@@ -4,8 +4,10 @@ import datetime
 from pathlib import Path
 from typing import Optional
 
-from .audio_utils import convert_to_wav, get_duration, validate_audio
-from .config import check_ffmpeg, get_device, load_config
+from tqdm import tqdm
+
+from .audio_utils import SUPPORTED_EXTENSIONS, convert_to_wav, get_duration, validate_audio
+from .config import check_ffmpeg, get_device, get_hf_token, load_config
 from .formatter import to_markdown
 from .models import TranscriptionSegment
 from .transcriber import transcribe
@@ -26,6 +28,11 @@ def process_file(
     language: Optional[str] = "en",
     include_timestamps: bool = True,
     overwrite: bool = False,
+    no_diarize: bool = False,
+    num_speakers: Optional[int] = None,
+    min_speakers: Optional[int] = None,
+    max_speakers: Optional[int] = None,
+    enroll_speakers: bool = False,
 ) -> Path:
     """Run the full pipeline on a single audio file. Returns path to output .md."""
     path = Path(path)
@@ -60,18 +67,98 @@ def process_file(
     )
 
     duration = get_duration(wav_path)
+    aligned_segments = segments
+    speaker_map: Optional[dict[str, str]] = None
+    speaker_metadata: list[dict] = []
+
+    if not no_diarize:
+        from .aligner import align
+        from .diarizer import diarize
+
+        hf_token = get_hf_token(config)
+        if hf_token:
+            print(f"  Diarizing speakers...")
+            diarization = diarize(
+                wav_path,
+                hf_token=hf_token,
+                device=device,
+                num_speakers=num_speakers,
+                min_speakers=min_speakers,
+                max_speakers=max_speakers,
+            )
+            aligned_segments = align(segments, diarization)
+
+            unique_speakers = sorted({seg.speaker for seg in aligned_segments if seg.speaker != "UNKNOWN"})
+
+            if enroll_speakers:
+                from .speaker_manager import enroll_speaker
+                import click
+                speaker_map = {}
+                click.echo(f"\n  Found {len(unique_speakers)} speaker(s). Let's name them.")
+                for i, label in enumerate(unique_speakers, 1):
+                    # Show a sample line for this speaker
+                    sample = next(
+                        (s for s in aligned_segments if s.speaker == label and s.text.strip()),
+                        None,
+                    )
+                    sample_ts = f"{int(sample.start // 60):02d}:{int(sample.start % 60):02d}" if sample else "??"
+                    sample_text = sample.text.strip() if sample else "(no sample)"
+                    click.echo(f"\n  Speaker {i} of {len(unique_speakers)} (heard at {sample_ts}):")
+                    click.echo(f'    "{sample_text[:80]}"')
+                    name = click.prompt("  Who is this?").strip()
+                    role = click.prompt("  Role (DM/Player/Guest, optional)", default="").strip()
+                    notes = click.prompt("  Notes (optional)", default="").strip()
+                    speaker_map[label] = name
+                    enroll_speaker(
+                        name=name.lower().replace(" ", "_"),
+                        display_name=name,
+                        role=role,
+                        audio_path=wav_path,
+                        segments=diarization,
+                        speaker_label=label,
+                        device=device,
+                        data_dir=None,
+                        notes=notes,
+                    )
+                    speaker_metadata.append({"name": name, "role": role})
+                click.echo(f"\n  Enrolled {len(unique_speakers)} speakers.")
+            else:
+                from .speaker_manager import match_speakers
+                matches = match_speakers(
+                    audio_path=wav_path,
+                    diarization_segments=diarization,
+                    data_dir=None,
+                    device=device,
+                    threshold=config.get("similarity_threshold", 0.65),
+                )
+                if matches:
+                    speaker_map = matches
+                    print("  Speaker matches:")
+                    for label, name in sorted(matches.items()):
+                        print(f"    {label} → {name}")
+                    # Build speaker metadata from matched names (deduplicated, preserving order)
+                    seen: set[str] = set()
+                    for name in matches.values():
+                        if name not in seen:
+                            seen.add(name)
+                            speaker_metadata.append({"name": name, "role": ""})
+                else:
+                    # No profiles yet — use raw labels
+                    speaker_map = {s: s for s in unique_speakers}
+                    for label in unique_speakers:
+                        speaker_metadata.append({"name": label, "role": ""})
 
     metadata = {
         "title": path.stem.replace("_", " ").replace("-", " ").title(),
         "source_file": path.name,
         "date_processed": datetime.date.today().isoformat(),
         "duration": _seconds_to_hhmmss(duration),
-        "speakers": [],
+        "speakers": speaker_metadata,
     }
 
     content = to_markdown(
-        segments,
-        speaker_map=None,  # Phase 1: no diarization
+        aligned_segments,
+        speaker_map=speaker_map,
         metadata=metadata,
         include_timestamps=include_timestamps,
     )
@@ -79,3 +166,48 @@ def process_file(
     out_path.write_text(content, encoding="utf-8")
     print(f"  Wrote {out_path.name}")
     return out_path
+
+
+def process_folder(
+    folder: Path,
+    output_dir: Optional[Path] = None,
+    verbose: bool = False,
+    **kwargs,
+) -> tuple[list[Path], list[str]]:
+    """Process all audio files in a folder.
+
+    Returns (successful_paths, error_messages).
+    Skips files whose .md output already exists unless overwrite=True is in kwargs.
+    """
+    folder = Path(folder)
+    audio_files = sorted(
+        f for f in folder.iterdir() if f.suffix.lower() in SUPPORTED_EXTENSIONS
+    )
+
+    if not audio_files:
+        return [], []
+
+    successes: list[Path] = []
+    errors: list[str] = []
+    overwrite = kwargs.get("overwrite", False)
+    out_base = Path(output_dir) if output_dir else folder
+
+    progress = tqdm(audio_files, desc="Transcribing", unit="file", disable=not verbose)
+
+    for f in progress:
+        if verbose:
+            progress.set_description(f.name)
+        out_path = out_base / (f.stem + ".md")
+        if out_path.exists() and not overwrite:
+            if verbose:
+                print(f"  Skipping {f.name} (already exists)")
+            continue
+        try:
+            result = process_file(f, output_dir=output_dir, **kwargs)
+            successes.append(result)
+        except Exception as exc:
+            errors.append(f"{f.name}: {exc}")
+            if verbose:
+                print(f"  ERROR {f.name}: {exc}")
+
+    return successes, errors

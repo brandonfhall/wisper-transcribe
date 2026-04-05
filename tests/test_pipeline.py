@@ -26,7 +26,7 @@ def test_process_file_creates_markdown(
 
     from wisper_transcribe.pipeline import process_file
 
-    out = process_file(audio, output_dir=tmp_path, device="cpu", model_size="tiny")
+    out = process_file(audio, output_dir=tmp_path, device="cpu", model_size="tiny", no_diarize=True)
 
     assert out.exists()
     assert out.suffix == ".md"
@@ -76,7 +76,7 @@ def test_process_file_overwrites_when_forced(
 
     from wisper_transcribe.pipeline import process_file
 
-    out = process_file(audio, output_dir=tmp_path, device="cpu", overwrite=True)
+    out = process_file(audio, output_dir=tmp_path, device="cpu", overwrite=True, no_diarize=True)
 
     assert "Welcome to the game" in out.read_text(encoding="utf-8")
 
@@ -95,7 +95,7 @@ def test_process_file_frontmatter_metadata(
 
     from wisper_transcribe.pipeline import process_file
 
-    out = process_file(audio, output_dir=tmp_path, device="cpu")
+    out = process_file(audio, output_dir=tmp_path, device="cpu", no_diarize=True)
     content = out.read_text(encoding="utf-8")
 
     assert "source_file: session_01.mp3" in content

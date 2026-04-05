@@ -1,7 +1,9 @@
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
+import click
 import platformdirs
 import tomli_w
 
@@ -79,3 +81,44 @@ def get_device() -> str:
         return "cuda" if torch.cuda.is_available() else "cpu"
     except ImportError:
         return "cpu"
+
+
+def get_hf_token(config: Optional[dict] = None) -> str:
+    """Return HuggingFace token from env var, config, or interactive prompt.
+
+    Raises RuntimeError if no token is found and stdin is not a tty.
+    """
+    import os
+
+    token = os.environ.get("HUGGINGFACE_TOKEN", "")
+    if token:
+        return token
+
+    if config is None:
+        config = load_config()
+    token = config.get("hf_token", "")
+    if token:
+        return token
+
+    # Interactive prompt as last resort
+    import sys
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            "HuggingFace token required for speaker diarization.\n"
+            "Set it with: wisper config set hf_token <your_token>\n"
+            "Or export HUGGINGFACE_TOKEN=<your_token>"
+        )
+
+    click.echo(
+        "\nA HuggingFace token is required for speaker diarization.\n"
+        "Get a free token at https://huggingface.co/settings/tokens\n"
+        "You must also accept the pyannote model terms at:\n"
+        "  https://huggingface.co/pyannote/speaker-diarization-3.1"
+    )
+    token = click.prompt("HuggingFace token").strip()
+    if token:
+        cfg = load_config()
+        cfg["hf_token"] = token
+        save_config(cfg)
+        click.echo("Token saved to config.")
+    return token

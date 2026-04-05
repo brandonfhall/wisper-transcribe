@@ -1,0 +1,80 @@
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from wisper_transcribe.models import DiarizationSegment
+
+
+def _make_turn(start, end):
+    turn = MagicMock()
+    turn.start = start
+    turn.end = end
+    return turn
+
+
+def test_diarize_returns_segments():
+    mock_pipeline = MagicMock()
+    mock_pipeline.return_value.itertracks.return_value = [
+        (_make_turn(0.0, 5.0), "A", "SPEAKER_00"),
+        (_make_turn(5.0, 10.0), "B", "SPEAKER_01"),
+        (_make_turn(10.0, 15.0), "C", "SPEAKER_00"),
+    ]
+
+    import wisper_transcribe.diarizer as d
+    d._pipeline = mock_pipeline
+
+    result = d.diarize(Path("fake.wav"), hf_token="hf_fake", device="cpu")
+
+    assert len(result) == 3
+    assert isinstance(result[0], DiarizationSegment)
+    assert result[0].speaker == "SPEAKER_00"
+    assert result[0].start == 0.0
+    assert result[1].speaker == "SPEAKER_01"
+    assert result[2].speaker == "SPEAKER_00"
+
+    # Cleanup
+    d._pipeline = None
+
+
+def test_diarize_with_num_speakers():
+    mock_pipeline = MagicMock()
+    mock_pipeline.return_value.itertracks.return_value = [
+        (_make_turn(0.0, 5.0), "A", "SPEAKER_00"),
+    ]
+
+    import wisper_transcribe.diarizer as d
+    d._pipeline = mock_pipeline
+
+    d.diarize(Path("fake.wav"), hf_token="hf_fake", device="cpu", num_speakers=4)
+    mock_pipeline.assert_called_once_with(str(Path("fake.wav")), num_speakers=4)
+
+    d._pipeline = None
+
+
+def test_diarize_with_min_max_speakers():
+    mock_pipeline = MagicMock()
+    mock_pipeline.return_value.itertracks.return_value = []
+
+    import wisper_transcribe.diarizer as d
+    d._pipeline = mock_pipeline
+
+    d.diarize(Path("fake.wav"), hf_token="hf_fake", device="cpu", min_speakers=2, max_speakers=6)
+    mock_pipeline.assert_called_once_with(str(Path("fake.wav")), min_speakers=2, max_speakers=6)
+
+    d._pipeline = None
+
+
+def test_load_pipeline_called_when_none():
+    import wisper_transcribe.diarizer as d
+    d._pipeline = None
+
+    mock_pipeline_instance = MagicMock()
+    mock_pipeline_instance.return_value.itertracks.return_value = []
+
+    with patch("wisper_transcribe.diarizer.Pipeline") as mock_cls:
+        mock_cls.from_pretrained.return_value = mock_pipeline_instance
+        d.diarize(Path("fake.wav"), hf_token="hf_abc", device="cpu")
+        mock_cls.from_pretrained.assert_called_once()
+
+    d._pipeline = None

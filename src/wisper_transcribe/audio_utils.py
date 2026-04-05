@@ -1,6 +1,8 @@
 import tempfile
 from pathlib import Path
 
+from pydub import AudioSegment
+
 SUPPORTED_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".mp4"}
 
 
@@ -21,8 +23,6 @@ def convert_to_wav(path: Path) -> Path:
 
     If the file is already a 16kHz mono WAV, returns the original path unchanged.
     """
-    from pydub import AudioSegment
-
     path = Path(path)
     audio = AudioSegment.from_file(str(path))
 
@@ -44,7 +44,5 @@ def convert_to_wav(path: Path) -> Path:
 
 def get_duration(path: Path) -> float:
     """Return audio duration in seconds."""
-    from pydub import AudioSegment
-
     audio = AudioSegment.from_file(str(path))
     return len(audio) / 1000.0
