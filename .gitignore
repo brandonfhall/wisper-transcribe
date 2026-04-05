@@ -35,3 +35,5 @@ Thumbs.db
 
 # Temp files created during audio processing
 *.tmp.wav
+example-file/*
+.claude/settings.local.json
