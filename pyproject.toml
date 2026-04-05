@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "wisper-transcribe"
+version = "0.1.0"
+description = "Podcast transcription with speaker diarization for tabletop RPG actual-play recordings"
+requires-python = ">=3.10"
+dependencies = [
+    "faster-whisper>=1.1.0",
+    "pyannote-audio>=3.3",
+    "torch>=2.1",
+    "torchaudio>=2.1",
+    "click>=8.1",
+    "platformdirs>=4.0",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "tqdm>=4.65",
+    "pydub>=0.25",
+    "pyyaml>=6.0",
+    "tomli>=2.0; python_version < '3.11'",
+    "tomli-w>=1.0",
+]
+
+[project.scripts]
+wisper = "wisper_transcribe.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
