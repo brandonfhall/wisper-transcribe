@@ -275,7 +275,138 @@ Also delete the entire scipy audio pre-loading block in `diarize()` — torchcod
 6. End-to-end test: `wisper transcribe <file> --enroll-speakers --device cuda`
 7. Commit, update `architecture.md`
 
-### Future / Phase 6
+### Phase 7 — Docker Containerization (from Whisper-WebUI review)
+
+**Context:** [Whisper-WebUI](https://github.com/jhj0517/Whisper-WebUI) ships Docker support with CUDA GPU passthrough. Their stack is identical to ours (faster-whisper + pyannote 3.1) but they lack speaker enrollment entirely. Our speaker identification engine is a genuine differentiator. Containerization makes deployment reproducible and eliminates the CUDA DLL hunting that plagues Windows installs.
+
+**What to build:**
+
+1. **`Dockerfile`** — Two-target build:
+   - **GPU target**: Base image `nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04`. Includes CUDA runtime + cuDNN. No need for `-devel` variant since we're doing inference only, not compiling CUDA code.
+   - **CPU target**: Base image `python:3.12-slim`. For users without NVIDIA GPUs or for CI.
+   - Install Python 3.12, pip deps from `pyproject.toml`. No system ffmpeg needed — faster-whisper bundles it via PyAV.
+   - Expected image size: ~8-10GB (GPU), <1GB (CPU).
+
+2. **`docker-compose.yml`** — GPU passthrough using modern compose syntax:
+   ```yaml
+   services:
+     wisper:
+       build: .
+       deploy:
+         resources:
+           reservations:
+             devices:
+               - driver: nvidia
+                 count: all
+                 capabilities: [gpu]
+       volumes:
+         - ./models:/root/.cache/huggingface    # persist model downloads (~2GB)
+         - ./profiles:/app/profiles             # speaker embeddings + metadata
+         - ./input:/app/input                   # audio files to transcribe
+         - ./output:/app/output                 # markdown transcripts
+       stdin_open: true
+       tty: true                                # required for interactive enrollment
+   ```
+
+3. **Volume mounts (critical)**:
+   - **HuggingFace cache** (`~/.cache/huggingface`): Models are 2+ GB. Must persist across container restarts to avoid re-downloading.
+   - **Speaker profiles** (`profiles/`): The `platformdirs` data dir must be overridden inside the container to a bind-mounted path. Without this, enrolled speaker embeddings are lost when the container stops.
+   - **Input/output dirs**: User mounts their audio files in and gets transcripts out.
+
+4. **`platformdirs` override**: Inside the container, set `WISPER_DATA_DIR` env var (new) to point to the mounted volume. `config.py` checks this env var before falling back to `platformdirs.user_data_dir()`. This is the only source code change needed.
+
+5. **Host prerequisites** (document in README):
+   - NVIDIA GPU with CUDA Compute Capability ≥ 3.5
+   - NVIDIA driver installed on host (`nvidia-smi` must work)
+   - [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installed
+   - Docker ≥ 19.03
+
+**What NOT to do:**
+- Don't add Gradio or any web UI. The CLI runs inside the container via `docker run -it`.
+- Don't support macOS MPS in Docker. Mac users continue running bare-metal. Docker is for Linux server/cloud deployment with NVIDIA GPUs.
+- Don't bake models into the image. They're 2+ GB and version-specific. Bind mount the cache.
+
+**Performance notes:** GPU passthrough via NVIDIA Container Toolkit has negligible overhead vs bare-metal. The main cost is image size (~8GB for CUDA runtime layers), not runtime performance.
+
+**Verification:**
+- [ ] `docker compose build` completes
+- [ ] `docker compose run wisper wisper setup` — guided wizard works with TTY
+- [ ] `docker compose run wisper wisper transcribe /app/input/test.mp3 --enroll-speakers` — enrollment works, profiles persist in mounted volume
+- [ ] `docker compose run wisper wisper transcribe /app/input/test2.mp3` — automatic speaker matching from previously enrolled profiles
+- [ ] `nvidia-smi` visible inside container, transcription uses CUDA
+- [ ] Container restart preserves models and profiles (no re-download)
+
+---
+
+### Phase 8 — Silero VAD Preprocessing (from Whisper-WebUI review)
+
+**Context:** Whisper-WebUI runs [Silero VAD](https://github.com/snakers4/silero-vad) before transcription to strip silence and non-speech segments. This is especially valuable for tabletop RPG sessions which have long pauses (thinking, dice rolling, snack breaks, cross-talk). Removing these segments before Whisper processes them improves both speed and accuracy.
+
+**What to build:**
+
+1. **New module: `src/wisper_transcribe/vad.py`**
+   - `strip_silence(wav_path: Path, aggressiveness: int = 3) -> Path`
+   - Loads Silero VAD model (lightweight PyTorch, ~1MB, no HF token needed)
+   - Runs VAD over the 16kHz mono WAV
+   - Returns a new WAV with non-speech segments removed (or marked)
+   - Must preserve original timestamps for alignment — store a time-mapping so diarization segments still map to the original audio timeline
+   - Cache the Silero model at module level (same pattern as `transcriber._model`)
+
+2. **Pipeline integration** — Insert between steps 2 (PREPROCESS) and 3 (TRANSCRIBE):
+   ```
+   1. VALIDATE
+   2. PREPROCESS (convert to WAV)
+   3. VAD (strip silence)     ← NEW
+   4. TRANSCRIBE
+   5. DIARIZE
+   6. ALIGN
+   7. IDENTIFY
+   8. FORMAT
+   ```
+
+3. **CLI flag**: `--vad / --no-vad` (default: on). Add to `wisper transcribe`.
+
+4. **Timestamp remapping**: This is the tricky part. If VAD removes a 30-second silence gap, all subsequent timestamps shift. Two approaches:
+   - **Option A (simpler)**: Run VAD only to *inform* Whisper's `vad_filter` parameter (faster-whisper already has built-in VAD support via `vad_filter=True`). This avoids timestamp remapping entirely. Start here.
+   - **Option B (full)**: Actually strip audio, then remap timestamps post-transcription. More work, better results. Do this only if Option A's quality isn't sufficient.
+
+5. **Tests**: `tests/test_vad.py` — mock Silero model, verify silence stripping logic and timestamp preservation.
+
+**Recommendation:** Start with Option A — faster-whisper's built-in `vad_filter=True` parameter. This is literally a one-line change in `transcriber.py` and gets 80% of the benefit. Only build the full Silero pipeline if the built-in filter isn't aggressive enough for RPG session audio.
+
+**Verification:**
+- [ ] `wisper transcribe session.mp3 --vad` — faster transcription than `--no-vad` on same file
+- [ ] Timestamps in output still align with original audio (spot-check a few)
+- [ ] No accuracy regression on clean speech segments
+
+---
+
+### Phase 9 — Compute Type / Quantization Flag (from Whisper-WebUI review)
+
+**Context:** Whisper-WebUI exposes FP16/INT8 quantization selection. faster-whisper already supports this via CTranslate2 — we just need to surface it in the CLI. INT8 roughly halves VRAM usage with minimal accuracy loss, enabling `large-v3` on 8GB GPUs.
+
+**What to build:**
+
+1. **CLI flag**: `--compute-type` on `wisper transcribe`
+   - Values: `auto` (default), `float16`, `int8`, `int8_float16`, `float32`
+   - `auto` = `float16` on CUDA, `float32` on CPU (current behavior)
+
+2. **Config support**: `compute_type` key in `config.toml` so users can set a default.
+
+3. **Code change in `transcriber.py`**: Pass `compute_type` to `WhisperModel()` constructor. Currently hardcoded or defaulted — make it configurable.
+
+4. **Tests**: Add `compute_type` parameter to existing `test_transcriber.py` mocks.
+
+**This is a quick win** — probably 20-30 lines of code total across `cli.py`, `config.py`, and `transcriber.py`.
+
+**Verification:**
+- [ ] `wisper transcribe test.mp3 --compute-type int8` — runs with lower VRAM
+- [ ] `wisper config set compute_type int8_float16` — persists default
+- [ ] `wisper transcribe test.mp3` — uses saved default
+
+---
+
+### Phase 10 — Optional GUI
 
 - **Optional GUI** — Textual (terminal) or tkinter/PyQt. Wraps the same `pipeline.process_file()` and `speaker_manager` calls. Keep CLI/library separation clean.
 
