@@ -34,6 +34,17 @@ def _compat_hf_hub_download(*args, use_auth_token=None, **kwargs):
 
 _hf_hub.hf_hub_download = _compat_hf_hub_download
 
+# speechbrain 1.0 lazy-loads speechbrain.integrations.k2_fsa on any module
+# inspection (e.g. inspect.getmembers).  k2 is not installed; the lazy load
+# raises an error.  Pre-populate sys.modules with an empty stub so that the
+# lazy import silently resolves to a no-op module instead of crashing.
+import sys as _sys
+import types as _types
+if "speechbrain.integrations.k2_fsa" not in _sys.modules:
+    _sys.modules["speechbrain.integrations.k2_fsa"] = _types.ModuleType(
+        "speechbrain.integrations.k2_fsa"
+    )
+
 # PyTorch 2.6 changed torch.load's default weights_only from False → True.
 # pyannote-audio 3.x calls torch.load without specifying weights_only, and its
 # checkpoints contain custom globals (TorchVersion, etc.) not in the safe list.

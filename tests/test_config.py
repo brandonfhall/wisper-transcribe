@@ -58,6 +58,7 @@ def test_get_device_cuda_available():
 def test_get_device_cpu_fallback():
     mock_torch = MagicMock()
     mock_torch.cuda.is_available.return_value = False
+    mock_torch.backends.mps.is_available.return_value = False
     with patch.dict("sys.modules", {"torch": mock_torch}):
         from wisper_transcribe import config
         import importlib
