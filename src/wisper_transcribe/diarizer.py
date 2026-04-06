@@ -12,21 +12,24 @@ from typing import Optional
 # a failed import returns an empty stub module rather than crashing.
 import sys as _sys
 import types as _types
-import speechbrain.utils.importutils as _sb_import_utils
+try:
+    import speechbrain.utils.importutils as _sb_import_utils
 
-_sb_LazyModule = _sb_import_utils.LazyModule
-_orig_ensure_module = _sb_LazyModule.ensure_module
+    _sb_LazyModule = _sb_import_utils.LazyModule
+    _orig_ensure_module = _sb_LazyModule.ensure_module
 
-def _tolerant_ensure_module(self, stacklevel=1):  # type: ignore[misc]
-    try:
-        return _orig_ensure_module(self, stacklevel + 1)
-    except (ImportError, ModuleNotFoundError):
-        stub = _types.ModuleType(self.target)
-        _sys.modules.setdefault(self.target, stub)
-        self.lazy_module = stub  # type: ignore[attr-defined]
-        return stub
+    def _tolerant_ensure_module(self, stacklevel=1):  # type: ignore[misc]
+        try:
+            return _orig_ensure_module(self, stacklevel + 1)
+        except (ImportError, ModuleNotFoundError):
+            stub = _types.ModuleType(self.target)
+            _sys.modules.setdefault(self.target, stub)
+            self.lazy_module = stub  # type: ignore[attr-defined]
+            return stub
 
-_sb_LazyModule.ensure_module = _tolerant_ensure_module  # type: ignore[method-assign]
+    _sb_LazyModule.ensure_module = _tolerant_ensure_module  # type: ignore[method-assign]
+except ImportError:
+    pass  # speechbrain not installed; patch not needed
 
 from tqdm import tqdm
 
