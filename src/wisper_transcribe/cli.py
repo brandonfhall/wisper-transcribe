@@ -149,10 +149,10 @@ def setup():
             from pyannote.audio import Inference, Model, Pipeline
 
             click.echo("   Downloading pyannote/speaker-diarization-3.1 ...")
-            pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=token)
+            pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=token)
             del pipeline
             click.echo("   Downloading pyannote/embedding ...")
-            model = Model.from_pretrained("pyannote/embedding", use_auth_token=token)
+            model = Model.from_pretrained("pyannote/embedding", token=token)
             del model
             click.echo("   OK  : all models cached — subsequent runs start immediately")
         except Exception as e:

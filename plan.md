@@ -211,6 +211,8 @@ pyannote pipeline wrapper, max-overlap aligner, HF token management, `--num-spea
 
 - **`wisper config show` model clarity** — surface which Whisper model and pyannote models are active, not just config key/value pairs.
 
+- **Enrollment speaker order — chronological** — During `--enroll-speakers`, speakers are currently presented in pyannote label order (`SPEAKER_00`, `SPEAKER_01`, …) which reflects diarization assignment, not first appearance. Sort by each speaker's earliest segment start time so the first voice the user hears in the file is Speaker 1. One-line fix in `pipeline.py`: replace `sorted({seg.speaker …})` with a sort keyed on `min(s.start for s in aligned_segments if s.speaker == label)`.
+
 ### pyannote 4.x upgrade
 
 **Status: Ready to execute. All blockers resolved.**
@@ -451,4 +453,43 @@ PyTorch itself supports Intel Arc/Data Center GPUs via `torch.xpu` (production-r
 - [x] `wisper transcribe ./recordings/` → batch processing with progress, skip existing, error recovery
 - [x] `wisper setup` → guided first-run wizard
 - [ ] Parallel folder processing with `--workers N`
+
+
+## 4/6/2026 8:51AM 
+
+PS C:\vscode\wisper-transcribe> & c:\vscode\wisper-transcribe\.venv\Scripts\Activate.ps1
+(.venv) PS C:\vscode\wisper-transcribe> wisper transcribe '.\example-file\Episode 1 – Introducing Tom Exposition.mp3' --enroll-speakers --device cuda
+
+────────────────────────────────────────────────────────────
+  Input  : example-file\Episode 1 – Introducing Tom Exposition.mp3
+  Output : example-file\Episode 1 – Introducing Tom Exposition.md
+  Model  : medium (cuda)
+────────────────────────────────────────────────────────────
+                                                                                                                                                                                                                C:\Users\brand\AppData\Local\Programs\Python\Python312\Lib\inspect.py:1007: UserWarning: Module 'speechbrain.pretrained' was deprecated, redirecting to 'speechbrain.inference'. Please update your script. This is a change from SpeechBrain 1.0. See: https://github.com/speechbrain/speechbrain/releases/tag/v1.0.0
+  if ismodule(module) and hasattr(module, '__file__'):
+C:\Users\brand\AppData\Local\Programs\Python\Python312\Lib\inspect.py:1007: UserWarning: Module 'speechbrain.k2_integration' was deprecated, redirecting to 'speechbrain.integrations.k2_fsa'. Please update your script.
+  if ismodule(module) and hasattr(module, '__file__'):
+C:\Users\brand\AppData\Local\Programs\Python\Python312\Lib\inspect.py:1007: UserWarning: Module 'speechbrain.wordemb' was deprecated, redirecting to 'speechbrain.integrations.huggingface.wordemb'. Please update your script.
+  if ismodule(module) and hasattr(module, '__file__'):
+C:\Users\brand\AppData\Local\Programs\Python\Python312\Lib\inspect.py:1007: UserWarning: Module 'speechbrain.lobes.models.huggingface_transformers' was deprecated, redirecting to 'speechbrain.integrations.huggingface'. Please update your script.
+  if ismodule(module) and hasattr(module, '__file__'):
+C:\Users\brand\AppData\Local\Programs\Python\Python312\Lib\inspect.py:1007: UserWarning: Module 'speechbrain.lobes.models.spacy' was deprecated, redirecting to 'speechbrain.integrations.nlp'. Please update your script.
+  if ismodule(module) and hasattr(module, '__file__'):
+C:\Users\brand\AppData\Local\Programs\Python\Python312\Lib\inspect.py:1007: UserWarning: Module 'speechbrain.lobes.models.flair' was deprecated, redirecting to 'speechbrain.integrations.nlp'. Please update your script.
+  if ismodule(module) and hasattr(module, '__file__'):
+C:\Users\brand\AppData\Local\Programs\Python\Python312\Lib\inspect.py:1007: UserWarning: Module 'speechbrain.nnet.loss.transducer_loss' was deprecated, redirecting to 'speechbrain.integrations.numba.transducer_loss'. Please update your script. This module depends on the optional 'numba' package. If you encounter an ImportError here, please install numba, for example with: pip install numba
+  if ismodule(module) and hasattr(module, '__file__'):
+W0406 08:48:38.926000 17364 Lib\site-packages\torch\utils\flop_counter.py:29] triton not found; flop counting will not work for triton kernels
+C:\vscode\wisper-transcribe\.venv\Lib\site-packages\pyannote\audio\utils\reproducibility.py:74: ReproducibilityWarning: TensorFloat-32 (TF32) has been disabled as it might lead to reproducibility issues and lower accuracy.
+It can be re-enabled by calling
+   >>> import torch
+   >>> torch.backends.cuda.matmul.allow_tf32 = True
+   >>> torch.backends.cudnn.allow_tf32 = True
+See https://github.com/pyannote/pyannote-audio/issues/1370 for more details.
+
+  warnings.warn(
+                                                                                                                                                                                                                C:\vscode\wisper-transcribe\.venv\Lib\site-packages\pyannote\audio\models\blocks\pooling.py:103: UserWarning: std(): degrees of freedom is <= 0. Correction should be strictly less than the reduction factor (input numel divided by output numel). (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\aten\src\ATen\native\ReduceOps.cpp:1858.)
+  std = sequences.std(dim=-1, correction=1)
+                                                                                                                                                                                                                Error: 'DiarizeOutput' object has no attribute 'itertracks'
+(.venv) PS C:\vscode\wisper-transcribe>
 

@@ -9,9 +9,9 @@ description = "Podcast transcription with speaker diarization for tabletop RPG a
 requires-python = ">=3.10"
 dependencies = [
     "faster-whisper>=1.1.0",
-    "pyannote-audio>=3.3,<4.0",
-    "torch>=2.0.0",
-    "torchaudio>=2.0.0",
+    "pyannote-audio>=4.0",
+    "torch>=2.8.0",
+    "torchaudio>=2.8.0",
     "click>=8.1",
     "platformdirs>=4.0",
     "numpy>=1.24",
@@ -40,6 +40,8 @@ testpaths = ["tests"]
 filterwarnings = [
     # speechbrain 1.0 deprecated-redirect noise (k2, transformers, spacy, numba, pretrained)
     "ignore:Module 'speechbrain.*' was deprecated:UserWarning",
+    # torchcodec can't load FFmpeg shared DLLs until Gyan.FFmpeg.Shared is installed
+    "ignore:torchcodec is not installed correctly:UserWarning",
     # matplotlib 3.7 colormap API change (triggered by pyannote.core.notebook)
     "ignore:The get_cmap function was deprecated:matplotlib.MatplotlibDeprecationWarning",
     # pydub uses audioop which is removed in Python 3.13

@@ -81,7 +81,7 @@ def _load_embedding_model(device: str):
         try:
             model = Model.from_pretrained(
                 "pyannote/embedding",
-                use_auth_token=_get_hf_token(),
+                token=_get_hf_token(),
             )
         except Exception as e:
             if "locate the file on the Hub" in str(e) or "connection" in str(e).lower():

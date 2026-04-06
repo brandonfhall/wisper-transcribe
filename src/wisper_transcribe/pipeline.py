@@ -93,7 +93,10 @@ def process_file(
             )
             aligned_segments = align(segments, diarization)
 
-            unique_speakers = sorted({seg.speaker for seg in aligned_segments if seg.speaker != "UNKNOWN"})
+            unique_speakers = sorted(
+                {seg.speaker for seg in aligned_segments if seg.speaker != "UNKNOWN"},
+                key=lambda label: min(s.start for s in aligned_segments if s.speaker == label),
+            )
 
             if enroll_speakers:
                 from .speaker_manager import enroll_speaker
