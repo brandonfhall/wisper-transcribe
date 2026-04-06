@@ -412,6 +412,33 @@ Also delete the entire scipy audio pre-loading block in `diarize()` — torchcod
 
 ---
 
+### Long-Term — Intel GPU Support
+
+**Status:** Research complete (April 2026). Not actionable yet — blocked by upstream dependencies.
+
+**The problem:** Our two core inference engines don't support Intel GPUs:
+- **CTranslate2** (powers faster-whisper): NVIDIA CUDA only. Open issue [#1715](https://github.com/OpenNMT/CTranslate2/issues/1715), no work planned.
+- **pyannote-audio**: No Intel XPU backend. No upstream interest.
+
+PyTorch itself supports Intel Arc/Data Center GPUs via `torch.xpu` (production-ready since PyTorch 2.5), but that doesn't help when our deps use CUDA-specific code paths.
+
+**Viable paths if this becomes a real need:**
+
+1. **OpenVINO backend for transcription** — Intel's inference engine has official Whisper support (1.4-5x faster than PyTorch). Would require an abstraction layer in `transcriber.py` that dispatches to either faster-whisper (CUDA/CPU) or OpenVINO (Intel GPU/CPU) based on detected hardware. Model conversion step needed (Whisper → ONNX → OpenVINO IR). Static-shape constraint on GPU execution.
+
+2. **whisper.cpp with SYCL** — C++ Whisper implementation with full Intel GPU acceleration via SYCL/oneAPI. Python bindings exist (`pywhispercpp`). Different integration surface from faster-whisper but avoids the model conversion step.
+
+3. **Diarization alternatives** — If transcription moves to OpenVINO, diarization could either:
+   - Convert pyannote models to OpenVINO (manual, static-shape constraints, fragile)
+   - Switch to SpeechBrain ECAPA-TDNN for speaker embeddings (actually faster on CPU than pyannote on GPU — 6.7x speedup reported)
+   - Wait for pyannote to add XPU support upstream
+
+**Architecture note:** If we ever add a second backend, the right design is an abstract `TranscriptionBackend` interface in `transcriber.py` with `FasterWhisperBackend` and `OpenVINOBackend` implementations. Same for `DiarizationBackend` in `diarizer.py`. Keep the pipeline module backend-agnostic.
+
+**When to revisit:** Check back when either (a) CTranslate2 adds Intel GPU support, (b) a user actually needs this, or (c) OpenVINO's Whisper API stabilizes enough to be a drop-in. Don't build speculatively.
+
+---
+
 ## Verification Checklist
 
 - [x] `pip install -e .` succeeds
