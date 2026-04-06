@@ -12,10 +12,10 @@
 | Diarization | `pyannote-audio 4.x` | Speaker segmentation + voice embeddings |
 | Audio loading (diarizer) | `scipy.io.wavfile` | Bypasses `torchcodec` (see [Known Constraints](#known-constraints)) |
 | Audio conversion | `pydub` + ffmpeg | Convert any format → 16kHz mono WAV |
-| CLI | `click` | Command groups: `transcribe`, `enroll`, `speakers`, `config`, `fix` |
+| CLI | `click` | Command groups: `setup`, `transcribe`, `enroll`, `speakers`, `config`, `fix` |
 | Config/storage | `platformdirs` + TOML | OS-native user data dirs, never hardcoded paths |
 | Progress display | `tqdm` | Nested bars: folder-level (position=0), transcription (position=1) |
-| GPU detection | `torch.cuda.is_available()` | Auto-selects CUDA or CPU at runtime |
+| GPU detection | `torch.cuda / torch.backends.mps` | Auto-selects CUDA → MPS → CPU at runtime |
 
 ---
 
@@ -23,7 +23,7 @@
 
 ```
 src/wisper_transcribe/
-├── cli.py              Click entry points — no business logic, delegates to pipeline/manager
+├── cli.py              Click entry points — no business logic, delegates to pipeline/manager; includes setup wizard
 ├── pipeline.py         Main orchestrator: process_file(), process_folder()
 ├── transcriber.py      faster-whisper wrapper, lazy model cache (_model), CUDA DLL path fix
 ├── diarizer.py         pyannote pipeline wrapper, lazy cache (_pipeline), scipy audio loading

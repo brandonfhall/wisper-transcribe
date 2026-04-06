@@ -227,5 +227,5 @@ pyannote pipeline wrapper, max-overlap aligner, HF token management, `--num-spea
 - [x] `wisper speakers list` → shows enrolled profiles
 - [x] `wisper fix session.md --speaker "Unknown Speaker 1" --name "Frank"` → updates transcript
 - [x] `wisper transcribe ./recordings/` → batch processing with progress, skip existing, error recovery
-- [ ] `wisper setup` → guided first-run wizard
+- [x] `wisper setup` → guided first-run wizard
 - [ ] Parallel folder processing with `--workers N`

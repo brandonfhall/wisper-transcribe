@@ -23,7 +23,7 @@ def main():
 @click.option("-o", "--output", "output_dir", type=click.Path(path_type=Path), default=None, help="Output directory (default: same as input)")
 @click.option("-m", "--model", "model_size", default="medium", show_default=True, type=click.Choice(["tiny", "base", "small", "medium", "large-v3"]), help="Whisper model size")
 @click.option("-l", "--language", default="en", show_default=True, help="Language code (e.g. en, fr) or 'auto'")
-@click.option("--device", default="auto", show_default=True, type=click.Choice(["auto", "cpu", "cuda"]), help="Compute device")
+@click.option("--device", default="auto", show_default=True, type=click.Choice(["auto", "cpu", "cuda", "mps"]), help="Compute device")
 @click.option("--overwrite", is_flag=True, default=False, help="Overwrite existing output files")
 @click.option("--timestamps/--no-timestamps", default=True, show_default=True, help="Include timestamps in output")
 @click.option("-n", "--num-speakers", default=None, type=int, help="Expected number of speakers (improves diarization)")
@@ -88,6 +88,85 @@ def transcribe(
 def _audio_extensions():
     from .audio_utils import SUPPORTED_EXTENSIONS
     return SUPPORTED_EXTENSIONS
+
+
+@main.command()
+def setup():
+    """Guided first-run setup: ffmpeg, HF token, and model pre-download."""
+    import os
+    import sys
+
+    from .config import check_ffmpeg, get_device, load_config, save_config
+
+    click.echo("")
+    click.echo("wisper-transcribe setup")
+    click.echo("=" * 42)
+
+    # ── ffmpeg ────────────────────────────────────────────────────────────────
+    click.echo("\n>> Checking ffmpeg...")
+    try:
+        check_ffmpeg()
+        click.echo("   OK  : ffmpeg found")
+    except RuntimeError as e:
+        click.echo(f"   FAIL: {e}", err=True)
+        click.echo("   Run setup.sh (Mac/Linux) or setup.ps1 (Windows) to install it automatically.")
+        sys.exit(1)
+
+    # ── Device ────────────────────────────────────────────────────────────────
+    click.echo("\n>> Detecting compute device...")
+    device = get_device()
+    labels = {"cuda": "NVIDIA GPU (CUDA)", "mps": "Apple Silicon GPU (MPS)", "cpu": "CPU"}
+    click.echo(f"   OK  : {labels.get(device, device)}")
+    if device == "mps":
+        click.echo("   Note: transcription uses CPU (CTranslate2 limitation); diarization uses MPS")
+
+    # ── HuggingFace token ─────────────────────────────────────────────────────
+    click.echo("\n>> Checking HuggingFace token...")
+    config = load_config()
+    token = os.environ.get("HUGGINGFACE_TOKEN", "") or config.get("hf_token", "")
+    if token:
+        click.echo("   OK  : token already configured")
+    else:
+        click.echo("   A free HuggingFace token is required for speaker diarization.")
+        click.echo("   Get one at: https://huggingface.co/settings/tokens")
+        click.echo("")
+        click.echo("   You must also accept the model licenses (free, one-time):")
+        click.echo("     https://huggingface.co/pyannote/speaker-diarization-3.1")
+        click.echo("     https://huggingface.co/pyannote/embedding")
+        click.echo("")
+        token = click.prompt("   HuggingFace token", hide_input=True).strip()
+        if token:
+            config["hf_token"] = token
+            save_config(config)
+            click.echo("   OK  : token saved")
+        else:
+            click.echo("   WARN: no token provided — diarization will be skipped on first run")
+
+    # ── Model pre-download ────────────────────────────────────────────────────
+    if token:
+        click.echo("\n>> Pre-downloading pyannote models (first run only — may take a few minutes)...")
+        try:
+            from pyannote.audio import Inference, Model, Pipeline
+
+            click.echo("   Downloading pyannote/speaker-diarization-3.1 ...")
+            pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=token)
+            del pipeline
+            click.echo("   Downloading pyannote/embedding ...")
+            model = Model.from_pretrained("pyannote/embedding", use_auth_token=token)
+            del model
+            click.echo("   OK  : all models cached — subsequent runs start immediately")
+        except Exception as e:
+            click.echo(f"   WARN: model download failed: {e}", err=True)
+            click.echo("   Models will download automatically on first transcription run.")
+
+    # ── Done ──────────────────────────────────────────────────────────────────
+    click.echo("")
+    click.echo("=" * 42)
+    click.echo("Setup complete!")
+    click.echo("")
+    click.echo("Next steps:")
+    click.echo("  wisper transcribe <file.mp3> --enroll-speakers")
+    click.echo("")
 
 
 @main.group()

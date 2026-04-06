@@ -66,27 +66,29 @@ pip install -e .
 
 ### One-time setup
 
-Store your HuggingFace token (required for speaker detection).
-
-*Note: When creating the token, ensure it has the permission: **"Read access to contents of all repos under your personal namespace"**.*
+Run the setup wizard — it checks ffmpeg, prompts for your HuggingFace token, and pre-downloads all models so your first transcription run starts immediately:
 
 ```bash
-wisper config set hf_token hf_abc123...
+wisper setup
 ```
 
-Or set it as an environment variable:
+*Note: When creating your HuggingFace token, ensure it has **"Read access to contents of all repos under your personal namespace"**.*
 
-```bash
-export HUGGINGFACE_TOKEN=hf_abc123...   # Mac/Linux
-$env:HUGGINGFACE_TOKEN="hf_abc123..."  # Windows PowerShell
-```
-
-You must also accept the model license agreements on HuggingFace (one-time, free):
+You must also accept the model license agreements on HuggingFace (free, one-time — links shown by `wisper setup`):
 - [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
 - [pyannote/embedding](https://huggingface.co/pyannote/embedding)
 - [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0)
-- [pyannote/speaker-diarization-community-1/resolve/main/plda/xvec_transform.npz.bz2] (https://huggingface.co/pyannote/speaker-diarization-community-1/resolve/main/plda/xvec_transform.npz.bz2)
-- [pyannote/speaker-diarization-community-1] (https://huggingface.co/pyannote/speaker-diarization-community-1)
+- [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)
+- [pyannote/speaker-diarization-community-1 PLDA transform](https://huggingface.co/pyannote/speaker-diarization-community-1/resolve/main/plda/xvec_transform.npz.bz2)
+
+Alternatively, set the token manually or via environment variable:
+
+```bash
+wisper config set hf_token hf_abc123...
+
+export HUGGINGFACE_TOKEN=hf_abc123...   # Mac/Linux
+$env:HUGGINGFACE_TOKEN="hf_abc123..."  # Windows PowerShell
+```
 
 
 
@@ -198,6 +200,16 @@ The YAML frontmatter makes these files easy to ingest into NotebookLM or query w
 ---
 
 ## All Commands
+
+### `wisper setup`
+
+Guided first-run wizard. Run this once after installation:
+
+```bash
+wisper setup
+```
+
+Checks ffmpeg, detects your GPU (CUDA/MPS/CPU), prompts for your HuggingFace token, and pre-downloads all pyannote models (~700 MB, cached permanently).
 
 ### `wisper transcribe`
 
@@ -364,6 +376,6 @@ Tests mock all ML models — no GPU, network, or real audio files required.
 - [x] Phase 3: Speaker profiles + cross-file voice matching
 - [x] Phase 4: Batch processing + CLI polish
 - [x] Phase 5: Tests (64 passing), coverage reporting, README, setup scripts, CI
-- [ ] Phase 6: `wisper setup` guided first-run wizard
+- [x] Phase 6: `wisper setup` guided first-run wizard
 - [ ] Phase 7: Parallel folder processing (`--workers N`)
 - [ ] Phase 8: Optional GUI (Textual or tkinter)

@@ -87,7 +87,6 @@ Write-Host "Setup complete!" -ForegroundColor Green
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor White
 Write-Host "  1. Activate venv:     .venv\Scripts\activate"
-Write-Host "  2. Accept HF licenses (one-time, free) — see README.md"
-Write-Host "  3. Store HF token:    wisper config set hf_token hf_xxxxxxx"
-Write-Host "  4. First session:     wisper transcribe session01.mp3 --enroll-speakers"
+Write-Host "  2. Run setup wizard:  wisper setup   (configures HF token + pre-downloads models)"
+Write-Host "  3. First session:     wisper transcribe session01.mp3 --enroll-speakers"
 Write-Host ""
