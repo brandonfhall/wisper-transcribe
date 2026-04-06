@@ -53,6 +53,18 @@ This repo is public on GitHub. Before every commit:
 
 If a secret is accidentally committed, it must be treated as compromised immediately (revoke and regenerate the token).
 
+## Architecture Documentation
+
+Detailed technical reference lives in [`architecture.md`](architecture.md). It covers the processing pipeline, module responsibilities, key design decisions, speaker identification, data storage, and known constraints.
+
+**Keep `architecture.md` current.** After any PR that:
+- Adds or renames a module
+- Changes the processing pipeline
+- Introduces a new key design decision or workaround
+- Updates dependencies in a way that affects runtime behavior
+
+...update `architecture.md` as part of the same commit. Do not defer docs to a follow-up.
+
 ## Development Rules
 
 - **Write tests alongside each feature.** Every new module gets a corresponding `tests/test_<module>.py`. Do not defer tests to a later phase.

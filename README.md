@@ -105,20 +105,29 @@ wisper transcribe session01.mp3 --enroll-speakers --num-speakers 6
 wisper will transcribe, detect speakers, then prompt you for each one:
 
 ```
-Speaker 1 of 6 (heard at 00:00:12):
-  "Welcome back everyone. Last session you had just entered the ruins..."
-Who is this? > Alice
-Role (DM/Player/Guest, optional)? > DM
-Notes (optional)? > Game Master
+────────────────────────────────────────────────────────────
+  Input  : session01.mp3
+  Output : session01.md
+  Model  : medium (cuda)
+────────────────────────────────────────────────────────────
+  Transcribing: 100%|████████| 4823/4823s
 
-Speaker 2 of 6 (heard at 00:00:18):
-  "Right, I want to check for traps before we go further in."
-Who is this? > Bob
-Role? > Player
-...
+  Found 6 speaker(s). Let's name them.
 
-✓ Enrolled 6 speakers
-✓ Wrote session01.md
+  Speaker 1 of 6 (heard at 00:00:12):
+    "Welcome back everyone. Last session you had just entered the ruins..."
+  Who is this? Alice
+  Role (DM/Player/Guest, optional): DM
+  Notes (optional):
+
+  Speaker 2 of 6 (heard at 00:00:18):
+    "Right, I want to check for traps before we go further in."
+  Who is this? Bob
+  Role (DM/Player/Guest, optional): Player
+  ...
+
+  Enrolled 6 speakers.
+  Wrote session01.md
 ```
 
 ### All future sessions — fully automatic
@@ -128,13 +137,17 @@ wisper transcribe session02.mp3 --num-speakers 6
 ```
 
 ```
-Transcribing... done
-Diarizing... done
-Speaker matches:
-  SPEAKER_00 → Alice  (0.91)
-  SPEAKER_01 → Bob    (0.84)
-  SPEAKER_02 → Charlie (0.78)
-✓ Wrote session02.md
+────────────────────────────────────────────────────────────
+  Input  : session02.mp3
+  Output : session02.md
+  Model  : medium (cuda)
+────────────────────────────────────────────────────────────
+  Transcribing: 100%|████████| 4901/4901s
+  Speaker matches:
+    SPEAKER_00 → Alice
+    SPEAKER_01 → Bob
+    SPEAKER_02 → Charlie
+  Wrote session02.md
 ```
 
 ### Process a whole folder at once
@@ -144,11 +157,10 @@ wisper transcribe ./recordings/ --num-speakers 6
 ```
 
 ```
-Processing 12 files...
-[1/12] session01.mp3 → skipped (already exists)
-[2/12] session02.mp3 → session02.md ✓
-[3/12] session03.mp3 → session03.md ✓
-...
+Processing folder: recordings/
+Folder Progress:  75%|████████        | 9/12 [14:23<04:51]
+Processing session10.mp3
+
 Done. 11 transcribed, 1 skipped, 0 errors.
 ```
 
@@ -351,5 +363,7 @@ Tests mock all ML models — no GPU, network, or real audio files required.
 - [x] Phase 2: Speaker diarization
 - [x] Phase 3: Speaker profiles + cross-file voice matching
 - [x] Phase 4: Batch processing + CLI polish
-- [ ] Phase 5: README + test coverage report
-- [ ] Phase 6: Optional GUI (Textual or tkinter)
+- [x] Phase 5: Tests (64 passing), coverage reporting, README, setup scripts, CI
+- [ ] Phase 6: `wisper setup` guided first-run wizard
+- [ ] Phase 7: Parallel folder processing (`--workers N`)
+- [ ] Phase 8: Optional GUI (Textual or tkinter)
