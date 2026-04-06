@@ -54,6 +54,7 @@ def process_file(
     enroll_speakers: bool = False,
     play_audio: bool = False,
     compute_type: str = "auto",
+    vad_filter: Optional[bool] = None,
 ) -> Path:
     """Run the full pipeline on a single audio file. Returns path to output .md."""
     from .config import resolve_compute_type
@@ -69,6 +70,8 @@ def process_file(
         language = config.get("language", "en")
     if compute_type == "auto":
         compute_type = config.get("compute_type", "auto")
+    if vad_filter is None:
+        vad_filter = config.get("vad_filter", True)
 
     check_ffmpeg()
     validate_audio(path)
@@ -97,6 +100,7 @@ def process_file(
         device=device,
         language=language,
         compute_type=compute_type,
+        vad_filter=vad_filter,
     )
 
     duration = get_duration(wav_path)

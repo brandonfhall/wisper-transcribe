@@ -114,6 +114,7 @@ wisper transcribe <path>          # file or folder
   --timestamps / --no-timestamps
   --device cpu|cuda|auto
   --compute-type auto|float16|int8_float16|int8|float32
+  --vad / --no-vad                # voice activity detection to skip silence (default: on)
   --overwrite
   --verbose
 
@@ -195,7 +196,7 @@ pyannote pipeline wrapper, max-overlap aligner, HF token management, `--num-spea
 `process_folder()` with tqdm progress bars, per-file error recovery, skip-existing, `--verbose` flag. Windows CUDA DLL path resolution. `wisper config` commands.
 
 ### ✅ Phase 5 — Tests & README
-74 tests passing. All ML calls mocked. No GPU required for test suite. README with install, quick start, full CLI reference.
+76 tests passing. All ML calls mocked. No GPU required for test suite. README with install, quick start, full CLI reference.
 
 ### ✅ pyannote-audio 4.x Upgrade (April 2026)
 Upgraded from 3.4.0 → 4.0.4. Removed 5 compatibility shims (torchaudio stubs, hf_hub `use_auth_token`, torch.load default). speechbrain `LazyModule.ensure_module` patch retained — pyannote 4.x still uses speechbrain for ECAPA-TDNN embeddings and the Windows path bug is in speechbrain itself.
@@ -210,7 +211,7 @@ torchcodec still cannot find FFmpeg shared DLLs on this Windows install despite 
 
 ### Near-term (ready to build)
 
-- **Parallel folder processing** — `concurrent.futures.ThreadPoolExecutor` for CPU-bound files. Caveat: pyannote and whisper are not thread-safe when sharing a GPU — needs per-worker model instances or CPU-only mode guard.
+*(No remaining near-term items — see completed list below.)*
 
 ### ✅ Near-term completed
 
@@ -221,6 +222,7 @@ torchcodec still cannot find FFmpeg shared DLLs on this Windows install despite 
 - **Enrollment speaker order — chronological** ✅ — speakers sorted by first appearance timestamp in `pipeline.py`.
 - **Audio playback during enrollment** ✅ — `--play-audio` flag; plays up to 10 s via pydub; silent fallback. (PR #3)
 - **`wisper speakers reset`** ✅ — deletes all profiles and embeddings with confirmation prompt.
+- **Phase 8 — VAD filter** ✅ — `--vad/--no-vad` flag; faster-whisper built-in `vad_filter`; `None`-sentinel so unset falls through to config default (on). 76 tests.
 - **Phase 9 — Compute type / quantization** ✅ — `--compute-type auto|float16|int8_float16|int8|float32`; configurable via `wisper config set compute_type`; shown in run header and `wisper config show`.
 
 ### pyannote 4.x upgrade
@@ -290,46 +292,9 @@ torchcodec still cannot find FFmpeg shared DLLs on this Windows install despite 
 
 ---
 
-### Phase 8 — Silero VAD Preprocessing (from Whisper-WebUI review)
+### ✅ Phase 8 — VAD Filter (from Whisper-WebUI review)
 
-**Context:** Whisper-WebUI runs [Silero VAD](https://github.com/snakers4/silero-vad) before transcription to strip silence and non-speech segments. This is especially valuable for tabletop RPG sessions which have long pauses (thinking, dice rolling, snack breaks, cross-talk). Removing these segments before Whisper processes them improves both speed and accuracy.
-
-**What to build:**
-
-1. **New module: `src/wisper_transcribe/vad.py`**
-   - `strip_silence(wav_path: Path, aggressiveness: int = 3) -> Path`
-   - Loads Silero VAD model (lightweight PyTorch, ~1MB, no HF token needed)
-   - Runs VAD over the 16kHz mono WAV
-   - Returns a new WAV with non-speech segments removed (or marked)
-   - Must preserve original timestamps for alignment — store a time-mapping so diarization segments still map to the original audio timeline
-   - Cache the Silero model at module level (same pattern as `transcriber._model`)
-
-2. **Pipeline integration** — Insert between steps 2 (PREPROCESS) and 3 (TRANSCRIBE):
-   ```
-   1. VALIDATE
-   2. PREPROCESS (convert to WAV)
-   3. VAD (strip silence)     ← NEW
-   4. TRANSCRIBE
-   5. DIARIZE
-   6. ALIGN
-   7. IDENTIFY
-   8. FORMAT
-   ```
-
-3. **CLI flag**: `--vad / --no-vad` (default: on). Add to `wisper transcribe`.
-
-4. **Timestamp remapping**: This is the tricky part. If VAD removes a 30-second silence gap, all subsequent timestamps shift. Two approaches:
-   - **Option A (simpler)**: Run VAD only to *inform* Whisper's `vad_filter` parameter (faster-whisper already has built-in VAD support via `vad_filter=True`). This avoids timestamp remapping entirely. Start here.
-   - **Option B (full)**: Actually strip audio, then remap timestamps post-transcription. More work, better results. Do this only if Option A's quality isn't sufficient.
-
-5. **Tests**: `tests/test_vad.py` — mock Silero model, verify silence stripping logic and timestamp preservation.
-
-**Recommendation:** Start with Option A — faster-whisper's built-in `vad_filter=True` parameter. This is literally a one-line change in `transcriber.py` and gets 80% of the benefit. Only build the full Silero pipeline if the built-in filter isn't aggressive enough for RPG session audio.
-
-**Verification:**
-- [ ] `wisper transcribe session.mp3 --vad` — faster transcription than `--no-vad` on same file
-- [ ] Timestamps in output still align with original audio (spot-check a few)
-- [ ] No accuracy regression on clean speech segments
+**Status: Complete.** Used faster-whisper's built-in `vad_filter=True` (Option A). Avoids timestamp remapping entirely — faster-whisper's Silero VAD integration keeps timestamps original-relative. `--vad/--no-vad` flag added to CLI; `vad_filter` in config.toml; `None`-sentinel in `process_file()` so unset flag falls through to config default.
 
 ---
 
@@ -339,7 +304,17 @@ torchcodec still cannot find FFmpeg shared DLLs on this Windows install despite 
 
 ---
 
-### Phase 10 — Optional GUI
+### Phase 10 — Parallel Folder Processing (CPU-only)
+
+**Context:** GPU processing is always the bottleneck — faster-whisper and pyannote are not thread-safe when sharing a GPU, and loading duplicate model copies would exhaust VRAM. Parallelism only makes sense on CPU-only deployments (e.g. a Linux server processing a large queue of files overnight).
+
+**What to build:** `--workers N` flag on `wisper transcribe <folder>`. Uses `concurrent.futures.ThreadPoolExecutor`. Each worker gets its own model instance (no sharing). Guard: if `device != "cpu"`, emit a warning and clamp workers to 1. Default workers=1 (current behavior unchanged for all GPU users).
+
+**When to build:** Only if there's an actual CPU-server use case. Not worth building for the primary RTX 3090 / M5 Mac workflow.
+
+---
+
+### Phase 11 — Optional GUI
 
 - **Optional GUI** — Textual (terminal) or tkinter/PyQt. Wraps the same `pipeline.process_file()` and `speaker_manager` calls. Keep CLI/library separation clean.
 

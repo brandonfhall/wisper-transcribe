@@ -110,7 +110,7 @@ wisper will transcribe, detect speakers, then prompt you for each one:
 ────────────────────────────────────────────────────────────
   Input  : session01.mp3
   Output : session01.md
-  Model  : medium (cuda)
+  Model  : medium (cuda, float16)
 ────────────────────────────────────────────────────────────
   Transcribing: 100%|████████| 4823/4823s
 
@@ -142,7 +142,7 @@ wisper transcribe session02.mp3 --num-speakers 6
 ────────────────────────────────────────────────────────────
   Input  : session02.mp3
   Output : session02.md
-  Model  : medium (cuda)
+  Model  : medium (cuda, float16)
 ────────────────────────────────────────────────────────────
   Transcribing: 100%|████████| 4901/4901s
   Speaker matches:
@@ -228,9 +228,14 @@ wisper transcribe <path>
   --min-speakers INT       Minimum speaker count
   --max-speakers INT       Maximum speaker count
   --enroll-speakers        Interactively name speakers (use on first run)
+  --play-audio             Play each speaker's sample clip during enrollment
   --no-diarize             Skip speaker detection (single-speaker output)
   --timestamps             Include timestamps (default: on)
   --no-timestamps          Omit timestamps
+  --compute-type TYPE      CTranslate2 dtype: auto|float16|int8_float16|int8|float32
+                           (default: auto → float16 on CUDA, int8 on CPU)
+  --vad / --no-vad         Voice activity detection — skips silence before transcription
+                           (default: on; improves speed and accuracy on audio with pauses)
   --overwrite              Re-process files that already have output
   --verbose                Show detailed progress
 ```
@@ -251,6 +256,7 @@ wisper enroll "Alice" --audio session08.mp3 --update   # blend with existing pro
 wisper speakers list                    # show all enrolled profiles
 wisper speakers remove "Alice"          # delete a profile
 wisper speakers rename "Alice" "Alicia" # rename a profile
+wisper speakers reset                   # delete ALL profiles and embeddings (with confirmation)
 wisper speakers test session03.mp3      # preview match results without writing output
 ```
 
@@ -365,7 +371,7 @@ wisper-transcribe/
 .venv/bin/pytest tests/ -v        # Mac/Linux
 ```
 
-Tests mock all ML models — no GPU, network, or real audio files required.
+Tests mock all ML models — no GPU, network, or real audio files required. (76 tests)
 
 ---
 
@@ -375,7 +381,10 @@ Tests mock all ML models — no GPU, network, or real audio files required.
 - [x] Phase 2: Speaker diarization
 - [x] Phase 3: Speaker profiles + cross-file voice matching
 - [x] Phase 4: Batch processing + CLI polish
-- [x] Phase 5: Tests (64 passing), coverage reporting, README, setup scripts, CI
+- [x] Phase 5: Tests (76 passing), coverage reporting, README, setup scripts, CI
 - [x] Phase 6: `wisper setup` guided first-run wizard
-- [ ] Phase 7: Parallel folder processing (`--workers N`)
-- [ ] Phase 8: Optional GUI (Textual or tkinter)
+- [ ] Phase 7: Docker containerization (GPU + CPU targets)
+- [x] Phase 8: VAD filter (`--vad/--no-vad`) via faster-whisper built-in Silero VAD
+- [x] Phase 9: Compute type / quantization (`--compute-type`)
+- [ ] Phase 10: Parallel folder processing (`--workers N`, CPU-only)
+- [ ] Phase 11: Optional GUI (Textual or tkinter)
