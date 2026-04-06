@@ -62,7 +62,23 @@ def diarize(
         if max_speakers is not None:
             kwargs["max_speakers"] = max_speakers
 
-    diarization = _pipeline(str(audio_path), **kwargs)
+    # Load audio via scipy and pass as a tensor dict to bypass torchcodec,
+    # which is pyannote 4.x's default decoder but fails on Windows unless
+    # the FFmpeg "full-shared" build is installed. The input is always a
+    # WAV file (guaranteed by convert_to_wav() in the pipeline).
+    import numpy as np
+    import scipy.io.wavfile as _wavfile
+    import torch
+
+    sample_rate, data = _wavfile.read(str(audio_path))
+    if data.ndim == 1:
+        data = data[np.newaxis, :]          # (time,) → (1, time)
+    else:
+        data = data.T                        # (time, ch) → (ch, time)
+    if np.issubdtype(data.dtype, np.integer):
+        data = data.astype(np.float32) / np.iinfo(data.dtype).max
+    waveform = torch.from_numpy(data.copy())
+    diarization = _pipeline({"waveform": waveform, "sample_rate": sample_rate}, **kwargs)
 
     segments: list[DiarizationSegment] = []
     for turn, _track, speaker in diarization.itertracks(yield_label=True):

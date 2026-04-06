@@ -1,9 +1,12 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 
 from wisper_transcribe.models import DiarizationSegment
+
+_FAKE_AUDIO = (16000, np.zeros(16000, dtype=np.int16))  # (sample_rate, mono array)
 
 
 def _make_turn(start, end):
@@ -13,7 +16,8 @@ def _make_turn(start, end):
     return turn
 
 
-def test_diarize_returns_segments():
+@patch("scipy.io.wavfile.read", return_value=_FAKE_AUDIO)
+def test_diarize_returns_segments(mock_read):
     mock_pipeline = MagicMock()
     mock_pipeline.return_value.itertracks.return_value = [
         (_make_turn(0.0, 5.0), "A", "SPEAKER_00"),
@@ -33,11 +37,17 @@ def test_diarize_returns_segments():
     assert result[1].speaker == "SPEAKER_01"
     assert result[2].speaker == "SPEAKER_00"
 
-    # Cleanup
+    # Pipeline receives a waveform dict, not a file path
+    audio_arg = mock_pipeline.call_args.args[0]
+    assert isinstance(audio_arg, dict)
+    assert "waveform" in audio_arg
+    assert "sample_rate" in audio_arg
+
     d._pipeline = None
 
 
-def test_diarize_with_num_speakers():
+@patch("scipy.io.wavfile.read", return_value=_FAKE_AUDIO)
+def test_diarize_with_num_speakers(mock_read):
     mock_pipeline = MagicMock()
     mock_pipeline.return_value.itertracks.return_value = [
         (_make_turn(0.0, 5.0), "A", "SPEAKER_00"),
@@ -47,12 +57,15 @@ def test_diarize_with_num_speakers():
     d._pipeline = mock_pipeline
 
     d.diarize(Path("fake.wav"), hf_token="hf_fake", device="cpu", num_speakers=4)
-    mock_pipeline.assert_called_once_with(str(Path("fake.wav")), num_speakers=4)
+
+    _, kwargs = mock_pipeline.call_args
+    assert kwargs.get("num_speakers") == 4
 
     d._pipeline = None
 
 
-def test_diarize_with_min_max_speakers():
+@patch("scipy.io.wavfile.read", return_value=_FAKE_AUDIO)
+def test_diarize_with_min_max_speakers(mock_read):
     mock_pipeline = MagicMock()
     mock_pipeline.return_value.itertracks.return_value = []
 
@@ -60,12 +73,16 @@ def test_diarize_with_min_max_speakers():
     d._pipeline = mock_pipeline
 
     d.diarize(Path("fake.wav"), hf_token="hf_fake", device="cpu", min_speakers=2, max_speakers=6)
-    mock_pipeline.assert_called_once_with(str(Path("fake.wav")), min_speakers=2, max_speakers=6)
+
+    _, kwargs = mock_pipeline.call_args
+    assert kwargs.get("min_speakers") == 2
+    assert kwargs.get("max_speakers") == 6
 
     d._pipeline = None
 
 
-def test_load_pipeline_called_when_none():
+@patch("scipy.io.wavfile.read", return_value=_FAKE_AUDIO)
+def test_load_pipeline_called_when_none(mock_read):
     import wisper_transcribe.diarizer as d
     d._pipeline = None
 
