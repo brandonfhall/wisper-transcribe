@@ -139,3 +139,69 @@ def test_enroll_speakers_chronological_order(
 
     enrolled_labels = [c.kwargs["speaker_label"] for c in mock_enroll.call_args_list]
     assert enrolled_labels == ["SPEAKER_01", "SPEAKER_00"]
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=600.0)
+@patch("wisper_transcribe.pipeline.transcribe")
+@patch("wisper_transcribe.pipeline.get_hf_token", return_value="fake-token")
+@patch("wisper_transcribe.diarizer.diarize", return_value=[])
+@patch("wisper_transcribe.aligner.align")
+@patch("wisper_transcribe.speaker_manager.enroll_speaker")
+@patch("wisper_transcribe.pipeline._play_excerpt")
+@patch("click.prompt", return_value="Alice")
+def test_enroll_play_audio_calls_play_excerpt(
+    mock_prompt, mock_play, mock_enroll, mock_align, mock_diarize, mock_hf_token,
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg,
+    tmp_path,
+):
+    """play_audio=True calls _play_excerpt for each speaker sample."""
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    mock_convert.return_value = audio
+    mock_transcribe.return_value = [
+        TranscriptionSegment(start=0.0, end=5.0, text="Hello"),
+    ]
+    mock_align.return_value = [
+        AlignedSegment(start=0.0, end=5.0, text="Hello", speaker="SPEAKER_00"),
+    ]
+
+    from wisper_transcribe.pipeline import process_file
+
+    process_file(audio, output_dir=tmp_path, device="cpu", enroll_speakers=True, play_audio=True)
+
+    mock_play.assert_called_once_with(audio, 0.0, 5.0)
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=600.0)
+@patch("wisper_transcribe.pipeline.transcribe")
+@patch("wisper_transcribe.pipeline.get_hf_token", return_value="fake-token")
+@patch("wisper_transcribe.diarizer.diarize", return_value=[])
+@patch("wisper_transcribe.aligner.align")
+@patch("wisper_transcribe.speaker_manager.enroll_speaker")
+@patch("click.prompt", return_value="Alice")
+def test_enroll_play_audio_false_does_not_play(
+    mock_prompt, mock_enroll, mock_align, mock_diarize, mock_hf_token,
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg,
+    tmp_path,
+):
+    """play_audio=False (default) never calls pydub playback."""
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    mock_convert.return_value = audio
+    mock_transcribe.return_value = [
+        TranscriptionSegment(start=0.0, end=5.0, text="Hello"),
+    ]
+    mock_align.return_value = [
+        AlignedSegment(start=0.0, end=5.0, text="Hello", speaker="SPEAKER_00"),
+    ]
+
+    with patch("wisper_transcribe.pipeline._play_excerpt") as mock_play:
+        from wisper_transcribe.pipeline import process_file
+        process_file(audio, output_dir=tmp_path, device="cpu", enroll_speakers=True, play_audio=False)
+        mock_play.assert_not_called()

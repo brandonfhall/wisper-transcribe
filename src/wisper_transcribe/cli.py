@@ -31,6 +31,7 @@ def main():
 @click.option("--max-speakers", default=None, type=int, help="Maximum number of speakers")
 @click.option("--no-diarize", is_flag=True, default=False, help="Skip speaker diarization")
 @click.option("--enroll-speakers", is_flag=True, default=False, help="Interactively name and enroll detected speakers")
+@click.option("--play-audio", is_flag=True, default=False, help="Play each speaker's audio excerpt during enrollment")
 @click.option("--verbose", is_flag=True, default=False, help="Show detailed progress")
 def transcribe(
     path: Path,
@@ -45,6 +46,7 @@ def transcribe(
     max_speakers: Optional[int],
     no_diarize: bool,
     enroll_speakers: bool,
+    play_audio: bool,
     verbose: bool,
 ):
     """Transcribe an audio file (or folder of files) to markdown."""
@@ -63,6 +65,7 @@ def transcribe(
         min_speakers=min_speakers,
         max_speakers=max_speakers,
         enroll_speakers=enroll_speakers,
+        play_audio=play_audio,
     )
 
     if path.is_dir():
