@@ -19,6 +19,7 @@ DEFAULTS = {
     "language": "en",
     "device": "auto",
     "compute_type": "auto",
+    "vad_filter": True,
     "timestamps": True,
     "similarity_threshold": 0.65,
     "min_speakers": 2,

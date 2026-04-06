@@ -35,6 +35,8 @@ def main():
 @click.option("--compute-type", default="auto", show_default=True,
               type=click.Choice(["auto", "float16", "int8_float16", "int8", "float32"]),
               help="CTranslate2 quantization (auto=float16 on CUDA, int8 on CPU)")
+@click.option("--vad/--no-vad", default=None,
+              help="Voice activity detection to skip silence (default: on, from config)")
 @click.option("--verbose", is_flag=True, default=False, help="Show detailed progress")
 def transcribe(
     path: Path,
@@ -51,6 +53,7 @@ def transcribe(
     enroll_speakers: bool,
     play_audio: bool,
     compute_type: str,
+    vad: Optional[bool],
     verbose: bool,
 ):
     """Transcribe an audio file (or folder of files) to markdown."""
@@ -71,6 +74,7 @@ def transcribe(
         enroll_speakers=enroll_speakers,
         play_audio=play_audio,
         compute_type=compute_type,
+        vad_filter=vad,
     )
 
     if path.is_dir():

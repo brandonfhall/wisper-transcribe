@@ -90,3 +90,29 @@ def test_load_model_resolves_auto_cpu():
         _, kwargs = mock_cls.call_args
         assert kwargs.get("compute_type") == "int8"
         t._model = None
+
+
+def test_transcribe_passes_vad_filter_true():
+    """vad_filter=True is forwarded to model.transcribe()."""
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = (iter([]), _make_mock_info(1.0))
+
+    import wisper_transcribe.transcriber as t
+    t._model = mock_model
+
+    t.transcribe(Path("fake.wav"), device="cpu", vad_filter=True)
+    _, kwargs = mock_model.transcribe.call_args
+    assert kwargs.get("vad_filter") is True
+
+
+def test_transcribe_passes_vad_filter_false():
+    """vad_filter=False is forwarded to model.transcribe()."""
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = (iter([]), _make_mock_info(1.0))
+
+    import wisper_transcribe.transcriber as t
+    t._model = mock_model
+
+    t.transcribe(Path("fake.wav"), device="cpu", vad_filter=False)
+    _, kwargs = mock_model.transcribe.call_args
+    assert kwargs.get("vad_filter") is False
