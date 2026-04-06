@@ -117,6 +117,8 @@ New embedding blended with existing: `stored = 0.7 * stored + 0.3 * new`
 
 pyannote 3.x uses `soundfile` for audio loading, but its `core/io.py` references two torchaudio API symbols that were removed in torchaudio 2.x: `torchaudio.AudioMetaData` (namedtuple) and `torchaudio.list_audio_backends()` (function). Both are patched back in at the top of `diarizer.py` before `from pyannote.audio import Pipeline` so the import succeeds.
 
+`huggingface_hub >=0.25` also removed the `use_auth_token` parameter from `hf_hub_download()` in favour of `token`. pyannote 3.x still passes `use_auth_token` internally (in `core/pipeline.py` and `core/model.py`). A third shim wraps `huggingface_hub.hf_hub_download` at the module level — before pyannote's `from huggingface_hub import hf_hub_download` runs — so every pyannote call that uses `use_auth_token` is transparently forwarded as `token`.
+
 At runtime, `diarize()` pre-loads the WAV file with `scipy.io.wavfile` and passes a `{'waveform': tensor, 'sample_rate': int}` dict to the pipeline. When the dict contains `"waveform"`, pyannote's `Audio.__call__()` and `Audio.crop()` both operate directly on the tensor without ever calling `torchaudio.load()`, so the missing torchaudio audio I/O is never exercised.
 
 ### Module-level imports for mock patching

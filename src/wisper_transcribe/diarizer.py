@@ -19,6 +19,21 @@ if not hasattr(_torchaudio, "AudioMetaData"):
 if not hasattr(_torchaudio, "list_audio_backends"):
     _torchaudio.list_audio_backends = lambda: ["soundfile"]  # type: ignore[attr-defined]
 
+# huggingface_hub >=0.25 removed use_auth_token from hf_hub_download().
+# pyannote-audio 3.x still passes it at call-time (pipeline.py, model.py).
+# Patch at the huggingface_hub module level BEFORE pyannote imports the symbol,
+# so every subsequent `from huggingface_hub import hf_hub_download` in pyannote
+# binds to this wrapper instead of the raw function.
+import huggingface_hub as _hf_hub
+_orig_hf_hub_download = _hf_hub.hf_hub_download
+
+def _compat_hf_hub_download(*args, use_auth_token=None, **kwargs):
+    if use_auth_token is not None and "token" not in kwargs:
+        kwargs["token"] = use_auth_token
+    return _orig_hf_hub_download(*args, **kwargs)
+
+_hf_hub.hf_hub_download = _compat_hf_hub_download
+
 from pyannote.audio import Pipeline
 
 from .models import DiarizationSegment
