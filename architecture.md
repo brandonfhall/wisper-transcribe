@@ -124,6 +124,12 @@ speechbrain 1.0 lazy-loads optional integrations (k2, transformers, spacy, numba
 ### CUDA DLL path resolution (Windows)
 `transcriber.load_model()` searches for `cublas64_12.dll` in PyTorch's `nvidia-cublas` site-packages directory and the system CUDA Toolkit before loading `WhisperModel`. CTranslate2 on Windows requires this DLL to be on `PATH` or added via `os.add_dll_directory()`.
 
+### VAD filter via faster-whisper built-in
+`transcribe()` passes `vad_filter=True/False` directly to `_model.transcribe()`. faster-whisper bundles Silero VAD internally; when enabled it skips silence/non-speech frames before feeding audio to Whisper. This is "Option A" from the plan — no separate audio stripping step, no timestamp remapping required. Timestamps in the output remain original-audio-relative. Controlled via `--vad/--no-vad` CLI flag (default: on, from config). `process_file()` uses `vad_filter: Optional[bool] = None` as a sentinel so an unset flag falls through to the config value rather than hard-coding True.
+
+### CTranslate2 compute type
+`load_model()` calls `resolve_compute_type(compute_type, device)` to convert `"auto"` to a concrete CTranslate2 dtype: `"float16"` on CUDA (fast, GPU-native), `"int8"` on CPU (lower memory, minimal accuracy loss). Non-auto values (`float32`, `int8_float16`, etc.) are passed through unchanged. This is configurable via `--compute-type` flag and `wisper config set compute_type`.
+
 ### Module-level model caches
 `_model` (transcriber) and `_pipeline` (diarizer) are module-level globals. This avoids reloading multi-GB models between files when processing a folder. The caches are intentionally reset to `None` in tests.
 
@@ -150,7 +156,7 @@ wisper-transcribe/       ← platformdirs.user_data_dir("wisper-transcribe")
         └── <name>.npy   512-dim float32 voice embeddings (gitignored)
 ```
 
-Config keys: `model`, `language`, `device`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`.
+Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`.
 
 ---
 
