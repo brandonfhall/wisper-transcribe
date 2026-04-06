@@ -32,7 +32,7 @@ def load_pipeline(hf_token: str, device: str):
         raise RuntimeError(
             "CUDA is not available. Your PyTorch installation may not include CUDA support.\n"
             "Reinstall with CUDA support:\n"
-            "  pip install "torch>=2.8.0" torchaudio --index-url https://download.pytorch.org/whl/cu126\n"
+            "  pip install 'torch>=2.8.0' torchaudio --index-url https://download.pytorch.org/whl/cu126\n"
             "Or use --device cpu"
         )
     _pipeline.to(torch.device(device))

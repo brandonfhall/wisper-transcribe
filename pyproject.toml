@@ -25,6 +25,9 @@ dependencies = [
     "nvidia-cudnn-cu12; sys_platform == 'win32'",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest-cov"]
+
 [project.scripts]
 wisper = "wisper_transcribe.cli:main"
 
@@ -33,3 +36,11 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["wisper_transcribe"]
+omit = ["*/tests/*", "*/__main__.py"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
