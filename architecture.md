@@ -170,7 +170,7 @@ Config keys: `model`, `language`, `device`, `timestamps`, `similarity_threshold`
 | Constraint | Detail |
 |-----------|--------|
 | torchcodec on Windows | Requires FFmpeg "full-shared" build; avoided by scipy audio loading in diarizer |
-| MPS on Apple Silicon | Unreliable for faster-whisper and pyannote; CPU used by default on Mac |
+| MPS on Apple Silicon | faster-whisper (CTranslate2) has no MPS backend — transcription always uses CPU on Mac. pyannote diarization and speaker embeddings run on MPS when available (auto-detected). |
 | Thread safety | `_model` and `_pipeline` globals are not thread-safe; parallel folder processing would require per-worker instances |
 | pyannote license | HuggingFace token + one-time model license acceptance required (free) |
 
