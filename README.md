@@ -60,6 +60,9 @@ You must also accept the model license agreements on HuggingFace (one-time, free
 - [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
 - [pyannote/embedding](https://huggingface.co/pyannote/embedding)
 - [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0)
+- [pyannote/speaker-diarization-community-1/resolve/main/plda/xvec_transform.npz.bz2] (https://huggingface.co/pyannote/speaker-diarization-community-1/resolve/main/plda/xvec_transform.npz.bz2)
+- [pyannote/speaker-diarization-community-1] (https://huggingface.co/pyannote/speaker-diarization-community-1)
+
 
 
 ---
