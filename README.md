@@ -77,9 +77,8 @@ wisper setup
 You must also accept the model license agreements on HuggingFace (free, one-time — links shown by `wisper setup`):
 - [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
 - [pyannote/embedding](https://huggingface.co/pyannote/embedding)
-- [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0)
-- [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)
-- [pyannote/speaker-diarization-community-1 PLDA transform](https://huggingface.co/pyannote/speaker-diarization-community-1/resolve/main/plda/xvec_transform.npz.bz2)
+
+`pyannote/segmentation-3.0` is a sub-dependency of `speaker-diarization-3.1` and will be downloaded automatically — you do not need to accept it separately.
 
 Alternatively, set the token manually or via environment variable:
 
@@ -371,7 +370,7 @@ wisper-transcribe/
 .venv/bin/pytest tests/ -v        # Mac/Linux
 ```
 
-Tests mock all ML models — no GPU, network, or real audio files required. (77 tests)
+Tests mock all ML models — no GPU, network, or real audio files required. (103 tests)
 
 ---
 
@@ -461,7 +460,7 @@ Unset it (or open a new terminal) to return to clean output.
 - [x] Phase 2: Speaker diarization
 - [x] Phase 3: Speaker profiles + cross-file voice matching
 - [x] Phase 4: Batch processing + CLI polish
-- [x] Phase 5: Tests (77 passing), coverage reporting, README, setup scripts, CI
+- [x] Phase 5: Tests (103 passing), coverage reporting, README, setup scripts, CI
 - [x] Phase 6: `wisper setup` guided first-run wizard
 - [x] Phase 7: Docker containerization (GPU + CPU targets, `WISPER_DATA_DIR` override)
 - [x] Phase 8: VAD filter (`--vad/--no-vad`) via faster-whisper built-in Silero VAD

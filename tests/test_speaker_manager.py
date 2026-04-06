@@ -281,3 +281,20 @@ def test_reset_profiles_empty(tmp_path):
 
     count = reset_profiles(data_dir=tmp_path)
     assert count == 0
+
+
+def test_extract_embedding_no_matching_segments_raises(tmp_path):
+    """ValueError is raised when no segments match the requested speaker label."""
+    from wisper_transcribe.speaker_manager import extract_embedding
+
+    segments = [DiarizationSegment(start=0.0, end=5.0, speaker="SPEAKER_01")]
+    fake_audio = (16000, np.zeros(16000, dtype=np.float32))
+
+    with patch("scipy.io.wavfile.read", return_value=fake_audio):
+        with patch("wisper_transcribe.speaker_manager._load_embedding_model"):
+            with pytest.raises(ValueError, match="No segments found for speaker"):
+                extract_embedding(
+                    tmp_path / "fake.wav",
+                    segments,
+                    speaker_label="SPEAKER_00",
+                )
