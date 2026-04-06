@@ -149,10 +149,10 @@ def setup():
             from pyannote.audio import Inference, Model, Pipeline
 
             click.echo("   Downloading pyannote/speaker-diarization-3.1 ...")
-            pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=token)
+            pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=token)
             del pipeline
             click.echo("   Downloading pyannote/embedding ...")
-            model = Model.from_pretrained("pyannote/embedding", use_auth_token=token)
+            model = Model.from_pretrained("pyannote/embedding", token=token)
             del model
             click.echo("   OK  : all models cached — subsequent runs start immediately")
         except Exception as e:
@@ -386,6 +386,28 @@ def speakers_test(audio: Path, num_speakers: Optional[int]):
 
     for label, name in sorted(matches.items()):
         click.echo(f"  {label} → {name}")
+
+
+@speakers.command("reset")
+@click.option("--yes", is_flag=True, default=False, help="Skip confirmation prompt")
+def speakers_reset(yes: bool):
+    """Delete all enrolled speaker profiles and embeddings."""
+    from .speaker_manager import load_profiles, reset_profiles
+
+    profiles = load_profiles()
+    count = len(profiles)
+    if count == 0:
+        click.echo("No speakers enrolled — nothing to reset.")
+        return
+
+    names = ", ".join(p.display_name for p in profiles.values())
+    click.echo(f"This will permanently delete {count} speaker(s): {names}")
+
+    if not yes:
+        click.confirm("Reset speaker database?", abort=True)
+
+    reset_profiles()
+    click.echo(f"Removed {count} speaker(s). Database is now empty.")
 
 
 # ---------------------------------------------------------------------------

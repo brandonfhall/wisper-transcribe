@@ -112,14 +112,11 @@ New embedding blended with existing: `stored = 0.7 * stored + 0.3 * new`
 
 ## Key Design Decisions
 
-### pyannote-audio pinned to 3.x, torchaudio compatibility shims
-`pyannote-audio` is pinned to `>=3.3,<4.0`. pyannote 4.x depends on `torchcodec` for audio I/O, which requires FFmpeg's "full-shared" build on Windows (not provided by `winget install Gyan.FFmpeg`).
+### scipy audio pre-loading (torchcodec bypass)
+pyannote-audio 4.x uses `torchcodec` for audio I/O by default. On Windows, torchcodec requires FFmpeg's "full-shared" build (`winget install Gyan.FFmpeg.Shared`) to load its native DLLs. Rather than make the full-shared build a hard requirement, `diarize()` and `extract_embedding()` pre-load the WAV file with `scipy.io.wavfile` and pass a `{'waveform': tensor, 'sample_rate': int}` dict to pyannote. When the dict contains `"waveform"`, pyannote's `Audio.__call__()` and `Audio.crop()` skip torchcodec entirely and operate on the tensor directly. The input is always a 16kHz mono WAV produced by `convert_to_wav()`.
 
-pyannote 3.x uses `soundfile` for audio loading, but its `core/io.py` references two torchaudio API symbols that were removed in torchaudio 2.x: `torchaudio.AudioMetaData` (namedtuple) and `torchaudio.list_audio_backends()` (function). Both are patched back in at the top of `diarizer.py` before `from pyannote.audio import Pipeline` so the import succeeds.
-
-`huggingface_hub >=0.25` also removed the `use_auth_token` parameter from `hf_hub_download()` in favour of `token`. pyannote 3.x still passes `use_auth_token` internally (in `core/pipeline.py` and `core/model.py`). A third shim wraps `huggingface_hub.hf_hub_download` at the module level — before pyannote's `from huggingface_hub import hf_hub_download` runs — so every pyannote call that uses `use_auth_token` is transparently forwarded as `token`.
-
-At runtime, `diarize()` pre-loads the WAV file with `scipy.io.wavfile` and passes a `{'waveform': tensor, 'sample_rate': int}` dict to the pipeline. When the dict contains `"waveform"`, pyannote's `Audio.__call__()` and `Audio.crop()` both operate directly on the tensor without ever calling `torchaudio.load()`, so the missing torchaudio audio I/O is never exercised.
+### speechbrain LazyModule shim (Windows path bug)
+speechbrain 1.0 lazy-loads optional integrations (k2, transformers, spacy, numba) via `LazyModule.ensure_module()`. The guard that suppresses lazy loads triggered by `inspect.getmembers()` checks for `"/inspect.py"` — a forward-slash check that never matches on Windows (which uses backslash). As a result, every missing optional integration raises `ImportError` instead of silently no-oping. `diarizer.py` patches `LazyModule.ensure_module` at import time to catch these `ImportError`s and return empty stub modules. This is the only compatibility shim remaining; it is in speechbrain itself, not pyannote.
 
 ### Module-level imports for mock patching
 `pyannote.audio.Pipeline` is imported at the top of `diarizer.py` (not inside the function). `pydub.AudioSegment` is imported at the top of `audio_utils.py`. This is required so `unittest.mock.patch("wisper_transcribe.diarizer.Pipeline", ...)` resolves correctly in tests. Lazy imports inside functions cannot be patched at the module path.
@@ -171,7 +168,7 @@ Config keys: `model`, `language`, `device`, `timestamps`, `similarity_threshold`
 
 | Constraint | Detail |
 |-----------|--------|
-| torchcodec on Windows | Requires FFmpeg "full-shared" build; avoided by scipy audio loading in diarizer |
+| torchcodec on Windows | Requires `Gyan.FFmpeg.Shared` (full-shared build). Currently bypassed by scipy waveform pre-loading in `diarize()` and `extract_embedding()`; torchcodec would work after installing the shared build and restarting |
 | MPS on Apple Silicon | faster-whisper (CTranslate2) has no MPS backend — transcription always uses CPU on Mac. pyannote diarization and speaker embeddings run on MPS when available (auto-detected). |
 | Thread safety | `_model` and `_pipeline` globals are not thread-safe; parallel folder processing would require per-worker instances |
 | pyannote license | HuggingFace token + one-time model license acceptance required (free) |

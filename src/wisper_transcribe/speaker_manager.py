@@ -70,6 +70,25 @@ def save_profiles(profiles: dict[str, SpeakerProfile], data_dir: Optional[Path] 
         json.dump(raw, f, indent=2)
 
 
+def reset_profiles(data_dir: Optional[Path] = None) -> int:
+    """Delete all speaker profiles and embeddings. Returns number of speakers removed."""
+    speakers_json = _get_speakers_json(data_dir)
+    emb_dir = _get_embeddings_dir(data_dir)
+
+    count = 0
+    if speakers_json.exists():
+        import json as _json
+        with open(speakers_json, encoding="utf-8") as f:
+            count = len(_json.load(f))
+        speakers_json.unlink()
+
+    if emb_dir.exists():
+        for npy in emb_dir.glob("*.npy"):
+            npy.unlink()
+
+    return count
+
+
 # ---------------------------------------------------------------------------
 # Embedding extraction
 # ---------------------------------------------------------------------------
@@ -81,7 +100,7 @@ def _load_embedding_model(device: str):
         try:
             model = Model.from_pretrained(
                 "pyannote/embedding",
-                use_auth_token=_get_hf_token(),
+                token=_get_hf_token(),
             )
         except Exception as e:
             if "locate the file on the Hub" in str(e) or "connection" in str(e).lower():

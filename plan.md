@@ -120,7 +120,7 @@ wisper enroll <name> --audio <file>
   --notes TEXT
   --update                        # EMA blend with existing embedding
 
-wisper speakers list|remove|rename|test
+wisper speakers list|remove|rename|reset|test
 
 wisper config show|set|path
 
@@ -193,7 +193,14 @@ pyannote pipeline wrapper, max-overlap aligner, HF token management, `--num-spea
 `process_folder()` with tqdm progress bars, per-file error recovery, skip-existing, `--verbose` flag. Windows CUDA DLL path resolution. `wisper config` commands.
 
 ### ✅ Phase 5 — Tests & README
-64 tests passing. All ML calls mocked. No GPU required for test suite. README with install, quick start, full CLI reference.
+67 tests passing. All ML calls mocked. No GPU required for test suite. README with install, quick start, full CLI reference.
+
+### ✅ pyannote-audio 4.x Upgrade (April 2026)
+Upgraded from 3.4.0 → 4.0.4. Removed 5 compatibility shims (torchaudio stubs, hf_hub `use_auth_token`, torch.load default). speechbrain `LazyModule.ensure_module` patch retained — pyannote 4.x still uses speechbrain for ECAPA-TDNN embeddings and the Windows path bug is in speechbrain itself.
+
+One additional fix required post-upgrade: pyannote 4.x wraps diarization output in a `DiarizeOutput` dataclass (`DiarizeOutput.speaker_diarization` is the `Annotation`), breaking the existing `diarization.itertracks()` call. Fixed in `diarizer.py` with a `hasattr` guard for backwards compatibility.
+
+torchcodec still cannot find FFmpeg shared DLLs on this Windows install despite `Gyan.FFmpeg.Shared` being listed in `setup.ps1`. The scipy audio loading bypass (`scipy.io.wavfile` → waveform dict) remains as a workaround. Functionally equivalent; end-to-end test confirmed working (11 speakers enrolled, full `.md` output, CUDA device).
 
 ---
 
@@ -211,69 +218,13 @@ pyannote pipeline wrapper, max-overlap aligner, HF token management, `--num-spea
 
 - **`wisper config show` model clarity** — surface which Whisper model and pyannote models are active, not just config key/value pairs.
 
+- **Enrollment speaker order — chronological** — During `--enroll-speakers`, speakers are currently presented in pyannote label order (`SPEAKER_00`, `SPEAKER_01`, …) which reflects diarization assignment, not first appearance. Sort by each speaker's earliest segment start time so the first voice the user hears in the file is Speaker 1. One-line fix in `pipeline.py`: replace `sorted({seg.speaker …})` with a sort keyed on `min(s.start for s in aligned_segments if s.speaker == label)`.
+
+- **Audio playback during enrollment** — When prompted to name a speaker, play the audio excerpt shown in the prompt so the user can hear the voice rather than just reading the transcript snippet. Use `pydub.playback.play()` (wraps ffplay/simpleaudio/pyaudio). Requires a short clip extraction: slice the `convert_to_wav()` output to the excerpt segment, load with `pydub.AudioSegment.from_wav()`, then `play()`. Should be opt-in via `--play-audio` flag on `wisper transcribe --enroll-speakers` since it requires audio output and adds latency. Fall back gracefully if no audio device is available.
+
 ### pyannote 4.x upgrade
 
-**Status: Ready to execute. All blockers resolved.**
-
-Currently on pyannote-audio 3.4.0 with six compatibility shims across `diarizer.py` and `speaker_manager.py` to bridge API drift in torchaudio, huggingface_hub, torch, and speechbrain. pyannote 4.x was written against current library versions and eliminates nearly all of them.
-
-**What was blocking it:** pyannote 4.x requires `torchcodec` for audio I/O, which needs FFmpeg shared DLLs (`avcodec-*.dll` etc.). We were installing `Gyan.FFmpeg` (static executables only). `Gyan.FFmpeg.Shared` has always been in winget and provides both executables and DLLs. `setup.ps1` has already been updated to use it.
-
----
-
-**Shims to delete from `diarizer.py`:**
-
-| Shim | Reason it existed |
-|------|------------------|
-| `torchaudio.AudioMetaData` namedtuple | Removed from torchaudio 2.x public API |
-| `torchaudio.list_audio_backends` lambda | Same removal |
-| `torchaudio.info` scipy-backed stub | Same removal |
-| `huggingface_hub.hf_hub_download` wrapper | `use_auth_token` renamed to `token` in hf_hub ≥0.25 |
-| `speechbrain.LazyModule.ensure_module` patch | Windows path bug (`/inspect.py` vs `\inspect.py`) |
-| `torch.load` weights_only=False default | PyTorch 2.6 changed default; old pyannote checkpoints have custom globals |
-
-Also delete the entire scipy audio pre-loading block in `diarize()` — torchcodec handles audio I/O natively.
-
----
-
-**Full change list:**
-
-`setup.ps1` / `README.md` ✅ already done
-- `winget install Gyan.FFmpeg.Shared` instead of `Gyan.FFmpeg`
-
-`pyproject.toml`
-- `pyannote-audio>=3.3,<4.0` → `pyannote-audio>=4.0`
-- `torch>=2.0.0` → `torch>=2.8.0`
-- `torchaudio>=2.0.0` → `torchaudio>=2.8.0`
-
-`diarizer.py`
-- Delete all six shim blocks (torchaudio, hf_hub, speechbrain, torch.load)
-- Remove scipy audio pre-loading in `diarize()`, pass file path directly to pipeline
-- `use_auth_token=hf_token` → `token=hf_token` in `Pipeline.from_pretrained()`
-
-`speaker_manager.py`
-- Remove scipy audio pre-loading in `extract_embedding()`, pass file path directly
-- `use_auth_token=` → `token=` in `Model.from_pretrained()`
-
-`architecture.md`
-- Remove shim explanations from Key Design Decisions
-- Update Known Constraints table (torchcodec now works with Gyan.FFmpeg.Shared)
-- Update Tech Stack table (audio loading: torchcodec instead of scipy)
-
----
-
-**One uncertainty:** speechbrain's `ensure_module` Windows path bug is in speechbrain itself, not pyannote. If pyannote 4.x still uses speechbrain for ECAPA-TDNN speaker embeddings, that shim may need to stay. Verify during upgrade — if pyannote 4.x switched embedding backends, delete it entirely.
-
----
-
-**Upgrade steps:**
-1. `winget install Gyan.FFmpeg.Shared` (or re-run `setup.ps1`)
-2. Verify torchcodec loads: `python -c "import torchcodec; print('ok')"`
-3. `pip install "pyannote-audio>=4.0"` (pulls torch≥2.8.0 transitively)
-4. Apply all code changes above
-5. `pytest tests/ -v` — fix any remaining issues
-6. End-to-end test: `wisper transcribe <file> --enroll-speakers --device cuda`
-7. Commit, update `architecture.md`
+**Status: ✅ Complete (April 2026). Merged in PR #2.**
 
 ### Phase 7 — Docker Containerization (from Whisper-WebUI review)
 
@@ -450,5 +401,5 @@ PyTorch itself supports Intel Arc/Data Center GPUs via `torch.xpu` (production-r
 - [x] `wisper fix session.md --speaker "Unknown Speaker 1" --name "Frank"` → updates transcript
 - [x] `wisper transcribe ./recordings/` → batch processing with progress, skip existing, error recovery
 - [x] `wisper setup` → guided first-run wizard
+- [x] `wisper transcribe <file> --enroll-speakers --device cuda` on pyannote 4.0.4 → 11 speakers enrolled, full `.md` produced (4/6/2026)
 - [ ] Parallel folder processing with `--workers N`
-
