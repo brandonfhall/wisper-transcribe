@@ -132,9 +132,9 @@ def process_file(
                 )
                 if matches:
                     speaker_map = matches
-                tqdm.write("  Speaker matches:")
+                    tqdm.write("  Speaker matches:")
                     for label, name in sorted(matches.items()):
-                    tqdm.write(f"    {label} → {name}")
+                        tqdm.write(f"    {label} → {name}")
                     # Build speaker metadata from matched names (deduplicated, preserving order)
                     seen: set[str] = set()
                     for name in matches.values():

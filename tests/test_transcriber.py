@@ -14,6 +14,12 @@ def _make_mock_segment(start, end, text):
     return seg
 
 
+def _make_mock_info(duration: float = 10.0):
+    info = MagicMock()
+    info.duration = duration
+    return info
+
+
 @patch("wisper_transcribe.transcriber._model", None)
 @patch("wisper_transcribe.transcriber.WhisperModel", create=True)
 def test_transcribe_returns_segments(mock_whisper_cls):
@@ -24,7 +30,7 @@ def test_transcribe_returns_segments(mock_whisper_cls):
         _make_mock_segment(0.0, 3.0, "Hello world"),
         _make_mock_segment(3.0, 6.0, "This is a test"),
     ]
-    mock_model.transcribe.return_value = (iter(raw_segments), MagicMock())
+    mock_model.transcribe.return_value = (iter(raw_segments), _make_mock_info(6.0))
 
     with patch("wisper_transcribe.transcriber.WhisperModel", mock_whisper_cls):
         import wisper_transcribe.transcriber as t
@@ -49,7 +55,7 @@ def test_transcribe_filters_empty_segments():
         _make_mock_segment(1.0, 2.0, "   "),  # whitespace only
         _make_mock_segment(2.0, 3.0, "More text"),
     ]
-    mock_model.transcribe.return_value = (iter(raw_segments), MagicMock())
+    mock_model.transcribe.return_value = (iter(raw_segments), _make_mock_info(3.0))
 
     import wisper_transcribe.transcriber as t
     t._model = mock_model
