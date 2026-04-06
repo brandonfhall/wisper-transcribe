@@ -97,13 +97,32 @@ def config():
 
 @config.command("show")
 def config_show():
-    """Show current configuration."""
-    from .config import get_config_path, load_config
+    """Show current configuration and data paths."""
+    import os
+    from .config import get_config_path, get_data_dir, load_config
 
     cfg = load_config()
-    click.echo(f"Config file: {get_config_path()}")
+    data_dir = get_data_dir()
+    profiles_dir = data_dir / "profiles"
+    hf_cache = os.environ.get(
+        "HF_HOME",
+        os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub"),
+    )
+
+    click.echo("─" * 50)
+    click.echo("Paths")
+    click.echo("─" * 50)
+    click.echo(f"  Config file    : {get_config_path()}")
+    click.echo(f"  Data directory : {data_dir}")
+    click.echo(f"  Speaker profiles: {profiles_dir}")
+    click.echo(f"  HF model cache : {hf_cache}")
+    click.echo("")
+    click.echo("─" * 50)
+    click.echo("Settings")
+    click.echo("─" * 50)
     for k, v in cfg.items():
-        click.echo(f"  {k} = {v!r}")
+        display = "***" if k == "hf_token" and v else repr(v)
+        click.echo(f"  {k:<22} = {display}")
 
 
 @config.command("set")

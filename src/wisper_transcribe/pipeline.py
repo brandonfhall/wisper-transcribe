@@ -56,7 +56,13 @@ def process_file(
         tqdm.write(f"  Skipping {path.name} (output already exists, use --overwrite to force)")
         return out_path
 
-    tqdm.write(f"\nProcessing: {path.name}")
+    tqdm.write("")
+    tqdm.write("─" * 60)
+    tqdm.write(f"  Input  : {path}")
+    tqdm.write(f"  Output : {out_path}")
+    tqdm.write(f"  Model  : {model_size} ({device})")
+    tqdm.write("─" * 60)
+
     wav_path = convert_to_wav(path)
 
     segments: list[TranscriptionSegment] = transcribe(
