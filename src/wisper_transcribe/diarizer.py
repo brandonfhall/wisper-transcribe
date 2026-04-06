@@ -34,6 +34,24 @@ def _compat_hf_hub_download(*args, use_auth_token=None, **kwargs):
 
 _hf_hub.hf_hub_download = _compat_hf_hub_download
 
+# PyTorch 2.6 changed torch.load's default weights_only from False → True.
+# pyannote-audio 3.x calls torch.load without specifying weights_only, and its
+# checkpoints contain custom globals (TorchVersion, etc.) not in the safe list.
+# All loads here are from trusted HuggingFace checkpoints, so restore the
+# pre-2.6 default by making weights_only=False the default when not specified.
+import torch as _torch
+
+if not hasattr(_torch, "_compat_load_patched"):
+    _orig_torch_load = _torch.load
+
+    def _compat_torch_load(f, *args, weights_only=None, **kwargs):  # type: ignore[misc]
+        if weights_only is None:
+            weights_only = False
+        return _orig_torch_load(f, *args, weights_only=weights_only, **kwargs)
+
+    _torch.load = _compat_torch_load  # type: ignore[assignment]
+    _torch._compat_load_patched = True  # type: ignore[attr-defined]
+
 from pyannote.audio import Pipeline
 
 from .models import DiarizationSegment
