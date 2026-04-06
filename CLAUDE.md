@@ -20,10 +20,25 @@ Never run `pip install` or `pytest` against the system Python — always use `.v
 ## Running Tests
 
 ```bash
+# Without coverage
 .venv/Scripts/pytest tests/ -v
+
+# With coverage report (matches what CI runs)
+.venv/Scripts/pytest tests/ -v --cov --cov-report=term-missing
 ```
 
 Tests must not require a GPU, network access, or real ML models. Mock all ML model calls (faster-whisper, pyannote) using `unittest.mock`.
+
+## Branch Protection & CI
+
+The `main` branch is protected on GitHub. All changes must go through a pull request:
+
+- **Never push directly to `main`.** Create a feature branch and open a PR.
+- **CI must pass before merging.** The `CI` workflow (`.github/workflows/ci.yml`) runs the full test suite on every push and PR. A failing CI check blocks the merge.
+- **Tests must pass locally before pushing.** Run `pytest tests/ -v` and confirm all tests pass — do not push a branch knowing tests are red.
+- **Branch naming:** Use descriptive names like `feat/setup-scripts` or `fix/cuda-detection`.
+
+The CI workflow runs on `ubuntu-latest` with CPU-only PyTorch (no GPU available on GitHub runners). Tests are all mocked so this is fine.
 
 ## Security — Public Repo Rules
 
