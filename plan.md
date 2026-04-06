@@ -472,3 +472,140 @@ Build all phases sequentially. Each phase should be fully working before moving 
 - [ ] `wisper speakers list` → shows enrolled profiles
 - [ ] `wisper fix session.md --speaker "Unknown Speaker 1" --name "Frank" --re-enroll` → updates transcript + creates profile
 - [ ] `wisper transcribe ./recordings/` → batch processing with progress, skip existing, error recovery
+
+
+## Manual Testing Notes
+- Add a progress bar per file and per group of files. 
+- Clarify if the model downloads from Hugging face are one time. 
+- Clarify how to check which models are here. 
+- Clarify which model is running by default. 
+- Add logic to detect if there is a CUDA device and to select the optimal model for the hardware. 
+- (.venv) PS C:\vscode\wisper-transcribe> wisper transcribe '.\example-file\Episode 1 – Introducing Tom Exposition.mp3'     --enroll-speakers --device cuda
+    Transcribing Episode 1 – Introducing Tom Exposition.mp3...
+    Error: Library cublas64_12.dll is not found or cannot be loaded
+    - May be fixed now by including 
+      - "nvidia-cublas-cu12; sys_platform == 'win32'",
+      - "nvidia-cudnn-cu12; sys_platform == 'win32'",
+- Parallel processing for folders? 
+- expose default save directory in wisper config
+- expose default save directory for speaker profiles in config 
+
+- May be add dependency checking or a "setup.sh" style script to initilitze everything. 
+
+-
+(.venv) PS C:\vscode\wisper-transcribe> wisper transcribe '.\example-file\Episode 1 – Introducing Tom Exposition.mp3' --enroll-speakers
+  Transcribing Episode 1 – Introducing Tom Exposition.mp3...
+C:\vscode\wisper-transcribe\.venv\Lib\site-packages\pyannote\audio\core\io.py:47: UserWarning:
+torchcodec is not installed correctly so built-in audio decoding will fail. Solutions are:
+* use audio preloaded in-memory as a {'waveform': (channel, time) torch.Tensor, 'sample_rate': int} dictionary;
+* fix torchcodec installation. Error message was:
+
+Could not load libtorchcodec. Likely causes:
+          1. FFmpeg is not properly installed in your environment. We support
+             versions 4, 5, 6, 7, and 8, and we attempt to load libtorchcodec
+             for each of those versions. Errors for versions not installed on
+             your system are expected; only the error for your installed FFmpeg
+             version is relevant. On Windows, ensure you've installed the
+             "full-shared" version which ships DLLs.
+          2. The PyTorch version (2.11.0+cpu) is not compatible with
+             this version of TorchCodec. Refer to the version compatibility
+             table:
+             https://github.com/pytorch/torchcodec?tab=readme-ov-file#installing-torchcodec.
+          3. Another runtime dependency; see exceptions below.
+
+        The following exceptions were raised as we tried to load libtorchcodec:
+
+[start of libtorchcodec loading traceback]
+FFmpeg version 8:
+Traceback (most recent call last):
+  File "C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torch\_ops.py", line 1503, in load_library
+    ctypes.CDLL(path)
+  File "C:\Users\brand\AppData\Local\Programs\Python\Python312\Lib\ctypes\__init__.py", line 379, in __init__
+    self._handle = _dlopen(self._name, mode)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: Could not find module 'C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torchcodec\libtorchcodec_core8.dll' (or one of its dependencies). Try using the full path with constructor syntax.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torchcodec\_internally_replaced_utils.py", line 93, in load_torchcodec_shared_libraries
+    torch.ops.load_library(core_library_path)
+  File "C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torch\_ops.py", line 1505, in load_library
+    raise OSError(f"Could not load this library: {path}") from e
+OSError: Could not load this library: C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torchcodec\libtorchcodec_core8.dll
+
+FFmpeg version 7:
+Traceback (most recent call last):
+  File "C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torch\_ops.py", line 1503, in load_library
+    ctypes.CDLL(path)
+  File "C:\Users\brand\AppData\Local\Programs\Python\Python312\Lib\ctypes\__init__.py", line 379, in __init__
+    self._handle = _dlopen(self._name, mode)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: Could not find module 'C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torchcodec\libtorchcodec_core7.dll' (or one of its dependencies). Try using the full path with constructor syntax.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torchcodec\_internally_replaced_utils.py", line 93, in load_torchcodec_shared_libraries
+    torch.ops.load_library(core_library_path)
+  File "C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torch\_ops.py", line 1505, in load_library
+    raise OSError(f"Could not load this library: {path}") from e
+OSError: Could not load this library: C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torchcodec\libtorchcodec_core7.dll
+
+FFmpeg version 6:
+Traceback (most recent call last):
+  File "C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torch\_ops.py", line 1503, in load_library
+    ctypes.CDLL(path)
+  File "C:\Users\brand\AppData\Local\Programs\Python\Python312\Lib\ctypes\__init__.py", line 379, in __init__
+    self._handle = _dlopen(self._name, mode)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: Could not find module 'C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torchcodec\libtorchcodec_core6.dll' (or one of its dependencies). Try using the full path with constructor syntax.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torchcodec\_internally_replaced_utils.py", line 93, in load_torchcodec_shared_libraries
+    torch.ops.load_library(core_library_path)
+  File "C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torch\_ops.py", line 1505, in load_library
+    raise OSError(f"Could not load this library: {path}") from e
+OSError: Could not load this library: C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torchcodec\libtorchcodec_core6.dll
+
+FFmpeg version 5:
+Traceback (most recent call last):
+  File "C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torch\_ops.py", line 1503, in load_library
+    ctypes.CDLL(path)
+  File "C:\Users\brand\AppData\Local\Programs\Python\Python312\Lib\ctypes\__init__.py", line 379, in __init__
+    self._handle = _dlopen(self._name, mode)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: Could not find module 'C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torchcodec\libtorchcodec_core5.dll' (or one of its dependencies). Try using the full path with constructor syntax.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torchcodec\_internally_replaced_utils.py", line 93, in load_torchcodec_shared_libraries
+    torch.ops.load_library(core_library_path)
+  File "C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torch\_ops.py", line 1505, in load_library
+    raise OSError(f"Could not load this library: {path}") from e
+OSError: Could not load this library: C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torchcodec\libtorchcodec_core5.dll
+
+FFmpeg version 4:
+Traceback (most recent call last):
+  File "C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torch\_ops.py", line 1503, in load_library
+    ctypes.CDLL(path)
+  File "C:\Users\brand\AppData\Local\Programs\Python\Python312\Lib\ctypes\__init__.py", line 379, in __init__
+    self._handle = _dlopen(self._name, mode)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: Could not find module 'C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torchcodec\libtorchcodec_core4.dll' (or one of its dependencies). Try using the full path with constructor syntax.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torchcodec\_internally_replaced_utils.py", line 93, in load_torchcodec_shared_libraries
+    torch.ops.load_library(core_library_path)
+  File "C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torch\_ops.py", line 1505, in load_library
+    raise OSError(f"Could not load this library: {path}") from e
+OSError: Could not load this library: C:\vscode\wisper-transcribe\.venv\Lib\site-packages\torchcodec\libtorchcodec_core4.dll
+[end of libtorchcodec loading traceback].
+  warnings.warn(
+  Diarizing speakers...
+Error: Pipeline.from_pretrained() got an unexpected keyword argument 'use_auth_token'

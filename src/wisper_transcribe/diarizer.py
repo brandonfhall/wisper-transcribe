@@ -16,7 +16,7 @@ def load_pipeline(hf_token: str, device: str):
 
     _pipeline = Pipeline.from_pretrained(
         "pyannote/speaker-diarization-3.1",
-        use_auth_token=hf_token,
+        token=hf_token,
     )
     _pipeline.to(device)  # type: ignore[arg-type]
     return _pipeline

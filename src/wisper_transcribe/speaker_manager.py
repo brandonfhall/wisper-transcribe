@@ -78,8 +78,10 @@ def _load_embedding_model(device: str):
     global _embedding_model
     if _embedding_model is None:
         from pyannote.audio import Model, Inference
-        model = Model.from_pretrained("pyannote/embedding",
-                                      use_auth_token=_get_hf_token())
+        model = Model.from_pretrained(
+            "pyannote/embedding",
+            token=_get_hf_token(),
+        )
         _embedding_model = Inference(model, window="whole")
         if device == "cuda":
             import torch
