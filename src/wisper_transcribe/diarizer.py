@@ -33,7 +33,7 @@ def load_pipeline(hf_token: str, device: str):
     try:
         _pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
-            token=hf_token,
+            use_auth_token=hf_token,
         )
     except Exception as e:
         if "locate the file on the Hub" in str(e) or "connection" in str(e).lower():
