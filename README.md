@@ -41,7 +41,9 @@ pip install -e .
 
 ### One-time setup
 
-Store your HuggingFace token (required for speaker detection):
+Store your HuggingFace token (required for speaker detection).
+
+*Note: When creating the token, ensure it has the permission: **"Read access to contents of all repos under your personal namespace"**.*
 
 ```bash
 wisper config set hf_token hf_abc123...
@@ -57,6 +59,8 @@ $env:HUGGINGFACE_TOKEN="hf_abc123..."  # Windows PowerShell
 You must also accept the model license agreements on HuggingFace (one-time, free):
 - [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
 - [pyannote/embedding](https://huggingface.co/pyannote/embedding)
+- [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0)
+
 
 ---
 

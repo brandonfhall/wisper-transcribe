@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Optional
 
 import click
+
+# Suppress harmless multiline torchcodec/FFmpeg warnings from pyannote on Windows
+warnings.filterwarnings("ignore", module="pyannote.audio.core.io")
 
 from . import __version__
 

@@ -14,10 +14,19 @@ def load_pipeline(hf_token: str, device: str):
     """Load pyannote speaker-diarization-3.1, cache module-level."""
     global _pipeline
 
-    _pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-3.1",
-        token=hf_token,
-    )
+    try:
+        _pipeline = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-3.1",
+            token=hf_token,
+        )
+    except Exception as e:
+        if "locate the file on the Hub" in str(e) or "connection" in str(e).lower():
+            raise RuntimeError(
+                "Failed to download the diarization model from Hugging Face. "
+                "Please ensure you have an active internet connection for the first run."
+            ) from e
+        raise
+        
     _pipeline.to(device)  # type: ignore[arg-type]
     return _pipeline
 

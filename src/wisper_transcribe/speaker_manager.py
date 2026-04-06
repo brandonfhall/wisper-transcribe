@@ -78,10 +78,18 @@ def _load_embedding_model(device: str):
     global _embedding_model
     if _embedding_model is None:
         from pyannote.audio import Model, Inference
-        model = Model.from_pretrained(
-            "pyannote/embedding",
-            token=_get_hf_token(),
-        )
+        try:
+            model = Model.from_pretrained(
+                "pyannote/embedding",
+                token=_get_hf_token(),
+            )
+        except Exception as e:
+            if "locate the file on the Hub" in str(e) or "connection" in str(e).lower():
+                raise RuntimeError(
+                    "Failed to download the embedding model from Hugging Face. "
+                    "Please ensure you have an active internet connection for the first run."
+                ) from e
+            raise
         _embedding_model = Inference(model, window="whole")
         if device == "cuda":
             import torch
