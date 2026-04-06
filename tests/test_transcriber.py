@@ -66,3 +66,27 @@ def test_transcribe_filters_empty_segments():
     assert "More text" in texts
     assert "" not in texts
     assert len(result) == 2
+
+
+def test_load_model_passes_compute_type():
+    """load_model resolves 'auto' and forwards the concrete value to WhisperModel."""
+    with patch("faster_whisper.WhisperModel") as mock_cls:
+        mock_cls.return_value = MagicMock()
+        import wisper_transcribe.transcriber as t
+        t._model = None
+        t.load_model("tiny", "cpu", compute_type="int8")
+        _, kwargs = mock_cls.call_args
+        assert kwargs.get("compute_type") == "int8"
+        t._model = None
+
+
+def test_load_model_resolves_auto_cpu():
+    """compute_type='auto' on CPU resolves to 'int8'."""
+    with patch("faster_whisper.WhisperModel") as mock_cls:
+        mock_cls.return_value = MagicMock()
+        import wisper_transcribe.transcriber as t
+        t._model = None
+        t.load_model("tiny", "cpu", compute_type="auto")
+        _, kwargs = mock_cls.call_args
+        assert kwargs.get("compute_type") == "int8"
+        t._model = None

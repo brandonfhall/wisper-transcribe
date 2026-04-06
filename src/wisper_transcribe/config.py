@@ -18,12 +18,22 @@ DEFAULTS = {
     "model": "medium",
     "language": "en",
     "device": "auto",
+    "compute_type": "auto",
     "timestamps": True,
     "similarity_threshold": 0.65,
     "min_speakers": 2,
     "max_speakers": 8,
     "hf_token": "",
 }
+
+COMPUTE_TYPES = ("auto", "float16", "int8_float16", "int8", "float32")
+
+
+def resolve_compute_type(compute_type: str, device: str) -> str:
+    """Resolve 'auto' to a concrete CTranslate2 compute type based on device."""
+    if compute_type != "auto":
+        return compute_type
+    return "float16" if device == "cuda" else "int8"
 
 
 def get_data_dir() -> Path:

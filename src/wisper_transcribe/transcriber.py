@@ -6,7 +6,7 @@ from .models import TranscriptionSegment
 _model = None
 
 
-def load_model(model_size: str, device: str):
+def load_model(model_size: str, device: str, compute_type: str = "auto"):
     """Load faster-whisper model, caching it module-level."""
     global _model
     
@@ -62,8 +62,10 @@ def load_model(model_size: str, device: str):
         tqdm.write("  Note: faster-whisper does not support MPS — transcription will use CPU.")
 
     from faster_whisper import WhisperModel
+    from .config import resolve_compute_type
 
-    _model = WhisperModel(model_size, device=ct2_device, compute_type="float16" if ct2_device == "cuda" else "int8")
+    ct2_compute = resolve_compute_type(compute_type, ct2_device)
+    _model = WhisperModel(model_size, device=ct2_device, compute_type=ct2_compute)
     return _model
 
 
@@ -72,6 +74,7 @@ def transcribe(
     model_size: str = "medium",
     device: str = "auto",
     language: Optional[str] = "en",
+    compute_type: str = "auto",
 ) -> list[TranscriptionSegment]:
     """Transcribe audio and return a list of timestamped segments."""
     global _model
@@ -82,7 +85,7 @@ def transcribe(
         device = get_device()
 
     if _model is None:
-        load_model(model_size, device)
+        load_model(model_size, device, compute_type)
 
     segments, info = _model.transcribe(
         str(audio_path),

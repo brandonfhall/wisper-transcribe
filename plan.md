@@ -113,6 +113,7 @@ wisper transcribe <path>          # file or folder
   --no-diarize
   --timestamps / --no-timestamps
   --device cpu|cuda|auto
+  --compute-type auto|float16|int8_float16|int8|float32
   --overwrite
   --verbose
 
@@ -194,7 +195,7 @@ pyannote pipeline wrapper, max-overlap aligner, HF token management, `--num-spea
 `process_folder()` with tqdm progress bars, per-file error recovery, skip-existing, `--verbose` flag. Windows CUDA DLL path resolution. `wisper config` commands.
 
 ### ✅ Phase 5 — Tests & README
-69 tests passing. All ML calls mocked. No GPU required for test suite. README with install, quick start, full CLI reference.
+74 tests passing. All ML calls mocked. No GPU required for test suite. README with install, quick start, full CLI reference.
 
 ### ✅ pyannote-audio 4.x Upgrade (April 2026)
 Upgraded from 3.4.0 → 4.0.4. Removed 5 compatibility shims (torchaudio stubs, hf_hub `use_auth_token`, torch.load default). speechbrain `LazyModule.ensure_module` patch retained — pyannote 4.x still uses speechbrain for ECAPA-TDNN embeddings and the Windows path bug is in speechbrain itself.
@@ -209,19 +210,18 @@ torchcodec still cannot find FFmpeg shared DLLs on this Windows install despite 
 
 ### Near-term (ready to build)
 
-- **`wisper setup` command** — walk through ffmpeg check, HF token prompt, model pre-download, CUDA detection. Better first-run experience than hitting errors mid-transcription.
-
 - **Parallel folder processing** — `concurrent.futures.ThreadPoolExecutor` for CPU-bound files. Caveat: pyannote and whisper are not thread-safe when sharing a GPU — needs per-worker model instances or CPU-only mode guard.
 
-- **Progress header on each file** — show Input path, Output path, active model/device, and tqdm bar in one clean block before processing starts. *(In progress)*
+### ✅ Near-term completed
 
-- **Expose data paths in `wisper config show`** — print config dir, profiles dir, and HF cache dir so users know where things live without digging.
-
-- **`wisper config show` model clarity** — surface which Whisper model and pyannote models are active, not just config key/value pairs.
-
-- **Enrollment speaker order — chronological** — During `--enroll-speakers`, speakers are currently presented in pyannote label order (`SPEAKER_00`, `SPEAKER_01`, …) which reflects diarization assignment, not first appearance. Sort by each speaker's earliest segment start time so the first voice the user hears in the file is Speaker 1. One-line fix in `pipeline.py`: replace `sorted({seg.speaker …})` with a sort keyed on `min(s.start for s in aligned_segments if s.speaker == label)`.
-
-- ~~**Audio playback during enrollment**~~ ✅ Done — `wisper transcribe --enroll-speakers --play-audio` plays up to 10 s of each speaker's excerpt before the name prompt. Implemented via `_play_excerpt()` in `pipeline.py` using `pydub.AudioSegment` + `pydub.playback.play()`. Silently no-ops if no audio device or backend is available.
+- **`wisper setup` command** ✅ — guided wizard: ffmpeg, HF token, model pre-download, device detection.
+- **Progress header on each file** ✅ — Input/Output/Model line printed before each file processes.
+- **Expose data paths in `wisper config show`** ✅ — config file, data dir, profiles dir, HF cache all shown.
+- **`wisper config show` model clarity** ✅ — Models section: device, Whisper model, compute type (with auto-resolution), pyannote models.
+- **Enrollment speaker order — chronological** ✅ — speakers sorted by first appearance timestamp in `pipeline.py`.
+- **Audio playback during enrollment** ✅ — `--play-audio` flag; plays up to 10 s via pydub; silent fallback. (PR #3)
+- **`wisper speakers reset`** ✅ — deletes all profiles and embeddings with confirmation prompt.
+- **Phase 9 — Compute type / quantization** ✅ — `--compute-type auto|float16|int8_float16|int8|float32`; configurable via `wisper config set compute_type`; shown in run header and `wisper config show`.
 
 ### pyannote 4.x upgrade
 
@@ -333,28 +333,9 @@ torchcodec still cannot find FFmpeg shared DLLs on this Windows install despite 
 
 ---
 
-### Phase 9 — Compute Type / Quantization Flag (from Whisper-WebUI review)
+### ✅ Phase 9 — Compute Type / Quantization Flag
 
-**Context:** Whisper-WebUI exposes FP16/INT8 quantization selection. faster-whisper already supports this via CTranslate2 — we just need to surface it in the CLI. INT8 roughly halves VRAM usage with minimal accuracy loss, enabling `large-v3` on 8GB GPUs.
-
-**What to build:**
-
-1. **CLI flag**: `--compute-type` on `wisper transcribe`
-   - Values: `auto` (default), `float16`, `int8`, `int8_float16`, `float32`
-   - `auto` = `float16` on CUDA, `float32` on CPU (current behavior)
-
-2. **Config support**: `compute_type` key in `config.toml` so users can set a default.
-
-3. **Code change in `transcriber.py`**: Pass `compute_type` to `WhisperModel()` constructor. Currently hardcoded or defaulted — make it configurable.
-
-4. **Tests**: Add `compute_type` parameter to existing `test_transcriber.py` mocks.
-
-**This is a quick win** — probably 20-30 lines of code total across `cli.py`, `config.py`, and `transcriber.py`.
-
-**Verification:**
-- [ ] `wisper transcribe test.mp3 --compute-type int8` — runs with lower VRAM
-- [ ] `wisper config set compute_type int8_float16` — persists default
-- [ ] `wisper transcribe test.mp3` — uses saved default
+**Status: Complete.** `--compute-type` flag added; `compute_type` in config.toml; `resolve_compute_type()` in `config.py`; shown in run header and `wisper config show`.
 
 ---
 
