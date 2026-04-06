@@ -1,5 +1,4 @@
 import subprocess
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -73,6 +72,34 @@ def test_get_data_dir_env_override(tmp_path, monkeypatch):
     import wisper_transcribe.config as cfg_mod
     importlib.reload(cfg_mod)
     assert cfg_mod.get_data_dir() == tmp_path
+
+
+def test_check_ffmpeg_called_process_error():
+    """CalledProcessError (ffmpeg found but exits non-zero) is treated same as missing."""
+    with patch("subprocess.run", side_effect=subprocess.CalledProcessError(1, "ffmpeg")):
+        from wisper_transcribe.config import check_ffmpeg
+        with pytest.raises(RuntimeError, match="ffmpeg not found"):
+            check_ffmpeg()
+
+
+def test_get_hf_token_env_var_wins(monkeypatch):
+    monkeypatch.setenv("HUGGINGFACE_TOKEN", "hf_from_env")
+    from wisper_transcribe.config import get_hf_token
+    assert get_hf_token({"hf_token": "hf_from_config"}) == "hf_from_env"
+
+
+def test_get_hf_token_config_fallback(monkeypatch):
+    monkeypatch.delenv("HUGGINGFACE_TOKEN", raising=False)
+    from wisper_transcribe.config import get_hf_token
+    assert get_hf_token({"hf_token": "hf_from_config"}) == "hf_from_config"
+
+
+def test_get_hf_token_non_tty_raises(monkeypatch):
+    monkeypatch.delenv("HUGGINGFACE_TOKEN", raising=False)
+    with patch("sys.stdin.isatty", return_value=False):
+        from wisper_transcribe.config import get_hf_token
+        with pytest.raises(RuntimeError, match="HuggingFace token required"):
+            get_hf_token({})
 
 
 def test_resolve_compute_type_auto_cuda():

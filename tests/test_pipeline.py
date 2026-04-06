@@ -12,6 +12,20 @@ FAKE_SEGMENTS = [
 ]
 
 
+def test_seconds_to_hhmmss():
+    from wisper_transcribe.pipeline import _seconds_to_hhmmss
+    assert _seconds_to_hhmmss(0) == "0:00:00"
+    assert _seconds_to_hhmmss(61) == "0:01:01"
+    assert _seconds_to_hhmmss(3725) == "1:02:05"
+    assert _seconds_to_hhmmss(3600) == "1:00:00"
+
+
+def test_play_excerpt_swallows_exceptions(tmp_path):
+    """_play_excerpt silently no-ops on any error (missing file, no audio device, etc.)."""
+    from wisper_transcribe.pipeline import _play_excerpt
+    _play_excerpt(tmp_path / "nonexistent.wav", 0.0, 5.0)  # must not raise
+
+
 @patch("wisper_transcribe.pipeline.check_ffmpeg")
 @patch("wisper_transcribe.pipeline.validate_audio")
 @patch("wisper_transcribe.pipeline.convert_to_wav")
