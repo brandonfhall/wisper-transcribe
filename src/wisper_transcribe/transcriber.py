@@ -83,7 +83,8 @@ def transcribe(
         mininterval=5.0, 
         position=1, 
         leave=False,
-        bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
+        bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+        dynamic_ncols=True,
     ) as pbar:
         for seg in segments:
             if seg.text.strip():
