@@ -27,7 +27,8 @@ def load_pipeline(hf_token: str, device: str):
             ) from e
         raise
         
-    _pipeline.to(device)  # type: ignore[arg-type]
+    import torch
+    _pipeline.to(torch.device(device))
     return _pipeline
 
 
