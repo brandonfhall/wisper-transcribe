@@ -223,7 +223,7 @@ torchcodec still cannot find FFmpeg shared DLLs on this Windows install despite 
 - **Audio playback during enrollment** ✅ — `--play-audio` flag; plays up to 10 s via pydub; silent fallback. (PR #3)
 - **`wisper speakers reset`** ✅ — deletes all profiles and embeddings with confirmation prompt.
 - **Phase 7 — Docker containerization** ✅ — `Dockerfile` (gpu/cpu targets), `docker-compose.yml`, `WISPER_DATA_DIR` env override in `config.py`. 77 tests.
-- **Third-party warning suppression** ✅ — speechbrain/pyannote/torch noise suppressed by default; `WISPER_DEBUG=1` restores raw output. (PR #6)
+- **Third-party warning suppression** ✅ — speechbrain/pyannote/torch noise suppressed by default; `WISPER_DEBUG=1` restores raw output. absl "triton not found" log requires `absl.logging.set_verbosity(ERROR)` (not `logging.getLogger("absl")`). (PR #6, absl fix in PR #7)
 - **Phase 8 — VAD filter** ✅ — `--vad/--no-vad` flag; faster-whisper built-in `vad_filter`; `None`-sentinel so unset falls through to config default (on). 76 tests.
 - **Phase 9 — Compute type / quantization** ✅ — `--compute-type auto|float16|int8_float16|int8|float32`; configurable via `wisper config set compute_type`; shown in run header and `wisper config show`.
 

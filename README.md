@@ -428,9 +428,17 @@ docker compose run wisper nvidia-smi
 
 ---
 
+## Environment Variables
+
+| Variable | Purpose |
+|----------|---------|
+| `WISPER_DATA_DIR` | Override config/profile storage path — used automatically in Docker |
+| `WISPER_DEBUG` | Set to `1` to disable warning suppression and see raw dependency output |
+| `HUGGINGFACE_TOKEN` | HF token as an alternative to `wisper config set hf_token` |
+
 ## Debugging / Verbose Warning Output
 
-wisper suppresses informational warnings from its dependencies (speechbrain, pyannote, torch) that are not actionable during normal use. If you need to see the raw output for debugging, set the `WISPER_DEBUG` environment variable before running:
+wisper suppresses informational warnings from its dependencies (speechbrain, pyannote, torch) that are not actionable during normal use. If you need to see the raw output for debugging, set `WISPER_DEBUG=1` before running:
 
 ```powershell
 # Windows PowerShell

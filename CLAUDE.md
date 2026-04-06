@@ -71,7 +71,15 @@ Detailed technical reference lives in [`architecture.md`](architecture.md). It c
 - **Commit at least once per phase.** Pause for user review after each phase commit before starting the next.
 - **Never commit to main without tests passing.**
 - **Cross-platform paths:** Always use `pathlib.Path`, never string concatenation for file paths.
-- **Config/data storage:** Use `platformdirs.user_data_dir("wisper-transcribe")` — never hardcode `%APPDATA%` or `~`.
+- **Config/data storage:** Use `get_data_dir()` from `config.py` — never hardcode `%APPDATA%`, `~`, or call `platformdirs` directly. `get_data_dir()` checks `WISPER_DATA_DIR` env var first (used in Docker) before falling back to `platformdirs`.
+
+## Environment Variables
+
+| Variable | Purpose |
+|----------|---------|
+| `WISPER_DATA_DIR` | Override config/profile storage path (used in Docker; maps to a bind-mounted volume) |
+| `WISPER_DEBUG` | Set to `1` to disable third-party warning suppression and see raw output |
+| `HUGGINGFACE_TOKEN` | HF token as an alternative to storing it in `config.toml` |
 
 ## Project Structure
 
@@ -80,6 +88,9 @@ wisper-transcribe/
 ├── src/wisper_transcribe/   # all source code
 ├── tests/                   # mirrors src structure
 ├── .venv/                   # local venv (gitignored)
+├── Dockerfile               # gpu and cpu build targets
+├── docker-compose.yml       # wisper (GPU) and wisper-cpu services
+├── .dockerignore
 ├── pyproject.toml
 └── CLAUDE.md                # this file
 ```
@@ -87,8 +98,13 @@ wisper-transcribe/
 ## Build Phases
 
 - Phase 1: Project skeleton + basic transcription ✓
-- Phase 2: Speaker diarization (pyannote)
-- Phase 3: Speaker profiles + cross-file voice matching
-- Phase 4: Batch processing + CLI polish
-- Phase 5: Tests + README
-- Phase 6: GUI (future, not in MVP)
+- Phase 2: Speaker diarization (pyannote) ✓
+- Phase 3: Speaker profiles + cross-file voice matching ✓
+- Phase 4: Batch processing + CLI polish ✓
+- Phase 5: Tests + README ✓
+- Phase 6: `wisper setup` wizard ✓
+- Phase 7: Docker containerization ✓
+- Phase 8: VAD filter (`--vad/--no-vad`) ✓
+- Phase 9: Compute type / quantization (`--compute-type`) ✓
+- Phase 10: Parallel folder processing (CPU-only, `--workers N`) — future
+- Phase 11: Optional GUI — future
