@@ -58,11 +58,24 @@ step "Checking ffmpeg..."
 if command -v ffmpeg &>/dev/null; then
     ok "ffmpeg found"
 else
-    warn "ffmpeg not found."
+    warn "ffmpeg not found — installing..."
     if [[ "$OSTYPE" == "darwin"* ]]; then
-        echo -e "   Install with: ${YELLOW}brew install ffmpeg${NC}"
+        if command -v brew &>/dev/null; then
+            brew install ffmpeg
+            ok "ffmpeg installed via Homebrew"
+        else
+            fail "Homebrew not found. Install Homebrew first: https://brew.sh, then re-run this script."
+        fi
     else
-        echo -e "   Install with: ${YELLOW}sudo apt install ffmpeg${NC}  (or your distro's equivalent)"
+        if command -v apt-get &>/dev/null; then
+            sudo apt-get install -y ffmpeg
+            ok "ffmpeg installed via apt"
+        elif command -v dnf &>/dev/null; then
+            sudo dnf install -y ffmpeg
+            ok "ffmpeg installed via dnf"
+        else
+            warn "Could not auto-install ffmpeg. Install it manually for your distro, then re-run."
+        fi
     fi
 fi
 

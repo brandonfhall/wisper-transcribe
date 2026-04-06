@@ -54,9 +54,16 @@ def load_model(model_size: str, device: str):
                 "Or use --device cpu"
             )
 
+    # CTranslate2 (faster-whisper's backend) does not support MPS.
+    # Fall back to CPU so the rest of the pipeline can still use MPS.
+    ct2_device = "cpu" if device == "mps" else device
+    if device == "mps":
+        from tqdm import tqdm
+        tqdm.write("  Note: faster-whisper does not support MPS — transcription will use CPU.")
+
     from faster_whisper import WhisperModel
 
-    _model = WhisperModel(model_size, device=device, compute_type="float16" if device == "cuda" else "int8")
+    _model = WhisperModel(model_size, device=ct2_device, compute_type="float16" if ct2_device == "cuda" else "int8")
     return _model
 
 
