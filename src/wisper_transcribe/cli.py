@@ -32,6 +32,9 @@ def main():
 @click.option("--no-diarize", is_flag=True, default=False, help="Skip speaker diarization")
 @click.option("--enroll-speakers", is_flag=True, default=False, help="Interactively name and enroll detected speakers")
 @click.option("--play-audio", is_flag=True, default=False, help="Play each speaker's audio excerpt during enrollment")
+@click.option("--compute-type", default="auto", show_default=True,
+              type=click.Choice(["auto", "float16", "int8_float16", "int8", "float32"]),
+              help="CTranslate2 quantization (auto=float16 on CUDA, int8 on CPU)")
 @click.option("--verbose", is_flag=True, default=False, help="Show detailed progress")
 def transcribe(
     path: Path,
@@ -47,6 +50,7 @@ def transcribe(
     no_diarize: bool,
     enroll_speakers: bool,
     play_audio: bool,
+    compute_type: str,
     verbose: bool,
 ):
     """Transcribe an audio file (or folder of files) to markdown."""
@@ -66,6 +70,7 @@ def transcribe(
         max_speakers=max_speakers,
         enroll_speakers=enroll_speakers,
         play_audio=play_audio,
+        compute_type=compute_type,
     )
 
     if path.is_dir():
@@ -181,7 +186,7 @@ def config():
 def config_show():
     """Show current configuration and data paths."""
     import os
-    from .config import get_config_path, get_data_dir, load_config
+    from .config import COMPUTE_TYPES, get_config_path, get_data_dir, get_device, load_config, resolve_compute_type
 
     cfg = load_config()
     data_dir = get_data_dir()
@@ -198,6 +203,20 @@ def config_show():
     click.echo(f"  Data directory : {data_dir}")
     click.echo(f"  Speaker profiles: {profiles_dir}")
     click.echo(f"  HF model cache : {hf_cache}")
+    click.echo("")
+    click.echo("─" * 50)
+    click.echo("Models")
+    click.echo("─" * 50)
+    device = get_device()
+    model = cfg.get("model", "medium")
+    ct_setting = cfg.get("compute_type", "auto")
+    ct_resolved = resolve_compute_type(ct_setting, device)
+    ct_display = f"{ct_setting} → {ct_resolved}" if ct_setting == "auto" else ct_setting
+    click.echo(f"  Device         : {device}")
+    click.echo(f"  Whisper model  : {model}")
+    click.echo(f"  Compute type   : {ct_display}")
+    click.echo(f"  Diarization    : pyannote/speaker-diarization-3.1")
+    click.echo(f"  Embedding      : pyannote/embedding")
     click.echo("")
     click.echo("─" * 50)
     click.echo("Settings")

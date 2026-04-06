@@ -65,3 +65,19 @@ def test_get_device_cpu_fallback():
         importlib.reload(config)
         result = config.get_device()
         assert result == "cpu"
+
+
+def test_resolve_compute_type_auto_cuda():
+    from wisper_transcribe.config import resolve_compute_type
+    assert resolve_compute_type("auto", "cuda") == "float16"
+
+
+def test_resolve_compute_type_auto_cpu():
+    from wisper_transcribe.config import resolve_compute_type
+    assert resolve_compute_type("auto", "cpu") == "int8"
+
+
+def test_resolve_compute_type_explicit():
+    from wisper_transcribe.config import resolve_compute_type
+    assert resolve_compute_type("int8_float16", "cuda") == "int8_float16"
+    assert resolve_compute_type("float32", "cpu") == "float32"

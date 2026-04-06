@@ -53,8 +53,11 @@ def process_file(
     max_speakers: Optional[int] = None,
     enroll_speakers: bool = False,
     play_audio: bool = False,
+    compute_type: str = "auto",
 ) -> Path:
     """Run the full pipeline on a single audio file. Returns path to output .md."""
+    from .config import resolve_compute_type
+
     path = Path(path)
     config = load_config()
 
@@ -64,6 +67,8 @@ def process_file(
         model_size = config.get("model", "medium")
     if language == "en":
         language = config.get("language", "en")
+    if compute_type == "auto":
+        compute_type = config.get("compute_type", "auto")
 
     check_ffmpeg()
     validate_audio(path)
@@ -76,11 +81,12 @@ def process_file(
         tqdm.write(f"  Skipping {path.name} (output already exists, use --overwrite to force)")
         return out_path
 
+    resolved_ct = resolve_compute_type(compute_type, device)
     tqdm.write("")
     tqdm.write("─" * 60)
     tqdm.write(f"  Input  : {path}")
     tqdm.write(f"  Output : {out_path}")
-    tqdm.write(f"  Model  : {model_size} ({device})")
+    tqdm.write(f"  Model  : {model_size} ({device}, {resolved_ct})")
     tqdm.write("─" * 60)
 
     wav_path = convert_to_wav(path)
@@ -90,6 +96,7 @@ def process_file(
         model_size=model_size,
         device=device,
         language=language,
+        compute_type=compute_type,
     )
 
     duration = get_duration(wav_path)
