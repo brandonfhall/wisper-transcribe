@@ -31,6 +31,30 @@ try:
 except ImportError:
     pass  # speechbrain not installed; patch not needed
 
+import os as _os
+import warnings as _warnings
+import logging as _logging
+
+# Suppress noisy third-party warnings that are not actionable for end users.
+# Set WISPER_DEBUG=1 in your shell to disable suppression and see the raw output.
+if not _os.environ.get("WISPER_DEBUG"):
+    # speechbrain module-redirect deprecations (fired by inspect.getmembers during pyannote load)
+    _warnings.filterwarnings(
+        "ignore",
+        message=r"Module 'speechbrain\..+' was deprecated",
+        category=UserWarning,
+    )
+    # pyannote TF32 reproducibility advisory (not relevant for inference)
+    _warnings.filterwarnings("ignore", module=r"pyannote\.audio\.utils\.reproducibility")
+    # pyannote pooling std() warning on short/silent audio segments
+    _warnings.filterwarnings(
+        "ignore",
+        message=r"std\(\): degrees of freedom is <= 0",
+        category=UserWarning,
+    )
+    # absl/torch "triton not found" flop-counter log
+    _logging.getLogger("absl").setLevel(_logging.ERROR)
+
 from tqdm import tqdm
 
 from pyannote.audio import Pipeline

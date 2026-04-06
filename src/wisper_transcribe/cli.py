@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import os
 import warnings
 from pathlib import Path
 from typing import Optional
 
 import click
 
-# Suppress harmless multiline torchcodec/FFmpeg warnings from pyannote on Windows
-warnings.filterwarnings("ignore", module="pyannote.audio.core.io")
+# Suppress harmless multiline torchcodec/FFmpeg warnings from pyannote on Windows.
+# Set WISPER_DEBUG=1 to disable all warning suppression for debugging.
+if not os.environ.get("WISPER_DEBUG"):
+    warnings.filterwarnings("ignore", module="pyannote.audio.core.io")
 
 from . import __version__
 
