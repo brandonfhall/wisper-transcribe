@@ -388,6 +388,28 @@ def speakers_test(audio: Path, num_speakers: Optional[int]):
         click.echo(f"  {label} → {name}")
 
 
+@speakers.command("reset")
+@click.option("--yes", is_flag=True, default=False, help="Skip confirmation prompt")
+def speakers_reset(yes: bool):
+    """Delete all enrolled speaker profiles and embeddings."""
+    from .speaker_manager import load_profiles, reset_profiles
+
+    profiles = load_profiles()
+    count = len(profiles)
+    if count == 0:
+        click.echo("No speakers enrolled — nothing to reset.")
+        return
+
+    names = ", ".join(p.display_name for p in profiles.values())
+    click.echo(f"This will permanently delete {count} speaker(s): {names}")
+
+    if not yes:
+        click.confirm("Reset speaker database?", abort=True)
+
+    reset_profiles()
+    click.echo(f"Removed {count} speaker(s). Database is now empty.")
+
+
 # ---------------------------------------------------------------------------
 # wisper fix
 # ---------------------------------------------------------------------------

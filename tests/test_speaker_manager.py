@@ -256,3 +256,28 @@ def test_enroll_speaker(tmp_path):
     # Embedding file should exist
     emb_path = tmp_path / "profiles" / "embeddings" / "alice.npy"
     assert emb_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# reset_profiles
+# ---------------------------------------------------------------------------
+
+def test_reset_profiles_removes_all(tmp_path):
+    from wisper_transcribe.speaker_manager import load_profiles, reset_profiles
+
+    _write_profile(tmp_path, "alice", np.ones(3))
+    _write_profile(tmp_path, "bob", np.ones(3))
+
+    count = reset_profiles(data_dir=tmp_path)
+
+    assert count == 2
+    assert load_profiles(data_dir=tmp_path) == {}
+    assert not (tmp_path / "profiles" / "embeddings" / "alice.npy").exists()
+    assert not (tmp_path / "profiles" / "embeddings" / "bob.npy").exists()
+
+
+def test_reset_profiles_empty(tmp_path):
+    from wisper_transcribe.speaker_manager import reset_profiles
+
+    count = reset_profiles(data_dir=tmp_path)
+    assert count == 0

@@ -120,7 +120,7 @@ wisper enroll <name> --audio <file>
   --notes TEXT
   --update                        # EMA blend with existing embedding
 
-wisper speakers list|remove|rename|test
+wisper speakers list|remove|rename|reset|test
 
 wisper config show|set|path
 
@@ -193,7 +193,7 @@ pyannote pipeline wrapper, max-overlap aligner, HF token management, `--num-spea
 `process_folder()` with tqdm progress bars, per-file error recovery, skip-existing, `--verbose` flag. Windows CUDA DLL path resolution. `wisper config` commands.
 
 ### ✅ Phase 5 — Tests & README
-65 tests passing. All ML calls mocked. No GPU required for test suite. README with install, quick start, full CLI reference.
+67 tests passing. All ML calls mocked. No GPU required for test suite. README with install, quick start, full CLI reference.
 
 ### ✅ pyannote-audio 4.x Upgrade (April 2026)
 Upgraded from 3.4.0 → 4.0.4. Removed 5 compatibility shims (torchaudio stubs, hf_hub `use_auth_token`, torch.load default). speechbrain `LazyModule.ensure_module` patch retained — pyannote 4.x still uses speechbrain for ECAPA-TDNN embeddings and the Windows path bug is in speechbrain itself.
