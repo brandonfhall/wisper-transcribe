@@ -53,10 +53,10 @@ def process_file(
     out_path = out_dir / (path.stem + ".md")
 
     if out_path.exists() and not overwrite:
-        print(f"  Skipping {path.name} (output already exists, use --overwrite to force)")
+        tqdm.write(f"  Skipping {path.name} (output already exists, use --overwrite to force)")
         return out_path
 
-    print(f"\nProcessing: {path.name}")
+    tqdm.write(f"\nProcessing: {path.name}")
     wav_path = convert_to_wav(path)
 
     segments: list[TranscriptionSegment] = transcribe(
@@ -132,9 +132,9 @@ def process_file(
                 )
                 if matches:
                     speaker_map = matches
-                    print("  Speaker matches:")
+                tqdm.write("  Speaker matches:")
                     for label, name in sorted(matches.items()):
-                        print(f"    {label} → {name}")
+                    tqdm.write(f"    {label} → {name}")
                     # Build speaker metadata from matched names (deduplicated, preserving order)
                     seen: set[str] = set()
                     for name in matches.values():
@@ -163,7 +163,7 @@ def process_file(
     )
 
     out_path.write_text(content, encoding="utf-8")
-    print(f"  Wrote {out_path.name}")
+    tqdm.write(f"  Wrote {out_path.name}")
     return out_path
 
 
@@ -191,22 +191,27 @@ def process_folder(
     overwrite = kwargs.get("overwrite", False)
     out_base = Path(output_dir) if output_dir else folder
 
-    progress = tqdm(audio_files, desc="Transcribing", unit="file", disable=not verbose)
+    progress = tqdm(
+        audio_files, 
+        desc="Folder Progress", 
+        unit="file", 
+        position=0, 
+        leave=True,
+        bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]"
+    )
 
     for f in progress:
-        if verbose:
-            progress.set_description(f.name)
+        progress.set_description(f"Processing {f.name}")
         out_path = out_base / (f.stem + ".md")
         if out_path.exists() and not overwrite:
             if verbose:
-                print(f"  Skipping {f.name} (already exists)")
+                tqdm.write(f"  Skipping {f.name} (already exists)")
             continue
         try:
             result = process_file(f, output_dir=output_dir, **kwargs)
             successes.append(result)
         except Exception as exc:
             errors.append(f"{f.name}: {exc}")
-            if verbose:
-                print(f"  ERROR {f.name}: {exc}")
+            tqdm.write(f"  ERROR {f.name}: {exc}")
 
     return successes, errors

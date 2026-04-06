@@ -76,7 +76,15 @@ def transcribe(
     from tqdm import tqdm
 
     result = []
-    with tqdm(total=round(info.duration, 2), desc="  Transcribing", unit="s", mininterval=5.0, bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]") as pbar:
+    with tqdm(
+        total=round(info.duration, 2), 
+        desc="  Transcribing", 
+        unit="s", 
+        mininterval=5.0, 
+        position=1, 
+        leave=False,
+        bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
+    ) as pbar:
         for seg in segments:
             if seg.text.strip():
                 result.append(TranscriptionSegment(start=seg.start, end=seg.end, text=seg.text.strip()))
