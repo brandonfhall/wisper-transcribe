@@ -67,14 +67,20 @@ def transcribe(
     if _model is None:
         load_model(model_size, device)
 
-    segments, _info = _model.transcribe(
+    segments, info = _model.transcribe(
         str(audio_path),
         language=language if language else None,
         beam_size=5,
     )
 
-    return [
-        TranscriptionSegment(start=seg.start, end=seg.end, text=seg.text.strip())
-        for seg in segments
-        if seg.text.strip()
-    ]
+    from tqdm import tqdm
+
+    result = []
+    with tqdm(total=round(info.duration, 2), desc="  Transcribing", unit="s", mininterval=5.0, bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]") as pbar:
+        for seg in segments:
+            if seg.text.strip():
+                result.append(TranscriptionSegment(start=seg.start, end=seg.end, text=seg.text.strip()))
+            # Update progress bar by the difference between the segment's end and our current progress tracker
+            pbar.update(seg.end - pbar.n)
+
+    return result

@@ -56,7 +56,7 @@ def process_file(
         print(f"  Skipping {path.name} (output already exists, use --overwrite to force)")
         return out_path
 
-    print(f"  Transcribing {path.name}...")
+    print(f"\nProcessing: {path.name}")
     wav_path = convert_to_wav(path)
 
     segments: list[TranscriptionSegment] = transcribe(
@@ -77,7 +77,6 @@ def process_file(
 
         hf_token = get_hf_token(config)
         if hf_token:
-            print(f"  Diarizing speakers...")
             diarization = diarize(
                 wav_path,
                 hf_token=hf_token,
