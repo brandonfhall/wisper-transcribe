@@ -211,7 +211,7 @@ wisper transcribe <path>
                            (default: medium; use large-v3 on a good GPU)
   -l, --language LANG      Language code, e.g. en, fr, de (default: en)
                            Use 'auto' to detect automatically
-  --device auto|cpu|cuda   Compute device (default: auto-detect)
+  --device auto|cpu|cuda|mps  Compute device (default: auto-detect; mps = Apple Silicon GPU)
   -n, --num-speakers INT   Expected speaker count — improves accuracy
   --min-speakers INT       Minimum speaker count
   --max-speakers INT       Maximum speaker count
@@ -320,7 +320,7 @@ All formats are automatically converted to 16kHz mono WAV internally before proc
 
 **Recommended:**
 - RTX 3090 (24 GB): `large-v3 --device cuda`
-- Apple M5: `medium --device cpu`
+- Apple M-series: `medium` (auto-detects MPS; diarization runs on GPU, transcription on CPU)
 - CPU-only machine: `small` or `base`
 
 ---
