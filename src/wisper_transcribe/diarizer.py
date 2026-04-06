@@ -52,8 +52,14 @@ if not _os.environ.get("WISPER_DEBUG"):
         message=r"std\(\): degrees of freedom is <= 0",
         category=UserWarning,
     )
-    # absl/torch "triton not found" flop-counter log
-    _logging.getLogger("absl").setLevel(_logging.ERROR)
+    # absl/torch "triton not found" flop-counter log — absl-py has its own
+    # logging system separate from Python's logging hierarchy; must use
+    # absl.logging.set_verbosity rather than logging.getLogger("absl")
+    try:
+        import absl.logging as _absl_logging
+        _absl_logging.set_verbosity(_absl_logging.ERROR)
+    except ImportError:
+        pass
 
 from tqdm import tqdm
 

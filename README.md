@@ -371,7 +371,87 @@ wisper-transcribe/
 .venv/bin/pytest tests/ -v        # Mac/Linux
 ```
 
-Tests mock all ML models — no GPU, network, or real audio files required. (76 tests)
+Tests mock all ML models — no GPU, network, or real audio files required. (77 tests)
+
+---
+
+## Docker
+
+Run wisper entirely in a container — no Python environment setup, no CUDA DLL hunting.
+
+### Prerequisites
+
+- Docker ≥ 19.03
+- For GPU: NVIDIA driver installed on host (`nvidia-smi` must work) + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
+
+### Quick start
+
+```bash
+# Build the GPU image (~8 GB — includes PyTorch CUDA wheels)
+docker compose build
+
+# First-time setup (token + model download — takes a few minutes)
+docker compose run wisper wisper setup
+
+# Transcribe with speaker enrollment
+# Place audio files in ./input/ first
+docker compose run wisper wisper transcribe /app/input/session01.mp3 --enroll-speakers
+
+# Subsequent sessions — automatic speaker matching
+docker compose run wisper wisper transcribe /app/input/session02.mp3
+# Output appears in ./output/
+```
+
+### CPU-only
+
+```bash
+docker compose build wisper-cpu
+docker compose run wisper-cpu wisper transcribe /app/input/session.mp3
+```
+
+### Volume layout
+
+| Local path | Container path | Contents |
+|-----------|---------------|----------|
+| `./cache/` | `/root/.cache/huggingface` | Downloaded models (~2 GB, persisted) |
+| `./data/` | `/data` | `config.toml` + speaker profiles |
+| `./input/` | `/app/input` | Your audio files |
+| `./output/` | `/app/output` | Transcribed `.md` files |
+
+These directories are created automatically on first run. Speaker profiles and model downloads persist across container restarts.
+
+### Verify GPU passthrough
+
+```bash
+docker compose run wisper nvidia-smi
+```
+
+---
+
+## Environment Variables
+
+| Variable | Purpose |
+|----------|---------|
+| `WISPER_DATA_DIR` | Override config/profile storage path — used automatically in Docker |
+| `WISPER_DEBUG` | Set to `1` to disable warning suppression and see raw dependency output |
+| `HUGGINGFACE_TOKEN` | HF token as an alternative to `wisper config set hf_token` |
+
+## Debugging / Verbose Warning Output
+
+wisper suppresses informational warnings from its dependencies (speechbrain, pyannote, torch) that are not actionable during normal use. If you need to see the raw output for debugging, set `WISPER_DEBUG=1` before running:
+
+```powershell
+# Windows PowerShell
+$env:WISPER_DEBUG="1"
+wisper transcribe session.mp3
+```
+
+```bash
+# Mac/Linux
+WISPER_DEBUG=1 wisper transcribe session.mp3
+```
+
+Unset it (or open a new terminal) to return to clean output.
 
 ---
 
@@ -381,9 +461,9 @@ Tests mock all ML models — no GPU, network, or real audio files required. (76 
 - [x] Phase 2: Speaker diarization
 - [x] Phase 3: Speaker profiles + cross-file voice matching
 - [x] Phase 4: Batch processing + CLI polish
-- [x] Phase 5: Tests (76 passing), coverage reporting, README, setup scripts, CI
+- [x] Phase 5: Tests (77 passing), coverage reporting, README, setup scripts, CI
 - [x] Phase 6: `wisper setup` guided first-run wizard
-- [ ] Phase 7: Docker containerization (GPU + CPU targets)
+- [x] Phase 7: Docker containerization (GPU + CPU targets, `WISPER_DATA_DIR` override)
 - [x] Phase 8: VAD filter (`--vad/--no-vad`) via faster-whisper built-in Silero VAD
 - [x] Phase 9: Compute type / quantization (`--compute-type`)
 - [ ] Phase 10: Parallel folder processing (`--workers N`, CPU-only)

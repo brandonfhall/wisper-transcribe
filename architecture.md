@@ -124,6 +124,9 @@ speechbrain 1.0 lazy-loads optional integrations (k2, transformers, spacy, numba
 ### CUDA DLL path resolution (Windows)
 `transcriber.load_model()` searches for `cublas64_12.dll` in PyTorch's `nvidia-cublas` site-packages directory and the system CUDA Toolkit before loading `WhisperModel`. CTranslate2 on Windows requires this DLL to be on `PATH` or added via `os.add_dll_directory()`.
 
+### Third-party warning suppression (`WISPER_DEBUG`)
+`diarizer.py` and `cli.py` suppress several classes of non-actionable warnings from speechbrain, pyannote, and torch at module import time using `warnings.filterwarnings()` and `logging.getLogger("absl").setLevel(ERROR)`. All suppressions are gated on `not os.environ.get("WISPER_DEBUG")` so a developer can set `WISPER_DEBUG=1` in their shell to restore raw output for debugging. Suppressed warnings: speechbrain module-redirect deprecations (inspect.getmembers side effect), pyannote TF32 ReproducibilityWarning, pyannote pooling std() UserWarning, pyannote torchcodec/FFmpeg multiline warning. The absl "triton not found" flop-counter log is suppressed via `absl.logging.set_verbosity(ERROR)` — absl-py has its own logging system separate from Python's `logging` hierarchy, so `logging.getLogger("absl")` has no effect; must use `absl.logging` directly.
+
 ### VAD filter via faster-whisper built-in
 `transcribe()` passes `vad_filter=True/False` directly to `_model.transcribe()`. faster-whisper bundles Silero VAD internally; when enabled it skips silence/non-speech frames before feeding audio to Whisper. This is "Option A" from the plan — no separate audio stripping step, no timestamp remapping required. Timestamps in the output remain original-audio-relative. Controlled via `--vad/--no-vad` CLI flag (default: on, from config). `process_file()` uses `vad_filter: Optional[bool] = None` as a sentinel so an unset flag falls through to the config value rather than hard-coding True.
 
@@ -140,15 +143,18 @@ speechbrain 1.0 lazy-loads optional integrations (k2, transformers, spacy, numba
 
 ## Data Storage
 
-All user data lives **outside the repo** in the OS-native user data directory:
+All user data lives **outside the repo** in the OS-native user data directory, unless overridden by `WISPER_DATA_DIR`:
 
-| Platform | Path |
-|----------|------|
-| Windows  | `%APPDATA%\wisper-transcribe\` |
-| Mac      | `~/Library/Application Support/wisper-transcribe/` |
+| Context | Path |
+|---------|------|
+| Windows | `%APPDATA%\wisper-transcribe\` |
+| Mac/Linux | `~/.local/share/wisper-transcribe/` (or XDG equivalent) |
+| Docker | `/data` (via `WISPER_DATA_DIR=/data` env var set in the image) |
+
+`get_data_dir()` in `config.py` checks `os.environ.get("WISPER_DATA_DIR")` first; if set, that path is used instead of `platformdirs.user_data_dir()`. This is the only source-code change needed for Docker support — everything else (config loading, profile storage, embedding paths) calls through `get_data_dir()` already.
 
 ```
-wisper-transcribe/       ← platformdirs.user_data_dir("wisper-transcribe")
+wisper-transcribe/       ← get_data_dir()
 ├── config.toml
 └── profiles/
     ├── speakers.json    name → SpeakerProfile metadata

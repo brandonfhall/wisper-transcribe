@@ -196,7 +196,7 @@ pyannote pipeline wrapper, max-overlap aligner, HF token management, `--num-spea
 `process_folder()` with tqdm progress bars, per-file error recovery, skip-existing, `--verbose` flag. Windows CUDA DLL path resolution. `wisper config` commands.
 
 ### ✅ Phase 5 — Tests & README
-76 tests passing. All ML calls mocked. No GPU required for test suite. README with install, quick start, full CLI reference.
+77 tests passing. All ML calls mocked. No GPU required for test suite. README with install, quick start, full CLI reference.
 
 ### ✅ pyannote-audio 4.x Upgrade (April 2026)
 Upgraded from 3.4.0 → 4.0.4. Removed 5 compatibility shims (torchaudio stubs, hf_hub `use_auth_token`, torch.load default). speechbrain `LazyModule.ensure_module` patch retained — pyannote 4.x still uses speechbrain for ECAPA-TDNN embeddings and the Windows path bug is in speechbrain itself.
@@ -222,6 +222,8 @@ torchcodec still cannot find FFmpeg shared DLLs on this Windows install despite 
 - **Enrollment speaker order — chronological** ✅ — speakers sorted by first appearance timestamp in `pipeline.py`.
 - **Audio playback during enrollment** ✅ — `--play-audio` flag; plays up to 10 s via pydub; silent fallback. (PR #3)
 - **`wisper speakers reset`** ✅ — deletes all profiles and embeddings with confirmation prompt.
+- **Phase 7 — Docker containerization** ✅ — `Dockerfile` (gpu/cpu targets), `docker-compose.yml`, `WISPER_DATA_DIR` env override in `config.py`. 77 tests.
+- **Third-party warning suppression** ✅ — speechbrain/pyannote/torch noise suppressed by default; `WISPER_DEBUG=1` restores raw output. absl "triton not found" log requires `absl.logging.set_verbosity(ERROR)` (not `logging.getLogger("absl")`). (PR #6, absl fix in PR #7)
 - **Phase 8 — VAD filter** ✅ — `--vad/--no-vad` flag; faster-whisper built-in `vad_filter`; `None`-sentinel so unset falls through to config default (on). 76 tests.
 - **Phase 9 — Compute type / quantization** ✅ — `--compute-type auto|float16|int8_float16|int8|float32`; configurable via `wisper config set compute_type`; shown in run header and `wisper config show`.
 
@@ -229,66 +231,23 @@ torchcodec still cannot find FFmpeg shared DLLs on this Windows install despite 
 
 **Status: ✅ Complete (April 2026). Merged in PR #2.**
 
-### Phase 7 — Docker Containerization (from Whisper-WebUI review)
+### ✅ Phase 7 — Docker Containerization
 
-**Context:** [Whisper-WebUI](https://github.com/jhj0517/Whisper-WebUI) ships Docker support with CUDA GPU passthrough. Their stack is identical to ours (faster-whisper + pyannote 3.1) but they lack speaker enrollment entirely. Our speaker identification engine is a genuine differentiator. Containerization makes deployment reproducible and eliminates the CUDA DLL hunting that plagues Windows installs.
+**Status: Complete.**
 
-**What to build:**
-
-1. **`Dockerfile`** — Two-target build:
-   - **GPU target**: Base image `nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04`. Includes CUDA runtime + cuDNN. No need for `-devel` variant since we're doing inference only, not compiling CUDA code.
-   - **CPU target**: Base image `python:3.12-slim`. For users without NVIDIA GPUs or for CI.
-   - Install Python 3.12, pip deps from `pyproject.toml`. No system ffmpeg needed — faster-whisper bundles it via PyAV.
-   - Expected image size: ~8-10GB (GPU), <1GB (CPU).
-
-2. **`docker-compose.yml`** — GPU passthrough using modern compose syntax:
-   ```yaml
-   services:
-     wisper:
-       build: .
-       deploy:
-         resources:
-           reservations:
-             devices:
-               - driver: nvidia
-                 count: all
-                 capabilities: [gpu]
-       volumes:
-         - ./models:/root/.cache/huggingface    # persist model downloads (~2GB)
-         - ./profiles:/app/profiles             # speaker embeddings + metadata
-         - ./input:/app/input                   # audio files to transcribe
-         - ./output:/app/output                 # markdown transcripts
-       stdin_open: true
-       tty: true                                # required for interactive enrollment
-   ```
-
-3. **Volume mounts (critical)**:
-   - **HuggingFace cache** (`~/.cache/huggingface`): Models are 2+ GB. Must persist across container restarts to avoid re-downloading.
-   - **Speaker profiles** (`profiles/`): The `platformdirs` data dir must be overridden inside the container to a bind-mounted path. Without this, enrolled speaker embeddings are lost when the container stops.
-   - **Input/output dirs**: User mounts their audio files in and gets transcripts out.
-
-4. **`platformdirs` override**: Inside the container, set `WISPER_DATA_DIR` env var (new) to point to the mounted volume. `config.py` checks this env var before falling back to `platformdirs.user_data_dir()`. This is the only source code change needed.
-
-5. **Host prerequisites** (document in README):
-   - NVIDIA GPU with CUDA Compute Capability ≥ 3.5
-   - NVIDIA driver installed on host (`nvidia-smi` must work)
-   - [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installed
-   - Docker ≥ 19.03
-
-**What NOT to do:**
-- Don't add Gradio or any web UI. The CLI runs inside the container via `docker run -it`.
-- Don't support macOS MPS in Docker. Mac users continue running bare-metal. Docker is for Linux server/cloud deployment with NVIDIA GPUs.
-- Don't bake models into the image. They're 2+ GB and version-specific. Bind mount the cache.
-
-**Performance notes:** GPU passthrough via NVIDIA Container Toolkit has negligible overhead vs bare-metal. The main cost is image size (~8GB for CUDA runtime layers), not runtime performance.
+- `Dockerfile`: two targets — `gpu` (PyTorch cu126 wheels, `python:3.12-slim` base) and `cpu`. PyTorch CUDA wheels bundle the CUDA runtime; no NVIDIA base image required. pydub still needs system `ffmpeg`, installed via apt.
+- `docker-compose.yml`: `wisper` (GPU, default) and `wisper-cpu` services. GPU passthrough via modern `deploy.resources.reservations.devices` syntax (NVIDIA Container Toolkit on host).
+- `config.py`: `get_data_dir()` checks `WISPER_DATA_DIR` env var before `platformdirs`. Set to `/data` in the image; bind-mounted to `./data/` on host.
+- Volume layout: `./cache` → HF model cache, `./data` → config + profiles, `./input` → audio, `./output` → transcripts.
+- `.dockerignore` excludes `.venv`, tests, example-file, docs, and user data dirs.
 
 **Verification:**
 - [ ] `docker compose build` completes
 - [ ] `docker compose run wisper wisper setup` — guided wizard works with TTY
-- [ ] `docker compose run wisper wisper transcribe /app/input/test.mp3 --enroll-speakers` — enrollment works, profiles persist in mounted volume
-- [ ] `docker compose run wisper wisper transcribe /app/input/test2.mp3` — automatic speaker matching from previously enrolled profiles
-- [ ] `nvidia-smi` visible inside container, transcription uses CUDA
-- [ ] Container restart preserves models and profiles (no re-download)
+- [ ] `docker compose run wisper wisper transcribe /app/input/test.mp3 --enroll-speakers` — enrollment works, profiles persist in `./data/`
+- [ ] `docker compose run wisper wisper transcribe /app/input/test2.mp3` — speaker matching from persisted profiles
+- [ ] `docker compose run wisper nvidia-smi` — GPU visible in container
+- [ ] Container restart: no re-download of models
 
 ---
 
