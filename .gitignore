@@ -35,5 +35,22 @@ Thumbs.db
 
 # Temp files created during audio processing
 *.tmp.wav
+
+# Local test/example audio (never commit real recordings)
 example-file/*
+
+# Secrets and local config
+.env
+.env.*
 .claude/settings.local.json
+
+# Speaker embeddings (voice biometric data — keep out of repo)
+*.npy
+
+# Audio files accidentally placed in repo root
+*.mp3
+*.wav
+*.m4a
+*.flac
+*.ogg
+*.mp4

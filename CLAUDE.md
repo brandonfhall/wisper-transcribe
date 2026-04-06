@@ -25,6 +25,19 @@ Never run `pip install` or `pytest` against the system Python — always use `.v
 
 Tests must not require a GPU, network access, or real ML models. Mock all ML model calls (faster-whisper, pyannote) using `unittest.mock`.
 
+## Security — Public Repo Rules
+
+This repo is public on GitHub. Before every commit:
+
+- **Never commit secrets.** HuggingFace tokens, API keys, and passwords must never appear in source files, test fixtures, or commit messages.
+- **HF token storage:** The token lives in `platformdirs.user_data_dir("wisper-transcribe")/config.toml`, which is outside the repo by design. Never move it into the repo.
+- **No real audio files.** Do not commit actual podcast recordings or any audio that could contain people's voices/personal data. The `example-file/` directory is gitignored for local testing only.
+- **No personal data in tests.** All test fixtures must use synthetic/fake data. Real names, voices, or session recordings must not appear in `tests/`.
+- **Check before staging.** Run `git diff` and `git status` before `git add` to verify nothing sensitive is accidentally included.
+- **Environment variables are fine.** `HUGGINGFACE_TOKEN` as an env var is an acceptable alternative to the config file — just never hardcode the value in source.
+
+If a secret is accidentally committed, it must be treated as compromised immediately (revoke and regenerate the token).
+
 ## Development Rules
 
 - **Write tests alongside each feature.** Every new module gets a corresponding `tests/test_<module>.py`. Do not defer tests to a later phase.
