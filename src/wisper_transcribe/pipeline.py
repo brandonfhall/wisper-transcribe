@@ -20,6 +20,25 @@ def _seconds_to_hhmmss(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:02d}"
 
 
+_MAX_PLAYBACK_SECONDS = 10.0
+
+
+def _play_excerpt(wav_path: Path, start: float, end: float) -> None:
+    """Play up to _MAX_PLAYBACK_SECONDS of a WAV excerpt. Silently no-ops on failure."""
+    try:
+        from pydub import AudioSegment
+        from pydub.playback import play
+
+        clip_start_ms = int(start * 1000)
+        clip_end_ms = int(min(end, start + _MAX_PLAYBACK_SECONDS) * 1000)
+        clip = AudioSegment.from_wav(str(wav_path))[clip_start_ms:clip_end_ms]
+        import click
+        click.echo("  [playing audio excerpt...]")
+        play(clip)
+    except Exception:
+        pass  # No audio device or backend available — skip silently
+
+
 def process_file(
     path: Path,
     output_dir: Optional[Path] = None,
@@ -33,6 +52,7 @@ def process_file(
     min_speakers: Optional[int] = None,
     max_speakers: Optional[int] = None,
     enroll_speakers: bool = False,
+    play_audio: bool = False,
 ) -> Path:
     """Run the full pipeline on a single audio file. Returns path to output .md."""
     path = Path(path)
@@ -113,6 +133,8 @@ def process_file(
                     sample_text = sample.text.strip() if sample else "(no sample)"
                     click.echo(f"\n  Speaker {i} of {len(unique_speakers)} (heard at {sample_ts}):")
                     click.echo(f'    "{sample_text[:80]}"')
+                    if play_audio and sample:
+                        _play_excerpt(wav_path, sample.start, sample.end)
                     name = click.prompt("  Who is this?").strip()
                     role = click.prompt("  Role (DM/Player/Guest, optional)", default="").strip()
                     notes = click.prompt("  Notes (optional)", default="").strip()

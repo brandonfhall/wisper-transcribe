@@ -109,6 +109,7 @@ wisper transcribe <path>          # file or folder
   -n, --num-speakers INT
   --min-speakers / --max-speakers INT
   --enroll-speakers               # interactive first-run naming
+  --play-audio                    # play each speaker's excerpt during enrollment
   --no-diarize
   --timestamps / --no-timestamps
   --device cpu|cuda|auto
@@ -193,7 +194,7 @@ pyannote pipeline wrapper, max-overlap aligner, HF token management, `--num-spea
 `process_folder()` with tqdm progress bars, per-file error recovery, skip-existing, `--verbose` flag. Windows CUDA DLL path resolution. `wisper config` commands.
 
 ### ✅ Phase 5 — Tests & README
-67 tests passing. All ML calls mocked. No GPU required for test suite. README with install, quick start, full CLI reference.
+69 tests passing. All ML calls mocked. No GPU required for test suite. README with install, quick start, full CLI reference.
 
 ### ✅ pyannote-audio 4.x Upgrade (April 2026)
 Upgraded from 3.4.0 → 4.0.4. Removed 5 compatibility shims (torchaudio stubs, hf_hub `use_auth_token`, torch.load default). speechbrain `LazyModule.ensure_module` patch retained — pyannote 4.x still uses speechbrain for ECAPA-TDNN embeddings and the Windows path bug is in speechbrain itself.
@@ -220,7 +221,7 @@ torchcodec still cannot find FFmpeg shared DLLs on this Windows install despite 
 
 - **Enrollment speaker order — chronological** — During `--enroll-speakers`, speakers are currently presented in pyannote label order (`SPEAKER_00`, `SPEAKER_01`, …) which reflects diarization assignment, not first appearance. Sort by each speaker's earliest segment start time so the first voice the user hears in the file is Speaker 1. One-line fix in `pipeline.py`: replace `sorted({seg.speaker …})` with a sort keyed on `min(s.start for s in aligned_segments if s.speaker == label)`.
 
-- **Audio playback during enrollment** — When prompted to name a speaker, play the audio excerpt shown in the prompt so the user can hear the voice rather than just reading the transcript snippet. Use `pydub.playback.play()` (wraps ffplay/simpleaudio/pyaudio). Requires a short clip extraction: slice the `convert_to_wav()` output to the excerpt segment, load with `pydub.AudioSegment.from_wav()`, then `play()`. Should be opt-in via `--play-audio` flag on `wisper transcribe --enroll-speakers` since it requires audio output and adds latency. Fall back gracefully if no audio device is available.
+- ~~**Audio playback during enrollment**~~ ✅ Done — `wisper transcribe --enroll-speakers --play-audio` plays up to 10 s of each speaker's excerpt before the name prompt. Implemented via `_play_excerpt()` in `pipeline.py` using `pydub.AudioSegment` + `pydub.playback.play()`. Silently no-ops if no audio device or backend is available.
 
 ### pyannote 4.x upgrade
 
