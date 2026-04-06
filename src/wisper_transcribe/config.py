@@ -75,10 +75,14 @@ def check_ffmpeg() -> None:
 
 
 def get_device() -> str:
-    """Return 'cuda' if a CUDA GPU is available, else 'cpu'."""
+    """Return 'cuda', 'mps', or 'cpu' based on available hardware."""
     try:
         import torch
-        return "cuda" if torch.cuda.is_available() else "cpu"
+        if torch.cuda.is_available():
+            return "cuda"
+        if torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
     except ImportError:
         return "cpu"
 

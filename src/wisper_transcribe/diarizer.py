@@ -51,6 +51,10 @@ def load_pipeline(hf_token: str, device: str):
             "  pip install 'torch>=2.8.0' torchaudio --index-url https://download.pytorch.org/whl/cu126\n"
             "Or use --device cpu"
         )
+    if device == "mps" and not torch.backends.mps.is_available():
+        raise RuntimeError(
+            "MPS is not available on this system. Use --device cpu instead."
+        )
     _pipeline.to(torch.device(device))
     return _pipeline
 

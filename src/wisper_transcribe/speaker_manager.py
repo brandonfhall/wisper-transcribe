@@ -91,9 +91,9 @@ def _load_embedding_model(device: str):
                 ) from e
             raise
         _embedding_model = Inference(model, window="whole")
-        if device == "cuda":
+        if device in ("cuda", "mps"):
             import torch
-            _embedding_model.to(torch.device("cuda"))
+            _embedding_model.to(torch.device(device))
     return _embedding_model
 
 

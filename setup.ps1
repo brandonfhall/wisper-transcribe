@@ -69,13 +69,16 @@ if ($cudaAvailable -eq "True") {
 
 # ── ffmpeg ────────────────────────────────────────────────────────────────────
 Write-Step "Checking ffmpeg..."
-try {
-    & ffmpeg -version 2>&1 | Out-Null
+if (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
     Write-OK "ffmpeg found"
-} catch {
-    Write-Warn "ffmpeg not found. Install it with:"
-    Write-Host "    winget install Gyan.FFmpeg" -ForegroundColor Yellow
-    Write-Host "   Then restart your terminal before using wisper." -ForegroundColor Gray
+} else {
+    Write-Warn "ffmpeg not found — installing via winget..."
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        & winget install Gyan.FFmpeg --silent --accept-package-agreements --accept-source-agreements
+        Write-OK "ffmpeg installed — restart your terminal before using wisper"
+    } else {
+        Write-Warn "winget not available. Download ffmpeg from https://ffmpeg.org/download.html and add it to your PATH."
+    }
 }
 
 # ── Done ──────────────────────────────────────────────────────────────────────
