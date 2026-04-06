@@ -210,7 +210,7 @@ torchcodec still cannot find FFmpeg shared DLLs on this Windows install despite 
 
 ### Near-term (ready to build)
 
-- **Parallel folder processing** — `concurrent.futures.ThreadPoolExecutor` for CPU-bound files. Caveat: pyannote and whisper are not thread-safe when sharing a GPU — needs per-worker model instances or CPU-only mode guard.
+*(No remaining near-term items — see completed list below.)*
 
 ### ✅ Near-term completed
 
@@ -339,7 +339,17 @@ torchcodec still cannot find FFmpeg shared DLLs on this Windows install despite 
 
 ---
 
-### Phase 10 — Optional GUI
+### Phase 10 — Parallel Folder Processing (CPU-only)
+
+**Context:** GPU processing is always the bottleneck — faster-whisper and pyannote are not thread-safe when sharing a GPU, and loading duplicate model copies would exhaust VRAM. Parallelism only makes sense on CPU-only deployments (e.g. a Linux server processing a large queue of files overnight).
+
+**What to build:** `--workers N` flag on `wisper transcribe <folder>`. Uses `concurrent.futures.ThreadPoolExecutor`. Each worker gets its own model instance (no sharing). Guard: if `device != "cpu"`, emit a warning and clamp workers to 1. Default workers=1 (current behavior unchanged for all GPU users).
+
+**When to build:** Only if there's an actual CPU-server use case. Not worth building for the primary RTX 3090 / M5 Mac workflow.
+
+---
+
+### Phase 11 — Optional GUI
 
 - **Optional GUI** — Textual (terminal) or tkinter/PyQt. Wraps the same `pipeline.process_file()` and `speaker_manager` calls. Keep CLI/library separation clean.
 
