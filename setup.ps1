@@ -68,16 +68,20 @@ if ($cudaAvailable -eq "True") {
 }
 
 # ── ffmpeg ────────────────────────────────────────────────────────────────────
+# Gyan.FFmpeg.Shared (not Gyan.FFmpeg) is required.
+# The plain Gyan.FFmpeg package is a static build — executables only, no DLLs.
+# torchcodec (used by pyannote for audio I/O) needs the shared DLLs
+# (avcodec-*.dll, avformat-*.dll, etc.) that only the Shared build provides.
 Write-Step "Checking ffmpeg..."
 if (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
     Write-OK "ffmpeg found"
 } else {
-    Write-Warn "ffmpeg not found — installing via winget..."
+    Write-Warn "ffmpeg not found — installing Gyan.FFmpeg.Shared via winget..."
     if (Get-Command winget -ErrorAction SilentlyContinue) {
-        & winget install Gyan.FFmpeg --silent --accept-package-agreements --accept-source-agreements
+        & winget install Gyan.FFmpeg.Shared --silent --accept-package-agreements --accept-source-agreements
         Write-OK "ffmpeg installed — restart your terminal before using wisper"
     } else {
-        Write-Warn "winget not available. Download ffmpeg from https://ffmpeg.org/download.html and add it to your PATH."
+        Write-Warn "winget not available. Download the ffmpeg 'full-shared' build from https://www.gyan.dev/ffmpeg/builds/ and add its bin\ folder to your PATH."
     }
 }
 

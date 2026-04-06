@@ -211,6 +211,70 @@ pyannote pipeline wrapper, max-overlap aligner, HF token management, `--num-spea
 
 - **`wisper config show` model clarity** — surface which Whisper model and pyannote models are active, not just config key/value pairs.
 
+### pyannote 4.x upgrade
+
+**Status: Ready to execute. All blockers resolved.**
+
+Currently on pyannote-audio 3.4.0 with six compatibility shims across `diarizer.py` and `speaker_manager.py` to bridge API drift in torchaudio, huggingface_hub, torch, and speechbrain. pyannote 4.x was written against current library versions and eliminates nearly all of them.
+
+**What was blocking it:** pyannote 4.x requires `torchcodec` for audio I/O, which needs FFmpeg shared DLLs (`avcodec-*.dll` etc.). We were installing `Gyan.FFmpeg` (static executables only). `Gyan.FFmpeg.Shared` has always been in winget and provides both executables and DLLs. `setup.ps1` has already been updated to use it.
+
+---
+
+**Shims to delete from `diarizer.py`:**
+
+| Shim | Reason it existed |
+|------|------------------|
+| `torchaudio.AudioMetaData` namedtuple | Removed from torchaudio 2.x public API |
+| `torchaudio.list_audio_backends` lambda | Same removal |
+| `torchaudio.info` scipy-backed stub | Same removal |
+| `huggingface_hub.hf_hub_download` wrapper | `use_auth_token` renamed to `token` in hf_hub ≥0.25 |
+| `speechbrain.LazyModule.ensure_module` patch | Windows path bug (`/inspect.py` vs `\inspect.py`) |
+| `torch.load` weights_only=False default | PyTorch 2.6 changed default; old pyannote checkpoints have custom globals |
+
+Also delete the entire scipy audio pre-loading block in `diarize()` — torchcodec handles audio I/O natively.
+
+---
+
+**Full change list:**
+
+`setup.ps1` / `README.md` ✅ already done
+- `winget install Gyan.FFmpeg.Shared` instead of `Gyan.FFmpeg`
+
+`pyproject.toml`
+- `pyannote-audio>=3.3,<4.0` → `pyannote-audio>=4.0`
+- `torch>=2.0.0` → `torch>=2.8.0`
+- `torchaudio>=2.0.0` → `torchaudio>=2.8.0`
+
+`diarizer.py`
+- Delete all six shim blocks (torchaudio, hf_hub, speechbrain, torch.load)
+- Remove scipy audio pre-loading in `diarize()`, pass file path directly to pipeline
+- `use_auth_token=hf_token` → `token=hf_token` in `Pipeline.from_pretrained()`
+
+`speaker_manager.py`
+- Remove scipy audio pre-loading in `extract_embedding()`, pass file path directly
+- `use_auth_token=` → `token=` in `Model.from_pretrained()`
+
+`architecture.md`
+- Remove shim explanations from Key Design Decisions
+- Update Known Constraints table (torchcodec now works with Gyan.FFmpeg.Shared)
+- Update Tech Stack table (audio loading: torchcodec instead of scipy)
+
+---
+
+**One uncertainty:** speechbrain's `ensure_module` Windows path bug is in speechbrain itself, not pyannote. If pyannote 4.x still uses speechbrain for ECAPA-TDNN speaker embeddings, that shim may need to stay. Verify during upgrade — if pyannote 4.x switched embedding backends, delete it entirely.
+
+---
+
+**Upgrade steps:**
+1. `winget install Gyan.FFmpeg.Shared` (or re-run `setup.ps1`)
+2. Verify torchcodec loads: `python -c "import torchcodec; print('ok')"`
+3. `pip install "pyannote-audio>=4.0"` (pulls torch≥2.8.0 transitively)
+4. Apply all code changes above
+5. `pytest tests/ -v` — fix any remaining issues
+6. End-to-end test: `wisper transcribe <file> --enroll-speakers --device cuda`
+7. Commit, update `architecture.md`
+
 ### Future / Phase 6
 
 - **Optional GUI** — Textual (terminal) or tkinter/PyQt. Wraps the same `pipeline.process_file()` and `speaker_manager` calls. Keep CLI/library separation clean.
@@ -229,3 +293,4 @@ pyannote pipeline wrapper, max-overlap aligner, HF token management, `--num-spea
 - [x] `wisper transcribe ./recordings/` → batch processing with progress, skip existing, error recovery
 - [x] `wisper setup` → guided first-run wizard
 - [ ] Parallel folder processing with `--workers N`
+

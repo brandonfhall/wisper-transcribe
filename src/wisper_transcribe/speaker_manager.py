@@ -121,10 +121,24 @@ def extract_embedding(
     # Use up to 5 longest segments
     longest = sorted(speaker_segs, key=lambda s: s.end - s.start, reverse=True)[:5]
 
+    # Pre-load audio via scipy and pass as a waveform dict so pyannote never
+    # calls torchaudio.info() / torchaudio.load() (removed in torchaudio 2.x).
+    import numpy as np
+    import scipy.io.wavfile as _wavfile
+    import torch
+    sample_rate, data = _wavfile.read(str(audio_path))
+    if data.ndim == 1:
+        data = data[np.newaxis, :]
+    else:
+        data = data.T
+    if np.issubdtype(data.dtype, np.integer):
+        data = data.astype(np.float32) / np.iinfo(data.dtype).max
+    audio_dict = {"waveform": torch.from_numpy(data.copy()), "sample_rate": sample_rate}
+
     embeddings = []
     for seg in longest:
         excerpt = PyannoteSegment(seg.start, seg.end)
-        emb = inference.crop(str(audio_path), excerpt)
+        emb = inference.crop(audio_dict, excerpt)
         embeddings.append(emb)
 
     return np.mean(embeddings, axis=0)

@@ -19,6 +19,19 @@ if not hasattr(_torchaudio, "AudioMetaData"):
 if not hasattr(_torchaudio, "list_audio_backends"):
     _torchaudio.list_audio_backends = lambda: ["soundfile"]  # type: ignore[attr-defined]
 
+if not hasattr(_torchaudio, "info"):
+    import scipy.io.wavfile as _sf_info
+    def _torchaudio_info_compat(filepath, *args, **kwargs):  # type: ignore[misc]
+        sr, data = _sf_info.read(str(filepath))
+        frames = data.shape[0]
+        channels = 1 if data.ndim == 1 else data.shape[1]
+        bits = data.dtype.itemsize * 8
+        return _torchaudio.AudioMetaData(  # type: ignore[attr-defined]
+            sample_rate=sr, num_frames=frames, num_channels=channels,
+            bits_per_sample=bits, encoding="PCM_S",
+        )
+    _torchaudio.info = _torchaudio_info_compat  # type: ignore[attr-defined]
+
 # huggingface_hub >=0.25 removed use_auth_token from hf_hub_download().
 # pyannote-audio 3.x still passes it at call-time (pipeline.py, model.py).
 # Patch at the huggingface_hub module level BEFORE pyannote imports the symbol,
@@ -83,11 +96,55 @@ if not hasattr(_torch, "_compat_load_patched"):
     _torch.load = _compat_torch_load  # type: ignore[assignment]
     _torch._compat_load_patched = True  # type: ignore[attr-defined]
 
+from tqdm import tqdm
+
 from pyannote.audio import Pipeline
 
 from .models import DiarizationSegment
 
 _pipeline = None
+
+
+class _DiarizationProgressHook:
+    """Translates pyannote pipeline hook calls into tqdm progress bars.
+
+    pyannote calls hook(step_name, artifact, file, total, completed) at each
+    chunk of the segmentation and embedding steps.  We open a new tqdm bar
+    whenever the step name changes and update it on each callback.
+    """
+
+    def __init__(self) -> None:
+        self._bar: Optional[tqdm] = None  # type: ignore[type-arg]
+        self._step: Optional[str] = None
+
+    def __call__(self, step_name, *args, total=None, completed=None, **kwargs):  # noqa: ARG002
+        if total is None:
+            return
+        if step_name != self._step:
+            if self._bar is not None:
+                self._bar.close()
+            self._step = step_name
+            self._bar = tqdm(
+                total=total,
+                desc=f"  {step_name.capitalize()}",
+                position=1,
+                leave=False,
+                unit="chunk",
+                bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
+                dynamic_ncols=True,
+            )
+        if completed is not None and self._bar is not None:
+            self._bar.n = completed
+            self._bar.refresh()
+            if completed >= total:
+                self._bar.close()
+                self._bar = None
+                self._step = None
+
+    def close(self) -> None:
+        if self._bar is not None:
+            self._bar.close()
+            self._bar = None
 
 
 def load_pipeline(hf_token: str, device: str):
@@ -162,7 +219,15 @@ def diarize(
     if np.issubdtype(data.dtype, np.integer):
         data = data.astype(np.float32) / np.iinfo(data.dtype).max
     waveform = torch.from_numpy(data.copy())
-    diarization = _pipeline({"waveform": waveform, "sample_rate": sample_rate}, **kwargs)
+    hook = _DiarizationProgressHook()
+    try:
+        diarization = _pipeline(
+            {"waveform": waveform, "sample_rate": sample_rate},
+            hook=hook,
+            **kwargs,
+        )
+    finally:
+        hook.close()
 
     segments: list[DiarizationSegment] = []
     for turn, _track, speaker in diarization.itertracks(yield_label=True):
