@@ -161,8 +161,16 @@ def diarize(
     finally:
         hook.close()
 
+    # pyannote 4.x returns DiarizeOutput(speaker_diarization=Annotation, …)
+    # pyannote 3.x / legacy mode returns an Annotation directly.
+    annotation = (
+        diarization.speaker_diarization
+        if hasattr(diarization, "speaker_diarization")
+        else diarization
+    )
+
     segments: list[DiarizationSegment] = []
-    for turn, _track, speaker in diarization.itertracks(yield_label=True):
+    for turn, _track, speaker in annotation.itertracks(yield_label=True):
         segments.append(
             DiarizationSegment(
                 start=turn.start,
