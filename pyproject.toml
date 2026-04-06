@@ -37,6 +37,16 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    # speechbrain 1.0 deprecated-redirect noise (k2, transformers, spacy, numba, pretrained)
+    "ignore:Module 'speechbrain.*' was deprecated:UserWarning",
+    # matplotlib 3.7 colormap API change (triggered by pyannote.core.notebook)
+    "ignore:The get_cmap function was deprecated:matplotlib.MatplotlibDeprecationWarning",
+    # pydub uses audioop which is removed in Python 3.13
+    "ignore:'audioop' is deprecated:DeprecationWarning",
+    # SWIG-generated types (onnxruntime / faster-whisper) have no __module__
+    "ignore:builtin type .* has no __module__:DeprecationWarning",
+]
 
 [tool.coverage.run]
 source = ["wisper_transcribe"]

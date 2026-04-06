@@ -34,16 +34,36 @@ def _compat_hf_hub_download(*args, use_auth_token=None, **kwargs):
 
 _hf_hub.hf_hub_download = _compat_hf_hub_download
 
-# speechbrain 1.0 lazy-loads speechbrain.integrations.k2_fsa on any module
-# inspection (e.g. inspect.getmembers).  k2 is not installed; the lazy load
-# raises an error.  Pre-populate sys.modules with an empty stub so that the
-# lazy import silently resolves to a no-op module instead of crashing.
+# speechbrain 1.0 lazy-loads optional integrations (k2, transformers, spacy,
+# numba, …) whenever something calls inspect.getmembers() on the speechbrain
+# package.  Any integration whose optional dependency is not installed raises
+# instead of silently no-oping.  Patch LazyModule.__load (before speechbrain
+# is imported by pyannote) so that a failed import returns an empty stub module
+# rather than crashing.  This covers all missing optional deps at once.
 import sys as _sys
 import types as _types
-if "speechbrain.integrations.k2_fsa" not in _sys.modules:
-    _sys.modules["speechbrain.integrations.k2_fsa"] = _types.ModuleType(
-        "speechbrain.integrations.k2_fsa"
-    )
+import speechbrain.utils.importutils as _sb_import_utils
+
+_sb_LazyModule = _sb_import_utils.LazyModule
+_orig_ensure_module = _sb_LazyModule.ensure_module
+
+def _tolerant_ensure_module(self, stacklevel=1):  # type: ignore[misc]
+    # speechbrain checks `.endswith("/inspect.py")` to suppress lazy loads
+    # triggered by inspect.getmembers(), but the forward-slash check never
+    # matches on Windows (paths use backslash).  As a result every optional
+    # integration (k2, transformers, spacy, numba…) is actually loaded and
+    # crashes when its optional dependency isn't installed.  Catch the
+    # ImportError here and return an empty stub so missing integrations are
+    # silently ignored.
+    try:
+        return _orig_ensure_module(self, stacklevel + 1)
+    except (ImportError, ModuleNotFoundError):
+        stub = _types.ModuleType(self.target)
+        _sys.modules.setdefault(self.target, stub)
+        self.lazy_module = stub  # type: ignore[attr-defined]
+        return stub
+
+_sb_LazyModule.ensure_module = _tolerant_ensure_module  # type: ignore[method-assign]
 
 # PyTorch 2.6 changed torch.load's default weights_only from False → True.
 # pyannote-audio 3.x calls torch.load without specifying weights_only, and its
