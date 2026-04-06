@@ -44,6 +44,16 @@ def load_model(model_size: str, device: str):
                     os.add_dll_directory(str(p))
                 break
 
+    if device == "cuda":
+        import torch
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA is not available. Your PyTorch installation may not include CUDA support.\n"
+                "Reinstall with CUDA support:\n"
+                "  pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124\n"
+                "Or use --device cpu"
+            )
+
     from faster_whisper import WhisperModel
 
     _model = WhisperModel(model_size, device=device, compute_type="float16" if device == "cuda" else "int8")

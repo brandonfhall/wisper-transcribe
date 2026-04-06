@@ -24,6 +24,22 @@ Runs entirely offline. No cloud APIs. Outputs clean markdown files ready for Not
 
 ## Installation
 
+### Quick setup (recommended)
+
+Run the setup script — it handles the venv, package install, and CUDA PyTorch in one step:
+
+```powershell
+# Windows
+.\setup.ps1
+```
+
+```bash
+# Mac/Linux
+bash setup.sh
+```
+
+### Manual setup
+
 ```bash
 git clone <repo>
 cd wisper-transcribe
@@ -38,6 +54,15 @@ source .venv/bin/activate
 
 pip install -e .
 ```
+
+> **Windows CUDA users:** `pip install` from PyPI installs the CPU-only PyTorch build by default. After the steps above, run this extra command to get GPU support:
+> ```powershell
+> pip install "torch>=2.8.0" "torchaudio>=2.8.0" --index-url https://download.pytorch.org/whl/cu126 --force-reinstall
+> ```
+> `pyannote-audio 4.x` requires `torch>=2.8.0`, which lives on the CUDA 12.6 index (`cu126`). The `cu124` index only goes up to 2.6.0 and will cause a dependency conflict.
+>
+> Verify it worked: `python -c "import torch; print(torch.cuda.is_available())"` should print `True`.
+> The setup script (`setup.ps1`) handles this automatically.
 
 ### One-time setup
 
