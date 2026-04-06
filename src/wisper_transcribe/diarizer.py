@@ -3,6 +3,22 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+# torchaudio 2.x removed AudioMetaData from its public API in favour of
+# torchcodec.  pyannote-audio 3.x still references it at import time as a
+# type annotation.  Patch the name back in before pyannote loads so the
+# import succeeds; the actual audio loading is done via scipy (see diarize()).
+import torchaudio as _torchaudio
+
+if not hasattr(_torchaudio, "AudioMetaData"):
+    import collections
+    _torchaudio.AudioMetaData = collections.namedtuple(  # type: ignore[attr-defined]
+        "AudioMetaData",
+        ["sample_rate", "num_frames", "num_channels", "bits_per_sample", "encoding"],
+    )
+
+if not hasattr(_torchaudio, "list_audio_backends"):
+    _torchaudio.list_audio_backends = lambda: ["soundfile"]  # type: ignore[attr-defined]
+
 from pyannote.audio import Pipeline
 
 from .models import DiarizationSegment

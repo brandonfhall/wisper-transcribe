@@ -112,8 +112,12 @@ New embedding blended with existing: `stored = 0.7 * stored + 0.3 * new`
 
 ## Key Design Decisions
 
-### scipy for audio loading in diarizer
-pyannote-audio 4.x uses `torchcodec` as its default audio decoder. On Windows, `torchcodec` requires FFmpeg to be installed as the "full-shared" build — the winget `Gyan.FFmpeg` package does not provide the required DLLs. Rather than require a specific FFmpeg variant, we pre-load audio with `scipy.io.wavfile` and pass a `{'waveform': tensor, 'sample_rate': int}` dict directly to the pyannote pipeline, bypassing `torchcodec` entirely. This is safe because `diarize()` always receives a WAV file (guaranteed by `convert_to_wav()` upstream).
+### pyannote-audio pinned to 3.x, torchaudio compatibility shims
+`pyannote-audio` is pinned to `>=3.3,<4.0`. pyannote 4.x depends on `torchcodec` for audio I/O, which requires FFmpeg's "full-shared" build on Windows (not provided by `winget install Gyan.FFmpeg`).
+
+pyannote 3.x uses `soundfile` for audio loading, but its `core/io.py` references two torchaudio API symbols that were removed in torchaudio 2.x: `torchaudio.AudioMetaData` (namedtuple) and `torchaudio.list_audio_backends()` (function). Both are patched back in at the top of `diarizer.py` before `from pyannote.audio import Pipeline` so the import succeeds.
+
+At runtime, `diarize()` pre-loads the WAV file with `scipy.io.wavfile` and passes a `{'waveform': tensor, 'sample_rate': int}` dict to the pipeline. When the dict contains `"waveform"`, pyannote's `Audio.__call__()` and `Audio.crop()` both operate directly on the tensor without ever calling `torchaudio.load()`, so the missing torchaudio audio I/O is never exercised.
 
 ### Module-level imports for mock patching
 `pyannote.audio.Pipeline` is imported at the top of `diarizer.py` (not inside the function). `pydub.AudioSegment` is imported at the top of `audio_utils.py`. This is required so `unittest.mock.patch("wisper_transcribe.diarizer.Pipeline", ...)` resolves correctly in tests. Lazy imports inside functions cannot be patched at the module path.
