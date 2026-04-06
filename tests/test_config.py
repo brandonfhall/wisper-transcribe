@@ -67,6 +67,14 @@ def test_get_device_cpu_fallback():
         assert result == "cpu"
 
 
+def test_get_data_dir_env_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    import importlib
+    import wisper_transcribe.config as cfg_mod
+    importlib.reload(cfg_mod)
+    assert cfg_mod.get_data_dir() == tmp_path
+
+
 def test_resolve_compute_type_auto_cuda():
     from wisper_transcribe.config import resolve_compute_type
     assert resolve_compute_type("auto", "cuda") == "float16"

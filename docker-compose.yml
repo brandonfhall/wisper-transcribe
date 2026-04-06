@@ -1,0 +1,47 @@
+name: wisper-transcribe
+
+# Local bind-mount directories (created automatically by Docker on first run):
+#   ./cache/   — HuggingFace model downloads (~2 GB, persisted across restarts)
+#   ./data/    — wisper config.toml + speaker profiles (persisted)
+#   ./input/   — place your audio files here before running
+#   ./output/  — transcribed .md files appear here
+
+services:
+
+  # ── GPU service (default) ──────────────────────────────────────────────────
+  # Requires: NVIDIA driver on host + NVIDIA Container Toolkit installed.
+  # Verify with: docker compose run wisper nvidia-smi
+  wisper:
+    build:
+      context: .
+      target: gpu
+    image: wisper-transcribe:gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - ./cache:/root/.cache/huggingface   # HF model cache
+      - ./data:/data                       # config + speaker profiles
+      - ./input:/app/input                 # audio input
+      - ./output:/app/output               # transcript output
+    stdin_open: true   # required for interactive enrollment prompts
+    tty: true
+
+  # ── CPU service ────────────────────────────────────────────────────────────
+  # Use on machines without an NVIDIA GPU, or for CI/testing.
+  wisper-cpu:
+    build:
+      context: .
+      target: cpu
+    image: wisper-transcribe:cpu
+    volumes:
+      - ./cache:/root/.cache/huggingface
+      - ./data:/data
+      - ./input:/app/input
+      - ./output:/app/output
+    stdin_open: true
+    tty: true

@@ -1,0 +1,27 @@
+# Version control
+.git/
+.github/
+
+# Python build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+
+# Dev, test, and docs (not needed at runtime)
+tests/
+example-file/
+CLAUDE.md
+plan.md
+architecture.md
+
+# Secrets and user data (never bake into image)
+.env
+*.npy
+data/
+cache/
+input/
+output/

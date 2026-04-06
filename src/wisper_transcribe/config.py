@@ -38,6 +38,10 @@ def resolve_compute_type(compute_type: str, device: str) -> str:
 
 
 def get_data_dir() -> Path:
+    import os
+    override = os.environ.get("WISPER_DATA_DIR")
+    if override:
+        return Path(override)
     return Path(platformdirs.user_data_dir(APP_NAME))
 
 
