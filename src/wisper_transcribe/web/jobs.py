@@ -261,6 +261,10 @@ class JobQueue:
 
         class ProgressCatcher:
             def write(self, s: str) -> None:
+                # Check cancel on every progress tick (tqdm bar update fires this
+                # frequently during transcription, so this is the reliable cancel point)
+                if job._cancel_event.is_set():
+                    raise InterruptedError("Job cancelled by user")
                 # Strip ANSI control sequences (cursor-up, clear-line, colour codes, etc.)
                 clean = _ansi_escape.sub('', s)
                 # tqdm updates the same line using carriage returns (\r)
