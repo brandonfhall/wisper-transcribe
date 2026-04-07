@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block title %}Transcribe{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl space-y-8">
+
+  <div>
+    <h1 class="text-2xl font-bold text-gray-900">New Transcription</h1>
+    <p class="mt-1 text-sm text-gray-500">Upload an audio file to start transcription.</p>
+  </div>
+
+  <form method="post" action="/transcribe" enctype="multipart/form-data" class="space-y-6">
+
+    <!-- File upload -->
+    <div class="card">
+      <h2 class="text-base font-semibold text-gray-900 mb-4">Audio File</h2>
+      <label class="form-label" for="file">Select file <span class="text-gray-400 font-normal">(mp3, wav, m4a, flac, ogg, mp4)</span></label>
+      <input type="file" id="file" name="file" accept=".mp3,.wav,.m4a,.flac,.ogg,.mp4"
+             class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-medium file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100" required/>
+      <p class="mt-2 text-xs text-gray-500" id="file-size-hint"></p>
+    </div>
+
+    <!-- Options (collapsible) -->
+    <details class="card" open>
+      <summary class="text-base font-semibold text-gray-900 cursor-pointer select-none">Options</summary>
+      <div class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+
+        <div>
+          <label class="form-label" for="model_size">Model</label>
+          <select id="model_size" name="model_size" class="form-input">
+            {% for m in ["tiny","base","small","medium","large-v3"] %}
+            <option value="{{ m }}" {% if m == "medium" %}selected{% endif %}>{{ m }}</option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div>
+          <label class="form-label" for="device">Device</label>
+          <select id="device" name="device" class="form-input">
+            {% for d in ["auto","cpu","cuda","mps"] %}
+            <option value="{{ d }}" {% if d == "auto" %}selected{% endif %}>{{ d }}</option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div>
+          <label class="form-label" for="language">Language</label>
+          <input type="text" id="language" name="language" value="en" placeholder="en, fr, auto…" class="form-input"/>
+        </div>
+
+        <div>
+          <label class="form-label" for="compute_type">Compute Type</label>
+          <select id="compute_type" name="compute_type" class="form-input">
+            {% for c in ["auto","float16","int8_float16","int8","float32"] %}
+            <option value="{{ c }}" {% if c == "auto" %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div>
+          <label class="form-label" for="num_speakers">Num Speakers <span class="text-gray-400">(optional)</span></label>
+          <input type="number" id="num_speakers" name="num_speakers" min="1" max="20" placeholder="auto-detect" class="form-input"/>
+        </div>
+
+        <div>
+          <label class="form-label" for="initial_prompt">Initial Prompt <span class="text-gray-400">(optional)</span></label>
+          <input type="text" id="initial_prompt" name="initial_prompt" placeholder="Fantasy RPG vocabulary…" class="form-input"/>
+        </div>
+
+        <div class="flex items-center gap-6 sm:col-span-2">
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" name="include_timestamps" value="1" checked class="rounded text-indigo-600"/>
+            <span class="text-sm text-gray-700">Include timestamps</span>
+          </label>
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" name="no_diarize" value="1" class="rounded text-indigo-600"/>
+            <span class="text-sm text-gray-700">Skip speaker diarization</span>
+          </label>
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" name="vad" value="on" checked class="rounded text-indigo-600"/>
+            <span class="text-sm text-gray-700">Voice activity detection</span>
+          </label>
+        </div>
+
+      </div>
+    </details>
+
+    <div class="flex gap-4">
+      <button type="submit" class="btn-primary" id="submit-btn">
+        <svg class="h-5 w-5 mr-2 -ml-1" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.985V5.653z"/>
+        </svg>
+        Start Transcription
+      </button>
+      <a href="/" class="btn-secondary">Cancel</a>
+    </div>
+
+  </form>
+</div>
+
+<script>
+document.querySelector('input[type=file]').addEventListener('change', function(e) {
+  const f = e.target.files[0];
+  if (f) {
+    const mb = (f.size / 1048576).toFixed(1);
+    document.getElementById('file-size-hint').textContent = `Selected: ${f.name} (${mb} MB)`;
+  }
+});
+document.querySelector('form').addEventListener('submit', function() {
+  const btn = document.getElementById('submit-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<svg class="animate-spin h-5 w-5 mr-2 -ml-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>Uploading…';
+});
+</script>
+{% endblock %}

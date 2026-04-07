@@ -23,8 +23,8 @@
 
 ```
 src/wisper_transcribe/
-├── cli.py              Click entry points — no business logic, delegates to pipeline/manager; includes setup wizard
-├── pipeline.py         Main orchestrator: process_file(), process_folder()
+├── cli.py              Click entry points — no business logic, delegates to pipeline/manager; includes setup wizard, server command
+├── pipeline.py         Main orchestrator: process_file(), process_folder() (supports --workers N via ProcessPoolExecutor)
 ├── transcriber.py      faster-whisper wrapper, lazy model cache (_model), CUDA DLL path fix
 ├── diarizer.py         pyannote pipeline wrapper, lazy cache (_pipeline), scipy audio loading
 ├── aligner.py          Merge transcription segments with diarization labels (max-overlap)
@@ -32,7 +32,17 @@ src/wisper_transcribe/
 ├── formatter.py        Markdown output, YAML frontmatter, timestamp formatting
 ├── audio_utils.py      validate_audio(), convert_to_wav(), get_duration()
 ├── config.py           load_config(), save_config(), get_device(), get_hf_token(), check_ffmpeg()
-└── models.py           Dataclasses: TranscriptionSegment, DiarizationSegment, AlignedSegment, SpeakerProfile
+├── models.py           Dataclasses: TranscriptionSegment, DiarizationSegment, AlignedSegment, SpeakerProfile
+├── static/             Vendored web assets: htmx.min.js, tailwind.min.css (pre-built), wisp.svg, app.js
+└── web/                Phase 11: FastAPI web UI
+    ├── app.py          FastAPI application factory (create_app()), module-level app instance for uvicorn
+    ├── jobs.py         In-memory job queue, JobQueue class, asyncio background worker, SSE progress via tqdm.write patch
+    └── routes/
+        ├── dashboard.py    GET /, GET /jobs (HTMX partial)
+        ├── transcribe.py   GET/POST /transcribe, GET /transcribe/jobs/{id}, SSE /jobs/{id}/stream, enrollment wizard
+        ├── transcripts.py  GET/POST /transcripts, transcript detail, download, fix-speaker
+        ├── speakers.py     GET/POST /speakers, enroll, rename, remove
+        └── config.py       GET/POST /config
 ```
 
 ---
@@ -201,7 +211,8 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - `tqdm.write` used throughout production code so test output is not polluted by progress bars
 - Enrollment tests patch `wisper_transcribe.speaker_manager.load_profiles` to return `{}` (no existing profiles) to prevent tests from seeing real profiles on the developer's machine
 - Coverage: run `pytest tests/ -v --cov --cov-report=term-missing`
-- Test count: 117 (all mocked, no GPU/network required)
+- Web tests use `fastapi.testclient.TestClient`; routes are tested via HTTP with all ML calls mocked — no GPU/network needed
+- Test count: 117 core + web test suite (all mocked)
 
 **CI matrix** (`.github/workflows/ci.yml`):
 - Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)
@@ -219,6 +230,42 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 | MPS on Apple Silicon | faster-whisper (CTranslate2) has no MPS backend — transcription always uses CPU on Mac. pyannote diarization and speaker embeddings run on MPS when available (auto-detected). |
 | Thread safety | `_model` and `_pipeline` globals are not thread-safe; parallel folder processing uses `ProcessPoolExecutor` so each worker is a separate process with isolated module state |
 | pyannote license | HuggingFace token + one-time model license acceptance required (free) |
+
+---
+
+## Web Interface (Phase 11)
+
+### Stack
+FastAPI + Jinja2 + HTMX + Tailwind CSS. All assets served locally — no CDN or internet required at runtime.
+
+| Layer | Choice | Notes |
+|-------|--------|-------|
+| Backend | FastAPI (uvicorn) | `wisper server` command; single-file app factory |
+| Templates | Jinja2 (server-side) | Rendered HTML; HTMX handles partial updates |
+| Reactive UI | HTMX 1.9 (vendored) | `static/htmx.min.js` committed; polled job updates |
+| Styling | Tailwind CSS (compiled) | `static/tailwind.min.css` pre-built; regenerate with `pytailwindcss` |
+| Icons | Heroicons (inline SVG) | Embedded in templates — no external load |
+
+### Job Queue
+`web/jobs.py` — `JobQueue` class with in-memory `dict[str, Job]` and an `asyncio.Queue` drain loop.
+- One background asyncio task consumes the queue; each job runs `process_file()` via `asyncio.to_thread()`.
+- One job at a time (GPU-safe) — the module-level `_model`/`_pipeline` globals are not thread-safe.
+- Progress: `tqdm.write` is monkey-patched per-job to capture log lines into `job.log_lines`; restored after job completes.
+- SSE endpoint (`GET /transcribe/jobs/{id}/stream`) streams `job.log_lines` and status to the browser.
+
+### Speaker Enrollment Web Flow
+Interactive CLI enrollment (TTY prompts) is replaced by a post-job wizard:
+1. Transcription completes with `enroll_speakers=False`; detected speakers appear in transcript as `SPEAKER_XX` labels.
+2. Dashboard shows "Name Speakers" button for completed jobs.
+3. `GET /transcribe/jobs/{id}/enroll` renders a wizard page with each detected label and a name input (plus existing profiles as click-to-fill options).
+4. `POST /transcribe/jobs/{id}/enroll` applies speaker name renames via `formatter.update_speaker_names()`.
+
+### Offline Assets
+- `static/htmx.min.js`: placeholder committed to repo; real file downloaded during `docker build` via `curl`. For local use: `curl -sL https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js -o src/wisper_transcribe/static/htmx.min.js`
+- `static/tailwind.min.css`: pre-built CSS committed to repo; regenerate after template changes with `python -m pytailwindcss -i .../input.css -o .../tailwind.min.css --minify`
+
+### Docker Web Services
+`docker-compose.yml` defines `wisper-web` (GPU) and `wisper-cpu-web` (CPU), both exposing port 8080. Same image as CLI services, different `command: ["server", "--host", "0.0.0.0", "--port", "8080"]`.
 
 ---
 

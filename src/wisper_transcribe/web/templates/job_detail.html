@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Job {{ job.id[:8] }}{% endblock %}
+
+{% block content %}
+<div class="max-w-3xl space-y-6">
+
+  <div class="flex items-center gap-4">
+    <a href="/" class="text-indigo-600 hover:underline text-sm">← Dashboard</a>
+    <h1 class="text-2xl font-bold text-gray-900">Transcription Job</h1>
+    <span id="status-badge">
+      {% if job.status == "pending" %}<span class="badge-pending">Pending</span>
+      {% elif job.status == "running" %}<span class="badge-running">Running</span>
+      {% elif job.status == "completed" %}<span class="badge-completed">Completed</span>
+      {% else %}<span class="badge-failed">Failed</span>{% endif %}
+    </span>
+  </div>
+
+  <!-- Job metadata -->
+  <div class="card">
+    <dl class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+      <div><dt class="font-medium text-gray-500">Job ID</dt><dd class="font-mono text-xs text-gray-700">{{ job.id }}</dd></div>
+      <div><dt class="font-medium text-gray-500">Input</dt><dd class="font-mono text-xs text-gray-700 truncate">{{ job.input_path }}</dd></div>
+      <div><dt class="font-medium text-gray-500">Created</dt><dd class="text-gray-700">{{ job.created_at.strftime("%Y-%m-%d %H:%M:%S") }}</dd></div>
+      {% if job.finished_at %}
+      <div><dt class="font-medium text-gray-500">Finished</dt><dd class="text-gray-700">{{ job.finished_at.strftime("%Y-%m-%d %H:%M:%S") }}</dd></div>
+      {% endif %}
+    </dl>
+  </div>
+
+  <!-- Log terminal -->
+  <div class="card">
+    <h2 class="text-base font-semibold text-gray-900 mb-3">Progress Log</h2>
+    <div id="log-terminal" class="log-terminal">
+      {% for line in job.log_lines %}<div>{{ line }}</div>{% endfor %}
+      <div id="log-cursor" class="{% if job.status in ('pending','running') %}animate-pulse{% endif %}">{% if job.status in ('pending','running') %}█{% endif %}</div>
+    </div>
+  </div>
+
+  <!-- Actions -->
+  <div id="job-actions" class="flex gap-4">
+    {% if job.status == "completed" %}
+      {% if job.output_path %}
+        <a href="/transcripts/{{ job.output_path | stem }}" class="btn-primary">View Transcript</a>
+        <a href="/transcribe/jobs/{{ job.id }}/enroll" class="btn-secondary">Name Speakers</a>
+      {% endif %}
+    {% elif job.status == "failed" %}
+      <div class="rounded-md bg-red-50 border border-red-200 p-4 w-full">
+        <p class="text-sm text-red-800"><strong>Error:</strong> {{ job.error }}</p>
+      </div>
+    {% endif %}
+    <a href="/" class="btn-secondary">Back to Dashboard</a>
+  </div>
+
+</div>
+
+{% if job.status in ("pending", "running") %}
+<script>
+(function() {
+  const terminal = document.getElementById('log-terminal');
+  const cursor = document.getElementById('log-cursor');
+  const badge = document.getElementById('status-badge');
+  const actions = document.getElementById('job-actions');
+
+  const es = new EventSource('/transcribe/jobs/{{ job.id }}/stream');
+
+  es.onmessage = function(e) {
+    const evt = JSON.parse(e.data);
+
+    if (evt.type === 'log') {
+      const line = document.createElement('div');
+      line.textContent = evt.message;
+      terminal.insertBefore(line, cursor);
+      terminal.scrollTop = terminal.scrollHeight;
+    }
+
+    if (evt.type === 'status') {
+      // Update badge
+      const statusMap = {
+        pending: '<span class="badge-pending">Pending</span>',
+        running: '<span class="badge-running">Running</span>',
+        completed: '<span class="badge-completed">Completed</span>',
+        failed: '<span class="badge-failed">Failed</span>',
+      };
+      if (statusMap[evt.status]) badge.innerHTML = statusMap[evt.status];
+    }
+
+    if (evt.type === 'done') {
+      cursor.textContent = '';
+      es.close();
+      // Reload actions area
+      if (evt.status === 'completed' && evt.output_path) {
+        const stem = evt.output_path.replace(/\\/g, '/').split('/').pop().replace('.md', '');
+        actions.innerHTML = `
+          <a href="/transcripts/${stem}" class="btn-primary">View Transcript</a>
+          <a href="/transcribe/jobs/{{ job.id }}/enroll" class="btn-secondary">Name Speakers</a>
+          <a href="/" class="btn-secondary">Back to Dashboard</a>`;
+      } else if (evt.status === 'failed') {
+        actions.innerHTML = `
+          <div class="rounded-md bg-red-50 border border-red-200 p-4 w-full">
+            <p class="text-sm text-red-800"><strong>Error:</strong> ${evt.error || 'Unknown error'}</p>
+          </div>
+          <a href="/" class="btn-secondary">Back to Dashboard</a>`;
+      }
+    }
+  };
+
+  es.onerror = function() { es.close(); };
+})();
+</script>
+{% endif %}
+{% endblock %}

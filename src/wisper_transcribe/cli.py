@@ -123,6 +123,36 @@ def _audio_extensions():
 
 
 @main.command()
+@click.option("--host", default="0.0.0.0", show_default=True, help="Bind host")
+@click.option("--port", default=8080, show_default=True, type=int, help="Bind port")
+@click.option("--reload", is_flag=True, default=False, help="Auto-reload on code change (dev mode)")
+def server(host: str, port: int, reload: bool) -> None:
+    """Start the wisper web UI server.
+
+    Opens a browser-based interface for transcription, speaker management,
+    and configuration.  Visit http://localhost:8080 after starting.
+
+    All web assets are served locally — no internet connection required at
+    runtime once the package is installed.
+    """
+    try:
+        import uvicorn
+    except ImportError:
+        raise click.ClickException(
+            "uvicorn is required to run the web server.  "
+            "Install with: pip install 'wisper-transcribe[web]' or pip install uvicorn"
+        )
+    click.echo(f"Starting wisper web UI on http://{host}:{port}")
+    click.echo("Press Ctrl+C to stop.")
+    uvicorn.run(
+        "wisper_transcribe.web.app:app",
+        host=host,
+        port=port,
+        reload=reload,
+    )
+
+
+@main.command()
 def setup():
     """Guided first-run setup: ffmpeg, HF token, and model pre-download."""
     import os

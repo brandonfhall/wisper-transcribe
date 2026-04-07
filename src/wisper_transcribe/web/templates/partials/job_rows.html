@@ -1,0 +1,39 @@
+{% if jobs %}
+<table class="min-w-full divide-y divide-gray-200 text-sm">
+  <thead class="bg-gray-50">
+    <tr>
+      <th class="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">File</th>
+      <th class="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Status</th>
+      <th class="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Created</th>
+      <th class="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+    </tr>
+  </thead>
+  <tbody class="bg-white divide-y divide-gray-200">
+    {% for job in jobs %}
+    <tr>
+      <td class="px-4 py-3 font-mono text-xs text-gray-700 max-w-xs truncate">{{ job.input_path | basename }}</td>
+      <td class="px-4 py-3">
+        {% if job.status == "pending" %}
+          <span class="badge-pending">Pending</span>
+        {% elif job.status == "running" %}
+          <span class="badge-running">Running</span>
+        {% elif job.status == "completed" %}
+          <span class="badge-completed">Completed</span>
+        {% else %}
+          <span class="badge-failed">Failed</span>
+        {% endif %}
+      </td>
+      <td class="px-4 py-3 text-gray-500 text-xs">{{ job.created_at.strftime("%H:%M:%S") }}</td>
+      <td class="px-4 py-3 flex gap-2">
+        <a href="/transcribe/jobs/{{ job.id }}" class="text-indigo-600 hover:underline text-xs">View</a>
+        {% if job.status == "completed" and job.output_path %}
+          <a href="/transcripts/{{ job.output_path | stem }}" class="text-green-600 hover:underline text-xs">Transcript</a>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="text-sm text-gray-500 text-center py-8">No jobs yet. <a href="/transcribe" class="text-indigo-600 hover:underline">Start a transcription →</a></p>
+{% endif %}

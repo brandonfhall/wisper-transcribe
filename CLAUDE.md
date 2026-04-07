@@ -133,7 +133,11 @@ python -m pytailwindcss -i src/wisper_transcribe/static/input.css \
 # commit tailwind.min.css along with your template changes
 ```
 
-HTMX is vendored at `src/wisper_transcribe/static/htmx.min.js` (committed, no build step needed).
+HTMX placeholder is at `src/wisper_transcribe/static/htmx.min.js`. The Dockerfile downloads the real file automatically during `docker build`. For local use, download it once:
+```bash
+curl -sL "https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js" \
+     -o src/wisper_transcribe/static/htmx.min.js
+```
 
 Web route tests: `pytest tests/test_web_*.py -v`
 

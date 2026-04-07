@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-gray-50">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>{% block title %}wisper{% endblock %} — wisper-transcribe</title>
+  <link rel="stylesheet" href="/static/tailwind.min.css"/>
+  <script src="/static/htmx.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body class="h-full">
+
+<!-- Navigation -->
+<nav class="bg-indigo-900 shadow-lg">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div class="flex items-center justify-between h-16">
+
+      <!-- Logo + wordmark -->
+      <a href="/" class="flex items-center gap-3 group">
+        <span class="wisp-logo">
+          <!-- Inline wisp SVG — will-o'-the-wisp orb -->
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="36" height="36" aria-hidden="true">
+            <defs>
+              <radialGradient id="n-glow" cx="50%" cy="50%" r="50%">
+                <stop offset="0%" stop-color="#a5b4fc" stop-opacity="0.4"/>
+                <stop offset="100%" stop-color="#4f46e5" stop-opacity="0"/>
+              </radialGradient>
+              <radialGradient id="n-orb" cx="38%" cy="35%" r="60%">
+                <stop offset="0%" stop-color="#e0e7ff"/>
+                <stop offset="45%" stop-color="#818cf8"/>
+                <stop offset="100%" stop-color="#4338ca"/>
+              </radialGradient>
+              <filter id="n-blur" x="-80%" y="-80%" width="260%" height="260%">
+                <feGaussianBlur stdDeviation="5"/>
+              </filter>
+            </defs>
+            <circle cx="32" cy="34" r="22" fill="url(#n-glow)" filter="url(#n-blur)"/>
+            <circle cx="32" cy="34" r="10" fill="url(#n-orb)"/>
+            <circle cx="28" cy="30" r="3.2" fill="white" opacity="0.35"/>
+            <circle cx="20" cy="22" r="2" fill="#a5b4fc" opacity="0.7" class="spark-1"/>
+            <circle cx="44" cy="18" r="1.4" fill="#c7d2fe" opacity="0.6" class="spark-2"/>
+            <circle cx="47" cy="43" r="1.6" fill="#818cf8" opacity="0.55" class="spark-3"/>
+          </svg>
+        </span>
+        <span class="text-white font-bold text-xl tracking-wide group-hover:text-indigo-200 transition-colors">wisper</span>
+      </a>
+
+      <!-- Nav links -->
+      <div class="hidden md:flex items-center gap-1">
+        <a href="/"             class="nav-link {% if request.url.path == '/' %}nav-active{% endif %}">Dashboard</a>
+        <a href="/transcribe"   class="nav-link {% if request.url.path.startswith('/transcribe') %}nav-active{% endif %}">Transcribe</a>
+        <a href="/transcripts"  class="nav-link {% if request.url.path.startswith('/transcripts') %}nav-active{% endif %}">Transcripts</a>
+        <a href="/speakers"     class="nav-link {% if request.url.path.startswith('/speakers') %}nav-active{% endif %}">Speakers</a>
+        <a href="/config"       class="nav-link {% if request.url.path.startswith('/config') %}nav-active{% endif %}">Config</a>
+      </div>
+
+      <!-- Mobile menu button (simple toggle) -->
+      <button type="button" onclick="document.getElementById('mobile-menu').classList.toggle('hidden')"
+              class="md:hidden text-indigo-200 hover:text-white p-2 rounded-md">
+        <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Mobile menu -->
+  <div id="mobile-menu" class="hidden md:hidden border-t border-indigo-800">
+    <div class="px-4 py-2 space-y-1">
+      <a href="/"            class="mobile-nav-link">Dashboard</a>
+      <a href="/transcribe"  class="mobile-nav-link">Transcribe</a>
+      <a href="/transcripts" class="mobile-nav-link">Transcripts</a>
+      <a href="/speakers"    class="mobile-nav-link">Speakers</a>
+      <a href="/config"      class="mobile-nav-link">Config</a>
+    </div>
+  </div>
+</nav>
+
+<!-- Flash messages -->
+{% if flash %}
+<div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-4">
+  <div class="rounded-md bg-{{ flash.type }}-50 border border-{{ flash.type }}-200 p-4">
+    <p class="text-sm text-{{ flash.type }}-800">{{ flash.message }}</p>
+  </div>
+</div>
+{% endif %}
+
+<!-- Main content -->
+<main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+  {% block content %}{% endblock %}
+</main>
+
+<style>
+.nav-link { @apply px-3 py-2 rounded-md text-sm font-medium text-indigo-200 hover:text-white hover:bg-indigo-800 transition-colors; }
+.nav-active { @apply bg-indigo-800 text-white; }
+.mobile-nav-link { @apply block px-3 py-2 rounded-md text-sm font-medium text-indigo-200 hover:text-white hover:bg-indigo-800; }
+.spark-1 { animation: float1 3.2s ease-in-out infinite; }
+.spark-2 { animation: float2 2.8s ease-in-out infinite 0.6s; }
+.spark-3 { animation: float3 3.6s ease-in-out infinite 1.2s; }
+@keyframes float1 { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+@keyframes float2 { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-2.5px); } }
+@keyframes float3 { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+</style>
+
+</body>
+</html>
