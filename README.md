@@ -138,15 +138,16 @@ Add `--play-audio` to hear a short clip of each speaker before naming them. If y
     "Welcome back everyone..."
   [playing audio excerpt...]
   Existing speakers:
-    1. Alice (DM)
-    2. Bob (Player)
-    3. Charlie (Player)
+    1. Alice (DM) — 89% ★
+    2. Charlie (Player) — 71%
+    3. Bob (Player) — 43%
   Enter a number to select, or type a new name.
   Who is this? (or 'r' to replay): 1
   Using existing profile for Alice.
+  Add this episode's audio to improve future recognition of Alice? [y/N]:
 ```
 
-Entering `r` replays the clip. Entering a number reuses an existing profile without extracting a new embedding.
+Entering `r` replays the clip. Entering a number reuses an existing profile. Profiles are ranked by voice similarity to the current speaker — `★` marks any match above the confidence threshold. You'll then be offered the option to blend this episode's audio into the existing profile (defaults to No).
 
 ### All future sessions — fully automatic
 
@@ -419,7 +420,7 @@ wisper-transcribe/
 .venv/bin/pytest tests/ -v        # Mac/Linux
 ```
 
-Tests mock all ML models — no GPU, network, or real audio files required. (115 tests)
+Tests mock all ML models — no GPU, network, or real audio files required. (117 tests)
 
 CI runs the test suite across Python 3.10–3.14 on every push and PR. Python 3.14 is treated as experimental (non-blocking). A weekly job also runs with the latest available package versions to catch forward-compatibility issues early.
 
