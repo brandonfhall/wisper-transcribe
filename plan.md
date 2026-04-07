@@ -408,4 +408,5 @@ Wisp logo: will-o'-the-wisp SVG orb with animated floating spark particles. Head
   - for web progress bar remove the middle section which would map to the commmand line progress bar. 
   - multiple progress bars for each step (Transcription, Diarization, Formatting) with the current step highlighted. show them progressivly as they complete.
   - When naming speakers after a transcription I am only able to name a single speaker. If there are mutliple unknown speakers to identify I can only name one. When clicking on a name in the next box it does not update the UI. 
+  - I still have to hit CTRL+C twice to end the server via cli. 
  
