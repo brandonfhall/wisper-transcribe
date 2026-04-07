@@ -115,6 +115,8 @@ wisper transcribe <path>          # file or folder
   --device cpu|cuda|auto
   --compute-type auto|float16|int8_float16|int8|float32
   --vad / --no-vad                # voice activity detection to skip silence (default: on)
+  --vocab-file FILE               # newline-separated hotwords list (overrides config)
+  --initial-prompt TEXT           # prepended context to guide transcription style
   --overwrite
   --verbose
 
@@ -181,105 +183,9 @@ Required one-time license agreements (free, HuggingFace account):
 
 ---
 
-## Implementation Status
-
-### ✅ Phase 1 — Project Skeleton + Basic Transcription
-All modules created, CLI entry point, single-file transcription to markdown, tests.
-
-### ✅ Phase 2 — Speaker Diarization
-pyannote pipeline wrapper, max-overlap aligner, HF token management, `--num-speakers` / `--no-diarize` flags.
-
-### ✅ Phase 3 — Speaker Profiles & Cross-File Identification
-`speaker_manager.py`: profile CRUD, embedding extraction, cosine-similarity matching with greedy assignment, EMA updates. `wisper enroll`, `wisper speakers`, `wisper fix` commands.
-
-### ✅ Phase 4 — Batch Processing & Polish
-`process_folder()` with tqdm progress bars, per-file error recovery, skip-existing, `--verbose` flag. Windows CUDA DLL path resolution. `wisper config` commands.
-
-### ✅ Phase 5 — Tests & README
-103 tests passing. All ML calls mocked. No GPU required for test suite. README with install, quick start, full CLI reference.
-
-### ✅ pyannote-audio 4.x Upgrade (April 2026)
-Upgraded from 3.4.0 → 4.0.4. Removed 5 compatibility shims (torchaudio stubs, hf_hub `use_auth_token`, torch.load default). speechbrain `LazyModule.ensure_module` patch retained — pyannote 4.x still uses speechbrain for ECAPA-TDNN embeddings and the Windows path bug is in speechbrain itself.
-
-One additional fix required post-upgrade: pyannote 4.x wraps diarization output in a `DiarizeOutput` dataclass (`DiarizeOutput.speaker_diarization` is the `Annotation`), breaking the existing `diarization.itertracks()` call. Fixed in `diarizer.py` with a `hasattr` guard for backwards compatibility.
-
-torchcodec still cannot find FFmpeg shared DLLs on this Windows install despite `Gyan.FFmpeg.Shared` being listed in `setup.ps1`. The scipy audio loading bypass (`scipy.io.wavfile` → waveform dict) remains as a workaround. Functionally equivalent; end-to-end test confirmed working (11 speakers enrolled, full `.md` output, CUDA device).
-
----
-
 ## Backlog
 
-### Near-term (ready to build)
-
-*(No remaining near-term items — see completed list below.)*
-
-### ✅ Near-term completed
-
-- **`wisper setup` command** ✅ — guided wizard: ffmpeg, HF token, model pre-download, device detection.
-- **Progress header on each file** ✅ — Input/Output/Model line printed before each file processes.
-- **Expose data paths in `wisper config show`** ✅ — config file, data dir, profiles dir, HF cache all shown.
-- **`wisper config show` model clarity** ✅ — Models section: device, Whisper model, compute type (with auto-resolution), pyannote models.
-- **Enrollment speaker order — chronological** ✅ — speakers sorted by first appearance timestamp in `pipeline.py`.
-- **Audio playback during enrollment** ✅ — `--play-audio` flag; plays up to 10 s via ffplay subprocess (reliable cross-platform). (PR #3; Windows fix in feat/enrollment-ux)
-- **`wisper speakers reset`** ✅ — deletes all profiles and embeddings with confirmation prompt.
-- **Phase 7 — Docker containerization** ✅ — `Dockerfile` (gpu/cpu targets), `docker-compose.yml`, `WISPER_DATA_DIR` env override in `config.py`. 103 tests.
-- **Third-party warning suppression** ✅ — speechbrain/pyannote/torch noise suppressed by default; `WISPER_DEBUG=1` restores raw output. absl "triton not found" log requires `absl.logging.set_verbosity(ERROR)` (not `logging.getLogger("absl")`). (PR #6, absl fix in PR #7)
-- **Phase 8 — VAD filter** ✅ — `--vad/--no-vad` flag; faster-whisper built-in `vad_filter`; `None`-sentinel so unset falls through to config default (on). 103 tests.
-- **Phase 9 — Compute type / quantization** ✅ — `--compute-type auto|float16|int8_float16|int8|float32`; configurable via `wisper config set compute_type`; shown in run header and `wisper config show`.
-
-### pyannote 4.x upgrade
-
-**Status: ✅ Complete (April 2026). Merged in PR #2.**
-
-### ✅ Phase 7 — Docker Containerization
-
-**Status: Complete.**
-
-- `Dockerfile`: two targets — `gpu` (PyTorch cu126 wheels, `python:3.12-slim` base) and `cpu`. PyTorch CUDA wheels bundle the CUDA runtime; no NVIDIA base image required. pydub still needs system `ffmpeg`, installed via apt.
-- `docker-compose.yml`: `wisper` (GPU, default) and `wisper-cpu` services. GPU passthrough via modern `deploy.resources.reservations.devices` syntax (NVIDIA Container Toolkit on host).
-- `config.py`: `get_data_dir()` checks `WISPER_DATA_DIR` env var before `platformdirs`. Set to `/data` in the image; bind-mounted to `./data/` on host.
-- Volume layout: `./cache` → HF model cache, `./data` → config + profiles, `./input` → audio, `./output` → transcripts.
-- `.dockerignore` excludes `.venv`, tests, example-file, docs, and user data dirs.
-
-**Verification:**
-- [ ] `docker compose build` completes
-- [ ] `docker compose run wisper wisper setup` — guided wizard works with TTY
-- [ ] `docker compose run wisper wisper transcribe /app/input/test.mp3 --enroll-speakers` — enrollment works, profiles persist in `./data/`
-- [ ] `docker compose run wisper wisper transcribe /app/input/test2.mp3` — speaker matching from persisted profiles
-- [ ] `docker compose run wisper nvidia-smi` — GPU visible in container
-- [ ] Container restart: no re-download of models
-
----
-
-### ✅ Phase 8 — VAD Filter (from Whisper-WebUI review)
-
-**Status: Complete.** Used faster-whisper's built-in `vad_filter=True` (Option A). Avoids timestamp remapping entirely — faster-whisper's Silero VAD integration keeps timestamps original-relative. `--vad/--no-vad` flag added to CLI; `vad_filter` in config.toml; `None`-sentinel in `process_file()` so unset flag falls through to config default.
-
----
-
-### ✅ Phase 9 — Compute Type / Quantization Flag
-
-**Status: Complete.** `--compute-type` flag added; `compute_type` in config.toml; `resolve_compute_type()` in `config.py`; shown in run header and `wisper config show`.
-
----
-
-### ✅ Enrollment UX Improvements (feat/enrollment-ux branch)
-
-**1. Re-play audio during enrollment** ✅
-At the "Who is this?" prompt, entering `r` triggers a second `_play_excerpt` call and re-asks. Only active when `--play-audio` is set. Implemented as a prompt loop in `pipeline.py`.
-
-**2. Select an existing speaker during enrollment** ✅
-Before the name prompt, enrolled speaker profiles are ranked by cosine similarity to the current speaker's embedding and displayed with percentage scores (`★` for matches above threshold). User enters a number to reuse an existing profile (offered EMA update, default No) or types a new name to create one. Implemented in `pipeline.py` using `load_profiles()`, `extract_embedding()`, and `_cosine_similarity()`.
-
-**3. Custom vocabulary / hot-words for transcription** ✅
-`--vocab-file <path>` (newline-separated words → `hotwords`, `#`-comments ignored) and `--initial-prompt "<text>"` flags added to CLI. Both threaded through `process_file()` to `transcribe()` which passes them to `_model.transcribe()`. faster-whisper 1.2.1 supports `hotwords` natively. Hotwords also persist in `config.toml` via `wisper config set hotwords "word1, word2"` — `process_file()` falls back to config when no `--vocab-file` is passed.
-
-**4. Show 'already processed' skip message** ✅ (also in this branch)
-Folder-mode skip message now always shown (was `--verbose` only). Single-file message updated to match.
-
----
-
-### DM Character Voice Handling (Future Feature)
+### DM Character Voice Handling
 
 **Problem:** When a DM does a character voice (dragon accent, goblin voice, NPC), pyannote assigns it a different SPEAKER_XX label than their regular speech. Typical similarity scores: DM normal vs. DM profile ~0.80–0.90, DM character voice vs. DM profile ~0.35–0.55 — often below the 0.65 match threshold, so character voices fall through to `Unknown Speaker N`.
 
@@ -330,7 +236,7 @@ Re-score `Unknown Speaker N` labels at a looser secondary threshold (~0.40) afte
 
 ---
 
-### Local LLM Post-Processing (`wisper refine`) (Future Feature)
+### Local LLM Post-Processing (`wisper refine`)
 
 **Concept:** After the primary pipeline produces a `.md` transcript, run a local LLM agent pass to clean up errors that are mechanical for an LLM but hard for heuristic code: vocabulary misspellings, obviously wrong speaker assignments, and unknown speaker identification from context.
 
@@ -343,8 +249,6 @@ llm_model = "llama3.2"
 ```
 
 New CLI command: `wisper refine <transcript.md>`
-
----
 
 #### Tasks, ranked by feasibility
 
@@ -371,7 +275,7 @@ Approach:
 - Heuristic pre-filter: flag segments where a single block contains both narration-style text AND first-person game actions ("I roll", "I attack", "I cast", "I want to...") — these are the highest-probability candidates
 - Send flagged segment + surrounding 5 segments for context
 - Prompt: "Does this segment sound like one continuous speaker or two? If two, where is the split? Return JSON: `{single_speaker: bool, split_after: '<exact text>'}`"
-- IMPORTANT: After `_merge_consecutive()` in formatter.py, the original segment-level timestamps are gone — only the start timestamp of the merged block remains. Split segments can only inherit the block's start time. Flag this as a limitation in the output.
+- IMPORTANT: After `_merge_consecutive()` in formatter.py, the original segment-level timestamps are gone — only the start timestamp of the merged block remains. Split segments can only inherit the block's start time.
 
 **Task 3 — Speaker assignment from context** *(LOW-MEDIUM feasibility, HIGH risk)*
 
@@ -386,15 +290,7 @@ Approach:
 
 **Task 4 — Unknown speaker identification from context** *(MEDIUM feasibility, MEDIUM risk)*
 
-`Unknown Speaker N` labels in the transcript can sometimes be resolved from surrounding dialogue: "Unknown Speaker 2 says 'As Lyra, the innkeeper says...' " suggests this is the DM doing a character voice.
-
-Approach:
-- Collect all "Unknown Speaker N" occurrences with their surrounding segments
-- Provide full enrolled speaker list + known character names
-- Prompt: "Based on this dialogue, which enrolled speaker is most likely speaking? Return JSON: `{label: 'Unknown Speaker 2', likely_speaker: 'DM', character: 'Lyra', confidence: 0.7}`"
-- Threshold: confidence > 0.75 to suggest; never auto-apply
-
----
+`Unknown Speaker N` labels in the transcript can sometimes be resolved from surrounding dialogue. Collect all "Unknown Speaker N" occurrences with surrounding segments, provide enrolled speaker list + known character names, ask the LLM to identify. Threshold: confidence > 0.75 to suggest; never auto-apply.
 
 #### Architecture
 
@@ -418,18 +314,13 @@ Approach:
 
 **Optional `--llm-fix` on `wisper transcribe`:** Runs vocabulary correction automatically after the pipeline (the lowest-risk task only). Skipped if Ollama is not reachable — emits a warning, does not abort.
 
----
-
 #### Context window management
 
-A 3-hour session at ~150 wpm ≈ 27,000 words ≈ 35,000 tokens. Most local models have 128K context, but processing 35K tokens in one shot is slow and expensive on local hardware.
+A 3-hour session at ~150 wpm ≈ 27,000 words ≈ 35,000 tokens. Most local models have 128K context, but processing 35K tokens in one shot is slow on local hardware.
 
-Strategy:
-- **Vocabulary pass:** 25 lines per request, no overlap needed (task is stateless)
+- **Vocabulary pass:** 25 lines per request, no overlap needed (stateless)
 - **Speaker detection / unknown speaker:** 20-line sliding window, 5-line overlap for context continuity
 - Tasks run independently; vocabulary first (cheap), speaker detection second (expensive)
-
----
 
 #### Safety principles
 
@@ -438,24 +329,20 @@ Strategy:
 3. Vocabulary changes only accepted if they are a known-term substitution (validated by edit distance against hotwords list); reject freeform rewrites
 4. Speaker reassignment is **suggestion only** — never auto-applied regardless of confidence
 5. YAML frontmatter is **never touched** by the LLM — only the markdown body lines
-6. Ollama connectivity failure is a soft warning, not an error; the rest of the pipeline continues unaffected
+6. Ollama connectivity failure is a soft warning, not an error
 7. All changes logged to `refine.log` alongside the transcript
-
----
 
 #### What NOT to build
 
-- **Grammar/style improvements:** The transcript is a verbatim record, not polished prose. LLM should not fix run-ons, filler words ("um", "like"), or informal language.
-- **Content summarization:** NotebookLM handles this. Not our problem.
-- **Automatic full-transcript rewrite:** Too high a risk of hallucination silently corrupting factual content.
-
----
+- Grammar/style improvements — verbatim record, not polished prose
+- Content summarization — NotebookLM handles this
+- Automatic full-transcript rewrite — hallucination risk too high
 
 #### Dependencies
 
-- `ollama` Python package (optional; fallback to `httpx` raw REST if not installed)
+- `ollama` Python package (optional; fallback to `httpx` raw REST)
 - No new ML models required
-- Feature is entirely opt-in; `llm_endpoint` and `llm_model` absent from config means `wisper refine` exits early with a setup message
+- Feature is entirely opt-in; missing `llm_endpoint`/`llm_model` in config → early exit with setup message
 
 ---
 
@@ -471,7 +358,7 @@ Strategy:
 
 ### Phase 11 — Optional GUI
 
-- **Optional GUI** — Textual (terminal) or tkinter/PyQt. Wraps the same `pipeline.process_file()` and `speaker_manager` calls. Keep CLI/library separation clean.
+Textual (terminal) or tkinter/PyQt. Wraps the same `pipeline.process_file()` and `speaker_manager` calls. Keep CLI/library separation clean.
 
 ---
 
@@ -483,35 +370,14 @@ Strategy:
 - **CTranslate2** (powers faster-whisper): NVIDIA CUDA only. Open issue [#1715](https://github.com/OpenNMT/CTranslate2/issues/1715), no work planned.
 - **pyannote-audio**: No Intel XPU backend. No upstream interest.
 
-PyTorch itself supports Intel Arc/Data Center GPUs via `torch.xpu` (production-ready since PyTorch 2.5), but that doesn't help when our deps use CUDA-specific code paths.
-
 **Viable paths if this becomes a real need:**
 
-1. **OpenVINO backend for transcription** — Intel's inference engine has official Whisper support (1.4-5x faster than PyTorch). Would require an abstraction layer in `transcriber.py` that dispatches to either faster-whisper (CUDA/CPU) or OpenVINO (Intel GPU/CPU) based on detected hardware. Model conversion step needed (Whisper → ONNX → OpenVINO IR). Static-shape constraint on GPU execution.
+1. **OpenVINO backend for transcription** — Intel's inference engine has official Whisper support. Would require an abstraction layer in `transcriber.py` dispatching to either faster-whisper (CUDA/CPU) or OpenVINO (Intel GPU/CPU). Model conversion step needed (Whisper → ONNX → OpenVINO IR).
 
-2. **whisper.cpp with SYCL** — C++ Whisper implementation with full Intel GPU acceleration via SYCL/oneAPI. Python bindings exist (`pywhispercpp`). Different integration surface from faster-whisper but avoids the model conversion step.
+2. **whisper.cpp with SYCL** — C++ Whisper implementation with full Intel GPU acceleration via SYCL/oneAPI. Python bindings exist (`pywhispercpp`).
 
-3. **Diarization alternatives** — If transcription moves to OpenVINO, diarization could either:
-   - Convert pyannote models to OpenVINO (manual, static-shape constraints, fragile)
-   - Switch to SpeechBrain ECAPA-TDNN for speaker embeddings (actually faster on CPU than pyannote on GPU — 6.7x speedup reported)
-   - Wait for pyannote to add XPU support upstream
+3. **Diarization alternatives** — SpeechBrain ECAPA-TDNN for speaker embeddings (actually faster on CPU than pyannote on GPU — 6.7x speedup reported).
 
-**Architecture note:** If we ever add a second backend, the right design is an abstract `TranscriptionBackend` interface in `transcriber.py` with `FasterWhisperBackend` and `OpenVINOBackend` implementations. Same for `DiarizationBackend` in `diarizer.py`. Keep the pipeline module backend-agnostic.
+**Architecture note:** If a second backend is ever added, use an abstract `TranscriptionBackend` interface in `transcriber.py` and `DiarizationBackend` in `diarizer.py`. Keep pipeline module backend-agnostic.
 
-**When to revisit:** Check back when either (a) CTranslate2 adds Intel GPU support, (b) a user actually needs this, or (c) OpenVINO's Whisper API stabilizes enough to be a drop-in. Don't build speculatively.
-
----
-
-## Verification Checklist
-
-- [x] `pip install -e .` succeeds
-- [x] `wisper transcribe single_speaker.mp3` → readable .md without speaker labels
-- [x] `wisper transcribe multi_speaker.mp3 --num-speakers 4` → .md with SPEAKER_XX labels
-- [x] `wisper transcribe session01.mp3 --enroll-speakers --num-speakers 6` → interactive enrollment + .md with real names
-- [x] `wisper transcribe session02.mp3 --num-speakers 6` → automatic speaker matching from profiles
-- [x] `wisper speakers list` → shows enrolled profiles
-- [x] `wisper fix session.md --speaker "Unknown Speaker 1" --name "Frank"` → updates transcript
-- [x] `wisper transcribe ./recordings/` → batch processing with progress, skip existing, error recovery
-- [x] `wisper setup` → guided first-run wizard
-- [x] `wisper transcribe <file> --enroll-speakers --device cuda` on pyannote 4.0.4 → 11 speakers enrolled, full `.md` produced (4/6/2026)
-- [ ] Parallel folder processing with `--workers N`
+**When to revisit:** When (a) CTranslate2 adds Intel GPU support, (b) a user actually needs this, or (c) OpenVINO's Whisper API stabilizes. Don't build speculatively.
