@@ -15,19 +15,21 @@
   {% if transcripts %}
   <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
     {% for t in transcripts %}
-    <a href="/transcripts/{{ t.stem | urlencode }}"
-       class="card hover:shadow-md hover:ring-1 hover:ring-green-300 transition-all flex flex-col">
-      <div class="flex items-start justify-between">
+    <div class="card relative hover:shadow-md hover:ring-1 hover:ring-green-300 transition-all flex flex-col">
+      <!-- Full-card overlay link (sits behind action buttons) -->
+      <a href="/transcripts/{{ t.stem | urlencode }}" class="absolute inset-0 rounded-lg" aria-label="View {{ t.title }}"></a>
+
+      <div class="relative z-10 flex items-start justify-between">
         <h3 class="text-sm font-semibold text-gray-900 truncate flex-1 mr-2">{{ t.title }}</h3>
-        <!-- Action buttons — stop click from bubbling to the card link -->
-        <div class="flex items-center gap-2 flex-shrink-0" onclick="event.preventDefault(); event.stopPropagation()">
+        <!-- Action buttons sit above the overlay link -->
+        <div class="flex items-center gap-2 flex-shrink-0">
           <a href="/transcripts/{{ t.stem | urlencode }}/download"
-             class="text-gray-400 hover:text-indigo-600" title="Download .md">
+             class="relative z-10 text-gray-400 hover:text-indigo-600" title="Download .md">
             <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"/>
             </svg>
           </a>
-          <form method="post" action="/transcripts/{{ t.stem | urlencode }}/delete"
+          <form method="post" action="/transcripts/{{ t.stem | urlencode }}/delete" class="relative z-10"
                 onsubmit="return confirm('Delete {{ t.title }}? This cannot be undone.')">
             <button type="submit" class="text-gray-400 hover:text-red-500" title="Delete transcript">
               <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
@@ -37,14 +39,14 @@
           </form>
         </div>
       </div>
-      <div class="mt-2 space-y-1 text-xs text-gray-500 flex-1">
+      <div class="relative z-10 mt-2 space-y-1 text-xs text-gray-500 flex-1">
         {% if t.date_processed %}<p>{{ t.date_processed }}</p>{% endif %}
         {% if t.duration %}<p>Duration: {{ t.duration }}</p>{% endif %}
         {% if t.speakers %}
         <p>Speakers: {{ t.speakers | map(attribute="name") | join(", ") }}</p>
         {% endif %}
       </div>
-    </a>
+    </div>
     {% endfor %}
   </div>
   {% else %}
