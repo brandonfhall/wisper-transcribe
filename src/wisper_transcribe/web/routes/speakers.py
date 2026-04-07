@@ -8,15 +8,16 @@ from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from . import templates
+from wisper_transcribe.speaker_manager import load_profiles, save_profiles
 
 router = APIRouter(prefix="/speakers")
 
 
 @router.get("", response_class=HTMLResponse)
 async def speakers_list(request: Request) -> HTMLResponse:
-    from wisper_transcribe.speaker_manager import load_profiles
     profiles = load_profiles()
     return templates.TemplateResponse(
+        request,
         "speakers.html",
         {"request": request, "profiles": profiles},
     )
@@ -26,6 +27,7 @@ async def speakers_list(request: Request) -> HTMLResponse:
 async def enroll_form(request: Request) -> HTMLResponse:
     """Standalone speaker enrollment form (not tied to a transcription job)."""
     return templates.TemplateResponse(
+        request,
         "speaker_enroll_standalone.html",
         {"request": request},
     )
@@ -60,7 +62,7 @@ async def enroll_submit(
         from wisper_transcribe.config import get_device
         from wisper_transcribe.diarizer import diarize
         from wisper_transcribe.config import load_config, get_hf_token
-        from wisper_transcribe.speaker_manager import enroll_speaker, update_embedding, extract_embedding, load_profiles
+        from wisper_transcribe.speaker_manager import enroll_speaker, update_embedding, extract_embedding
 
         config = load_config()
         device = get_device()
@@ -118,8 +120,6 @@ async def enroll_submit(
 
 @router.post("/{name}/remove", response_class=HTMLResponse)
 async def remove_speaker(request: Request, name: str) -> RedirectResponse:
-    from wisper_transcribe.speaker_manager import load_profiles, save_profiles
-
     profiles = load_profiles()
     if name in profiles:
         profile = profiles.pop(name)
@@ -132,8 +132,6 @@ async def remove_speaker(request: Request, name: str) -> RedirectResponse:
 
 @router.post("/{name}/rename", response_class=HTMLResponse)
 async def rename_speaker(request: Request, name: str) -> RedirectResponse:
-    from wisper_transcribe.speaker_manager import load_profiles, save_profiles
-
     form = await request.form()
     new_display = str(form.get("new_name", "")).strip()
     if not new_display:

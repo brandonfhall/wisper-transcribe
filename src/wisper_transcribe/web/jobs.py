@@ -24,6 +24,8 @@ from typing import Any, Optional
 
 import tqdm as _tqdm_module
 
+from wisper_transcribe.pipeline import process_file
+
 # Job status literals
 PENDING = "pending"
 RUNNING = "running"
@@ -123,7 +125,6 @@ class JobQueue:
     def _run_job(self, job: Job) -> None:
         """Runs in a thread.  Patches tqdm.write to capture progress logs."""
         from pathlib import Path
-        from wisper_transcribe.pipeline import process_file
 
         # Patch tqdm.write to capture messages
         original_write = _tqdm_module.tqdm.write

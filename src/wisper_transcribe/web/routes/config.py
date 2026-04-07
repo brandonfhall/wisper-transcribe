@@ -5,6 +5,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from . import templates
+from wisper_transcribe.config import get_config_path, load_config, save_config
 
 router = APIRouter(prefix="/config")
 
@@ -25,10 +26,10 @@ _CONFIG_FIELDS = [
 
 @router.get("", response_class=HTMLResponse)
 async def config_show(request: Request) -> HTMLResponse:
-    from wisper_transcribe.config import get_config_path, load_config
     config = load_config()
     config_path = get_config_path()
     return templates.TemplateResponse(
+        request,
         "config.html",
         {
             "request": request,
@@ -42,8 +43,6 @@ async def config_show(request: Request) -> HTMLResponse:
 
 @router.post("", response_class=HTMLResponse)
 async def config_save(request: Request) -> RedirectResponse:
-    from wisper_transcribe.config import load_config, save_config
-
     form = await request.form()
     config = load_config()
 

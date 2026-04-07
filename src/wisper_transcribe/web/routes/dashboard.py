@@ -33,6 +33,7 @@ async def dashboard(request: Request) -> HTMLResponse:
     speaker_count = len(load_profiles())
 
     return templates.TemplateResponse(
+        request,
         "index.html",
         {
             "request": request,
@@ -52,6 +53,7 @@ async def jobs_partial(request: Request) -> HTMLResponse:
     """HTMX partial: job table rows (polled every 2s when jobs are active)."""
     queue = _get_queue(request)
     return templates.TemplateResponse(
+        request,
         "partials/job_rows.html",
         {"request": request, "jobs": queue.list_recent()},
     )

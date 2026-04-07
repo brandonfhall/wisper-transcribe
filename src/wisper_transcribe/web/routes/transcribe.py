@@ -24,6 +24,7 @@ def _get_queue(request: Request) -> JobQueue:
 async def transcribe_form(request: Request) -> HTMLResponse:
     """Render the upload / options form."""
     return templates.TemplateResponse(
+        request,
         "transcribe.html",
         {"request": request},
     )
@@ -102,6 +103,7 @@ async def job_detail(request: Request, job_id: str) -> HTMLResponse:
     if job is None:
         return HTMLResponse(content="Job not found", status_code=404)
     return templates.TemplateResponse(
+        request,
         "job_detail.html",
         {"request": request, "job": job},
     )
@@ -185,6 +187,7 @@ async def enroll_form(request: Request, job_id: str) -> HTMLResponse:
     profiles = load_profiles()
 
     return templates.TemplateResponse(
+        request,
         "speaker_enroll.html",
         {
             "request": request,

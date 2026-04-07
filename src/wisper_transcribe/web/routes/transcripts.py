@@ -56,6 +56,7 @@ async def transcripts_list(request: Request) -> HTMLResponse:
         })
 
     return templates.TemplateResponse(
+        request,
         "transcripts.html",
         {"request": request, "transcripts": items},
     )
@@ -79,6 +80,7 @@ async def transcript_detail(request: Request, name: str) -> HTMLResponse:
     html_body = _md.markdown(body, extensions=["nl2br"])
 
     return templates.TemplateResponse(
+        request,
         "transcript_detail.html",
         {
             "request": request,

@@ -262,7 +262,7 @@ Interactive CLI enrollment (TTY prompts) is replaced by a post-job wizard:
 
 ### Offline Assets
 - `static/htmx.min.js`: placeholder committed to repo; real file downloaded during `docker build` via `curl`. For local use: `curl -sL https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js -o src/wisper_transcribe/static/htmx.min.js`
-- `static/tailwind.min.css`: pre-built CSS committed to repo; regenerate after template changes with `python -m pytailwindcss -i .../input.css -o .../tailwind.min.css --minify`
+- `static/tailwind.min.css`: pre-built CSS committed to repo; regenerate after template changes with `python -m pytailwindcss -i ./src/wisper_transcribe/static/input.css -o ./src/wisper_transcribe/static/tailwind.min.css --minify`
 
 ### Docker Web Services
 `docker-compose.yml` defines `wisper-web` (GPU) and `wisper-cpu-web` (CPU), both exposing port 8080. Same image as CLI services, different `command: ["server", "--host", "0.0.0.0", "--port", "8080"]`.
