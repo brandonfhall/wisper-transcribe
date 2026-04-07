@@ -344,11 +344,17 @@ wisper server
 
 ### Speaker enrollment in the web UI
 
-The interactive CLI enrollment prompt is replaced by a post-job wizard. After transcription completes, click **Name Speakers** on the job detail page to assign names to detected speakers one at a time, with existing profiles ranked by voice similarity.
+The interactive CLI enrollment prompt is replaced by a post-job wizard. After transcription completes, click **Name Speakers** on the job detail page. Each detected speaker has a **Play sample** button so you can hear the voice before assigning a name. Existing profiles are shown as click-to-fill options ranked by voice similarity.
+
+### Job management
+
+- The job detail page shows a **real-time progress bar** updated via Server-Sent Events.
+- A **Stop Job** button lets you cancel any pending or running transcription.
+- Transcripts are saved to `./output/` (or `data_dir/output`) and are immediately visible on the Transcripts page after the job completes.
 
 ### Offline-first
 
-All web assets (HTMX, Tailwind CSS) are served locally — no CDN or internet connection required after installation.
+All web assets (HTMX, Tailwind CSS) are served locally — no CDN or internet connection required after installation. Tailwind CSS is rebuilt automatically on server startup if `input.css` has changed.
 
 > **Note for local (non-Docker) installs:** HTMX is vendored in `src/wisper_transcribe/static/htmx.min.js`. The file in the repo is a placeholder; download the real file once with:
 > ```bash
@@ -472,7 +478,7 @@ wisper-transcribe/
 .venv/bin/pytest tests/ -v        # Mac/Linux
 ```
 
-Tests mock all ML models — no GPU, network, or real audio files required. (152 tests)
+Tests mock all ML models — no GPU, network, or real audio files required. (156 tests)
 
 CI runs the test suite across Python 3.10–3.14 on every push and PR. Python 3.14 is treated as experimental (non-blocking). A weekly job also runs with the latest available package versions to catch forward-compatibility issues early.
 
@@ -590,3 +596,4 @@ Unset it (or open a new terminal) to return to clean output.
 - [x] Windows audio playback fix: `--play-audio` now uses `ffplay` subprocess (reliable on all platforms)
 - [x] Phase 10: Parallel folder processing (`--workers N`, CPU-only)
 - [x] Phase 11: Browser-based web UI (`wisper server`, HTMX + FastAPI + Tailwind, Docker web services)
+- [x] Web UI polish: progress bar, cancel/stop, speaker audio playback, auto-Tailwind build, correct transcript save path

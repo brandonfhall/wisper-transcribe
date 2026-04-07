@@ -212,7 +212,7 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - Enrollment tests patch `wisper_transcribe.speaker_manager.load_profiles` to return `{}` (no existing profiles) to prevent tests from seeing real profiles on the developer's machine
 - Coverage: run `pytest tests/ -v --cov --cov-report=term-missing`
 - Web tests use `fastapi.testclient.TestClient`; routes are tested via HTTP with all ML calls mocked — no GPU/network needed
-- Test count: 117 core + web test suite (all mocked)
+- Test count: 156 (all mocked, all passing)
 
 **CI matrix** (`.github/workflows/ci.yml`):
 - Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)
@@ -250,19 +250,24 @@ FastAPI + Jinja2 + HTMX + Tailwind CSS. All assets served locally — no CDN or 
 `web/jobs.py` — `JobQueue` class with in-memory `dict[str, Job]` and an `asyncio.Queue` drain loop.
 - One background asyncio task consumes the queue; each job runs `process_file()` via `asyncio.to_thread()`.
 - One job at a time (GPU-safe) — the module-level `_model`/`_pipeline` globals are not thread-safe.
-- Progress: `tqdm.write` is monkey-patched per-job to capture log lines into `job.log_lines`; restored after job completes.
-- SSE endpoint (`GET /transcribe/jobs/{id}/stream`) streams `job.log_lines` and status to the browser.
+- Progress: `tqdm.write` is monkey-patched per-job to capture log lines into `job.log_lines`; `tqdm.__init__` is also patched to redirect the progress bar to `job.progress`; both are restored after completion.
+- SSE endpoint (`GET /transcribe/jobs/{id}/stream`) streams `job.log_lines`, `job.progress`, and status to the browser.
+- Job `name` is set to the uploaded file's stem so the UI displays a meaningful name instead of a temp-file UUID.
+- Output is always written to the configured output directory (`./output` or `data_dir/output`) so the Transcripts page can find it.
+- Cancel: `POST /transcribe/jobs/{id}/cancel` calls `JobQueue.cancel()`. Pending jobs are immediately marked failed. Running jobs set a `threading.Event` (`_cancel_event`) that is checked in the `tqdm.write` patch; when set, `InterruptedError` is raised to abort the pipeline thread cleanly.
 
 ### Speaker Enrollment Web Flow
 Interactive CLI enrollment (TTY prompts) is replaced by a post-job wizard:
 1. Transcription completes with `enroll_speakers=False`; detected speakers appear in transcript as `SPEAKER_XX` labels.
-2. Dashboard shows "Name Speakers" button for completed jobs.
-3. `GET /transcribe/jobs/{id}/enroll` renders a wizard page with each detected label and a name input (plus existing profiles as click-to-fill options).
-4. `POST /transcribe/jobs/{id}/enroll` applies speaker name renames via `formatter.update_speaker_names()`.
+2. After `process_file()` returns, `_extract_speaker_excerpts()` parses the output markdown for each speaker's first timestamp and cuts a ~12s audio clip via ffmpeg, stored in `job.speaker_excerpts[speaker_name]`.
+3. Dashboard shows "Name Speakers" button for completed jobs.
+4. `GET /transcribe/jobs/{id}/enroll` renders a wizard page with each detected label, a name input (plus existing profiles as click-to-fill options), and a Play/Stop button if an audio excerpt is available.
+5. `GET /transcribe/jobs/{id}/excerpt/{speaker_name}` serves the audio clip as `audio/mpeg`.
+6. `POST /transcribe/jobs/{id}/enroll` applies speaker name renames via `formatter.update_speaker_names()`.
 
 ### Offline Assets
 - `static/htmx.min.js`: placeholder committed to repo; real file downloaded during `docker build` via `curl`. For local use: `curl -sL https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js -o src/wisper_transcribe/static/htmx.min.js`
-- `static/tailwind.min.css`: pre-built CSS committed to repo; regenerate after template changes with `python -m pytailwindcss -i ./src/wisper_transcribe/static/input.css -o ./src/wisper_transcribe/static/tailwind.min.css --minify`
+- `static/tailwind.min.css`: rebuilt automatically on server startup by `app._build_tailwind()` (mtime-checked; skips if already current). `pytailwindcss` is a main dependency (no Node.js required). Docker builds also invoke the build step so images are self-contained. Manual rebuild: `python -m pytailwindcss -i ./src/wisper_transcribe/static/input.css -o ./src/wisper_transcribe/static/tailwind.min.css --minify`
 
 ### Docker Web Services
 `docker-compose.yml` defines `wisper-web` (GPU) and `wisper-cpu-web` (CPU), both exposing port 8080. Same image as CLI services, different `command: ["server", "--host", "0.0.0.0", "--port", "8080"]`.

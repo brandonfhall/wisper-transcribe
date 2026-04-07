@@ -360,11 +360,19 @@ Full-featured web interface launched by `wisper server`. FastAPI + HTMX + Jinja2
 
 Pages: Dashboard (live job queue, system status), Transcribe (file upload + all options), Transcripts (browse/view/download), Speakers (profiles, enroll, rename, remove), Config (edit all settings).
 
-Speaker enrollment replaced by a post-job naming wizard (the interactive TTY-based CLI flow is web-incompatible).
+Speaker enrollment replaced by a post-job naming wizard (the interactive TTY-based CLI flow is web-incompatible). Each speaker card includes a Play/Stop button that streams a ~12s audio excerpt so users can hear the voice before naming.
 
 Docker: `wisper-web` (GPU) and `wisper-cpu-web` (CPU) services on port 8080.
 
-Wisp logo: will-o'-the-wisp SVG orb with animated floating spark particles, indigo/violet palette.
+Wisp logo: will-o'-the-wisp SVG orb with animated floating spark particles. Header banner is dark green (`bg-green-900`).
+
+**Web UI improvements (April 2026):**
+- Transcripts now always save to the configured output directory (was saving to temp dir for web uploads)
+- Job name is the uploaded filename stem — shown in dashboard table and job detail heading
+- Visual progress bar on job detail page, driven by tqdm SSE events
+- Stop Job button cancels pending jobs immediately; signals running jobs via threading.Event checked on each tqdm heartbeat
+- Tailwind CSS auto-rebuilt on server startup (mtime check); `pytailwindcss` promoted to main dependency; Dockerfile also builds CSS at image build time
+- Speaker audio playback in enrollment wizard (Play/Stop toggle per speaker card)
 
 ---
 
