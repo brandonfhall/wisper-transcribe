@@ -36,6 +36,8 @@ The `main` branch is protected on GitHub. All changes must go through a pull req
 - **Never push directly to `main`.** Create a feature branch and open a PR.
 - **CI must pass before merging.** The `CI` workflow (`.github/workflows/ci.yml`) runs the full test suite on every push and PR. A failing CI check blocks the merge.
 - **Tests must pass locally before pushing.** Run `pytest tests/ -v` and confirm all tests pass — do not push a branch knowing tests are red.
+- **New features should have tests.
+- ** Every new module or function must have corresponding tests in the `tests/` directory.
 - **Branch naming:** Use descriptive names like `feat/setup-scripts` or `fix/cuda-detection`.
 
 The CI workflow runs on `ubuntu-latest` with CPU-only PyTorch (no GPU available on GitHub runners). Tests are all mocked so this is fine.
@@ -140,17 +142,3 @@ curl -sL "https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js" \
 ```
 
 Web route tests: `pytest tests/test_web_*.py -v`
-
-## Build Phases
-
-- Phase 1: Project skeleton + basic transcription ✓
-- Phase 2: Speaker diarization (pyannote) ✓
-- Phase 3: Speaker profiles + cross-file voice matching ✓
-- Phase 4: Batch processing + CLI polish ✓
-- Phase 5: Tests + README ✓
-- Phase 6: `wisper setup` wizard ✓
-- Phase 7: Docker containerization ✓
-- Phase 8: VAD filter (`--vad/--no-vad`) ✓
-- Phase 9: Compute type / quantization (`--compute-type`) ✓
-- Phase 10: Parallel folder processing (CPU-only, `--workers N`) ✓
-- Phase 11: Browser-based web UI (`wisper server`) ✓
