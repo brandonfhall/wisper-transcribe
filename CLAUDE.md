@@ -40,6 +40,8 @@ The `main` branch is protected on GitHub. All changes must go through a pull req
 
 The CI workflow runs on `ubuntu-latest` with CPU-only PyTorch (no GPU available on GitHub runners). Tests are all mocked so this is fine.
 
+**CI matrix:** The `test` job runs against Python 3.10, 3.11, 3.12, 3.13, and 3.14 in parallel. 3.10–3.13 are blocking (a failure prevents merge). 3.14 is non-blocking (`continue-on-error: true`) — failures are visible but do not block the PR. A weekly cron job also runs the full matrix plus a `latest-deps` job (installs with `--upgrade`) to catch forward-compatibility issues early.
+
 ## Security — Public Repo Rules
 
 This repo is public on GitHub. Before every commit:

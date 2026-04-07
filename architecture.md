@@ -187,7 +187,13 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - `tqdm.write` used throughout production code so test output is not polluted by progress bars
 - Enrollment tests patch `wisper_transcribe.speaker_manager.load_profiles` to return `{}` (no existing profiles) to prevent tests from seeing real profiles on the developer's machine
 - Coverage: run `pytest tests/ -v --cov --cov-report=term-missing`
-- Test count: 113 (all mocked, no GPU/network required)
+- Test count: 115 (all mocked, no GPU/network required)
+
+**CI matrix** (`.github/workflows/ci.yml`):
+- Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)
+- Weekly cron (Monday): same matrix + `latest-deps` job (`pip install --upgrade`) to detect forward-compatibility breakage before it hits PRs
+- `allow-prereleases: true` on `setup-python` so 3.14 resolves even if still in pre-release
+- Dependabot monitors `pip`, `docker`, and `github-actions` ecosystems weekly
 
 ---
 
