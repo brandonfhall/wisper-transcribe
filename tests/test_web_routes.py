@@ -97,6 +97,25 @@ def test_job_detail_unknown_returns_404(client):
     assert resp.status_code == 404
 
 
+def test_cancel_job_redirects(client, tmp_path):
+    """POST /transcribe/jobs/<id>/cancel marks job cancelled and redirects."""
+    audio_file = tmp_path / "test.mp3"
+    audio_file.write_bytes(b"fake")
+    with open(audio_file, "rb") as f:
+        post_resp = client.post(
+            "/transcribe",
+            files={"file": ("test.mp3", f, "audio/mpeg")},
+            data={},
+            follow_redirects=False,
+        )
+    job_url = post_resp.headers["location"]
+    job_id = job_url.split("/")[-1]
+
+    cancel_resp = client.post(f"/transcribe/jobs/{job_id}/cancel", follow_redirects=False)
+    assert cancel_resp.status_code == 303
+    assert cancel_resp.headers["location"] == job_url
+
+
 # ---------------------------------------------------------------------------
 # Transcripts
 # ---------------------------------------------------------------------------

@@ -114,6 +114,29 @@ def test_run_job_records_error_on_failure(tmp_path):
     assert "boom" in job.error
 
 
+def test_cancel_pending_job_marks_failed():
+    from wisper_transcribe.web.jobs import FAILED
+    q = _make_queue()
+    job = q.submit("/tmp/a.mp3")
+    assert q.cancel(job.id) is True
+    assert job.status == FAILED
+    assert job.error == "Cancelled"
+    assert job.finished_at is not None
+
+
+def test_cancel_unknown_job_returns_false():
+    q = _make_queue()
+    assert q.cancel("nonexistent") is False
+
+
+def test_cancel_completed_job_returns_false():
+    from wisper_transcribe.web.jobs import COMPLETED
+    q = _make_queue()
+    job = q.submit("/tmp/a.mp3")
+    job.status = COMPLETED
+    assert q.cancel(job.id) is False
+
+
 def test_run_job_tqdm_patch_restores_original(tmp_path):
     """tqdm.write should be restored to its original after job completes."""
     import tqdm as _tqdm

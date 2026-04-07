@@ -20,6 +20,21 @@ def _get_queue(request: Request) -> JobQueue:
     return request.app.state.job_queue
 
 
+def _default_output_dir() -> Path:
+    """Return the default output directory for web-submitted transcription jobs.
+
+    Mirrors the logic in transcripts._output_dir so transcripts always land
+    where the browser can find them.
+    """
+    from wisper_transcribe.config import get_data_dir
+
+    out = Path("output")
+    if not out.exists():
+        out = Path(get_data_dir()) / "output"
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
 @router.get("", response_class=HTMLResponse)
 async def transcribe_form(request: Request) -> HTMLResponse:
     """Render the upload / options form."""
@@ -72,11 +87,18 @@ async def start_transcribe(
     elif vad == "off":
         vad_filter = False
 
-    out_path: Optional[Path] = Path(output_dir) if output_dir else None
+    # Always write transcripts to a known output dir so the Transcripts page
+    # can find them.  User-supplied output_dir overrides the default.
+    out_path: Path = Path(output_dir) if output_dir else _default_output_dir()
+
+    # Use the original filename stem as a hint so the output .md has a
+    # meaningful name instead of a temp-file UUID.
+    original_stem = Path(file.filename or "upload").stem
 
     queue = _get_queue(request)
     job = queue.submit(
         input_path=tmp.name,
+        original_stem=original_stem,
         model_size=model_size,
         language=None if language == "auto" else language,
         device=device,
@@ -93,6 +115,14 @@ async def start_transcribe(
     )
 
     return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_job(request: Request, job_id: str) -> RedirectResponse:
+    """Cancel a pending or running job."""
+    queue = _get_queue(request)
+    queue.cancel(job_id)
+    return RedirectResponse(url=f"/transcribe/jobs/{job_id}", status_code=303)
 
 
 @router.get("/jobs/{job_id}", response_class=HTMLResponse)

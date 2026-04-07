@@ -6,7 +6,7 @@
 
   <div class="flex items-center gap-4">
     <a href="/" class="text-indigo-600 hover:underline text-sm">← Dashboard</a>
-    <h1 class="text-2xl font-bold text-gray-900">Transcription Job</h1>
+    <h1 class="text-2xl font-bold text-gray-900">{{ job.name or "Transcription Job" }}</h1>
     <span id="status-badge">
       {% if job.status == "pending" %}<span class="badge-pending">Pending</span>
       {% elif job.status == "running" %}<span class="badge-running">Running</span>
@@ -27,6 +27,24 @@
     </dl>
   </div>
 
+  <!-- Progress bar (only shown while running) -->
+  {% if job.status in ("pending", "running") or job.progress %}
+  <div class="card" id="progress-card">
+    <div class="flex items-center justify-between mb-2">
+      <h2 class="text-base font-semibold text-gray-900">Progress</h2>
+      <span id="progress-label" class="text-xs text-gray-500 font-mono">
+        {% if job.progress %}{{ job.progress }}{% else %}Waiting…{% endif %}
+      </span>
+    </div>
+    <div class="w-full bg-gray-200 rounded-full h-3 overflow-hidden">
+      <div id="progress-bar"
+           class="h-3 rounded-full transition-all duration-500 bg-green-600"
+           style="width: {% if job.status == 'pending' %}0{% elif job.status == 'completed' %}100{% else %}0{% endif %}%">
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
   <!-- Log terminal -->
   <div class="card">
     <h2 class="text-base font-semibold text-gray-900 mb-3">Progress Log</h2>
@@ -37,12 +55,17 @@
   </div>
 
   <!-- Actions -->
-  <div id="job-actions" class="flex gap-4">
+  <div id="job-actions" class="flex gap-4 flex-wrap">
     {% if job.status == "completed" %}
       {% if job.output_path %}
         <a href="/transcripts/{{ job.output_path | stem }}" class="btn-primary">View Transcript</a>
         <a href="/transcribe/jobs/{{ job.id }}/enroll" class="btn-secondary">Name Speakers</a>
       {% endif %}
+    {% elif job.status in ("pending", "running") %}
+      <form method="post" action="/transcribe/jobs/{{ job.id }}/cancel"
+            onsubmit="return confirm('Cancel this transcription job?')">
+        <button type="submit" class="btn-danger">Stop Job</button>
+      </form>
     {% elif job.status == "failed" %}
       <div class="rounded-md bg-red-50 border border-red-200 p-4 w-full">
         <p class="text-sm text-red-800"><strong>Error:</strong> {{ job.error }}</p>
@@ -60,6 +83,14 @@
   const cursor = document.getElementById('log-cursor');
   const badge = document.getElementById('status-badge');
   const actions = document.getElementById('job-actions');
+  const progressBar = document.getElementById('progress-bar');
+  const progressLabel = document.getElementById('progress-label');
+
+  // Parse percentage from tqdm-style strings like "Folder Progress:  45%|███ | 1/2"
+  function parsePercent(msg) {
+    const m = msg.match(/(\d+)%\s*[|│]/);
+    return m ? parseInt(m[1], 10) : null;
+  }
 
   const es = new EventSource('/transcribe/jobs/{{ job.id }}/stream');
 
@@ -73,8 +104,15 @@
       terminal.scrollTop = terminal.scrollHeight;
     }
 
+    if (evt.type === 'progress') {
+      if (progressLabel) progressLabel.textContent = evt.message;
+      if (progressBar) {
+        const pct = parsePercent(evt.message);
+        if (pct !== null) progressBar.style.width = pct + '%';
+      }
+    }
+
     if (evt.type === 'status') {
-      // Update badge
       const statusMap = {
         pending: '<span class="badge-pending">Pending</span>',
         running: '<span class="badge-running">Running</span>',
@@ -87,7 +125,9 @@
     if (evt.type === 'done') {
       cursor.textContent = '';
       es.close();
-      // Reload actions area
+      // Fill progress bar to 100% on completion
+      if (progressBar) progressBar.style.width = '100%';
+      if (progressLabel) progressLabel.textContent = evt.status === 'completed' ? 'Complete' : 'Failed';
       if (evt.status === 'completed' && evt.output_path) {
         const stem = evt.output_path.replace(/\\/g, '/').split('/').pop().replace('.md', '');
         actions.innerHTML = `
@@ -95,9 +135,11 @@
           <a href="/transcribe/jobs/{{ job.id }}/enroll" class="btn-secondary">Name Speakers</a>
           <a href="/" class="btn-secondary">Back to Dashboard</a>`;
       } else if (evt.status === 'failed') {
+        if (progressBar) progressBar.classList.replace('bg-green-600', 'bg-red-500');
+        const msg = evt.error === 'Cancelled' ? 'Job was cancelled.' : `<strong>Error:</strong> ${evt.error || 'Unknown error'}`;
         actions.innerHTML = `
           <div class="rounded-md bg-red-50 border border-red-200 p-4 w-full">
-            <p class="text-sm text-red-800"><strong>Error:</strong> ${evt.error || 'Unknown error'}</p>
+            <p class="text-sm text-red-800">${msg}</p>
           </div>
           <a href="/" class="btn-secondary">Back to Dashboard</a>`;
       }

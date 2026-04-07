@@ -11,7 +11,7 @@
   <tbody class="bg-white divide-y divide-gray-200">
     {% for job in jobs %}
     <tr>
-      <td class="px-4 py-3 font-mono text-xs text-gray-700 max-w-xs truncate">{{ job.input_path | basename }}</td>
+      <td class="px-4 py-3 font-mono text-xs text-gray-700 max-w-xs truncate">{{ job.name or (job.input_path | basename) }}</td>
       <td class="px-4 py-3">
         {% if job.status == "pending" %}
           <span class="badge-pending">Pending</span>

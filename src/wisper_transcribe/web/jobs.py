@@ -17,6 +17,7 @@ Design:
 from __future__ import annotations
 
 import asyncio
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -40,6 +41,8 @@ class Job:
     created_at: datetime
     input_path: str
     kwargs: dict[str, Any]
+    # Human-readable name shown in the UI (defaults to input filename stem)
+    name: str = ""
     output_path: Optional[str] = None
     error: Optional[str] = None
     log_lines: list[str] = field(default_factory=list)
@@ -47,6 +50,8 @@ class Job:
     finished_at: Optional[datetime] = None
     # Set after transcription completes when enroll flow is needed
     diarization_labels: list[str] = field(default_factory=list)
+    # Threading event set by cancel() to signal the worker to abort
+    _cancel_event: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
 
 
 class JobQueue:
@@ -79,13 +84,34 @@ class JobQueue:
     # ------------------------------------------------------------------
 
     def submit(self, input_path: str, **kwargs: Any) -> Job:
-        """Enqueue a transcription job.  Returns the Job immediately."""
+        """Enqueue a transcription job.  Returns the Job immediately.
+
+        If ``original_stem`` is provided in kwargs it is used as the job's
+        human-readable name and to rename the temp upload file so the output
+        .md inherits the original filename.  It is stripped from kwargs before
+        being forwarded to process_file.
+        """
+        from pathlib import Path
+        import shutil
+
+        original_stem: str = kwargs.pop("original_stem", "")
+        if not original_stem:
+            original_stem = Path(input_path).stem
+
+        # Rename temp file so process_file writes <stem>.md instead of a UUID
+        tmp_path = Path(input_path)
+        if tmp_path.exists() and tmp_path.stem != original_stem:
+            renamed = tmp_path.with_name(original_stem + tmp_path.suffix)
+            shutil.move(str(tmp_path), str(renamed))
+            input_path = str(renamed)
+
         job = Job(
             id=str(uuid.uuid4()),
             status=PENDING,
             created_at=datetime.now(),
             input_path=input_path,
             kwargs=kwargs,
+            name=original_stem,
         )
         self._jobs[job.id] = job
         self._queue.put_nowait(job.id)
@@ -102,6 +128,28 @@ class JobQueue:
 
     def active_count(self) -> int:
         return sum(1 for j in self._jobs.values() if j.status in (PENDING, RUNNING))
+
+    def cancel(self, job_id: str) -> bool:
+        """Request cancellation of a pending or running job.
+
+        Pending jobs are immediately marked failed.  Running jobs set their
+        cancel event; the worker checks it and aborts the pipeline thread via
+        a raised exception on the next tqdm heartbeat.
+
+        Returns True if the job existed and was cancellable.
+        """
+        job = self._jobs.get(job_id)
+        if job is None:
+            return False
+        if job.status == PENDING:
+            job.status = FAILED
+            job.error = "Cancelled"
+            job.finished_at = datetime.now()
+            return True
+        if job.status == RUNNING:
+            job._cancel_event.set()
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # Background worker
@@ -131,6 +179,8 @@ class JobQueue:
         original_write = _tqdm_module.tqdm.write
 
         def capturing_write(msg: str, *args: Any, **kw: Any) -> None:
+            if job._cancel_event.is_set():
+                raise InterruptedError("Job cancelled by user")
             original_write(msg, *args, **kw)
             if msg.strip():
                 job.log_lines.append(msg.strip())
@@ -159,6 +209,10 @@ class JobQueue:
             output_path = process_file(Path(job.input_path), **job.kwargs)
             job.output_path = str(output_path)
             job.status = COMPLETED
+        except InterruptedError:
+            job.status = FAILED
+            job.error = "Cancelled"
+            # Do not re-raise — cancellation is intentional, not an error
         except Exception as exc:
             job.status = FAILED
             job.error = str(exc)

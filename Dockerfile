@@ -47,7 +47,12 @@ FROM base AS cpu
 RUN pip install --no-cache-dir -e . \
  # Download vendored HTMX so wisper server works fully offline
  && curl -sL "https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js" \
-         -o /app/src/wisper_transcribe/static/htmx.min.js
+         -o /app/src/wisper_transcribe/static/htmx.min.js \
+ # Build Tailwind CSS so the web UI is fully self-contained in the image
+ && python -m pytailwindcss \
+         -i /app/src/wisper_transcribe/static/input.css \
+         -o /app/src/wisper_transcribe/static/tailwind.min.css \
+         --minify
 
 ENTRYPOINT ["wisper"]
 CMD ["--help"]
@@ -65,7 +70,12 @@ RUN pip install --no-cache-dir -e . \
         --index-url https://download.pytorch.org/whl/cu126 \
  # Download vendored HTMX so wisper server works fully offline
  && curl -sL "https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js" \
-         -o /app/src/wisper_transcribe/static/htmx.min.js
+         -o /app/src/wisper_transcribe/static/htmx.min.js \
+ # Build Tailwind CSS so the web UI is fully self-contained in the image
+ && python -m pytailwindcss \
+         -i /app/src/wisper_transcribe/static/input.css \
+         -o /app/src/wisper_transcribe/static/tailwind.min.css \
+         --minify
 
 ENTRYPOINT ["wisper"]
 CMD ["--help"]

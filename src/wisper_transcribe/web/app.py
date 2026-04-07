@@ -1,6 +1,8 @@
 """FastAPI application factory for the wisper-transcribe web UI."""
 from __future__ import annotations
 
+import subprocess
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -13,6 +15,38 @@ from .jobs import JobQueue
 
 _STATIC_DIR = Path(__file__).parent.parent / "static"
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
+_INPUT_CSS = _STATIC_DIR / "input.css"
+_OUTPUT_CSS = _STATIC_DIR / "tailwind.min.css"
+
+
+def _build_tailwind() -> None:
+    """Rebuild tailwind.min.css from input.css if the source is newer.
+
+    Runs the pytailwindcss standalone binary (bundled with the package —
+    no Node.js required).  Safe to call on every startup; skips the build
+    if output is already up-to-date.
+    """
+    if (
+        _OUTPUT_CSS.exists()
+        and _INPUT_CSS.stat().st_mtime <= _OUTPUT_CSS.stat().st_mtime
+    ):
+        return  # already up-to-date
+
+    try:
+        subprocess.run(
+            [
+                sys.executable, "-m", "pytailwindcss",
+                "-i", str(_INPUT_CSS),
+                "-o", str(_OUTPUT_CSS),
+                "--minify",
+            ],
+            check=True,
+            capture_output=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        # Non-fatal: serve the existing CSS if the build fails
+        import warnings
+        warnings.warn(f"Tailwind CSS build failed: {exc}. Using existing tailwind.min.css.")
 
 try:
     from wisper_transcribe import __version__
@@ -27,6 +61,7 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[misc]
+        _build_tailwind()
         job_queue.start()
         yield
         await job_queue.stop()
