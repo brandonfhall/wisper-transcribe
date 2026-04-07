@@ -243,6 +243,12 @@ class JobQueue:
         """Runs in a thread.  Patches tqdm.write to capture progress logs."""
         from pathlib import Path
 
+        # Disable TMonitor — tqdm's background thread that watches bars for stalls.
+        # It registers an atexit callback that join()s the thread, which hangs on
+        # shutdown (especially on Python 3.14's stricter thread cleanup).
+        original_monitor_interval = _tqdm_module.tqdm.monitor_interval
+        _tqdm_module.tqdm.monitor_interval = 0
+
         # Patch tqdm.write to capture messages
         original_write = _tqdm_module.tqdm.write
 
@@ -299,4 +305,5 @@ class JobQueue:
         finally:
             _tqdm_module.tqdm.write = original_write  # type: ignore[method-assign]
             _tqdm_module.tqdm.__init__ = original_init  # type: ignore[method-assign]
+            _tqdm_module.tqdm.monitor_interval = original_monitor_interval
             job.finished_at = datetime.now()
