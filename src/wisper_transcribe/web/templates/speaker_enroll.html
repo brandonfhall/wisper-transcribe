@@ -22,6 +22,8 @@
 
   <form method="post" action="/transcribe/jobs/{{ job.id }}/enroll" class="space-y-4">
     {% for speaker_name in detected_speakers %}
+    {# Use speaker_name as the stable ID key — avoids inner-loop shadowing loop.index #}
+    {% set field_id = "name_" ~ speaker_name | replace(" ", "_") | replace("/", "_") | replace(".", "_") %}
     <div class="card space-y-3">
       <div class="flex items-center justify-between">
         <h3 class="font-medium text-gray-900">{{ speaker_name }}</h3>
@@ -45,12 +47,12 @@
 
       {% if existing_profiles %}
       <div>
-        <p class="text-xs font-medium text-gray-500 mb-2">Existing profiles</p>
+        <p class="text-xs font-medium text-gray-500 mb-2">Existing profiles — click to assign</p>
         <div class="flex flex-wrap gap-2">
           {% for key, profile in existing_profiles.items() %}
           <button type="button"
-                  onclick="document.getElementById('name_{{ loop.index0 }}_{{ loop.index }}').value = '{{ profile.display_name }}'"
-                  class="text-xs px-2 py-1 rounded border border-gray-300 hover:border-indigo-500 hover:text-indigo-600 transition-colors">
+                  onclick="document.getElementById('{{ field_id }}').value = '{{ profile.display_name }}'; document.getElementById('{{ field_id }}').focus();"
+                  class="text-xs px-2 py-1 rounded border border-gray-300 hover:border-green-600 hover:text-green-700 transition-colors">
             {{ profile.display_name }}{% if profile.role %} <span class="text-gray-400">({{ profile.role }})</span>{% endif %}
           </button>
           {% endfor %}
@@ -59,8 +61,8 @@
       {% endif %}
 
       <div>
-        <label class="form-label text-xs" for="name_{{ loop.index }}">Assign name</label>
-        <input type="text" id="name_{{ loop.index0 }}_{{ loop.index }}"
+        <label class="form-label text-xs" for="{{ field_id }}">Assign name</label>
+        <input type="text" id="{{ field_id }}"
                name="speaker_{{ speaker_name }}"
                value="{{ speaker_name }}"
                class="form-input text-sm"

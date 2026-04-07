@@ -6,12 +6,19 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import tqdm as _tqdm_module
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .jobs import JobQueue
+
+# Disable TMonitor globally — it spawns a daemon thread with an atexit join()
+# that hangs on Python 3.14's stricter thread cleanup, requiring multiple Ctrl+C.
+# TMonitor only helps detect stalled bars in interactive terminals; it's useless
+# in a web server context.
+_tqdm_module.tqdm.monitor_interval = 0
 
 _STATIC_DIR = Path(__file__).parent.parent / "static"
 _TEMPLATES_DIR = Path(__file__).parent / "templates"

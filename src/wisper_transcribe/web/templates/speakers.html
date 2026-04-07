@@ -14,6 +14,7 @@
 
   {% if profiles %}
   <div class="card overflow-hidden p-0">
+    <div class="overflow-x-auto">
     <table class="min-w-full divide-y divide-gray-200 text-sm">
       <thead class="bg-gray-50">
         <tr>
@@ -27,16 +28,30 @@
       <tbody class="bg-white divide-y divide-gray-200">
         {% for key, profile in profiles.items() %}
         <tr>
-          <td class="px-6 py-4 font-medium text-gray-900">{{ profile.display_name }}</td>
+          <td class="px-6 py-4 font-medium text-gray-900">
+            {{ profile.display_name }}
+            {% if has_clip and has_clip[key] %}
+            <audio id="clip_{{ key }}" src="/speakers/{{ key }}/clip" preload="none" class="hidden"></audio>
+            {% endif %}
+          </td>
           <td class="px-6 py-4 text-gray-500">{{ profile.role or "—" }}</td>
           <td class="px-6 py-4 text-gray-500 text-xs">{{ profile.enrolled_date }}</td>
           <td class="px-6 py-4 text-gray-500 text-xs max-w-xs truncate">{{ profile.notes or "—" }}</td>
           <td class="px-6 py-4">
-            <div class="flex gap-3 items-center">
+            <div class="flex gap-3 items-center flex-wrap">
+              {% if has_clip and has_clip[key] %}
+              <button type="button" onclick="playClip('clip_{{ key }}', this)"
+                      class="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-full border border-green-500 text-green-700 hover:bg-green-50 transition-colors">
+                <svg class="h-3 w-3" fill="currentColor" viewBox="0 0 20 20">
+                  <path d="M6.3 2.841A1.5 1.5 0 004 4.11v11.78a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/>
+                </svg>
+                Play
+              </button>
+              {% endif %}
               <!-- Rename -->
               <form method="post" action="/speakers/{{ key }}/rename" class="flex gap-1 items-center">
-                <input type="text" name="new_name" placeholder="New name" class="text-xs border border-gray-300 rounded px-2 py-1 w-28 focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"/>
-                <button type="submit" class="text-xs text-indigo-600 hover:underline">Rename</button>
+                <input type="text" name="new_name" placeholder="New name" class="text-xs border border-gray-300 rounded px-2 py-1 w-24 focus:ring-1 focus:ring-green-500 focus:border-green-500"/>
+                <button type="submit" class="text-xs text-green-700 hover:underline">Rename</button>
               </form>
               <!-- Remove -->
               <form method="post" action="/speakers/{{ key }}/remove"
@@ -49,6 +64,7 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
   </div>
   {% else %}
   <div class="card text-center py-12">
@@ -61,4 +77,21 @@
   {% endif %}
 
 </div>
+
+<script>
+function playClip(audioId, btn) {
+  document.querySelectorAll('audio').forEach(a => {
+    if (a.id !== audioId) { a.pause(); a.currentTime = 0; }
+  });
+  const audio = document.getElementById(audioId);
+  if (audio.paused) {
+    audio.play();
+    btn.innerHTML = '<svg class="h-3 w-3" fill="currentColor" viewBox="0 0 20 20"><path d="M5.75 3a.75.75 0 00-.75.75v12.5c0 .414.336.75.75.75h1.5a.75.75 0 00.75-.75V3.75A.75.75 0 007.25 3h-1.5zM12.75 3a.75.75 0 00-.75.75v12.5c0 .414.336.75.75.75h1.5a.75.75 0 00.75-.75V3.75A.75.75 0 0014.25 3h-1.5z"/></svg> Stop';
+    audio.onended = () => { btn.innerHTML = '<svg class="h-3 w-3" fill="currentColor" viewBox="0 0 20 20"><path d="M6.3 2.841A1.5 1.5 0 004 4.11v11.78a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/></svg> Play'; };
+  } else {
+    audio.pause(); audio.currentTime = 0;
+    btn.innerHTML = '<svg class="h-3 w-3" fill="currentColor" viewBox="0 0 20 20"><path d="M6.3 2.841A1.5 1.5 0 004 4.11v11.78a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/></svg> Play';
+  }
+}
+</script>
 {% endblock %}

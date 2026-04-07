@@ -1,4 +1,5 @@
 {% if jobs %}
+<div class="overflow-x-auto">
 <table class="min-w-full divide-y divide-gray-200 text-sm">
   <thead class="bg-gray-50">
     <tr>
@@ -34,6 +35,7 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
 {% else %}
 <p class="text-sm text-gray-500 text-center py-8">No jobs yet. <a href="/transcribe" class="text-indigo-600 hover:underline">Start a transcription →</a></p>
 {% endif %}
