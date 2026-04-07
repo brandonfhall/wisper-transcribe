@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, File, Form, Request, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 
 from . import templates
 from wisper_transcribe.speaker_manager import load_profiles, save_profiles
@@ -13,14 +13,33 @@ from wisper_transcribe.speaker_manager import load_profiles, save_profiles
 router = APIRouter(prefix="/speakers")
 
 
+def _clip_path(key: str) -> "Path":
+    from wisper_transcribe.speaker_manager import _get_embeddings_dir
+    return _get_embeddings_dir() / f"{key}.mp3"
+
+
 @router.get("", response_class=HTMLResponse)
 async def speakers_list(request: Request) -> HTMLResponse:
     profiles = load_profiles()
+    # Pass which profiles have a reference clip available
+    has_clip = {key: _clip_path(key).exists() for key in profiles}
     return templates.TemplateResponse(
         request,
         "speakers.html",
-        {"request": request, "profiles": profiles},
+        {"request": request, "profiles": profiles, "has_clip": has_clip},
     )
+
+
+@router.get("/{key}/clip")
+async def speaker_clip(request: Request, key: str) -> Response:
+    """Serve the reference audio clip for a speaker profile."""
+    import re
+    if not re.match(r"^[\w\-]+$", key):
+        return HTMLResponse(content="Invalid key", status_code=400)
+    clip = _clip_path(key)
+    if not clip.exists():
+        return HTMLResponse(content="No clip available", status_code=404)
+    return FileResponse(path=str(clip), media_type="audio/mpeg")
 
 
 @router.get("/enroll", response_class=HTMLResponse)

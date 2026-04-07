@@ -46,11 +46,15 @@
       </a>
 
       <!-- Nav links -->
-      <div class="hidden md:flex items-center gap-1">
+      <div class="hidden md:flex items-center">
         <a href="/"             class="nav-link {% if request.url.path == '/' %}nav-active{% endif %}">Dashboard</a>
+        <span class="nav-divider"></span>
         <a href="/transcribe"   class="nav-link {% if request.url.path.startswith('/transcribe') %}nav-active{% endif %}">Transcribe</a>
+        <span class="nav-divider"></span>
         <a href="/transcripts"  class="nav-link {% if request.url.path.startswith('/transcripts') %}nav-active{% endif %}">Transcripts</a>
+        <span class="nav-divider"></span>
         <a href="/speakers"     class="nav-link {% if request.url.path.startswith('/speakers') %}nav-active{% endif %}">Speakers</a>
+        <span class="nav-divider"></span>
         <a href="/config"       class="nav-link {% if request.url.path.startswith('/config') %}nav-active{% endif %}">Config</a>
       </div>
 
@@ -93,6 +97,7 @@
 <style>
 .nav-link { @apply px-3 py-2 rounded-md text-sm font-medium text-green-200 hover:text-white hover:bg-green-800 transition-colors; }
 .nav-active { @apply bg-green-800 text-white; }
+.nav-divider { @apply w-px h-5 bg-green-700 mx-1 self-center; }
 .mobile-nav-link { @apply block px-3 py-2 rounded-md text-sm font-medium text-green-200 hover:text-white hover:bg-green-800; }
 .spark-1 { animation: float1 3.2s ease-in-out infinite; }
 .spark-2 { animation: float2 2.8s ease-in-out infinite 0.6s; }

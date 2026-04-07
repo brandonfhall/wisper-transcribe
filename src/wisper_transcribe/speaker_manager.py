@@ -202,7 +202,43 @@ def enroll_speaker(
     profiles[name] = profile
     save_profiles(profiles, data_dir)
 
+    # Save a short reference audio clip alongside the embedding for web playback.
+    # Failures are silently swallowed — the clip is a convenience, not critical.
+    _save_reference_clip(audio_path, segments, speaker_label, emb_dir / f"{name}.mp3")
+
     return profile
+
+
+def _save_reference_clip(
+    audio_path: Path,
+    segments: list,
+    speaker_label: str,
+    out_path: Path,
+    max_seconds: float = 12.0,
+) -> None:
+    """Extract a short clip of speaker_label from audio_path using ffmpeg."""
+    import subprocess
+
+    # Find the first segment for this speaker
+    first = next((s for s in segments if s.speaker == speaker_label), None)
+    if first is None:
+        return
+    start = first.start
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-ss", str(start),
+                "-t", str(max_seconds),
+                "-i", str(audio_path),
+                "-ac", "1", "-ar", "22050", "-b:a", "64k",
+                str(out_path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------

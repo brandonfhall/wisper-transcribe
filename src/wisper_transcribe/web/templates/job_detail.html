@@ -19,7 +19,7 @@
   <div class="card">
     <dl class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
       <div><dt class="font-medium text-gray-500">Job ID</dt><dd class="font-mono text-xs text-gray-700">{{ job.id }}</dd></div>
-      <div><dt class="font-medium text-gray-500">Input</dt><dd class="font-mono text-xs text-gray-700 truncate">{{ job.input_path }}</dd></div>
+      <div><dt class="font-medium text-gray-500">File</dt><dd class="font-mono text-xs text-gray-700 truncate">{{ job.name or (job.input_path | basename) }}</dd></div>
       <div><dt class="font-medium text-gray-500">Created</dt><dd class="text-gray-700">{{ job.created_at.strftime("%Y-%m-%d %H:%M:%S") }}</dd></div>
       {% if job.finished_at %}
       <div><dt class="font-medium text-gray-500">Finished</dt><dd class="text-gray-700">{{ job.finished_at.strftime("%Y-%m-%d %H:%M:%S") }}</dd></div>
@@ -32,14 +32,14 @@
   <div class="card" id="progress-card">
     <div class="flex items-center justify-between mb-2">
       <h2 class="text-base font-semibold text-gray-900">Progress</h2>
-      <span id="progress-label" class="text-xs text-gray-500 font-mono">
-        {% if job.progress %}{{ job.progress }}{% else %}Waiting…{% endif %}
+      <span id="progress-pct" class="text-sm font-semibold text-green-700">
+        {% if job.status == 'completed' %}100%{% else %}—{% endif %}
       </span>
     </div>
     <div class="w-full bg-gray-200 rounded-full h-3 overflow-hidden">
       <div id="progress-bar"
            class="h-3 rounded-full transition-all duration-500 bg-green-600 {% if job.status in ('pending','running') and not job.progress %}animate-pulse{% endif %}"
-           style="width: {% if job.status == 'completed' %}100{% elif job.progress %}0{% else %}0{% endif %}%">
+           style="width: {% if job.status == 'completed' %}100{% else %}0{% endif %}%">
       </div>
     </div>
   </div>
@@ -84,7 +84,7 @@
   const badge = document.getElementById('status-badge');
   const actions = document.getElementById('job-actions');
   const progressBar = document.getElementById('progress-bar');
-  const progressLabel = document.getElementById('progress-label');
+  const progressPct = document.getElementById('progress-pct');
 
   // Parse percentage from tqdm-style strings like "Folder Progress:  45%|███ | 1/2"
   function parsePercent(msg) {
@@ -105,12 +105,12 @@
     }
 
     if (evt.type === 'progress') {
-      if (progressLabel) progressLabel.textContent = evt.message;
       if (progressBar) {
         const pct = parsePercent(evt.message);
         if (pct !== null) {
           progressBar.classList.remove('animate-pulse');
           progressBar.style.width = pct + '%';
+          if (progressPct) progressPct.textContent = pct + '%';
         }
       }
     }
@@ -130,7 +130,7 @@
       es.close();
       // Fill progress bar to 100% on completion
       if (progressBar) progressBar.style.width = '100%';
-      if (progressLabel) progressLabel.textContent = evt.status === 'completed' ? 'Complete' : 'Failed';
+      if (progressPct) progressPct.textContent = evt.status === 'completed' ? '100%' : '—';
       if (evt.status === 'completed' && evt.output_path) {
         const stem = evt.output_path.replace(/\\/g, '/').split('/').pop().replace('.md', '');
         actions.innerHTML = `

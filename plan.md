@@ -406,4 +406,6 @@ Wisp logo: will-o'-the-wisp SVG orb with animated floating spark particles. Head
   - input file on the transcribe page should show the file name, not the full path.
   - Allow playing of the sample file in the speakers section
   - for web progress bar remove the middle section which would map to the commmand line progress bar. 
+  - multiple progress bars for each step (Transcription, Diarization, Formatting) with the current step highlighted. show them progressivly as they complete.
+  - When naming speakers after a transcription I am only able to name a single speaker. If there are mutliple unknown speakers to identify I can only name one. When clicking on a name in the next box it does not update the UI. 
  
