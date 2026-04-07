@@ -205,12 +205,21 @@ def process_file(
                     # If user picked an existing profile, skip re-enrollment
                     is_existing = name in {p.display_name for p in existing_profiles.values()}
                     if is_existing:
-                        role = existing_profiles.get(
-                            next(k for k, p in existing_profiles.items() if p.display_name == name), None
-                        )
-                        role = role.role if role else ""
+                        profile_key = next(k for k, p in existing_profiles.items() if p.display_name == name)
+                        role = existing_profiles[profile_key].role
                         notes = ""
                         click.echo(f"  Using existing profile for {name}.")
+                        if click.confirm(
+                            f"  Add this episode's audio to improve future recognition of {name}?",
+                            default=False,
+                        ):
+                            from .speaker_manager import extract_embedding, update_embedding
+                            try:
+                                new_emb = extract_embedding(wav_path, diarization, label, device)
+                                update_embedding(profile_key, new_emb)
+                                click.echo(f"  Updated voice profile for {name}.")
+                            except Exception as exc:
+                                click.echo(f"  Could not update profile: {exc}")
                     else:
                         role = click.prompt("  Role (DM/Player/Guest, optional)", default="").strip()
                         notes = click.prompt("  Notes (optional)", default="").strip()

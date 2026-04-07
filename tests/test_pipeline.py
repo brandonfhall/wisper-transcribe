@@ -310,7 +310,7 @@ def test_enroll_pick_existing_speaker_skips_enroll(
     mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg,
     tmp_path,
 ):
-    """Entering a number at the name prompt selects an existing speaker; enroll_speaker is NOT called."""
+    """Selecting an existing speaker by number skips enroll_speaker; confirm=No skips embedding update."""
     from wisper_transcribe.models import SpeakerProfile
 
     audio = tmp_path / "session01.mp3"
@@ -329,12 +329,61 @@ def test_enroll_pick_existing_speaker_skips_enroll(
 
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value=existing):
         with patch("click.prompt", return_value="1"):
-            from wisper_transcribe.pipeline import process_file
-            out = process_file(audio, output_dir=tmp_path, device="cpu", enroll_speakers=True)
+            with patch("click.confirm", return_value=False) as mock_confirm:
+                from wisper_transcribe.pipeline import process_file
+                out = process_file(audio, output_dir=tmp_path, device="cpu", enroll_speakers=True)
 
     mock_enroll.assert_not_called()
+    mock_confirm.assert_called_once()
     content = out.read_text(encoding="utf-8")
     assert "Alice" in content
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=600.0)
+@patch("wisper_transcribe.pipeline.transcribe")
+@patch("wisper_transcribe.pipeline.get_hf_token", return_value="fake-token")
+@patch("wisper_transcribe.diarizer.diarize", return_value=[])
+@patch("wisper_transcribe.aligner.align")
+@patch("wisper_transcribe.speaker_manager.enroll_speaker")
+def test_enroll_pick_existing_speaker_confirm_yes_updates_embedding(
+    mock_enroll, mock_align, mock_diarize, mock_hf_token,
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg,
+    tmp_path,
+):
+    """Confirming yes on an existing speaker extracts a new embedding and blends it via EMA."""
+    from wisper_transcribe.models import SpeakerProfile
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    mock_convert.return_value = audio
+    mock_transcribe.return_value = [TranscriptionSegment(start=0.0, end=5.0, text="Hello")]
+    mock_align.return_value = [AlignedSegment(start=0.0, end=5.0, text="Hello", speaker="SPEAKER_00")]
+
+    existing = {
+        "alice": SpeakerProfile(
+            name="alice", display_name="Alice", role="DM",
+            embedding_path=tmp_path / "alice.npy",
+            enrolled_date="2026-01-01", enrollment_source="ep1.mp3",
+        )
+    }
+
+    import numpy as np
+    fake_emb = np.zeros(512, dtype=np.float32)
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value=existing):
+        with patch("click.prompt", return_value="1"):
+            with patch("click.confirm", return_value=True):
+                with patch("wisper_transcribe.speaker_manager.extract_embedding", return_value=fake_emb) as mock_extract:
+                    with patch("wisper_transcribe.speaker_manager.update_embedding") as mock_update:
+                        from wisper_transcribe.pipeline import process_file
+                        process_file(audio, output_dir=tmp_path, device="cpu", enroll_speakers=True)
+
+    mock_extract.assert_called_once()
+    mock_update.assert_called_once_with("alice", fake_emb)
+    mock_enroll.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
