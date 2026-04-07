@@ -116,6 +116,7 @@ async def job_stream(request: Request, job_id: str) -> StreamingResponse:
 
     async def event_generator():
         last_line_idx = 0
+        last_progress = None
         while True:
             if await request.is_disconnected():
                 break
@@ -130,6 +131,12 @@ async def job_stream(request: Request, job_id: str) -> StreamingResponse:
                 data = json.dumps({"type": "log", "message": line})
                 yield f"data: {data}\n\n"
             last_line_idx += len(new_lines)
+
+            # Send progress update if it has changed
+            if job.progress and job.progress != last_progress:
+                data = json.dumps({"type": "progress", "message": job.progress})
+                yield f"data: {data}\n\n"
+                last_progress = job.progress
 
             # Send status update
             data = json.dumps({"type": "status", "status": job.status})

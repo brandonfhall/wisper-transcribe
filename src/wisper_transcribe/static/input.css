@@ -1,6 +1,5 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@source "../web";
 
 @layer components {
   /* Wisp glow effect for the logo in nav */

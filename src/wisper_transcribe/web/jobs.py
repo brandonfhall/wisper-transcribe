@@ -43,6 +43,7 @@ class Job:
     output_path: Optional[str] = None
     error: Optional[str] = None
     log_lines: list[str] = field(default_factory=list)
+    progress: Optional[str] = None
     finished_at: Optional[datetime] = None
     # Set after transcription completes when enroll flow is needed
     diarization_labels: list[str] = field(default_factory=list)
@@ -134,7 +135,26 @@ class JobQueue:
             if msg.strip():
                 job.log_lines.append(msg.strip())
 
+        # Patch tqdm.__init__ to capture the progress bar itself
+        original_init = _tqdm_module.tqdm.__init__
+
+        class ProgressCatcher:
+            def write(self, s: str) -> None:
+                # tqdm updates the same line using carriage returns (\r)
+                for part in s.split('\r'):
+                    if part.strip():
+                        job.progress = part.strip()
+            def flush(self) -> None:
+                pass
+
+        def capturing_init(self, *args: Any, **kwargs: Any) -> None:
+            kwargs["file"] = ProgressCatcher()
+            kwargs["dynamic_ncols"] = False  # Avoids console size errors in background threads
+            kwargs["ncols"] = 100            # Keeps the text output clean and predictable
+            original_init(self, *args, **kwargs)
+
         _tqdm_module.tqdm.write = capturing_write  # type: ignore[method-assign]
+        _tqdm_module.tqdm.__init__ = capturing_init  # type: ignore[method-assign]
         try:
             output_path = process_file(Path(job.input_path), **job.kwargs)
             job.output_path = str(output_path)
@@ -145,4 +165,5 @@ class JobQueue:
             raise
         finally:
             _tqdm_module.tqdm.write = original_write  # type: ignore[method-assign]
+            _tqdm_module.tqdm.__init__ = original_init  # type: ignore[method-assign]
             job.finished_at = datetime.now()
