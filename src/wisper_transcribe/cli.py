@@ -40,6 +40,10 @@ def main():
               help="CTranslate2 quantization (auto=float16 on CUDA, int8 on CPU)")
 @click.option("--vad/--no-vad", default=None,
               help="Voice activity detection to skip silence (default: on, from config)")
+@click.option("--vocab-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None,
+              help="Text file of custom words/names (one per line) to boost transcription accuracy")
+@click.option("--initial-prompt", default=None,
+              help="Text prepended as context to guide transcription style and vocabulary")
 @click.option("--verbose", is_flag=True, default=False, help="Show detailed progress")
 def transcribe(
     path: Path,
@@ -57,12 +61,20 @@ def transcribe(
     play_audio: bool,
     compute_type: str,
     vad: Optional[bool],
+    vocab_file: Optional[Path],
+    initial_prompt: Optional[str],
     verbose: bool,
 ):
     """Transcribe an audio file (or folder of files) to markdown."""
     from .pipeline import process_file, process_folder
 
     lang = None if language == "auto" else language
+
+    hotwords: Optional[list[str]] = None
+    if vocab_file is not None:
+        lines = Path(vocab_file).read_text(encoding="utf-8").splitlines()
+        hotwords = [ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")]
+
     kwargs = dict(
         output_dir=output_dir,
         model_size=model_size,
@@ -78,6 +90,8 @@ def transcribe(
         play_audio=play_audio,
         compute_type=compute_type,
         vad_filter=vad,
+        initial_prompt=initial_prompt,
+        hotwords=hotwords,
     )
 
     if path.is_dir():
@@ -246,6 +260,9 @@ def config_set(key: str, value: str):
         value = value.lower() in ("true", "1", "yes")
     elif key in cfg and isinstance(cfg[key], float):
         value = float(value)
+    elif key in cfg and isinstance(cfg[key], list):
+        # Accept comma-separated input: "Kyra, Golarion, Zeldris" → ["Kyra", "Golarion", "Zeldris"]
+        value = [w.strip() for w in value.split(",") if w.strip()]
     cfg[key] = value
     save_config(cfg)
     click.echo(f"Set {key} = {value!r}")

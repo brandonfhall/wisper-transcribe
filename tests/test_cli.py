@@ -241,3 +241,41 @@ def test_transcribe_cli_language_auto_passes_none(tmp_path):
 
     call_kwargs = mock_pf.call_args.kwargs
     assert call_kwargs["language"] is None
+
+
+def test_transcribe_cli_vocab_file_passes_hotwords(tmp_path):
+    """--vocab-file reads lines and passes them as hotwords to process_file."""
+    audio = tmp_path / "test.mp3"
+    audio.write_bytes(b"fake")
+    vocab = tmp_path / "words.txt"
+    vocab.write_text("Kyra\nGolarion\n# comment\n\nZeldris\n", encoding="utf-8")
+
+    with patch("wisper_transcribe.pipeline.process_file", return_value=tmp_path / "test.md") as mock_pf:
+        (tmp_path / "test.md").write_text("# test", encoding="utf-8")
+        CliRunner().invoke(main, ["transcribe", str(audio), "--vocab-file", str(vocab)])
+
+    call_kwargs = mock_pf.call_args.kwargs
+    assert call_kwargs["hotwords"] == ["Kyra", "Golarion", "Zeldris"]
+
+
+def test_transcribe_cli_initial_prompt_passes_through(tmp_path):
+    """--initial-prompt passes the string to process_file."""
+    audio = tmp_path / "test.mp3"
+    audio.write_bytes(b"fake")
+
+    with patch("wisper_transcribe.pipeline.process_file", return_value=tmp_path / "test.md") as mock_pf:
+        (tmp_path / "test.md").write_text("# test", encoding="utf-8")
+        CliRunner().invoke(main, ["transcribe", str(audio), "--initial-prompt", "Kyra Golarion"])
+
+    call_kwargs = mock_pf.call_args.kwargs
+    assert call_kwargs["initial_prompt"] == "Kyra Golarion"
+
+
+def test_config_set_hotwords_list(tmp_path, monkeypatch):
+    """wisper config set hotwords accepts comma-separated input and stores as list."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    result = CliRunner().invoke(main, ["config", "set", "hotwords", "Kyra, Golarion, Zeldris"])
+    assert result.exit_code == 0
+
+    from wisper_transcribe.config import load_config
+    assert load_config()["hotwords"] == ["Kyra", "Golarion", "Zeldris"]

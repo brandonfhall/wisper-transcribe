@@ -76,6 +76,8 @@ def transcribe(
     language: Optional[str] = "en",
     compute_type: str = "auto",
     vad_filter: bool = True,
+    initial_prompt: Optional[str] = None,
+    hotwords: Optional[list[str]] = None,
 ) -> list[TranscriptionSegment]:
     """Transcribe audio and return a list of timestamped segments."""
     global _model
@@ -93,6 +95,8 @@ def transcribe(
         language=language if language else None,
         beam_size=5,
         vad_filter=vad_filter,
+        initial_prompt=initial_prompt,
+        hotwords=hotwords,
     )
 
     from tqdm import tqdm

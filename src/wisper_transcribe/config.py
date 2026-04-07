@@ -25,6 +25,7 @@ DEFAULTS = {
     "min_speakers": 2,
     "max_speakers": 8,
     "hf_token": "",
+    "hotwords": [],
 }
 
 COMPUTE_TYPES = ("auto", "float16", "int8_float16", "int8", "float32")
