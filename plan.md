@@ -400,15 +400,21 @@ Wisp logo: will-o'-the-wisp SVG orb with animated floating spark particles. Head
 
 
 
-## GUI Improvements
- - Put dividers or space out the menu items in the upper right. 
- - mobile layout adjustments
- - confirm where transcripts are stored. 
-    - Decision - Show transcripts already in output folder?
-  - input file on the transcribe page should show the file name, not the full path.
-  - Allow playing of the sample file in the speakers section
-  - for web progress bar remove the middle section which would map to the commmand line progress bar. 
-  - multiple progress bars for each step (Transcription, Diarization, Formatting) with the current step highlighted. show them progressivly as they complete.
-  - When naming speakers after a transcription I am only able to name a single speaker. If there are mutliple unknown speakers to identify I can only name one. When clicking on a name in the next box it does not update the UI. 
-  - I still have to hit CTRL+C twice to end the server via cli. 
+## GUI Improvements (April 2026)
+
+- ✅ Nav dividers between menu items in the upper right
+- ✅ Mobile layout adjustments (overflow-x-auto on tables, responsive padding)
+- ✅ Transcript save path confirmed: `./output/` or `data_dir/output/` — always the configured output dir, not a temp path
+- ✅ Input file shows filename stem, not full temp path, on transcribe/job pages
+- ✅ Speaker audio playback on Speakers profile page (Play/Stop toggle per row)
+- ✅ Progress bar cleaned up — raw tqdm text removed, clean percentage shown
+- ✅ Multi-step progress bars (Transcribing → Diarizing → Formatting) with active step highlighted and connectors filling as steps complete
+- ✅ Multi-speaker naming bug fixed — clicking a profile name now correctly fills the right speaker's input field
+- ✅ Ctrl+C single press to stop server (TMonitor disabled globally)
+- ✅ Transcript filenames with Unicode/special characters work correctly (path-traversal validation, `urlencode` filter, `urllib.parse.quote` in redirects)
+- ✅ Rename a Speaker uses a dropdown of existing speakers instead of free-text input
+- ✅ ETA and speed counter (e.g. `5.2s/s`, `0.39chunk/s`) shown below progress bar during transcription and diarization — both CLI and web
+- ✅ Dashboard stat cards are clickable links (Active Jobs → Transcribe, Transcripts → Transcripts, Speakers → Speakers)
+- ✅ Transcript cards on the Transcripts page are fully clickable to view; download and delete buttons accessible per card
+- ✅ Delete transcript from the Transcripts page (trash icon with confirmation)
  
