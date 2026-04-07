@@ -127,7 +127,17 @@ speechbrain 1.0 lazy-loads optional integrations (k2, transformers, spacy, numba
 `transcriber.load_model()` searches for `cublas64_12.dll` in PyTorch's `nvidia-cublas` site-packages directory and the system CUDA Toolkit before loading `WhisperModel`. CTranslate2 on Windows requires this DLL to be on `PATH` or added via `os.add_dll_directory()`.
 
 ### Third-party warning suppression (`WISPER_DEBUG`)
-`diarizer.py` and `cli.py` suppress several classes of non-actionable warnings from speechbrain, pyannote, and torch at module import time using `warnings.filterwarnings()` and `logging.getLogger("absl").setLevel(ERROR)`. All suppressions are gated on `not os.environ.get("WISPER_DEBUG")` so a developer can set `WISPER_DEBUG=1` in their shell to restore raw output for debugging. Suppressed warnings: speechbrain module-redirect deprecations (inspect.getmembers side effect), pyannote TF32 ReproducibilityWarning, pyannote pooling std() UserWarning, pyannote torchcodec/FFmpeg multiline warning. The absl "triton not found" flop-counter log is suppressed via `absl.logging.set_verbosity(ERROR)` — absl-py has its own logging system separate from Python's `logging` hierarchy, so `logging.getLogger("absl")` has no effect; must use `absl.logging` directly.
+`diarizer.py` and `cli.py` suppress several classes of non-actionable warnings from speechbrain, pyannote, Lightning, and torch at module import time using `warnings.filterwarnings()`. All suppressions are gated on `not os.environ.get("WISPER_DEBUG")` so a developer can set `WISPER_DEBUG=1` in their shell to restore raw output for debugging. Suppressed warnings:
+- speechbrain module-redirect deprecations (inspect.getmembers side effect)
+- pyannote TF32 ReproducibilityWarning
+- pyannote pooling std() UserWarning on short/silent segments
+- Lightning migration shim: "Redirecting import of pytorch_lightning..." (checkpoint saved under old namespace)
+- Lightning checkpoint auto-upgrade notification (v1.x → v2.x format)
+- Lightning multiple ModelCheckpoint callback states in old checkpoint
+- pyannote embedding model task-dependent loss function UserWarning (not used during inference)
+- Lightning state dict missing keys warning (`loss_func.W` in checkpoint but not in inference model)
+
+The absl "triton not found" flop-counter log is suppressed via `absl.logging.set_verbosity(ERROR)` — absl-py has its own logging system separate from Python's `logging` hierarchy, so `logging.getLogger("absl")` has no effect; must use `absl.logging` directly.
 
 ### VAD filter via faster-whisper built-in
 `transcribe()` passes `vad_filter=True/False` directly to `_model.transcribe()`. faster-whisper bundles Silero VAD internally; when enabled it skips silence/non-speech frames before feeding audio to Whisper. This is "Option A" from the plan — no separate audio stripping step, no timestamp remapping required. Timestamps in the output remain original-audio-relative. Controlled via `--vad/--no-vad` CLI flag (default: on, from config). `process_file()` uses `vad_filter: Optional[bool] = None` as a sentinel so an unset flag falls through to the config value rather than hard-coding True.
