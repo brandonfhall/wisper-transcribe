@@ -404,5 +404,6 @@ Wisp logo: will-o'-the-wisp SVG orb with animated floating spark particles. Head
  - confirm where transcripts are stored. 
     - Decision - Show transcripts already in output folder?
   - input file on the transcribe page should show the file name, not the full path.
+  - Allow playing of the sample file in the speakers section
   
  
