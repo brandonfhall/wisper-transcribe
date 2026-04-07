@@ -395,3 +395,13 @@ Wisp logo: will-o'-the-wisp SVG orb with animated floating spark particles. Head
 **Architecture note:** If a second backend is ever added, use an abstract `TranscriptionBackend` interface in `transcriber.py` and `DiarizationBackend` in `diarizer.py`. Keep pipeline module backend-agnostic.
 
 **When to revisit:** When (a) CTranslate2 adds Intel GPU support, (b) a user actually needs this, or (c) OpenVINO's Whisper API stabilizes. Don't build speculatively.
+
+
+
+## GUI Improvements
+ - Put dividers or space out the menu items in the upper right. 
+ - mobile layout adjustments
+ - confirm where transcripts are stored. 
+    - Decision - Show transcripts already in output folder?
+  
+ 
