@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -24,19 +25,33 @@ _MAX_PLAYBACK_SECONDS = 10.0
 
 
 def _play_excerpt(wav_path: Path, start: float, end: float) -> None:
-    """Play up to _MAX_PLAYBACK_SECONDS of a WAV excerpt. Silently no-ops on failure."""
-    try:
-        from pydub import AudioSegment
-        from pydub.playback import play
+    """Play up to _MAX_PLAYBACK_SECONDS of a WAV excerpt using ffplay.
 
-        clip_start_ms = int(start * 1000)
-        clip_end_ms = int(min(end, start + _MAX_PLAYBACK_SECONDS) * 1000)
-        clip = AudioSegment.from_wav(str(wav_path))[clip_start_ms:clip_end_ms]
-        import click
-        click.echo("  [playing audio excerpt...]")
-        play(clip)
-    except Exception:
-        pass  # No audio device or backend available — skip silently
+    ffplay ships with ffmpeg, which is already a hard dependency, making this
+    reliable on Windows, macOS, and Linux without extra Python audio packages.
+    Warns (but doesn't abort) if playback fails.
+    """
+    import click
+
+    duration = min(end - start, _MAX_PLAYBACK_SECONDS)
+    click.echo("  [playing audio excerpt...]")
+    try:
+        subprocess.run(
+            [
+                "ffplay",
+                "-nodisp",
+                "-autoexit",
+                "-loglevel", "quiet",
+                "-ss", str(start),
+                "-t", str(duration),
+                str(wav_path),
+            ],
+            check=True,
+        )
+    except FileNotFoundError:
+        click.echo("  [ffplay not found — skipping audio playback]")
+    except subprocess.CalledProcessError:
+        click.echo("  [audio playback failed — skipping]")
 
 
 def process_file(
@@ -55,6 +70,8 @@ def process_file(
     play_audio: bool = False,
     compute_type: str = "auto",
     vad_filter: Optional[bool] = None,
+    initial_prompt: Optional[str] = None,
+    hotwords: Optional[list[str]] = None,
 ) -> Path:
     """Run the full pipeline on a single audio file. Returns path to output .md."""
     from .config import resolve_compute_type
@@ -72,6 +89,9 @@ def process_file(
         compute_type = config.get("compute_type", "auto")
     if vad_filter is None:
         vad_filter = config.get("vad_filter", True)
+    if hotwords is None:
+        config_hotwords = config.get("hotwords", [])
+        hotwords = config_hotwords if config_hotwords else None
 
     check_ffmpeg()
     validate_audio(path)
@@ -81,7 +101,7 @@ def process_file(
     out_path = out_dir / (path.stem + ".md")
 
     if out_path.exists() and not overwrite:
-        tqdm.write(f"  Skipping {path.name} (output already exists, use --overwrite to force)")
+        tqdm.write(f"  Skipping {path.name} — already processed (use --overwrite to re-run)")
         return out_path
 
     resolved_ct = resolve_compute_type(compute_type, device)
@@ -101,6 +121,8 @@ def process_file(
         language=language,
         compute_type=compute_type,
         vad_filter=vad_filter,
+        initial_prompt=initial_prompt,
+        hotwords=hotwords,
     )
 
     duration = get_duration(wav_path)
@@ -130,9 +152,11 @@ def process_file(
             )
 
             if enroll_speakers:
-                from .speaker_manager import enroll_speaker
+                from .speaker_manager import enroll_speaker, load_profiles
                 import click
                 speaker_map = {}
+                existing_profiles = load_profiles()
+                existing_names = sorted(existing_profiles.keys())  # stable order
                 click.echo(f"\n  Found {len(unique_speakers)} speaker(s). Let's name them.")
                 for i, label in enumerate(unique_speakers, 1):
                     # Show a sample line for this speaker
@@ -144,23 +168,65 @@ def process_file(
                     sample_text = sample.text.strip() if sample else "(no sample)"
                     click.echo(f"\n  Speaker {i} of {len(unique_speakers)} (heard at {sample_ts}):")
                     click.echo(f'    "{sample_text[:80]}"')
+
+                    # Offer replay loop if --play-audio is set
                     if play_audio and sample:
                         _play_excerpt(wav_path, sample.start, sample.end)
-                    name = click.prompt("  Who is this?").strip()
-                    role = click.prompt("  Role (DM/Player/Guest, optional)", default="").strip()
-                    notes = click.prompt("  Notes (optional)", default="").strip()
+
+                    # Show existing speakers the user can pick by number
+                    if existing_names:
+                        click.echo("  Existing speakers:")
+                        for idx, pname in enumerate(existing_names, 1):
+                            p = existing_profiles[pname]
+                            role_str = f" ({p.role})" if p.role else ""
+                            click.echo(f"    {idx}. {p.display_name}{role_str}")
+                        click.echo("  Enter a number to select, or type a new name.")
+
+                    # Name prompt — loop to support 'r' replay and numeric selection
+                    name = ""
+                    while True:
+                        prompt_hint = " (or 'r' to replay)" if play_audio and sample else ""
+                        raw = click.prompt(f"  Who is this?{prompt_hint}").strip()
+                        if play_audio and sample and raw.lower() == "r":
+                            _play_excerpt(wav_path, sample.start, sample.end)
+                            continue
+                        if existing_names and raw.isdigit():
+                            idx = int(raw) - 1
+                            if 0 <= idx < len(existing_names):
+                                name = existing_profiles[existing_names[idx]].display_name
+                                break
+                            else:
+                                click.echo(f"  Please enter a number between 1 and {len(existing_names)}, or a name.")
+                                continue
+                        if raw:
+                            name = raw
+                            break
+
+                    # If user picked an existing profile, skip re-enrollment
+                    is_existing = name in {p.display_name for p in existing_profiles.values()}
+                    if is_existing:
+                        role = existing_profiles.get(
+                            next(k for k, p in existing_profiles.items() if p.display_name == name), None
+                        )
+                        role = role.role if role else ""
+                        notes = ""
+                        click.echo(f"  Using existing profile for {name}.")
+                    else:
+                        role = click.prompt("  Role (DM/Player/Guest, optional)", default="").strip()
+                        notes = click.prompt("  Notes (optional)", default="").strip()
+                        enroll_speaker(
+                            name=name.lower().replace(" ", "_"),
+                            display_name=name,
+                            role=role,
+                            audio_path=wav_path,
+                            segments=diarization,
+                            speaker_label=label,
+                            device=device,
+                            data_dir=None,
+                            notes=notes,
+                        )
+
                     speaker_map[label] = name
-                    enroll_speaker(
-                        name=name.lower().replace(" ", "_"),
-                        display_name=name,
-                        role=role,
-                        audio_path=wav_path,
-                        segments=diarization,
-                        speaker_label=label,
-                        device=device,
-                        data_dir=None,
-                        notes=notes,
-                    )
                     speaker_metadata.append({"name": name, "role": role})
                 click.echo(f"\n  Enrolled {len(unique_speakers)} speakers.")
             else:
@@ -247,8 +313,7 @@ def process_folder(
         progress.set_description(f"Processing {f.name}")
         out_path = out_base / (f.stem + ".md")
         if out_path.exists() and not overwrite:
-            if verbose:
-                tqdm.write(f"  Skipping {f.name} (already exists)")
+            tqdm.write(f"  Skipping {f.name} — already processed (use --overwrite to re-run)")
             continue
         try:
             result = process_file(f, output_dir=output_dir, **kwargs)

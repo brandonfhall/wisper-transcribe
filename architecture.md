@@ -8,7 +8,7 @@
 
 | Component | Library | Purpose |
 |-----------|---------|---------|
-| Transcription | `faster-whisper` (CTranslate2) | 4× faster than openai/whisper, lower VRAM, lazy model caching |
+| Transcription | `faster-whisper` (CTranslate2) | 4× faster than openai/whisper, lower VRAM, lazy model caching; supports `hotwords` and `initial_prompt` for vocabulary guidance |
 | Diarization | `pyannote-audio 4.x` | Speaker segmentation + voice embeddings |
 | Audio loading (diarizer) | `scipy.io.wavfile` | Bypasses `torchcodec` (see [Known Constraints](#known-constraints)) |
 | Audio conversion | `pydub` + ffmpeg | Convert any format → 16kHz mono WAV |
@@ -95,9 +95,10 @@ Audio file
 
 ### Enrollment flow
 1. After diarization, user names each `SPEAKER_XX` label interactively (`--enroll-speakers`)
-2. `speaker_manager.extract_embedding()` slices the WAV to that speaker's segments and runs pyannote's embedding model
-3. 512-dim numpy vector saved to `profiles/embeddings/<name>.npy`
-4. Metadata (display name, role, notes, date) saved to `profiles/speakers.json`
+2. For each speaker, `pipeline.py` shows a sample quote and (with `--play-audio`) plays a clip via `ffplay` subprocess
+3. If profiles already exist, a numbered list is shown; the user can enter a number to reuse an existing profile (skipping embedding extraction) or type a new name to create one
+4. Entering `r` at the name prompt replays the audio clip (only when `--play-audio` is set)
+5. For new speakers: `speaker_manager.extract_embedding()` slices the WAV to that speaker's segments and runs pyannote's embedding model; 512-dim numpy vector saved to `profiles/embeddings/<name>.npy`; metadata saved to `profiles/speakers.json`
 
 ### Matching flow (subsequent runs)
 1. Extract embedding for each detected speaker label
@@ -129,6 +130,18 @@ speechbrain 1.0 lazy-loads optional integrations (k2, transformers, spacy, numba
 
 ### VAD filter via faster-whisper built-in
 `transcribe()` passes `vad_filter=True/False` directly to `_model.transcribe()`. faster-whisper bundles Silero VAD internally; when enabled it skips silence/non-speech frames before feeding audio to Whisper. This is "Option A" from the plan — no separate audio stripping step, no timestamp remapping required. Timestamps in the output remain original-audio-relative. Controlled via `--vad/--no-vad` CLI flag (default: on, from config). `process_file()` uses `vad_filter: Optional[bool] = None` as a sentinel so an unset flag falls through to the config value rather than hard-coding True.
+
+### Custom vocabulary (hotwords / initial_prompt)
+`transcribe()` accepts two optional vocabulary guidance parameters forwarded to `_model.transcribe()`:
+- `hotwords: list[str]` — explicitly boosted tokens (faster-whisper ≥ 1.1). Ideal for proper nouns, character names, and location names that Whisper under-weights (e.g. `["Kyra", "Golarion", "Zeldris"]`).
+- `initial_prompt: str` — text prepended as fake prior context; nudges Whisper toward certain vocabulary and style.
+
+Exposed via `--vocab-file <path>` (newline-separated word list → `hotwords`, lines starting with `#` ignored) and `--initial-prompt "<text>"` CLI flags. The `cli.py` layer reads the file and parses the list before passing to `process_file()`.
+
+Hotwords can also be persisted in `config.toml` as a TOML array via `wisper config set hotwords "word1, word2, ..."`. `process_file()` falls back to `config["hotwords"]` when no `--vocab-file` is passed. `--vocab-file` always takes precedence over config. Config key: `hotwords` (default: `[]`).
+
+### Audio playback during enrollment (`--play-audio`)
+`_play_excerpt()` in `pipeline.py` calls `ffplay` via `subprocess.run()` with `-nodisp -autoexit -loglevel quiet -ss <start> -t <duration>`. ffplay ships with ffmpeg, which is already a hard dependency, making this reliable cross-platform without additional Python audio packages. Replaces an earlier `pydub.playback.play()` implementation that silently failed on Windows due to missing `simpleaudio`/`pyaudio` backends.
 
 ### CTranslate2 compute type
 `load_model()` calls `resolve_compute_type(compute_type, device)` to convert `"auto"` to a concrete CTranslate2 dtype: `"float16"` on CUDA (fast, GPU-native), `"int8"` on CPU (lower memory, minimal accuracy loss). Non-auto values (`float32`, `int8_float16`, etc.) are passed through unchanged. This is configurable via `--compute-type` flag and `wisper config set compute_type`.
@@ -172,7 +185,9 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - **No GPU, no network, no real audio required.** All ML calls (WhisperModel, pyannote Pipeline, embedding extraction) are mocked with `unittest.mock.MagicMock`
 - `scipy.io.wavfile.read` patched in diarizer tests to return a fake `(16000, np.zeros(...))` tuple
 - `tqdm.write` used throughout production code so test output is not polluted by progress bars
+- Enrollment tests patch `wisper_transcribe.speaker_manager.load_profiles` to return `{}` (no existing profiles) to prevent tests from seeing real profiles on the developer's machine
 - Coverage: run `pytest tests/ -v --cov --cov-report=term-missing`
+- Test count: 113 (all mocked, no GPU/network required)
 
 ---
 

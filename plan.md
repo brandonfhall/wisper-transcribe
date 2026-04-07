@@ -220,7 +220,7 @@ torchcodec still cannot find FFmpeg shared DLLs on this Windows install despite 
 - **Expose data paths in `wisper config show`** ✅ — config file, data dir, profiles dir, HF cache all shown.
 - **`wisper config show` model clarity** ✅ — Models section: device, Whisper model, compute type (with auto-resolution), pyannote models.
 - **Enrollment speaker order — chronological** ✅ — speakers sorted by first appearance timestamp in `pipeline.py`.
-- **Audio playback during enrollment** ✅ — `--play-audio` flag; plays up to 10 s via pydub; silent fallback. (PR #3)
+- **Audio playback during enrollment** ✅ — `--play-audio` flag; plays up to 10 s via ffplay subprocess (reliable cross-platform). (PR #3; Windows fix in feat/enrollment-ux)
 - **`wisper speakers reset`** ✅ — deletes all profiles and embeddings with confirmation prompt.
 - **Phase 7 — Docker containerization** ✅ — `Dockerfile` (gpu/cpu targets), `docker-compose.yml`, `WISPER_DATA_DIR` env override in `config.py`. 103 tests.
 - **Third-party warning suppression** ✅ — speechbrain/pyannote/torch noise suppressed by default; `WISPER_DEBUG=1` restores raw output. absl "triton not found" log requires `absl.logging.set_verbosity(ERROR)` (not `logging.getLogger("absl")`). (PR #6, absl fix in PR #7)
@@ -260,6 +260,22 @@ torchcodec still cannot find FFmpeg shared DLLs on this Windows install despite 
 ### ✅ Phase 9 — Compute Type / Quantization Flag
 
 **Status: Complete.** `--compute-type` flag added; `compute_type` in config.toml; `resolve_compute_type()` in `config.py`; shown in run header and `wisper config show`.
+
+---
+
+### ✅ Enrollment UX Improvements (feat/enrollment-ux branch)
+
+**1. Re-play audio during enrollment** ✅
+At the "Who is this?" prompt, entering `r` triggers a second `_play_excerpt` call and re-asks. Only active when `--play-audio` is set. Implemented as a prompt loop in `pipeline.py`.
+
+**2. Select an existing speaker during enrollment** ✅
+Before the name prompt, enrolled speaker profiles are loaded and displayed as a numbered list. User enters a number to reuse an existing profile (skips embedding extraction) or types a new name to create one. Implemented in `pipeline.py` using `load_profiles()`.
+
+**3. Custom vocabulary / hot-words for transcription** ✅
+`--vocab-file <path>` (newline-separated words → `hotwords`, `#`-comments ignored) and `--initial-prompt "<text>"` flags added to CLI. Both threaded through `process_file()` to `transcribe()` which passes them to `_model.transcribe()`. faster-whisper 1.2.1 supports `hotwords` natively. Hotwords also persist in `config.toml` via `wisper config set hotwords "word1, word2"` — `process_file()` falls back to config when no `--vocab-file` is passed.
+
+**4. Show 'already processed' skip message** ✅ (also in this branch)
+Folder-mode skip message now always shown (was `--verbose` only). Single-file message updated to match.
 
 ---
 

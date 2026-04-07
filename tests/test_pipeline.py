@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
@@ -20,10 +21,40 @@ def test_seconds_to_hhmmss():
     assert _seconds_to_hhmmss(3600) == "1:00:00"
 
 
-def test_play_excerpt_swallows_exceptions(tmp_path):
-    """_play_excerpt silently no-ops on any error (missing file, no audio device, etc.)."""
+@patch("wisper_transcribe.pipeline.subprocess.run")
+def test_play_excerpt_calls_ffplay(mock_run, tmp_path):
+    """_play_excerpt invokes ffplay with the correct -ss / -t arguments."""
     from wisper_transcribe.pipeline import _play_excerpt
-    _play_excerpt(tmp_path / "nonexistent.wav", 0.0, 5.0)  # must not raise
+
+    wav = tmp_path / "test.wav"
+    wav.write_bytes(b"")
+    _play_excerpt(wav, 10.0, 15.0)
+
+    mock_run.assert_called_once()
+    cmd = mock_run.call_args[0][0]
+    assert cmd[0] == "ffplay"
+    assert "-ss" in cmd and "10.0" in cmd
+    assert "-t" in cmd and "5.0" in cmd
+
+
+@patch("wisper_transcribe.pipeline.subprocess.run", side_effect=FileNotFoundError)
+def test_play_excerpt_ffplay_not_found(mock_run, tmp_path, capsys):
+    """_play_excerpt warns (does not raise) when ffplay is missing."""
+    from wisper_transcribe.pipeline import _play_excerpt
+
+    _play_excerpt(tmp_path / "test.wav", 0.0, 5.0)  # must not raise
+    out = capsys.readouterr().out
+    assert "ffplay not found" in out
+
+
+@patch("wisper_transcribe.pipeline.subprocess.run", side_effect=subprocess.CalledProcessError(1, "ffplay"))
+def test_play_excerpt_ffplay_error(mock_run, tmp_path, capsys):
+    """_play_excerpt warns (does not raise) when ffplay exits non-zero."""
+    from wisper_transcribe.pipeline import _play_excerpt
+
+    _play_excerpt(tmp_path / "test.wav", 0.0, 5.0)  # must not raise
+    out = capsys.readouterr().out
+    assert "playback failed" in out
 
 
 @patch("wisper_transcribe.pipeline.check_ffmpeg")
@@ -126,9 +157,10 @@ def test_process_file_frontmatter_metadata(
 @patch("wisper_transcribe.diarizer.diarize", return_value=[])
 @patch("wisper_transcribe.aligner.align")
 @patch("wisper_transcribe.speaker_manager.enroll_speaker")
+@patch("wisper_transcribe.speaker_manager.load_profiles", return_value={})
 @patch("click.prompt", return_value="Test")
 def test_enroll_speakers_chronological_order(
-    mock_prompt, mock_enroll, mock_align, mock_diarize, mock_hf_token,
+    mock_prompt, mock_load_profiles, mock_enroll, mock_align, mock_diarize, mock_hf_token,
     mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg,
     tmp_path,
 ):
@@ -164,10 +196,11 @@ def test_enroll_speakers_chronological_order(
 @patch("wisper_transcribe.diarizer.diarize", return_value=[])
 @patch("wisper_transcribe.aligner.align")
 @patch("wisper_transcribe.speaker_manager.enroll_speaker")
+@patch("wisper_transcribe.speaker_manager.load_profiles", return_value={})
 @patch("wisper_transcribe.pipeline._play_excerpt")
 @patch("click.prompt", return_value="Alice")
 def test_enroll_play_audio_calls_play_excerpt(
-    mock_prompt, mock_play, mock_enroll, mock_align, mock_diarize, mock_hf_token,
+    mock_prompt, mock_play, mock_load_profiles, mock_enroll, mock_align, mock_diarize, mock_hf_token,
     mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg,
     tmp_path,
 ):
@@ -198,13 +231,14 @@ def test_enroll_play_audio_calls_play_excerpt(
 @patch("wisper_transcribe.diarizer.diarize", return_value=[])
 @patch("wisper_transcribe.aligner.align")
 @patch("wisper_transcribe.speaker_manager.enroll_speaker")
+@patch("wisper_transcribe.speaker_manager.load_profiles", return_value={})
 @patch("click.prompt", return_value="Alice")
 def test_enroll_play_audio_false_does_not_play(
-    mock_prompt, mock_enroll, mock_align, mock_diarize, mock_hf_token,
+    mock_prompt, mock_load_profiles, mock_enroll, mock_align, mock_diarize, mock_hf_token,
     mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg,
     tmp_path,
 ):
-    """play_audio=False (default) never calls pydub playback."""
+    """play_audio=False (default) never calls _play_excerpt."""
     audio = tmp_path / "session01.mp3"
     audio.write_bytes(b"fake audio")
     mock_convert.return_value = audio
@@ -219,3 +253,186 @@ def test_enroll_play_audio_false_does_not_play(
         from wisper_transcribe.pipeline import process_file
         process_file(audio, output_dir=tmp_path, device="cpu", enroll_speakers=True, play_audio=False)
         mock_play.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Feature 1: replay 'r' during enrollment
+# ---------------------------------------------------------------------------
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=600.0)
+@patch("wisper_transcribe.pipeline.transcribe")
+@patch("wisper_transcribe.pipeline.get_hf_token", return_value="fake-token")
+@patch("wisper_transcribe.diarizer.diarize", return_value=[])
+@patch("wisper_transcribe.aligner.align")
+@patch("wisper_transcribe.speaker_manager.enroll_speaker")
+@patch("wisper_transcribe.speaker_manager.load_profiles", return_value={})
+@patch("wisper_transcribe.pipeline._play_excerpt")
+def test_enroll_replay_r_triggers_second_play(
+    mock_play, mock_load_profiles, mock_enroll, mock_align, mock_diarize, mock_hf_token,
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg,
+    tmp_path,
+):
+    """Entering 'r' at the name prompt replays the excerpt and re-asks."""
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    mock_convert.return_value = audio
+    mock_transcribe.return_value = [TranscriptionSegment(start=0.0, end=5.0, text="Hello")]
+    mock_align.return_value = [AlignedSegment(start=0.0, end=5.0, text="Hello", speaker="SPEAKER_00")]
+
+    # First prompt call returns 'r' (replay), second returns the actual name
+    prompt_responses = iter(["r", "Alice", "", ""])
+    with patch("click.prompt", side_effect=lambda *a, **kw: next(prompt_responses)):
+        from wisper_transcribe.pipeline import process_file
+        process_file(audio, output_dir=tmp_path, device="cpu", enroll_speakers=True, play_audio=True)
+
+    # _play_excerpt: once on initial display + once for replay = 2 calls
+    assert mock_play.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Feature 2: pick existing speaker by number
+# ---------------------------------------------------------------------------
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=600.0)
+@patch("wisper_transcribe.pipeline.transcribe")
+@patch("wisper_transcribe.pipeline.get_hf_token", return_value="fake-token")
+@patch("wisper_transcribe.diarizer.diarize", return_value=[])
+@patch("wisper_transcribe.aligner.align")
+@patch("wisper_transcribe.speaker_manager.enroll_speaker")
+def test_enroll_pick_existing_speaker_skips_enroll(
+    mock_enroll, mock_align, mock_diarize, mock_hf_token,
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg,
+    tmp_path,
+):
+    """Entering a number at the name prompt selects an existing speaker; enroll_speaker is NOT called."""
+    from wisper_transcribe.models import SpeakerProfile
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    mock_convert.return_value = audio
+    mock_transcribe.return_value = [TranscriptionSegment(start=0.0, end=5.0, text="Hello")]
+    mock_align.return_value = [AlignedSegment(start=0.0, end=5.0, text="Hello", speaker="SPEAKER_00")]
+
+    existing = {
+        "alice": SpeakerProfile(
+            name="alice", display_name="Alice", role="DM",
+            embedding_path=tmp_path / "alice.npy",
+            enrolled_date="2026-01-01", enrollment_source="ep1.mp3",
+        )
+    }
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value=existing):
+        with patch("click.prompt", return_value="1"):
+            from wisper_transcribe.pipeline import process_file
+            out = process_file(audio, output_dir=tmp_path, device="cpu", enroll_speakers=True)
+
+    mock_enroll.assert_not_called()
+    content = out.read_text(encoding="utf-8")
+    assert "Alice" in content
+
+
+# ---------------------------------------------------------------------------
+# Feature 3: hotwords / initial_prompt pass-through
+# ---------------------------------------------------------------------------
+
+def test_transcribe_passes_hotwords():
+    """hotwords list is forwarded to model.transcribe()."""
+    from unittest.mock import MagicMock
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = (iter([]), MagicMock(duration=1.0))
+
+    import wisper_transcribe.transcriber as t
+    t._model = mock_model
+
+    t.transcribe(Path("fake.wav"), device="cpu", hotwords=["Kyra", "Golarion"])
+    _, kwargs = mock_model.transcribe.call_args
+    assert kwargs.get("hotwords") == ["Kyra", "Golarion"]
+
+
+def test_transcribe_passes_initial_prompt():
+    """initial_prompt string is forwarded to model.transcribe()."""
+    from unittest.mock import MagicMock
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = (iter([]), MagicMock(duration=1.0))
+
+    import wisper_transcribe.transcriber as t
+    t._model = mock_model
+
+    t.transcribe(Path("fake.wav"), device="cpu", initial_prompt="Kyra Zeldris Golarion")
+    _, kwargs = mock_model.transcribe.call_args
+    assert kwargs.get("initial_prompt") == "Kyra Zeldris Golarion"
+
+
+def test_transcribe_hotwords_none_by_default():
+    """hotwords defaults to None (not passed as a non-None value)."""
+    from unittest.mock import MagicMock
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = (iter([]), MagicMock(duration=1.0))
+
+    import wisper_transcribe.transcriber as t
+    t._model = mock_model
+
+    t.transcribe(Path("fake.wav"), device="cpu")
+    _, kwargs = mock_model.transcribe.call_args
+    assert kwargs.get("hotwords") is None
+    assert kwargs.get("initial_prompt") is None
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=300.0)
+@patch("wisper_transcribe.pipeline.transcribe")
+def test_process_file_uses_config_hotwords(
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg, tmp_path
+):
+    """When hotwords=None is passed, process_file falls back to config['hotwords']."""
+    audio = tmp_path / "ep.mp3"
+    audio.write_bytes(b"fake")
+    mock_convert.return_value = audio
+    mock_transcribe.return_value = FAKE_SEGMENTS
+
+    with patch("wisper_transcribe.pipeline.load_config", return_value={
+        "hotwords": ["Kyra", "Golarion"],
+        "vad_filter": True,
+        "model": "medium",
+        "language": "en",
+        "compute_type": "auto",
+    }):
+        from wisper_transcribe.pipeline import process_file
+        process_file(audio, output_dir=tmp_path, device="cpu", no_diarize=True)
+
+    _, kwargs = mock_transcribe.call_args
+    assert kwargs.get("hotwords") == ["Kyra", "Golarion"]
+
+
+# ---------------------------------------------------------------------------
+# Feature 4: always show skip message for already-processed files
+# ---------------------------------------------------------------------------
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=300.0)
+@patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
+def test_skip_message_shown_without_verbose(
+    mock_t, mock_d, mock_c, mock_v, mock_f, tmp_path, capsys
+):
+    """Already-processed skip message is shown regardless of verbose flag."""
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake")
+    (tmp_path / "session01.md").write_text("existing")
+    mock_c.side_effect = lambda p: p
+
+    from wisper_transcribe.pipeline import process_folder
+
+    process_folder(tmp_path, output_dir=tmp_path, no_diarize=True, device="cpu", verbose=False)
+
+    captured = capsys.readouterr()
+    assert "already processed" in captured.out

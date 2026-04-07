@@ -131,6 +131,23 @@ wisper will transcribe, detect speakers, then prompt you for each one:
   Wrote session01.md
 ```
 
+Add `--play-audio` to hear a short clip of each speaker before naming them. If you already have enrolled profiles, the prompt shows a numbered list so you can select by number instead of retyping:
+
+```
+  Speaker 1 of 6 (heard at 00:00:12):
+    "Welcome back everyone..."
+  [playing audio excerpt...]
+  Existing speakers:
+    1. Alice (DM)
+    2. Bob (Player)
+    3. Charlie (Player)
+  Enter a number to select, or type a new name.
+  Who is this? (or 'r' to replay): 1
+  Using existing profile for Alice.
+```
+
+Entering `r` replays the clip. Entering a number reuses an existing profile without extracting a new embedding.
+
 ### All future sessions — fully automatic
 
 ```bash
@@ -235,6 +252,13 @@ wisper transcribe <path>
                            (default: auto → float16 on CUDA, int8 on CPU)
   --vad / --no-vad         Voice activity detection — skips silence before transcription
                            (default: on; improves speed and accuracy on audio with pauses)
+  --vocab-file FILE        Text file of custom words/names (one per line) to boost accuracy.
+                           Useful for character names, locations, and game-specific terms
+                           that Whisper might not recognize (e.g. "Kyra", "Golarion").
+                           Lines starting with # are ignored.
+                           Overrides hotwords stored in config.
+  --initial-prompt TEXT    Text prepended as prior context to guide transcription style
+                           and vocabulary. Alternative to --vocab-file for short hints.
   --overwrite              Re-process files that already have output
   --verbose                Show detailed progress
 ```
@@ -315,6 +339,31 @@ No problem — their profile is simply ignored for that file. Unused profiles ne
 wisper fix session03.md --speaker "Alice" --name "Diana"
 ```
 
+### Improve transcription accuracy for character names and locations
+
+Pass a custom word list to boost recognition of proper nouns Whisper doesn't know:
+
+```bash
+wisper transcribe session01.mp3 --vocab-file characters.txt
+```
+
+`characters.txt` — one word per line, `#` comments ignored:
+```
+# Glass Cannon characters
+Kyra
+Golarion
+Zeldris
+Korvosa
+```
+
+To apply hotwords to every future transcription automatically, save them to config:
+
+```bash
+wisper config set hotwords "Kyra, Golarion, Zeldris, Korvosa"
+```
+
+The `--vocab-file` flag takes precedence over the stored config when both are present.
+
 ---
 
 ## Supported Audio Formats
@@ -370,7 +419,7 @@ wisper-transcribe/
 .venv/bin/pytest tests/ -v        # Mac/Linux
 ```
 
-Tests mock all ML models — no GPU, network, or real audio files required. (103 tests)
+Tests mock all ML models — no GPU, network, or real audio files required. (113 tests)
 
 ---
 
@@ -465,5 +514,7 @@ Unset it (or open a new terminal) to return to clean output.
 - [x] Phase 7: Docker containerization (GPU + CPU targets, `WISPER_DATA_DIR` override)
 - [x] Phase 8: VAD filter (`--vad/--no-vad`) via faster-whisper built-in Silero VAD
 - [x] Phase 9: Compute type / quantization (`--compute-type`)
+- [x] Enrollment UX: replay audio with `r`, select existing speaker by number, `--vocab-file` / `--initial-prompt`
+- [x] Windows audio playback fix: `--play-audio` now uses `ffplay` subprocess (reliable on all platforms)
 - [ ] Phase 10: Parallel folder processing (`--workers N`, CPU-only)
 - [ ] Phase 11: Optional GUI (Textual or tkinter)
