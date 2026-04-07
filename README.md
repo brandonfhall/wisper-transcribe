@@ -14,7 +14,7 @@ Runs entirely offline. No cloud APIs. Outputs clean markdown files ready for Not
 - GPU recommended but not required (CPU works, just slower)
 
 **Windows (CUDA):** 
-- Install ffmpeg via `winget install Gyan.FFmpeg`
+- Install ffmpeg via `winget install Gyan.FFmpeg.shared`
 - Install CUDA Toolkit via `winget install Nvidia.CUDA` (Restart your terminal/VS Code after installing)
 - *Note: If you encounter `cublas64_12.dll` or `zlibwapi.dll` not found errors, manually download NVIDIA cuDNN and place its `.dll` files in your CUDA `bin` directory (usually `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x\bin`).*
 
