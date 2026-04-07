@@ -261,6 +261,8 @@ wisper transcribe <path>
   --initial-prompt TEXT    Text prepended as prior context to guide transcription style
                            and vocabulary. Alternative to --vocab-file for short hints.
   --overwrite              Re-process files that already have output
+  --workers INT            Parallel workers for folder processing — CPU only;
+                           clamped to 1 on GPU (default: 1)
   --verbose                Show detailed progress
 ```
 
@@ -304,6 +306,56 @@ wisper config set hf_token hf_abc123...   # store HuggingFace token
 wisper config set similarity_threshold 0.70  # stricter speaker matching
 wisper config path                        # show where config.toml lives
 ```
+
+### `wisper server`
+
+Start the browser-based web UI:
+
+```bash
+wisper server                  # default: http://0.0.0.0:8080
+wisper server --port 9000      # custom port
+wisper server --reload         # dev mode — auto-reloads on code changes
+```
+
+Open `http://localhost:8080` in your browser. All features available via the CLI are also accessible through the web UI: transcription, speaker enrollment, transcript browsing, config management.
+
+---
+
+## Web UI
+
+A full-featured browser interface for wisper. No separate install — included in the same package.
+
+### Quick start
+
+```bash
+wisper server
+# → Open http://localhost:8080
+```
+
+### Features
+
+| Page | URL | Description |
+|------|-----|-------------|
+| Dashboard | `/` | Job queue, system status (device, model, HF token), quick upload |
+| Transcribe | `/transcribe` | Drag-and-drop upload, all transcription options, live progress stream |
+| Transcripts | `/transcripts` | Browse output files, view rendered markdown, download |
+| Speakers | `/speakers` | Enroll, rename, remove speaker profiles |
+| Config | `/config` | View and edit all settings |
+
+### Speaker enrollment in the web UI
+
+The interactive CLI enrollment prompt is replaced by a post-job wizard. After transcription completes, click **Name Speakers** on the job detail page to assign names to detected speakers one at a time, with existing profiles ranked by voice similarity.
+
+### Offline-first
+
+All web assets (HTMX, Tailwind CSS) are served locally — no CDN or internet connection required after installation.
+
+> **Note for local (non-Docker) installs:** HTMX is vendored in `src/wisper_transcribe/static/htmx.min.js`. The file in the repo is a placeholder; download the real file once with:
+> ```bash
+> curl -sL "https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js" \
+>      -o src/wisper_transcribe/static/htmx.min.js
+> ```
+> The Docker build does this automatically.
 
 ---
 
@@ -420,7 +472,7 @@ wisper-transcribe/
 .venv/bin/pytest tests/ -v        # Mac/Linux
 ```
 
-Tests mock all ML models — no GPU, network, or real audio files required. (117 tests)
+Tests mock all ML models — no GPU, network, or real audio files required. (152 tests)
 
 CI runs the test suite across Python 3.10–3.14 on every push and PR. Python 3.14 is treated as experimental (non-blocking). A weekly job also runs with the latest available package versions to catch forward-compatibility issues early.
 
@@ -453,11 +505,28 @@ docker compose run wisper wisper transcribe /app/input/session02.mp3
 # Output appears in ./output/
 ```
 
-### CPU-only
+### CPU-only (CLI)
 
 ```bash
 docker compose build wisper-cpu
 docker compose run wisper-cpu wisper transcribe /app/input/session.mp3
+```
+
+### Web UI
+
+```bash
+# GPU web server
+docker compose up wisper-web
+# → Open http://localhost:8080
+
+# CPU-only web server
+docker compose up wisper-cpu-web
+# → Open http://localhost:8080
+```
+
+First-time setup (token + model download) still required:
+```bash
+docker compose run wisper-web wisper setup
 ```
 
 ### Volume layout
@@ -519,5 +588,5 @@ Unset it (or open a new terminal) to return to clean output.
 - [x] Phase 9: Compute type / quantization (`--compute-type`)
 - [x] Enrollment UX: replay audio with `r`, select existing speaker by number, `--vocab-file` / `--initial-prompt`
 - [x] Windows audio playback fix: `--play-audio` now uses `ffplay` subprocess (reliable on all platforms)
-- [ ] Phase 10: Parallel folder processing (`--workers N`, CPU-only)
-- [ ] Phase 11: Optional GUI (Textual or tkinter)
+- [x] Phase 10: Parallel folder processing (`--workers N`, CPU-only)
+- [x] Phase 11: Browser-based web UI (`wisper server`, HTMX + FastAPI + Tailwind, Docker web services)
