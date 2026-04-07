@@ -96,9 +96,10 @@ Audio file
 ### Enrollment flow
 1. After diarization, user names each `SPEAKER_XX` label interactively (`--enroll-speakers`)
 2. For each speaker, `pipeline.py` shows a sample quote and (with `--play-audio`) plays a clip via `ffplay` subprocess
-3. If profiles already exist, a numbered list is shown; the user can enter a number to reuse an existing profile (skipping embedding extraction) or type a new name to create one
-4. Entering `r` at the name prompt replays the audio clip (only when `--play-audio` is set)
-5. For new speakers: `speaker_manager.extract_embedding()` slices the WAV to that speaker's segments and runs pyannote's embedding model; 512-dim numpy vector saved to `profiles/embeddings/<name>.npy`; metadata saved to `profiles/speakers.json`
+3. If profiles already exist, `extract_embedding()` is called for the current speaker label and scored against all enrolled profile embeddings via cosine similarity; profiles are displayed ranked by score (descending) with a percentage and `★` for matches above the threshold
+4. The user can enter a number to reuse an existing profile (skipping re-enrollment) or type a new name to create one; if reusing, they are offered the option to blend this episode's audio into the profile via EMA (default: No)
+5. Entering `r` at the name prompt replays the audio clip (only when `--play-audio` is set)
+6. For new speakers: `speaker_manager.extract_embedding()` slices the WAV to that speaker's segments and runs pyannote's embedding model; 512-dim numpy vector saved to `profiles/embeddings/<name>.npy`; metadata saved to `profiles/speakers.json`
 
 ### Matching flow (subsequent runs)
 1. Extract embedding for each detected speaker label
@@ -187,7 +188,7 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - `tqdm.write` used throughout production code so test output is not polluted by progress bars
 - Enrollment tests patch `wisper_transcribe.speaker_manager.load_profiles` to return `{}` (no existing profiles) to prevent tests from seeing real profiles on the developer's machine
 - Coverage: run `pytest tests/ -v --cov --cov-report=term-missing`
-- Test count: 115 (all mocked, no GPU/network required)
+- Test count: 117 (all mocked, no GPU/network required)
 
 **CI matrix** (`.github/workflows/ci.yml`):
 - Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)

@@ -311,6 +311,7 @@ def test_enroll_pick_existing_speaker_skips_enroll(
     tmp_path,
 ):
     """Selecting an existing speaker by number skips enroll_speaker; confirm=No skips embedding update."""
+    import numpy as np
     from wisper_transcribe.models import SpeakerProfile
 
     audio = tmp_path / "session01.mp3"
@@ -319,19 +320,24 @@ def test_enroll_pick_existing_speaker_skips_enroll(
     mock_transcribe.return_value = [TranscriptionSegment(start=0.0, end=5.0, text="Hello")]
     mock_align.return_value = [AlignedSegment(start=0.0, end=5.0, text="Hello", speaker="SPEAKER_00")]
 
+    fake_emb = np.zeros(512, dtype=np.float32)
+    npy_path = tmp_path / "alice.npy"
+    np.save(str(npy_path), fake_emb)
+
     existing = {
         "alice": SpeakerProfile(
             name="alice", display_name="Alice", role="DM",
-            embedding_path=tmp_path / "alice.npy",
+            embedding_path=npy_path,
             enrolled_date="2026-01-01", enrollment_source="ep1.mp3",
         )
     }
 
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value=existing):
-        with patch("click.prompt", return_value="1"):
-            with patch("click.confirm", return_value=False) as mock_confirm:
-                from wisper_transcribe.pipeline import process_file
-                out = process_file(audio, output_dir=tmp_path, device="cpu", enroll_speakers=True)
+        with patch("wisper_transcribe.speaker_manager.extract_embedding", return_value=fake_emb):
+            with patch("click.prompt", return_value="1"):
+                with patch("click.confirm", return_value=False) as mock_confirm:
+                    from wisper_transcribe.pipeline import process_file
+                    out = process_file(audio, output_dir=tmp_path, device="cpu", enroll_speakers=True)
 
     mock_enroll.assert_not_called()
     mock_confirm.assert_called_once()
@@ -362,16 +368,18 @@ def test_enroll_pick_existing_speaker_confirm_yes_updates_embedding(
     mock_transcribe.return_value = [TranscriptionSegment(start=0.0, end=5.0, text="Hello")]
     mock_align.return_value = [AlignedSegment(start=0.0, end=5.0, text="Hello", speaker="SPEAKER_00")]
 
+    import numpy as np
+    fake_emb = np.zeros(512, dtype=np.float32)
+    npy_path = tmp_path / "alice.npy"
+    np.save(str(npy_path), fake_emb)
+
     existing = {
         "alice": SpeakerProfile(
             name="alice", display_name="Alice", role="DM",
-            embedding_path=tmp_path / "alice.npy",
+            embedding_path=npy_path,
             enrolled_date="2026-01-01", enrollment_source="ep1.mp3",
         )
     }
-
-    import numpy as np
-    fake_emb = np.zeros(512, dtype=np.float32)
 
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value=existing):
         with patch("click.prompt", return_value="1"):
@@ -381,9 +389,61 @@ def test_enroll_pick_existing_speaker_confirm_yes_updates_embedding(
                         from wisper_transcribe.pipeline import process_file
                         process_file(audio, output_dir=tmp_path, device="cpu", enroll_speakers=True)
 
-    mock_extract.assert_called_once()
+    # extract_embedding called twice: once for ranking display, once for EMA update
+    assert mock_extract.call_count == 2
     mock_update.assert_called_once_with("alice", fake_emb)
     mock_enroll.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=600.0)
+@patch("wisper_transcribe.pipeline.transcribe")
+@patch("wisper_transcribe.pipeline.get_hf_token", return_value="fake-token")
+@patch("wisper_transcribe.diarizer.diarize", return_value=[])
+@patch("wisper_transcribe.aligner.align")
+@patch("wisper_transcribe.speaker_manager.enroll_speaker")
+def test_enroll_existing_speakers_ranked_by_similarity(
+    mock_enroll, mock_align, mock_diarize, mock_hf_token,
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg,
+    tmp_path, capsys,
+):
+    """Existing speakers are listed in descending similarity order with scores."""
+    import numpy as np
+    from wisper_transcribe.models import SpeakerProfile
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    mock_convert.return_value = audio
+    mock_transcribe.return_value = [TranscriptionSegment(start=0.0, end=5.0, text="Hello")]
+    mock_align.return_value = [AlignedSegment(start=0.0, end=5.0, text="Hello", speaker="SPEAKER_00")]
+
+    # Alice embedding is close to the query; Bob is orthogonal (score ~0)
+    alice_emb = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    bob_emb   = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    query_emb = np.array([0.9, 0.1, 0.0], dtype=np.float32)  # closer to Alice
+
+    for name, emb in [("alice", alice_emb), ("bob", bob_emb)]:
+        np.save(str(tmp_path / f"{name}.npy"), emb)
+
+    existing = {
+        "alice": SpeakerProfile("alice", "Alice", "DM", tmp_path / "alice.npy", "2026-01-01", "ep1.mp3"),
+        "bob":   SpeakerProfile("bob",   "Bob",   "Player", tmp_path / "bob.npy", "2026-01-01", "ep1.mp3"),
+    }
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value=existing):
+        with patch("wisper_transcribe.speaker_manager.extract_embedding", return_value=query_emb):
+            with patch("click.prompt", return_value="Alice"):
+                with patch("click.confirm", return_value=False):
+                    from wisper_transcribe.pipeline import process_file
+                    process_file(audio, output_dir=tmp_path, device="cpu", enroll_speakers=True)
+
+    out = capsys.readouterr().out
+    alice_pos = out.index("Alice")
+    bob_pos   = out.index("Bob")
+    assert alice_pos < bob_pos, "Alice (higher similarity) should appear before Bob"
 
 
 # ---------------------------------------------------------------------------

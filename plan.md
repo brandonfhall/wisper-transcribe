@@ -269,7 +269,7 @@ torchcodec still cannot find FFmpeg shared DLLs on this Windows install despite 
 At the "Who is this?" prompt, entering `r` triggers a second `_play_excerpt` call and re-asks. Only active when `--play-audio` is set. Implemented as a prompt loop in `pipeline.py`.
 
 **2. Select an existing speaker during enrollment** ✅
-Before the name prompt, enrolled speaker profiles are loaded and displayed as a numbered list. User enters a number to reuse an existing profile (skips embedding extraction) or types a new name to create one. Implemented in `pipeline.py` using `load_profiles()`.
+Before the name prompt, enrolled speaker profiles are ranked by cosine similarity to the current speaker's embedding and displayed with percentage scores (`★` for matches above threshold). User enters a number to reuse an existing profile (offered EMA update, default No) or types a new name to create one. Implemented in `pipeline.py` using `load_profiles()`, `extract_embedding()`, and `_cosine_similarity()`.
 
 **3. Custom vocabulary / hot-words for transcription** ✅
 `--vocab-file <path>` (newline-separated words → `hotwords`, `#`-comments ignored) and `--initial-prompt "<text>"` flags added to CLI. Both threaded through `process_file()` to `transcribe()` which passes them to `_model.transcribe()`. faster-whisper 1.2.1 supports `hotwords` natively. Hotwords also persist in `config.toml` via `wisper config set hotwords "word1, word2"` — `process_file()` falls back to config when no `--vocab-file` is passed.
