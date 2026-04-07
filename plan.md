@@ -350,9 +350,7 @@ A 3-hour session at ~150 wpm ≈ 27,000 words ≈ 35,000 tokens. Most local mode
 
 **Context:** GPU processing is always the bottleneck — faster-whisper and pyannote are not thread-safe when sharing a GPU, and loading duplicate model copies would exhaust VRAM. Parallelism only makes sense on CPU-only deployments (e.g. a Linux server processing a large queue of files overnight).
 
-**What to build:** `--workers N` flag on `wisper transcribe <folder>`. Uses `concurrent.futures.ThreadPoolExecutor`. Each worker gets its own model instance (no sharing). Guard: if `device != "cpu"`, emit a warning and clamp workers to 1. Default workers=1 (current behavior unchanged for all GPU users).
-
-**When to build:** Only if there's an actual CPU-server use case. Not worth building for the primary RTX 3090 / M5 Mac workflow.
+**What was built:** `--workers N` flag on `wisper transcribe <folder>`. Uses `concurrent.futures.ProcessPoolExecutor` (not ThreadPoolExecutor — the module-level `_model`/`_pipeline` globals are not thread-safe; each subprocess gets its own isolated module state). Guard: if effective device != `"cpu"` (after resolving `"auto"`), emit a warning and clamp workers to 1. Default workers=1 (unchanged for all GPU users). ✓ Implemented Phase 10.
 
 ---
 

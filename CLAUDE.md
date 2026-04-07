@@ -88,14 +88,54 @@ Detailed technical reference lives in [`architecture.md`](architecture.md). It c
 ```
 wisper-transcribe/
 ├── src/wisper_transcribe/   # all source code
+│   ├── web/                 # Phase 11: FastAPI web UI
+│   │   ├── app.py
+│   │   ├── jobs.py
+│   │   ├── routes/
+│   │   └── templates/
+│   └── static/              # Phase 11: vendored assets (htmx.min.js, tailwind.min.css, wisp.svg)
 ├── tests/                   # mirrors src structure
 ├── .venv/                   # local venv (gitignored)
 ├── Dockerfile               # gpu and cpu build targets
-├── docker-compose.yml       # wisper (GPU) and wisper-cpu services
+├── docker-compose.yml       # wisper (GPU), wisper-cpu, wisper-web, wisper-cpu-web services
 ├── .dockerignore
+├── tailwind.config.js       # Phase 11: Tailwind CSS config (content paths)
 ├── pyproject.toml
 └── CLAUDE.md                # this file
 ```
+
+## Running the Web UI (Phase 11)
+
+```bash
+# Start the server (works immediately — Tailwind CSS is pre-built and committed)
+wisper server                          # defaults: host=0.0.0.0, port=8080
+wisper server --port 9000              # custom port
+wisper server --reload                 # dev mode auto-reload
+
+# Docker
+docker compose up wisper-web           # GPU
+docker compose up wisper-cpu-web       # CPU-only
+# → Open http://localhost:8080
+```
+
+All web assets (HTMX, Tailwind CSS) are served locally — no CDN or internet required at runtime.
+
+## Web UI Development (Phase 11)
+
+The compiled `tailwind.min.css` is committed to the repo. `pip install -e .` → `wisper server` works with no extra steps.
+
+If you **modify HTML templates** and add/remove Tailwind utility classes, regenerate the CSS:
+
+```bash
+pip install -e .[dev]       # installs pytailwindcss (wraps Tailwind standalone binary, no Node.js)
+python -m pytailwindcss -i src/wisper_transcribe/static/input.css \
+    -o src/wisper_transcribe/static/tailwind.min.css --minify
+# commit tailwind.min.css along with your template changes
+```
+
+HTMX is vendored at `src/wisper_transcribe/static/htmx.min.js` (committed, no build step needed).
+
+Web route tests: `pytest tests/test_web_*.py -v`
 
 ## Build Phases
 
@@ -108,5 +148,5 @@ wisper-transcribe/
 - Phase 7: Docker containerization ✓
 - Phase 8: VAD filter (`--vad/--no-vad`) ✓
 - Phase 9: Compute type / quantization (`--compute-type`) ✓
-- Phase 10: Parallel folder processing (CPU-only, `--workers N`) — future
-- Phase 11: Optional GUI — future
+- Phase 10: Parallel folder processing (CPU-only, `--workers N`) ✓
+- Phase 11: Browser-based web UI (`wisper server`) ✓

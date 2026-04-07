@@ -44,6 +44,8 @@ def main():
               help="Text file of custom words/names (one per line) to boost transcription accuracy")
 @click.option("--initial-prompt", default=None,
               help="Text prepended as context to guide transcription style and vocabulary")
+@click.option("--workers", default=1, type=click.IntRange(min=1),
+              help="Parallel workers for folder processing (CPU-only; clamped to 1 on GPU)")
 @click.option("--verbose", is_flag=True, default=False, help="Show detailed progress")
 def transcribe(
     path: Path,
@@ -63,6 +65,7 @@ def transcribe(
     vad: Optional[bool],
     vocab_file: Optional[Path],
     initial_prompt: Optional[str],
+    workers: int,
     verbose: bool,
 ):
     """Transcribe an audio file (or folder of files) to markdown."""
@@ -96,7 +99,7 @@ def transcribe(
 
     if path.is_dir():
         click.echo(f"Processing folder: {path}")
-        successes, errors = process_folder(path, verbose=verbose, **kwargs)
+        successes, errors = process_folder(path, verbose=verbose, workers=workers, **kwargs)
         skipped = sum(
             1 for f in path.iterdir()
             if f.suffix.lower() in _audio_extensions()

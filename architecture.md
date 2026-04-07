@@ -160,6 +160,9 @@ Hotwords can also be persisted in `config.toml` as a TOML array via `wisper conf
 ### Module-level model caches
 `_model` (transcriber) and `_pipeline` (diarizer) are module-level globals. This avoids reloading multi-GB models between files when processing a folder. The caches are intentionally reset to `None` in tests.
 
+### Parallel folder processing (`--workers N`)
+`process_folder()` accepts a `workers` parameter (default 1). When `workers > 1`, it uses `concurrent.futures.ProcessPoolExecutor` — **not** `ThreadPoolExecutor` — because `_model` and `_pipeline` are module-level globals that are not thread-safe. Each subprocess gets its own copy of the module, so globals are isolated. Guard: if the effective device resolves to anything other than `"cpu"` (after resolving `"auto"`), `workers` is clamped to 1 with a warning, because GPU memory cannot be shared across processes. CPU-only deployments (e.g. a batch server) can safely use multiple workers. `ProcessPoolExecutor` is imported at module level in `pipeline.py` so tests can patch it at `wisper_transcribe.pipeline.ProcessPoolExecutor`.
+
 ### pyproject.toml torch version
 `torch>=2.8.0` is required because `pyannote-audio 4.x` declares this minimum. The CUDA build must be installed from `https://download.pytorch.org/whl/cu126` — PyPI only ships the CPU-only build. The `setup.ps1` script handles this automatically on Windows.
 
@@ -214,7 +217,7 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 |-----------|--------|
 | torchcodec on Windows | Requires `Gyan.FFmpeg.Shared` (full-shared build). Currently bypassed by scipy waveform pre-loading in `diarize()` and `extract_embedding()`; torchcodec would work after installing the shared build and restarting |
 | MPS on Apple Silicon | faster-whisper (CTranslate2) has no MPS backend — transcription always uses CPU on Mac. pyannote diarization and speaker embeddings run on MPS when available (auto-detected). |
-| Thread safety | `_model` and `_pipeline` globals are not thread-safe; parallel folder processing would require per-worker instances |
+| Thread safety | `_model` and `_pipeline` globals are not thread-safe; parallel folder processing uses `ProcessPoolExecutor` so each worker is a separate process with isolated module state |
 | pyannote license | HuggingFace token + one-time model license acceptance required (free) |
 
 ---
