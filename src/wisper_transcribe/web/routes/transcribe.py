@@ -239,8 +239,7 @@ async def enroll_form(request: Request, job_id: str) -> HTMLResponse:
 @router.get("/jobs/{job_id}/excerpt/{speaker_name}")
 async def speaker_excerpt(request: Request, job_id: str, speaker_name: str) -> Response:
     """Serve a short audio clip for a detected speaker (used in enrollment wizard)."""
-    import re
-    if not re.match(r"^[\w\- ]+$", speaker_name):
+    if "/" in speaker_name or "\\" in speaker_name or "\x00" in speaker_name or ".." in speaker_name:
         return HTMLResponse(content="Invalid speaker name", status_code=400)
     queue = _get_queue(request)
     job = queue.get(job_id)

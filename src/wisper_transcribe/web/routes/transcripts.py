@@ -1,8 +1,8 @@
 """Transcripts route — browse and view markdown transcripts."""
 from __future__ import annotations
 
-import re
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
@@ -64,8 +64,8 @@ async def transcripts_list(request: Request) -> HTMLResponse:
 
 @router.get("/{name}", response_class=HTMLResponse)
 async def transcript_detail(request: Request, name: str) -> HTMLResponse:
-    # Sanitize name — allow only alphanumerics, hyphens, underscores
-    if not re.match(r"^[\w\-]+$", name):
+    # Reject path traversal attempts — disallow directory separators and null bytes
+    if "/" in name or "\\" in name or "\x00" in name or ".." in name:
         return HTMLResponse(content="Invalid name", status_code=400)
 
     out_dir = _output_dir(request)
@@ -94,7 +94,7 @@ async def transcript_detail(request: Request, name: str) -> HTMLResponse:
 
 @router.get("/{name}/download")
 async def transcript_download(request: Request, name: str) -> FileResponse:
-    if not re.match(r"^[\w\-]+$", name):
+    if "/" in name or "\\" in name or "\x00" in name or ".." in name:
         return HTMLResponse(content="Invalid name", status_code=400)
     out_dir = _output_dir(request)
     md_path = out_dir / f"{name}.md"
@@ -110,7 +110,7 @@ async def transcript_download(request: Request, name: str) -> FileResponse:
 @router.post("/{name}/fix-speaker", response_class=HTMLResponse)
 async def fix_speaker(request: Request, name: str) -> HTMLResponse:
     """Rename a speaker in an existing transcript."""
-    if not re.match(r"^[\w\-]+$", name):
+    if "/" in name or "\\" in name or "\x00" in name or ".." in name:
         return HTMLResponse(content="Invalid name", status_code=400)
     out_dir = _output_dir(request)
     md_path = out_dir / f"{name}.md"
@@ -130,5 +130,5 @@ async def fix_speaker(request: Request, name: str) -> HTMLResponse:
     return HTMLResponse(
         content="",
         status_code=303,
-        headers={"Location": f"/transcripts/{name}"},
+        headers={"Location": f"/transcripts/{quote(name)}"},
     )

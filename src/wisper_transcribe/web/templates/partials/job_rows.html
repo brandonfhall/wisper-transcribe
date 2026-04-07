@@ -28,7 +28,7 @@
       <td class="px-4 py-3 flex gap-2">
         <a href="/transcribe/jobs/{{ job.id }}" class="text-indigo-600 hover:underline text-xs">View</a>
         {% if job.status == "completed" and job.output_path %}
-          <a href="/transcripts/{{ job.output_path | stem }}" class="text-green-600 hover:underline text-xs">Transcript</a>
+          <a href="/transcripts/{{ job.output_path | stem | urlencode }}" class="text-green-600 hover:underline text-xs">Transcript</a>
         {% endif %}
       </td>
     </tr>

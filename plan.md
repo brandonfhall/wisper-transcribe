@@ -373,6 +373,8 @@ Wisp logo: will-o'-the-wisp SVG orb with animated floating spark particles. Head
 - Stop Job button cancels pending jobs immediately; signals running jobs via threading.Event checked on each tqdm heartbeat
 - Tailwind CSS auto-rebuilt on server startup (mtime check); `pytailwindcss` promoted to main dependency; Dockerfile also builds CSS at image build time
 - Speaker audio playback in enrollment wizard (Play/Stop toggle per speaker card)
+- Transcript filenames with Unicode/special characters (spaces, em-dashes, `!`, `()`) now work correctly: path-traversal validation replaces restrictive allowlist regex; `urllib.parse.quote` used in all redirect `Location` headers; `urlencode` Jinja2 filter applied to all template links; `encodeURIComponent` used in JS-built URLs
+- Rename a Speaker form uses a dropdown populated from the transcript's speaker list instead of a free-text input
 
 ---
 

@@ -155,10 +155,45 @@ def test_transcript_detail_not_found(client, tmp_path):
 
 
 def test_transcript_detail_invalid_name_rejected(client):
-    # The route regex allows only word chars and hyphens; dots are rejected
+    # Path traversal attempts are rejected (400) or normalised away (404)
     resp = client.get("/transcripts/../../etc")
-    # FastAPI normalizes the path — will result in 400 or 404
     assert resp.status_code in (400, 404, 422)
+
+
+def test_transcript_detail_unicode_filename(client, tmp_path):
+    """Filenames with spaces, em-dashes, and special chars should work (400 fix)."""
+    stem = "Episode 2 \u2013 O Captain! My (Dead) Captain!"
+    md = tmp_path / f"{stem}.md"
+    md.write_text(
+        "---\ntitle: Episode 2\nspeakers:\n  - name: Alice\n    role: DM\n---\n\n**Alice**: Hello.",
+        encoding="utf-8",
+    )
+    from urllib.parse import quote
+    with patch("wisper_transcribe.web.routes.transcripts._output_dir", return_value=tmp_path):
+        resp = client.get(f"/transcripts/{quote(stem)}")
+    assert resp.status_code == 200
+    assert b"Episode 2" in resp.content
+
+
+def test_fix_speaker_unicode_filename_no_latin1_error(client, tmp_path):
+    """POST /fix-speaker redirect must not raise UnicodeEncodeError for non-ASCII names."""
+    stem = "Episode 2 \u2013 O Captain! My (Dead) Captain!"
+    md = tmp_path / f"{stem}.md"
+    md.write_text(
+        "---\nspeakers:\n  - name: SPEAKER_00\n    role: ''\n---\n\n**SPEAKER_00**: Hello.",
+        encoding="utf-8",
+    )
+    from urllib.parse import quote
+    with patch("wisper_transcribe.web.routes.transcripts._output_dir", return_value=tmp_path):
+        resp = client.post(
+            f"/transcripts/{quote(stem)}/fix-speaker",
+            data={"old_name": "SPEAKER_00", "new_name": "Alice"},
+            follow_redirects=False,
+        )
+    # Must not 500; redirect Location header must be ASCII-safe (percent-encoded)
+    assert resp.status_code == 303
+    location = resp.headers["location"]
+    location.encode("latin-1")  # would raise if non-ASCII slipped through
 
 
 def test_transcript_download(client, tmp_path):

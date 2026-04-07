@@ -36,10 +36,19 @@
   <!-- Fix speaker names form -->
   <details class="card">
     <summary class="text-sm font-medium text-gray-700 cursor-pointer">Rename a Speaker</summary>
-    <form method="post" action="/transcripts/{{ name }}/fix-speaker" class="mt-4 flex items-end gap-3">
+    <form method="post" action="/transcripts/{{ name }}/fix-speaker" class="mt-4 flex items-end gap-3 flex-wrap">
       <div>
         <label class="form-label text-xs">Current name</label>
+        {% if meta.speakers %}
+        <select name="old_name" class="form-input" required>
+          <option value="" disabled selected>Select speaker…</option>
+          {% for s in meta.speakers %}
+          <option value="{{ s.name }}">{{ s.name }}{% if s.role %} ({{ s.role }}){% endif %}</option>
+          {% endfor %}
+        </select>
+        {% else %}
         <input type="text" name="old_name" class="form-input" placeholder="Alice" required/>
+        {% endif %}
       </div>
       <div>
         <label class="form-label text-xs">New name</label>

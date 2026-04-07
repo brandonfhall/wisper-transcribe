@@ -33,8 +33,7 @@ async def speakers_list(request: Request) -> HTMLResponse:
 @router.get("/{key}/clip")
 async def speaker_clip(request: Request, key: str) -> Response:
     """Serve the reference audio clip for a speaker profile."""
-    import re
-    if not re.match(r"^[\w\-]+$", key):
+    if "/" in key or "\\" in key or "\x00" in key or ".." in key:
         return HTMLResponse(content="Invalid key", status_code=400)
     clip = _clip_path(key)
     if not clip.exists():

@@ -212,7 +212,7 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - Enrollment tests patch `wisper_transcribe.speaker_manager.load_profiles` to return `{}` (no existing profiles) to prevent tests from seeing real profiles on the developer's machine
 - Coverage: run `pytest tests/ -v --cov --cov-report=term-missing`
 - Web tests use `fastapi.testclient.TestClient`; routes are tested via HTTP with all ML calls mocked — no GPU/network needed
-- Test count: 156 (all mocked, all passing)
+- Test count: 158 (all mocked, all passing)
 
 **CI matrix** (`.github/workflows/ci.yml`):
 - Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)
@@ -264,6 +264,14 @@ Interactive CLI enrollment (TTY prompts) is replaced by a post-job wizard:
 4. `GET /transcribe/jobs/{id}/enroll` renders a wizard page with each detected label, a name input (plus existing profiles as click-to-fill options), and a Play/Stop button if an audio excerpt is available.
 5. `GET /transcribe/jobs/{id}/excerpt/{speaker_name}` serves the audio clip as `audio/mpeg`.
 6. `POST /transcribe/jobs/{id}/enroll` applies speaker name renames via `formatter.update_speaker_names()`.
+
+### Transcript Filename Handling
+Transcript filenames may contain arbitrary Unicode characters (spaces, em-dashes, parentheses, etc.). All URL path parameters that correspond to filenames use **path-traversal validation** rather than an allowlist regex — only `/`, `\`, `..`, and null bytes are rejected. This allows episode titles like "Episode 2 – O Captain! My (Dead) Captain!" to work correctly.
+
+URL-encoding is applied at every point where a filename is embedded in a URL or HTTP header:
+- Templates use the `urlencode` Jinja2 filter (`routes/__init__.py`) for all `<a href>` links that include a file stem.
+- Redirect `Location` headers are built with `urllib.parse.quote(name)` so latin-1 codec is never violated.
+- JavaScript in `job_detail.html` uses `encodeURIComponent(stem)` when constructing the post-SSE transcript link.
 
 ### Offline Assets
 - `static/htmx.min.js`: placeholder committed to repo; real file downloaded during `docker build` via `curl`. For local use: `curl -sL https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js -o src/wisper_transcribe/static/htmx.min.js`

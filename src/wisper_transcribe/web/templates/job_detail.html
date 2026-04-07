@@ -86,7 +86,7 @@
   <div id="job-actions" class="flex gap-4 flex-wrap">
     {% if job.status == "completed" %}
       {% if job.output_path %}
-        <a href="/transcripts/{{ job.output_path | stem }}" class="btn-primary">View Transcript</a>
+        <a href="/transcripts/{{ job.output_path | stem | urlencode }}" class="btn-primary">View Transcript</a>
         <a href="/transcribe/jobs/{{ job.id }}/enroll" class="btn-secondary">Name Speakers</a>
       {% endif %}
     {% elif job.status in ("pending", "running") %}
@@ -219,7 +219,7 @@
       if (evt.status === 'completed' && evt.output_path) {
         const stem = evt.output_path.replace(/\\/g, '/').split('/').pop().replace('.md', '');
         actions.innerHTML = `
-          <a href="/transcripts/${stem}" class="btn-primary">View Transcript</a>
+          <a href="/transcripts/${encodeURIComponent(stem)}" class="btn-primary">View Transcript</a>
           <a href="/transcribe/jobs/{{ job.id }}/enroll" class="btn-secondary">Name Speakers</a>
           <a href="/" class="btn-secondary">Back to Dashboard</a>`;
       } else if (evt.status === 'failed') {
