@@ -38,8 +38,8 @@
     </div>
     <div class="w-full bg-gray-200 rounded-full h-3 overflow-hidden">
       <div id="progress-bar"
-           class="h-3 rounded-full transition-all duration-500 bg-green-600"
-           style="width: {% if job.status == 'pending' %}0{% elif job.status == 'completed' %}100{% else %}0{% endif %}%">
+           class="h-3 rounded-full transition-all duration-500 bg-green-600 {% if job.status in ('pending','running') and not job.progress %}animate-pulse{% endif %}"
+           style="width: {% if job.status == 'completed' %}100{% elif job.progress %}0{% else %}0{% endif %}%">
       </div>
     </div>
   </div>
@@ -108,7 +108,10 @@
       if (progressLabel) progressLabel.textContent = evt.message;
       if (progressBar) {
         const pct = parsePercent(evt.message);
-        if (pct !== null) progressBar.style.width = pct + '%';
+        if (pct !== null) {
+          progressBar.classList.remove('animate-pulse');
+          progressBar.style.width = pct + '%';
+        }
       }
     }
 

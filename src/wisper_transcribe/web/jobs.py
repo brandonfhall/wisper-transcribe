@@ -256,12 +256,18 @@ class JobQueue:
         # Patch tqdm.__init__ to capture the progress bar itself
         original_init = _tqdm_module.tqdm.__init__
 
+        import re as _re
+        _ansi_escape = _re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
+
         class ProgressCatcher:
             def write(self, s: str) -> None:
+                # Strip ANSI control sequences (cursor-up, clear-line, colour codes, etc.)
+                clean = _ansi_escape.sub('', s)
                 # tqdm updates the same line using carriage returns (\r)
-                for part in s.split('\r'):
-                    if part.strip():
-                        job.progress = part.strip()
+                for part in clean.split('\r'):
+                    stripped = part.strip()
+                    if stripped:
+                        job.progress = stripped
             def flush(self) -> None:
                 pass
 
