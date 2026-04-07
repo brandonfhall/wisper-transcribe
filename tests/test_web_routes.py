@@ -205,6 +205,22 @@ def test_transcript_download(client, tmp_path):
     assert b"Session 01" in resp.content
 
 
+def test_delete_transcript(client, tmp_path):
+    md = tmp_path / "session01.md"
+    md.write_text("# Session 01\n\n**Alice**: Hello.")
+    with patch("wisper_transcribe.web.routes.transcripts._output_dir", return_value=tmp_path):
+        resp = client.post("/transcripts/session01/delete", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/transcripts"
+    assert not md.exists()
+
+
+def test_delete_transcript_nonexistent_is_silent(client, tmp_path):
+    with patch("wisper_transcribe.web.routes.transcripts._output_dir", return_value=tmp_path):
+        resp = client.post("/transcripts/nonexistent/delete", follow_redirects=False)
+    assert resp.status_code == 303  # silently redirects even if file missing
+
+
 def test_fix_speaker_renames_in_transcript(client, tmp_path):
     md = tmp_path / "session01.md"
     md.write_text(

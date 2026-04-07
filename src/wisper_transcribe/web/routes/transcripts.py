@@ -107,6 +107,22 @@ async def transcript_download(request: Request, name: str) -> FileResponse:
     )
 
 
+@router.post("/{name}/delete", response_class=HTMLResponse)
+async def delete_transcript(request: Request, name: str) -> HTMLResponse:
+    """Delete a transcript .md file from the output directory."""
+    if "/" in name or "\\" in name or "\x00" in name or ".." in name:
+        return HTMLResponse(content="Invalid name", status_code=400)
+    out_dir = _output_dir(request)
+    md_path = out_dir / f"{name}.md"
+    if md_path.exists():
+        md_path.unlink()
+    return HTMLResponse(
+        content="",
+        status_code=303,
+        headers={"Location": "/transcripts"},
+    )
+
+
 @router.post("/{name}/fix-speaker", response_class=HTMLResponse)
 async def fix_speaker(request: Request, name: str) -> HTMLResponse:
     """Rename a speaker in an existing transcript."""

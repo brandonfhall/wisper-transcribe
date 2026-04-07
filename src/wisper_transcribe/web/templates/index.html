@@ -12,7 +12,7 @@
 
   <!-- Stats row -->
   <div class="grid grid-cols-1 gap-5 sm:grid-cols-3">
-    <div class="card">
+    <a href="/transcribe" class="card hover:shadow-md hover:ring-1 hover:ring-indigo-300 transition-all">
       <div class="flex items-center">
         <div class="flex-shrink-0 bg-indigo-500 rounded-md p-3">
           <svg class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
@@ -24,9 +24,9 @@
           <p class="mt-1 text-3xl font-semibold text-gray-900">{{ active_count }}</p>
         </div>
       </div>
-    </div>
+    </a>
 
-    <div class="card">
+    <a href="/transcripts" class="card hover:shadow-md hover:ring-1 hover:ring-green-300 transition-all">
       <div class="flex items-center">
         <div class="flex-shrink-0 bg-green-500 rounded-md p-3">
           <svg class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
@@ -38,9 +38,9 @@
           <p class="mt-1 text-3xl font-semibold text-gray-900">{{ transcript_count }}</p>
         </div>
       </div>
-    </div>
+    </a>
 
-    <div class="card">
+    <a href="/speakers" class="card hover:shadow-md hover:ring-1 hover:ring-purple-300 transition-all">
       <div class="flex items-center">
         <div class="flex-shrink-0 bg-purple-500 rounded-md p-3">
           <svg class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
@@ -52,7 +52,7 @@
           <p class="mt-1 text-3xl font-semibold text-gray-900">{{ speaker_count }}</p>
         </div>
       </div>
-    </div>
+    </a>
   </div>
 
   <!-- System info -->

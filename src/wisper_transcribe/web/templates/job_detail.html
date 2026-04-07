@@ -70,6 +70,10 @@
         {% if job.status == 'completed' %}100%{% else %}{% endif %}
       </span>
     </div>
+    <div id="progress-stats" class="flex justify-between mt-0.5 {% if job.status != 'running' %}hidden{% endif %}">
+      <span id="progress-eta" class="text-xs text-gray-400"></span>
+      <span id="progress-rate" class="text-xs font-mono text-gray-400"></span>
+    </div>
   </div>
   {% endif %}
 
@@ -111,14 +115,29 @@
   const cursor = document.getElementById('log-cursor');
   const badge = document.getElementById('status-badge');
   const actions = document.getElementById('job-actions');
-  const progressBar = document.getElementById('progress-bar');
-  const progressPct = document.getElementById('progress-pct');
-  const stepLabel   = document.getElementById('step-label');
+  const progressBar   = document.getElementById('progress-bar');
+  const progressPct   = document.getElementById('progress-pct');
+  const stepLabel     = document.getElementById('step-label');
+  const progressStats = document.getElementById('progress-stats');
+  const progressEta   = document.getElementById('progress-eta');
+  const progressRate  = document.getElementById('progress-rate');
 
-  // Parse percentage from tqdm-style strings like "Transcribing:  45%|███ | 1/2"
+  // Parse percentage from tqdm-style string:  "Transcribing:  45%|███ | 1/2 [00:23<00:28, 5.2s/s]"
   function parsePercent(msg) {
     const m = msg.match(/(\d+)%\s*[|│]/);
     return m ? parseInt(m[1], 10) : null;
+  }
+
+  // Parse ETA from "[elapsed<remaining, rate]" block
+  function parseETA(msg) {
+    const m = msg.match(/<(\d+:\d{2}(?::\d{2})?)/);
+    return m ? m[1] : null;
+  }
+
+  // Parse rate from ", rate]" at end of timing block (e.g. "5.2s/s", "0.39chunk/s")
+  function parseRate(msg) {
+    const m = msg.match(/,\s*([\d.]+\s*[kMG]?\w+\/\w+)\s*\]/);
+    return m ? m[1].trim() : null;
   }
 
   // Step state: 'waiting' | 'active' | 'done'
@@ -188,16 +207,38 @@
     }
 
     if (evt.type === 'progress') {
-      if (progressBar) {
-        const pct = parsePercent(evt.message);
-        if (pct !== null) {
-          // If we're getting % progress, we must be transcribing
+      const pct  = parsePercent(evt.message);
+      const eta  = parseETA(evt.message);
+      const rate = parseRate(evt.message);
+      const lower = evt.message.toLowerCase();
+
+      if (pct !== null && progressBar) {
+        progressBar.classList.remove('animate-pulse');
+
+        // Map per-phase percentage to an overall bar position:
+        //   Transcribing  →  0–60%
+        //   Diarizing     →  60–90%
+        //   (Formatting is instant — jumps to 100% on done)
+        let barPct;
+        if (lower.includes('transcrib')) {
           activateStep(0);
-          progressBar.classList.remove('animate-pulse');
-          progressBar.style.width = (pct * 0.6) + '%'; // transcription = first 60% of overall bar
-          if (progressPct) progressPct.textContent = pct + '%';
+          if (stepLabel) stepLabel.textContent = 'Transcribing…';
+          barPct = pct * 0.6;
+        } else if (lower.includes('segmentation') || lower.includes('embedding') || lower.includes('clustering')) {
+          activateStep(1);
+          if (stepLabel) stepLabel.textContent = 'Diarizing…';
+          barPct = 60 + pct * 0.3;
+        } else {
+          barPct = pct * 0.6; // fallback
         }
+        progressBar.style.width = barPct + '%';
+        if (progressPct) progressPct.textContent = Math.round(barPct) + '%';
       }
+
+      // ETA and speed counter
+      if (progressEta && eta) progressEta.textContent = 'ETA ' + eta;
+      if (progressRate && rate) progressRate.textContent = rate;
+      if (progressStats && (eta || rate)) progressStats.classList.remove('hidden');
     }
 
     if (evt.type === 'status') {
@@ -215,6 +256,7 @@
       es.close();
       if (progressBar) progressBar.style.width = '100%';
       if (progressPct) progressPct.textContent = evt.status === 'completed' ? '100%' : '—';
+      if (progressStats) progressStats.classList.add('hidden');
       if (evt.status === 'completed') allDone();
       if (evt.status === 'completed' && evt.output_path) {
         const stem = evt.output_path.replace(/\\/g, '/').split('/').pop().replace('.md', '');

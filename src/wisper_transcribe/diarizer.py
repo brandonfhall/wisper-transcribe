@@ -125,7 +125,7 @@ class _DiarizationProgressHook:
                 position=1,
                 leave=False,
                 unit="chunk",
-                bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
+                bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
                 dynamic_ncols=True,
             )
         if completed is not None and self._bar is not None:
