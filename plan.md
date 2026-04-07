@@ -279,6 +279,186 @@ Folder-mode skip message now always shown (was `--verbose` only). Single-file me
 
 ---
 
+### DM Character Voice Handling (Future Feature)
+
+**Problem:** When a DM does a character voice (dragon accent, goblin voice, NPC), pyannote assigns it a different SPEAKER_XX label than their regular speech. Typical similarity scores: DM normal vs. DM profile ~0.80–0.90, DM character voice vs. DM profile ~0.35–0.55 — often below the 0.65 match threshold, so character voices fall through to `Unknown Speaker N`.
+
+Three approaches designed (April 2026); none implemented yet.
+
+#### Approach 1 — Named Character Profiles *(recommended first step, low complexity)*
+
+No data model changes. The `notes` field stores `voice_of:<key>` to mark a profile as a character voice. The user enrolls the character with the name they want in the transcript (e.g. `DM (as Aziel)`).
+
+**Enrollment UX addition** (one extra prompt after naming a new speaker):
+```
+  Who is this? DM (as Aziel)
+  Is this a character voice performed by an existing speaker? [y/N]: y
+  Which speaker performs this voice?
+    1. DM  (DM)  — 61%
+  > 1
+  Enrolled "DM (as Aziel)" as a character voice of DM.
+```
+
+**Output:**
+```markdown
+**DM** *(01:23)*: Let us begin our adventure.
+**DM (as Aziel)** *(14:22)*: Come now, little ones. You dare enter my lair?
+```
+
+Character voice profiles suppressed from YAML frontmatter `speakers:` list (only real people listed). `wisper speakers list` shows `[voice of DM]` annotation.
+
+**Files:** `pipeline.py` (~20 lines enrollment prompt + speaker_metadata suppression), `cli.py` (speakers list annotation). **Tests:** 3–4 in `test_pipeline.py`, 1 in `test_speaker_manager.py`.
+
+**Limitation:** Format frozen at enrollment time. Change via `wisper speakers rename` + `wisper fix`.
+
+#### Approach 2 — Structured Ownership + Runtime Format Control *(medium complexity, build after Approach 1)*
+
+Add `attributed_to: str | None` and `character_name: str | None` to `SpeakerProfile`. Add `character_voice_format` config key. Formatter assembles the display string from the template at render time.
+
+```toml
+character_voice_format = "{speaker} (as {character})"  # default
+# alternatives: "{character}" / "{speaker}"
+```
+
+**Files:** `models.py`, `speaker_manager.py` (load/save + match_speakers), `formatter.py` (`_merge_consecutive` key change, `_resolve_display()`), `config.py`, `cli.py` (optional `wisper speakers attribute` command). **Type change:** `speaker_map` from `dict[str, str]` → `dict[str, SpeakerRef]` — touches all speaker_map tests.
+
+**Migration from Approach 1:** Non-breaking. Profiles with `notes = "voice_of:X"` can be auto-migrated by reading that field as `attributed_to` in `load_profiles()`.
+
+#### Approach 3 — Automatic Heuristic Detection *(not recommended standalone)*
+
+Re-score `Unknown Speaker N` labels at a looser secondary threshold (~0.40) after primary matching. Can attribute to real speaker but **cannot name the character** → output is `DM (as Unknown Character)`. Threshold has no good default across DMs/campaigns; silent false positives worse than honest unknowns. Best treated as future enhancement layered on Approach 2, not standalone.
+
+---
+
+### Local LLM Post-Processing (`wisper refine`) (Future Feature)
+
+**Concept:** After the primary pipeline produces a `.md` transcript, run a local LLM agent pass to clean up errors that are mechanical for an LLM but hard for heuristic code: vocabulary misspellings, obviously wrong speaker assignments, and unknown speaker identification from context.
+
+**Local LLM target:** Ollama (primary). Simple REST API, free, runs on Windows/Mac without extra setup. `llama3.2:3b` (fast, fits 4 GB VRAM) or `llama3.1:8b` (better quality, 8 GB) are the recommended starting models. LM Studio is a secondary target (same OpenAI-compatible API, same code path). Neither requires a new Python ML dependency — just `httpx` or the lightweight `ollama` package for REST calls.
+
+New config keys:
+```toml
+llm_endpoint = "http://localhost:11434"   # Ollama default
+llm_model = "llama3.2"
+```
+
+New CLI command: `wisper refine <transcript.md>`
+
+---
+
+#### Tasks, ranked by feasibility
+
+**Task 1 — Vocabulary / hotword spelling correction** *(HIGH feasibility, LOW risk)*
+
+Whisper often transcribes unknown proper nouns phonetically: "Kyra" → "Kira", "Golarion" → "Golarian", "Zeldris" → "Zeldis". The hotwords list and speaker notes are available at post-processing time and can be fed directly to the LLM as ground truth.
+
+Approach:
+- Process 20–30 transcript lines per request
+- Prompt: "These proper nouns must be spelled exactly as given: [list]. Correct any misspellings in the lines below. Return JSON: `{changes: [{original, corrected}]}`. Change nothing else."
+- Validate output: accept only changes that are plausible substitutions of known terms (soundex or edit-distance check on the diff)
+
+Context source: `config["hotwords"]` + `SpeakerProfile.notes` for all enrolled profiles (character names often end up in notes).
+
+**Task 2 — Multi-speaker segment detection** *(MEDIUM feasibility, MEDIUM risk)*
+
+When diarization misses a speaker switch mid-segment, the merged block contains two voices. Example:
+```
+**DM**: The door creaks open. Right! I attack the skeleton.
+```
+The `"Right! I attack"` is almost certainly a player response that got captured in the same diarization window.
+
+Approach:
+- Heuristic pre-filter: flag segments where a single block contains both narration-style text AND first-person game actions ("I roll", "I attack", "I cast", "I want to...") — these are the highest-probability candidates
+- Send flagged segment + surrounding 5 segments for context
+- Prompt: "Does this segment sound like one continuous speaker or two? If two, where is the split? Return JSON: `{single_speaker: bool, split_after: '<exact text>'}`"
+- IMPORTANT: After `_merge_consecutive()` in formatter.py, the original segment-level timestamps are gone — only the start timestamp of the merged block remains. Split segments can only inherit the block's start time. Flag this as a limitation in the output.
+
+**Task 3 — Speaker assignment from context** *(LOW-MEDIUM feasibility, HIGH risk)*
+
+A segment labeled DM that says "I rolled a nat 20!" is obviously a player. Context-based reassignment using known speaker roles and character names.
+
+Approach:
+- Provide LLM with: enrolled speaker list + roles + character names from profile notes
+- Send a window of 20 segments around the suspect segment
+- Prompt: "Based on context and these speaker roles, does the assignment seem correct? Return JSON: `{correct: bool, likely_speaker: str, confidence: float, reason: str}`"
+- **Only suggest, never auto-apply.** Speaker reassignment is the highest-risk change.
+- Apply only if confidence > 0.85 AND user has `--apply-suggestions` flag
+
+**Task 4 — Unknown speaker identification from context** *(MEDIUM feasibility, MEDIUM risk)*
+
+`Unknown Speaker N` labels in the transcript can sometimes be resolved from surrounding dialogue: "Unknown Speaker 2 says 'As Lyra, the innkeeper says...' " suggests this is the DM doing a character voice.
+
+Approach:
+- Collect all "Unknown Speaker N" occurrences with their surrounding segments
+- Provide full enrolled speaker list + known character names
+- Prompt: "Based on this dialogue, which enrolled speaker is most likely speaking? Return JSON: `{label: 'Unknown Speaker 2', likely_speaker: 'DM', character: 'Lyra', confidence: 0.7}`"
+- Threshold: confidence > 0.75 to suggest; never auto-apply
+
+---
+
+#### Architecture
+
+**New module:** `src/wisper_transcribe/llm_fixer.py`
+- `OllamaClient` — thin REST wrapper, handles chat and generate endpoints
+- `fix_vocabulary(lines, hotwords, character_names) → list[Edit]`
+- `detect_multi_speaker(lines, context_window) → list[SplitSuggestion]`
+- `suggest_speaker_fixes(lines, profiles) → list[SpeakerSuggestion]`
+- `apply_edits(transcript_text, edits) → str` — surgical line-level substitution, never rewrites structure
+
+**New CLI command:** `wisper refine <transcript.md>`
+```
+  --tasks vocabulary,speakers,unknown   # which fix types to run (default: vocabulary)
+  --dry-run                             # show proposed changes without writing (DEFAULT ON)
+  --apply                               # actually write changes to file (requires explicit flag)
+  --model NAME                          # override llm_model from config
+  --endpoint URL                        # override llm_endpoint from config
+```
+
+`--dry-run` is the default. Changes are printed as a colored diff; user must explicitly pass `--apply` to write. A `.md.bak` backup is always written before applying.
+
+**Optional `--llm-fix` on `wisper transcribe`:** Runs vocabulary correction automatically after the pipeline (the lowest-risk task only). Skipped if Ollama is not reachable — emits a warning, does not abort.
+
+---
+
+#### Context window management
+
+A 3-hour session at ~150 wpm ≈ 27,000 words ≈ 35,000 tokens. Most local models have 128K context, but processing 35K tokens in one shot is slow and expensive on local hardware.
+
+Strategy:
+- **Vocabulary pass:** 25 lines per request, no overlap needed (task is stateless)
+- **Speaker detection / unknown speaker:** 20-line sliding window, 5-line overlap for context continuity
+- Tasks run independently; vocabulary first (cheap), speaker detection second (expensive)
+
+---
+
+#### Safety principles
+
+1. `--dry-run` on by default — never silently modify a transcript
+2. Backup (`.md.bak`) always created before `--apply`
+3. Vocabulary changes only accepted if they are a known-term substitution (validated by edit distance against hotwords list); reject freeform rewrites
+4. Speaker reassignment is **suggestion only** — never auto-applied regardless of confidence
+5. YAML frontmatter is **never touched** by the LLM — only the markdown body lines
+6. Ollama connectivity failure is a soft warning, not an error; the rest of the pipeline continues unaffected
+7. All changes logged to `refine.log` alongside the transcript
+
+---
+
+#### What NOT to build
+
+- **Grammar/style improvements:** The transcript is a verbatim record, not polished prose. LLM should not fix run-ons, filler words ("um", "like"), or informal language.
+- **Content summarization:** NotebookLM handles this. Not our problem.
+- **Automatic full-transcript rewrite:** Too high a risk of hallucination silently corrupting factual content.
+
+---
+
+#### Dependencies
+
+- `ollama` Python package (optional; fallback to `httpx` raw REST if not installed)
+- No new ML models required
+- Feature is entirely opt-in; `llm_endpoint` and `llm_model` absent from config means `wisper refine` exits early with a setup message
+
+---
+
 ### Phase 10 — Parallel Folder Processing (CPU-only)
 
 **Context:** GPU processing is always the bottleneck — faster-whisper and pyannote are not thread-safe when sharing a GPU, and loading duplicate model copies would exhaust VRAM. Parallelism only makes sense on CPU-only deployments (e.g. a Linux server processing a large queue of files overnight).
