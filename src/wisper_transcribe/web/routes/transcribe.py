@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, File, Form, Request, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
 
 from ..jobs import COMPLETED, FAILED, JobQueue
 from . import templates
@@ -231,8 +231,25 @@ async def enroll_form(request: Request, job_id: str) -> HTMLResponse:
             "job": job,
             "detected_speakers": speakers_in_transcript,
             "existing_profiles": profiles,
+            "speaker_excerpts": job.speaker_excerpts,
         },
     )
+
+
+@router.get("/jobs/{job_id}/excerpt/{speaker_name}")
+async def speaker_excerpt(request: Request, job_id: str, speaker_name: str) -> Response:
+    """Serve a short audio clip for a detected speaker (used in enrollment wizard)."""
+    import re
+    if not re.match(r"^[\w\- ]+$", speaker_name):
+        return HTMLResponse(content="Invalid speaker name", status_code=400)
+    queue = _get_queue(request)
+    job = queue.get(job_id)
+    if job is None:
+        return HTMLResponse(content="Job not found", status_code=404)
+    clip_path = job.speaker_excerpts.get(speaker_name)
+    if not clip_path or not Path(clip_path).exists():
+        return HTMLResponse(content="Excerpt not available", status_code=404)
+    return FileResponse(path=clip_path, media_type="audio/mpeg")
 
 
 @router.post("/jobs/{job_id}/enroll", response_class=HTMLResponse)

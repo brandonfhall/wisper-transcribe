@@ -33,6 +33,72 @@ RUNNING = "running"
 COMPLETED = "completed"
 FAILED = "failed"
 
+_EXCERPT_SECONDS = 12  # length of each speaker audio clip
+
+
+def _extract_speaker_excerpts(job: "Job", output_path: "Path") -> None:  # type: ignore[name-defined]
+    """Extract a short audio clip per speaker from the transcribed file.
+
+    Parses the output markdown for the first timestamp of each speaker, then
+    uses ffmpeg to cut a ~12s clip from the original input audio.  Clips are
+    saved alongside the transcript as <stem>_excerpt_<speaker>.mp3 so they
+    can be served to the browser during the enrollment wizard.
+
+    Failures are silently swallowed — playback is a nice-to-have, not critical.
+    """
+    import re
+    import subprocess
+    from pathlib import Path as _Path
+
+    try:
+        content = _Path(output_path).read_text(encoding="utf-8")
+    except Exception:
+        return
+
+    # Match lines like: **Alice** *(00:01:23)*: …  or  **Bob** *(1:23)*: …
+    pattern = re.compile(r"\*\*(.+?)\*\*\s+\*\((\d+:\d{2}(?::\d{2})?)\)\*")
+    first_ts: dict[str, float] = {}
+    for m in pattern.finditer(content):
+        speaker = m.group(1)
+        ts_str = m.group(2)
+        if speaker in first_ts:
+            continue
+        parts = ts_str.split(":")
+        if len(parts) == 2:
+            secs = int(parts[0]) * 60 + int(parts[1])
+        else:
+            secs = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+        first_ts[speaker] = float(secs)
+
+    if not first_ts:
+        return
+
+    out_dir = _Path(output_path).parent
+    stem = _Path(output_path).stem
+    input_path = _Path(job.input_path)
+
+    for speaker, start in first_ts.items():
+        safe_name = re.sub(r"[^\w\-]", "_", speaker)
+        clip_path = out_dir / f"{stem}_excerpt_{safe_name}.mp3"
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-ss", str(start),
+                    "-t", str(_EXCERPT_SECONDS),
+                    "-i", str(input_path),
+                    "-ac", "1",
+                    "-ar", "22050",
+                    "-b:a", "64k",
+                    str(clip_path),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            job.speaker_excerpts[speaker] = str(clip_path)
+        except Exception:
+            pass
+
 
 @dataclass
 class Job:
@@ -50,6 +116,8 @@ class Job:
     finished_at: Optional[datetime] = None
     # Set after transcription completes when enroll flow is needed
     diarization_labels: list[str] = field(default_factory=list)
+    # speaker_label -> path to a short audio excerpt (for enrollment wizard playback)
+    speaker_excerpts: dict[str, str] = field(default_factory=dict)
     # Threading event set by cancel() to signal the worker to abort
     _cancel_event: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
 
@@ -209,6 +277,7 @@ class JobQueue:
             output_path = process_file(Path(job.input_path), **job.kwargs)
             job.output_path = str(output_path)
             job.status = COMPLETED
+            _extract_speaker_excerpts(job, output_path)
         except InterruptedError:
             job.status = FAILED
             job.error = "Cancelled"
