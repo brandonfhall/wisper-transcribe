@@ -405,5 +405,5 @@ Wisp logo: will-o'-the-wisp SVG orb with animated floating spark particles. Head
     - Decision - Show transcripts already in output folder?
   - input file on the transcribe page should show the file name, not the full path.
   - Allow playing of the sample file in the speakers section
-  
+  - for web progress bar remove the middle section which would map to the commmand line progress bar. 
  
