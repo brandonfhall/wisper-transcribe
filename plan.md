@@ -346,17 +346,25 @@ A 3-hour session at ~150 wpm ≈ 27,000 words ≈ 35,000 tokens. Most local mode
 
 ---
 
-### Phase 10 — Parallel Folder Processing (CPU-only)
+### Phase 10 — Parallel Folder Processing (CPU-only) ✓
 
 **Context:** GPU processing is always the bottleneck — faster-whisper and pyannote are not thread-safe when sharing a GPU, and loading duplicate model copies would exhaust VRAM. Parallelism only makes sense on CPU-only deployments (e.g. a Linux server processing a large queue of files overnight).
 
-**What was built:** `--workers N` flag on `wisper transcribe <folder>`. Uses `concurrent.futures.ProcessPoolExecutor` (not ThreadPoolExecutor — the module-level `_model`/`_pipeline` globals are not thread-safe; each subprocess gets its own isolated module state). Guard: if effective device != `"cpu"` (after resolving `"auto"`), emit a warning and clamp workers to 1. Default workers=1 (unchanged for all GPU users). ✓ Implemented Phase 10.
+**What was built:** `--workers N` flag on `wisper transcribe <folder>`. Uses `concurrent.futures.ProcessPoolExecutor` (not ThreadPoolExecutor — the module-level `_model`/`_pipeline` globals are not thread-safe; each subprocess gets its own isolated module state). Guards: device != cpu → clamp to 1; `--enroll-speakers` → clamp to 1 (needs TTY). Default workers=1.
 
 ---
 
-### Phase 11 — Optional GUI
+### Phase 11 — Browser-Based Web UI ✓
 
-Textual (terminal) or tkinter/PyQt. Wraps the same `pipeline.process_file()` and `speaker_manager` calls. Keep CLI/library separation clean.
+Full-featured web interface launched by `wisper server`. FastAPI + HTMX + Jinja2 + Tailwind CSS. All assets served locally — no CDN at runtime.
+
+Pages: Dashboard (live job queue, system status), Transcribe (file upload + all options), Transcripts (browse/view/download), Speakers (profiles, enroll, rename, remove), Config (edit all settings).
+
+Speaker enrollment replaced by a post-job naming wizard (the interactive TTY-based CLI flow is web-incompatible).
+
+Docker: `wisper-web` (GPU) and `wisper-cpu-web` (CPU) services on port 8080.
+
+Wisp logo: will-o'-the-wisp SVG orb with animated floating spark particles, indigo/violet palette.
 
 ---
 
