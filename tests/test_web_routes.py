@@ -76,6 +76,22 @@ def test_transcribe_post_queues_job_and_redirects(client, tmp_path):
     assert location.startswith("/transcribe/jobs/")
 
 
+def test_transcribe_output_dir_field_is_ignored(client, tmp_path):
+    """output_dir is no longer a form parameter — posting it must not cause a 422."""
+    audio_file = tmp_path / "test.mp3"
+    audio_file.write_bytes(b"fake mp3")
+    with open(audio_file, "rb") as f:
+        resp = client.post(
+            "/transcribe",
+            files={"file": ("test.mp3", f, "audio/mpeg")},
+            data={"output_dir": "/etc/passwd"},
+            follow_redirects=False,
+        )
+    # Unknown form fields are silently ignored; job must queue normally
+    assert resp.status_code == 303
+    assert resp.headers["location"].startswith("/transcribe/jobs/")
+
+
 def test_job_detail_returns_200(client, tmp_path):
     """Job detail page renders correctly for an existing job."""
     audio_file = tmp_path / "test.mp3"

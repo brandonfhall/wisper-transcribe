@@ -4,6 +4,7 @@ from urllib.parse import quote
 from unittest.mock import patch
 
 from wisper_transcribe.web.app import create_app
+from wisper_transcribe.web.routes.transcribe import _validate_job_id
 
 
 @pytest.fixture
@@ -152,13 +153,77 @@ def test_transcribe_enroll_open_redirect_blocked(client: TestClient, payload: st
 def test_transcribe_enroll_submit_open_redirect_blocked(client: TestClient, payload: str):
     """Ensure job enroll submit route prevents open redirects/CRLF for non-completed jobs."""
     safe_url = quote(payload, safe="")
-    
+
     from wisper_transcribe.web.jobs import Job
     from datetime import datetime
     fake_job = Job(id=payload, status="pending", created_at=datetime.now(), input_path="", kwargs={})
 
     with patch("wisper_transcribe.web.jobs.JobQueue.get", return_value=fake_job):
         resp = client.post(f"/transcribe/jobs/{safe_url}/enroll", follow_redirects=False)
-        
+
     assert resp.status_code == 400
     assert "Invalid job ID" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# _validate_job_id unit tests
+# ---------------------------------------------------------------------------
+
+_VALID_JOB_IDS = [
+    "550e8400-e29b-41d4-a716-446655440000",  # standard UUID
+    "abc-123",
+    "job_id_with_underscores",
+    "a1B2c3",
+]
+
+@pytest.mark.parametrize("job_id", _VALID_JOB_IDS)
+def test_validate_job_id_accepts_valid_ids(job_id: str):
+    """_validate_job_id must return the input unchanged for well-formed IDs."""
+    assert _validate_job_id(job_id) == job_id
+
+
+_INVALID_JOB_IDS = [
+    "",                             # empty
+    "\x00",                         # null byte
+    "../../etc/passwd",             # path traversal
+    "id with spaces",               # spaces not allowed
+    "id/with/slashes",              # path separators
+    "id\\backslash",                # backslash
+    "evil\r\nLocation: evil.com",   # CRLF header injection
+    "javascript:alert(1)",          # JS URI
+    "\\\\evil.com",                 # UNC path attempt
+    "id!@#",                        # special chars
+]
+
+@pytest.mark.parametrize("bad_id", _INVALID_JOB_IDS)
+def test_validate_job_id_rejects_invalid_inputs(bad_id: str):
+    """_validate_job_id must return None for any dangerous or malformed input."""
+    assert _validate_job_id(bad_id) is None
+
+
+# ---------------------------------------------------------------------------
+# Speaker enroll — error redirect must not leak internal exception text
+# ---------------------------------------------------------------------------
+
+def test_speakers_enroll_error_does_not_leak_exception(client: TestClient):
+    """A failed enrollment must redirect with a generic code, not exception details."""
+    with patch("wisper_transcribe.config.load_config", return_value={}), \
+         patch("wisper_transcribe.config.get_device", return_value="cpu"), \
+         patch("wisper_transcribe.config.get_hf_token", return_value="tok"), \
+         patch(
+             "wisper_transcribe.audio_utils.convert_to_wav",
+             side_effect=RuntimeError("secret internal path: /home/user/.config"),
+         ):
+        resp = client.post(
+            "/speakers/enroll",
+            files={"audio": ("clip.mp3", b"fake", "audio/mpeg")},
+            data={"name": "Alice"},
+            follow_redirects=False,
+        )
+    assert resp.status_code == 303
+    location = resp.headers.get("location", "")
+    assert "enroll_failed" in location
+    # The exception message must NOT appear anywhere in the redirect URL
+    assert "secret" not in location
+    assert "internal" not in location
+    assert "home" not in location

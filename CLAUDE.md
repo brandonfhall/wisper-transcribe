@@ -56,6 +56,36 @@ wisper server --reload                # dev mode; http://localhost:8080
 - **No personal data in tests.** Synthetic/fake data only.
 - If a secret is accidentally committed, treat it as compromised immediately.
 
+### Web Route Security Standards
+
+These rules apply to every web route handler. CodeQL scans all PRs — violations block merge.
+
+#### User input in file paths (CWE-22 Path Traversal)
+Use the two-layer pattern for any URL parameter or form field used in a file path:
+1. `os.path.basename()` strips leading path components.
+2. `os.path.abspath(os.path.join(base, safe_name)).startswith(base + os.sep)` confirms the result stays inside the intended directory.
+
+`Path.resolve()` on tainted input is **not** sufficient — CodeQL does not recognise it as a sanitiser. Use `os.path.abspath` + `startswith`.
+
+#### User input in redirect URLs (CWE-601 Open Redirect)
+Use `_validate_job_id()` (defined in `transcribe.py`) for every job ID that appears in a `RedirectResponse` or `Location` header. For other ID types, apply the same two-layer pattern:
+1. Strict regex guard `re.match(r"^[\w\-]+$", value)` — rejects everything except alphanumerics and hyphens.
+2. `os.path` dummy-guard round-trip — `os.path.basename(os.path.abspath(os.path.join(base, value)))` — to produce a string that CodeQL's taint tracker recognises as clean.
+
+`re.match().group(1)` is **still considered tainted** by CodeQL even after a format check. The `os.path` round-trip is required to break the taint chain.
+
+#### Never reflect user input into error messages or redirect parameters
+Exception messages, file paths, and internal state must not appear in redirect `Location` headers or in HTML error responses. Use a generic error code (e.g. `?error=enroll_failed`) instead of `?error={str(exc)}`.
+
+#### Never accept arbitrary file paths from form data
+Do not accept `output_dir`, `base_path`, or similar path parameters from form POST data. Always use the internally-resolved default (e.g. `_default_output_dir()`).
+
+#### Test coverage requirement
+Every security control must have a corresponding test in `tests/test_path_traversal.py` covering:
+- Null-byte payloads (`\x00`)
+- Regex-busting payloads (`invalid*name`, `id/with/slashes`)
+- Open-redirect / CRLF payloads for any endpoint that redirects
+
 ---
 
 ## Key Conventions
@@ -65,8 +95,10 @@ wisper server --reload                # dev mode; http://localhost:8080
 | Always `pathlib.Path`, never string paths | Cross-platform (Windows backslash) |
 | Always `get_data_dir()` from `config.py` for user data | Respects `WISPER_DATA_DIR` env var (Docker) |
 | URL-encode transcript stems in templates with `\| urlencode` filter | Filenames may contain em-dashes, spaces, `!`, `()` |
-| Use path-traversal check (`..`, `/`, `\`, null bytes) not allowlist regex | Allowlist blocked valid unicode filenames |
+| Use `os.path.basename` + `abspath/startswith` for path guards, not `Path.resolve()` | CodeQL only recognises `os.path` as a path sanitiser |
+| Use `_validate_job_id()` for job IDs in redirects | Breaks CodeQL taint chain; regex alone is insufficient |
 | Redirect `Location` headers use `urllib.parse.quote(name)` | latin-1 codec rejects non-ASCII characters |
+| Never put `str(exc)` in a redirect URL or error response | Information disclosure; use generic error codes |
 
 ---
 

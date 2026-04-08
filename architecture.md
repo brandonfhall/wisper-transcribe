@@ -212,7 +212,8 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - Enrollment tests patch `wisper_transcribe.speaker_manager.load_profiles` to return `{}` (no existing profiles) to prevent tests from seeing real profiles on the developer's machine
 - Coverage: run `pytest tests/ -v --cov --cov-report=term-missing`
 - Web tests use `fastapi.testclient.TestClient`; routes are tested via HTTP with all ML calls mocked — no GPU/network needed
-- Test count: 160 (all mocked, all passing)
+- Security tests in `tests/test_path_traversal.py` cover path traversal (null-byte, dotdot), regex-busting payloads, open-redirect/CRLF payloads, and unit tests for `_validate_job_id()`
+- Test count: 203 (all mocked, all passing)
 
 **CI matrix** (`.github/workflows/ci.yml`):
 - Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)
@@ -265,8 +266,26 @@ Interactive CLI enrollment (TTY prompts) is replaced by a post-job wizard:
 5. `GET /transcribe/jobs/{id}/excerpt/{speaker_name}` serves the audio clip as `audio/mpeg`.
 6. `POST /transcribe/jobs/{id}/enroll` applies speaker name renames via `formatter.update_speaker_names()`.
 
+### Web Route Security
+
+All web route handlers follow a consistent two-layer defence pattern enforced by CodeQL scanning on every PR:
+
+**Path traversal (CWE-22) — transcript and speaker clip routes:**
+1. `os.path.basename(user_input)` strips leading path components and is recognised by CodeQL as a path sanitiser.
+2. `os.path.abspath(os.path.join(base, safe_name)).startswith(base + os.sep)` confirms the resolved path stays within the intended directory.
+`Path.resolve()` on tainted input is **not** used — CodeQL does not recognise it as a sanitiser.
+
+**Open redirect (CWE-601) — job ID routes (`cancel_job`, `enroll_form`, `enroll_submit`):**
+`_validate_job_id(job_id)` in `transcribe.py` applies both layers:
+1. `re.match(r"^[\w\-]+$", job_id)` rejects everything except alphanumeric/hyphen.
+2. `os.path.basename(os.path.abspath(os.path.join("_guard", job_id)))` round-trip produces a string CodeQL's taint tracker treats as clean. `re.match().group(1)` alone is **still considered tainted** by CodeQL even after format validation; the `os.path` round-trip is required.
+
+**Error messages:** Internal exception text is never placed in redirect URLs or error responses. Routes use generic error codes (e.g. `?error=enroll_failed`).
+
+**Output directory:** The `start_transcribe` form handler ignores any user-supplied `output_dir` and always writes to `_default_output_dir()`. Accepting arbitrary paths from form data would allow writing outside the data directory.
+
 ### Transcript Filename Handling
-Transcript filenames may contain arbitrary Unicode characters (spaces, em-dashes, parentheses, etc.). All URL path parameters that correspond to filenames use **path-traversal validation** rather than an allowlist regex — only `/`, `\`, `..`, and null bytes are rejected. This allows episode titles like "Episode 2 – O Captain! My (Dead) Captain!" to work correctly.
+Transcript filenames may contain arbitrary Unicode characters (spaces, em-dashes, parentheses, etc.). All URL path parameters that correspond to filenames use the **two-layer path guard** (basename + abspath/startswith) rather than an allowlist regex — allowlist regex would block valid unicode filenames. This allows episode titles like "Episode 2 – O Captain! My (Dead) Captain!" to work correctly.
 
 URL-encoding is applied at every point where a filename is embedded in a URL or HTTP header:
 - Templates use the `urlencode` Jinja2 filter (`routes/__init__.py`) for all `<a href>` links that include a file stem.

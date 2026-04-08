@@ -176,10 +176,8 @@ async def enroll_submit(
                 device=device,
                 notes=notes,
             )
-    except Exception as exc:
-        return RedirectResponse(
-            url=f"/speakers/enroll?error={str(exc)[:100]}", status_code=303
-        )
+    except Exception:
+        return RedirectResponse(url="/speakers/enroll?error=enroll_failed", status_code=303)
 
     return RedirectResponse(url="/speakers", status_code=303)
 
