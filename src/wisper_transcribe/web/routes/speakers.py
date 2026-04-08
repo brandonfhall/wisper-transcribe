@@ -1,6 +1,7 @@
 """Speakers route — manage enrolled speaker profiles."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -33,26 +34,15 @@ async def speakers_list(request: Request) -> HTMLResponse:
 @router.get("/{key}/clip")
 async def speaker_clip(request: Request, key: str) -> Response:
     """Serve the reference audio clip for a speaker profile."""
-    # Basic sanity check on the key to reject obvious path-manipulation attempts.
-    if "/" in key or "\\" in key or "\x00" in key:
-    if "/" in key or "\\" in key or "\x00" in key or ".." in key:
-
+    if not key or "\x00" in key:
         return HTMLResponse(content="Invalid key", status_code=400)
-    try:
-        # Resolve the paths and ensure the clip stays within the embeddings directory.
-        from wisper_transcribe.speaker_manager import _get_embeddings_dir
+        
+    safe_key = os.path.basename(key)
+    if safe_key != key or safe_key in {".", ".."}:
+        return HTMLResponse(content="Invalid key", status_code=400)
 
-        base_path = _get_embeddings_dir().resolve()
-        fullpath = clip.resolve()
-    except FileNotFoundError:
-    # Construct the clip path and ensure it stays within the embeddings directory.
-
-    if not fullpath.is_file() or base_path not in fullpath.parents:
-        return HTMLResponse(content="No clip available", status_code=404)
+    from wisper_transcribe.speaker_manager import _get_embeddings_dir
     embeddings_dir = _get_embeddings_dir().resolve()
-    return FileResponse(path=str(fullpath), media_type="audio/mpeg")
-
-
     clip = _clip_path(key).resolve()
 
     # Verify that the resolved clip path is contained within the embeddings directory.
@@ -64,7 +54,7 @@ async def speaker_clip(request: Request, key: str) -> Response:
         if embeddings_dir not in clip.parents and clip != embeddings_dir:
             return HTMLResponse(content="Invalid key", status_code=400)
 
-    if not clip.exists():
+    if not clip.exists() or not clip.is_file():
         return HTMLResponse(content="No clip available", status_code=404)
     return FileResponse(path=str(clip), media_type="audio/mpeg")
 

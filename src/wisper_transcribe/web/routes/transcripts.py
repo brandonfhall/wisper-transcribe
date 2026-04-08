@@ -1,6 +1,7 @@
 """Transcripts route — browse and view markdown transcripts."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from urllib.parse import quote
 
@@ -38,6 +39,24 @@ def _parse_frontmatter(content: str) -> tuple[dict, str]:
     return {}, content
 
 
+def _get_safe_transcript_path(request: Request, name: str) -> Path | None:
+    """Resolve and sanitize transcript path, mitigating path traversal."""
+    if not name or "\x00" in name:
+        return None
+        
+    # os.path.basename is recognized as a sanitizer by static analysis tools (e.g., CodeQL)
+    safe_name = os.path.basename(name)
+    if safe_name != name or safe_name in {".", ".."}:
+        return None
+        
+    out_dir = _output_dir(request).resolve()
+    md_path = (out_dir / f"{safe_name}.md").resolve()
+    
+    if not md_path.is_relative_to(out_dir):
+        return None
+    return md_path
+
+
 @router.get("", response_class=HTMLResponse)
 async def transcripts_list(request: Request) -> HTMLResponse:
     out_dir = _output_dir(request)
@@ -64,16 +83,8 @@ async def transcripts_list(request: Request) -> HTMLResponse:
 
 @router.get("/{name}", response_class=HTMLResponse)
 async def transcript_detail(request: Request, name: str) -> HTMLResponse:
-    # Reject path traversal attempts — disallow directory separators and null bytes
-    if "/" in name or "\\" in name or "\x00" in name or ".." in name:
-        return HTMLResponse(content="Invalid name", status_code=400)
-
-    out_dir = _output_dir(request)
-    out_dir_resolved = out_dir.resolve()
-    md_path = (out_dir / f"{name}.md").resolve()
-    try:
-        md_path.relative_to(out_dir_resolved)
-    except ValueError:
+    md_path = _get_safe_transcript_path(request, name)
+    if not md_path:
         return HTMLResponse(content="Invalid name", status_code=400)
     if not md_path.exists():
         return HTMLResponse(content="Transcript not found", status_code=404)
@@ -99,14 +110,8 @@ async def transcript_detail(request: Request, name: str) -> HTMLResponse:
 
 @router.get("/{name}/download")
 async def transcript_download(request: Request, name: str):
-    if "/" in name or "\\" in name or "\x00" in name or ".." in name:
-        return HTMLResponse(content="Invalid name", status_code=400)
-    out_dir = _output_dir(request)
-    out_dir_resolved = out_dir.resolve()
-    md_path = (out_dir / f"{name}.md").resolve()
-    try:
-        md_path.relative_to(out_dir_resolved)
-    except ValueError:
+    md_path = _get_safe_transcript_path(request, name)
+    if not md_path:
         return HTMLResponse(content="Invalid name", status_code=400)
     if not md_path.exists():
         return HTMLResponse(content="Transcript not found", status_code=404)
@@ -120,14 +125,8 @@ async def transcript_download(request: Request, name: str):
 @router.post("/{name}/delete", response_class=HTMLResponse)
 async def delete_transcript(request: Request, name: str) -> HTMLResponse:
     """Delete a transcript .md file from the output directory."""
-    if "/" in name or "\\" in name or "\x00" in name or ".." in name:
-        return HTMLResponse(content="Invalid name", status_code=400)
-    out_dir = _output_dir(request)
-    out_dir_resolved = out_dir.resolve()
-    md_path = (out_dir / f"{name}.md").resolve()
-    try:
-        md_path.relative_to(out_dir_resolved)
-    except ValueError:
+    md_path = _get_safe_transcript_path(request, name)
+    if not md_path:
         return HTMLResponse(content="Invalid name", status_code=400)
     if md_path.exists():
         md_path.unlink()
@@ -141,14 +140,8 @@ async def delete_transcript(request: Request, name: str) -> HTMLResponse:
 @router.post("/{name}/fix-speaker", response_class=HTMLResponse)
 async def fix_speaker(request: Request, name: str) -> HTMLResponse:
     """Rename a speaker in an existing transcript."""
-    if "/" in name or "\\" in name or "\x00" in name or ".." in name:
-        return HTMLResponse(content="Invalid name", status_code=400)
-    out_dir = _output_dir(request)
-    out_dir_resolved = out_dir.resolve()
-    md_path = (out_dir / f"{name}.md").resolve()
-    try:
-        md_path.relative_to(out_dir_resolved)
-    except ValueError:
+    md_path = _get_safe_transcript_path(request, name)
+    if not md_path:
         return HTMLResponse(content="Invalid name", status_code=400)
     if not md_path.exists():
         return HTMLResponse(content="Transcript not found", status_code=404)

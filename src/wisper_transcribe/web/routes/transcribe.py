@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import tempfile
 from pathlib import Path
 from typing import Annotated, Optional
@@ -239,7 +240,11 @@ async def enroll_form(request: Request, job_id: str) -> HTMLResponse:
 @router.get("/jobs/{job_id}/excerpt/{speaker_name}")
 async def speaker_excerpt(request: Request, job_id: str, speaker_name: str) -> Response:
     """Serve a short audio clip for a detected speaker (used in enrollment wizard)."""
-    if "/" in speaker_name or "\\" in speaker_name or "\x00" in speaker_name or ".." in speaker_name:
+    if not speaker_name or "\x00" in speaker_name:
+        return HTMLResponse(content="Invalid speaker name", status_code=400)
+        
+    safe_name = os.path.basename(speaker_name)
+    if safe_name != speaker_name or safe_name in {".", ".."}:
         return HTMLResponse(content="Invalid speaker name", status_code=400)
     queue = _get_queue(request)
     job = queue.get(job_id)

@@ -189,7 +189,8 @@ class JobQueue:
         return self._jobs.get(job_id)
 
     def list_all(self) -> list[Job]:
-        return sorted(self._jobs.values(), key=lambda j: j.created_at, reverse=True)
+        # Reverse insertion order first so that ties in created_at put newer jobs first
+        return sorted(list(self._jobs.values())[::-1], key=lambda j: j.created_at, reverse=True)
 
     def list_recent(self, limit: int = 20) -> list[Job]:
         return self.list_all()[:limit]
