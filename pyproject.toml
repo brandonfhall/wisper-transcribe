@@ -38,6 +38,9 @@ dev = [
     "pytest-cov",
     "httpx>=0.27",         # async HTTP client for SSE streaming tests
 ]
+macos = [
+    "mlx-whisper",         # Apple Silicon GPU/ANE Whisper backend (macOS only)
+]
 
 [project.scripts]
 wisper = "wisper_transcribe.cli:main"

@@ -26,6 +26,13 @@ DEFAULTS = {
     "max_speakers": 8,
     "hf_token": "",
     "hotwords": [],
+    # Apple Silicon: "auto" uses MLX Whisper on MPS when mlx-whisper is installed,
+    # "true" requires MLX (errors if not installed), "false" always uses faster-whisper CPU.
+    "use_mlx": "auto",
+    # Run transcription and diarization concurrently via ProcessPoolExecutor(max_workers=2).
+    # Each subprocess gets its own copy of the module-level model globals.
+    # Disabled by default — enable after benchmarking on your hardware.
+    "parallel_stages": False,
 }
 
 COMPUTE_TYPES = ("auto", "float16", "int8_float16", "int8", "float32")

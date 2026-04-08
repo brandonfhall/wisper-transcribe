@@ -55,6 +55,48 @@ def _play_excerpt(wav_path: Path, start: float, end: float) -> None:
         click.echo("  [audio playback failed — skipping]")
 
 
+# ---------------------------------------------------------------------------
+# Module-level worker functions for ProcessPoolExecutor (must be picklable).
+# Each runs in its own subprocess with isolated module-level globals (_model,
+# _pipeline), so loading both models concurrently is safe.
+# ---------------------------------------------------------------------------
+
+def _transcribe_worker(wav_path: Path, **kwargs) -> list[TranscriptionSegment]:
+    """Subprocess entry point for transcription (parallel_stages mode)."""
+    from .transcriber import transcribe as _transcribe
+    return _transcribe(wav_path, **kwargs)
+
+
+def _diarize_worker(wav_path: Path, **kwargs) -> list:
+    """Subprocess entry point for diarization (parallel_stages mode)."""
+    from .diarizer import diarize as _diarize
+    return _diarize(wav_path, **kwargs)
+
+
+def _run_parallel_transcribe_diarize(
+    wav_path: Path,
+    transcribe_kwargs: dict,
+    diarize_kwargs: dict,
+) -> tuple[list[TranscriptionSegment], list]:
+    """Run transcription and diarization concurrently via ProcessPoolExecutor.
+
+    Each subprocess gets its own copy of the module-level model globals
+    (_model, _pipeline), so there are no thread-safety concerns. On Linux/Mac,
+    fork-based process creation has minimal overhead. On Windows, spawn-based
+    creation adds ~1–2 seconds of startup cost per file, which is acceptable
+    for 1–3 hour recordings.
+
+    Returns (transcription_segments, diarization_segments).
+    """
+    tqdm.write("  Running transcription and diarization concurrently")
+    with ProcessPoolExecutor(max_workers=2) as executor:
+        trans_future = executor.submit(_transcribe_worker, wav_path, **transcribe_kwargs)
+        diar_future = executor.submit(_diarize_worker, wav_path, **diarize_kwargs)
+        segments = trans_future.result()
+        diarization = diar_future.result()
+    return segments, diarization
+
+
 def process_file(
     path: Path,
     output_dir: Optional[Path] = None,
@@ -94,6 +136,9 @@ def process_file(
         config_hotwords = config.get("hotwords", [])
         hotwords = config_hotwords if config_hotwords else None
 
+    use_mlx: str = config.get("use_mlx", "auto")
+    parallel_stages: bool = config.get("parallel_stages", False)
+
     check_ffmpeg()
     validate_audio(path)
 
@@ -115,16 +160,49 @@ def process_file(
 
     wav_path = convert_to_wav(path)
 
-    segments: list[TranscriptionSegment] = transcribe(
-        wav_path,
-        model_size=model_size,
-        device=device,
-        language=language,
-        compute_type=compute_type,
-        vad_filter=vad_filter,
-        initial_prompt=initial_prompt,
-        hotwords=hotwords,
-    )
+    # Resolve the HF token before any model runs so we know whether diarization
+    # is possible. This is needed up-front in the parallel path.
+    hf_token = ""
+    if not no_diarize:
+        hf_token = get_hf_token(config)
+
+    # Decide whether to run transcription + diarization concurrently.
+    _run_parallel = parallel_stages and not no_diarize and bool(hf_token)
+
+    diarization = None
+    if _run_parallel:
+        transcribe_kw = dict(
+            model_size=model_size,
+            device=device,
+            language=language,
+            compute_type=compute_type,
+            vad_filter=vad_filter,
+            initial_prompt=initial_prompt,
+            hotwords=hotwords,
+            use_mlx=use_mlx,
+        )
+        diarize_kw = dict(
+            hf_token=hf_token,
+            device=device,
+            num_speakers=num_speakers,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+        )
+        segments, diarization = _run_parallel_transcribe_diarize(
+            wav_path, transcribe_kw, diarize_kw
+        )
+    else:
+        segments: list[TranscriptionSegment] = transcribe(
+            wav_path,
+            model_size=model_size,
+            device=device,
+            language=language,
+            compute_type=compute_type,
+            vad_filter=vad_filter,
+            initial_prompt=initial_prompt,
+            hotwords=hotwords,
+            use_mlx=use_mlx,
+        )
 
     duration = get_duration(wav_path)
     aligned_segments = segments
@@ -133,10 +211,10 @@ def process_file(
 
     if not no_diarize:
         from .aligner import align
-        from .diarizer import diarize
 
-        hf_token = get_hf_token(config)
-        if hf_token:
+        if diarization is None and hf_token:
+            # Sequential path: diarize now (parallel path already populated diarization).
+            from .diarizer import diarize
             diarization = diarize(
                 wav_path,
                 hf_token=hf_token,
@@ -145,6 +223,8 @@ def process_file(
                 min_speakers=min_speakers,
                 max_speakers=max_speakers,
             )
+
+        if diarization is not None:
             aligned_segments = align(segments, diarization)
 
             unique_speakers = sorted(

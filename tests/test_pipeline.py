@@ -545,3 +545,278 @@ def test_skip_message_shown_without_verbose(
 
     captured = capsys.readouterr()
     assert "already processed" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Feature 5: use_mlx config key forwarded to transcribe()
+# ---------------------------------------------------------------------------
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=300.0)
+@patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
+def test_process_file_forwards_use_mlx_from_config(
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg, tmp_path
+):
+    """use_mlx from config is forwarded to transcribe() as a keyword argument."""
+    audio = tmp_path / "ep.mp3"
+    audio.write_bytes(b"fake")
+    mock_convert.return_value = audio
+
+    with patch("wisper_transcribe.pipeline.load_config", return_value={
+        "model": "medium",
+        "language": "en",
+        "compute_type": "auto",
+        "vad_filter": True,
+        "hotwords": [],
+        "use_mlx": "false",
+        "parallel_stages": False,
+    }):
+        from wisper_transcribe.pipeline import process_file
+        process_file(audio, output_dir=tmp_path, device="cpu", no_diarize=True)
+
+    _, kwargs = mock_transcribe.call_args
+    assert kwargs.get("use_mlx") == "false"
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=300.0)
+@patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
+def test_process_file_use_mlx_defaults_to_auto(
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg, tmp_path
+):
+    """use_mlx defaults to 'auto' when not present in config."""
+    audio = tmp_path / "ep.mp3"
+    audio.write_bytes(b"fake")
+    mock_convert.return_value = audio
+
+    # Config missing use_mlx key
+    with patch("wisper_transcribe.pipeline.load_config", return_value={
+        "model": "medium",
+        "language": "en",
+        "compute_type": "auto",
+        "vad_filter": True,
+        "hotwords": [],
+        "parallel_stages": False,
+    }):
+        from wisper_transcribe.pipeline import process_file
+        process_file(audio, output_dir=tmp_path, device="cpu", no_diarize=True)
+
+    _, kwargs = mock_transcribe.call_args
+    assert kwargs.get("use_mlx") == "auto"
+
+
+# ---------------------------------------------------------------------------
+# Feature 6: parallel_stages — concurrent transcription + diarization
+# ---------------------------------------------------------------------------
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=600.0)
+@patch("wisper_transcribe.pipeline.get_hf_token", return_value="fake-token")
+@patch("wisper_transcribe.pipeline._run_parallel_transcribe_diarize")
+@patch("wisper_transcribe.aligner.align")
+@patch("wisper_transcribe.speaker_manager.match_speakers", return_value={})
+def test_parallel_stages_calls_parallel_helper(
+    mock_match, mock_align, mock_parallel, mock_hf,
+    mock_duration, mock_convert, mock_validate, mock_ffmpeg, tmp_path
+):
+    """When parallel_stages=True and diarize is enabled, _run_parallel_transcribe_diarize is called."""
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    mock_convert.return_value = audio
+    mock_parallel.return_value = (FAKE_SEGMENTS, [])
+    mock_align.return_value = []
+
+    with patch("wisper_transcribe.pipeline.load_config", return_value={
+        "model": "medium",
+        "language": "en",
+        "compute_type": "auto",
+        "vad_filter": True,
+        "hotwords": [],
+        "use_mlx": "auto",
+        "parallel_stages": True,
+        "similarity_threshold": 0.65,
+    }):
+        from wisper_transcribe.pipeline import process_file
+        process_file(audio, output_dir=tmp_path, device="cpu", no_diarize=False)
+
+    mock_parallel.assert_called_once()
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=600.0)
+@patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
+@patch("wisper_transcribe.pipeline._run_parallel_transcribe_diarize")
+def test_parallel_stages_disabled_uses_sequential(
+    mock_parallel, mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg, tmp_path
+):
+    """When parallel_stages=False (default), _run_parallel_transcribe_diarize is NOT called."""
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    mock_convert.return_value = audio
+
+    with patch("wisper_transcribe.pipeline.load_config", return_value={
+        "model": "medium",
+        "language": "en",
+        "compute_type": "auto",
+        "vad_filter": True,
+        "hotwords": [],
+        "use_mlx": "auto",
+        "parallel_stages": False,
+    }):
+        from wisper_transcribe.pipeline import process_file
+        process_file(audio, output_dir=tmp_path, device="cpu", no_diarize=True)
+
+    mock_parallel.assert_not_called()
+    mock_transcribe.assert_called_once()
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=600.0)
+@patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
+@patch("wisper_transcribe.pipeline._run_parallel_transcribe_diarize")
+def test_parallel_stages_skipped_when_no_diarize(
+    mock_parallel, mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg, tmp_path
+):
+    """parallel_stages=True is ignored when no_diarize=True — sequential transcription only."""
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    mock_convert.return_value = audio
+
+    with patch("wisper_transcribe.pipeline.load_config", return_value={
+        "model": "medium",
+        "language": "en",
+        "compute_type": "auto",
+        "vad_filter": True,
+        "hotwords": [],
+        "use_mlx": "auto",
+        "parallel_stages": True,
+    }):
+        from wisper_transcribe.pipeline import process_file
+        process_file(audio, output_dir=tmp_path, device="cpu", no_diarize=True)
+
+    mock_parallel.assert_not_called()
+    mock_transcribe.assert_called_once()
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=600.0)
+@patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
+@patch("wisper_transcribe.pipeline.get_hf_token", return_value="")
+@patch("wisper_transcribe.pipeline._run_parallel_transcribe_diarize")
+def test_parallel_stages_skipped_without_hf_token(
+    mock_parallel, mock_hf, mock_transcribe,
+    mock_duration, mock_convert, mock_validate, mock_ffmpeg, tmp_path
+):
+    """parallel_stages=True is ignored when no HF token — sequential path used."""
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    mock_convert.return_value = audio
+
+    with patch("wisper_transcribe.pipeline.load_config", return_value={
+        "model": "medium",
+        "language": "en",
+        "compute_type": "auto",
+        "vad_filter": True,
+        "hotwords": [],
+        "use_mlx": "auto",
+        "parallel_stages": True,
+    }):
+        from wisper_transcribe.pipeline import process_file
+        process_file(audio, output_dir=tmp_path, device="cpu", no_diarize=False)
+
+    mock_parallel.assert_not_called()
+    mock_transcribe.assert_called_once()
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=600.0)
+@patch("wisper_transcribe.pipeline.get_hf_token", return_value="fake-token")
+@patch("wisper_transcribe.pipeline._run_parallel_transcribe_diarize")
+@patch("wisper_transcribe.aligner.align")
+@patch("wisper_transcribe.speaker_manager.match_speakers", return_value={})
+def test_parallel_stages_produces_correct_output(
+    mock_match, mock_align, mock_parallel, mock_hf,
+    mock_duration, mock_convert, mock_validate, mock_ffmpeg, tmp_path
+):
+    """parallel_stages=True produces the same markdown output as sequential."""
+    from wisper_transcribe.models import AlignedSegment
+
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    mock_convert.return_value = audio
+
+    fake_aligned = [
+        AlignedSegment(start=0.0, end=5.0, speaker="SPEAKER_00", text="Welcome to the game"),
+        AlignedSegment(start=5.0, end=10.0, speaker="SPEAKER_00", text="Let us begin"),
+    ]
+    mock_parallel.return_value = (FAKE_SEGMENTS, [])
+    mock_align.return_value = fake_aligned
+
+    with patch("wisper_transcribe.pipeline.load_config", return_value={
+        "model": "medium",
+        "language": "en",
+        "compute_type": "auto",
+        "vad_filter": True,
+        "hotwords": [],
+        "use_mlx": "auto",
+        "parallel_stages": True,
+        "similarity_threshold": 0.65,
+    }):
+        from wisper_transcribe.pipeline import process_file
+        out = process_file(audio, output_dir=tmp_path, device="cpu", no_diarize=False)
+
+    assert out.exists()
+    content = out.read_text(encoding="utf-8")
+    assert "Welcome to the game" in content
+    assert "Let us begin" in content
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=600.0)
+@patch("wisper_transcribe.pipeline.get_hf_token", return_value="fake-token")
+@patch("wisper_transcribe.pipeline._run_parallel_transcribe_diarize")
+@patch("wisper_transcribe.aligner.align")
+@patch("wisper_transcribe.speaker_manager.match_speakers", return_value={})
+def test_parallel_stages_passes_use_mlx_to_worker(
+    mock_match, mock_align, mock_parallel, mock_hf,
+    mock_duration, mock_convert, mock_validate, mock_ffmpeg, tmp_path
+):
+    """parallel_stages path forwards use_mlx to the transcription worker kwargs."""
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    mock_convert.return_value = audio
+    mock_parallel.return_value = (FAKE_SEGMENTS, [])
+    mock_align.return_value = []
+
+    with patch("wisper_transcribe.pipeline.load_config", return_value={
+        "model": "medium",
+        "language": "en",
+        "compute_type": "auto",
+        "vad_filter": True,
+        "hotwords": [],
+        "use_mlx": "false",
+        "parallel_stages": True,
+        "similarity_threshold": 0.65,
+    }):
+        from wisper_transcribe.pipeline import process_file
+        process_file(audio, output_dir=tmp_path, device="cpu", no_diarize=False)
+
+    _, call_args, call_kwargs = mock_parallel.mock_calls[0]
+    transcribe_kwargs = call_args[1]  # second positional arg is transcribe_kwargs dict
+    assert transcribe_kwargs.get("use_mlx") == "false"

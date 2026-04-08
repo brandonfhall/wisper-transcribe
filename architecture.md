@@ -9,6 +9,7 @@
 | Component | Library | Purpose |
 |-----------|---------|---------|
 | Transcription | `faster-whisper` (CTranslate2) | 4× faster than openai/whisper, lower VRAM, lazy model caching; supports `hotwords` and `initial_prompt` for vocabulary guidance |
+| Transcription (macOS) | `mlx-whisper` (optional) | Apple Silicon GPU/ANE backend; dispatched automatically when `use_mlx=auto` and `mlx-whisper` is installed on MPS devices |
 | Diarization | `pyannote-audio 4.x` | Speaker segmentation + voice embeddings |
 | Audio loading (diarizer) | `scipy.io.wavfile` | Bypasses `torchcodec` (see [Known Constraints](#known-constraints)) |
 | Audio conversion | `pydub` + ffmpeg | Convert any format → 16kHz mono WAV |
@@ -66,11 +67,12 @@ Audio file
     ├──────────────────────────────────────────────────────┐
     ▼                                                      ▼
 3. TRANSCRIBE       transcriber.transcribe()       4. DIARIZE   diarizer.diarize()
-   • faster-whisper model (lazy-loaded, cached)       • pyannote Pipeline (lazy-loaded, cached)
-   • Returns List[TranscriptionSegment]               • Audio loaded via scipy.io.wavfile
-   • Each segment: start, end, text                   • Passed as tensor dict to pipeline
-   • tqdm progress bar on transcription time          • Returns List[DiarizationSegment]
-                                                        • Each segment: start, end, speaker label
+   • faster-whisper (CTranslate2) by default          • pyannote Pipeline (lazy-loaded, cached)
+   • MLX Whisper on Apple Silicon if available        • Audio loaded via scipy.io.wavfile
+     (use_mlx=auto + macOS + MPS + mlx-whisper)       • Passed as tensor dict to pipeline
+   • Returns List[TranscriptionSegment]               • Returns List[DiarizationSegment]
+   • Each segment: start, end, text                   • Each segment: start, end, speaker label
+   Steps 3+4 run concurrently when parallel_stages=True (ProcessPoolExecutor; each subprocess isolates model globals)
     │                                                      │
     └──────────────────┬───────────────────────────────────┘
                        ▼
@@ -167,6 +169,18 @@ Hotwords can also be persisted in `config.toml` as a TOML array via `wisper conf
 ### CTranslate2 compute type
 `load_model()` calls `resolve_compute_type(compute_type, device)` to convert `"auto"` to a concrete CTranslate2 dtype: `"float16"` on CUDA (fast, GPU-native), `"int8"` on CPU (lower memory, minimal accuracy loss). Non-auto values (`float32`, `int8_float16`, etc.) are passed through unchanged. This is configurable via `--compute-type` flag and `wisper config set compute_type`.
 
+### MLX Whisper backend (Apple Silicon)
+On macOS with an MPS device, `transcribe()` can dispatch to `mlx_whisper.transcribe()` instead of faster-whisper. The dispatch logic lives in `transcriber.py` and is controlled by the `use_mlx` config key (`"auto"` | `"true"` | `"false"`). `"auto"` (default) enables MLX only when `mlx-whisper` is installed and importable — it falls back to faster-whisper CPU silently if not. `"true"` errors if the package is missing. `"false"` always uses faster-whisper CPU.
+
+MLX models are downloaded from HuggingFace (`mlx-community/whisper-*-mlx`) on first use and cached in `~/.cache/huggingface/hub/`. The model-name mapping from standard size names to MLX repo IDs lives in `_MLX_MODEL_MAP`. hotwords are injected into `initial_prompt` as a comma-separated prefix (mlx-whisper has no native hotwords param). `vad_filter` is silently skipped (not supported). Install: `pip install 'wisper-transcribe[macos]'`.
+
+### Parallel stage processing (`parallel_stages`)
+When `parallel_stages=True` in config (default `False`), `process_file()` runs transcription and diarization concurrently via `ProcessPoolExecutor(max_workers=2)`. The two stages are independent: both take the same converted WAV file as input and produce outputs that are combined in the `align()` step. Each subprocess gets its own copy of the module-level `_model`/`_pipeline` globals, so there are no thread-safety concerns.
+
+Interaction with `--workers N` folder mode: when both `parallel_stages=True` and `workers>1` are active, the total process count is N×2. This is documented; users with high `--workers` values can set `parallel_stages=False` to avoid contention. The web job queue's one-job-at-a-time guarantee is unaffected because the inner `ProcessPoolExecutor` runs inside the `asyncio.to_thread()` call and does not interact with the event loop.
+
+The helper function `_run_parallel_transcribe_diarize()` wraps the executor logic and is a module-level target for test mocking (`@patch("wisper_transcribe.pipeline._run_parallel_transcribe_diarize")`). `_transcribe_worker` and `_diarize_worker` are module-level (not closures) so they can be pickled by the executor.
+
 ### Module-level model caches
 `_model` (transcriber) and `_pipeline` (diarizer) are module-level globals. This avoids reloading multi-GB models between files when processing a folder. The caches are intentionally reset to `None` in tests.
 
@@ -199,7 +213,7 @@ wisper-transcribe/       ← get_data_dir()
         └── <name>.npy   512-dim float32 voice embeddings (gitignored)
 ```
 
-Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`.
+Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`, `hotwords`, `use_mlx`, `parallel_stages`.
 
 ---
 
@@ -228,7 +242,7 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 | Constraint | Detail |
 |-----------|--------|
 | torchcodec on Windows | Requires `Gyan.FFmpeg.Shared` (full-shared build). Currently bypassed by scipy waveform pre-loading in `diarize()` and `extract_embedding()`; torchcodec would work after installing the shared build and restarting |
-| MPS on Apple Silicon | faster-whisper (CTranslate2) has no MPS backend — transcription always uses CPU on Mac. pyannote diarization and speaker embeddings run on MPS when available (auto-detected). |
+| MPS on Apple Silicon | faster-whisper (CTranslate2) has no MPS backend. With `mlx-whisper` installed (`pip install 'wisper-transcribe[macos]'`), transcription uses the Apple Silicon GPU/ANE via MLX Whisper. Without it, transcription falls back to CPU. pyannote diarization and speaker embeddings always run on MPS when available. |
 | Thread safety | `_model` and `_pipeline` globals are not thread-safe; parallel folder processing uses `ProcessPoolExecutor` so each worker is a separate process with isolated module state |
 | pyannote license | HuggingFace token + one-time model license acceptance required (free) |
 
