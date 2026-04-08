@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import subprocess
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
@@ -310,12 +311,17 @@ def process_folder(
     folder: Path,
     output_dir: Optional[Path] = None,
     verbose: bool = False,
+    workers: int = 1,
     **kwargs,
 ) -> tuple[list[Path], list[str]]:
     """Process all audio files in a folder.
 
     Returns (successful_paths, error_messages).
     Skips files whose .md output already exists unless overwrite=True is in kwargs.
+
+    workers > 1 enables parallel processing via ProcessPoolExecutor.  Only
+    supported when device resolves to "cpu" — GPU processing is single-worker
+    because faster-whisper and pyannote are not thread-safe when sharing VRAM.
     """
     folder = Path(folder)
     audio_files = sorted(
@@ -325,32 +331,79 @@ def process_folder(
     if not audio_files:
         return [], []
 
+    # Resolve effective device and enforce CPU-only guard
+    effective_device = kwargs.get("device", "auto")
+    if effective_device == "auto":
+        effective_device = get_device()
+    if workers > 1 and effective_device != "cpu":
+        tqdm.write(
+            f"  WARNING: --workers={workers} is only supported on CPU. "
+            f"GPU processing requires a single worker. Clamping to 1."
+        )
+        workers = 1
+
+    # Interactive enrollment requires a TTY — incompatible with subprocesses
+    if workers > 1 and kwargs.get("enroll_speakers", False):
+        tqdm.write(
+            "  WARNING: --enroll-speakers requires interactive input and cannot "
+            "run in parallel workers. Clamping to 1."
+        )
+        workers = 1
+
     successes: list[Path] = []
     errors: list[str] = []
-    overwrite = kwargs.get("overwrite", False)
-    out_base = Path(output_dir) if output_dir else folder
 
-    progress = tqdm(
-        audio_files, 
-        desc="Folder Progress", 
-        unit="file", 
-        position=0, 
-        leave=True,
-        bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
-        dynamic_ncols=True,
-    )
+    if workers > 1:
+        progress = tqdm(
+            total=len(audio_files),
+            desc="Folder Progress",
+            unit="file",
+            position=0,
+            leave=True,
+            bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
+            dynamic_ncols=True,
+        )
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            future_to_file = {
+                executor.submit(process_file, f, output_dir=output_dir, **kwargs): f
+                for f in audio_files
+            }
+            for future in as_completed(future_to_file):
+                f = future_to_file[future]
+                progress.set_description(f"Finished {f.name}")
+                progress.update(1)
+                try:
+                    result = future.result()
+                    successes.append(result)
+                except Exception as exc:
+                    errors.append(f"{f.name}: {exc}")
+                    tqdm.write(f"  ERROR {f.name}: {exc}")
+        progress.close()
+    else:
+        overwrite = kwargs.get("overwrite", False)
+        out_base = Path(output_dir) if output_dir else folder
 
-    for f in progress:
-        progress.set_description(f"Processing {f.name}")
-        out_path = out_base / (f.stem + ".md")
-        if out_path.exists() and not overwrite:
-            tqdm.write(f"  Skipping {f.name} — already processed (use --overwrite to re-run)")
-            continue
-        try:
-            result = process_file(f, output_dir=output_dir, **kwargs)
-            successes.append(result)
-        except Exception as exc:
-            errors.append(f"{f.name}: {exc}")
-            tqdm.write(f"  ERROR {f.name}: {exc}")
+        progress = tqdm(
+            audio_files,
+            desc="Folder Progress",
+            unit="file",
+            position=0,
+            leave=True,
+            bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
+            dynamic_ncols=True,
+        )
+
+        for f in progress:
+            progress.set_description(f"Processing {f.name}")
+            out_path = out_base / (f.stem + ".md")
+            if out_path.exists() and not overwrite:
+                tqdm.write(f"  Skipping {f.name} — already processed (use --overwrite to re-run)")
+                continue
+            try:
+                result = process_file(f, output_dir=output_dir, **kwargs)
+                successes.append(result)
+            except Exception as exc:
+                errors.append(f"{f.name}: {exc}")
+                tqdm.write(f"  ERROR {f.name}: {exc}")
 
     return successes, errors

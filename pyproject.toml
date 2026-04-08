@@ -24,10 +24,20 @@ dependencies = [
     "tomli-w>=1.0",
     "nvidia-cublas-cu12; sys_platform == 'win32'",
     "nvidia-cudnn-cu12; sys_platform == 'win32'",
+    # Web UI (Phase 11)
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "python-multipart>=0.0.9",
+    "jinja2>=3.1",
+    "markdown>=3.5",
+    "pytailwindcss>=0.3",  # Tailwind CSS build tool (wraps standalone binary, no Node.js)
 ]
 
 [project.optional-dependencies]
-dev = ["pytest-cov"]
+dev = [
+    "pytest-cov",
+    "httpx>=0.27",         # async HTTP client for SSE streaming tests
+]
 
 [project.scripts]
 wisper = "wisper_transcribe.cli:main"

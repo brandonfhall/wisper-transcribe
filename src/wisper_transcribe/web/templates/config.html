@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Config{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl space-y-6">
+
+  <div>
+    <h1 class="text-2xl font-bold text-gray-900">Configuration</h1>
+    <p class="mt-1 text-sm text-gray-500">
+      Settings are saved to <code class="text-xs bg-gray-100 px-1 py-0.5 rounded">{{ config_path }}</code>
+    </p>
+  </div>
+
+  {% if saved %}
+  <div class="rounded-md bg-green-50 border border-green-200 p-4">
+    <p class="text-sm text-green-800">✓ Configuration saved.</p>
+  </div>
+  {% endif %}
+
+  <form method="post" action="/config" class="space-y-6">
+
+    <div class="card space-y-4">
+      <h2 class="text-base font-semibold text-gray-900">Model & Processing</h2>
+      {% for key, type_, desc, choices in fields %}
+      {% if key not in ("hf_token",) %}
+      <div>
+        <label class="form-label" for="cfg_{{ key }}">{{ key }} <span class="text-gray-400 font-normal text-xs">— {{ desc }}</span></label>
+        {% if type_ == "bool" %}
+          <input type="checkbox" id="cfg_{{ key }}" name="{{ key }}" value="1"
+                 {% if config.get(key) %}checked{% endif %}
+                 class="rounded text-indigo-600"/>
+        {% elif choices %}
+          <select id="cfg_{{ key }}" name="{{ key }}" class="form-input">
+            {% for c in choices %}
+            <option value="{{ c }}" {% if config.get(key) == c %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+        {% else %}
+          <input type="text" id="cfg_{{ key }}" name="{{ key }}"
+                 value="{{ config.get(key, '') }}"
+                 class="form-input"/>
+        {% endif %}
+      </div>
+      {% endif %}
+      {% endfor %}
+    </div>
+
+    <div class="card space-y-4">
+      <h2 class="text-base font-semibold text-gray-900">HuggingFace Token</h2>
+      <p class="text-xs text-gray-500">Required for speaker diarization. Get a free token at <strong>huggingface.co</strong>.</p>
+      <div>
+        <label class="form-label" for="cfg_hf_token">hf_token</label>
+        <input type="password" id="cfg_hf_token" name="hf_token"
+               value="{{ config.get('hf_token', '') }}"
+               class="form-input font-mono text-sm"
+               placeholder="hf_…"/>
+      </div>
+    </div>
+
+    <div class="flex gap-4">
+      <button type="submit" class="btn-primary">Save Configuration</button>
+      <a href="/" class="btn-secondary">Cancel</a>
+    </div>
+
+  </form>
+
+</div>
+{% endblock %}

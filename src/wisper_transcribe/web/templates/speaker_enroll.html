@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}Name Speakers{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl space-y-6">
+
+  <div>
+    <a href="/transcribe/jobs/{{ job.id }}" class="text-indigo-600 hover:underline text-sm">← Job</a>
+    <h1 class="text-2xl font-bold text-gray-900 mt-2">Name Detected Speakers</h1>
+    <p class="mt-1 text-sm text-gray-500">
+      Assign names to the speakers detected in this transcript.
+      Existing profiles are listed — click a name to select, or type a new one.
+    </p>
+  </div>
+
+  {% if not detected_speakers %}
+  <div class="card text-center py-8">
+    <p class="text-gray-500">No detected speakers found in this transcript.</p>
+    <a href="/transcribe/jobs/{{ job.id }}" class="mt-4 inline-block btn-secondary">Back to Job</a>
+  </div>
+  {% else %}
+
+  <form method="post" action="/transcribe/jobs/{{ job.id }}/enroll" class="space-y-4">
+    {% for speaker_name in detected_speakers %}
+    {# Use speaker_name as the stable ID key — avoids inner-loop shadowing loop.index #}
+    {% set field_id = "name_" ~ speaker_name | replace(" ", "_") | replace("/", "_") | replace(".", "_") %}
+    <div class="card space-y-3">
+      <div class="flex items-center justify-between">
+        <h3 class="font-medium text-gray-900">{{ speaker_name }}</h3>
+        <div class="flex items-center gap-3">
+          {% if speaker_excerpts and speaker_name in speaker_excerpts %}
+          <audio id="audio_{{ loop.index }}"
+                 src="/transcribe/jobs/{{ job.id }}/excerpt/{{ speaker_name }}"
+                 preload="none" class="hidden"></audio>
+          <button type="button"
+                  onclick="playExcerpt('audio_{{ loop.index }}', this)"
+                  class="inline-flex items-center gap-1 text-xs px-3 py-1 rounded-full border border-green-500 text-green-700 hover:bg-green-50 transition-colors">
+            <svg class="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 20 20">
+              <path d="M6.3 2.841A1.5 1.5 0 004 4.11v11.78a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/>
+            </svg>
+            Play sample
+          </button>
+          {% endif %}
+          <span class="badge-pending text-xs">detected speaker</span>
+        </div>
+      </div>
+
+      {% if existing_profiles %}
+      <div>
+        <p class="text-xs font-medium text-gray-500 mb-2">Existing profiles — click to assign</p>
+        <div class="flex flex-wrap gap-2">
+          {% for key, profile in existing_profiles.items() %}
+          <button type="button"
+                  onclick="document.getElementById('{{ field_id }}').value = '{{ profile.display_name }}'; document.getElementById('{{ field_id }}').focus();"
+                  class="text-xs px-2 py-1 rounded border border-gray-300 hover:border-green-600 hover:text-green-700 transition-colors">
+            {{ profile.display_name }}{% if profile.role %} <span class="text-gray-400">({{ profile.role }})</span>{% endif %}
+          </button>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
+      <div>
+        <label class="form-label text-xs" for="{{ field_id }}">Assign name</label>
+        <input type="text" id="{{ field_id }}"
+               name="speaker_{{ speaker_name }}"
+               value="{{ speaker_name }}"
+               class="form-input text-sm"
+               placeholder="Type a name or click an existing profile above"/>
+      </div>
+    </div>
+    {% endfor %}
+
+    <div class="flex gap-4">
+      <button type="submit" class="btn-primary">Apply Names</button>
+      <a href="/transcribe/jobs/{{ job.id }}" class="btn-secondary">Skip</a>
+    </div>
+  </form>
+  {% endif %}
+
+</div>
+
+<script>
+function playExcerpt(audioId, btn) {
+  // Stop any currently playing excerpt
+  document.querySelectorAll('audio').forEach(a => {
+    if (a.id !== audioId) { a.pause(); a.currentTime = 0; }
+  });
+  const audio = document.getElementById(audioId);
+  if (audio.paused) {
+    audio.play();
+    btn.innerHTML = '<svg class="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 20 20"><path d="M5.75 3a.75.75 0 00-.75.75v12.5c0 .414.336.75.75.75h1.5a.75.75 0 00.75-.75V3.75A.75.75 0 007.25 3h-1.5zM12.75 3a.75.75 0 00-.75.75v12.5c0 .414.336.75.75.75h1.5a.75.75 0 00.75-.75V3.75A.75.75 0 0014.25 3h-1.5z"/></svg> Stop';
+    audio.onended = () => {
+      btn.innerHTML = '<svg class="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 20 20"><path d="M6.3 2.841A1.5 1.5 0 004 4.11v11.78a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/></svg> Play sample';
+    };
+  } else {
+    audio.pause(); audio.currentTime = 0;
+    btn.innerHTML = '<svg class="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 20 20"><path d="M6.3 2.841A1.5 1.5 0 004 4.11v11.78a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/></svg> Play sample';
+  }
+}
+</script>
+{% endblock %}

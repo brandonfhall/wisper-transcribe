@@ -23,8 +23,8 @@
 
 ```
 src/wisper_transcribe/
-├── cli.py              Click entry points — no business logic, delegates to pipeline/manager; includes setup wizard
-├── pipeline.py         Main orchestrator: process_file(), process_folder()
+├── cli.py              Click entry points — no business logic, delegates to pipeline/manager; includes setup wizard, server command
+├── pipeline.py         Main orchestrator: process_file(), process_folder() (supports --workers N via ProcessPoolExecutor)
 ├── transcriber.py      faster-whisper wrapper, lazy model cache (_model), CUDA DLL path fix
 ├── diarizer.py         pyannote pipeline wrapper, lazy cache (_pipeline), scipy audio loading
 ├── aligner.py          Merge transcription segments with diarization labels (max-overlap)
@@ -32,7 +32,17 @@ src/wisper_transcribe/
 ├── formatter.py        Markdown output, YAML frontmatter, timestamp formatting
 ├── audio_utils.py      validate_audio(), convert_to_wav(), get_duration()
 ├── config.py           load_config(), save_config(), get_device(), get_hf_token(), check_ffmpeg()
-└── models.py           Dataclasses: TranscriptionSegment, DiarizationSegment, AlignedSegment, SpeakerProfile
+├── models.py           Dataclasses: TranscriptionSegment, DiarizationSegment, AlignedSegment, SpeakerProfile
+├── static/             Vendored web assets: htmx.min.js, tailwind.min.css (pre-built), wisp.svg, app.js
+└── web/                Phase 11: FastAPI web UI
+    ├── app.py          FastAPI application factory (create_app()), module-level app instance for uvicorn
+    ├── jobs.py         In-memory job queue, JobQueue class, asyncio background worker, SSE progress via tqdm.write patch
+    └── routes/
+        ├── dashboard.py    GET /, GET /jobs (HTMX partial)
+        ├── transcribe.py   GET/POST /transcribe, GET /transcribe/jobs/{id}, SSE /jobs/{id}/stream, enrollment wizard
+        ├── transcripts.py  GET/POST /transcripts, transcript detail, download, delete, fix-speaker
+        ├── speakers.py     GET/POST /speakers, enroll, rename, remove
+        └── config.py       GET/POST /config
 ```
 
 ---
@@ -160,6 +170,9 @@ Hotwords can also be persisted in `config.toml` as a TOML array via `wisper conf
 ### Module-level model caches
 `_model` (transcriber) and `_pipeline` (diarizer) are module-level globals. This avoids reloading multi-GB models between files when processing a folder. The caches are intentionally reset to `None` in tests.
 
+### Parallel folder processing (`--workers N`)
+`process_folder()` accepts a `workers` parameter (default 1). When `workers > 1`, it uses `concurrent.futures.ProcessPoolExecutor` — **not** `ThreadPoolExecutor` — because `_model` and `_pipeline` are module-level globals that are not thread-safe. Each subprocess gets its own copy of the module, so globals are isolated. Guard: if the effective device resolves to anything other than `"cpu"` (after resolving `"auto"`), `workers` is clamped to 1 with a warning, because GPU memory cannot be shared across processes. CPU-only deployments (e.g. a batch server) can safely use multiple workers. `ProcessPoolExecutor` is imported at module level in `pipeline.py` so tests can patch it at `wisper_transcribe.pipeline.ProcessPoolExecutor`.
+
 ### pyproject.toml torch version
 `torch>=2.8.0` is required because `pyannote-audio 4.x` declares this minimum. The CUDA build must be installed from `https://download.pytorch.org/whl/cu126` — PyPI only ships the CPU-only build. The `setup.ps1` script handles this automatically on Windows.
 
@@ -198,7 +211,9 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - `tqdm.write` used throughout production code so test output is not polluted by progress bars
 - Enrollment tests patch `wisper_transcribe.speaker_manager.load_profiles` to return `{}` (no existing profiles) to prevent tests from seeing real profiles on the developer's machine
 - Coverage: run `pytest tests/ -v --cov --cov-report=term-missing`
-- Test count: 117 (all mocked, no GPU/network required)
+- Web tests use `fastapi.testclient.TestClient`; routes are tested via HTTP with all ML calls mocked — no GPU/network needed
+- Security tests in `tests/test_path_traversal.py` cover path traversal (null-byte, dotdot), regex-busting payloads, open-redirect/CRLF payloads, and unit tests for `_validate_job_id()`
+- Test count: 203 (all mocked, all passing)
 
 **CI matrix** (`.github/workflows/ci.yml`):
 - Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)
@@ -214,8 +229,90 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 |-----------|--------|
 | torchcodec on Windows | Requires `Gyan.FFmpeg.Shared` (full-shared build). Currently bypassed by scipy waveform pre-loading in `diarize()` and `extract_embedding()`; torchcodec would work after installing the shared build and restarting |
 | MPS on Apple Silicon | faster-whisper (CTranslate2) has no MPS backend — transcription always uses CPU on Mac. pyannote diarization and speaker embeddings run on MPS when available (auto-detected). |
-| Thread safety | `_model` and `_pipeline` globals are not thread-safe; parallel folder processing would require per-worker instances |
+| Thread safety | `_model` and `_pipeline` globals are not thread-safe; parallel folder processing uses `ProcessPoolExecutor` so each worker is a separate process with isolated module state |
 | pyannote license | HuggingFace token + one-time model license acceptance required (free) |
+
+---
+
+## Web Interface (Phase 11)
+
+### Stack
+FastAPI + Jinja2 + HTMX + Tailwind CSS. All assets served locally — no CDN or internet required at runtime.
+
+| Layer | Choice | Notes |
+|-------|--------|-------|
+| Backend | FastAPI (uvicorn) | `wisper server` command; single-file app factory |
+| Templates | Jinja2 (server-side) | Rendered HTML; HTMX handles partial updates |
+| Reactive UI | HTMX 1.9 (vendored) | `static/htmx.min.js` committed; polled job updates |
+| Styling | Tailwind CSS (compiled) | `static/tailwind.min.css` pre-built; regenerate with `pytailwindcss` |
+| Icons | Heroicons (inline SVG) | Embedded in templates — no external load |
+
+### Job Queue
+`web/jobs.py` — `JobQueue` class with in-memory `dict[str, Job]` and an `asyncio.Queue` drain loop.
+- One background asyncio task consumes the queue; each job runs `process_file()` via `asyncio.to_thread()`.
+- One job at a time (GPU-safe) — the module-level `_model`/`_pipeline` globals are not thread-safe.
+- Progress: `tqdm.write` is monkey-patched per-job to capture log lines into `job.log_lines`; `tqdm.__init__` is also patched to redirect the progress bar to `job.progress`; both are restored after completion.
+- SSE endpoint (`GET /transcribe/jobs/{id}/stream`) streams `job.log_lines`, `job.progress`, and status to the browser.
+- Job `name` is set to the uploaded file's stem so the UI displays a meaningful name instead of a temp-file UUID.
+- Output is always written to the configured output directory (`./output` or `data_dir/output`) so the Transcripts page can find it.
+- Cancel: `POST /transcribe/jobs/{id}/cancel` calls `JobQueue.cancel()`. Pending jobs are immediately marked failed. Running jobs set a `threading.Event` (`_cancel_event`) that is checked in the `tqdm.write` patch; when set, `InterruptedError` is raised to abort the pipeline thread cleanly.
+
+### Speaker Enrollment Web Flow
+Interactive CLI enrollment (TTY prompts) is replaced by a post-job wizard:
+1. Transcription completes with `enroll_speakers=False`; detected speakers appear in transcript as `SPEAKER_XX` labels.
+2. After `process_file()` returns, `_extract_speaker_excerpts()` parses the output markdown for each speaker's first timestamp and cuts a ~12s audio clip via ffmpeg, stored in `job.speaker_excerpts[speaker_name]`.
+3. Dashboard shows "Name Speakers" button for completed jobs.
+4. `GET /transcribe/jobs/{id}/enroll` renders a wizard page with each detected label, a name input (plus existing profiles as click-to-fill options), and a Play/Stop button if an audio excerpt is available.
+5. `GET /transcribe/jobs/{id}/excerpt/{speaker_name}` serves the audio clip as `audio/mpeg`.
+6. `POST /transcribe/jobs/{id}/enroll` applies speaker name renames via `formatter.update_speaker_names()`.
+
+### Web Route Security
+
+All web route handlers follow a consistent two-layer defence pattern enforced by CodeQL scanning on every PR:
+
+**Path traversal (CWE-22) — transcript and speaker clip routes:**
+1. `os.path.basename(user_input)` strips leading path components and is recognised by CodeQL as a path sanitiser.
+2. `os.path.abspath(os.path.join(base, safe_name)).startswith(base + os.sep)` confirms the resolved path stays within the intended directory.
+`Path.resolve()` on tainted input is **not** used — CodeQL does not recognise it as a sanitiser.
+
+**Open redirect (CWE-601) — job ID routes (`cancel_job`, `enroll_form`, `enroll_submit`):**
+`_validate_job_id(job_id)` in `transcribe.py` applies both layers:
+1. `re.match(r"^[\w\-]+$", job_id)` rejects everything except alphanumeric/hyphen.
+2. `os.path.basename(os.path.abspath(os.path.join("_guard", job_id)))` round-trip produces a string CodeQL's taint tracker treats as clean. `re.match().group(1)` alone is **still considered tainted** by CodeQL even after format validation; the `os.path` round-trip is required.
+
+**Error messages:** Internal exception text is never placed in redirect URLs or error responses. Routes use generic error codes (e.g. `?error=enroll_failed`).
+
+**Output directory:** The `start_transcribe` form handler ignores any user-supplied `output_dir` and always writes to `_default_output_dir()`. Accepting arbitrary paths from form data would allow writing outside the data directory.
+
+### Transcript Filename Handling
+Transcript filenames may contain arbitrary Unicode characters (spaces, em-dashes, parentheses, etc.). All URL path parameters that correspond to filenames use the **two-layer path guard** (basename + abspath/startswith) rather than an allowlist regex — allowlist regex would block valid unicode filenames. This allows episode titles like "Episode 2 – O Captain! My (Dead) Captain!" to work correctly.
+
+URL-encoding is applied at every point where a filename is embedded in a URL or HTTP header:
+- Templates use the `urlencode` Jinja2 filter (`routes/__init__.py`) for all `<a href>` links that include a file stem.
+- Redirect `Location` headers are built with `urllib.parse.quote(name)` so latin-1 codec is never violated.
+- JavaScript in `job_detail.html` uses `encodeURIComponent(stem)` when constructing the post-SSE transcript link.
+
+### Progress Display (Web)
+The job detail page shows a live progress bar driven by SSE events from `GET /transcribe/jobs/{id}/stream`:
+- Three step indicators (T / D / F) advance sequentially as phases complete.
+- The overall bar maps per-phase tqdm percentages: transcription → 0–60%, diarization → 60–90%, formatting → 100% on done.
+- ETA and speed counter (`5.2s/s`, `0.39chunk/s`) are parsed from the tqdm string and shown below the bar while a job is active, hidden on completion.
+- Diarization bars now include `{rate_fmt}` (chunk/s) to match transcription output.
+
+### Transcript Management (Web)
+- Transcripts list page: each card is fully clickable via the **overlay link pattern** (card is a `div` with an `absolute inset-0` `<a>` underneath, action buttons use `relative z-10` to sit above). This avoids the invalid-HTML problem of nesting `<form>` inside `<a>`.
+- Delete: `POST /transcripts/{name}/delete` removes the `.md` file and redirects to `/transcripts`.
+- Dashboard stat cards link to their respective sections (Active Jobs → `/transcribe`, Transcripts → `/transcripts`, Enrolled Speakers → `/speakers`).
+
+### Navigation Styling
+Nav link styles (`nav-link`, `nav-active`, `nav-divider`, `mobile-nav-link`) are defined in `static/input.css` as Tailwind component-layer classes, not in an inline `<style>` block in `base.html`. This ensures they are included in the compiled `tailwind.min.css` and benefit from purging. Links display as pill buttons: transparent border at rest, `border-green-500 bg-green-800` on hover, `border-green-400 bg-green-800` for the active page.
+
+### Offline Assets
+- `static/htmx.min.js`: placeholder committed to repo; real file downloaded during `docker build` via `curl`. For local use: `curl -sL https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js -o src/wisper_transcribe/static/htmx.min.js`
+- `static/tailwind.min.css`: rebuilt automatically on server startup by `app._build_tailwind()` (mtime-checked; skips if already current). `pytailwindcss` is a main dependency (no Node.js required). Docker builds also invoke the build step so images are self-contained. Manual rebuild: `python -m pytailwindcss -i ./src/wisper_transcribe/static/input.css -o ./src/wisper_transcribe/static/tailwind.min.css --minify`
+
+### Docker Web Services
+`docker-compose.yml` defines `wisper-web` (GPU) and `wisper-cpu-web` (CPU), both exposing port 8080. Same image as CLI services, different `command: ["server", "--host", "0.0.0.0", "--port", "8080"]`.
 
 ---
 

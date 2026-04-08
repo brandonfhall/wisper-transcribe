@@ -1,189 +1,85 @@
-# Wisper-Transcribe: Podcast Transcription with Speaker Diarization
+# Wisper-Transcribe: Backlog & Future Work
 
-## Context
+## Project Context
 
-The user runs tabletop RPG actual-play podcasts (D&D-style) with 5-8 speakers (GM + players). They want to transcribe sessions into markdown transcripts with consistent speaker labeling across files. The transcripts will be fed into a NotebookLM-style system for querying game events and tracking stats.
+Podcast transcription tool for tabletop RPG actual-play recordings (D&D, Pathfinder, etc.) with 5–8 speakers (GM + players). Transcripts are fed into NotebookLM for querying game events and tracking stats.
 
-**Hardware**: NVIDIA RTX 3090 (24GB VRAM) on Windows, Apple M5 Mac. Both platforms must be supported.
-**Processing**: All local, no cloud APIs. CLI-driven.
+**Hardware:** NVIDIA RTX 3090 (Windows), Apple M5 Mac. Both platforms supported.
+**Processing:** Fully local — no cloud APIs. CLI + web UI.
+**Stack:** faster-whisper + pyannote-audio. See [architecture.md](architecture.md) for full technical reference and [README.md](README.md) for user docs.
 
-## Technical Stack
-
-**Custom pipeline: faster-whisper + pyannote-audio**
-
-- faster-whisper: 4× faster than OpenAI whisper via CTranslate2, lower VRAM usage
-- pyannote-audio: speaker diarization + voice embedding extraction
-- Chose this over WhisperX due to chronic dependency pinning issues in WhisperX
-- Direct embedding access is critical for cross-file speaker ID
-
-**Key dependency: HuggingFace token** (free) required for pyannote models. One-time setup.
-**System requirement: ffmpeg** for audio format conversion.
-
-## Project Structure
-
-```
-wisper-transcribe/
-├── pyproject.toml
-├── README.md
-├── CLAUDE.md
-├── plan.md
-├── src/
-│   └── wisper_transcribe/
-│       ├── __init__.py
-│       ├── __main__.py            # python -m wisper_transcribe
-│       ├── cli.py                 # Click CLI commands
-│       ├── config.py              # Config loading, platform paths, ffmpeg check
-│       ├── pipeline.py            # Main orchestrator
-│       ├── transcriber.py         # faster-whisper wrapper
-│       ├── diarizer.py            # pyannote diarization wrapper
-│       ├── speaker_manager.py     # Speaker profiles, enrollment, matching
-│       ├── aligner.py             # Merge transcription + diarization segments
-│       ├── formatter.py           # Markdown output generation
-│       ├── audio_utils.py         # Audio validation, conversion
-│       └── models.py              # Data classes
-└── tests/
-    ├── test_models.py
-    ├── test_config.py
-    ├── test_audio_utils.py
-    ├── test_transcriber.py
-    ├── test_formatter.py
-    ├── test_aligner.py
-    ├── test_diarizer.py
-    ├── test_pipeline.py
-    ├── test_pipeline_folder.py
-    └── test_speaker_manager.py
-```
-
-User data stored via `platformdirs` (outside the repo, never committed):
-- Windows: `%APPDATA%\wisper-transcribe\`
-- Mac: `~/Library/Application Support/wisper-transcribe/`
-
-```
-wisper-transcribe/          # user data dir
-├── config.toml
-└── profiles/
-    ├── speakers.json       # name -> metadata mapping
-    └── embeddings/         # .npy voice fingerprint files (gitignored)
-```
-
-## Processing Pipeline
-
-```
-1. VALIDATE     → audio_utils: check file exists, supported format
-2. PREPROCESS   → audio_utils: convert to 16kHz mono WAV (if needed)
-3. TRANSCRIBE   → transcriber: faster-whisper → text segments with timestamps
-4. DIARIZE      → diarizer: pyannote → speaker-labeled time regions
-5. ALIGN        → aligner: merge text segments with speaker labels
-6. IDENTIFY     → speaker_manager: match anonymous labels to enrolled profiles
-7. FORMAT       → formatter: produce markdown output
-8. WRITE        → save .md file (one per input file)
-```
-
-## Speaker Labeling Lifecycle
-
-### First run — enroll speakers interactively
-```
-$ wisper transcribe session01.mp3 --enroll-speakers --num-speakers 6
-```
-After transcription + diarization, prompts for each speaker's name/role. Saves voice embeddings to profiles directory for future matching.
-
-### Subsequent runs — automatic matching
-```
-$ wisper transcribe session02.mp3 --num-speakers 6
-```
-Extracts embeddings for each detected speaker, compares via cosine similarity against enrolled profiles (threshold: 0.65 default), assigns names. Unknown speakers labeled "Unknown Speaker N".
-
-### Edge cases
-- **New player:** appears as "Unknown Speaker N" → `wisper fix` + `wisper enroll`
-- **Absent player:** their profile is simply ignored
-- **Voice drift:** `wisper enroll --update` blends new sample via EMA (alpha=0.3)
-- **Wrong match:** `wisper fix session.md --speaker "Alice" --name "Diana"`
-
-## CLI Reference
-
-```
-wisper transcribe <path>          # file or folder
-  -o, --output DIR
-  -m, --model SIZE                # tiny/base/small/medium/large-v3 (default: medium)
-  -l, --language LANG             # language code or 'auto'
-  -n, --num-speakers INT
-  --min-speakers / --max-speakers INT
-  --enroll-speakers               # interactive first-run naming
-  --play-audio                    # play each speaker's excerpt during enrollment
-  --no-diarize
-  --timestamps / --no-timestamps
-  --device cpu|cuda|auto
-  --compute-type auto|float16|int8_float16|int8|float32
-  --vad / --no-vad                # voice activity detection to skip silence (default: on)
-  --vocab-file FILE               # newline-separated hotwords list (overrides config)
-  --initial-prompt TEXT           # prepended context to guide transcription style
-  --overwrite
-  --verbose
-
-wisper enroll <name> --audio <file>
-  --segment START-END
-  --notes TEXT
-  --update                        # EMA blend with existing embedding
-
-wisper speakers list|remove|rename|reset|test
-
-wisper config show|set|path
-
-wisper fix <transcript.md>
-  --speaker NAME --name NEW_NAME [--re-enroll]
-```
-
-## Output Format
-
-```markdown
----
-title: Session 01 - The Dragon's Keep
-source_file: session01.mp3
-date_processed: '2026-04-05'
-duration: 1:23:45
-speakers:
-- name: Alice
-  role: DM
-- name: Bob
-  role: Player
 ---
 
-# Session 01 - The Dragon's Keep
+## Notes for Claude (Recent Security & Bug Fixes) — ALL RESOLVED ✓
 
-**Alice** *(00:00:12)*: Welcome back everyone. Last session you had just entered the ruins.
-
-**Bob** *(00:00:18)*: Right, I want to check for traps before we go further in.
-```
-
-## HuggingFace Model Notes
-
-Models are downloaded once on first use and cached to `~/.cache/huggingface/hub/`. Subsequent runs are fully offline.
-
-| Model | Purpose | Size |
-|-------|---------|------|
-| `openai/whisper-*` (via faster-whisper) | Transcription | 75MB–1.5GB depending on size |
-| `pyannote/speaker-diarization-3.1` | Speaker diarization | ~400MB |
-| `pyannote/embedding` | Voice fingerprinting | ~200MB |
-| `pyannote/segmentation-3.0` | Voice activity detection | ~100MB |
-
-To check what's cached: `huggingface-cli scan-cache`
-
-Required one-time license agreements (free, HuggingFace account):
-- https://huggingface.co/pyannote/speaker-diarization-3.1
-- https://huggingface.co/pyannote/embedding
-- https://huggingface.co/pyannote/segmentation-3.0
-
-## Cross-Platform Notes
-
-- Always use `pathlib.Path` for all file ops
-- `platformdirs` for config/data directory resolution
-- **Windows (RTX 3090)**: CUDA auto-detected. Use `large-v3` model. CUDA DLL path fix applied in `transcriber.py` for CTranslate2 compatibility.
-- **Mac (M5)**: CPU-only (MPS unreliable for these models). Use `medium` model for speed.
-- ffmpeg check on startup with platform-specific install instructions
+*   **Path Traversal (CWE-22) Mitigations ✓:** Resolved GitHub CI CodeQL HIGH warnings across web routes. Replaced manual string checks with `os.path.basename()`. Satisfied CodeQL's taint tracking engine via: (1) `os.path.abspath().startswith()` validation with `os.path.join` (avoiding `Path.resolve()` on tainted inputs), (2) strict Regex Match Guards (`^[\w\-]+$`), and (3) explicit cross-module taint clearing via the `os.path.abspath().startswith()` dummy guard pattern.
+*   **Security Tests ✓:** `tests/test_path_traversal.py` enforces path traversal guards (null-byte, directory escape), open-redirect/CRLF payloads, and unit tests for `_validate_job_id()`. Exception-message non-leak test added. `follow_redirects=False` used for all POST redirect assertions.
+*   **Job Queue Flakiness ✓:** Fixed `test_list_all_sorted_by_created_at` — `JobQueue.list_all()` reverses insertion order before sorting to break timestamp ties (common on Windows).
+*   **Setup Crash ✓:** Fixed `IndentationError` / mangled `try/except` in `speakers.py` (`speaker_clip`) that broke FastAPI init and caused 25+ test errors.
+*   **Open Redirect Mitigations ✓ (all 3 CodeQL MEDIUMs resolved):** Introduced `_validate_job_id()` helper in `transcribe.py`. Regex alone (`re.match().group(1)`) is still tainted by CodeQL — the helper adds the `os.path` dummy-guard round-trip that produces a taint-clean copy. Used in `cancel_job`, `enroll_form`, and `enroll_submit`. Corresponding unit tests in `test_path_traversal.py`.
+*   **Exception Message Leak ✓:** `speakers.py` enroll error redirect now uses generic `?error=enroll_failed` instead of `str(exc)[:100]`. Regression test added.
+*   **Unvalidated output_dir ✓:** Removed user-controlled `output_dir` form parameter from `start_transcribe`. Output always goes to `_default_output_dir()`. Regression test added.
+*   **Security standards documented ✓:** `CLAUDE.md` now has an explicit Web Route Security Standards section covering CWE-22, CWE-601, error reflection, and test coverage requirements for all future work.
 
 ---
 
 ## Backlog
+
+### Research — Apple Silicon Acceleration
+
+**Status:** Not researched. M5 Mac is a primary development and use machine.
+
+**Problem:** faster-whisper (CTranslate2) has no MPS backend — transcription always falls back to CPU on Apple Silicon. pyannote diarization and embedding extraction do use MPS when available. So on Mac, transcription is the bottleneck running purely on CPU even though the M5 has substantial GPU compute.
+
+**Areas to investigate:**
+
+1. **MLX-Whisper** — Apple's MLX framework has a first-party Whisper port (`mlx-examples/whisper`) that runs natively on the Apple Neural Engine / GPU. Could replace faster-whisper on Mac only, dispatched via a backend abstraction in `transcriber.py`. Need to evaluate: output format compatibility with our `TranscriptionSegment` model, word-level timestamp support (required for diarization alignment), and accuracy vs. faster-whisper medium/large-v3.
+
+2. **WhisperKit** — Swift-native Whisper optimized for Apple Silicon via Core ML. Python bindings exist (`whisperkittools`). Higher integration complexity but potentially better ANE utilization than MLX.
+
+3. **faster-whisper on MPS via OpenBLAS / Accelerate** — CTranslate2 CPU backend on Apple Silicon already benefits from Accelerate framework (BLAS). Worth benchmarking: is the CPU path already near-optimal on M-series, or is there a meaningful gap vs. MPS-capable alternatives?
+
+**Decision point:** Only build a Mac-specific backend if benchmarks show >2× speedup over the current CPU path. The abstraction cost (maintaining two backends) must be justified by real-world session processing time.
+
+---
+
+### Research — Parallel Processing of a Single File
+
+**Status:** Not researched. Current pipeline processes one file sequentially (validate → convert → transcribe → diarize → align → identify → format).
+
+**Problem:** A 3-hour session takes significant wall time even on fast hardware. The transcription and diarization steps together are the bottleneck and currently run sequentially, but they are largely independent — transcription produces text segments, diarization produces speaker-labeled time regions; neither needs the other's output to start.
+
+**Areas to investigate:**
+
+1. **Concurrent transcription + diarization** — Both steps take the same WAV file as input. They could run in parallel using `asyncio.to_thread()` (already used in the web job runner) or `ProcessPoolExecutor` with two workers. The blocker: both `_model` (transcriber) and `_pipeline` (diarizer) are module-level globals — parallel threads/processes would each need their own copy. Memory cost on GPU: loading both models simultaneously requires ~5 GB (medium) + ~700 MB (pyannote) = ~6 GB, well within the RTX 3090's 24 GB. On CPU/Mac, both are loaded anyway.
+
+2. **Audio chunking for transcription** — Split audio into N overlapping chunks, transcribe in parallel across CPU cores, merge results. faster-whisper's VAD already chunks internally; exposing this as a multi-process step is non-trivial. Risk: segment boundary artifacts at chunk join points, especially mid-sentence. Would need overlap + deduplication logic.
+
+3. **Diarization chunking** — pyannote processes audio in overlapping windows internally. Not obviously parallelizable from outside the pipeline without forking pyannote internals.
+
+**Likely best outcome:** Run transcription and diarization concurrently (approach 1) — this is architecturally clean and the two models are already independent. Estimate: could cut wall time by ~30–40% on GPU where diarization is the slower step.
+
+**Guard:** Must not break the `--workers N` folder processing mode or the web job queue's one-job-at-a-time guarantee.
+
+---
+
+### Research — Faster / Better Transcription Models
+
+**Status:** Not researched. Currently using faster-whisper with OpenAI Whisper weights (tiny → large-v3).
+
+**Areas to investigate:**
+
+1. **Whisper large-v3-turbo** — OpenAI released a distilled large-v3 model (~809M params vs. 1.5B) that is reportedly ~8× faster than large-v3 with minimal accuracy loss on English. Already supported by faster-whisper. Should be a near-drop-in upgrade for the `large-v3` config option — worth benchmarking accuracy on podcast audio specifically.
+
+2. **Distil-Whisper** — Hugging Face distilled variants (`distil-large-v3`, `distil-medium.en`) are 5.8× faster than large-v3 with ~1% WER increase on clean speech. English-only. May be ideal for the Mac CPU path where speed matters most. Requires `transformers` backend, not CTranslate2 — would need a new backend shim or conversion to CTranslate2 format via `ct2-transformers-converter`.
+
+3. **Parakeet (NVIDIA NeMo)** — NVIDIA's `parakeet-tdt-0.6b-v2` recently topped the OpenASR leaderboard, outperforming Whisper large-v3 on English benchmarks. Uses CTC+TDT decoding. No faster-whisper support yet; would require NeMo or ONNX integration. GPU-only (CUDA). Worth watching — if CTranslate2 support lands, this could be a significant accuracy upgrade.
+
+4. **Model format: CTranslate2 conversion** — Any Hugging Face Whisper-compatible model can be converted to CTranslate2 format via `ct2-transformers-converter`, making it usable in the current faster-whisper path with no code changes beyond adding the model size option.
+
+**Recommendation order:** large-v3-turbo first (zero integration cost, meaningful speedup), then distil-large-v3 for Mac/CPU users, then watch Parakeet for future GPU accuracy gains.
+
+---
 
 ### DM Character Voice Handling
 
@@ -343,22 +239,6 @@ A 3-hour session at ~150 wpm ≈ 27,000 words ≈ 35,000 tokens. Most local mode
 - `ollama` Python package (optional; fallback to `httpx` raw REST)
 - No new ML models required
 - Feature is entirely opt-in; missing `llm_endpoint`/`llm_model` in config → early exit with setup message
-
----
-
-### Phase 10 — Parallel Folder Processing (CPU-only)
-
-**Context:** GPU processing is always the bottleneck — faster-whisper and pyannote are not thread-safe when sharing a GPU, and loading duplicate model copies would exhaust VRAM. Parallelism only makes sense on CPU-only deployments (e.g. a Linux server processing a large queue of files overnight).
-
-**What to build:** `--workers N` flag on `wisper transcribe <folder>`. Uses `concurrent.futures.ThreadPoolExecutor`. Each worker gets its own model instance (no sharing). Guard: if `device != "cpu"`, emit a warning and clamp workers to 1. Default workers=1 (current behavior unchanged for all GPU users).
-
-**When to build:** Only if there's an actual CPU-server use case. Not worth building for the primary RTX 3090 / M5 Mac workflow.
-
----
-
-### Phase 11 — Optional GUI
-
-Textual (terminal) or tkinter/PyQt. Wraps the same `pipeline.process_file()` and `speaker_manager` calls. Keep CLI/library separation clean.
 
 ---
 

@@ -45,3 +45,49 @@ services:
       - ./output:/app/output
     stdin_open: true
     tty: true
+
+  # ── GPU web service ────────────────────────────────────────────────────────
+  # Browser-based UI for transcription, speaker management, and config.
+  # Visit http://localhost:8080 after starting.
+  #   docker compose up wisper-web
+  wisper-web:
+    build:
+      context: .
+      target: gpu
+    image: wisper-transcribe:gpu
+    command: ["server", "--host", "0.0.0.0", "--port", "8080"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./cache:/root/.cache/huggingface
+      - ./data:/data
+      - ./input:/app/input
+      - ./output:/app/output
+    environment:
+      - WISPER_DATA_DIR=/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # ── CPU web service ─────────────────────────────────────────────────────────
+  # Web UI without GPU (uses CPU for inference — slower but no NVIDIA required).
+  #   docker compose up wisper-cpu-web
+  wisper-cpu-web:
+    build:
+      context: .
+      target: cpu
+    image: wisper-transcribe:cpu
+    command: ["server", "--host", "0.0.0.0", "--port", "8080"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./cache:/root/.cache/huggingface
+      - ./data:/data
+      - ./input:/app/input
+      - ./output:/app/output
+    environment:
+      - WISPER_DATA_DIR=/data

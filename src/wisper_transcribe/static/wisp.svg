@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" aria-label="Wisper wisp logo">
+  <defs>
+    <radialGradient id="glow-outer" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#818cf8" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#4f46e5" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow-mid" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#a5b4fc" stop-opacity="0.5"/>
+      <stop offset="100%" stop-color="#6366f1" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="orb-core" cx="38%" cy="35%" r="60%">
+      <stop offset="0%" stop-color="#e0e7ff"/>
+      <stop offset="45%" stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#4338ca"/>
+    </radialGradient>
+    <filter id="blur-lg" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="6"/>
+    </filter>
+    <filter id="blur-sm" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2.5"/>
+    </filter>
+  </defs>
+
+  <!-- Outer atmospheric glow -->
+  <circle cx="32" cy="34" r="28" fill="url(#glow-outer)" filter="url(#blur-lg)"/>
+
+  <!-- Mid glow -->
+  <circle cx="32" cy="34" r="16" fill="url(#glow-mid)" filter="url(#blur-sm)"/>
+
+  <!-- Core orb -->
+  <circle cx="32" cy="34" r="10" fill="url(#orb-core)"/>
+
+  <!-- Inner highlight -->
+  <circle cx="28" cy="30" r="3.5" fill="white" opacity="0.35"/>
+
+  <!-- Floating spark particles -->
+  <circle cx="20" cy="22" r="2.2" fill="#a5b4fc" opacity="0.7" class="spark-1"/>
+  <circle cx="44" cy="18" r="1.5" fill="#c7d2fe" opacity="0.6" class="spark-2"/>
+  <circle cx="48" cy="42" r="1.8" fill="#818cf8" opacity="0.5" class="spark-3"/>
+
+  <style>
+    .spark-1 { animation: float1 3.2s ease-in-out infinite; }
+    .spark-2 { animation: float2 2.8s ease-in-out infinite 0.6s; }
+    .spark-3 { animation: float3 3.6s ease-in-out infinite 1.2s; }
+    @keyframes float1 { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+    @keyframes float2 { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+    @keyframes float3 { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+  </style>
+</svg>

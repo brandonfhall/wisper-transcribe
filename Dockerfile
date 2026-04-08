@@ -23,9 +23,10 @@ FROM python:3.12-slim AS base
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-# ffmpeg is required by pydub for audio format conversion
+# ffmpeg is required by pydub; curl is used to download vendored HTMX at build time
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
+        curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -43,7 +44,15 @@ ENV WISPER_DATA_DIR=/data
 # ── cpu target ────────────────────────────────────────────────────────────────
 FROM base AS cpu
 
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir -e . \
+ # Download vendored HTMX so wisper server works fully offline
+ && curl -sL "https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js" \
+         -o /app/src/wisper_transcribe/static/htmx.min.js \
+ # Build Tailwind CSS so the web UI is fully self-contained in the image
+ && python -m pytailwindcss \
+         -i /app/src/wisper_transcribe/static/input.css \
+         -o /app/src/wisper_transcribe/static/tailwind.min.css \
+         --minify
 
 ENTRYPOINT ["wisper"]
 CMD ["--help"]
@@ -58,7 +67,15 @@ RUN pip install --no-cache-dir -e . \
  && pip install --no-cache-dir --upgrade \
         "torch>=2.8.0" \
         "torchaudio>=2.8.0" \
-        --index-url https://download.pytorch.org/whl/cu126
+        --index-url https://download.pytorch.org/whl/cu126 \
+ # Download vendored HTMX so wisper server works fully offline
+ && curl -sL "https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js" \
+         -o /app/src/wisper_transcribe/static/htmx.min.js \
+ # Build Tailwind CSS so the web UI is fully self-contained in the image
+ && python -m pytailwindcss \
+         -i /app/src/wisper_transcribe/static/input.css \
+         -o /app/src/wisper_transcribe/static/tailwind.min.css \
+         --minify
 
 ENTRYPOINT ["wisper"]
 CMD ["--help"]

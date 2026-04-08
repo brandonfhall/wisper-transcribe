@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Enroll Speaker{% endblock %}
+
+{% block content %}
+<div class="max-w-xl space-y-6">
+
+  <div>
+    <a href="/speakers" class="text-indigo-600 hover:underline text-sm">← Speakers</a>
+    <h1 class="text-2xl font-bold text-gray-900 mt-2">Enroll New Speaker</h1>
+    <p class="mt-1 text-sm text-gray-500">Upload an audio clip to create a voice profile.</p>
+  </div>
+
+  {% if request.query_params.get("error") %}
+  <div class="rounded-md bg-red-50 border border-red-200 p-4">
+    <p class="text-sm text-red-800">Error: {{ request.query_params.get("error") }}</p>
+  </div>
+  {% endif %}
+
+  <form method="post" action="/speakers/enroll" enctype="multipart/form-data" class="card space-y-4">
+
+    <div>
+      <label class="form-label" for="name">Speaker Name</label>
+      <input type="text" id="name" name="name" required placeholder="Alice" class="form-input"/>
+    </div>
+
+    <div>
+      <label class="form-label" for="role">Role <span class="text-gray-400 font-normal">(optional)</span></label>
+      <input type="text" id="role" name="role" placeholder="DM, Player, Guest…" class="form-input"/>
+    </div>
+
+    <div>
+      <label class="form-label" for="notes">Notes <span class="text-gray-400 font-normal">(optional)</span></label>
+      <input type="text" id="notes" name="notes" placeholder="Main character: Kyra the Ranger" class="form-input"/>
+    </div>
+
+    <div>
+      <label class="form-label" for="audio">Audio File</label>
+      <input type="file" id="audio" name="audio" accept=".mp3,.wav,.m4a,.flac,.ogg,.mp4" required
+             class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-medium file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"/>
+      <p class="mt-1 text-xs text-gray-500">A clip with clear speech from this speaker (30s – 5min ideal).</p>
+    </div>
+
+    <div class="flex items-center gap-2">
+      <input type="checkbox" id="update" name="update" value="1" class="rounded text-indigo-600"/>
+      <label for="update" class="text-sm text-gray-700">Update existing profile (blend with EMA)</label>
+    </div>
+
+    <div class="flex gap-4 pt-2">
+      <button type="submit" class="btn-primary">Enroll Speaker</button>
+      <a href="/speakers" class="btn-secondary">Cancel</a>
+    </div>
+  </form>
+
+</div>
+{% endblock %}

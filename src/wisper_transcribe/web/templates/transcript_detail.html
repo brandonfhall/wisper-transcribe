@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}{{ meta.title or name }}{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+
+  <div class="flex items-center gap-4">
+    <a href="/transcripts" class="text-indigo-600 hover:underline text-sm">← Transcripts</a>
+    <h1 class="text-2xl font-bold text-gray-900 flex-1">{{ meta.title or name }}</h1>
+    <a href="/transcripts/{{ name }}/download" class="btn-secondary text-sm">Download .md</a>
+  </div>
+
+  <!-- Metadata -->
+  {% if meta %}
+  <div class="card">
+    <dl class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
+      {% if meta.date_processed %}<div><dt class="font-medium text-gray-500">Processed</dt><dd>{{ meta.date_processed }}</dd></div>{% endif %}
+      {% if meta.duration %}<div><dt class="font-medium text-gray-500">Duration</dt><dd>{{ meta.duration }}</dd></div>{% endif %}
+      {% if meta.source_file %}<div class="sm:col-span-2"><dt class="font-medium text-gray-500">Source</dt><dd class="font-mono text-xs truncate">{{ meta.source_file }}</dd></div>{% endif %}
+    </dl>
+    {% if meta.speakers %}
+    <div class="mt-4">
+      <p class="text-sm font-medium text-gray-500 mb-2">Speakers</p>
+      <div class="flex flex-wrap gap-2">
+        {% for s in meta.speakers %}
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
+          {{ s.name }}{% if s.role %} <span class="ml-1 text-indigo-500">({{ s.role }})</span>{% endif %}
+        </span>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <!-- Fix speaker names form -->
+  <details class="card">
+    <summary class="text-sm font-medium text-gray-700 cursor-pointer">Rename a Speaker</summary>
+    <form method="post" action="/transcripts/{{ name }}/fix-speaker" class="mt-4 flex items-end gap-3 flex-wrap">
+      <div>
+        <label class="form-label text-xs">Current name</label>
+        {% if meta.speakers %}
+        <select name="old_name" class="form-input" required>
+          <option value="" disabled selected>Select speaker…</option>
+          {% for s in meta.speakers %}
+          <option value="{{ s.name }}">{{ s.name }}{% if s.role %} ({{ s.role }}){% endif %}</option>
+          {% endfor %}
+        </select>
+        {% else %}
+        <input type="text" name="old_name" class="form-input" placeholder="Alice" required/>
+        {% endif %}
+      </div>
+      <div>
+        <label class="form-label text-xs">New name</label>
+        <input type="text" name="new_name" class="form-input" placeholder="Alice (DM)" required/>
+      </div>
+      <button type="submit" class="btn-secondary text-sm">Rename</button>
+    </form>
+  </details>
+
+  <!-- Transcript body -->
+  <div class="card prose prose-indigo max-w-none">
+    {{ html_body | safe }}
+  </div>
+
+</div>
+{% endblock %}

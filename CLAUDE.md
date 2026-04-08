@@ -1,112 +1,122 @@
-# wisper-transcribe — Developer Instructions
+# wisper-transcribe — Claude Instructions
 
-## Environment
+> **Full references:** [README.md](README.md) (user docs) · [architecture.md](architecture.md) (technical deep-dive)
 
-All commands (installs, tests, running the CLI) must be run inside the project's Python virtual environment:
+---
 
-```bash
-# Create venv (one-time)
-python -m venv .venv
-
-# Activate (Windows)
-.venv\Scripts\activate
-
-# Install package in editable mode
-pip install -e .
-```
-
-Never run `pip install` or `pytest` against the system Python — always use `.venv`.
-
-## Running Tests
+## Commands
 
 ```bash
-# Without coverage
-.venv/Scripts/pytest tests/ -v
+# Install / editable mode (always use .venv)
+.venv/bin/pip install -e .            # Mac/Linux
+.venv\Scripts\pip install -e .        # Windows
 
-# With coverage report (matches what CI runs)
-.venv/Scripts/pytest tests/ -v --cov --cov-report=term-missing
+# Run tests
+.venv/bin/pytest tests/ -v            # Mac/Linux
+.venv\Scripts\pytest tests/ -v        # Windows
+
+# With coverage (matches CI)
+.venv/bin/pytest tests/ -v --cov --cov-report=term-missing
+
+# Run web server
+wisper server --reload                # dev mode; http://localhost:8080
+
+# Rebuild Tailwind CSS (required after any template class changes)
+.venv/bin/python -m pytailwindcss -i src/wisper_transcribe/static/input.css \
+    -o src/wisper_transcribe/static/tailwind.min.css --minify
+# Commit tailwind.min.css alongside template changes
 ```
 
-Tests must not require a GPU, network access, or real ML models. Mock all ML model calls (faster-whisper, pyannote) using `unittest.mock`.
+---
 
-## Branch Protection & CI
+## Git / CI Rules
 
-The `main` branch is protected on GitHub. All changes must go through a pull request:
-
-- **Never push directly to `main`.** Create a feature branch and open a PR.
-- **CI must pass before merging.** The `CI` workflow (`.github/workflows/ci.yml`) runs the full test suite on every push and PR. A failing CI check blocks the merge.
-- **Tests must pass locally before pushing.** Run `pytest tests/ -v` and confirm all tests pass — do not push a branch knowing tests are red.
-- **Branch naming:** Use descriptive names like `feat/setup-scripts` or `fix/cuda-detection`.
-
-The CI workflow runs on `ubuntu-latest` with CPU-only PyTorch (no GPU available on GitHub runners). Tests are all mocked so this is fine.
-
-**CI matrix:** The `test` job runs against Python 3.10, 3.11, 3.12, 3.13, and 3.14 in parallel. 3.10–3.13 are blocking (a failure prevents merge). 3.14 is non-blocking (`continue-on-error: true`) — failures are visible but do not block the PR. A weekly cron job also runs the full matrix plus a `latest-deps` job (installs with `--upgrade`) to catch forward-compatibility issues early.
-
-## Security — Public Repo Rules
-
-This repo is public on GitHub. Before every commit:
-
-- **Never commit secrets.** HuggingFace tokens, API keys, and passwords must never appear in source files, test fixtures, or commit messages.
-- **HF token storage:** The token lives in `platformdirs.user_data_dir("wisper-transcribe")/config.toml`, which is outside the repo by design. Never move it into the repo.
-- **No real audio files.** Do not commit actual podcast recordings or any audio that could contain people's voices/personal data. The `example-file/` directory is gitignored for local testing only.
-- **No personal data in tests.** All test fixtures must use synthetic/fake data. Real names, voices, or session recordings must not appear in `tests/`.
-- **Check before staging.** Run `git diff` and `git status` before `git add` to verify nothing sensitive is accidentally included.
-- **Environment variables are fine.** `HUGGINGFACE_TOKEN` as an env var is an acceptable alternative to the config file — just never hardcode the value in source.
-
-If a secret is accidentally committed, it must be treated as compromised immediately (revoke and regenerate the token).
-
-## Architecture Documentation
-
-Detailed technical reference lives in [`architecture.md`](architecture.md). It covers the processing pipeline, module responsibilities, key design decisions, speaker identification, data storage, and known constraints.
-
-**Keep `architecture.md` current.** After any PR that:
-- Adds or renames a module
-- Changes the processing pipeline
-- Introduces a new key design decision or workaround
-- Updates dependencies in a way that affects runtime behavior
-
-...update `architecture.md` as part of the same commit. Do not defer docs to a follow-up.
-
-## Development Rules
-
-- **Write tests alongside each feature.** Every new module gets a corresponding `tests/test_<module>.py`. Do not defer tests to a later phase.
+- **Never push to `main` directly.** All changes go through a PR.
+- **Tests must pass locally before pushing.** CI blocks merges on failure.
 - **Commit at least once per phase.** Pause for user review after each phase commit before starting the next.
-- **Never commit to main without tests passing.**
-- **Cross-platform paths:** Always use `pathlib.Path`, never string concatenation for file paths.
-- **Config/data storage:** Use `get_data_dir()` from `config.py` — never hardcode `%APPDATA%`, `~`, or call `platformdirs` directly. `get_data_dir()` checks `WISPER_DATA_DIR` env var first (used in Docker) before falling back to `platformdirs`.
+- **Branch naming:** `feat/...` or `fix/...`
+- **CI matrix:** Python 3.10–3.13 are blocking; 3.14 is `continue-on-error: true` (non-blocking).
+- **Update `architecture.md`** in the same commit whenever you add a module, change the pipeline, or introduce a non-obvious design decision.
+
+---
+
+## Testing Rules
+
+- No GPU, no network, no real audio in tests — mock everything ML-related.
+- Mock targets: `wisper_transcribe.transcriber.WhisperModel`, `wisper_transcribe.diarizer.Pipeline`, `wisper_transcribe.speaker_manager.load_profiles`.
+- Web tests use `fastapi.testclient.TestClient` with all ML calls mocked.
+- Every new module needs a `tests/test_<module>.py`.
+
+---
+
+## Security (public repo)
+
+- **No secrets in source.** HF token lives in `platformdirs` user data dir or `HUGGINGFACE_TOKEN` env var — never in code.
+- **No real audio files committed.** `example-file/` is gitignored.
+- **No personal data in tests.** Synthetic/fake data only.
+- If a secret is accidentally committed, treat it as compromised immediately.
+
+### Web Route Security Standards
+
+These rules apply to every web route handler. CodeQL scans all PRs — violations block merge.
+
+#### User input in file paths (CWE-22 Path Traversal)
+Use the two-layer pattern for any URL parameter or form field used in a file path:
+1. `os.path.basename()` strips leading path components.
+2. `os.path.abspath(os.path.join(base, safe_name)).startswith(base + os.sep)` confirms the result stays inside the intended directory.
+
+`Path.resolve()` on tainted input is **not** sufficient — CodeQL does not recognise it as a sanitiser. Use `os.path.abspath` + `startswith`.
+
+#### User input in redirect URLs (CWE-601 Open Redirect)
+Use `_validate_job_id()` (defined in `transcribe.py`) for every job ID that appears in a `RedirectResponse` or `Location` header. For other ID types, apply the same two-layer pattern:
+1. Strict regex guard `re.match(r"^[\w\-]+$", value)` — rejects everything except alphanumerics and hyphens.
+2. `os.path` dummy-guard round-trip — `os.path.basename(os.path.abspath(os.path.join(base, value)))` — to produce a string that CodeQL's taint tracker recognises as clean.
+
+`re.match().group(1)` is **still considered tainted** by CodeQL even after a format check. The `os.path` round-trip is required to break the taint chain.
+
+#### Never reflect user input into error messages or redirect parameters
+Exception messages, file paths, and internal state must not appear in redirect `Location` headers or in HTML error responses. Use a generic error code (e.g. `?error=enroll_failed`) instead of `?error={str(exc)}`.
+
+#### Never accept arbitrary file paths from form data
+Do not accept `output_dir`, `base_path`, or similar path parameters from form POST data. Always use the internally-resolved default (e.g. `_default_output_dir()`).
+
+#### Test coverage requirement
+Every security control must have a corresponding test in `tests/test_path_traversal.py` covering:
+- Null-byte payloads (`\x00`)
+- Regex-busting payloads (`invalid*name`, `id/with/slashes`)
+- Open-redirect / CRLF payloads for any endpoint that redirects
+
+---
+
+## Key Conventions
+
+| Rule | Why |
+|------|-----|
+| Always `pathlib.Path`, never string paths | Cross-platform (Windows backslash) |
+| Always `get_data_dir()` from `config.py` for user data | Respects `WISPER_DATA_DIR` env var (Docker) |
+| URL-encode transcript stems in templates with `\| urlencode` filter | Filenames may contain em-dashes, spaces, `!`, `()` |
+| Use `os.path.basename` + `abspath/startswith` for path guards, not `Path.resolve()` | CodeQL only recognises `os.path` as a path sanitiser |
+| Use `_validate_job_id()` for job IDs in redirects | Breaks CodeQL taint chain; regex alone is insufficient |
+| Redirect `Location` headers use `urllib.parse.quote(name)` | latin-1 codec rejects non-ASCII characters |
+| Never put `str(exc)` in a redirect URL or error response | Information disclosure; use generic error codes |
+
+---
 
 ## Environment Variables
 
 | Variable | Purpose |
 |----------|---------|
-| `WISPER_DATA_DIR` | Override config/profile storage path (used in Docker; maps to a bind-mounted volume) |
-| `WISPER_DEBUG` | Set to `1` to disable third-party warning suppression and see raw output |
-| `HUGGINGFACE_TOKEN` | HF token as an alternative to storing it in `config.toml` |
+| `WISPER_DATA_DIR` | Override data dir (Docker bind mount) |
+| `WISPER_DEBUG` | Set `1` to disable warning suppression |
+| `HUGGINGFACE_TOKEN` | HF token alternative to `config.toml` |
 
-## Project Structure
+---
 
-```
-wisper-transcribe/
-├── src/wisper_transcribe/   # all source code
-├── tests/                   # mirrors src structure
-├── .venv/                   # local venv (gitignored)
-├── Dockerfile               # gpu and cpu build targets
-├── docker-compose.yml       # wisper (GPU) and wisper-cpu services
-├── .dockerignore
-├── pyproject.toml
-└── CLAUDE.md                # this file
-```
+## Non-Obvious Gotchas
 
-## Build Phases
-
-- Phase 1: Project skeleton + basic transcription ✓
-- Phase 2: Speaker diarization (pyannote) ✓
-- Phase 3: Speaker profiles + cross-file voice matching ✓
-- Phase 4: Batch processing + CLI polish ✓
-- Phase 5: Tests + README ✓
-- Phase 6: `wisper setup` wizard ✓
-- Phase 7: Docker containerization ✓
-- Phase 8: VAD filter (`--vad/--no-vad`) ✓
-- Phase 9: Compute type / quantization (`--compute-type`) ✓
-- Phase 10: Parallel folder processing (CPU-only, `--workers N`) — future
-- Phase 11: Optional GUI — future
+- **`static/htmx.min.js` is a placeholder.** The real file is downloaded by `docker build`. For local dev: `curl -sL "https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js" -o src/wisper_transcribe/static/htmx.min.js`
+- **Tailwind auto-rebuilds on startup** (mtime check in `app.py`), but you still need to rebuild manually and commit `tailwind.min.css` when changing template classes.
+- **`tqdm.monitor_interval = 0`** is set globally at app startup (`app.py`) and per-job (`jobs.py`) to prevent `TMonitor` from spawning a daemon thread that hangs `Ctrl+C` on Python 3.14.
+- **One job at a time.** `_model` and `_pipeline` are module-level globals — not thread-safe. `JobQueue` runs one job at a time intentionally.
+- **Transcript output dir:** Web uploads go to `./output/` (or `data_dir/output/`) — not `input_path.parent`. This is enforced in `transcribe.py`'s `_default_output_dir()`.
+- **Speaker profile keys** are `name.lower().replace(" ", "_")` — used as both filesystem filename and URL slug.
