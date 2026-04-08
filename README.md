@@ -338,7 +338,7 @@ wisper server
 |------|-----|-------------|
 | Dashboard | `/` | Job queue, system status (device, model, HF token), quick upload |
 | Transcribe | `/transcribe` | Drag-and-drop upload, all transcription options, live progress stream |
-| Transcripts | `/transcripts` | Browse output files, view rendered markdown, download |
+| Transcripts | `/transcripts` | Browse output files, view rendered markdown, download, delete |
 | Speakers | `/speakers` | Enroll, rename, remove speaker profiles |
 | Config | `/config` | View and edit all settings |
 
@@ -348,9 +348,10 @@ The interactive CLI enrollment prompt is replaced by a post-job wizard. After tr
 
 ### Job management
 
-- The job detail page shows a **real-time progress bar** updated via Server-Sent Events.
+- The job detail page shows a **real-time progress bar** with per-phase step indicators (Transcribing → Diarizing → Formatting), an ETA, and a live speed counter (e.g. `5.2s/s`).
 - A **Stop Job** button lets you cancel any pending or running transcription.
 - Transcripts are saved to `./output/` (or `data_dir/output`) and are immediately visible on the Transcripts page after the job completes.
+- Transcripts can be **deleted** from the Transcripts page (trash icon with confirmation).
 
 ### Offline-first
 
@@ -478,7 +479,7 @@ wisper-transcribe/
 .venv/bin/pytest tests/ -v        # Mac/Linux
 ```
 
-Tests mock all ML models — no GPU, network, or real audio files required. (156 tests)
+Tests mock all ML models — no GPU, network, or real audio files required. (160 tests)
 
 CI runs the test suite across Python 3.10–3.14 on every push and PR. Python 3.14 is treated as experimental (non-blocking). A weekly job also runs with the latest available package versions to catch forward-compatibility issues early.
 
@@ -596,4 +597,5 @@ Unset it (or open a new terminal) to return to clean output.
 - [x] Windows audio playback fix: `--play-audio` now uses `ffplay` subprocess (reliable on all platforms)
 - [x] Phase 10: Parallel folder processing (`--workers N`, CPU-only)
 - [x] Phase 11: Browser-based web UI (`wisper server`, HTMX + FastAPI + Tailwind, Docker web services)
-- [x] Web UI polish: progress bar, cancel/stop, speaker audio playback, auto-Tailwind build, correct transcript save path
+- [x] Web UI polish: progress bar with ETA + speed counter, multi-step phase indicators, cancel/stop job, speaker audio playback, auto-Tailwind build, correct transcript save path
+- [x] Web UI: clickable transcript cards, delete transcripts, clickable dashboard stat cards, Unicode filename support, speaker rename dropdown, bordered nav pill buttons

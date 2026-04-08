@@ -40,7 +40,7 @@ src/wisper_transcribe/
     └── routes/
         ├── dashboard.py    GET /, GET /jobs (HTMX partial)
         ├── transcribe.py   GET/POST /transcribe, GET /transcribe/jobs/{id}, SSE /jobs/{id}/stream, enrollment wizard
-        ├── transcripts.py  GET/POST /transcripts, transcript detail, download, fix-speaker
+        ├── transcripts.py  GET/POST /transcripts, transcript detail, download, delete, fix-speaker
         ├── speakers.py     GET/POST /speakers, enroll, rename, remove
         └── config.py       GET/POST /config
 ```
@@ -212,7 +212,7 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - Enrollment tests patch `wisper_transcribe.speaker_manager.load_profiles` to return `{}` (no existing profiles) to prevent tests from seeing real profiles on the developer's machine
 - Coverage: run `pytest tests/ -v --cov --cov-report=term-missing`
 - Web tests use `fastapi.testclient.TestClient`; routes are tested via HTTP with all ML calls mocked — no GPU/network needed
-- Test count: 158 (all mocked, all passing)
+- Test count: 160 (all mocked, all passing)
 
 **CI matrix** (`.github/workflows/ci.yml`):
 - Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)
@@ -272,6 +272,21 @@ URL-encoding is applied at every point where a filename is embedded in a URL or 
 - Templates use the `urlencode` Jinja2 filter (`routes/__init__.py`) for all `<a href>` links that include a file stem.
 - Redirect `Location` headers are built with `urllib.parse.quote(name)` so latin-1 codec is never violated.
 - JavaScript in `job_detail.html` uses `encodeURIComponent(stem)` when constructing the post-SSE transcript link.
+
+### Progress Display (Web)
+The job detail page shows a live progress bar driven by SSE events from `GET /transcribe/jobs/{id}/stream`:
+- Three step indicators (T / D / F) advance sequentially as phases complete.
+- The overall bar maps per-phase tqdm percentages: transcription → 0–60%, diarization → 60–90%, formatting → 100% on done.
+- ETA and speed counter (`5.2s/s`, `0.39chunk/s`) are parsed from the tqdm string and shown below the bar while a job is active, hidden on completion.
+- Diarization bars now include `{rate_fmt}` (chunk/s) to match transcription output.
+
+### Transcript Management (Web)
+- Transcripts list page: each card is fully clickable via the **overlay link pattern** (card is a `div` with an `absolute inset-0` `<a>` underneath, action buttons use `relative z-10` to sit above). This avoids the invalid-HTML problem of nesting `<form>` inside `<a>`.
+- Delete: `POST /transcripts/{name}/delete` removes the `.md` file and redirects to `/transcripts`.
+- Dashboard stat cards link to their respective sections (Active Jobs → `/transcribe`, Transcripts → `/transcripts`, Enrolled Speakers → `/speakers`).
+
+### Navigation Styling
+Nav link styles (`nav-link`, `nav-active`, `nav-divider`, `mobile-nav-link`) are defined in `static/input.css` as Tailwind component-layer classes, not in an inline `<style>` block in `base.html`. This ensures they are included in the compiled `tailwind.min.css` and benefit from purging. Links display as pill buttons: transparent border at rest, `border-green-500 bg-green-800` on hover, `border-green-400 bg-green-800` for the active page.
 
 ### Offline Assets
 - `static/htmx.min.js`: placeholder committed to repo; real file downloaded during `docker build` via `curl`. For local use: `curl -sL https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js -o src/wisper_transcribe/static/htmx.min.js`
