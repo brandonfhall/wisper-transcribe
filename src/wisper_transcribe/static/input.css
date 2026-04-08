@@ -7,6 +7,24 @@
     filter: drop-shadow(0 0 8px #818cf8) drop-shadow(0 0 16px #4f46e550);
   }
 
+  /* Navigation links — pill buttons with visible border */
+  .nav-link {
+    @apply px-3 py-1.5 rounded-md text-sm font-medium text-green-200
+           border border-transparent
+           hover:text-white hover:border-green-500 hover:bg-green-800
+           transition-all;
+  }
+  .nav-active {
+    @apply text-white border-green-400 bg-green-800;
+  }
+  .nav-divider {
+    @apply w-px h-4 bg-green-700 mx-2 self-center;
+  }
+  .mobile-nav-link {
+    @apply block px-3 py-2 rounded-md text-sm font-medium text-green-200
+           hover:text-white hover:bg-green-800;
+  }
+
   /* Job status badges */
   .badge-pending  { @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-700; }
   .badge-running  { @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-700 animate-pulse; }
