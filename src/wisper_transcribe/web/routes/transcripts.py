@@ -50,14 +50,13 @@ def _get_safe_transcript_path(request: Request, name: str) -> Path | None:
         return None
         
     out_dir = _output_dir(request).resolve()
-    md_path = (out_dir / f"{safe_name}.md").resolve()
     
     # Use os.path.abspath and .startswith() to satisfy CodeQL's path traversal queries
     base_dir = os.path.abspath(str(out_dir))
     if not base_dir.endswith(os.sep):
         base_dir += os.sep
         
-    target_path = os.path.abspath(str(md_path))
+    target_path = os.path.abspath(os.path.join(str(out_dir), f"{safe_name}.md"))
     if not target_path.startswith(base_dir):
         return None
         

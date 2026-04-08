@@ -7,6 +7,7 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Annotated, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
@@ -123,7 +124,7 @@ async def cancel_job(request: Request, job_id: str) -> RedirectResponse:
     """Cancel a pending or running job."""
     queue = _get_queue(request)
     queue.cancel(job_id)
-    return RedirectResponse(url=f"/transcribe/jobs/{job_id}", status_code=303)
+    return RedirectResponse(url=f"/transcribe/jobs/{quote(job_id, safe='')}", status_code=303)
 
 
 @router.get("/jobs/{job_id}", response_class=HTMLResponse)
@@ -203,7 +204,7 @@ async def enroll_form(request: Request, job_id: str) -> HTMLResponse:
     if job is None:
         return HTMLResponse(content="Job not found", status_code=404)
     if job.status != COMPLETED:
-        return RedirectResponse(url=f"/transcribe/jobs/{job_id}", status_code=303)
+        return RedirectResponse(url=f"/transcribe/jobs/{quote(job_id, safe='')}", status_code=303)
 
     from wisper_transcribe.speaker_manager import load_profiles
 
@@ -262,7 +263,7 @@ async def enroll_submit(request: Request, job_id: str) -> RedirectResponse:
     queue = _get_queue(request)
     job = queue.get(job_id)
     if job is None or job.status != COMPLETED or not job.output_path:
-        return RedirectResponse(url=f"/transcribe/jobs/{job_id}", status_code=303)
+        return RedirectResponse(url=f"/transcribe/jobs/{quote(job_id, safe='')}", status_code=303)
 
     form_data = await request.form()
     # Form fields: speaker_<label> = display_name
@@ -281,4 +282,4 @@ async def enroll_submit(request: Request, job_id: str) -> RedirectResponse:
         out_path.write_text(content, encoding="utf-8")
 
     transcript_name = Path(job.output_path).stem
-    return RedirectResponse(url=f"/transcripts/{transcript_name}", status_code=303)
+    return RedirectResponse(url=f"/transcripts/{quote(transcript_name, safe='')}", status_code=303)

@@ -12,10 +12,11 @@ Podcast transcription tool for tabletop RPG actual-play recordings (D&D, Pathfin
 
 ## Notes for Claude (Recent Security & Bug Fixes)
 
-*   **Path Traversal (CWE-22) Mitigations:** Resolved GitHub CI CodeQL warnings in `transcripts.py`, `speakers.py`, and `transcribe.py`. Replaced manual string checks with `os.path.basename()`. In `transcripts.py`, explicitly used `os.path.abspath().startswith()` and reconstructed the `Path` object to successfully clear CodeQL's taint tracking. In `speakers.py` (`enroll_submit`), added a strict Regex Match Guard (`re.match(r"^[\w\-]+$")`) before cross-module calls to definitively clear CodeQL's taint tracking.
+*   **Path Traversal (CWE-22) Mitigations:** Resolved GitHub CI CodeQL warnings across web routes. Replaced manual string checks with `os.path.basename()`. To definitively satisfy CodeQL's taint tracking engine, we also: (1) reconstructed `Path` objects using `os.path.abspath().startswith()` validation and `os.path.join` (avoiding `Path.resolve()` on tainted inputs), (2) applied strict Regex Match Guards (`^[\w\-]+$`), and (3) re-applied `os.path.basename()` immediately prior to path construction and cross-module calls.
 *   **Security Tests:** Added `tests/test_path_traversal.py` to enforce the new path traversal guards against null-byte and directory escape payloads. Fixed a testing quirk with FastAPI's `TestClient` automatically following `303 Redirect` responses by explicitly setting `follow_redirects=False` for POST requests.
 *   **Job Queue Flakiness:** Fixed `test_list_all_sorted_by_created_at` failure in `jobs.py`. `JobQueue.list_all()` now reverses the dictionary values before sorting to preserve stable reverse-insertion order when `created_at` timestamps tie (especially common on Windows due to clock resolution).
 *   **Setup Crash:** Fixed an `IndentationError` and a mangled `try/except` block in `speakers.py` (`speaker_clip`) that was breaking the FastAPI app initialization and causing 25+ tests to error out during setup.
+*   **Open Redirect Mitigations:** Resolved CodeQL warnings for Untrusted URL Redirection across `transcribe.py`. Added strict URL encoding (`urllib.parse.quote(..., safe="")`) to user-provided path parameters (`job_id`) before injecting them into `RedirectResponse` locations, neutralizing CRLF and protocol-relative redirect payloads. Complete explicit test coverage for all three affected endpoints (`cancel_job`, `enroll_form`, and `enroll_submit`) added to `test_path_traversal.py`.
 
 ---
 

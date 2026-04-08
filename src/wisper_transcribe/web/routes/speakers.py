@@ -15,8 +15,9 @@ router = APIRouter(prefix="/speakers")
 
 
 def _clip_path(key: str) -> "Path":
+    import os
     from wisper_transcribe.speaker_manager import _get_embeddings_dir
-    return _get_embeddings_dir() / f"{key}.mp3"
+    return _get_embeddings_dir() / f"{os.path.basename(key)}.mp3"
 
 
 @router.get("", response_class=HTMLResponse)
@@ -96,6 +97,16 @@ async def enroll_submit(
     if safe_name != name or safe_name in {".", ".."}:
         return RedirectResponse(url="/speakers/enroll?error=invalid_name", status_code=303)
 
+    import re
+    profile_key = safe_name.lower().replace(" ", "_")
+    # Strict regex validation to definitively clear CodeQL's path traversal taint
+    if not re.match(r"^[\w\-]+$", profile_key):
+        return RedirectResponse(url="/speakers/enroll?error=invalid_name", status_code=303)
+        
+    # Re-apply os.path.basename after string manipulations to ensure 
+    # CodeQL recognizes the path traversal taint is completely broken
+    profile_key = os.path.basename(profile_key)
+
     if audio is None:
         return RedirectResponse(url="/speakers/enroll?error=no_audio", status_code=303)
 
@@ -130,12 +141,6 @@ async def enroll_submit(
         if not speaker_time:
             return RedirectResponse(url="/speakers/enroll?error=no_speech", status_code=303)
         primary_label = max(speaker_time, key=lambda k: speaker_time[k])
-
-        import re
-        profile_key = safe_name.lower().replace(" ", "_")
-        # Strict regex validation to definitively clear CodeQL's path traversal taint
-        if not re.match(r"^[\w\-]+$", profile_key):
-            return RedirectResponse(url="/speakers/enroll?error=invalid_name", status_code=303)
 
         if update:
             profiles = load_profiles()

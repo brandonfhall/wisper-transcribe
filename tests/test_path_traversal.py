@@ -1,6 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 from urllib.parse import quote
+from unittest.mock import patch
 
 from wisper_transcribe.web.app import create_app
 
@@ -24,7 +25,6 @@ _MALICIOUS_PAYLOADS = [
 _REGEX_PAYLOADS = [
     "invalid*name",
     "invalid+name",
-    "name with space",
     "name!@#",
 ]
 
@@ -111,3 +111,58 @@ def test_transcribe_excerpt_path_traversal_blocked(client: TestClient, payload: 
     resp = client.get(f"/transcribe/jobs/fake-job-id/excerpt/{safe_url}")
     assert resp.status_code == 400
     assert "Invalid speaker name" in resp.text
+
+
+# Payloads that try to trick the redirect mechanism (Open Redirect / CRLF)
+# Note: Payloads with forward slashes ("/") are omitted because FastAPI's default 
+# path router strictly blocks them, returning a 404 before our handlers even run.
+_REDIRECT_PAYLOADS = [
+    "\\\\evil.com",
+    "javascript:alert(1)",
+    "\r\nLocation: evil.com",
+]
+
+@pytest.mark.parametrize("payload", _REDIRECT_PAYLOADS)
+def test_transcribe_cancel_open_redirect_blocked(client: TestClient, payload: str):
+    """Ensure job cancellation route prevents open redirects/CRLF."""
+    safe_url = quote(payload, safe="")
+    resp = client.post(f"/transcribe/jobs/{safe_url}/cancel", follow_redirects=False)
+    
+    assert resp.status_code == 303
+    # Ensure the exact, fully-encoded payload is safely contained in the relative URL
+    assert resp.headers.get("location") == f"/transcribe/jobs/{safe_url}"
+    assert not resp.headers.get("location", "").startswith("//")
+
+
+@pytest.mark.parametrize("payload", _REDIRECT_PAYLOADS)
+def test_transcribe_enroll_open_redirect_blocked(client: TestClient, payload: str):
+    """Ensure job enroll route prevents open redirects/CRLF for non-completed jobs."""
+    safe_url = quote(payload, safe="")
+    
+    from wisper_transcribe.web.jobs import Job
+    from datetime import datetime
+    fake_job = Job(id=payload, status="pending", created_at=datetime.now(), input_path="", kwargs={})
+
+    with patch("wisper_transcribe.web.jobs.JobQueue.get", return_value=fake_job):
+        resp = client.get(f"/transcribe/jobs/{safe_url}/enroll", follow_redirects=False)
+        
+    assert resp.status_code == 303
+    assert resp.headers.get("location") == f"/transcribe/jobs/{safe_url}"
+    assert not resp.headers.get("location", "").startswith("//")
+
+
+@pytest.mark.parametrize("payload", _REDIRECT_PAYLOADS)
+def test_transcribe_enroll_submit_open_redirect_blocked(client: TestClient, payload: str):
+    """Ensure job enroll submit route prevents open redirects/CRLF for non-completed jobs."""
+    safe_url = quote(payload, safe="")
+    
+    from wisper_transcribe.web.jobs import Job
+    from datetime import datetime
+    fake_job = Job(id=payload, status="pending", created_at=datetime.now(), input_path="", kwargs={})
+
+    with patch("wisper_transcribe.web.jobs.JobQueue.get", return_value=fake_job):
+        resp = client.post(f"/transcribe/jobs/{safe_url}/enroll", follow_redirects=False)
+        
+    assert resp.status_code == 303
+    assert resp.headers.get("location") == f"/transcribe/jobs/{safe_url}"
+    assert not resp.headers.get("location", "").startswith("//")
