@@ -124,8 +124,11 @@ async def enroll_submit(
             return RedirectResponse(url="/speakers/enroll?error=no_speech", status_code=303)
         primary_label = max(speaker_time, key=lambda k: speaker_time[k])
 
-        # Ensure CodeQL recognizes the path key is sanitized
-        profile_key = os.path.basename(safe_name.lower().replace(" ", "_"))
+        import re
+        profile_key = safe_name.lower().replace(" ", "_")
+        # Strict regex validation to definitively clear CodeQL's path traversal taint
+        if not re.match(r"^[\w\-]+$", profile_key):
+            return RedirectResponse(url="/speakers/enroll?error=invalid_name", status_code=303)
 
         if update:
             profiles = load_profiles()
