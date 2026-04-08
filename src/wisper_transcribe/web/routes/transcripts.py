@@ -69,7 +69,12 @@ async def transcript_detail(request: Request, name: str) -> HTMLResponse:
         return HTMLResponse(content="Invalid name", status_code=400)
 
     out_dir = _output_dir(request)
-    md_path = out_dir / f"{name}.md"
+    out_dir_resolved = out_dir.resolve()
+    md_path = (out_dir / f"{name}.md").resolve()
+    try:
+        md_path.relative_to(out_dir_resolved)
+    except ValueError:
+        return HTMLResponse(content="Invalid name", status_code=400)
     if not md_path.exists():
         return HTMLResponse(content="Transcript not found", status_code=404)
 
@@ -93,11 +98,16 @@ async def transcript_detail(request: Request, name: str) -> HTMLResponse:
 
 
 @router.get("/{name}/download")
-async def transcript_download(request: Request, name: str) -> FileResponse:
+async def transcript_download(request: Request, name: str):
     if "/" in name or "\\" in name or "\x00" in name or ".." in name:
         return HTMLResponse(content="Invalid name", status_code=400)
     out_dir = _output_dir(request)
-    md_path = out_dir / f"{name}.md"
+    out_dir_resolved = out_dir.resolve()
+    md_path = (out_dir / f"{name}.md").resolve()
+    try:
+        md_path.relative_to(out_dir_resolved)
+    except ValueError:
+        return HTMLResponse(content="Invalid name", status_code=400)
     if not md_path.exists():
         return HTMLResponse(content="Transcript not found", status_code=404)
     return FileResponse(
@@ -113,7 +123,12 @@ async def delete_transcript(request: Request, name: str) -> HTMLResponse:
     if "/" in name or "\\" in name or "\x00" in name or ".." in name:
         return HTMLResponse(content="Invalid name", status_code=400)
     out_dir = _output_dir(request)
-    md_path = out_dir / f"{name}.md"
+    out_dir_resolved = out_dir.resolve()
+    md_path = (out_dir / f"{name}.md").resolve()
+    try:
+        md_path.relative_to(out_dir_resolved)
+    except ValueError:
+        return HTMLResponse(content="Invalid name", status_code=400)
     if md_path.exists():
         md_path.unlink()
     return HTMLResponse(
@@ -129,7 +144,12 @@ async def fix_speaker(request: Request, name: str) -> HTMLResponse:
     if "/" in name or "\\" in name or "\x00" in name or ".." in name:
         return HTMLResponse(content="Invalid name", status_code=400)
     out_dir = _output_dir(request)
-    md_path = out_dir / f"{name}.md"
+    out_dir_resolved = out_dir.resolve()
+    md_path = (out_dir / f"{name}.md").resolve()
+    try:
+        md_path.relative_to(out_dir_resolved)
+    except ValueError:
+        return HTMLResponse(content="Invalid name", status_code=400)
     if not md_path.exists():
         return HTMLResponse(content="Transcript not found", status_code=404)
 
