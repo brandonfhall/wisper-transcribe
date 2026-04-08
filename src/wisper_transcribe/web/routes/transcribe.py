@@ -120,11 +120,17 @@ async def start_transcribe(
 
 
 @router.post("/jobs/{job_id}/cancel")
-async def cancel_job(request: Request, job_id: str) -> RedirectResponse:
+async def cancel_job(request: Request, job_id: str) -> Response:
     """Cancel a pending or running job."""
+    import re
+    match = re.match(r"^([\w\-]+)$", job_id)
+    if not match:
+        return HTMLResponse(content="Invalid job ID", status_code=400)
+    safe_id = match.group(1)
+
     queue = _get_queue(request)
-    queue.cancel(job_id)
-    return RedirectResponse(url=f"/transcribe/jobs/{quote(job_id, safe='')}", status_code=303)
+    queue.cancel(safe_id)
+    return RedirectResponse(url=f"/transcribe/jobs/{safe_id}", status_code=303)
 
 
 @router.get("/jobs/{job_id}", response_class=HTMLResponse)
@@ -197,14 +203,20 @@ async def job_stream(request: Request, job_id: str) -> StreamingResponse:
 
 
 @router.get("/jobs/{job_id}/enroll", response_class=HTMLResponse)
-async def enroll_form(request: Request, job_id: str) -> HTMLResponse:
+async def enroll_form(request: Request, job_id: str) -> Response:
     """Speaker enrollment wizard for a completed job."""
+    import re
+    match = re.match(r"^([\w\-]+)$", job_id)
+    if not match:
+        return HTMLResponse(content="Invalid job ID", status_code=400)
+    safe_id = match.group(1)
+
     queue = _get_queue(request)
-    job = queue.get(job_id)
+    job = queue.get(safe_id)
     if job is None:
         return HTMLResponse(content="Job not found", status_code=404)
     if job.status != COMPLETED:
-        return RedirectResponse(url=f"/transcribe/jobs/{quote(job_id, safe='')}", status_code=303)
+        return RedirectResponse(url=f"/transcribe/jobs/{safe_id}", status_code=303)
 
     from wisper_transcribe.speaker_manager import load_profiles
 
@@ -258,12 +270,18 @@ async def speaker_excerpt(request: Request, job_id: str, speaker_name: str) -> R
 
 
 @router.post("/jobs/{job_id}/enroll", response_class=HTMLResponse)
-async def enroll_submit(request: Request, job_id: str) -> RedirectResponse:
+async def enroll_submit(request: Request, job_id: str) -> Response:
     """Apply speaker name assignments and regenerate the transcript."""
+    import re
+    match = re.match(r"^([\w\-]+)$", job_id)
+    if not match:
+        return HTMLResponse(content="Invalid job ID", status_code=400)
+    safe_id = match.group(1)
+
     queue = _get_queue(request)
-    job = queue.get(job_id)
+    job = queue.get(safe_id)
     if job is None or job.status != COMPLETED or not job.output_path:
-        return RedirectResponse(url=f"/transcribe/jobs/{quote(job_id, safe='')}", status_code=303)
+        return RedirectResponse(url=f"/transcribe/jobs/{safe_id}", status_code=303)
 
     form_data = await request.form()
     # Form fields: speaker_<label> = display_name

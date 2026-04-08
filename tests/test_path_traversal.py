@@ -128,10 +128,8 @@ def test_transcribe_cancel_open_redirect_blocked(client: TestClient, payload: st
     safe_url = quote(payload, safe="")
     resp = client.post(f"/transcribe/jobs/{safe_url}/cancel", follow_redirects=False)
     
-    assert resp.status_code == 303
-    # Ensure the exact, fully-encoded payload is safely contained in the relative URL
-    assert resp.headers.get("location") == f"/transcribe/jobs/{safe_url}"
-    assert not resp.headers.get("location", "").startswith("//")
+    assert resp.status_code == 400
+    assert "Invalid job ID" in resp.text
 
 
 @pytest.mark.parametrize("payload", _REDIRECT_PAYLOADS)
@@ -146,9 +144,8 @@ def test_transcribe_enroll_open_redirect_blocked(client: TestClient, payload: st
     with patch("wisper_transcribe.web.jobs.JobQueue.get", return_value=fake_job):
         resp = client.get(f"/transcribe/jobs/{safe_url}/enroll", follow_redirects=False)
         
-    assert resp.status_code == 303
-    assert resp.headers.get("location") == f"/transcribe/jobs/{safe_url}"
-    assert not resp.headers.get("location", "").startswith("//")
+    assert resp.status_code == 400
+    assert "Invalid job ID" in resp.text
 
 
 @pytest.mark.parametrize("payload", _REDIRECT_PAYLOADS)
@@ -163,6 +160,5 @@ def test_transcribe_enroll_submit_open_redirect_blocked(client: TestClient, payl
     with patch("wisper_transcribe.web.jobs.JobQueue.get", return_value=fake_job):
         resp = client.post(f"/transcribe/jobs/{safe_url}/enroll", follow_redirects=False)
         
-    assert resp.status_code == 303
-    assert resp.headers.get("location") == f"/transcribe/jobs/{safe_url}"
-    assert not resp.headers.get("location", "").startswith("//")
+    assert resp.status_code == 400
+    assert "Invalid job ID" in resp.text

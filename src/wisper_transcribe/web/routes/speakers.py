@@ -48,14 +48,13 @@ async def speaker_clip(request: Request, key: str) -> Response:
 
     from wisper_transcribe.speaker_manager import _get_embeddings_dir
     embeddings_dir = _get_embeddings_dir().resolve()
-    clip = _clip_path(safe_key).resolve()
 
     # Use os.path.abspath and .startswith() to satisfy CodeQL's path traversal queries
     base_dir = os.path.abspath(str(embeddings_dir))
     if not base_dir.endswith(os.sep):
         base_dir += os.sep
         
-    target_path = os.path.abspath(str(clip))
+    target_path = os.path.abspath(os.path.join(str(embeddings_dir), f"{safe_key}.mp3"))
     if not target_path.startswith(base_dir):
         return HTMLResponse(content="Invalid key", status_code=400)
         
@@ -98,14 +97,12 @@ async def enroll_submit(
         return RedirectResponse(url="/speakers/enroll?error=invalid_name", status_code=303)
 
     import re
-    profile_key = safe_name.lower().replace(" ", "_")
-    # Strict regex validation to definitively clear CodeQL's path traversal taint
-    if not re.match(r"^[\w\-]+$", profile_key):
+    profile_key_raw = safe_name.lower().replace(" ", "_")
+    # Extracting from a strict regex capture group definitively breaks CodeQL's taint chain
+    match = re.match(r"^([\w\-]+)$", profile_key_raw)
+    if not match:
         return RedirectResponse(url="/speakers/enroll?error=invalid_name", status_code=303)
-        
-    # Re-apply os.path.basename after string manipulations to ensure 
-    # CodeQL recognizes the path traversal taint is completely broken
-    profile_key = os.path.basename(profile_key)
+    profile_key = match.group(1)
 
     if audio is None:
         return RedirectResponse(url="/speakers/enroll?error=no_audio", status_code=303)
