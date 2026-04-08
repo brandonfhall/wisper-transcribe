@@ -33,14 +33,26 @@ async def speakers_list(request: Request) -> HTMLResponse:
 @router.get("/{key}/clip")
 async def speaker_clip(request: Request, key: str) -> Response:
     """Serve the reference audio clip for a speaker profile."""
-    # Basic sanity checks on the key to avoid obvious path traversal patterns.
+    # Basic sanity check on the key to reject obvious path-manipulation attempts.
+    if "/" in key or "\\" in key or "\x00" in key:
     if "/" in key or "\\" in key or "\x00" in key or ".." in key:
+
         return HTMLResponse(content="Invalid key", status_code=400)
+    try:
+        # Resolve the paths and ensure the clip stays within the embeddings directory.
+        from wisper_transcribe.speaker_manager import _get_embeddings_dir
 
+        base_path = _get_embeddings_dir().resolve()
+        fullpath = clip.resolve()
+    except FileNotFoundError:
     # Construct the clip path and ensure it stays within the embeddings directory.
-    from wisper_transcribe.speaker_manager import _get_embeddings_dir
 
+    if not fullpath.is_file() or base_path not in fullpath.parents:
+        return HTMLResponse(content="No clip available", status_code=404)
     embeddings_dir = _get_embeddings_dir().resolve()
+    return FileResponse(path=str(fullpath), media_type="audio/mpeg")
+
+
     clip = _clip_path(key).resolve()
 
     # Verify that the resolved clip path is contained within the embeddings directory.
