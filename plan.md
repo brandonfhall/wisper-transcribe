@@ -12,7 +12,7 @@ Podcast transcription tool for tabletop RPG actual-play recordings (D&D, Pathfin
 
 ## Notes for Claude (Recent Security & Bug Fixes)
 
-*   **Path Traversal (CWE-22) Mitigations:** Resolved GitHub CI CodeQL warnings in `transcripts.py`, `speakers.py`, and `transcribe.py`. Replaced manual string checks (`if ".." in path`) with robust standard library checks using `os.path.basename()` and `.is_relative_to()`.
+*   **Path Traversal (CWE-22) Mitigations:** Resolved GitHub CI CodeQL warnings in `transcripts.py`, `speakers.py`, and `transcribe.py`. Replaced manual string checks with `os.path.basename()`. In `transcripts.py`, explicitly used `os.path.abspath().startswith()` and reconstructed the `Path` object to successfully clear CodeQL's taint tracking.
 *   **Security Tests:** Added `tests/test_path_traversal.py` to enforce the new path traversal guards against null-byte and directory escape payloads.
 *   **Job Queue Flakiness:** Fixed `test_list_all_sorted_by_created_at` failure in `jobs.py`. `JobQueue.list_all()` now reverses the dictionary values before sorting to preserve stable reverse-insertion order when `created_at` timestamps tie (especially common on Windows due to clock resolution).
 *   **Setup Crash:** Fixed an `IndentationError` and a mangled `try/except` block in `speakers.py` (`speaker_clip`) that was breaking the FastAPI app initialization and causing 25+ tests to error out during setup.
