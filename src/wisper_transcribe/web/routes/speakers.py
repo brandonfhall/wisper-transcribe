@@ -82,6 +82,13 @@ async def enroll_submit(
     """Enroll a new speaker or update an existing one from an uploaded audio file."""
     import tempfile
 
+    if not name or "\x00" in name:
+        return RedirectResponse(url="/speakers/enroll?error=invalid_name", status_code=303)
+        
+    safe_name = os.path.basename(name)
+    if safe_name != name or safe_name in {".", ".."}:
+        return RedirectResponse(url="/speakers/enroll?error=invalid_name", status_code=303)
+
     if audio is None:
         return RedirectResponse(url="/speakers/enroll?error=no_audio", status_code=303)
 
@@ -117,7 +124,8 @@ async def enroll_submit(
             return RedirectResponse(url="/speakers/enroll?error=no_speech", status_code=303)
         primary_label = max(speaker_time, key=lambda k: speaker_time[k])
 
-        profile_key = name.lower().replace(" ", "_")
+        # Ensure CodeQL recognizes the path key is sanitized
+        profile_key = os.path.basename(safe_name.lower().replace(" ", "_"))
 
         if update:
             profiles = load_profiles()
@@ -127,7 +135,7 @@ async def enroll_submit(
             else:
                 enroll_speaker(
                     name=profile_key,
-                    display_name=name,
+                    display_name=safe_name,
                     role=role,
                     audio_path=wav_path,
                     segments=diarization,
@@ -138,7 +146,7 @@ async def enroll_submit(
         else:
             enroll_speaker(
                 name=profile_key,
-                display_name=name,
+                display_name=safe_name,
                 role=role,
                 audio_path=wav_path,
                 segments=diarization,

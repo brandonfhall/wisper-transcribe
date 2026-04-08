@@ -54,6 +54,14 @@ def test_speakers_clip_path_traversal_blocked(client: TestClient, payload: str):
 
 
 @pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS)
+def test_speakers_enroll_path_traversal_blocked(client: TestClient, payload: str):
+    """Ensure the speaker enrollment route blocks directory traversal."""
+    resp = client.post("/speakers/enroll", data={"name": payload}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert "error=invalid_name" in resp.headers.get("location", "")
+
+
+@pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS)
 def test_transcribe_excerpt_path_traversal_blocked(client: TestClient, payload: str):
     """Ensure the transcribe excerpt route blocks directory traversal."""
     safe_url = quote(payload)
