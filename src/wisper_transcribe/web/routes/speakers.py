@@ -49,18 +49,21 @@ async def speaker_clip(request: Request, key: str) -> Response:
     embeddings_dir = _get_embeddings_dir().resolve()
     clip = _clip_path(safe_key).resolve()
 
-    # Verify that the resolved clip path is contained within the embeddings directory.
-    try:
-        if not clip.is_relative_to(embeddings_dir):
-            return HTMLResponse(content="Invalid key", status_code=400)
-    except AttributeError:
-        # Fallback for Python versions without Path.is_relative_to
-        if embeddings_dir not in clip.parents and clip != embeddings_dir:
-            return HTMLResponse(content="Invalid key", status_code=400)
+    # Use os.path.abspath and .startswith() to satisfy CodeQL's path traversal queries
+    base_dir = os.path.abspath(str(embeddings_dir))
+    if not base_dir.endswith(os.sep):
+        base_dir += os.sep
+        
+    target_path = os.path.abspath(str(clip))
+    if not target_path.startswith(base_dir):
+        return HTMLResponse(content="Invalid key", status_code=400)
+        
+    # Reconstruct Path from the validated string to ensure taint is dropped
+    clean_clip = Path(target_path)
 
-    if not clip.exists() or not clip.is_file():
+    if not clean_clip.exists() or not clean_clip.is_file():
         return HTMLResponse(content="No clip available", status_code=404)
-    return FileResponse(path=str(clip), media_type="audio/mpeg")
+    return FileResponse(path=str(clean_clip), media_type="audio/mpeg")
 
 
 @router.get("/enroll", response_class=HTMLResponse)
