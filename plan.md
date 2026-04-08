@@ -12,6 +12,62 @@ Podcast transcription tool for tabletop RPG actual-play recordings (D&D, Pathfin
 
 ## Backlog
 
+### Research — Apple Silicon Acceleration
+
+**Status:** Not researched. M5 Mac is a primary development and use machine.
+
+**Problem:** faster-whisper (CTranslate2) has no MPS backend — transcription always falls back to CPU on Apple Silicon. pyannote diarization and embedding extraction do use MPS when available. So on Mac, transcription is the bottleneck running purely on CPU even though the M5 has substantial GPU compute.
+
+**Areas to investigate:**
+
+1. **MLX-Whisper** — Apple's MLX framework has a first-party Whisper port (`mlx-examples/whisper`) that runs natively on the Apple Neural Engine / GPU. Could replace faster-whisper on Mac only, dispatched via a backend abstraction in `transcriber.py`. Need to evaluate: output format compatibility with our `TranscriptionSegment` model, word-level timestamp support (required for diarization alignment), and accuracy vs. faster-whisper medium/large-v3.
+
+2. **WhisperKit** — Swift-native Whisper optimized for Apple Silicon via Core ML. Python bindings exist (`whisperkittools`). Higher integration complexity but potentially better ANE utilization than MLX.
+
+3. **faster-whisper on MPS via OpenBLAS / Accelerate** — CTranslate2 CPU backend on Apple Silicon already benefits from Accelerate framework (BLAS). Worth benchmarking: is the CPU path already near-optimal on M-series, or is there a meaningful gap vs. MPS-capable alternatives?
+
+**Decision point:** Only build a Mac-specific backend if benchmarks show >2× speedup over the current CPU path. The abstraction cost (maintaining two backends) must be justified by real-world session processing time.
+
+---
+
+### Research — Parallel Processing of a Single File
+
+**Status:** Not researched. Current pipeline processes one file sequentially (validate → convert → transcribe → diarize → align → identify → format).
+
+**Problem:** A 3-hour session takes significant wall time even on fast hardware. The transcription and diarization steps together are the bottleneck and currently run sequentially, but they are largely independent — transcription produces text segments, diarization produces speaker-labeled time regions; neither needs the other's output to start.
+
+**Areas to investigate:**
+
+1. **Concurrent transcription + diarization** — Both steps take the same WAV file as input. They could run in parallel using `asyncio.to_thread()` (already used in the web job runner) or `ProcessPoolExecutor` with two workers. The blocker: both `_model` (transcriber) and `_pipeline` (diarizer) are module-level globals — parallel threads/processes would each need their own copy. Memory cost on GPU: loading both models simultaneously requires ~5 GB (medium) + ~700 MB (pyannote) = ~6 GB, well within the RTX 3090's 24 GB. On CPU/Mac, both are loaded anyway.
+
+2. **Audio chunking for transcription** — Split audio into N overlapping chunks, transcribe in parallel across CPU cores, merge results. faster-whisper's VAD already chunks internally; exposing this as a multi-process step is non-trivial. Risk: segment boundary artifacts at chunk join points, especially mid-sentence. Would need overlap + deduplication logic.
+
+3. **Diarization chunking** — pyannote processes audio in overlapping windows internally. Not obviously parallelizable from outside the pipeline without forking pyannote internals.
+
+**Likely best outcome:** Run transcription and diarization concurrently (approach 1) — this is architecturally clean and the two models are already independent. Estimate: could cut wall time by ~30–40% on GPU where diarization is the slower step.
+
+**Guard:** Must not break the `--workers N` folder processing mode or the web job queue's one-job-at-a-time guarantee.
+
+---
+
+### Research — Faster / Better Transcription Models
+
+**Status:** Not researched. Currently using faster-whisper with OpenAI Whisper weights (tiny → large-v3).
+
+**Areas to investigate:**
+
+1. **Whisper large-v3-turbo** — OpenAI released a distilled large-v3 model (~809M params vs. 1.5B) that is reportedly ~8× faster than large-v3 with minimal accuracy loss on English. Already supported by faster-whisper. Should be a near-drop-in upgrade for the `large-v3` config option — worth benchmarking accuracy on podcast audio specifically.
+
+2. **Distil-Whisper** — Hugging Face distilled variants (`distil-large-v3`, `distil-medium.en`) are 5.8× faster than large-v3 with ~1% WER increase on clean speech. English-only. May be ideal for the Mac CPU path where speed matters most. Requires `transformers` backend, not CTranslate2 — would need a new backend shim or conversion to CTranslate2 format via `ct2-transformers-converter`.
+
+3. **Parakeet (NVIDIA NeMo)** — NVIDIA's `parakeet-tdt-0.6b-v2` recently topped the OpenASR leaderboard, outperforming Whisper large-v3 on English benchmarks. Uses CTC+TDT decoding. No faster-whisper support yet; would require NeMo or ONNX integration. GPU-only (CUDA). Worth watching — if CTranslate2 support lands, this could be a significant accuracy upgrade.
+
+4. **Model format: CTranslate2 conversion** — Any Hugging Face Whisper-compatible model can be converted to CTranslate2 format via `ct2-transformers-converter`, making it usable in the current faster-whisper path with no code changes beyond adding the model size option.
+
+**Recommendation order:** large-v3-turbo first (zero integration cost, meaningful speedup), then distil-large-v3 for Mac/CPU users, then watch Parakeet for future GPU accuracy gains.
+
+---
+
 ### DM Character Voice Handling
 
 **Problem:** When a DM does a character voice (dragon accent, goblin voice, NPC), pyannote assigns it a different SPEAKER_XX label than their regular speech. Typical similarity scores: DM normal vs. DM profile ~0.80–0.90, DM character voice vs. DM profile ~0.35–0.55 — often below the 0.65 match threshold, so character voices fall through to `Unknown Speaker N`.
