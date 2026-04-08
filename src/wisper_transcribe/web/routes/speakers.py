@@ -41,9 +41,13 @@ async def speaker_clip(request: Request, key: str) -> Response:
     if safe_key != key or safe_key in {".", ".."}:
         return HTMLResponse(content="Invalid key", status_code=400)
 
+    import re
+    if not re.match(r"^[\w\-]+$", safe_key):
+        return HTMLResponse(content="Invalid key", status_code=400)
+
     from wisper_transcribe.speaker_manager import _get_embeddings_dir
     embeddings_dir = _get_embeddings_dir().resolve()
-    clip = _clip_path(key).resolve()
+    clip = _clip_path(safe_key).resolve()
 
     # Verify that the resolved clip path is contained within the embeddings directory.
     try:
