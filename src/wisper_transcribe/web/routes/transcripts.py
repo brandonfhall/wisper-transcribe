@@ -52,9 +52,17 @@ def _get_safe_transcript_path(request: Request, name: str) -> Path | None:
     out_dir = _output_dir(request).resolve()
     md_path = (out_dir / f"{safe_name}.md").resolve()
     
-    if not md_path.is_relative_to(out_dir):
+    # Use os.path.abspath and .startswith() to satisfy CodeQL's path traversal queries
+    base_dir = os.path.abspath(str(out_dir))
+    if not base_dir.endswith(os.sep):
+        base_dir += os.sep
+        
+    target_path = os.path.abspath(str(md_path))
+    if not target_path.startswith(base_dir):
         return None
-    return md_path
+        
+    # Reconstruct Path from the validated string to ensure taint is dropped
+    return Path(target_path)
 
 
 @router.get("", response_class=HTMLResponse)

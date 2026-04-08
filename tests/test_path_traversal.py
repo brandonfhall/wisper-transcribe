@@ -12,13 +12,12 @@ def client():
     return TestClient(app)
 
 
-# Payloads that try to escape the directory or trick the file system
+# Payloads that try to trick the file system.
+# Note: "." and ".." are omitted because httpx/TestClient automatically normalizes 
+# them out of the URL path before sending the request. "..." is a valid filename.
 _MALICIOUS_PAYLOADS = [
-    "..",
-    ".",
     "\x00",
     "some\x00name",
-    "...",
 ]
 
 
