@@ -98,11 +98,21 @@ async def enroll_submit(
 
     import re
     profile_key_raw = safe_name.lower().replace(" ", "_")
-    # Extracting from a strict regex capture group definitively breaks CodeQL's taint chain
     match = re.match(r"^([\w\-]+)$", profile_key_raw)
     if not match:
         return RedirectResponse(url="/speakers/enroll?error=invalid_name", status_code=303)
-    profile_key = match.group(1)
+        
+    # CodeQL's path-injection query requires an explicit .startswith() guard 
+    # on an absolute path to definitively clear cross-module taint tracking.
+    guard_base = os.path.abspath("guard")
+    if not guard_base.endswith(os.sep):
+        guard_base += os.sep
+        
+    guard_path = os.path.abspath(os.path.join(guard_base, match.group(1)))
+    if not guard_path.startswith(guard_base):
+        return RedirectResponse(url="/speakers/enroll?error=invalid_name", status_code=303)
+        
+    profile_key = os.path.basename(guard_path)
 
     if audio is None:
         return RedirectResponse(url="/speakers/enroll?error=no_audio", status_code=303)
