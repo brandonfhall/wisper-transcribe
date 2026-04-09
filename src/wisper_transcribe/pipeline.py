@@ -155,7 +155,13 @@ def process_file(
     tqdm.write("─" * 60)
     tqdm.write(f"  Input  : {path}")
     tqdm.write(f"  Output : {out_path}")
-    tqdm.write(f"  Model  : {model_size} ({device}, {resolved_ct})")
+    # Show MLX backend label when it will be used; otherwise show CTranslate2 compute type.
+    from .transcriber import _is_mlx_available
+    _will_use_mlx = device == "mps" and use_mlx != "false" and _is_mlx_available()
+    if _will_use_mlx:
+        tqdm.write(f"  Model  : {model_size} (mps, mlx)")
+    else:
+        tqdm.write(f"  Model  : {model_size} ({device}, {resolved_ct})")
     tqdm.write("─" * 60)
 
     wav_path = convert_to_wav(path)
