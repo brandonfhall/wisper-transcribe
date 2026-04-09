@@ -61,18 +61,63 @@ def _play_excerpt(wav_path: Path, start: float, end: float) -> None:
 # _pipeline), so loading both models concurrently is safe.
 # ---------------------------------------------------------------------------
 
-def _transcribe_worker(wav_path: Path, **kwargs) -> list[TranscriptionSegment]:
+def _patch_tqdm_for_queue(queue, channel: str) -> None:  # type: ignore[type-arg]
+    """Patch tqdm in a subprocess to forward output to a multiprocessing Queue.
+
+    Must be called before any ML library imports in the subprocess so that
+    every tqdm instance and write() call goes to the queue instead of stderr.
+    The queue accepts (channel, msg_type, message) tuples where msg_type is
+    either 'log' (tqdm.write call) or 'bar' (progress bar render).
+
+    The parent process drains the queue and forwards messages through the
+    already-patched tqdm.write so they are captured by jobs._run_job.
+    """
+    import re as _re
+    import tqdm as _tqdm_mod
+
+    _ansi = _re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
+    _orig_init = _tqdm_mod.tqdm.__init__
+
+    def _write(msg: str, *a, **kw) -> None:
+        if msg.strip():
+            queue.put((channel, "log", msg.strip()))
+
+    class _QueueFile:
+        def write(self, s: str) -> None:
+            clean = _ansi.sub('', s)
+            for part in clean.split('\r'):
+                stripped = part.strip()
+                if stripped:
+                    queue.put((channel, "bar", stripped))
+        def flush(self) -> None:
+            pass
+
+    def _init(self, *a, **kw) -> None:  # type: ignore[misc]
+        kw["file"] = _QueueFile()
+        kw["dynamic_ncols"] = False
+        kw["ncols"] = 100
+        _orig_init(self, *a, **kw)
+
+    _tqdm_mod.tqdm.write = _write  # type: ignore[method-assign]
+    _tqdm_mod.tqdm.__init__ = _init  # type: ignore[method-assign]
+
+
+def _transcribe_worker(wav_path: Path, _progress_queue=None, **kwargs) -> list[TranscriptionSegment]:
     """Subprocess entry point for transcription (parallel_stages mode)."""
+    if _progress_queue is not None:
+        _patch_tqdm_for_queue(_progress_queue, "transcribe")
     from .transcriber import transcribe as _transcribe
     return _transcribe(wav_path, **kwargs)
 
 
-def _diarize_worker(wav_path: Path, **kwargs) -> list:
+def _diarize_worker(wav_path: Path, _progress_queue=None, **kwargs) -> list:
     """Subprocess entry point for diarization (parallel_stages mode)."""
     # Suppress Lightning/pyannote noise before any ML import so there is
     # no gap in a freshly-spawned subprocess where warnings can leak.
     from ._noise_suppress import suppress_third_party_noise
     suppress_third_party_noise()
+    if _progress_queue is not None:
+        _patch_tqdm_for_queue(_progress_queue, "diarize")
     from .diarizer import diarize as _diarize
     return _diarize(wav_path, **kwargs)
 
@@ -85,19 +130,51 @@ def _run_parallel_transcribe_diarize(
     """Run transcription and diarization concurrently via ProcessPoolExecutor.
 
     Each subprocess gets its own copy of the module-level model globals
-    (_model, _pipeline), so there are no thread-safety concerns. On Linux/Mac,
-    fork-based process creation has minimal overhead. On Windows, spawn-based
-    creation adds ~1–2 seconds of startup cost per file, which is acceptable
-    for 1–3 hour recordings.
+    (_model, _pipeline), so there are no thread-safety concerns. Progress
+    from each subprocess is forwarded to the parent via a multiprocessing
+    Queue and drained by a background thread that calls tqdm.write() with
+    channel-prefixed messages so jobs._run_job captures them.
 
     Returns (transcription_segments, diarization_segments).
     """
+    import multiprocessing
+    import queue as _queue_lib
+    import threading
+
     tqdm.write("  Running transcription and diarization concurrently")
-    with ProcessPoolExecutor(max_workers=2) as executor:
-        trans_future = executor.submit(_transcribe_worker, wav_path, **transcribe_kwargs)
-        diar_future = executor.submit(_diarize_worker, wav_path, **diarize_kwargs)
-        segments = trans_future.result()
-        diarization = diar_future.result()
+
+    mp_queue: multiprocessing.Queue = multiprocessing.Queue()  # type: ignore[type-arg]
+    _stop = threading.Event()
+
+    def _drain() -> None:
+        while not _stop.is_set() or not mp_queue.empty():
+            try:
+                channel, msg_type, msg = mp_queue.get(timeout=0.05)
+            except _queue_lib.Empty:
+                continue
+            except Exception:
+                break
+            if msg_type == "log":
+                tqdm.write(msg)
+            else:  # "bar" — route to progress_channels via special prefix
+                tqdm.write(f"[progress:{channel}] {msg}")
+
+    drain_thread = threading.Thread(target=_drain, daemon=True)
+    drain_thread.start()
+    try:
+        with ProcessPoolExecutor(max_workers=2) as executor:
+            trans_future = executor.submit(
+                _transcribe_worker, wav_path, _progress_queue=mp_queue, **transcribe_kwargs
+            )
+            diar_future = executor.submit(
+                _diarize_worker, wav_path, _progress_queue=mp_queue, **diarize_kwargs
+            )
+            segments = trans_future.result()
+            diarization = diar_future.result()
+    finally:
+        _stop.set()
+        drain_thread.join(timeout=2.0)
+
     return segments, diarization
 
 
