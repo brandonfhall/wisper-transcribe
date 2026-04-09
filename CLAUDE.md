@@ -4,6 +4,19 @@
 
 ---
 
+## Documentation Rules (always apply)
+
+Keeping docs in sync with code is **non-optional** — treat it as part of the definition of done for every task.
+
+| Doc | Update when |
+|-----|-------------|
+| `architecture.md` | Any new module, pipeline change, design decision, config key, or test count change. Update: module map entry, relevant design-decision section, config key list, Known Constraints table, test count. |
+| `README.md` | Any user-facing change: new CLI flag, changed flag behaviour, new command, changed env variable, Docker change, or anything that affects how a user runs or configures wisper. |
+
+Both files must be updated **in the same commit** as the code change, not as a follow-up.
+
+---
+
 ## Commands
 
 ```bash
@@ -36,7 +49,7 @@ wisper server --reload                # dev mode; http://localhost:8080
 - **Commit at least once per phase.** Pause for user review after each phase commit before starting the next.
 - **Branch naming:** `feat/...` or `fix/...`
 - **CI matrix:** Python 3.10–3.13 are blocking; 3.14 is `continue-on-error: true` (non-blocking).
-- **Update `architecture.md`** in the same commit whenever you add a module, change the pipeline, or introduce a non-obvious design decision. This is not optional — doc updates are part of the definition of done for every task. Specifically update: module map entries, relevant design decision sections, config key list, test count, and any affected web interface sections.
+- **Update docs** per the Documentation Rules section above — both `architecture.md` and `README.md` in the same commit as the code change.
 
 ---
 

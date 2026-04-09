@@ -72,10 +72,11 @@ def transcribe(
     debug: bool,
 ):
     """Transcribe an audio file (or folder of files) to markdown."""
-    if debug:
-        from .debug_log import setup_debug_logging
-        log_path = setup_debug_logging()
-        click.echo(f"  Debug log: {log_path}")
+    if debug or verbose:
+        from .debug_log import setup_logging
+        log_path = setup_logging(debug=debug, verbose=verbose)
+        if log_path:
+            click.echo(f"  Debug log: {log_path}")
 
     from .pipeline import process_file, process_folder
 
@@ -146,9 +147,10 @@ def server(host: str, port: int, reload: bool, debug: bool) -> None:
     runtime once the package is installed.
     """
     if debug:
-        from .debug_log import setup_debug_logging
-        log_path = setup_debug_logging()
-        click.echo(f"  Debug log: {log_path}")
+        from .debug_log import setup_logging
+        log_path = setup_logging(debug=True)
+        if log_path:
+            click.echo(f"  Debug log: {log_path}")
 
     try:
         import uvicorn

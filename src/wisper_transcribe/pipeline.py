@@ -64,13 +64,14 @@ def _play_excerpt(wav_path: Path, start: float, end: float) -> None:
 def _patch_tqdm_for_queue(queue, channel: str) -> None:  # type: ignore[type-arg]
     """Patch tqdm in a subprocess to forward output to a multiprocessing Queue.
 
-    Must be called before any ML library imports in the subprocess so that
-    every tqdm instance and write() call goes to the queue instead of stderr.
-    The queue accepts (channel, msg_type, message) tuples where msg_type is
-    either 'log' (tqdm.write call) or 'bar' (progress bar render).
+    Must be called before any ML library imports in the subprocess.
 
-    The parent process drains the queue and forwards messages through the
-    already-patched tqdm.write so they are captured by jobs._run_job.
+    Queue tuple format: (channel, msg_type, message)
+      msg_type="log"  — tqdm.write() status messages; parent forwards via tqdm.write()
+                        so they reach the debug log file if active.
+      msg_type="bar"  — progress bar renders (last non-empty frame per update);
+                        parent writes these directly to sys.stderr so they give
+                        terminal progress without appearing in the log file.
     """
     import re as _re
     import tqdm as _tqdm_mod
@@ -83,19 +84,20 @@ def _patch_tqdm_for_queue(queue, channel: str) -> None:  # type: ignore[type-arg
             queue.put((channel, "log", msg.strip()))
 
     class _QueueFile:
+        """Captures bar renders and forwards the last non-empty frame per update."""
         def write(self, s: str) -> None:
             clean = _ansi.sub('', s)
-            for part in clean.split('\r'):
-                stripped = part.strip()
-                if stripped:
-                    queue.put((channel, "bar", stripped))
+            # Each tqdm update may contain multiple \r-separated frames; take the last.
+            parts = [p.strip() for p in clean.split('\r') if p.strip()]
+            if parts:
+                queue.put((channel, "bar", parts[-1]))
         def flush(self) -> None:
             pass
 
     def _init(self, *a, **kw) -> None:  # type: ignore[misc]
         kw["file"] = _QueueFile()
         kw["dynamic_ncols"] = False
-        kw["ncols"] = 100
+        kw["ncols"] = 80
         _orig_init(self, *a, **kw)
 
     _tqdm_mod.tqdm.write = _write  # type: ignore[method-assign]
@@ -138,42 +140,63 @@ def _run_parallel_transcribe_diarize(
     Returns (transcription_segments, diarization_segments).
     """
     import multiprocessing
-    import queue as _queue_lib
+    import queue as _queue_mod
     import threading
 
     tqdm.write("  Running transcription and diarization concurrently")
 
-    mp_queue: multiprocessing.Queue = multiprocessing.Queue()  # type: ignore[type-arg]
-    _stop = threading.Event()
+    # On macOS (spawn start method) a plain multiprocessing.Queue cannot be
+    # pickled and passed via ProcessPoolExecutor.submit().  A Manager-backed
+    # queue is a proxy object that survives the pickle round-trip.
+    with multiprocessing.Manager() as manager:
+        mp_queue = manager.Queue()  # type: ignore[type-arg]
+        _stop = threading.Event()
 
-    def _drain() -> None:
-        while not _stop.is_set() or not mp_queue.empty():
-            try:
-                channel, msg_type, msg = mp_queue.get(timeout=0.05)
-            except _queue_lib.Empty:
-                continue
-            except Exception:
-                break
-            if msg_type == "log":
-                tqdm.write(msg)
-            else:  # "bar" — route to progress_channels via special prefix
-                tqdm.write(f"[progress:{channel}] {msg}")
+        # Track the last bar render per channel to suppress duplicate frames.
+        _last_bar: dict[str, str] = {}
 
-    drain_thread = threading.Thread(target=_drain, daemon=True)
-    drain_thread.start()
-    try:
-        with ProcessPoolExecutor(max_workers=2) as executor:
-            trans_future = executor.submit(
-                _transcribe_worker, wav_path, _progress_queue=mp_queue, **transcribe_kwargs
-            )
-            diar_future = executor.submit(
-                _diarize_worker, wav_path, _progress_queue=mp_queue, **diarize_kwargs
-            )
-            segments = trans_future.result()
-            diarization = diar_future.result()
-    finally:
-        _stop.set()
-        drain_thread.join(timeout=2.0)
+        def _drain() -> None:
+            import sys
+            while not _stop.is_set() or not mp_queue.empty():
+                try:
+                    channel, msg_type, msg = mp_queue.get(timeout=0.05)
+                except _queue_mod.Empty:
+                    continue
+                except Exception:
+                    break
+                if msg_type == "log":
+                    # Goes through tqdm.write → captured by debug log tee if active.
+                    tqdm.write(msg)
+                else:
+                    # Bar render: write directly to stderr with \r so it updates
+                    # in-place like a real tqdm bar.  Bypasses tqdm.write so it
+                    # is NOT captured by the debug log tee (stays out of the file).
+                    # Deduplicate to avoid redundant redraws.
+                    if _last_bar.get(channel) != msg:
+                        _last_bar[channel] = msg
+                        sys.stderr.write(f"\r{msg}")
+                        sys.stderr.flush()
+
+        drain_thread = threading.Thread(target=_drain, daemon=True)
+        drain_thread.start()
+        try:
+            with ProcessPoolExecutor(max_workers=2) as executor:
+                trans_future = executor.submit(
+                    _transcribe_worker, wav_path, _progress_queue=mp_queue, **transcribe_kwargs
+                )
+                diar_future = executor.submit(
+                    _diarize_worker, wav_path, _progress_queue=mp_queue, **diarize_kwargs
+                )
+                segments = trans_future.result()
+                diarization = diar_future.result()
+        finally:
+            _stop.set()
+            drain_thread.join(timeout=2.0)
+            # Move cursor to a fresh line after the last in-place bar render.
+            if _last_bar:
+                import sys
+                sys.stderr.write("\n")
+                sys.stderr.flush()
 
     return segments, diarization
 

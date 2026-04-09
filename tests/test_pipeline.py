@@ -820,3 +820,206 @@ def test_parallel_stages_passes_use_mlx_to_worker(
     _, call_args, call_kwargs = mock_parallel.mock_calls[0]
     transcribe_kwargs = call_args[1]  # second positional arg is transcribe_kwargs dict
     assert transcribe_kwargs.get("use_mlx") == "false"
+
+
+# ---------------------------------------------------------------------------
+# Parallel drain thread — progress bar rendering format
+# ---------------------------------------------------------------------------
+# These tests guard the specific contract that bar renders are written to
+# sys.stderr with \r (in-place overwrite) rather than \n (newline-terminated).
+# A regression to newline format would produce a scrolling wall of bar text
+# instead of a single updating line — exactly the bug that was introduced when
+# _SilentFile swallowed bars and then later reversed incorrectly.
+# ---------------------------------------------------------------------------
+
+def _run_drain_with_messages(messages: list) -> str:
+    """
+    Run _run_parallel_transcribe_diarize against a pre-populated fake queue
+    and return everything that was written to sys.stderr.
+
+    `messages` is a list of (channel, msg_type, message) tuples pre-loaded
+    into the queue.  The fake ProcessPoolExecutor returns empty results
+    immediately so the test is fast and fully synchronous after the drain.
+    """
+    import io
+    import queue as _queue_mod
+    from unittest.mock import MagicMock, patch
+    from pathlib import Path
+
+    from wisper_transcribe.models import TranscriptionSegment
+    from wisper_transcribe.pipeline import _run_parallel_transcribe_diarize
+
+    # Build a simple queue pre-loaded with the desired messages.
+    fake_q: _queue_mod.SimpleQueue = _queue_mod.SimpleQueue()
+    for msg in messages:
+        fake_q.put(msg)
+
+    # Wrap it to expose .empty() and .get(timeout=…) as Manager queue does.
+    class _FakeManagerQueue:
+        def put(self, item):
+            fake_q.put(item)
+        def get(self, timeout=None):
+            try:
+                return fake_q.get_nowait()
+            except _queue_mod.Empty:
+                raise _queue_mod.Empty
+        def empty(self):
+            return fake_q.empty()
+
+    fake_manager_queue = _FakeManagerQueue()
+
+    # Fake Manager context manager.
+    fake_manager = MagicMock()
+    fake_manager.__enter__ = MagicMock(return_value=fake_manager)
+    fake_manager.__exit__ = MagicMock(return_value=False)
+    fake_manager.Queue.return_value = fake_manager_queue
+
+    # Fake executor whose futures return instantly with empty results.
+    fake_future_trans = MagicMock()
+    fake_future_trans.result.return_value = []
+    fake_future_diar = MagicMock()
+    fake_future_diar.result.return_value = []
+
+    fake_executor = MagicMock()
+    fake_executor.__enter__ = MagicMock(return_value=fake_executor)
+    fake_executor.__exit__ = MagicMock(return_value=False)
+    fake_executor.submit.side_effect = [fake_future_trans, fake_future_diar]
+
+    stderr_capture = io.StringIO()
+
+    with patch("multiprocessing.Manager", return_value=fake_manager), \
+         patch("wisper_transcribe.pipeline.ProcessPoolExecutor", return_value=fake_executor), \
+         patch("sys.stderr", stderr_capture):
+
+        _run_parallel_transcribe_diarize(
+            wav_path=Path("fake.wav"),
+            transcribe_kwargs={"model_size": "tiny", "device": "cpu",
+                               "language": "en", "compute_type": "int8",
+                               "vad_filter": False, "initial_prompt": None,
+                               "hotwords": None, "use_mlx": "false"},
+            diarize_kwargs={"hf_token": "x", "device": "cpu",
+                            "num_speakers": None, "min_speakers": None,
+                            "max_speakers": None},
+        )
+
+    return stderr_capture.getvalue()
+
+
+def test_drain_bar_uses_carriage_return_not_newline():
+    """Bar renders must be written with \\r so they overwrite in place in the terminal."""
+    stderr = _run_drain_with_messages([
+        ("transcribe", "bar", "Transcribing:  50%|#####     | 1/2 [00:01<00:01]"),
+        ("transcribe", "bar", "Transcribing: 100%|##########| 2/2 [00:02<00:00]"),
+    ])
+    # Every bar write must start with \r (not \n).
+    bar_writes = [w for w in stderr.split("\r") if "Transcribing" in w]
+    assert bar_writes, "Bar text should appear in stderr"
+    # The full stderr must not contain a bare \n before bar content
+    # (i.e. bars must not be newline-terminated individually).
+    for line in stderr.split("\n"):
+        if "Transcribing" in line:
+            assert not line.startswith("Transcribing"), (
+                "Bar render should be preceded by \\r, not appear at the start of a \\n-delimited line"
+            )
+
+
+def test_drain_bar_final_newline_emitted():
+    """A single trailing \\n is written after all bar renders so the cursor lands on a fresh line."""
+    stderr = _run_drain_with_messages([
+        ("transcribe", "bar", "Transcribing:  50%|#####     | 1/2 [00:01<00:01]"),
+        ("transcribe", "bar", "Transcribing: 100%|##########| 2/2 [00:02<00:00]"),
+    ])
+    assert stderr.endswith("\n"), (
+        "stderr should end with \\n so the next pipeline output starts on a fresh line"
+    )
+
+
+def test_drain_bar_deduplicates_identical_frames():
+    """Identical consecutive bar frames should be written only once."""
+    same_frame = "Transcribing:  75%|#######   | 3/4 [00:03<00:01]"
+    stderr = _run_drain_with_messages([
+        ("transcribe", "bar", same_frame),
+        ("transcribe", "bar", same_frame),  # duplicate — should be suppressed
+        ("transcribe", "bar", same_frame),  # duplicate — should be suppressed
+    ])
+    assert stderr.count(same_frame) == 1, "Duplicate bar frames should not be written multiple times"
+
+
+def test_drain_log_goes_through_tqdm_write_not_stderr():
+    """Log-type messages must NOT appear in stderr — they go through tqdm.write()."""
+    import io
+    from unittest.mock import patch as _patch
+
+    tqdm_calls: list[str] = []
+
+    def _capture_write(msg: str, *a, **kw) -> None:
+        tqdm_calls.append(msg)
+
+    with _patch("wisper_transcribe.pipeline.tqdm.write", side_effect=_capture_write):
+        stderr = _run_drain_with_messages([
+            ("transcribe", "log", "Using MLX-Whisper backend"),
+        ])
+
+    assert any("Using MLX-Whisper backend" in c for c in tqdm_calls), (
+        "Log messages must be forwarded via tqdm.write()"
+    )
+    assert "Using MLX-Whisper backend" not in stderr, (
+        "Log messages must not appear in stderr"
+    )
+
+
+def test_patch_tqdm_for_queue_bar_tuple_format():
+    """_patch_tqdm_for_queue puts (channel, 'bar', text) tuples for tqdm bar renders."""
+    import queue as _queue_mod
+    from wisper_transcribe.pipeline import _patch_tqdm_for_queue
+    import tqdm as _tqdm_mod
+
+    orig_write = _tqdm_mod.tqdm.write
+    orig_init = _tqdm_mod.tqdm.__init__
+    try:
+        q: _queue_mod.SimpleQueue = _queue_mod.SimpleQueue()
+        _patch_tqdm_for_queue(q, "transcribe")
+
+        # Simulate what tqdm's internal rendering does: write a bar string to the file.
+        # _patch_tqdm_for_queue replaces tqdm.__init__ to inject _QueueFile as `file`.
+        # We call it directly by instantiating a bar with disable=True then poking its file.
+        bar = _tqdm_mod.tqdm(total=2, disable=False)
+        bar.fp.write("Transcribing:  50%|#####|")  # type: ignore[attr-defined]
+
+        items = []
+        while not q.empty():
+            items.append(q.get_nowait())
+
+        assert any(t[1] == "bar" for t in items), "Bar renders should produce msg_type='bar' tuples"
+        assert all(t[0] == "transcribe" for t in items), "Channel should be 'transcribe'"
+    finally:
+        _tqdm_mod.tqdm.write = orig_write
+        _tqdm_mod.tqdm.__init__ = orig_init
+
+
+def test_patch_tqdm_for_queue_log_tuple_format():
+    """_patch_tqdm_for_queue puts (channel, 'log', text) tuples for tqdm.write() calls."""
+    import queue as _queue_mod
+    from wisper_transcribe.pipeline import _patch_tqdm_for_queue
+    import tqdm as _tqdm_mod
+
+    orig_write = _tqdm_mod.tqdm.write
+    orig_init = _tqdm_mod.tqdm.__init__
+    try:
+        q: _queue_mod.SimpleQueue = _queue_mod.SimpleQueue()
+        _patch_tqdm_for_queue(q, "diarize")
+
+        _tqdm_mod.tqdm.write("Loaded pyannote pipeline")
+
+        items = []
+        while not q.empty():
+            items.append(q.get_nowait())
+
+        assert len(items) == 1
+        channel, msg_type, msg = items[0]
+        assert channel == "diarize"
+        assert msg_type == "log"
+        assert msg == "Loaded pyannote pipeline"
+    finally:
+        _tqdm_mod.tqdm.write = orig_write
+        _tqdm_mod.tqdm.__init__ = orig_init

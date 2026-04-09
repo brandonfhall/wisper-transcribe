@@ -24,12 +24,12 @@
 
 ```
 src/wisper_transcribe/
-├── cli.py              Click entry points — no business logic, delegates to pipeline/manager; includes setup wizard, server command; --debug flag
+├── cli.py              Click entry points — no business logic, delegates to pipeline/manager; includes setup wizard, server command; --debug and --verbose flags
 ├── pipeline.py         Main orchestrator: process_file(), process_folder() (supports --workers N via ProcessPoolExecutor)
 ├── transcriber.py      faster-whisper wrapper, lazy model cache (_model), CUDA DLL path fix, MLX dispatch
 ├── diarizer.py         pyannote pipeline wrapper, lazy cache (_pipeline), scipy audio loading
 ├── _noise_suppress.py  Centralised third-party warning/logging suppression (Lightning, pyannote, speechbrain); safe to call from subprocesses
-├── debug_log.py        Optional file-based debug logging; activated by --debug; tees tqdm.write() + Python logging to ./logs/wisper_<ts>.log
+├── debug_log.py        Centralized logging controller (Logger class); activated by --debug (file) and/or --verbose (console); tees tqdm.write() + Python logging to ./logs/wisper_<ts>.log
 ├── aligner.py          Merge transcription segments with diarization labels (max-overlap)
 ├── speaker_manager.py  Profile CRUD, embedding extraction, cosine-similarity matching, EMA updates
 ├── formatter.py        Markdown output, YAML frontmatter, timestamp formatting
@@ -153,14 +153,20 @@ The function handles two categories:
 
 All suppressions are gated on `not os.environ.get("WISPER_DEBUG")`. The absl "triton not found" log is suppressed via `absl.logging.set_verbosity(ERROR)` — absl-py has its own logging system separate from Python's hierarchy, so `logging.getLogger("absl")` has no effect; must use `absl.logging` directly.
 
-### Debug file logging (`--debug`)
-`wisper transcribe --debug` and `wisper server --debug` both activate `debug_log.setup_debug_logging()`:
-1. Sets `WISPER_DEBUG=1` so warning suppression is disabled and raw ML output is visible.
-2. Creates `./logs/wisper_<YYYYMMDD_HHmmss>.log` in the **calling process's CWD** (i.e. wherever `wisper` is invoked from).
-3. Tees `tqdm.write()` to the log file — this captures the full pipeline status log for both sequential and parallel modes (subprocess progress is forwarded through the drain thread's `tqdm.write()` calls in the parent process, so it also reaches the file).
-4. Attaches a `logging.FileHandler` at `DEBUG` level to the root Python logger so ML library log output (torch, pyannote, Lightning) is also captured.
+### Logging (`--debug` / `--verbose`)
+Both flags are handled by `debug_log.Logger`, a class that owns both output modes independently. `setup_logging(debug=, verbose=)` creates the module-level singleton and is called once at CLI startup.
 
-The log path is printed to stdout when `--debug` is used.
+**`debug=True`** (`--debug` on `transcribe` and `server`):
+1. Sets `WISPER_DEBUG=1` so warning suppression is disabled.
+2. Creates `./logs/wisper_<YYYYMMDD_HHmmss>.log` in the CWD.
+3. Patches `tqdm.write()` to tee every call to the file (captures full pipeline status for sequential and parallel modes).
+4. Attaches a `_LoggingBridge` handler (not `logging.FileHandler`) to the root Python logger. `_LoggingBridge` routes records through `Logger._write_to_file()` — the same single fd used by the tqdm tee — eliminating the interleaved-write bug that occurred when two independent fds wrote to the same file concurrently (e.g. a long pydub ffmpeg command line split across a tqdm.write call).
+
+**`verbose=True`** (`--verbose` on `transcribe` only):
+1. Attaches a console `logging.StreamHandler` at DEBUG level to the root logger so ML library output (pyannote, faster-whisper, etc.) is surfaced in the terminal alongside normal `tqdm.write()` output.
+2. Does **not** create a log file; does **not** set `WISPER_DEBUG`.
+
+Both flags may be combined: `wisper transcribe --debug --verbose` writes the file and shows ML library logs on the console simultaneously. The log path is printed to stdout when `--debug` is active.
 
 ### VAD filter via faster-whisper built-in
 `transcribe()` passes `vad_filter=True/False` directly to `_model.transcribe()`. faster-whisper bundles Silero VAD internally; when enabled it skips silence/non-speech frames before feeding audio to Whisper. This is "Option A" from the plan — no separate audio stripping step, no timestamp remapping required. Timestamps in the output remain original-audio-relative. Controlled via `--vad/--no-vad` CLI flag (default: on, from config). `process_file()` uses `vad_filter: Optional[bool] = None` as a sentinel so an unset flag falls through to the config value rather than hard-coding True.
@@ -189,11 +195,11 @@ MLX models are downloaded from HuggingFace (`mlx-community/whisper-*-mlx`) on fi
 When `parallel_stages=True` in config (default `False`), `process_file()` runs transcription and diarization concurrently via `ProcessPoolExecutor(max_workers=2)`. The two stages are independent: both take the same converted WAV file as input and produce outputs combined in the `align()` step. Each subprocess gets its own copy of the module-level `_model`/`_pipeline` globals, so there are no thread-safety concerns.
 
 **Progress IPC for the web UI.** Subprocess workers write tqdm output to their own stderr by default — the web job's `ProgressCatcher` lives in the parent process and can't capture it. `_run_parallel_transcribe_diarize()` solves this by:
-1. Creating a `multiprocessing.Queue` passed to each worker as `_progress_queue`.
-2. Each worker calls `_patch_tqdm_for_queue(queue, channel)` before any ML import. This patches `tqdm.write` and `tqdm.__init__` in the subprocess so all output goes to the queue as `(channel, "log"|"bar", message)` tuples (`"transcribe"` or `"diarize"`).
-3. A background drain thread in the parent reads from the queue and calls `tqdm.write(msg)` (for log messages) or `tqdm.write(f"[progress:{channel}] {msg}")` (for bar renders). These go through the already-patched `capturing_write` in `jobs._run_job`.
-4. `capturing_write` detects the `[progress:channel]` prefix and routes it to `job.progress_channels[channel]` instead of `job.log_lines` (keeps the log terminal clean).
-5. The SSE route emits `channel_progress` events when either channel changes; the job detail page renders two stacked mini-bars driven by these events.
+1. Creating a `multiprocessing.Manager().Queue()` (not a plain `multiprocessing.Queue`) passed to each worker as `_progress_queue`. A managed queue is required on macOS because Python's "spawn" start method pickles arguments; plain `multiprocessing.Queue` objects cannot be pickled across spawn boundaries.
+2. Each worker calls `_patch_tqdm_for_queue(queue, channel)` before any ML import. This patches `tqdm.write` and `tqdm.__init__` in the subprocess. Queue tuple format: `(channel, msg_type, message)` where `msg_type` is `"log"` (tqdm.write status messages) or `"bar"` (last non-empty tqdm bar render frame per update, with ANSI codes stripped).
+3. A background drain thread in the parent reads tuples: `"log"` messages go through `tqdm.write()` so they reach the debug log tee if active; `"bar"` renders go directly to `sys.stderr` with per-channel deduplication so they display in the terminal without appearing in the log file.
+4. `tqdm.write()` in the parent goes through the `capturing_write` patch in `jobs._run_job`, routing messages to `job.log_lines` for the SSE stream.
+5. The SSE route streams log lines to the browser; the job detail page shows the standard progress indicators.
 
 Interaction with `--workers N` folder mode: when both `parallel_stages=True` and `workers>1` are active, the total process count is N×2. Users with high `--workers` values can set `parallel_stages=False` to avoid contention. The web job queue's one-job-at-a-time guarantee is unaffected because the inner `ProcessPoolExecutor` runs inside the `asyncio.to_thread()` call.
 
@@ -245,7 +251,9 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - Coverage: run `pytest tests/ -v --cov --cov-report=term-missing`
 - Web tests use `fastapi.testclient.TestClient`; routes are tested via HTTP with all ML calls mocked — no GPU/network needed
 - Security tests in `tests/test_path_traversal.py` cover path traversal (null-byte, dotdot), regex-busting payloads, open-redirect/CRLF payloads, and unit tests for `_validate_job_id()`
-- Test count: 220 (all mocked, all passing)
+- `tests/test_debug_log.py` covers `Logger` (file mode, verbose mode, combined), `setup_logging()`, singleton lifecycle, and `WISPER_DEBUG` env side-effect
+- `tests/conftest.py` provides an `autouse` fixture that patches `wisper_transcribe.pipeline.load_config` with a safe baseline config (prevents real user config — e.g. `parallel_stages=True` — from leaking into tests that don't explicitly patch it)
+- Test count: 244 (all mocked, all passing)
 
 **CI matrix** (`.github/workflows/ci.yml`):
 - Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)
