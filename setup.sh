@@ -79,13 +79,15 @@ else
     fi
 fi
 
-# ── Apple Silicon note ────────────────────────────────────────────────────────
+# ── Apple Silicon: mlx-whisper ────────────────────────────────────────────────
 if [[ "$OSTYPE" == "darwin"* ]]; then
     ARCH=$(uname -m)
     if [[ "$ARCH" == "arm64" ]]; then
-        echo ""
-        echo -e "${GRAY}   Note: Apple Silicon detected (MPS). wisper uses CPU mode by default${NC}"
-        echo -e "${GRAY}   (MPS is unreliable for faster-whisper and pyannote — CPU gives stable results)${NC}"
+        if "$PYTHON" -c "import mlx_whisper" &>/dev/null 2>&1; then
+            ok "mlx-whisper ready (Apple Silicon GPU/ANE transcription enabled)"
+        else
+            warn "mlx-whisper not importable despite being installed — transcription will fall back to CPU"
+        fi
     fi
 fi
 
