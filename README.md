@@ -14,7 +14,7 @@ Runs entirely offline. No cloud APIs. Outputs clean markdown files ready for Not
 - GPU recommended but not required (CPU works, just slower)
 
 **Windows (CUDA):** 
-- Install ffmpeg via `winget install Gyan.FFmpeg.shared`
+- Install ffmpeg via `winget install Gyan.FFmpeg.Shared`
 - Install CUDA Toolkit via `winget install Nvidia.CUDA` (Restart your terminal/VS Code after installing)
 - *Note: If you encounter `cublas64_12.dll` or `zlibwapi.dll` not found errors, manually download NVIDIA cuDNN and place its `.dll` files in your CUDA `bin` directory (usually `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x\bin`).*
 
@@ -35,7 +35,8 @@ Run the setup script — it handles the venv, package install, and CUDA PyTorch 
 
 ```bash
 # Mac/Linux
-bash setup.sh
+chmod +x setup.sh
+./setup.sh
 ```
 
 ### Manual setup
@@ -52,7 +53,15 @@ python -m venv .venv
 # Mac/Linux
 source .venv/bin/activate
 
-pip install -e .
+    pip install -e .
+
+    # Windows CUDA users:
+    # After the steps above, run this extra command to get GPU support:
+    # pip install "torch>=2.8.0" "torchaudio>=2.8.0" --index-url https://download.pytorch.org/whl/cu126 --force-reinstall
+
+    # Mac/Linux
+    source .venv/bin/activate
+
 ```
 
 > **Windows CUDA users:** `pip install` from PyPI installs the CPU-only PyTorch build by default. After the steps above, run this extra command to get GPU support:

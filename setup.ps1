@@ -49,22 +49,34 @@ Write-Step "Installing wisper-transcribe..."
 & $pip install -e . -q
 Write-OK "wisper-transcribe installed"
 
-# ── PyTorch with CUDA ─────────────────────────────────────────────────────────
-# The default 'pip install torch' gets the CPU-only build from PyPI.
-# We must explicitly point pip at PyTorch's CUDA index to get GPU support.
-# pyannote-audio 4.x requires torch>=2.8.0, which is on the cu126 index.
-Write-Step "Installing PyTorch with CUDA 12.6 support..."
-Write-Host "   (default pip install gets CPU-only PyTorch — this installs the GPU build)" -ForegroundColor Gray
-& $pip install "torch>=2.8.0" "torchaudio>=2.8.0" --index-url https://download.pytorch.org/whl/cu126 --force-reinstall -q
+# ── PyTorch installation ─────────────────────────────────────────────────────
+# Check if a CUDA-capable GPU is available via nvidia-smi or torch
+$hasNvidia = & nvidia-smi --list-gpus 2>$null
+if ($null -eq $hasNvidia) { $hasNvidia = $false }
+
+if ($hasNvidia) {
+    Write-Step "NVIDIA GPU detected. Installing PyTorch with CUDA 12.6 support..."
+    Write-Host "   (default pip install gets CPU-only PyTorch — this installs the GPU build)" -ForegroundColor Gray
+    & $pip install "torch>=2.8.0" "torchaudio>=2.8.0" --index-url https://download.pytorch.org/whl/cu126 --force-reinstall -q
+} else {
+    Write-Step "No NVIDIA GPU detected. Installing PyTorch (CPU build)..."
+    & $pip install "torch>=2.8.0" "torchaudio>=2.8.0" -q
+}
 
 $cudaAvailable = & $python -c "import torch; print(torch.cuda.is_available())"
 if ($cudaAvailable -eq "True") {
     $gpuName = & $python -c "import torch; print(torch.cuda.get_device_name(0))"
     Write-OK "CUDA available — GPU: $gpuName"
 } else {
-    Write-Warn "CUDA not detected after install."
-    Write-Host "   Check that your NVIDIA drivers are up to date (https://www.nvidia.com/drivers)" -ForegroundColor Yellow
-    Write-Host "   wisper will still work with --device cpu" -ForegroundColor Yellow
+    Write-OK "Running on CPU"
+}
+
+$cudaAvailable = & $python -c "import torch; print(torch.cuda.is_available())"
+if ($cudaAvailable -eq "True") {
+    $gpuName = & $python -c "import torch; print(torch.cuda.get_device_name(0))"
+    Write-OK "CUDA available — GPU: $gpuName"
+} else {
+    Write-OK "Running on CPU"
 }
 
 # ── ffmpeg ────────────────────────────────────────────────────────────────────
