@@ -36,7 +36,7 @@ wisper server --reload                # dev mode; http://localhost:8080
 - **Commit at least once per phase.** Pause for user review after each phase commit before starting the next.
 - **Branch naming:** `feat/...` or `fix/...`
 - **CI matrix:** Python 3.10–3.13 are blocking; 3.14 is `continue-on-error: true` (non-blocking).
-- **Update `architecture.md`** in the same commit whenever you add a module, change the pipeline, or introduce a non-obvious design decision.
+- **Update `architecture.md`** in the same commit whenever you add a module, change the pipeline, or introduce a non-obvious design decision. This is not optional — doc updates are part of the definition of done for every task. Specifically update: module map entries, relevant design decision sections, config key list, test count, and any affected web interface sections.
 
 ---
 
