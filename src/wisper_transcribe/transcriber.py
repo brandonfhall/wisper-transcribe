@@ -45,8 +45,13 @@ def _transcribe_mlx(
     hotwords are injected into initial_prompt as a comma-separated prefix,
     which nudges the model toward correct spellings via prior-context priming.
     """
+    import os
     import mlx_whisper
     from tqdm import tqdm
+
+    # The model is cached after the first run, but huggingface_hub still shows
+    # a "Fetching N files" verification bar on every call. Suppress it.
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
     repo = _MLX_MODEL_MAP.get(model_size, f"mlx-community/whisper-{model_size}-mlx")
     tqdm.write(f"  Using MLX-Whisper backend ({repo})")

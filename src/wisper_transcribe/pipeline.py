@@ -69,6 +69,10 @@ def _transcribe_worker(wav_path: Path, **kwargs) -> list[TranscriptionSegment]:
 
 def _diarize_worker(wav_path: Path, **kwargs) -> list:
     """Subprocess entry point for diarization (parallel_stages mode)."""
+    # Suppress Lightning/pyannote noise before any ML import so there is
+    # no gap in a freshly-spawned subprocess where warnings can leak.
+    from ._noise_suppress import suppress_third_party_noise
+    suppress_third_party_noise()
     from .diarizer import diarize as _diarize
     return _diarize(wav_path, **kwargs)
 

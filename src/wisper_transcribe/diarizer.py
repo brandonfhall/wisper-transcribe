@@ -31,65 +31,11 @@ try:
 except ImportError:
     pass  # speechbrain not installed; patch not needed
 
-import os as _os
-import warnings as _warnings
-import logging as _logging
+from ._noise_suppress import suppress_third_party_noise as _suppress
 
-# Suppress noisy third-party warnings that are not actionable for end users.
-# Set WISPER_DEBUG=1 in your shell to disable suppression and see the raw output.
-if not _os.environ.get("WISPER_DEBUG"):
-    # speechbrain module-redirect deprecations (fired by inspect.getmembers during pyannote load)
-    _warnings.filterwarnings(
-        "ignore",
-        message=r"Module 'speechbrain\..+' was deprecated",
-        category=UserWarning,
-    )
-    # pyannote TF32 reproducibility advisory (not relevant for inference)
-    _warnings.filterwarnings("ignore", module=r"pyannote\.audio\.utils\.reproducibility")
-    # pyannote pooling std() warning on short/silent audio segments
-    _warnings.filterwarnings(
-        "ignore",
-        message=r"std\(\): degrees of freedom is <= 0",
-        category=UserWarning,
-    )
-    # Lightning migration shim: "Redirecting import of pytorch_lightning..."
-    # Fired when pyannote/embedding loads a checkpoint saved under the old
-    # pytorch_lightning namespace.
-    _warnings.filterwarnings(
-        "ignore",
-        message=r"Redirecting import of pytorch_lightning",
-    )
-    # Lightning checkpoint auto-upgrade notification (v1.x → v2.x format)
-    _warnings.filterwarnings(
-        "ignore",
-        message=r"Lightning automatically upgraded your loaded checkpoint",
-    )
-    # Lightning multiple ModelCheckpoint states in old checkpoint
-    _warnings.filterwarnings(
-        "ignore",
-        message=r"You have multiple `ModelCheckpoint` callback states",
-    )
-    # pyannote embedding model: task-dependent loss stored in checkpoint but
-    # not used during inference; 'strict=False' is set internally by pyannote
-    _warnings.filterwarnings(
-        "ignore",
-        message=r"Model has been trained with a task-dependent loss function",
-        category=UserWarning,
-    )
-    # Lightning state dict: loss_func.W key present in checkpoint but not in
-    # the inference model — harmless for embedding extraction
-    _warnings.filterwarnings(
-        "ignore",
-        message=r"Found keys that are not in the model state dict but in the checkpoint",
-    )
-    # absl/torch "triton not found" flop-counter log — absl-py has its own
-    # logging system separate from Python's logging hierarchy; must use
-    # absl.logging.set_verbosity rather than logging.getLogger("absl")
-    try:
-        import absl.logging as _absl_logging
-        _absl_logging.set_verbosity(_absl_logging.ERROR)
-    except ImportError:
-        pass
+# Must run before pyannote is imported below — the Lightning compat-shim
+# fires redirect warnings the moment pytorch_lightning symbols are resolved.
+_suppress()
 
 from tqdm import tqdm
 
