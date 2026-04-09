@@ -129,14 +129,11 @@ def test_is_mlx_available_false_on_non_darwin():
         assert t._is_mlx_available() is False
 
 
-def test_is_mlx_available_false_when_import_fails():
-    """_is_mlx_available() returns False when mlx_whisper cannot be imported."""
+def test_is_mlx_available_false_when_package_not_found():
+    """_is_mlx_available() returns False when mlx_whisper is not installed."""
     import wisper_transcribe.transcriber as t
     with patch("wisper_transcribe.transcriber.platform.system", return_value="Darwin"):
-        with patch("builtins.__import__", side_effect=lambda name, *a, **kw: (
-            (_ for _ in ()).throw(ImportError("no mlx_whisper")) if name == "mlx_whisper"
-            else __import__(name, *a, **kw)
-        )):
+        with patch("importlib.util.find_spec", return_value=None):
             assert t._is_mlx_available() is False
 
 

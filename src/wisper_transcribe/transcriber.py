@@ -19,14 +19,17 @@ _MLX_MODEL_MAP = {
 
 
 def _is_mlx_available() -> bool:
-    """Return True if mlx_whisper is importable (Apple Silicon Macs only)."""
+    """Return True if mlx_whisper is installed and importable on Apple Silicon.
+
+    Uses importlib.util.find_spec for the presence check so this is safe to
+    call from the main process (e.g. uvicorn) where a full Metal-initialising
+    import may conflict with the async event loop.  The actual import happens
+    only inside _transcribe_mlx(), which runs in a subprocess.
+    """
     if platform.system() != "Darwin":
         return False
-    try:
-        import mlx_whisper  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    import importlib.util
+    return importlib.util.find_spec("mlx_whisper") is not None
 
 
 def _transcribe_mlx(
