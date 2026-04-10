@@ -6,20 +6,15 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
-from ..jobs import JobQueue
-from . import templates
+from . import get_queue, templates
 from wisper_transcribe.config import get_data_dir, get_device, load_config  # noqa: F401 (get_data_dir used in template context and tests)
 
 router = APIRouter()
 
 
-def _get_queue(request: Request) -> JobQueue:
-    return request.app.state.job_queue
-
-
 @router.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request) -> HTMLResponse:
-    queue = _get_queue(request)
+    queue = get_queue(request)
     config = load_config()
     device = get_device()
     hf_token_set = bool(config.get("hf_token") or __import__("os").environ.get("HUGGINGFACE_TOKEN"))
@@ -51,7 +46,7 @@ async def dashboard(request: Request) -> HTMLResponse:
 @router.get("/jobs", response_class=HTMLResponse)
 async def jobs_partial(request: Request) -> HTMLResponse:
     """HTMX partial: job table rows (polled every 2s when jobs are active)."""
-    queue = _get_queue(request)
+    queue = get_queue(request)
     return templates.TemplateResponse(
         request,
         "partials/job_rows.html",

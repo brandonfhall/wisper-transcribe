@@ -279,3 +279,115 @@ def test_config_set_hotwords_list(tmp_path, monkeypatch):
 
     from wisper_transcribe.config import load_config
     assert load_config()["hotwords"] == ["Kyra", "Golarion", "Zeldris"]
+
+
+# ---------------------------------------------------------------------------
+# wisper setup
+# ---------------------------------------------------------------------------
+
+def test_setup_detects_ffmpeg(monkeypatch):
+    """Setup wizard detects ffmpeg and reports OK."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(Path(__file__).parent / "tmp_setup"))
+    with patch("wisper_transcribe.config.check_ffmpeg"):
+        mock_torch = MagicMock()
+        mock_torch.cuda.is_available.return_value = False
+        mock_torch.backends.mps.is_available.return_value = False
+        with patch.dict("sys.modules", {"torch": mock_torch}):
+            result = CliRunner().invoke(main, ["setup"], input="\n")
+    # Should at least get past the ffmpeg check
+    assert "ffmpeg found" in result.output or "OK" in result.output
+
+
+def test_setup_ffmpeg_missing_exits(monkeypatch):
+    """Setup wizard exits when ffmpeg is missing."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(Path(__file__).parent / "tmp_setup"))
+    with patch("wisper_transcribe.config.check_ffmpeg", side_effect=RuntimeError("ffmpeg not found")):
+        result = CliRunner().invoke(main, ["setup"])
+    assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# wisper server
+# ---------------------------------------------------------------------------
+
+def test_server_missing_uvicorn():
+    """Server command shows error when uvicorn is not installed."""
+    with patch.dict("sys.modules", {"uvicorn": None}):
+        with patch("builtins.__import__", side_effect=ImportError("No module named 'uvicorn'")):
+            # The click exception should mention uvicorn
+            result = CliRunner().invoke(main, ["server"])
+            # Either exits non-zero or mentions uvicorn in output
+            assert result.exit_code != 0 or "uvicorn" in result.output.lower()
+
+
+# ---------------------------------------------------------------------------
+# wisper enroll
+# ---------------------------------------------------------------------------
+
+def test_enroll_cli_creates_profile(tmp_path, monkeypatch):
+    """wisper enroll <name> --audio <file> enrolls a speaker."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    audio = tmp_path / "clip.mp3"
+    audio.write_bytes(b"fake audio")
+
+    with patch("wisper_transcribe.audio_utils.convert_to_wav", return_value=audio), \
+         patch("wisper_transcribe.speaker_manager.extract_embedding", return_value=np.ones(512)), \
+         patch("wisper_transcribe.speaker_manager._save_reference_clip"), \
+         patch("wisper_transcribe.audio_utils.get_duration", return_value=30.0):
+        mock_torch = MagicMock()
+        mock_torch.cuda.is_available.return_value = False
+        mock_torch.backends.mps.is_available.return_value = False
+        with patch.dict("sys.modules", {"torch": mock_torch}):
+            result = CliRunner().invoke(
+                main, ["enroll", "TestSpeaker", "--audio", str(audio)]
+            )
+
+    assert result.exit_code == 0
+    assert "Enrolled" in result.output
+
+    from wisper_transcribe.speaker_manager import load_profiles
+    profiles = load_profiles(data_dir=tmp_path)
+    assert "testspeaker" in profiles
+
+
+def test_enroll_cli_with_update_flag(tmp_path, monkeypatch):
+    """wisper enroll --update averages with existing embedding."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    audio = tmp_path / "clip.mp3"
+    audio.write_bytes(b"fake audio")
+
+    # Create an existing profile first
+    _make_fake_profile(tmp_path, "alice")
+
+    with patch("wisper_transcribe.audio_utils.convert_to_wav", return_value=audio), \
+         patch("wisper_transcribe.speaker_manager.extract_embedding", return_value=np.ones(512)), \
+         patch("wisper_transcribe.audio_utils.get_duration", return_value=30.0):
+        mock_torch = MagicMock()
+        mock_torch.cuda.is_available.return_value = False
+        mock_torch.backends.mps.is_available.return_value = False
+        with patch.dict("sys.modules", {"torch": mock_torch}):
+            result = CliRunner().invoke(
+                main, ["enroll", "alice", "--audio", str(audio), "--update"]
+            )
+
+    assert result.exit_code == 0
+    assert "Updated" in result.output
+
+
+# ---------------------------------------------------------------------------
+# wisper transcribe folder
+# ---------------------------------------------------------------------------
+
+def test_transcribe_folder_reports_summary(tmp_path):
+    """Transcribing a folder prints a summary with counts."""
+    audio1 = tmp_path / "s01.mp3"
+    audio1.write_bytes(b"fake")
+    out_md = tmp_path / "s01.md"
+    out_md.write_text("# test")
+
+    with patch("wisper_transcribe.pipeline.process_file", return_value=out_md), \
+         patch("wisper_transcribe.pipeline.process_folder", return_value=([out_md], [])):
+        result = CliRunner().invoke(main, ["transcribe", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "Done" in result.output

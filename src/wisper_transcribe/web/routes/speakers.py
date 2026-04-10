@@ -127,10 +127,9 @@ async def enroll_submit(
 
     try:
         from wisper_transcribe.audio_utils import convert_to_wav
-        from wisper_transcribe.config import get_device
+        from wisper_transcribe.config import get_device, get_hf_token, load_config
         from wisper_transcribe.diarizer import diarize
-        from wisper_transcribe.config import load_config, get_hf_token
-        from wisper_transcribe.speaker_manager import enroll_speaker, update_embedding, extract_embedding
+        from wisper_transcribe.speaker_manager import enroll_speaker, extract_embedding, update_embedding
 
         config = load_config()
         device = get_device()
@@ -149,22 +148,9 @@ async def enroll_submit(
             return RedirectResponse(url="/speakers/enroll?error=no_speech", status_code=303)
         primary_label = max(speaker_time, key=lambda k: speaker_time[k])
 
-        if update:
-            profiles = load_profiles()
-            if profile_key in profiles:
-                new_emb = extract_embedding(wav_path, diarization, primary_label, device)
-                update_embedding(profile_key, new_emb)
-            else:
-                enroll_speaker(
-                    name=profile_key,
-                    display_name=safe_name,
-                    role=role,
-                    audio_path=wav_path,
-                    segments=diarization,
-                    speaker_label=primary_label,
-                    device=device,
-                    notes=notes,
-                )
+        if update and profile_key in load_profiles():
+            new_emb = extract_embedding(wav_path, diarization, primary_label, device)
+            update_embedding(profile_key, new_emb)
         else:
             enroll_speaker(
                 name=profile_key,

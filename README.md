@@ -483,7 +483,7 @@ wisper-transcribe/
 .venv/bin/pytest tests/ -v        # Mac/Linux
 ```
 
-Tests mock all ML models — no GPU, network, or real audio files required. (160 tests)
+Tests mock all ML models — no GPU, network, or real audio files required.
 
 CI runs the test suite across Python 3.10–3.14 on every push and PR. Python 3.14 is treated as experimental (non-blocking). A weekly job also runs with the latest available package versions to catch forward-compatibility issues early.
 
@@ -617,7 +617,7 @@ WISPER_DEBUG=1 wisper transcribe session.mp3
 - [x] Phase 2: Speaker diarization
 - [x] Phase 3: Speaker profiles + cross-file voice matching
 - [x] Phase 4: Batch processing + CLI polish
-- [x] Phase 5: Tests (103 passing), coverage reporting, README, setup scripts, CI
+- [x] Phase 5: Tests, coverage reporting, README, setup scripts, CI
 - [x] Phase 6: `wisper setup` guided first-run wizard
 - [x] Phase 7: Docker containerization (GPU + CPU targets, `WISPER_DATA_DIR` override)
 - [x] Phase 8: VAD filter (`--vad/--no-vad`) via faster-whisper built-in Silero VAD

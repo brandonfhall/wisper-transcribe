@@ -148,22 +148,13 @@ def diarize(
     # torchcodec (pyannote 4.x's default audio decoder) requires FFmpeg
     # shared DLLs on Windows (Gyan.FFmpeg.Shared).  The scipy bypass works
     # on all platforms and the input is always a WAV file from convert_to_wav().
-    import numpy as np
-    import scipy.io.wavfile as _wavfile
-    import torch
+    from .audio_utils import load_wav_as_tensor
 
-    sample_rate, data = _wavfile.read(str(audio_path))
-    if data.ndim == 1:
-        data = data[np.newaxis, :]          # (time,) → (1, time)
-    else:
-        data = data.T                        # (time, ch) → (ch, time)
-    if np.issubdtype(data.dtype, np.integer):
-        data = data.astype(np.float32) / np.iinfo(data.dtype).max
-    waveform = torch.from_numpy(data.copy())
+    audio_dict = load_wav_as_tensor(audio_path)
     hook = _DiarizationProgressHook()
     try:
         diarization = _pipeline(
-            {"waveform": waveform, "sample_rate": sample_rate},
+            audio_dict,
             hook=hook,
             **kwargs,
         )

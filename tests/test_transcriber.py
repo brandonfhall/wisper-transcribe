@@ -92,6 +92,59 @@ def test_load_model_resolves_auto_cpu():
         t._model = None
 
 
+def test_load_model_cuda_not_available_raises():
+    """load_model raises RuntimeError when CUDA is requested but not available."""
+    mock_torch = MagicMock()
+    mock_torch.cuda.is_available.return_value = False
+    # Provide __file__ so the Windows DLL search path logic doesn't crash
+    mock_torch.__file__ = "/fake/torch/__init__.py"
+
+    with patch.dict("sys.modules", {"torch": mock_torch}):
+        import wisper_transcribe.transcriber as t
+        t._model = None
+        with pytest.raises(RuntimeError, match="CUDA is not available"):
+            t.load_model("tiny", "cuda")
+        t._model = None
+
+
+def test_load_model_mps_falls_back_to_cpu():
+    """MPS device should use CPU for CTranslate2 since it doesn't support MPS."""
+    with patch("faster_whisper.WhisperModel") as mock_cls:
+        mock_cls.return_value = MagicMock()
+        import wisper_transcribe.transcriber as t
+        t._model = None
+        t.load_model("tiny", "mps", compute_type="auto")
+        args, kwargs = mock_cls.call_args
+        assert kwargs.get("device") == "cpu"  # MPS falls back to CPU
+        t._model = None
+
+
+def test_transcribe_passes_hotwords():
+    """hotwords parameter is forwarded to model.transcribe()."""
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = (iter([]), _make_mock_info(1.0))
+
+    import wisper_transcribe.transcriber as t
+    t._model = mock_model
+
+    t.transcribe(Path("fake.wav"), device="cpu", hotwords=["Kyra", "Golarion"])
+    _, kwargs = mock_model.transcribe.call_args
+    assert kwargs.get("hotwords") == ["Kyra", "Golarion"]
+
+
+def test_transcribe_passes_initial_prompt():
+    """initial_prompt parameter is forwarded to model.transcribe()."""
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = (iter([]), _make_mock_info(1.0))
+
+    import wisper_transcribe.transcriber as t
+    t._model = mock_model
+
+    t.transcribe(Path("fake.wav"), device="cpu", initial_prompt="Hello world")
+    _, kwargs = mock_model.transcribe.call_args
+    assert kwargs.get("initial_prompt") == "Hello world"
+
+
 def test_transcribe_passes_vad_filter_true():
     """vad_filter=True is forwarded to model.transcribe()."""
     mock_model = MagicMock()

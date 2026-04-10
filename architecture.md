@@ -11,7 +11,7 @@
 | Transcription | `faster-whisper` (CTranslate2) | 4× faster than openai/whisper, lower VRAM, lazy model caching; supports `hotwords` and `initial_prompt` for vocabulary guidance |
 | Transcription (macOS) | `mlx-whisper` (optional) | Apple Silicon GPU/ANE backend; dispatched automatically when `use_mlx=auto` and `mlx-whisper` is installed on MPS devices |
 | Diarization | `pyannote-audio 4.x` | Speaker segmentation + voice embeddings |
-| Audio loading (diarizer) | `scipy.io.wavfile` | Bypasses `torchcodec` (see [Known Constraints](#known-constraints)) |
+| Audio loading (diarizer) | `scipy.io.wavfile` via `load_wav_as_tensor()` | Bypasses `torchcodec` (see [Known Constraints](#known-constraints)) |
 | Audio conversion | `pydub` + ffmpeg | Convert any format → 16kHz mono WAV |
 | CLI | `click` | Command groups: `setup`, `transcribe`, `enroll`, `speakers`, `config`, `fix` |
 | Config/storage | `platformdirs` + TOML | OS-native user data dirs, never hardcoded paths |
@@ -25,15 +25,16 @@
 ```
 src/wisper_transcribe/
 ├── cli.py              Click entry points — no business logic, delegates to pipeline/manager; includes setup wizard, server command; --debug and --verbose flags
-├── pipeline.py         Main orchestrator: process_file(), process_folder() (supports --workers N via ProcessPoolExecutor)
+├── pipeline.py         Main orchestrator: process_file(), process_folder(); enrollment logic extracted into _interactive_enroll() and _prompt_speaker_name()
 ├── transcriber.py      faster-whisper wrapper, lazy model cache (_model), CUDA DLL path fix, MLX dispatch
-├── diarizer.py         pyannote pipeline wrapper, lazy cache (_pipeline), scipy audio loading
+├── diarizer.py         pyannote pipeline wrapper, lazy cache (_pipeline), uses load_wav_as_tensor() from audio_utils
 ├── _noise_suppress.py  Centralised third-party warning/logging suppression (Lightning, pyannote, speechbrain); safe to call from subprocesses
 ├── debug_log.py        Centralized logging controller (Logger class); activated by --debug (file) and/or --verbose (console); tees tqdm.write() + Python logging to ./logs/wisper_<ts>.log
 ├── aligner.py          Merge transcription segments with diarization labels (max-overlap)
 ├── speaker_manager.py  Profile CRUD, embedding extraction, cosine-similarity matching, EMA updates
-├── formatter.py        Markdown output, YAML frontmatter, timestamp formatting
-├── audio_utils.py      validate_audio(), convert_to_wav(), get_duration()
+├── formatter.py        Markdown output, YAML frontmatter, dynamic version from __version__
+├── audio_utils.py      validate_audio(), convert_to_wav(), get_duration(), load_wav_as_tensor()
+├── time_utils.py       Shared time formatting: format_timestamp(), format_duration()
 ├── config.py           load_config(), save_config(), get_device(), get_hf_token(), check_ffmpeg()
 ├── models.py           Dataclasses: TranscriptionSegment, DiarizationSegment, AlignedSegment, SpeakerProfile
 ├── static/             Vendored web assets: htmx.min.js, tailwind.min.css (pre-built), wisp.svg, app.js
@@ -41,6 +42,7 @@ src/wisper_transcribe/
     ├── app.py          FastAPI application factory (create_app()), module-level app instance for uvicorn
     ├── jobs.py         In-memory job queue, JobQueue class, asyncio background worker, SSE progress via tqdm.write patch
     └── routes/
+        ├── __init__.py     Jinja2 templates setup, shared get_queue() helper, urlencode filter
         ├── dashboard.py    GET /, GET /jobs (HTMX partial)
         ├── transcribe.py   GET/POST /transcribe, GET /transcribe/jobs/{id}, SSE /jobs/{id}/stream, enrollment wizard
         ├── transcripts.py  GET/POST /transcripts, transcript detail, download, delete, fix-speaker
@@ -129,7 +131,7 @@ New embedding blended with existing: `stored = 0.7 * stored + 0.3 * new`
 ## Key Design Decisions
 
 ### scipy audio pre-loading (torchcodec bypass)
-pyannote-audio 4.x uses `torchcodec` for audio I/O by default. On Windows, torchcodec requires FFmpeg's "full-shared" build (`winget install Gyan.FFmpeg.Shared`) to load its native DLLs. Rather than make the full-shared build a hard requirement, `diarize()` and `extract_embedding()` pre-load the WAV file with `scipy.io.wavfile` and pass a `{'waveform': tensor, 'sample_rate': int}` dict to pyannote. When the dict contains `"waveform"`, pyannote's `Audio.__call__()` and `Audio.crop()` skip torchcodec entirely and operate on the tensor directly. The input is always a 16kHz mono WAV produced by `convert_to_wav()`.
+pyannote-audio 4.x uses `torchcodec` for audio I/O by default. On Windows, torchcodec requires FFmpeg's "full-shared" build (`winget install Gyan.FFmpeg.Shared`) to load its native DLLs. Rather than make the full-shared build a hard requirement, `diarize()` and `extract_embedding()` call `audio_utils.load_wav_as_tensor()` — a shared helper that reads a WAV file via `scipy.io.wavfile`, normalises the data to float32, and returns a `{'waveform': tensor, 'sample_rate': int}` dict. When the dict contains `"waveform"`, pyannote's `Audio.__call__()` and `Audio.crop()` skip torchcodec entirely and operate on the tensor directly. The input is always a 16kHz mono WAV produced by `convert_to_wav()`. This loading logic was previously duplicated inline in both `diarizer.py` and `speaker_manager.py`; it is now centralised in `audio_utils.load_wav_as_tensor()`.
 
 ### speechbrain LazyModule shim (Windows path bug)
 speechbrain 1.0 lazy-loads optional integrations (k2, transformers, spacy, numba) via `LazyModule.ensure_module()`. The guard that suppresses lazy loads triggered by `inspect.getmembers()` checks for `"/inspect.py"` — a forward-slash check that never matches on Windows (which uses backslash). As a result, every missing optional integration raises `ImportError` instead of silently no-oping. `diarizer.py` patches `LazyModule.ensure_module` at import time to catch these `ImportError`s and return empty stub modules. This is the only compatibility shim remaining; it is in speechbrain itself, not pyannote.
@@ -245,7 +247,7 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 
 - All tests in `tests/`, mirroring `src/wisper_transcribe/`
 - **No GPU, no network, no real audio required.** All ML calls (WhisperModel, pyannote Pipeline, embedding extraction) are mocked with `unittest.mock.MagicMock`
-- `scipy.io.wavfile.read` patched in diarizer tests to return a fake `(16000, np.zeros(...))` tuple
+- `audio_utils.load_wav_as_tensor` patched in diarizer and speaker_manager tests to return a fake `{'waveform': tensor, 'sample_rate': 16000}` dict
 - `tqdm.write` used throughout production code so test output is not polluted by progress bars
 - Enrollment tests patch `wisper_transcribe.speaker_manager.load_profiles` to return `{}` (no existing profiles) to prevent tests from seeing real profiles on the developer's machine
 - Coverage: run `pytest tests/ -v --cov --cov-report=term-missing`
@@ -253,7 +255,9 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - Security tests in `tests/test_path_traversal.py` cover path traversal (null-byte, dotdot), regex-busting payloads, open-redirect/CRLF payloads, and unit tests for `_validate_job_id()`
 - `tests/test_debug_log.py` covers `Logger` (file mode, verbose mode, combined), `setup_logging()`, singleton lifecycle, and `WISPER_DEBUG` env side-effect
 - `tests/conftest.py` provides an `autouse` fixture that patches `wisper_transcribe.pipeline.load_config` with a safe baseline config (prevents real user config — e.g. `parallel_stages=True` — from leaking into tests that don't explicitly patch it)
-- Test count: 245 (all mocked, all passing)
+- `tests/test_time_utils.py` covers shared `format_timestamp()` and `format_duration()` helpers
+- `tests/test_noise_suppress.py` covers warning filters, logger levels, `WISPER_DEBUG` bypass, missing absl, speechbrain deprecations, checkpoint upgrade warnings
+- Test count: 272 (all mocked, all passing, 81% coverage)
 
 **CI matrix** (`.github/workflows/ci.yml`):
 - Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)
