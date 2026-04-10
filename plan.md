@@ -256,16 +256,3 @@ New file `src/wisper_transcribe/llm_fixer.py`:
 4. Unknown speaker suggestions: warn prominently when confidence is below 0.85 even if above the 0.75 suggestion threshold
 5. YAML frontmatter is never passed to the LLM or modified
 6. Ollama unreachable → `warnings.warn(...)`, early return; does not abort pipeline
-    SPEAKER_02 → Matthew
-    SPEAKER_03 → Unknown Speaker 7
-    SPEAKER_04 → Unknown Speaker 10
-    SPEAKER_05 → Unknown Speaker 8
-    SPEAKER_06 → Unknown Speaker 5
-    SPEAKER_07 → Unknown Speaker 3
-    SPEAKER_08 → Unknown Speaker 6
-    SPEAKER_09 → Unknown Speaker 4
-    SPEAKER_10 → Unknown Speaker 2
-    SPEAKER_11 → Unknown Speaker 9
-  Wrote Impossible Landscapes S1 E1 — Remove Your Mask.md
-Done: example-file/Impossible Landscapes S1 E1 — Remove Your Mask.md
-(.venv) PS /Users/brandon/VSCode/wisper-transcribe> 
