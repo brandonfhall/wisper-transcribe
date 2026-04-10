@@ -30,14 +30,18 @@ class _SilenceFilter(logging.Filter):
 def _silence_logger(name: str) -> None:
     """Apply a permanent silence filter to a named logger.
 
-    Also sets propagate=False so records do not leak through to the root
-    logger's handlers even if Lightning re-enables propagation later.
-    A NullHandler is added so the 'no handlers found' warning is not raised.
+    Sets setLevel(ERROR) so child loggers inherit a high effective level and
+    drop messages before any handler or filter runs.  Also attaches a
+    _SilenceFilter for defense-in-depth (persists even if downstream package
+    init code resets the level), and sets propagate=False so records do not
+    leak to root-logger handlers.  A NullHandler is added to prevent the
+    'no handlers found' warning.
     """
     logger = logging.getLogger(name)
     # Idempotent: skip if already silenced.
     if any(isinstance(f, _SilenceFilter) for f in logger.filters):
         return
+    logger.setLevel(logging.ERROR)
     logger.addFilter(_SilenceFilter())
     logger.propagate = False
     if not logger.handlers:

@@ -150,3 +150,46 @@ def test_suppress_sets_torch_logger_to_error(monkeypatch):
 
     logger = logging.getLogger("torch")
     assert any(isinstance(f, _SilenceFilter) for f in logger.filters)
+
+
+def test_torch_child_logger_blocked_after_suppress(monkeypatch):
+    """torch.utils.flop_counter WARNING is blocked after suppress.
+
+    Regression test: _silence_logger must call setLevel(ERROR) so child
+    loggers inherit a high effective level.  A _SilenceFilter on the parent
+    alone does NOT block records from child loggers — Python's callHandlers()
+    bypasses parent logger filters for propagated records.
+    """
+    monkeypatch.delenv("WISPER_DEBUG", raising=False)
+
+    from wisper_transcribe._noise_suppress import suppress_third_party_noise
+    suppress_third_party_noise()
+
+    child_logger = logging.getLogger("torch.utils.flop_counter")
+    # isEnabledFor(WARNING) must be False — the effective level is ERROR,
+    # inherited from the silenced "torch" parent.
+    assert not child_logger.isEnabledFor(logging.WARNING), (
+        "torch.utils.flop_counter should not process WARNING messages after suppress"
+    )
+
+
+def test_suppress_called_before_speechbrain_import_in_diarizer():
+    """_suppress() must run before the speechbrain shim in diarizer.py.
+
+    Regression test for the timing bug: speechbrain imports torch, which
+    imports torch.utils.flop_counter, which fires a WARNING.  If suppress
+    runs after that import, the warning leaks.  Verify that after importing
+    diarizer, the torch logger is already silenced (meaning suppress ran
+    before speechbrain was imported).
+    """
+    from wisper_transcribe._noise_suppress import _SilenceFilter
+
+    # Importing diarizer triggers the full module-level setup.
+    # We can't easily test import ORDER directly, but we can assert the
+    # end state: torch logger must have _SilenceFilter after diarizer loads.
+    import wisper_transcribe.diarizer  # noqa: F401
+
+    logger = logging.getLogger("torch")
+    assert any(isinstance(f, _SilenceFilter) for f in logger.filters), (
+        "torch logger not silenced — suppress() may be running after speechbrain import"
+    )

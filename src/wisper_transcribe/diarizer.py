@@ -3,6 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+# Must be the very first ML-adjacent action in this module.  The speechbrain
+# shim below imports speechbrain (which pulls in torch), so suppress must be
+# in place before that import fires or the torch flop_counter warning leaks.
+from ._noise_suppress import suppress_third_party_noise as _suppress
+_suppress()
+
 # speechbrain 1.0 lazy-loads optional integrations (k2, transformers, spacy,
 # numba, …) whenever something calls inspect.getmembers() on the speechbrain
 # package.  Any integration whose optional dependency is not installed raises
@@ -30,12 +36,6 @@ try:
     _sb_LazyModule.ensure_module = _tolerant_ensure_module  # type: ignore[method-assign]
 except ImportError:
     pass  # speechbrain not installed; patch not needed
-
-from ._noise_suppress import suppress_third_party_noise as _suppress
-
-# Must run before pyannote is imported below — the Lightning compat-shim
-# fires redirect warnings the moment pytorch_lightning symbols are resolved.
-_suppress()
 
 from tqdm import tqdm
 
