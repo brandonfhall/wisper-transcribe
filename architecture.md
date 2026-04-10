@@ -150,13 +150,14 @@ The function is called:
 - As the **first line** of `_diarize_worker()` in `pipeline.py` (before any ML import in each subprocess)
 
 The function handles two categories:
-1. **`warnings.filterwarnings("ignore", ...)`** for `warnings.warn()`-based messages (speechbrain redirects, pyannote TF32/std() UserWarnings, Lightning migration shim, checkpoint auto-upgrade, ModelCheckpoint states, task-dependent loss, missing state-dict keys)
-2. **`logging.getLogger(...).setLevel(ERROR)`** for `rank_zero_info()`-based messages that go through Python `logging` rather than `warnings.warn()` (Lightning "automatically upgraded your loaded checkpoint" etc.)
+1. **`warnings.filterwarnings("ignore", ...)`** for `warnings.warn()`-based messages (speechbrain redirects, pyannote TF32/std() warnings, Lightning migration shim, checkpoint auto-upgrade, ModelCheckpoint states, task-dependent loss, missing state-dict keys). Category restrictions are intentionally omitted so filters catch all warning categories.
+2. **`_silence_logger(name)`** for messages routed through Python `logging`. `setLevel(ERROR)` alone is unreliable because Lightning resets its own loggers to INFO during import. `_silence_logger` instead attaches a `_SilenceFilter` (a `logging.Filter` that always returns `False`) and sets `propagate=False`. A `Filter` is independent of `setLevel` — it persists even after downstream package init code resets the level. `propagate=False` prevents records from reaching root-logger handlers via propagation.
 
-All suppressions are gated on `not os.environ.get("WISPER_DEBUG")`. Additional suppressions:
-- `HF_HUB_DISABLE_SYMLINKS_WARNING=1` env var is set to silence the HuggingFace Hub symlink advisory on Windows (informational only; cache still works).
-- `logging.getLogger("torch").setLevel(ERROR)` suppresses `torch.utils.flop_counter`'s "triton not found" message via standard Python logging.
-- `absl.logging.set_verbosity(ERROR)` covers the same triton message when it routes through absl-py's logging system (separate from Python's hierarchy; `logging.getLogger("absl")` has no effect on it).
+All suppressions are gated on `not os.environ.get("WISPER_DEBUG")`. Loggers silenced:
+- `lightning`, `lightning.pytorch`, `lightning.pytorch.utilities`, `lightning.pytorch.utilities.migration`, `pytorch_lightning` — checkpoint upgrade and migration shim messages
+- `torch` — `torch.utils.flop_counter` "triton not found" message
+- `HF_HUB_DISABLE_SYMLINKS_WARNING=1` env var silences the HuggingFace Hub symlink advisory on Windows (informational; cache still works)
+- `absl.logging.set_verbosity(ERROR)` covers triton messages routed through absl-py's logging system (separate from Python's hierarchy; `logging.getLogger("absl")` has no effect on it)
 
 ### Logging (`--debug` / `--verbose`)
 Both flags are handled by `debug_log.Logger`, a class that owns both output modes independently. `setup_logging(debug=, verbose=)` creates the module-level singleton and is called once at CLI startup.

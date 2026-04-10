@@ -256,22 +256,6 @@ New file `src/wisper_transcribe/llm_fixer.py`:
 4. Unknown speaker suggestions: warn prominently when confidence is below 0.85 even if above the 0.75 suggestion threshold
 5. YAML frontmatter is never passed to the LLM or modified
 6. Ollama unreachable → `warnings.warn(...)`, early return; does not abort pipeline
-
-
-
-logs:
-
-/Users/brandon/VSCode/wisper-transcribe/.venv/lib/python3.14/site-packages/lightning/pytorch/utilities/migration/utils.py:197: Redirecting import of pytorch_lightning.callbacks.early_stopping.EarlyStopping to lightning.pytorch.callbacks.early_stopping.EarlyStopping
-/Users/brandon/VSCode/wisper-transcribe/.venv/lib/python3.14/site-packages/lightning/pytorch/utilities/migration/utils.py:197: Redirecting import of pytorch_lightning.callbacks.model_checkpoint.ModelCheckpoint to lightning.pytorch.callbacks.model_checkpoint.ModelCheckpoint
-/Users/brandon/VSCode/wisper-transcribe/.venv/lib/python3.14/site-packages/lightning/pytorch/utilities/migration/migration.py:208: You have multiple `ModelCheckpoint` callback states in this checkpoint, but we found state keys that would end up colliding with each other after an upgrade, which means we can't differentiate which of your checkpoint callbacks needs which states. At least one of your `ModelCheckpoint` callbacks will not be able to reload the state.
-Lightning automatically upgraded your loaded checkpoint from v1.2.7 to v2.6.1. To apply the upgrade to your files permanently, run `python -m lightning.pytorch.utilities.upgrade_checkpoint ../../.cache/huggingface/hub/models--pyannote--embedding/snapshots/4db4899737a38b2d618bbd74350915aa10293cb2/pytorch_model.bin`
-/Users/brandon/VSCode/wisper-transcribe/.venv/lib/python3.14/site-packages/pyannote/audio/core/model.py:639: UserWarning: Model has been trained with a task-dependent loss function. Set 'strict' to False to load the model without its loss function and prevent this warning from appearing. 
-  warnings.warn(msg)
-Lightning automatically upgraded your loaded checkpoint from v1.2.7 to v2.6.1. To apply the upgrade to your files permanently, run `python -m lightning.pytorch.utilities.upgrade_checkpoint ../../.cache/huggingface/hub/models--pyannote--embedding/snapshots/4db4899737a38b2d618bbd74350915aa10293cb2/pytorch_model.bin`
-/Users/brandon/VSCode/wisper-transcribe/.venv/lib/python3.14/site-packages/lightning/pytorch/core/saving.py:197: Found keys that are not in the model state dict but in the checkpoint: ['loss_func.W']
-  Speaker matches:
-    SPEAKER_00 → Unknown Speaker 11
-    SPEAKER_01 → Unknown Speaker 1
     SPEAKER_02 → Matthew
     SPEAKER_03 → Unknown Speaker 7
     SPEAKER_04 → Unknown Speaker 10
