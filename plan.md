@@ -10,58 +10,7 @@ Podcast transcription tool for tabletop RPG actual-play recordings (D&D, Pathfin
 
 ---
 
-## Notes for Claude (Recent Security & Bug Fixes) — ALL RESOLVED ✓
-
-*   **Path Traversal (CWE-22) Mitigations ✓:** Resolved GitHub CI CodeQL HIGH warnings across web routes. Replaced manual string checks with `os.path.basename()`. Satisfied CodeQL's taint tracking engine via: (1) `os.path.abspath().startswith()` validation with `os.path.join` (avoiding `Path.resolve()` on tainted inputs), (2) strict Regex Match Guards (`^[\w\-]+$`), and (3) explicit cross-module taint clearing via the `os.path.abspath().startswith()` dummy guard pattern.
-*   **Security Tests ✓:** `tests/test_path_traversal.py` enforces path traversal guards (null-byte, directory escape), open-redirect/CRLF payloads, and unit tests for `_validate_job_id()`. Exception-message non-leak test added. `follow_redirects=False` used for all POST redirect assertions.
-*   **Job Queue Flakiness ✓:** Fixed `test_list_all_sorted_by_created_at` — `JobQueue.list_all()` reverses insertion order before sorting to break timestamp ties (common on Windows).
-*   **Setup Crash ✓:** Fixed `IndentationError` / mangled `try/except` in `speakers.py` (`speaker_clip`) that broke FastAPI init and caused 25+ test errors.
-*   **Open Redirect Mitigations ✓ (all 3 CodeQL MEDIUMs resolved):** Introduced `_validate_job_id()` helper in `transcribe.py`. Regex alone (`re.match().group(1)`) is still tainted by CodeQL — the helper adds the `os.path` dummy-guard round-trip that produces a taint-clean copy. Used in `cancel_job`, `enroll_form`, and `enroll_submit`. Corresponding unit tests in `test_path_traversal.py`.
-*   **Exception Message Leak ✓:** `speakers.py` enroll error redirect now uses generic `?error=enroll_failed` instead of `str(exc)[:100]`. Regression test added.
-*   **Unvalidated output_dir ✓:** Removed user-controlled `output_dir` form parameter from `start_transcribe`. Output always goes to `_default_output_dir()`. Regression test added.
-*   **Security standards documented ✓:** `CLAUDE.md` now has an explicit Web Route Security Standards section covering CWE-22, CWE-601, error reflection, and test coverage requirements for all future work.
-
----
-
 ## Backlog
-
-### Research — Apple Silicon Acceleration
-
-**Status:** ✅ IMPLEMENTED (MLX-Whisper backend, April 2026). M5 Mac is a primary development and use machine.
-
-**Problem:** faster-whisper (CTranslate2) has no MPS backend — transcription always falls back to CPU on Apple Silicon. pyannote diarization and embedding extraction do use MPS when available. So on Mac, transcription is the bottleneck running purely on CPU even though the M5 has substantial GPU compute.
-
-**Areas to investigate:**
-
-1. **MLX-Whisper** — Apple's MLX framework has a first-party Whisper port (`mlx-examples/whisper`) that runs natively on the Apple Neural Engine / GPU. Could replace faster-whisper on Mac only, dispatched via a backend abstraction in `transcriber.py`. Need to evaluate: output format compatibility with our `TranscriptionSegment` model, word-level timestamp support (required for diarization alignment), and accuracy vs. faster-whisper medium/large-v3.
-
-2. **WhisperKit** — Swift-native Whisper optimized for Apple Silicon via Core ML. Python bindings exist (`whisperkittools`). Higher integration complexity but potentially better ANE utilization than MLX.
-
-3. **faster-whisper on MPS via OpenBLAS / Accelerate** — CTranslate2 CPU backend on Apple Silicon already benefits from Accelerate framework (BLAS). Worth benchmarking: is the CPU path already near-optimal on M-series, or is there a meaningful gap vs. MPS-capable alternatives?
-
-**Decision point:** Only build a Mac-specific backend if benchmarks show >2× speedup over the current CPU path. The abstraction cost (maintaining two backends) must be justified by real-world session processing time.
-
----
-
-### Research — Parallel Processing of a Single File
-
-**Status:** ✅ IMPLEMENTED (concurrent transcription + diarization via `ProcessPoolExecutor`, April 2026). Current pipeline processes one file sequentially by default; `parallel_stages = true` in config enables concurrent mode.
-
-**Problem:** A 3-hour session takes significant wall time even on fast hardware. The transcription and diarization steps together are the bottleneck and currently run sequentially, but they are largely independent — transcription produces text segments, diarization produces speaker-labeled time regions; neither needs the other's output to start.
-
-**Areas to investigate:**
-
-1. **Concurrent transcription + diarization** — Both steps take the same WAV file as input. They could run in parallel using `asyncio.to_thread()` (already used in the web job runner) or `ProcessPoolExecutor` with two workers. The blocker: both `_model` (transcriber) and `_pipeline` (diarizer) are module-level globals — parallel threads/processes would each need their own copy. Memory cost on GPU: loading both models simultaneously requires ~5 GB (medium) + ~700 MB (pyannote) = ~6 GB, well within the RTX 3090's 24 GB. On CPU/Mac, both are loaded anyway.
-
-2. **Audio chunking for transcription** — Split audio into N overlapping chunks, transcribe in parallel across CPU cores, merge results. faster-whisper's VAD already chunks internally; exposing this as a multi-process step is non-trivial. Risk: segment boundary artifacts at chunk join points, especially mid-sentence. Would need overlap + deduplication logic.
-
-3. **Diarization chunking** — pyannote processes audio in overlapping windows internally. Not obviously parallelizable from outside the pipeline without forking pyannote internals.
-
-**Likely best outcome:** Run transcription and diarization concurrently (approach 1) — this is architecturally clean and the two models are already independent. Estimate: could cut wall time by ~30–40% on GPU where diarization is the slower step.
-
-**Guard:** Must not break the `--workers N` folder processing mode or the web job queue's one-job-at-a-time guarantee.
-
----
 
 ### Research — Faster / Better Transcription Models
 
@@ -266,45 +215,7 @@ A 3-hour session at ~150 wpm ≈ 27,000 words ≈ 35,000 tokens. Most local mode
 
 ## Recommendations
 
-*Research completed April 2026. Findings grounded in full codebase review (transcriber.py, diarizer.py, pipeline.py, jobs.py, models.py, speaker_manager.py, formatter.py, config.py, cli.py).*
-
----
-
-### Apple Silicon Acceleration — Recommendation
-
-**Viable path: MLX-Whisper only.**
-
-WhisperKit is eliminated. It requires a Swift runtime, and the Python bindings (`whisperkittools`) are immature — adding an entire toolchain with no precedent in this codebase is not justified.
-
-MLX-Whisper is viable. `mlx_whisper.transcribe()` returns a dict with a `segments` list where each segment has `start`, `end`, `text`, and `words` keys — direct mapping to our `TranscriptionSegment`. Word timestamps are available via `word_timestamps=True`, satisfying the diarization alignment requirement. The output format is compatible with zero changes downstream.
-
-**Implementation plan:** ✅ COMPLETE
-
-- `transcriber.py` — `_is_mlx_available()` (uses `find_spec`, safe for main process), `_transcribe_mlx()`, `_MLX_MODEL_MAP` dict, dispatch logic in `transcribe()`. ✅
-- `pyproject.toml` — `mlx-whisper` added under `macos = [...]` optional dep and as a platform-marker dep (`sys_platform == 'darwin' and platform_machine == 'arm64'`). ✅
-- `config.py` — `use_mlx: "auto"` in DEFAULTS. ✅
-
-**Note:** The plan called for `_USE_MLX: bool` at module level; implemented as `_is_mlx_available()` function instead (avoids Metal init on non-CLI processes like uvicorn). Functionally equivalent.
-
-**Tests:** MLX dispatch, fallback, segment mapping, hotword injection — all in `test_transcriber.py`, all passing. ✅
-
----
-
-### Parallel Processing — Recommendation
-
-**Viable path: Concurrent transcription + diarization via `ProcessPoolExecutor(max_workers=2)`.**
-
-Audio chunking (option 2) is eliminated. Chunk boundary artifacts directly corrupt diarization alignment — mid-sentence splits produce `UNKNOWN` speaker labels. The deduplication/overlap logic needed to fix this outweighs any gain.
-
-`ProcessPoolExecutor` solves the module-level globals problem cleanly: each subprocess gets its own memory space, so `_model` (transcriber) and `_pipeline` (diarizer) are independent copies with no thread-safety issue. No refactoring of the globals is needed.
-
-**Implementation plan:** ✅ COMPLETE
-
-- `pipeline.py` — `_transcribe_worker()`, `_diarize_worker()`, `_run_parallel_transcribe_diarize()` with `ProcessPoolExecutor(max_workers=2)`. Progress IPC via `multiprocessing.Manager().Queue()` (survives macOS `spawn` pickle round-trip) drained by a background thread that tees log messages through `tqdm.write()` and renders bar updates directly to stderr. `_patch_tqdm_for_queue()` intercepts tqdm in each subprocess. ✅
-- `config.py` — `parallel_stages: False` in DEFAULTS. ✅
-- `_noise_suppress.py` — extracted from `diarizer.py` so `_diarize_worker()` can call it as the very first thing in the subprocess before any ML import. ✅
-
-**Remaining:** No `--no-parallel-stages` CLI override flag yet. Currently config-only. Low priority — `parallel_stages` defaults to `False`.
+*Research completed April 2026. Findings grounded in full codebase review.*
 
 ---
 

@@ -237,8 +237,8 @@ wisper transcribe <path>
   path                     Audio file or folder of audio files
 
   -o, --output DIR         Output directory (default: same as input)
-  -m, --model SIZE         tiny / base / small / medium / large-v3
-                           (default: medium; use large-v3 on a good GPU)
+  -m, --model SIZE         tiny / base / small / medium / large-v3 / large-v3-turbo
+                           (default: medium; use large-v3-turbo for best speed/accuracy)
   -l, --language LANG      Language code, e.g. en, fr, de (default: en)
                            Use 'auto' to detect automatically
   --device auto|cpu|cuda|mps  Compute device (default: auto-detect; mps = Apple Silicon GPU)
@@ -446,10 +446,11 @@ All formats are automatically converted to 16kHz mono WAV internally before proc
 | `base` | Fast | Decent | ~1 GB |
 | `small` | Moderate | Good | ~2 GB |
 | `medium` | Moderate | Very good | ~5 GB |
+| `large-v3-turbo` | Fast | Near-best | ~4 GB |
 | `large-v3` | Slow | Best | ~10 GB |
 
 **Recommended:**
-- RTX 3090 (24 GB): `large-v3 --device cuda`
+- RTX 3090 (24 GB): `large-v3-turbo --device cuda` (best speed/accuracy tradeoff)
 - Apple M-series: `medium` (auto-detects MPS; diarization runs on GPU, transcription on CPU)
 - CPU-only machine: `small` or `base`
 
