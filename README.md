@@ -238,7 +238,7 @@ wisper transcribe <path>
 
   -o, --output DIR         Output directory (default: same as input)
   -m, --model SIZE         tiny / base / small / medium / large-v3 / large-v3-turbo
-                           (default: medium; use large-v3-turbo for best speed/accuracy)
+                           (default: large-v3-turbo)
   -l, --language LANG      Language code, e.g. en, fr, de (default: en)
                            Use 'auto' to detect automatically
   --device auto|cpu|cuda|mps  Compute device (default: auto-detect; mps = Apple Silicon GPU)

@@ -11,7 +11,7 @@ router = APIRouter(prefix="/config")
 
 # Config keys exposed in the UI with types and descriptions
 _CONFIG_FIELDS = [
-    ("model",               "str",   "Whisper model size", ["tiny", "base", "small", "medium", "large-v3"]),
+    ("model",               "str",   "Whisper model size", ["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"]),
     ("language",            "str",   "Default language code (e.g. en, fr) or auto", None),
     ("device",              "str",   "Compute device", ["auto", "cpu", "cuda", "mps"]),
     ("compute_type",        "str",   "CTranslate2 quantization", ["auto", "float16", "int8_float16", "int8", "float32"]),

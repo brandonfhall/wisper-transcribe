@@ -24,7 +24,7 @@ def main():
 @main.command()
 @click.argument("path", type=click.Path(exists=True, path_type=Path))
 @click.option("-o", "--output", "output_dir", type=click.Path(path_type=Path), default=None, help="Output directory (default: same as input)")
-@click.option("-m", "--model", "model_size", default="medium", show_default=True, type=click.Choice(["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"]), help="Whisper model size")
+@click.option("-m", "--model", "model_size", default="large-v3-turbo", show_default=True, type=click.Choice(["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"]), help="Whisper model size")
 @click.option("-l", "--language", default="en", show_default=True, help="Language code (e.g. en, fr) or 'auto'")
 @click.option("--device", default="auto", show_default=True, type=click.Choice(["auto", "cpu", "cuda", "mps"]), help="Compute device")
 @click.option("--overwrite", is_flag=True, default=False, help="Overwrite existing output files")

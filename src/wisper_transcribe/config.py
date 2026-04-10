@@ -15,7 +15,7 @@ except ImportError:
 APP_NAME = "wisper-transcribe"
 
 DEFAULTS = {
-    "model": "medium",
+    "model": "large-v3-turbo",
     "language": "en",
     "device": "auto",
     "compute_type": "auto",
