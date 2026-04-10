@@ -45,13 +45,19 @@ def suppress_third_party_noise() -> None:
     # Lightning: extra checkpoint keys not in inference model (harmless)
     _f("ignore", message=r"Found keys that are not in the model state dict but in the checkpoint")
 
+    # HuggingFace Hub symlink warning on Windows (informational, not actionable)
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+
     # ── logging level suppression ─────────────────────────────────────────────
     # Some Lightning messages go through rank_zero_info() → logging.info()
     # rather than warnings.warn(), so filterwarnings() alone does not catch them.
     for _name in ("lightning", "lightning.pytorch", "pytorch_lightning"):
         logging.getLogger(_name).setLevel(logging.ERROR)
 
-    # absl/torch "triton not found" flop-counter log
+    # torch.utils.flop_counter logs "triton not found" via standard Python logging
+    logging.getLogger("torch").setLevel(logging.ERROR)
+
+    # absl "triton not found" flop-counter log (absl has its own logging hierarchy)
     try:
         import absl.logging as _absl
         _absl.set_verbosity(_absl.ERROR)

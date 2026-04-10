@@ -8,7 +8,7 @@
 
 | Component | Library | Purpose |
 |-----------|---------|---------|
-| Transcription | `faster-whisper` (CTranslate2) | 4× faster than openai/whisper, lower VRAM, lazy model caching; supports `hotwords` and `initial_prompt` for vocabulary guidance |
+| Transcription | `faster-whisper` (CTranslate2) | 4× faster than openai/whisper, lower VRAM, lazy model caching; supports `hotwords` and `initial_prompt` for vocabulary guidance; default model: `large-v3-turbo` |
 | Transcription (macOS) | `mlx-whisper` (optional) | Apple Silicon GPU/ANE backend; dispatched automatically when `use_mlx=auto` and `mlx-whisper` is installed on MPS devices |
 | Diarization | `pyannote-audio 4.x` | Speaker segmentation + voice embeddings |
 | Audio loading (diarizer) | `scipy.io.wavfile` via `load_wav_as_tensor()` | Bypasses `torchcodec` (see [Known Constraints](#known-constraints)) |
@@ -153,7 +153,10 @@ The function handles two categories:
 1. **`warnings.filterwarnings("ignore", ...)`** for `warnings.warn()`-based messages (speechbrain redirects, pyannote TF32/std() UserWarnings, Lightning migration shim, checkpoint auto-upgrade, ModelCheckpoint states, task-dependent loss, missing state-dict keys)
 2. **`logging.getLogger(...).setLevel(ERROR)`** for `rank_zero_info()`-based messages that go through Python `logging` rather than `warnings.warn()` (Lightning "automatically upgraded your loaded checkpoint" etc.)
 
-All suppressions are gated on `not os.environ.get("WISPER_DEBUG")`. The absl "triton not found" log is suppressed via `absl.logging.set_verbosity(ERROR)` — absl-py has its own logging system separate from Python's hierarchy, so `logging.getLogger("absl")` has no effect; must use `absl.logging` directly.
+All suppressions are gated on `not os.environ.get("WISPER_DEBUG")`. Additional suppressions:
+- `HF_HUB_DISABLE_SYMLINKS_WARNING=1` env var is set to silence the HuggingFace Hub symlink advisory on Windows (informational only; cache still works).
+- `logging.getLogger("torch").setLevel(ERROR)` suppresses `torch.utils.flop_counter`'s "triton not found" message via standard Python logging.
+- `absl.logging.set_verbosity(ERROR)` covers the same triton message when it routes through absl-py's logging system (separate from Python's hierarchy; `logging.getLogger("absl")` has no effect on it).
 
 ### Logging (`--debug` / `--verbose`)
 Both flags are handled by `debug_log.Logger`, a class that owns both output modes independently. `setup_logging(debug=, verbose=)` creates the module-level singleton and is called once at CLI startup.

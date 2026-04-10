@@ -12,24 +12,6 @@ Podcast transcription tool for tabletop RPG actual-play recordings (D&D, Pathfin
 
 ## Backlog
 
-### Research — Faster / Better Transcription Models
-
-**Status:** Partially implemented. `large-v3-turbo` is in the MLX model map (`transcriber.py`) but **not yet in the CLI `--model` choices** — Click will reject it if a user types it. The 1-line fix to `cli.py` is still needed.
-
-**Areas to investigate:**
-
-1. **Whisper large-v3-turbo** — OpenAI released a distilled large-v3 model (~809M params vs. 1.5B) that is reportedly ~8× faster than large-v3 with minimal accuracy loss on English. Already supported by faster-whisper. Should be a near-drop-in upgrade for the `large-v3` config option — worth benchmarking accuracy on podcast audio specifically.
-
-2. **Distil-Whisper** — Hugging Face distilled variants (`distil-large-v3`, `distil-medium.en`) are 5.8× faster than large-v3 with ~1% WER increase on clean speech. English-only. May be ideal for the Mac CPU path where speed matters most. Requires `transformers` backend, not CTranslate2 — would need a new backend shim or conversion to CTranslate2 format via `ct2-transformers-converter`.
-
-3. **Parakeet (NVIDIA NeMo)** — NVIDIA's `parakeet-tdt-0.6b-v2` recently topped the OpenASR leaderboard, outperforming Whisper large-v3 on English benchmarks. Uses CTC+TDT decoding. No faster-whisper support yet; would require NeMo or ONNX integration. GPU-only (CUDA). Worth watching — if CTranslate2 support lands, this could be a significant accuracy upgrade.
-
-4. **Model format: CTranslate2 conversion** — Any Hugging Face Whisper-compatible model can be converted to CTranslate2 format via `ct2-transformers-converter`, making it usable in the current faster-whisper path with no code changes beyond adding the model size option.
-
-**Recommendation order:** large-v3-turbo first (zero integration cost, meaningful speedup), then distil-large-v3 for Mac/CPU users, then watch Parakeet for future GPU accuracy gains.
-
----
-
 ### DM Character Voice Handling
 
 **Problem:** When a DM does a character voice (dragon accent, goblin voice, NPC), pyannote assigns it a different SPEAKER_XX label than their regular speech. Typical similarity scores: DM normal vs. DM profile ~0.80–0.90, DM character voice vs. DM profile ~0.35–0.55 — often below the 0.65 match threshold, so character voices fall through to `Unknown Speaker N`.
@@ -216,27 +198,6 @@ A 3-hour session at ~150 wpm ≈ 27,000 words ≈ 35,000 tokens. Most local mode
 ## Recommendations
 
 *Research completed April 2026. Findings grounded in full codebase review.*
-
----
-
-### Faster / Better Transcription Models — Recommendation
-
-**Path A (implement now): Add `large-v3-turbo` as a supported model size.**
-
-`large-v3-turbo` is already in faster-whisper's model registry. It is a distilled large-v3 (~809M params vs 1.5B), reportedly ~8× faster with minimal accuracy loss on English. Integration cost is a single line.
-
-- `cli.py` — add `"large-v3-turbo"` to the `--model` choices list. Scope: 1 line. ⬅ **NOT YET DONE**
-- `config.py` — optionally update the default after benchmarking on podcast audio. No other changes.
-
-**Path B (document as upgrade path): distil-large-v3 via CTranslate2 conversion.**
-
-`distil-large-v3` (HuggingFace) can be converted offline to CTranslate2 format via `ct2-transformers-converter`. The resulting directory is passed directly to `--model /path/to/distil-large-v3-ct2` — faster-whisper's `WhisperModel` constructor accepts a local path, so this requires zero code changes. Document the conversion command in `README.md`.
-
-Limitation: distil-large-v3 is English-only. Do not add it as a first-class CLI choice — document it as an advanced option to avoid trapping multilingual users.
-
-**Parakeet eliminated:** CTC decoding does not produce word-level timestamps. `aligner.py` requires `start`/`end` on every `TranscriptionSegment` for max-overlap matching. Without word timestamps, alignment quality degrades significantly for overlapping speech — common in RPG sessions with crosstalk. Revisit when/if Parakeet gains word timestamp support.
-
-**Suggested ordering:** Add `large-v3-turbo` to the CLI now. Document distil-large-v3 conversion in README. Benchmark both against current `medium` and `large-v3` defaults on actual podcast audio before changing the default model.
 
 ---
 

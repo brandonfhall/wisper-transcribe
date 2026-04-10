@@ -89,3 +89,25 @@ def test_suppress_filters_checkpoint_upgrade(monkeypatch):
         )
         upgrade_warnings = [x for x in w if "upgraded" in str(x.message)]
         assert len(upgrade_warnings) == 0
+
+
+def test_suppress_sets_hf_hub_symlink_env_var(monkeypatch):
+    """suppress_third_party_noise sets HF_HUB_DISABLE_SYMLINKS_WARNING=1."""
+    import os
+    monkeypatch.delenv("WISPER_DEBUG", raising=False)
+    monkeypatch.delenv("HF_HUB_DISABLE_SYMLINKS_WARNING", raising=False)
+
+    from wisper_transcribe._noise_suppress import suppress_third_party_noise
+    suppress_third_party_noise()
+
+    assert os.environ.get("HF_HUB_DISABLE_SYMLINKS_WARNING") == "1"
+
+
+def test_suppress_sets_torch_logger_to_error(monkeypatch):
+    """suppress_third_party_noise sets torch logger to ERROR to silence flop_counter."""
+    monkeypatch.delenv("WISPER_DEBUG", raising=False)
+
+    from wisper_transcribe._noise_suppress import suppress_third_party_noise
+    suppress_third_party_noise()
+
+    assert logging.getLogger("torch").level >= logging.ERROR
