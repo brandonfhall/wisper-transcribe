@@ -27,7 +27,7 @@ Podcast transcription tool for tabletop RPG actual-play recordings (D&D, Pathfin
 
 ### Research — Apple Silicon Acceleration
 
-**Status:** Not researched. M5 Mac is a primary development and use machine.
+**Status:** ✅ IMPLEMENTED (MLX-Whisper backend, April 2026). M5 Mac is a primary development and use machine.
 
 **Problem:** faster-whisper (CTranslate2) has no MPS backend — transcription always falls back to CPU on Apple Silicon. pyannote diarization and embedding extraction do use MPS when available. So on Mac, transcription is the bottleneck running purely on CPU even though the M5 has substantial GPU compute.
 
@@ -45,7 +45,7 @@ Podcast transcription tool for tabletop RPG actual-play recordings (D&D, Pathfin
 
 ### Research — Parallel Processing of a Single File
 
-**Status:** Not researched. Current pipeline processes one file sequentially (validate → convert → transcribe → diarize → align → identify → format).
+**Status:** ✅ IMPLEMENTED (concurrent transcription + diarization via `ProcessPoolExecutor`, April 2026). Current pipeline processes one file sequentially by default; `parallel_stages = true` in config enables concurrent mode.
 
 **Problem:** A 3-hour session takes significant wall time even on fast hardware. The transcription and diarization steps together are the bottleneck and currently run sequentially, but they are largely independent — transcription produces text segments, diarization produces speaker-labeled time regions; neither needs the other's output to start.
 
@@ -65,7 +65,7 @@ Podcast transcription tool for tabletop RPG actual-play recordings (D&D, Pathfin
 
 ### Research — Faster / Better Transcription Models
 
-**Status:** Not researched. Currently using faster-whisper with OpenAI Whisper weights (tiny → large-v3).
+**Status:** Partially implemented. `large-v3-turbo` is in the MLX model map (`transcriber.py`) but **not yet in the CLI `--model` choices** — Click will reject it if a user types it. The 1-line fix to `cli.py` is still needed.
 
 **Areas to investigate:**
 
@@ -278,15 +278,15 @@ WhisperKit is eliminated. It requires a Swift runtime, and the Python bindings (
 
 MLX-Whisper is viable. `mlx_whisper.transcribe()` returns a dict with a `segments` list where each segment has `start`, `end`, `text`, and `words` keys — direct mapping to our `TranscriptionSegment`. Word timestamps are available via `word_timestamps=True`, satisfying the diarization alignment requirement. The output format is compatible with zero changes downstream.
 
-**Implementation plan:**
+**Implementation plan:** ✅ COMPLETE
 
-- `transcriber.py` — add `_USE_MLX: bool = platform.system() == "Darwin" and torch.backends.mps.is_available()` at module level. Add `_transcribe_mlx(audio_path, model_size, **kwargs) -> list[TranscriptionSegment]` that calls `mlx_whisper.transcribe()` and maps results. The public `transcribe()` function becomes an if/else dispatcher. Model name mapping (e.g., `"large-v3"` → `"mlx-community/whisper-large-v3-mlx"`) is a small dict inside `transcriber.py`. Scope: ~50 lines added.
-- `pyproject.toml` — add `mlx-whisper` under `[project.optional-dependencies]` as `macos = ["mlx-whisper"]`. Windows/Linux installs are unaffected.
-- `config.py` — add `use_mlx: str = "auto"` to DEFAULTS (values: `"auto"`, `"true"`, `"false"`). `"auto"` enables on Apple Silicon when available.
+- `transcriber.py` — `_is_mlx_available()` (uses `find_spec`, safe for main process), `_transcribe_mlx()`, `_MLX_MODEL_MAP` dict, dispatch logic in `transcribe()`. ✅
+- `pyproject.toml` — `mlx-whisper` added under `macos = [...]` optional dep and as a platform-marker dep (`sys_platform == 'darwin' and platform_machine == 'arm64'`). ✅
+- `config.py` — `use_mlx: "auto"` in DEFAULTS. ✅
 
-**Gate:** Only set `_USE_MLX = True` as default after a manual benchmark confirms >2× speedup over the CPU path on the medium model. Implement the dispatch first; benchmark before enabling by default.
+**Note:** The plan called for `_USE_MLX: bool` at module level; implemented as `_is_mlx_available()` function instead (avoids Metal init on non-CLI processes like uvicorn). Functionally equivalent.
 
-**Tests:** Mock `mlx_whisper.transcribe`; verify segment mapping produces correct `TranscriptionSegment` objects; verify `_USE_MLX = False` leaves the faster-whisper path untouched (Windows/Linux CI unaffected).
+**Tests:** MLX dispatch, fallback, segment mapping, hotword injection — all in `test_transcriber.py`, all passing. ✅
 
 ---
 
@@ -298,18 +298,13 @@ Audio chunking (option 2) is eliminated. Chunk boundary artifacts directly corru
 
 `ProcessPoolExecutor` solves the module-level globals problem cleanly: each subprocess gets its own memory space, so `_model` (transcriber) and `_pipeline` (diarizer) are independent copies with no thread-safety issue. No refactoring of the globals is needed.
 
-**Implementation plan:**
+**Implementation plan:** ✅ COMPLETE
 
-- `pipeline.py` — in `process_file()`, replace the sequential `transcribe(wav_path, ...)` → `diarize(wav_path, ...)` calls with a `ProcessPoolExecutor(max_workers=2)` that submits both as futures, then calls `concurrent.futures.wait()` before passing results to `align()`. The two tasks are independent (same WAV input, no shared state). Scope: ~20 lines changed.
-- `config.py` — add `parallel_stages: bool = False` to DEFAULTS. Default `False` until validated.
+- `pipeline.py` — `_transcribe_worker()`, `_diarize_worker()`, `_run_parallel_transcribe_diarize()` with `ProcessPoolExecutor(max_workers=2)`. Progress IPC via `multiprocessing.Manager().Queue()` (survives macOS `spawn` pickle round-trip) drained by a background thread that tees log messages through `tqdm.write()` and renders bar updates directly to stderr. `_patch_tqdm_for_queue()` intercepts tqdm in each subprocess. ✅
+- `config.py` — `parallel_stages: False` in DEFAULTS. ✅
+- `_noise_suppress.py` — extracted from `diarizer.py` so `_diarize_worker()` can call it as the very first thing in the subprocess before any ML import. ✅
 
-**Interaction with `--workers N` folder mode:** When `parallel_stages=True`, each file-level worker spawns 2 sub-processes, giving N×2 total processes. Document this. On machines using large `--workers` values, provide a `--no-parallel-stages` override flag.
-
-**Interaction with web job queue:** The inner `ProcessPoolExecutor` runs inside the `asyncio.to_thread()` call in `jobs.py`. It does not touch the asyncio event loop. The one-job-at-a-time guarantee is maintained by the queue; this is unaffected.
-
-**Windows note:** Windows uses `spawn` (not `fork`), adding ~1–2 seconds of process startup overhead per file. Acceptable for 1–3 hour sessions.
-
-**Gate:** Ship behind `parallel_stages = false`. Enable as default only after end-to-end timing confirms the expected ~30–40% wall-time reduction on GPU.
+**Remaining:** No `--no-parallel-stages` CLI override flag yet. Currently config-only. Low priority — `parallel_stages` defaults to `False`.
 
 ---
 
@@ -319,7 +314,7 @@ Audio chunking (option 2) is eliminated. Chunk boundary artifacts directly corru
 
 `large-v3-turbo` is already in faster-whisper's model registry. It is a distilled large-v3 (~809M params vs 1.5B), reportedly ~8× faster with minimal accuracy loss on English. Integration cost is a single line.
 
-- `cli.py` — add `"large-v3-turbo"` to the `--model` choices list. Scope: 1 line.
+- `cli.py` — add `"large-v3-turbo"` to the `--model` choices list. Scope: 1 line. ⬅ **NOT YET DONE**
 - `config.py` — optionally update the default after benchmarking on podcast audio. No other changes.
 
 **Path B (document as upgrade path): distil-large-v3 via CTranslate2 conversion.**

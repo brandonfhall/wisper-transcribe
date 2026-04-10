@@ -71,14 +71,6 @@ if ($cudaAvailable -eq "True") {
     Write-OK "Running on CPU"
 }
 
-$cudaAvailable = & $python -c "import torch; print(torch.cuda.is_available())"
-if ($cudaAvailable -eq "True") {
-    $gpuName = & $python -c "import torch; print(torch.cuda.get_device_name(0))"
-    Write-OK "CUDA available — GPU: $gpuName"
-} else {
-    Write-OK "Running on CPU"
-}
-
 # ── ffmpeg ────────────────────────────────────────────────────────────────────
 # Gyan.FFmpeg.Shared (not Gyan.FFmpeg) is required.
 # The plain Gyan.FFmpeg package is a static build — executables only, no DLLs.

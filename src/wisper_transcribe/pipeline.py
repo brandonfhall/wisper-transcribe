@@ -92,8 +92,7 @@ def _patch_tqdm_for_queue(queue, channel: str) -> None:  # type: ignore[type-arg
             if parts:
                 final_msg = parts[-1]
                 # Strip trailing numeric/whitespace residue (e.g., "###5" -> "###")
-                import re as _re_clean
-                final_msg = _re_clean.sub(r'[\s\d]+$', '', final_msg)
+                final_msg = _re.sub(r'[\s\d]+$', '', final_msg)
                 queue.put((channel, "bar", final_msg))
         def flush(self) -> None:
             pass

@@ -53,15 +53,7 @@ python -m venv .venv
 # Mac/Linux
 source .venv/bin/activate
 
-    pip install -e .
-
-    # Windows CUDA users:
-    # After the steps above, run this extra command to get GPU support:
-    # pip install "torch>=2.8.0" "torchaudio>=2.8.0" --index-url https://download.pytorch.org/whl/cu126 --force-reinstall
-
-    # Mac/Linux
-    source .venv/bin/activate
-
+pip install -e .
 ```
 
 > **Windows CUDA users:** `pip install` from PyPI installs the CPU-only PyTorch build by default. After the steps above, run this extra command to get GPU support:
