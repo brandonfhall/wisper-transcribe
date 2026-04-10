@@ -9,6 +9,7 @@
 | Component | Library | Purpose |
 |-----------|---------|---------|
 | Transcription | `faster-whisper` (CTranslate2) | 4× faster than openai/whisper, lower VRAM, lazy model caching; supports `hotwords` and `initial_prompt` for vocabulary guidance |
+| Transcription (macOS) | `mlx-whisper` (optional) | Apple Silicon GPU/ANE backend; dispatched automatically when `use_mlx=auto` and `mlx-whisper` is installed on MPS devices |
 | Diarization | `pyannote-audio 4.x` | Speaker segmentation + voice embeddings |
 | Audio loading (diarizer) | `scipy.io.wavfile` | Bypasses `torchcodec` (see [Known Constraints](#known-constraints)) |
 | Audio conversion | `pydub` + ffmpeg | Convert any format → 16kHz mono WAV |
@@ -23,10 +24,12 @@
 
 ```
 src/wisper_transcribe/
-├── cli.py              Click entry points — no business logic, delegates to pipeline/manager; includes setup wizard, server command
+├── cli.py              Click entry points — no business logic, delegates to pipeline/manager; includes setup wizard, server command; --debug and --verbose flags
 ├── pipeline.py         Main orchestrator: process_file(), process_folder() (supports --workers N via ProcessPoolExecutor)
-├── transcriber.py      faster-whisper wrapper, lazy model cache (_model), CUDA DLL path fix
+├── transcriber.py      faster-whisper wrapper, lazy model cache (_model), CUDA DLL path fix, MLX dispatch
 ├── diarizer.py         pyannote pipeline wrapper, lazy cache (_pipeline), scipy audio loading
+├── _noise_suppress.py  Centralised third-party warning/logging suppression (Lightning, pyannote, speechbrain); safe to call from subprocesses
+├── debug_log.py        Centralized logging controller (Logger class); activated by --debug (file) and/or --verbose (console); tees tqdm.write() + Python logging to ./logs/wisper_<ts>.log
 ├── aligner.py          Merge transcription segments with diarization labels (max-overlap)
 ├── speaker_manager.py  Profile CRUD, embedding extraction, cosine-similarity matching, EMA updates
 ├── formatter.py        Markdown output, YAML frontmatter, timestamp formatting
@@ -66,11 +69,12 @@ Audio file
     ├──────────────────────────────────────────────────────┐
     ▼                                                      ▼
 3. TRANSCRIBE       transcriber.transcribe()       4. DIARIZE   diarizer.diarize()
-   • faster-whisper model (lazy-loaded, cached)       • pyannote Pipeline (lazy-loaded, cached)
-   • Returns List[TranscriptionSegment]               • Audio loaded via scipy.io.wavfile
-   • Each segment: start, end, text                   • Passed as tensor dict to pipeline
-   • tqdm progress bar on transcription time          • Returns List[DiarizationSegment]
-                                                        • Each segment: start, end, speaker label
+   • faster-whisper (CTranslate2) by default          • pyannote Pipeline (lazy-loaded, cached)
+   • MLX Whisper on Apple Silicon if available        • Audio loaded via scipy.io.wavfile
+     (use_mlx=auto + macOS + MPS + mlx-whisper)       • Passed as tensor dict to pipeline
+   • Returns List[TranscriptionSegment]               • Returns List[DiarizationSegment]
+   • Each segment: start, end, text                   • Each segment: start, end, speaker label
+   Steps 3+4 run concurrently when parallel_stages=True (ProcessPoolExecutor; each subprocess isolates model globals)
     │                                                      │
     └──────────────────┬───────────────────────────────────┘
                        ▼
@@ -136,18 +140,33 @@ speechbrain 1.0 lazy-loads optional integrations (k2, transformers, spacy, numba
 ### CUDA DLL path resolution (Windows)
 `transcriber.load_model()` searches for `cublas64_12.dll` in PyTorch's `nvidia-cublas` site-packages directory and the system CUDA Toolkit before loading `WhisperModel`. CTranslate2 on Windows requires this DLL to be on `PATH` or added via `os.add_dll_directory()`.
 
-### Third-party warning suppression (`WISPER_DEBUG`)
-`diarizer.py` and `cli.py` suppress several classes of non-actionable warnings from speechbrain, pyannote, Lightning, and torch at module import time using `warnings.filterwarnings()`. All suppressions are gated on `not os.environ.get("WISPER_DEBUG")` so a developer can set `WISPER_DEBUG=1` in their shell to restore raw output for debugging. Suppressed warnings:
-- speechbrain module-redirect deprecations (inspect.getmembers side effect)
-- pyannote TF32 ReproducibilityWarning
-- pyannote pooling std() UserWarning on short/silent segments
-- Lightning migration shim: "Redirecting import of pytorch_lightning..." (checkpoint saved under old namespace)
-- Lightning checkpoint auto-upgrade notification (v1.x → v2.x format)
-- Lightning multiple ModelCheckpoint callback states in old checkpoint
-- pyannote embedding model task-dependent loss function UserWarning (not used during inference)
-- Lightning state dict missing keys warning (`loss_func.W` in checkpoint but not in inference model)
+### Third-party warning suppression (`WISPER_DEBUG` / `_noise_suppress.py`)
+All suppression logic is centralised in `_noise_suppress.py` as a single `suppress_third_party_noise()` function. This is intentional: suppression must run as the **very first thing** in any process (or subprocess) that will load pyannote/Lightning, before those packages are imported. Inline suppression in `diarizer.py` alone was insufficient because subprocess workers (spawned by `ProcessPoolExecutor` in parallel mode) start fresh Python interpreters where `diarizer.py` is imported after `pipeline.py` — leaving a gap where Lightning redirect warnings fired before any filter was in place.
 
-The absl "triton not found" flop-counter log is suppressed via `absl.logging.set_verbosity(ERROR)` — absl-py has its own logging system separate from Python's `logging` hierarchy, so `logging.getLogger("absl")` has no effect; must use `absl.logging` directly.
+The function is called:
+- At the top of `diarizer.py` (main process, before `from pyannote.audio import Pipeline`)
+- As the **first line** of `_diarize_worker()` in `pipeline.py` (before any ML import in each subprocess)
+
+The function handles two categories:
+1. **`warnings.filterwarnings("ignore", ...)`** for `warnings.warn()`-based messages (speechbrain redirects, pyannote TF32/std() UserWarnings, Lightning migration shim, checkpoint auto-upgrade, ModelCheckpoint states, task-dependent loss, missing state-dict keys)
+2. **`logging.getLogger(...).setLevel(ERROR)`** for `rank_zero_info()`-based messages that go through Python `logging` rather than `warnings.warn()` (Lightning "automatically upgraded your loaded checkpoint" etc.)
+
+All suppressions are gated on `not os.environ.get("WISPER_DEBUG")`. The absl "triton not found" log is suppressed via `absl.logging.set_verbosity(ERROR)` — absl-py has its own logging system separate from Python's hierarchy, so `logging.getLogger("absl")` has no effect; must use `absl.logging` directly.
+
+### Logging (`--debug` / `--verbose`)
+Both flags are handled by `debug_log.Logger`, a class that owns both output modes independently. `setup_logging(debug=, verbose=)` creates the module-level singleton and is called once at CLI startup.
+
+**`debug=True`** (`--debug` on `transcribe` and `server`):
+1. Sets `WISPER_DEBUG=1` so warning suppression is disabled.
+2. Creates `./logs/wisper_<YYYYMMDD_HHmmss>.log` in the CWD.
+3. Patches `tqdm.write()` to tee every call to the file (captures full pipeline status for sequential and parallel modes).
+4. Attaches a `_LoggingBridge` handler (not `logging.FileHandler`) to the root Python logger. `_LoggingBridge` routes records through `Logger._write_to_file()` — the same single fd used by the tqdm tee — eliminating the interleaved-write bug that occurred when two independent fds wrote to the same file concurrently (e.g. a long pydub ffmpeg command line split across a tqdm.write call).
+
+**`verbose=True`** (`--verbose` on `transcribe` only):
+1. Attaches a console `logging.StreamHandler` at DEBUG level to the root logger so ML library output (pyannote, faster-whisper, etc.) is surfaced in the terminal alongside normal `tqdm.write()` output.
+2. Does **not** create a log file; does **not** set `WISPER_DEBUG`.
+
+Both flags may be combined: `wisper transcribe --debug --verbose` writes the file and shows ML library logs on the console simultaneously. The log path is printed to stdout when `--debug` is active.
 
 ### VAD filter via faster-whisper built-in
 `transcribe()` passes `vad_filter=True/False` directly to `_model.transcribe()`. faster-whisper bundles Silero VAD internally; when enabled it skips silence/non-speech frames before feeding audio to Whisper. This is "Option A" from the plan — no separate audio stripping step, no timestamp remapping required. Timestamps in the output remain original-audio-relative. Controlled via `--vad/--no-vad` CLI flag (default: on, from config). `process_file()` uses `vad_filter: Optional[bool] = None` as a sentinel so an unset flag falls through to the config value rather than hard-coding True.
@@ -166,6 +185,25 @@ Hotwords can also be persisted in `config.toml` as a TOML array via `wisper conf
 
 ### CTranslate2 compute type
 `load_model()` calls `resolve_compute_type(compute_type, device)` to convert `"auto"` to a concrete CTranslate2 dtype: `"float16"` on CUDA (fast, GPU-native), `"int8"` on CPU (lower memory, minimal accuracy loss). Non-auto values (`float32`, `int8_float16`, etc.) are passed through unchanged. This is configurable via `--compute-type` flag and `wisper config set compute_type`.
+
+### MLX Whisper backend (Apple Silicon)
+On macOS with an MPS device, `transcribe()` can dispatch to `mlx_whisper.transcribe()` instead of faster-whisper. The dispatch logic lives in `transcriber.py` and is controlled by the `use_mlx` config key (`"auto"` | `"true"` | `"false"`). `"auto"` (default) enables MLX only when `mlx-whisper` is installed and importable — it falls back to faster-whisper CPU silently if not. `"true"` errors if the package is missing. `"false"` always uses faster-whisper CPU.
+
+MLX models are downloaded from HuggingFace (`mlx-community/whisper-*-mlx`) on first use and cached in `~/.cache/huggingface/hub/`. The model-name mapping from standard size names to MLX repo IDs lives in `_MLX_MODEL_MAP`. hotwords are injected into `initial_prompt` as a comma-separated prefix (mlx-whisper has no native hotwords param). `vad_filter` is silently skipped (not supported). Install: `pip install 'wisper-transcribe[macos]'`.
+
+### Parallel stage processing (`parallel_stages`)
+When `parallel_stages=True` in config (default `False`), `process_file()` runs transcription and diarization concurrently via `ProcessPoolExecutor(max_workers=2)`. The two stages are independent: both take the same converted WAV file as input and produce outputs combined in the `align()` step. Each subprocess gets its own copy of the module-level `_model`/`_pipeline` globals, so there are no thread-safety concerns.
+
+**Progress IPC for the web UI.** Subprocess workers write tqdm output to their own stderr by default — the web job's `ProgressCatcher` lives in the parent process and can't capture it. `_run_parallel_transcribe_diarize()` solves this by:
+1. Creating a `multiprocessing.Manager().Queue()` (not a plain `multiprocessing.Queue`) passed to each worker as `_progress_queue`. A managed queue is required on macOS because Python's "spawn" start method pickles arguments; plain `multiprocessing.Queue` objects cannot be pickled across spawn boundaries.
+2. Each worker calls `_patch_tqdm_for_queue(queue, channel)` before any ML import. This patches `tqdm.write` and `tqdm.__init__` in the subprocess. Queue tuple format: `(channel, msg_type, message)` where `msg_type` is `"log"` (tqdm.write status messages) or `"bar"` (last non-empty tqdm bar render frame per update, with ANSI codes stripped).
+3. A background drain thread in the parent reads tuples: `"log"` messages go through `tqdm.write()` so they reach the debug log tee if active; `"bar"` renders go directly to `sys.stderr` with per-channel deduplication so they display in the terminal without appearing in the log file.
+4. `tqdm.write()` in the parent goes through the `capturing_write` patch in `jobs._run_job`, routing messages to `job.log_lines` for the SSE stream.
+5. The SSE route streams log lines to the browser; the job detail page shows the standard progress indicators.
+
+Interaction with `--workers N` folder mode: when both `parallel_stages=True` and `workers>1` are active, the total process count is N×2. Users with high `--workers` values can set `parallel_stages=False` to avoid contention. The web job queue's one-job-at-a-time guarantee is unaffected because the inner `ProcessPoolExecutor` runs inside the `asyncio.to_thread()` call.
+
+`_run_parallel_transcribe_diarize()` is a module-level function (target for test mocking). `_transcribe_worker`, `_diarize_worker`, and `_patch_tqdm_for_queue` are all module-level (not closures) so they are picklable by the executor.
 
 ### Module-level model caches
 `_model` (transcriber) and `_pipeline` (diarizer) are module-level globals. This avoids reloading multi-GB models between files when processing a folder. The caches are intentionally reset to `None` in tests.
@@ -199,7 +237,7 @@ wisper-transcribe/       ← get_data_dir()
         └── <name>.npy   512-dim float32 voice embeddings (gitignored)
 ```
 
-Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`.
+Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`, `hotwords`, `use_mlx`, `parallel_stages`.
 
 ---
 
@@ -213,7 +251,9 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - Coverage: run `pytest tests/ -v --cov --cov-report=term-missing`
 - Web tests use `fastapi.testclient.TestClient`; routes are tested via HTTP with all ML calls mocked — no GPU/network needed
 - Security tests in `tests/test_path_traversal.py` cover path traversal (null-byte, dotdot), regex-busting payloads, open-redirect/CRLF payloads, and unit tests for `_validate_job_id()`
-- Test count: 203 (all mocked, all passing)
+- `tests/test_debug_log.py` covers `Logger` (file mode, verbose mode, combined), `setup_logging()`, singleton lifecycle, and `WISPER_DEBUG` env side-effect
+- `tests/conftest.py` provides an `autouse` fixture that patches `wisper_transcribe.pipeline.load_config` with a safe baseline config (prevents real user config — e.g. `parallel_stages=True` — from leaking into tests that don't explicitly patch it)
+- Test count: 245 (all mocked, all passing)
 
 **CI matrix** (`.github/workflows/ci.yml`):
 - Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)
@@ -228,7 +268,7 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 | Constraint | Detail |
 |-----------|--------|
 | torchcodec on Windows | Requires `Gyan.FFmpeg.Shared` (full-shared build). Currently bypassed by scipy waveform pre-loading in `diarize()` and `extract_embedding()`; torchcodec would work after installing the shared build and restarting |
-| MPS on Apple Silicon | faster-whisper (CTranslate2) has no MPS backend — transcription always uses CPU on Mac. pyannote diarization and speaker embeddings run on MPS when available (auto-detected). |
+| MPS on Apple Silicon | faster-whisper (CTranslate2) has no MPS backend. With `mlx-whisper` installed (`pip install 'wisper-transcribe[macos]'`), transcription uses the Apple Silicon GPU/ANE via MLX Whisper. Without it, transcription falls back to CPU. pyannote diarization and speaker embeddings always run on MPS when available. |
 | Thread safety | `_model` and `_pipeline` globals are not thread-safe; parallel folder processing uses `ProcessPoolExecutor` so each worker is a separate process with isolated module state |
 | pyannote license | HuggingFace token + one-time model license acceptance required (free) |
 
@@ -251,8 +291,8 @@ FastAPI + Jinja2 + HTMX + Tailwind CSS. All assets served locally — no CDN or 
 `web/jobs.py` — `JobQueue` class with in-memory `dict[str, Job]` and an `asyncio.Queue` drain loop.
 - One background asyncio task consumes the queue; each job runs `process_file()` via `asyncio.to_thread()`.
 - One job at a time (GPU-safe) — the module-level `_model`/`_pipeline` globals are not thread-safe.
-- Progress: `tqdm.write` is monkey-patched per-job to capture log lines into `job.log_lines`; `tqdm.__init__` is also patched to redirect the progress bar to `job.progress`; both are restored after completion.
-- SSE endpoint (`GET /transcribe/jobs/{id}/stream`) streams `job.log_lines`, `job.progress`, and status to the browser.
+- Progress: `tqdm.write` is monkey-patched per-job to capture log lines into `job.log_lines`; `tqdm.__init__` is also patched to redirect the progress bar to `job.progress`; both are restored after completion. In parallel mode, `capturing_write` also detects `[progress:channel]` prefixed messages forwarded by the drain thread and routes them to `job.progress_channels[channel]` (a `dict[str, str]` keyed by `"transcribe"` / `"diarize"`) rather than `log_lines`.
+- SSE endpoint (`GET /transcribe/jobs/{id}/stream`) streams `job.log_lines`, `job.progress`, `job.progress_channels` (as `channel_progress` events), and status to the browser.
 - Job `name` is set to the uploaded file's stem so the UI displays a meaningful name instead of a temp-file UUID.
 - Output is always written to the configured output directory (`./output` or `data_dir/output`) so the Transcripts page can find it.
 - Cancel: `POST /transcribe/jobs/{id}/cancel` calls `JobQueue.cancel()`. Pending jobs are immediately marked failed. Running jobs set a `threading.Event` (`_cancel_event`) that is checked in the `tqdm.write` patch; when set, `InterruptedError` is raised to abort the pipeline thread cleanly.
@@ -293,11 +333,22 @@ URL-encoding is applied at every point where a filename is embedded in a URL or 
 - JavaScript in `job_detail.html` uses `encodeURIComponent(stem)` when constructing the post-SSE transcript link.
 
 ### Progress Display (Web)
-The job detail page shows a live progress bar driven by SSE events from `GET /transcribe/jobs/{id}/stream`:
-- Three step indicators (T / D / F) advance sequentially as phases complete.
+The job detail page shows a live progress bar driven by SSE events from `GET /transcribe/jobs/{id}/stream`.
+
+**Sequential mode** (default, `parallel_stages=False`):
+- Three step indicators (T / D / F) advance one at a time.
 - The overall bar maps per-phase tqdm percentages: transcription → 0–60%, diarization → 60–90%, formatting → 100% on done.
-- ETA and speed counter (`5.2s/s`, `0.39chunk/s`) are parsed from the tqdm string and shown below the bar while a job is active, hidden on completion.
-- Diarization bars now include `{rate_fmt}` (chunk/s) to match transcription output.
+- ETA and speed counter are parsed from the tqdm string and shown below the bar.
+
+**Parallel mode** (`parallel_stages=True`):
+- Activated when the log line "Running transcription and diarization concurrently" is received.
+- Two stacked mini-bars appear: green for Transcribing, indigo for Diarizing.
+- Both T and D step dots pulse simultaneously; D does **not** wait for T.
+- Channel progress arrives as `channel_progress` SSE events (`{"type": "channel_progress", "channel": "transcribe"|"diarize", "message": "..."}`).
+- The transcribe bar shows the raw tqdm percentage (0–100%).
+- The diarize bar maps pyannote's three sub-steps: Segmentation → 0–40%, Embedding → 40–80%, Clustering → 80–100%. The current sub-step name and ETA are shown under the bar.
+- The overall bar shows the average of both channel percentages, capped at 90% until the job completes.
+- On completion, both mini-bars snap to 100%, both dots turn solid green, and the F dot activates for formatting.
 
 ### Transcript Management (Web)
 - Transcripts list page: each card is fully clickable via the **overlay link pattern** (card is a `div` with an `absolute inset-0` `<a>` underneath, action buttons use `relative z-10` to sit above). This avoids the invalid-HTML problem of nesting `<form>` inside `<a>`.

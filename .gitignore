@@ -54,3 +54,6 @@ example-file/*
 *.flac
 *.ogg
 *.mp4
+
+#Log folders
+logs/

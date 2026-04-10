@@ -27,7 +27,7 @@ Podcast transcription tool for tabletop RPG actual-play recordings (D&D, Pathfin
 
 ### Research — Apple Silicon Acceleration
 
-**Status:** Not researched. M5 Mac is a primary development and use machine.
+**Status:** ✅ IMPLEMENTED (MLX-Whisper backend, April 2026). M5 Mac is a primary development and use machine.
 
 **Problem:** faster-whisper (CTranslate2) has no MPS backend — transcription always falls back to CPU on Apple Silicon. pyannote diarization and embedding extraction do use MPS when available. So on Mac, transcription is the bottleneck running purely on CPU even though the M5 has substantial GPU compute.
 
@@ -45,7 +45,7 @@ Podcast transcription tool for tabletop RPG actual-play recordings (D&D, Pathfin
 
 ### Research — Parallel Processing of a Single File
 
-**Status:** Not researched. Current pipeline processes one file sequentially (validate → convert → transcribe → diarize → align → identify → format).
+**Status:** ✅ IMPLEMENTED (concurrent transcription + diarization via `ProcessPoolExecutor`, April 2026). Current pipeline processes one file sequentially by default; `parallel_stages = true` in config enables concurrent mode.
 
 **Problem:** A 3-hour session takes significant wall time even on fast hardware. The transcription and diarization steps together are the bottleneck and currently run sequentially, but they are largely independent — transcription produces text segments, diarization produces speaker-labeled time regions; neither needs the other's output to start.
 
@@ -65,7 +65,7 @@ Podcast transcription tool for tabletop RPG actual-play recordings (D&D, Pathfin
 
 ### Research — Faster / Better Transcription Models
 
-**Status:** Not researched. Currently using faster-whisper with OpenAI Whisper weights (tiny → large-v3).
+**Status:** Partially implemented. `large-v3-turbo` is in the MLX model map (`transcriber.py`) but **not yet in the CLI `--model` choices** — Click will reject it if a user types it. The 1-line fix to `cli.py` is still needed.
 
 **Areas to investigate:**
 
@@ -261,3 +261,126 @@ A 3-hour session at ~150 wpm ≈ 27,000 words ≈ 35,000 tokens. Most local mode
 **Architecture note:** If a second backend is ever added, use an abstract `TranscriptionBackend` interface in `transcriber.py` and `DiarizationBackend` in `diarizer.py`. Keep pipeline module backend-agnostic.
 
 **When to revisit:** When (a) CTranslate2 adds Intel GPU support, (b) a user actually needs this, or (c) OpenVINO's Whisper API stabilizes. Don't build speculatively.
+
+---
+
+## Recommendations
+
+*Research completed April 2026. Findings grounded in full codebase review (transcriber.py, diarizer.py, pipeline.py, jobs.py, models.py, speaker_manager.py, formatter.py, config.py, cli.py).*
+
+---
+
+### Apple Silicon Acceleration — Recommendation
+
+**Viable path: MLX-Whisper only.**
+
+WhisperKit is eliminated. It requires a Swift runtime, and the Python bindings (`whisperkittools`) are immature — adding an entire toolchain with no precedent in this codebase is not justified.
+
+MLX-Whisper is viable. `mlx_whisper.transcribe()` returns a dict with a `segments` list where each segment has `start`, `end`, `text`, and `words` keys — direct mapping to our `TranscriptionSegment`. Word timestamps are available via `word_timestamps=True`, satisfying the diarization alignment requirement. The output format is compatible with zero changes downstream.
+
+**Implementation plan:** ✅ COMPLETE
+
+- `transcriber.py` — `_is_mlx_available()` (uses `find_spec`, safe for main process), `_transcribe_mlx()`, `_MLX_MODEL_MAP` dict, dispatch logic in `transcribe()`. ✅
+- `pyproject.toml` — `mlx-whisper` added under `macos = [...]` optional dep and as a platform-marker dep (`sys_platform == 'darwin' and platform_machine == 'arm64'`). ✅
+- `config.py` — `use_mlx: "auto"` in DEFAULTS. ✅
+
+**Note:** The plan called for `_USE_MLX: bool` at module level; implemented as `_is_mlx_available()` function instead (avoids Metal init on non-CLI processes like uvicorn). Functionally equivalent.
+
+**Tests:** MLX dispatch, fallback, segment mapping, hotword injection — all in `test_transcriber.py`, all passing. ✅
+
+---
+
+### Parallel Processing — Recommendation
+
+**Viable path: Concurrent transcription + diarization via `ProcessPoolExecutor(max_workers=2)`.**
+
+Audio chunking (option 2) is eliminated. Chunk boundary artifacts directly corrupt diarization alignment — mid-sentence splits produce `UNKNOWN` speaker labels. The deduplication/overlap logic needed to fix this outweighs any gain.
+
+`ProcessPoolExecutor` solves the module-level globals problem cleanly: each subprocess gets its own memory space, so `_model` (transcriber) and `_pipeline` (diarizer) are independent copies with no thread-safety issue. No refactoring of the globals is needed.
+
+**Implementation plan:** ✅ COMPLETE
+
+- `pipeline.py` — `_transcribe_worker()`, `_diarize_worker()`, `_run_parallel_transcribe_diarize()` with `ProcessPoolExecutor(max_workers=2)`. Progress IPC via `multiprocessing.Manager().Queue()` (survives macOS `spawn` pickle round-trip) drained by a background thread that tees log messages through `tqdm.write()` and renders bar updates directly to stderr. `_patch_tqdm_for_queue()` intercepts tqdm in each subprocess. ✅
+- `config.py` — `parallel_stages: False` in DEFAULTS. ✅
+- `_noise_suppress.py` — extracted from `diarizer.py` so `_diarize_worker()` can call it as the very first thing in the subprocess before any ML import. ✅
+
+**Remaining:** No `--no-parallel-stages` CLI override flag yet. Currently config-only. Low priority — `parallel_stages` defaults to `False`.
+
+---
+
+### Faster / Better Transcription Models — Recommendation
+
+**Path A (implement now): Add `large-v3-turbo` as a supported model size.**
+
+`large-v3-turbo` is already in faster-whisper's model registry. It is a distilled large-v3 (~809M params vs 1.5B), reportedly ~8× faster with minimal accuracy loss on English. Integration cost is a single line.
+
+- `cli.py` — add `"large-v3-turbo"` to the `--model` choices list. Scope: 1 line. ⬅ **NOT YET DONE**
+- `config.py` — optionally update the default after benchmarking on podcast audio. No other changes.
+
+**Path B (document as upgrade path): distil-large-v3 via CTranslate2 conversion.**
+
+`distil-large-v3` (HuggingFace) can be converted offline to CTranslate2 format via `ct2-transformers-converter`. The resulting directory is passed directly to `--model /path/to/distil-large-v3-ct2` — faster-whisper's `WhisperModel` constructor accepts a local path, so this requires zero code changes. Document the conversion command in `README.md`.
+
+Limitation: distil-large-v3 is English-only. Do not add it as a first-class CLI choice — document it as an advanced option to avoid trapping multilingual users.
+
+**Parakeet eliminated:** CTC decoding does not produce word-level timestamps. `aligner.py` requires `start`/`end` on every `TranscriptionSegment` for max-overlap matching. Without word timestamps, alignment quality degrades significantly for overlapping speech — common in RPG sessions with crosstalk. Revisit when/if Parakeet gains word timestamp support.
+
+**Suggested ordering:** Add `large-v3-turbo` to the CLI now. Document distil-large-v3 conversion in README. Benchmark both against current `medium` and `large-v3` defaults on actual podcast audio before changing the default model.
+
+---
+
+### DM Character Voice Handling — Recommendation
+
+**Viable path: Implement Approach 1 now; defer Approach 2.**
+
+Approach 1 delivers the core use case (~20 lines, uses existing `notes` field, no schema migration) and provides a clean migration path to Approach 2 when needed.
+
+**Approach 1 implementation plan:**
+
+- `pipeline.py` — after `match_speakers()` returns `speaker_map`, add a post-processing pass: for each profile whose `notes` matches `"voice_of:<key>"`, the display label is the profile's `display_name` (e.g., `"DM (as Aziel)"`). Character voice profiles are excluded from the YAML frontmatter `speakers:` list.
+- `cli.py` — in the enrollment interactive flow (the `wisper transcribe --enroll-speakers` dialog), add an optional prompt after naming a new speaker: *"Is this a character voice performed by an existing speaker? [y/N]"*. If yes, prompt for which speaker and write `notes = "voice_of:<key>"`. Also add `[voice of DM]` annotation to `wisper speakers list` output.
+- Scope: ~20 lines `pipeline.py`, ~15 lines `cli.py`. Tests: 3–4 in `test_pipeline.py`, 1 in `test_speaker_manager.py`.
+
+**Migration to Approach 2:** When Approach 2 ships (structured `attributed_to: Optional[str]` + `character_name: Optional[str]` fields on `SpeakerProfile`), `load_profiles()` reads existing profiles and auto-migrates any `notes = "voice_of:<key>"` to the new fields on first load. Non-breaking. The `character_voice_format` config key and runtime format control are Approach 2 additions.
+
+**Do not implement Approach 1 and 2 simultaneously.** The scope increase (models.py + speaker_manager.py + formatter.py + config.py + type change to `speaker_map`) is not justified until Approach 1 is validated in use.
+
+---
+
+### Local LLM Post-Processing — Recommendation
+
+**Viable path: Build Task A (vocabulary correction) + Task D (unknown speaker ID). Defer Task B and Task C.**
+
+**Task B (multi-speaker detection) deferred:** `_merge_consecutive()` in `formatter.py` destroys per-segment timestamps before the LLM sees the transcript. The LLM can detect that a block contains two voices but cannot propose an accurate split point — only the block's start timestamp survives the merge. This requires refactoring the formatter pipeline to preserve segment-level timestamps through the merge step before Task B is feasible.
+
+**Task C (speaker reassignment) deferred:** High risk of silent errors in actual-play content where player speaking styles overlap. Defer until vocabulary correction and unknown-speaker ID are validated in production.
+
+**Implementation plan for Task A + Task D:**
+
+New file `src/wisper_transcribe/llm_fixer.py`:
+- `OllamaClient` — thin `httpx` wrapper around Ollama's REST API (no new dependency; `httpx` is already in dev deps). Soft-fails with a warning if Ollama is unreachable.
+- `fix_vocabulary(lines: list[str], hotwords: list[str], character_names: list[str]) -> list[str]` — batches 25 lines per request; validates each proposed change against the hotwords list using edit-distance before accepting (rejects freeform LLM rewrites).
+- `identify_unknown_speakers(lines: list[str], profiles: list[SpeakerProfile]) -> list[SpeakerSuggestion]` — 20-line sliding window with 5-line overlap; returns `SpeakerSuggestion(line_idx, current_label, suggested_name, confidence, reason)`; only surfaces suggestions with confidence ≥ 0.75.
+- Scope: ~150–200 lines.
+
+`cli.py` — new `wisper refine <transcript.md>` command:
+- `--dry-run` (default on) — prints colored diff, writes nothing
+- `--apply` — writes `.md.bak` backup then overwrites transcript
+- `--tasks vocabulary,unknown` (default: `vocabulary`)
+- `--model NAME` / `--endpoint URL` — override config
+- YAML frontmatter is never modified
+- Scope: ~80–100 lines.
+
+`config.py` — add `llm_endpoint = "http://localhost:11434"` and `llm_model = "llama3"` to DEFAULTS. 2 lines.
+
+`tests/test_llm_fixer.py` — mock `httpx` calls; test batch slicing; test edit-distance guard rejects freeform changes; test dry-run produces diff without writing; test `.md.bak` created on apply; test Ollama unreachable produces warning not error.
+
+**Batch processing note:** A 3-hour session at ~1 line per 10 seconds ≈ 1,080 lines. Vocabulary at 25 lines/request ≈ 43 requests. At ~2 seconds per local Ollama request ≈ ~90 seconds total — acceptable. Document expected runtime in `--help` text.
+
+**Safety principles (all required):**
+1. `--dry-run` on by default — no silent transcript modification
+2. `.md.bak` always written before `--apply`
+3. Vocabulary changes accepted only if the substitution matches a known hotword/character name by edit-distance
+4. Unknown speaker suggestions: warn prominently when confidence is below 0.85 even if above the 0.75 suggestion threshold
+5. YAML frontmatter is never passed to the LLM or modified
+6. Ollama unreachable → `warnings.warn(...)`, early return; does not abort pipeline

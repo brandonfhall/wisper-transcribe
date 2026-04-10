@@ -54,6 +54,30 @@
       {% endfor %}
     </div>
 
+    <!-- Parallel dual bars (hidden until parallel mode is detected) -->
+    <div id="parallel-bars" class="hidden space-y-2 mb-3">
+      <div>
+        <div class="flex justify-between text-xs mb-0.5">
+          <span class="text-gray-600 font-medium">Transcribing</span>
+          <span id="transcribe-pct-label" class="text-green-700 font-semibold"></span>
+        </div>
+        <div class="w-full bg-gray-200 rounded-full h-1.5 overflow-hidden">
+          <div id="transcribe-bar" class="h-1.5 rounded-full bg-green-500 transition-all duration-500 animate-pulse" style="width:0%"></div>
+        </div>
+        <div id="transcribe-meta" class="text-xs text-gray-400 mt-0.5 h-3"></div>
+      </div>
+      <div>
+        <div class="flex justify-between text-xs mb-0.5">
+          <span class="text-gray-600 font-medium">Diarizing</span>
+          <span id="diarize-pct-label" class="text-indigo-600 font-semibold"></span>
+        </div>
+        <div class="w-full bg-gray-200 rounded-full h-1.5 overflow-hidden">
+          <div id="diarize-bar" class="h-1.5 rounded-full bg-indigo-500 transition-all duration-500 animate-pulse" style="width:0%"></div>
+        </div>
+        <div id="diarize-meta" class="text-xs text-gray-400 mt-0.5 h-3"></div>
+      </div>
+    </div>
+
     <!-- Overall progress bar -->
     <div class="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
       <div id="progress-bar"
@@ -111,86 +135,114 @@
 {% if job.status in ("pending", "running") %}
 <script>
 (function() {
-  const terminal = document.getElementById('log-terminal');
-  const cursor = document.getElementById('log-cursor');
-  const badge = document.getElementById('status-badge');
-  const actions = document.getElementById('job-actions');
-  const progressBar   = document.getElementById('progress-bar');
-  const progressPct   = document.getElementById('progress-pct');
-  const stepLabel     = document.getElementById('step-label');
+  const terminal    = document.getElementById('log-terminal');
+  const cursor      = document.getElementById('log-cursor');
+  const badge       = document.getElementById('status-badge');
+  const actions     = document.getElementById('job-actions');
+  const progressBar = document.getElementById('progress-bar');
+  const progressPct = document.getElementById('progress-pct');
+  const stepLabel   = document.getElementById('step-label');
   const progressStats = document.getElementById('progress-stats');
   const progressEta   = document.getElementById('progress-eta');
   const progressRate  = document.getElementById('progress-rate');
 
-  // Parse percentage from tqdm-style string:  "Transcribing:  45%|███ | 1/2 [00:23<00:28, 5.2s/s]"
+  // ── Helpers ────────────────────────────────────────────────────────────────
   function parsePercent(msg) {
     const m = msg.match(/(\d+)%\s*[|│]/);
     return m ? parseInt(m[1], 10) : null;
   }
-
-  // Parse ETA from "[elapsed<remaining, rate]" block
   function parseETA(msg) {
     const m = msg.match(/<(\d+:\d{2}(?::\d{2})?)/);
     return m ? m[1] : null;
   }
-
-  // Parse rate from ", rate]" at end of timing block (e.g. "5.2s/s", "0.39chunk/s")
   function parseRate(msg) {
     const m = msg.match(/,\s*([\d.]+\s*[kMG]?\w+\/\w+)\s*\]/);
     return m ? m[1].trim() : null;
   }
 
-  // Step state: 'waiting' | 'active' | 'done'
+  // ── Step dots ──────────────────────────────────────────────────────────────
   const steps = ['transcribe', 'diarize', 'format'];
   let currentStep = -1;
+  let parallelMode = false;
+  const parallelActive = new Set();  // steps active in parallel
 
   function activateStep(idx) {
+    if (parallelMode) {
+      if (parallelActive.has(idx)) return;
+      parallelActive.add(idx);
+      const dot = document.getElementById('step_dot_' + steps[idx]);
+      const lbl = document.getElementById('step_' + steps[idx]);
+      if (dot) { dot.classList.remove('bg-gray-300','bg-green-600'); dot.classList.add('bg-green-500','animate-pulse'); }
+      if (lbl) { lbl.classList.remove('text-gray-400'); lbl.classList.add('text-green-600'); }
+      return;
+    }
     if (idx <= currentStep) return;
-    // Mark all previous steps done
     for (let i = 0; i < idx; i++) doneStep(i);
-    // Mark this step active
     const dot = document.getElementById('step_dot_' + steps[idx]);
     const lbl = document.getElementById('step_' + steps[idx]);
-    if (dot) { dot.className = dot.className.replace('bg-gray-300', 'bg-green-500 animate-pulse'); }
-    if (lbl) lbl.classList.replace('text-gray-400', 'text-green-600');
+    if (dot) { dot.classList.remove('bg-gray-300'); dot.classList.add('bg-green-500','animate-pulse'); }
+    if (lbl) { lbl.classList.remove('text-gray-400'); lbl.classList.add('text-green-600'); }
     currentStep = idx;
   }
 
   function doneStep(idx) {
+    parallelActive.delete(idx);
     const dot = document.getElementById('step_dot_' + steps[idx]);
     const lbl = document.getElementById('step_' + steps[idx]);
-    if (dot) {
-      dot.classList.remove('animate-pulse');
-      dot.classList.remove('bg-gray-300');
-      dot.classList.remove('bg-green-500');
-      dot.classList.add('bg-green-600');
-    }
-    if (lbl) { lbl.classList.remove('text-gray-400'); lbl.classList.add('text-green-700'); }
-    // Fill connector after this step
+    if (dot) { dot.classList.remove('animate-pulse','bg-gray-300','bg-green-500'); dot.classList.add('bg-green-600'); }
+    if (lbl) { lbl.classList.remove('text-gray-400','text-green-600'); lbl.classList.add('text-green-700'); }
     const conn = document.getElementById('connector_' + (idx + 1));
-    if (conn) conn.classList.replace('bg-gray-200', 'bg-green-500');
+    if (conn) { conn.classList.remove('bg-gray-200'); conn.classList.add('bg-green-500'); }
   }
 
   function allDone() {
     steps.forEach((_, i) => doneStep(i));
     if (stepLabel) stepLabel.textContent = 'Complete';
+    // Snap both parallel bars to 100% on completion
+    const tb = document.getElementById('transcribe-bar');
+    const db = document.getElementById('diarize-bar');
+    if (tb) { tb.style.width = '100%'; tb.classList.remove('animate-pulse'); }
+    if (db) { db.style.width = '100%'; db.classList.remove('animate-pulse'); }
+    if (document.getElementById('transcribe-pct-label')) document.getElementById('transcribe-pct-label').textContent = '100%';
+    if (document.getElementById('diarize-pct-label')) document.getElementById('diarize-pct-label').textContent = '100%';
   }
 
-  // Detect which phase we're in from log messages
+  // ── Parallel mode ──────────────────────────────────────────────────────────
+  function enableParallelMode() {
+    if (parallelMode) return;
+    parallelMode = true;
+    const bars = document.getElementById('parallel-bars');
+    if (bars) bars.classList.remove('hidden');
+    activateStep(0);
+    activateStep(1);
+    if (stepLabel) stepLabel.textContent = 'Running in parallel…';
+  }
+
+  // Track per-channel progress for the combined overall bar
+  let tPct = 0, dPct = 0;
+
+  function updateOverallFromChannels() {
+    const combined = Math.round((tPct + dPct) / 2 * 0.9);  // 90% cap; 100% on done
+    if (progressBar) { progressBar.style.width = combined + '%'; progressBar.classList.remove('animate-pulse'); }
+    if (progressPct) progressPct.textContent = combined + '%';
+  }
+
+  // ── Phase detection (log messages) ────────────────────────────────────────
   function detectPhase(msg) {
     const lower = msg.toLowerCase();
     if (lower.includes('transcrib') || lower.includes('whisper') || lower.includes('loading model')) {
-      activateStep(0);
-      if (stepLabel) stepLabel.textContent = 'Transcribing…';
+      if (!parallelMode) { activateStep(0); if (stepLabel) stepLabel.textContent = 'Transcribing…'; }
     } else if (lower.includes('diariz') || lower.includes('speaker') || lower.includes('pyannote') || lower.includes('align')) {
-      activateStep(1);
-      if (stepLabel) stepLabel.textContent = 'Diarizing…';
+      if (!parallelMode) { activateStep(1); if (stepLabel) stepLabel.textContent = 'Diarizing…'; }
     } else if (lower.includes('wrote') || lower.includes('format') || lower.includes('speaker match')) {
+      // Both parallel bars done — mark T+D done, activate F
+      if (parallelMode) { doneStep(0); doneStep(1); }
       activateStep(2);
       if (stepLabel) stepLabel.textContent = 'Formatting…';
     }
   }
 
+  // ── SSE ───────────────────────────────────────────────────────────────────
   const es = new EventSource('/transcribe/jobs/{{ job.id }}/stream');
 
   es.onmessage = function(e) {
@@ -202,51 +254,85 @@
       terminal.insertBefore(line, cursor);
       terminal.scrollTop = terminal.scrollHeight;
       detectPhase(evt.message);
-      // Transcription starts when we see "Model :" header
       if (evt.message.includes('Model  :')) activateStep(0);
+      if (evt.message.toLowerCase().includes('concurrently')) enableParallelMode();
     }
 
     if (evt.type === 'progress') {
-      const pct  = parsePercent(evt.message);
-      const eta  = parseETA(evt.message);
-      const rate = parseRate(evt.message);
+      // Sequential mode: map Transcribing → 0-60%, diarizing steps → 60-90%
+      const pct   = parsePercent(evt.message);
+      const eta   = parseETA(evt.message);
+      const rate  = parseRate(evt.message);
       const lower = evt.message.toLowerCase();
-
-      if (pct !== null && progressBar) {
+      if (pct !== null && progressBar && !parallelMode) {
         progressBar.classList.remove('animate-pulse');
-
-        // Map per-phase percentage to an overall bar position:
-        //   Transcribing  →  0–60%
-        //   Diarizing     →  60–90%
-        //   (Formatting is instant — jumps to 100% on done)
         let barPct;
         if (lower.includes('transcrib')) {
-          activateStep(0);
-          if (stepLabel) stepLabel.textContent = 'Transcribing…';
+          activateStep(0); if (stepLabel) stepLabel.textContent = 'Transcribing…';
           barPct = pct * 0.6;
         } else if (lower.includes('segmentation') || lower.includes('embedding') || lower.includes('clustering')) {
-          activateStep(1);
-          if (stepLabel) stepLabel.textContent = 'Diarizing…';
+          activateStep(1); if (stepLabel) stepLabel.textContent = 'Diarizing…';
           barPct = 60 + pct * 0.3;
         } else {
-          barPct = pct * 0.6; // fallback
+          barPct = pct * 0.6;
         }
         progressBar.style.width = barPct + '%';
         if (progressPct) progressPct.textContent = Math.round(barPct) + '%';
       }
-
-      // ETA and speed counter
       if (progressEta && eta) progressEta.textContent = 'ETA ' + eta;
       if (progressRate && rate) progressRate.textContent = rate;
       if (progressStats && (eta || rate)) progressStats.classList.remove('hidden');
     }
 
+    if (evt.type === 'channel_progress') {
+      // Parallel mode: update the specific channel's bar
+      const ch  = evt.channel;
+      const msg = evt.message;
+      const pct = parsePercent(msg);
+      const lower = msg.toLowerCase();
+
+      if (ch === 'transcribe' && pct !== null) {
+        tPct = pct;
+        const bar = document.getElementById('transcribe-bar');
+        const lbl = document.getElementById('transcribe-pct-label');
+        const meta = document.getElementById('transcribe-meta');
+        if (bar) { bar.style.width = pct + '%'; bar.classList.remove('animate-pulse'); }
+        if (lbl) lbl.textContent = pct + '%';
+        const eta = parseETA(msg); const rate = parseRate(msg);
+        if (meta && (eta || rate)) meta.textContent = [eta ? 'ETA '+eta : '', rate || ''].filter(Boolean).join(' · ');
+        updateOverallFromChannels();
+      }
+
+      if (ch === 'diarize' && pct !== null) {
+        // Map pyannote sub-steps to overall diarize bar: segmentation 0-40%, embedding 40-80%, clustering 80-100%
+        let dpct;
+        if (lower.includes('segmentation'))      dpct = pct * 0.4;
+        else if (lower.includes('embedding'))    dpct = 40 + pct * 0.4;
+        else if (lower.includes('clustering'))   dpct = 80 + pct * 0.2;
+        else                                     dpct = pct * 0.4;
+        dpct = Math.round(dpct);
+        dPct = dpct;
+        const bar = document.getElementById('diarize-bar');
+        const lbl = document.getElementById('diarize-pct-label');
+        const meta = document.getElementById('diarize-meta');
+        // Show the current sub-step name
+        let stepName = '';
+        if (lower.includes('segmentation')) stepName = 'Segmentation';
+        else if (lower.includes('embedding')) stepName = 'Embedding';
+        else if (lower.includes('clustering')) stepName = 'Clustering';
+        if (bar) { bar.style.width = dpct + '%'; bar.classList.remove('animate-pulse'); }
+        if (lbl) lbl.textContent = dpct + '%';
+        if (meta && stepName) { const eta = parseETA(msg); meta.textContent = stepName + (eta ? ' · ETA '+eta : ''); }
+        updateOverallFromChannels();
+      }
+    }
+
     if (evt.type === 'status') {
       const statusMap = {
-        pending: '<span class="badge-pending">Pending</span>',
-        running: '<span class="badge-running">Running</span>',
+        pending:   '<span class="badge-pending">Pending</span>',
+        running:   '<span class="badge-running">Running</span>',
         completed: '<span class="badge-completed">Completed</span>',
-        failed: '<span class="badge-failed">Failed</span>',
+        failed:    '<span class="badge-failed">Failed</span>',
       };
       if (statusMap[evt.status]) badge.innerHTML = statusMap[evt.status];
     }

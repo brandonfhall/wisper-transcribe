@@ -113,6 +113,9 @@ class Job:
     error: Optional[str] = None
     log_lines: list[str] = field(default_factory=list)
     progress: Optional[str] = None
+    # Parallel mode: per-channel progress strings keyed by channel name
+    # (e.g. {"transcribe": "Transcribing:  45%|...", "diarize": "Segmentation:  30%|..."})
+    progress_channels: dict[str, str] = field(default_factory=dict)
     finished_at: Optional[datetime] = None
     # Set after transcription completes when enroll flow is needed
     diarization_labels: list[str] = field(default_factory=list)
@@ -257,8 +260,16 @@ class JobQueue:
             if job._cancel_event.is_set():
                 raise InterruptedError("Job cancelled by user")
             original_write(msg, *args, **kw)
-            if msg.strip():
-                job.log_lines.append(msg.strip())
+            stripped = msg.strip()
+            if not stripped:
+                return
+            # Parallel mode: "[progress:channel] ..." → progress_channels dict
+            # (not shown in log terminal — it's pure progress bar data)
+            m = _re.match(r'^\[progress:(\w+)\]\s*(.*)', stripped)
+            if m:
+                job.progress_channels[m.group(1)] = m.group(2)
+                return
+            job.log_lines.append(stripped)
 
         # Patch tqdm.__init__ to capture the progress bar itself
         original_init = _tqdm_module.tqdm.__init__

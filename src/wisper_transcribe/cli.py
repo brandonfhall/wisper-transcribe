@@ -47,6 +47,8 @@ def main():
 @click.option("--workers", default=1, type=click.IntRange(min=1),
               help="Parallel workers for folder processing (CPU-only; clamped to 1 on GPU)")
 @click.option("--verbose", is_flag=True, default=False, help="Show detailed progress")
+@click.option("--debug", is_flag=True, default=False,
+              help="Write full debug log to ./logs/wisper_<timestamp>.log")
 def transcribe(
     path: Path,
     output_dir: Optional[Path],
@@ -67,8 +69,15 @@ def transcribe(
     initial_prompt: Optional[str],
     workers: int,
     verbose: bool,
+    debug: bool,
 ):
     """Transcribe an audio file (or folder of files) to markdown."""
+    if debug or verbose:
+        from .debug_log import setup_logging
+        log_path = setup_logging(debug=debug, verbose=verbose)
+        if log_path:
+            click.echo(f"  Debug log: {log_path}")
+
     from .pipeline import process_file, process_folder
 
     lang = None if language == "auto" else language
@@ -126,7 +135,9 @@ def _audio_extensions():
 @click.option("--host", default="0.0.0.0", show_default=True, help="Bind host")
 @click.option("--port", default=8080, show_default=True, type=int, help="Bind port")
 @click.option("--reload", is_flag=True, default=False, help="Auto-reload on code change (dev mode)")
-def server(host: str, port: int, reload: bool) -> None:
+@click.option("--debug", is_flag=True, default=False,
+              help="Write full debug log to ./logs/wisper_<timestamp>.log")
+def server(host: str, port: int, reload: bool, debug: bool) -> None:
     """Start the wisper web UI server.
 
     Opens a browser-based interface for transcription, speaker management,
@@ -135,6 +146,12 @@ def server(host: str, port: int, reload: bool) -> None:
     All web assets are served locally — no internet connection required at
     runtime once the package is installed.
     """
+    if debug:
+        from .debug_log import setup_logging
+        log_path = setup_logging(debug=True)
+        if log_path:
+            click.echo(f"  Debug log: {log_path}")
+
     try:
         import uvicorn
     except ImportError:

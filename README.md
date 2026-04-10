@@ -14,7 +14,7 @@ Runs entirely offline. No cloud APIs. Outputs clean markdown files ready for Not
 - GPU recommended but not required (CPU works, just slower)
 
 **Windows (CUDA):** 
-- Install ffmpeg via `winget install Gyan.FFmpeg.shared`
+- Install ffmpeg via `winget install Gyan.FFmpeg.Shared`
 - Install CUDA Toolkit via `winget install Nvidia.CUDA` (Restart your terminal/VS Code after installing)
 - *Note: If you encounter `cublas64_12.dll` or `zlibwapi.dll` not found errors, manually download NVIDIA cuDNN and place its `.dll` files in your CUDA `bin` directory (usually `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x\bin`).*
 
@@ -35,7 +35,8 @@ Run the setup script — it handles the venv, package install, and CUDA PyTorch 
 
 ```bash
 # Mac/Linux
-bash setup.sh
+chmod +x setup.sh
+./setup.sh
 ```
 
 ### Manual setup
@@ -263,7 +264,10 @@ wisper transcribe <path>
   --overwrite              Re-process files that already have output
   --workers INT            Parallel workers for folder processing — CPU only;
                            clamped to 1 on GPU (default: 1)
-  --verbose                Show detailed progress
+  --verbose                Show detailed progress; surfaces ML library log output
+                           (pyannote, faster-whisper) on the console at DEBUG level
+  --debug                  Write a full timestamped log to ./logs/wisper_<timestamp>.log
+                           (tqdm.write output + Python logging at DEBUG level)
 ```
 
 ### `wisper enroll`
@@ -563,9 +567,36 @@ docker compose run wisper nvidia-smi
 | `WISPER_DEBUG` | Set to `1` to disable warning suppression and see raw dependency output |
 | `HUGGINGFACE_TOKEN` | HF token as an alternative to `wisper config set hf_token` |
 
-## Debugging / Verbose Warning Output
+## Debugging and Verbose Output
 
-wisper suppresses informational warnings from its dependencies (speechbrain, pyannote, torch) that are not actionable during normal use. If you need to see the raw output for debugging, set `WISPER_DEBUG=1` before running:
+wisper suppresses informational warnings from its dependencies (speechbrain, pyannote, torch) that are not actionable during normal use. Two CLI flags give you more visibility:
+
+### `--verbose`
+
+Surfaces ML library log output (pyannote, faster-whisper, Lightning) on the console at DEBUG level alongside normal status messages. Use this when something is misbehaving and you want to see what the libraries are doing:
+
+```bash
+wisper transcribe session.mp3 --verbose
+```
+
+### `--debug`
+
+Writes a full timestamped log to `./logs/wisper_<YYYYMMDD_HHmmss>.log`. Every `tqdm.write()` status message and Python logging output at DEBUG level is captured — including output forwarded from parallel subprocess workers. The log path is printed when the run starts:
+
+```bash
+wisper transcribe session.mp3 --debug
+#  Debug log: logs/wisper_20260409_134105.log
+```
+
+Both flags can be combined:
+
+```bash
+wisper transcribe session.mp3 --verbose --debug
+```
+
+### `WISPER_DEBUG` env var
+
+Sets the same warning-suppression override as `--debug` without creating a log file. Use when you want raw dependency output in the terminal without a file:
 
 ```powershell
 # Windows PowerShell
@@ -577,8 +608,6 @@ wisper transcribe session.mp3
 # Mac/Linux
 WISPER_DEBUG=1 wisper transcribe session.mp3
 ```
-
-Unset it (or open a new terminal) to return to clean output.
 
 ---
 

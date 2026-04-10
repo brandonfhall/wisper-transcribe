@@ -183,6 +183,7 @@ async def job_stream(request: Request, job_id: str) -> StreamingResponse:
     async def event_generator():
         last_line_idx = 0
         last_progress = None
+        last_channel_progress: dict[str, str] = {}
         while True:
             if await request.is_disconnected():
                 break
@@ -198,11 +199,18 @@ async def job_stream(request: Request, job_id: str) -> StreamingResponse:
                 yield f"data: {data}\n\n"
             last_line_idx += len(new_lines)
 
-            # Send progress update if it has changed
+            # Send overall progress update (sequential mode)
             if job.progress and job.progress != last_progress:
                 data = json.dumps({"type": "progress", "message": job.progress})
                 yield f"data: {data}\n\n"
                 last_progress = job.progress
+
+            # Send per-channel progress updates (parallel mode)
+            for channel, msg in job.progress_channels.items():
+                if last_channel_progress.get(channel) != msg:
+                    data = json.dumps({"type": "channel_progress", "channel": channel, "message": msg})
+                    yield f"data: {data}\n\n"
+                    last_channel_progress[channel] = msg
 
             # Send status update
             data = json.dumps({"type": "status", "status": job.status})

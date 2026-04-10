@@ -55,6 +55,155 @@ def _play_excerpt(wav_path: Path, start: float, end: float) -> None:
         click.echo("  [audio playback failed — skipping]")
 
 
+# ---------------------------------------------------------------------------
+# Module-level worker functions for ProcessPoolExecutor (must be picklable).
+# Each runs in its own subprocess with isolated module-level globals (_model,
+# _pipeline), so loading both models concurrently is safe.
+# ---------------------------------------------------------------------------
+
+def _patch_tqdm_for_queue(queue, channel: str) -> None:  # type: ignore[type-arg]
+    """Patch tqdm in a subprocess to forward output to a multiprocessing Queue.
+
+    Must be called before any ML library imports in the subprocess.
+
+    Queue tuple format: (channel, msg_type, message)
+      msg_type="log"  — tqdm.write() status messages; parent forwards via tqdm.write()
+                        so they reach the debug log file if active.
+      msg_type="bar"  — progress bar renders (last non-empty frame per update);
+                        parent writes these directly to sys.stderr so they give
+                        terminal progress without appearing in the log file.
+    """
+    import re as _re
+    import tqdm as _tqdm_mod
+
+    _ansi = _re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
+    _orig_init = _tqdm_mod.tqdm.__init__
+
+    def _write(msg: str, *a, **kw) -> None:
+        if msg.strip():
+            queue.put((channel, "log", msg.strip()))
+
+    class _QueueFile:
+        """Captures bar renders and forwards the last non-empty frame per update."""
+        def write(self, s: str) -> None:
+            clean = _ansi.sub('', s)
+            # Each tqdm update may contain multiple \r-separated frames; take the last.
+            parts = [p.strip() for p in clean.split('\r') if p.strip()]
+            if parts:
+                final_msg = parts[-1]
+                # Strip trailing numeric/whitespace residue (e.g., "###5" -> "###")
+                final_msg = _re.sub(r'[\s\d]+$', '', final_msg)
+                queue.put((channel, "bar", final_msg))
+        def flush(self) -> None:
+            pass
+
+    def _init(self, *a, **kw) -> None:  # type: ignore[misc]
+        kw["file"] = _QueueFile()
+        kw["dynamic_ncols"] = False
+        kw["ncols"] = 80
+        _orig_init(self, *a, **kw)
+
+    _tqdm_mod.tqdm.write = _write  # type: ignore[method-assign]
+    _tqdm_mod.tqdm.__init__ = _init  # type: ignore[method-assign]
+
+
+def _transcribe_worker(wav_path: Path, _progress_queue=None, **kwargs) -> list[TranscriptionSegment]:
+    """Subprocess entry point for transcription (parallel_stages mode)."""
+    if _progress_queue is not None:
+        _patch_tqdm_for_queue(_progress_queue, "transcribe")
+    from .transcriber import transcribe as _transcribe
+    return _transcribe(wav_path, **kwargs)
+
+
+def _diarize_worker(wav_path: Path, _progress_queue=None, **kwargs) -> list:
+    """Subprocess entry point for diarization (parallel_stages mode)."""
+    # Suppress Lightning/pyannote noise before any ML import so there is
+    # no gap in a freshly-spawned subprocess where warnings can leak.
+    from ._noise_suppress import suppress_third_party_noise
+    suppress_third_party_noise()
+    if _progress_queue is not None:
+        _patch_tqdm_for_queue(_progress_queue, "diarize")
+    from .diarizer import diarize as _diarize
+    return _diarize(wav_path, **kwargs)
+
+
+def _run_parallel_transcribe_diarize(
+    wav_path: Path,
+    transcribe_kwargs: dict,
+    diarize_kwargs: dict,
+) -> tuple[list[TranscriptionSegment], list]:
+    """Run transcription and diarization concurrently via ProcessPoolExecutor.
+
+    Each subprocess gets its own copy of the module-level model globals
+    (_model, _pipeline), so there are no thread-safety concerns. Progress
+    from each subprocess is forwarded to the parent via a multiprocessing
+    Queue and drained by a background thread that calls tqdm.write() with
+    channel-prefixed messages so jobs._run_job captures them.
+
+    Returns (transcription_segments, diarization_segments).
+    """
+    import multiprocessing
+    import queue as _queue_mod
+    import threading
+
+    tqdm.write("  Running transcription and diarization concurrently")
+
+    # On macOS (spawn start method) a plain multiprocessing.Queue cannot be
+    # pickled and passed via ProcessPoolExecutor.submit().  A Manager-backed
+    # queue is a proxy object that survives the pickle round-trip.
+    with multiprocessing.Manager() as manager:
+        mp_queue = manager.Queue()  # type: ignore[type-arg]
+        _stop = threading.Event()
+
+        # Track the last bar render per channel to suppress duplicate frames.
+        _last_bar: dict[str, str] = {}
+
+        def _drain() -> None:
+            import sys
+            while not _stop.is_set() or not mp_queue.empty():
+                try:
+                    channel, msg_type, msg = mp_queue.get(timeout=0.05)
+                except _queue_mod.Empty:
+                    continue
+                except Exception:
+                    break
+                if msg_type == "log":
+                    # Goes through tqdm.write → captured by debug log tee if active.
+                    tqdm.write(msg)
+                else:
+                    # Bar render: write directly to stderr with \r so it updates
+                    # in-place like a real tqdm bar.  Bypasses tqdm.write so it
+                    # is NOT captured by the debug log tee (stays out of the file).
+                    # Deduplicate to avoid redundant redraws.
+                    if _last_bar.get(channel) != msg:
+                        _last_bar[channel] = msg
+                        sys.stderr.write(f"\r{msg}")
+                        sys.stderr.flush()
+
+        drain_thread = threading.Thread(target=_drain, daemon=True)
+        drain_thread.start()
+        try:
+            with ProcessPoolExecutor(max_workers=2) as executor:
+                trans_future = executor.submit(
+                    _transcribe_worker, wav_path, _progress_queue=mp_queue, **transcribe_kwargs
+                )
+                diar_future = executor.submit(
+                    _diarize_worker, wav_path, _progress_queue=mp_queue, **diarize_kwargs
+                )
+                segments = trans_future.result()
+                diarization = diar_future.result()
+        finally:
+            _stop.set()
+            drain_thread.join(timeout=2.0)
+            # Move cursor to a fresh line after the last in-place bar render.
+            if _last_bar:
+                import sys
+                sys.stderr.write("\n")
+                sys.stderr.flush()
+
+    return segments, diarization
+
+
 def process_file(
     path: Path,
     output_dir: Optional[Path] = None,
@@ -94,6 +243,9 @@ def process_file(
         config_hotwords = config.get("hotwords", [])
         hotwords = config_hotwords if config_hotwords else None
 
+    use_mlx: str = config.get("use_mlx", "auto")
+    parallel_stages: bool = config.get("parallel_stages", False)
+
     check_ffmpeg()
     validate_audio(path)
 
@@ -110,21 +262,60 @@ def process_file(
     tqdm.write("─" * 60)
     tqdm.write(f"  Input  : {path}")
     tqdm.write(f"  Output : {out_path}")
-    tqdm.write(f"  Model  : {model_size} ({device}, {resolved_ct})")
+    # Show MLX backend label when it will be used; otherwise show CTranslate2 compute type.
+    from .transcriber import _is_mlx_available
+    _will_use_mlx = device == "mps" and use_mlx != "false" and _is_mlx_available()
+    if _will_use_mlx:
+        tqdm.write(f"  Model  : {model_size} (mps, mlx)")
+    else:
+        tqdm.write(f"  Model  : {model_size} ({device}, {resolved_ct})")
     tqdm.write("─" * 60)
 
     wav_path = convert_to_wav(path)
 
-    segments: list[TranscriptionSegment] = transcribe(
-        wav_path,
-        model_size=model_size,
-        device=device,
-        language=language,
-        compute_type=compute_type,
-        vad_filter=vad_filter,
-        initial_prompt=initial_prompt,
-        hotwords=hotwords,
-    )
+    # Resolve the HF token before any model runs so we know whether diarization
+    # is possible. This is needed up-front in the parallel path.
+    hf_token = ""
+    if not no_diarize:
+        hf_token = get_hf_token(config)
+
+    # Decide whether to run transcription + diarization concurrently.
+    _run_parallel = parallel_stages and not no_diarize and bool(hf_token)
+
+    diarization = None
+    if _run_parallel:
+        transcribe_kw = dict(
+            model_size=model_size,
+            device=device,
+            language=language,
+            compute_type=compute_type,
+            vad_filter=vad_filter,
+            initial_prompt=initial_prompt,
+            hotwords=hotwords,
+            use_mlx=use_mlx,
+        )
+        diarize_kw = dict(
+            hf_token=hf_token,
+            device=device,
+            num_speakers=num_speakers,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+        )
+        segments, diarization = _run_parallel_transcribe_diarize(
+            wav_path, transcribe_kw, diarize_kw
+        )
+    else:
+        segments: list[TranscriptionSegment] = transcribe(
+            wav_path,
+            model_size=model_size,
+            device=device,
+            language=language,
+            compute_type=compute_type,
+            vad_filter=vad_filter,
+            initial_prompt=initial_prompt,
+            hotwords=hotwords,
+            use_mlx=use_mlx,
+        )
 
     duration = get_duration(wav_path)
     aligned_segments = segments
@@ -133,10 +324,10 @@ def process_file(
 
     if not no_diarize:
         from .aligner import align
-        from .diarizer import diarize
 
-        hf_token = get_hf_token(config)
-        if hf_token:
+        if diarization is None and hf_token:
+            # Sequential path: diarize now (parallel path already populated diarization).
+            from .diarizer import diarize
             diarization = diarize(
                 wav_path,
                 hf_token=hf_token,
@@ -145,6 +336,8 @@ def process_file(
                 min_speakers=min_speakers,
                 max_speakers=max_speakers,
             )
+
+        if diarization is not None:
             aligned_segments = align(segments, diarization)
 
             unique_speakers = sorted(
