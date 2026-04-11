@@ -484,7 +484,7 @@ wisper-transcribe/
 .venv/bin/pytest tests/ -v        # Mac/Linux
 ```
 
-Tests mock all ML models — no GPU, network, or real audio files required.
+Tests mock all ML models — no GPU, network, or real audio files required. (272 tests, 81% coverage)
 
 CI runs the test suite across Python 3.10–3.14 on every push and PR. Python 3.14 is treated as experimental (non-blocking). A weekly job also runs with the latest available package versions to catch forward-compatibility issues early.
 
@@ -629,3 +629,8 @@ WISPER_DEBUG=1 wisper transcribe session.mp3
 - [x] Phase 11: Browser-based web UI (`wisper server`, HTMX + FastAPI + Tailwind, Docker web services)
 - [x] Web UI polish: progress bar with ETA + speed counter, multi-step phase indicators, cancel/stop job, speaker audio playback, auto-Tailwind build, correct transcript save path
 - [x] Web UI: clickable transcript cards, delete transcripts, clickable dashboard stat cards, Unicode filename support, speaker rename dropdown, bordered nav pill buttons
+- [x] MLX-Whisper backend: Apple Silicon GPU/ANE transcription via `mlx-whisper` (auto-detected on M-series; falls back to CPU if not installed)
+- [x] Parallel stage processing: concurrent transcription + diarization via `ProcessPoolExecutor` (`parallel_stages` config key); parallel progress bars in web UI
+- [x] Logging overhaul: `Logger` class (`debug_log.py`), `--debug` writes timestamped log file, `--verbose` surfaces ML library output; `_noise_suppress.py` extracted for subprocess safety; `_SilenceFilter` hardens Lightning logger suppression
+- [x] `large-v3-turbo` model: added to `--model` choices and set as the new default (distilled large-v3, ~8× faster with minimal accuracy loss)
+- [x] Code quality: extracted shared `time_utils.py` helpers, deduplicated pipeline/formatter/diarizer; test coverage expanded to 81% (272 tests)
