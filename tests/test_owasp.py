@@ -50,6 +50,15 @@ class TestSanitizeHtml:
         assert "Before" in result
         assert "After" in result
 
+    def test_strips_script_closing_tag_with_whitespace(self):
+        # Regex-based filters miss </script > (space before >) — HTMLParser handles it.
+        result = _sanitize_html("<script>evil()</script >")
+        assert "evil()" not in result
+
+    def test_strips_script_uppercase_closing_tag(self):
+        result = _sanitize_html("<script>evil()</SCRIPT>")
+        assert "evil()" not in result
+
     def test_strips_onclick_handler(self):
         result = _sanitize_html('<button onclick="evil()">click me</button>')
         assert "onclick" not in result
