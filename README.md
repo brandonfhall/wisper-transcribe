@@ -237,8 +237,8 @@ wisper transcribe <path>
   path                     Audio file or folder of audio files
 
   -o, --output DIR         Output directory (default: same as input)
-  -m, --model SIZE         tiny / base / small / medium / large-v3
-                           (default: medium; use large-v3 on a good GPU)
+  -m, --model SIZE         tiny / base / small / medium / large-v3 / large-v3-turbo
+                           (default: large-v3-turbo)
   -l, --language LANG      Language code, e.g. en, fr, de (default: en)
                            Use 'auto' to detect automatically
   --device auto|cpu|cuda|mps  Compute device (default: auto-detect; mps = Apple Silicon GPU)
@@ -446,10 +446,11 @@ All formats are automatically converted to 16kHz mono WAV internally before proc
 | `base` | Fast | Decent | ~1 GB |
 | `small` | Moderate | Good | ~2 GB |
 | `medium` | Moderate | Very good | ~5 GB |
+| `large-v3-turbo` | Fast | Near-best | ~4 GB |
 | `large-v3` | Slow | Best | ~10 GB |
 
 **Recommended:**
-- RTX 3090 (24 GB): `large-v3 --device cuda`
+- RTX 3090 (24 GB): `large-v3-turbo --device cuda` (best speed/accuracy tradeoff)
 - Apple M-series: `medium` (auto-detects MPS; diarization runs on GPU, transcription on CPU)
 - CPU-only machine: `small` or `base`
 
@@ -483,7 +484,7 @@ wisper-transcribe/
 .venv/bin/pytest tests/ -v        # Mac/Linux
 ```
 
-Tests mock all ML models — no GPU, network, or real audio files required. (160 tests)
+Tests mock all ML models — no GPU, network, or real audio files required.
 
 CI runs the test suite across Python 3.10–3.14 on every push and PR. Python 3.14 is treated as experimental (non-blocking). A weekly job also runs with the latest available package versions to catch forward-compatibility issues early.
 
@@ -617,7 +618,7 @@ WISPER_DEBUG=1 wisper transcribe session.mp3
 - [x] Phase 2: Speaker diarization
 - [x] Phase 3: Speaker profiles + cross-file voice matching
 - [x] Phase 4: Batch processing + CLI polish
-- [x] Phase 5: Tests (103 passing), coverage reporting, README, setup scripts, CI
+- [x] Phase 5: Tests, coverage reporting, README, setup scripts, CI
 - [x] Phase 6: `wisper setup` guided first-run wizard
 - [x] Phase 7: Docker containerization (GPU + CPU targets, `WISPER_DATA_DIR` override)
 - [x] Phase 8: VAD filter (`--vad/--no-vad`) via faster-whisper built-in Silero VAD
@@ -628,3 +629,8 @@ WISPER_DEBUG=1 wisper transcribe session.mp3
 - [x] Phase 11: Browser-based web UI (`wisper server`, HTMX + FastAPI + Tailwind, Docker web services)
 - [x] Web UI polish: progress bar with ETA + speed counter, multi-step phase indicators, cancel/stop job, speaker audio playback, auto-Tailwind build, correct transcript save path
 - [x] Web UI: clickable transcript cards, delete transcripts, clickable dashboard stat cards, Unicode filename support, speaker rename dropdown, bordered nav pill buttons
+- [x] MLX-Whisper backend: Apple Silicon GPU/ANE transcription via `mlx-whisper` (auto-detected on M-series; falls back to CPU if not installed)
+- [x] Parallel stage processing: concurrent transcription + diarization via `ProcessPoolExecutor` (`parallel_stages` config key); parallel progress bars in web UI
+- [x] Logging overhaul: `Logger` class (`debug_log.py`), `--debug` writes timestamped log file, `--verbose` surfaces ML library output; `_noise_suppress.py` extracted for subprocess safety; `_SilenceFilter` hardens Lightning logger suppression
+- [x] `large-v3-turbo` model: added to `--model` choices and set as the new default (distilled large-v3, ~8× faster with minimal accuracy loss)
+- [x] Code quality: extracted shared `time_utils.py` helpers, deduplicated pipeline/formatter/diarizer; test coverage expanded to 81% (272 tests)

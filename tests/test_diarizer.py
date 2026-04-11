@@ -3,12 +3,18 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+import torch
 
 from wisper_transcribe.models import DiarizationSegment
 
-_FAKE_AUDIO = (16000, np.zeros(16000, dtype=np.int16))  # (sample_rate, mono array)
-_FAKE_STEREO = (16000, np.zeros((16000, 2), dtype=np.int16))  # stereo: (time, channels)
-_FAKE_INT16_FULLSCALE = (16000, np.full(16000, 32767, dtype=np.int16))  # full-scale int16
+
+def _make_fake_audio_dict(*, mono: bool = True, dtype=np.int16, value: int = 0):
+    """Build a {waveform, sample_rate} dict matching load_wav_as_tensor output."""
+    if mono:
+        waveform = torch.zeros(1, 16000, dtype=torch.float32)
+    else:
+        waveform = torch.zeros(2, 16000, dtype=torch.float32)
+    return {"waveform": waveform, "sample_rate": 16000}
 
 
 def _make_turn(start, end):
@@ -18,8 +24,9 @@ def _make_turn(start, end):
     return turn
 
 
-@patch("scipy.io.wavfile.read", return_value=_FAKE_AUDIO)
-def test_diarize_returns_segments(mock_read):
+@patch("wisper_transcribe.audio_utils.load_wav_as_tensor")
+def test_diarize_returns_segments(mock_load):
+    mock_load.return_value = _make_fake_audio_dict()
     mock_pipeline = MagicMock()
     mock_pipeline.return_value.speaker_diarization.itertracks.return_value = [
         (_make_turn(0.0, 5.0), "A", "SPEAKER_00"),
@@ -48,8 +55,9 @@ def test_diarize_returns_segments(mock_read):
     d._pipeline = None
 
 
-@patch("scipy.io.wavfile.read", return_value=_FAKE_AUDIO)
-def test_diarize_with_num_speakers(mock_read):
+@patch("wisper_transcribe.audio_utils.load_wav_as_tensor")
+def test_diarize_with_num_speakers(mock_load):
+    mock_load.return_value = _make_fake_audio_dict()
     mock_pipeline = MagicMock()
     mock_pipeline.return_value.speaker_diarization.itertracks.return_value = [
         (_make_turn(0.0, 5.0), "A", "SPEAKER_00"),
@@ -66,8 +74,9 @@ def test_diarize_with_num_speakers(mock_read):
     d._pipeline = None
 
 
-@patch("scipy.io.wavfile.read", return_value=_FAKE_AUDIO)
-def test_diarize_with_min_max_speakers(mock_read):
+@patch("wisper_transcribe.audio_utils.load_wav_as_tensor")
+def test_diarize_with_min_max_speakers(mock_load):
+    mock_load.return_value = _make_fake_audio_dict()
     mock_pipeline = MagicMock()
     mock_pipeline.return_value.speaker_diarization.itertracks.return_value = []
 
@@ -83,9 +92,11 @@ def test_diarize_with_min_max_speakers(mock_read):
     d._pipeline = None
 
 
-@patch("scipy.io.wavfile.read", return_value=_FAKE_STEREO)
-def test_diarize_stereo_audio_transposed(mock_read):
-    """Stereo WAV (time, channels) is transposed to (channels, time) before passing to pipeline."""
+@patch("wisper_transcribe.audio_utils.load_wav_as_tensor")
+def test_diarize_stereo_audio_passed_through(mock_load):
+    """Stereo waveform from load_wav_as_tensor is passed through to pipeline."""
+    audio_dict = _make_fake_audio_dict(mono=False)
+    mock_load.return_value = audio_dict
     mock_pipeline = MagicMock()
     mock_pipeline.return_value.speaker_diarization.itertracks.return_value = []
 
@@ -95,32 +106,15 @@ def test_diarize_stereo_audio_transposed(mock_read):
     d.diarize(Path("fake.wav"), hf_token="hf_fake", device="cpu")
 
     waveform = mock_pipeline.call_args.args[0]["waveform"]
-    assert waveform.shape == (2, 16000)  # (channels, time) after transpose
+    assert waveform.shape == (2, 16000)  # (channels, time)
 
     d._pipeline = None
 
 
-@patch("scipy.io.wavfile.read", return_value=_FAKE_INT16_FULLSCALE)
-def test_diarize_int16_audio_normalized_to_float32(mock_read):
-    """Integer audio is normalized to float32 in [-1.0, 1.0]."""
-    import torch
-    mock_pipeline = MagicMock()
-    mock_pipeline.return_value.speaker_diarization.itertracks.return_value = []
+@patch("wisper_transcribe.audio_utils.load_wav_as_tensor")
+def test_load_pipeline_called_when_none(mock_load):
+    mock_load.return_value = _make_fake_audio_dict()
 
-    import wisper_transcribe.diarizer as d
-    d._pipeline = mock_pipeline
-
-    d.diarize(Path("fake.wav"), hf_token="hf_fake", device="cpu")
-
-    waveform = mock_pipeline.call_args.args[0]["waveform"]
-    assert waveform.dtype == torch.float32
-    assert waveform.max().item() <= 1.0
-
-    d._pipeline = None
-
-
-@patch("scipy.io.wavfile.read", return_value=_FAKE_AUDIO)
-def test_load_pipeline_called_when_none(mock_read):
     import wisper_transcribe.diarizer as d
     d._pipeline = None
 

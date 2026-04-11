@@ -3,6 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+# Must be the very first ML-adjacent action in this module.  The speechbrain
+# shim below imports speechbrain (which pulls in torch), so suppress must be
+# in place before that import fires or the torch flop_counter warning leaks.
+from ._noise_suppress import suppress_third_party_noise as _suppress
+_suppress()
+
 # speechbrain 1.0 lazy-loads optional integrations (k2, transformers, spacy,
 # numba, …) whenever something calls inspect.getmembers() on the speechbrain
 # package.  Any integration whose optional dependency is not installed raises
@@ -30,12 +36,6 @@ try:
     _sb_LazyModule.ensure_module = _tolerant_ensure_module  # type: ignore[method-assign]
 except ImportError:
     pass  # speechbrain not installed; patch not needed
-
-from ._noise_suppress import suppress_third_party_noise as _suppress
-
-# Must run before pyannote is imported below — the Lightning compat-shim
-# fires redirect warnings the moment pytorch_lightning symbols are resolved.
-_suppress()
 
 from tqdm import tqdm
 
@@ -148,22 +148,13 @@ def diarize(
     # torchcodec (pyannote 4.x's default audio decoder) requires FFmpeg
     # shared DLLs on Windows (Gyan.FFmpeg.Shared).  The scipy bypass works
     # on all platforms and the input is always a WAV file from convert_to_wav().
-    import numpy as np
-    import scipy.io.wavfile as _wavfile
-    import torch
+    from .audio_utils import load_wav_as_tensor
 
-    sample_rate, data = _wavfile.read(str(audio_path))
-    if data.ndim == 1:
-        data = data[np.newaxis, :]          # (time,) → (1, time)
-    else:
-        data = data.T                        # (time, ch) → (ch, time)
-    if np.issubdtype(data.dtype, np.integer):
-        data = data.astype(np.float32) / np.iinfo(data.dtype).max
-    waveform = torch.from_numpy(data.copy())
+    audio_dict = load_wav_as_tensor(audio_path)
     hook = _DiarizationProgressHook()
     try:
         diarization = _pipeline(
-            {"waveform": waveform, "sample_rate": sample_rate},
+            audio_dict,
             hook=hook,
             **kwargs,
         )

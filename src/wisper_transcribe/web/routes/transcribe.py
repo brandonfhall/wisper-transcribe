@@ -13,8 +13,8 @@ from urllib.parse import quote
 from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
 
-from ..jobs import COMPLETED, FAILED, JobQueue
-from . import templates
+from ..jobs import COMPLETED, FAILED
+from . import get_queue as _get_queue, templates
 
 router = APIRouter(prefix="/transcribe")
 
@@ -45,10 +45,6 @@ def _validate_job_id(job_id: str) -> str | None:
     if not _guard_path.startswith(_guard_base):
         return None
     return os.path.basename(_guard_path)
-
-
-def _get_queue(request: Request) -> JobQueue:
-    return request.app.state.job_queue
 
 
 def _default_output_dir() -> Path:

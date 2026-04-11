@@ -5,15 +5,7 @@ from typing import Optional
 import yaml
 
 from .models import AlignedSegment, TranscriptionSegment
-
-
-def _format_timestamp(seconds: float) -> str:
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    if h > 0:
-        return f"{h:02d}:{m:02d}:{s:02d}"
-    return f"{m:02d}:{s:02d}"
+from .time_utils import format_timestamp as _format_timestamp
 
 
 def _merge_consecutive(segments: list, speaker_map: Optional[dict[str, str]]) -> list[dict]:
@@ -91,8 +83,10 @@ def to_markdown(
                 lines.append(text)
         lines.append("")
 
+    from . import __version__
+
     lines.append("---")
-    lines.append("*Transcribed by wisper-transcribe v0.1.0*")
+    lines.append(f"*Transcribed by wisper-transcribe v{__version__}*")
 
     return "\n".join(lines)
 

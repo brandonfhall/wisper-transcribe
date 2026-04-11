@@ -1,7 +1,9 @@
 """Transcripts route — browse and view markdown transcripts."""
 from __future__ import annotations
 
+import html as _html_module
 import os
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import quote
 
@@ -22,6 +24,59 @@ def _output_dir(request: Request) -> Path:
         out_dir = Path(get_data_dir()) / "output"
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir
+
+
+class _HtmlSanitizer(HTMLParser):
+    """Strip <script> elements and on* event-handler attributes from HTML.
+
+    Uses Python's built-in HTMLParser rather than regex so that all syntactic
+    variants of tags (e.g. ``</script >``, ``</SCRIPT>``) are handled
+    correctly — regex-based approaches can be bypassed by whitespace or
+    case variations in closing tags (A03 XSS — CWE-79).
+    """
+
+    _STRIP_TAGS: frozenset[str] = frozenset({"script"})
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._output: list[str] = []
+        self._skip_depth: int = 0
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:  # type: ignore[override]
+        if tag.lower() in self._STRIP_TAGS:
+            self._skip_depth += 1
+            return
+        if self._skip_depth:
+            return
+        safe_attrs = [(k, v) for k, v in attrs if not k.lower().startswith("on")]
+        attr_str = "".join(
+            f' {k}="{_html_module.escape(v)}"' if v is not None else f" {k}"
+            for k, v in safe_attrs
+        )
+        self._output.append(f"<{tag}{attr_str}>")
+
+    def handle_endtag(self, tag: str) -> None:  # type: ignore[override]
+        if tag.lower() in self._STRIP_TAGS:
+            self._skip_depth = max(0, self._skip_depth - 1)
+            return
+        if self._skip_depth:
+            return
+        self._output.append(f"</{tag}>")
+
+    def handle_data(self, data: str) -> None:  # type: ignore[override]
+        if not self._skip_depth:
+            # Re-escape so decoded entities remain valid in the output HTML.
+            self._output.append(_html_module.escape(data))
+
+    def get_output(self) -> str:
+        return "".join(self._output)
+
+
+def _sanitize_html(html_input: str) -> str:
+    """Return *html_input* with script elements and on* handlers removed (A03 XSS)."""
+    sanitizer = _HtmlSanitizer()
+    sanitizer.feed(html_input)
+    return sanitizer.get_output()
 
 
 def _parse_frontmatter(content: str) -> tuple[dict, str]:
@@ -100,7 +155,7 @@ async def transcript_detail(request: Request, name: str) -> HTMLResponse:
     meta, body = _parse_frontmatter(content)
 
     import markdown as _md
-    html_body = _md.markdown(body, extensions=["nl2br"])
+    html_body = _sanitize_html(_md.markdown(body, extensions=["nl2br"]))
 
     return templates.TemplateResponse(
         request,

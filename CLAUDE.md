@@ -11,9 +11,21 @@ Keeping docs in sync with code is **non-optional** — treat it as part of the d
 | Doc | Update when |
 |-----|-------------|
 | `architecture.md` | Any new module, pipeline change, design decision, config key, or test count change. Update: module map entry, relevant design-decision section, config key list, Known Constraints table, test count. |
-| `README.md` | Any user-facing change: new CLI flag, changed flag behaviour, new command, changed env variable, Docker change, or anything that affects how a user runs or configures wisper. |
+| `README.md` | Any user-facing change: new CLI flag, changed flag behaviour, new command, changed env variable, Docker change, or anything that affects how a user runs or configures wisper. Do **not** put test counts in README — they belong in `architecture.md` only. |
 
 Both files must be updated **in the same commit** as the code change, not as a follow-up.
+
+---
+
+## Definition of Done
+
+A task is not complete until all three are true — in this order:
+
+1. **Tests pass** — run `.venv/bin/pytest tests/ -v` and confirm green
+2. **Docs updated** — `architecture.md` updated; `README.md` updated if user-facing (per Documentation Rules above)
+3. **Committed** — all changed files in a single `git commit`
+
+When a todo list reaches 100% completed, execute steps 1–3 immediately without waiting to be asked.
 
 ---
 
@@ -45,11 +57,9 @@ wisper server --reload                # dev mode; http://localhost:8080
 ## Git / CI Rules
 
 - **Never push to `main` directly.** All changes go through a PR.
-- **Tests must pass locally before pushing.** CI blocks merges on failure.
-- **Commit at least once per phase.** Pause for user review after each phase commit before starting the next.
+- **After committing a phase, pause for user review before starting the next.**
 - **Branch naming:** `feat/...` or `fix/...`
 - **CI matrix:** Python 3.10–3.13 are blocking; 3.14 is `continue-on-error: true` (non-blocking).
-- **Update docs** per the Documentation Rules section above — both `architecture.md` and `README.md` in the same commit as the code change.
 
 ---
 

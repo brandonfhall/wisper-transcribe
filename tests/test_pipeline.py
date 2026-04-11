@@ -13,12 +13,12 @@ FAKE_SEGMENTS = [
 ]
 
 
-def test_seconds_to_hhmmss():
-    from wisper_transcribe.pipeline import _seconds_to_hhmmss
-    assert _seconds_to_hhmmss(0) == "0:00:00"
-    assert _seconds_to_hhmmss(61) == "0:01:01"
-    assert _seconds_to_hhmmss(3725) == "1:02:05"
-    assert _seconds_to_hhmmss(3600) == "1:00:00"
+def test_format_duration():
+    from wisper_transcribe.time_utils import format_duration
+    assert format_duration(0) == "0:00:00"
+    assert format_duration(61) == "0:01:01"
+    assert format_duration(3725) == "1:02:05"
+    assert format_duration(3600) == "1:00:00"
 
 
 @patch("wisper_transcribe.pipeline.subprocess.run")

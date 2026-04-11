@@ -288,9 +288,10 @@ def test_extract_embedding_no_matching_segments_raises(tmp_path):
     from wisper_transcribe.speaker_manager import extract_embedding
 
     segments = [DiarizationSegment(start=0.0, end=5.0, speaker="SPEAKER_01")]
-    fake_audio = (16000, np.zeros(16000, dtype=np.float32))
+    import torch
+    fake_audio_dict = {"waveform": torch.zeros(1, 16000), "sample_rate": 16000}
 
-    with patch("scipy.io.wavfile.read", return_value=fake_audio):
+    with patch("wisper_transcribe.audio_utils.load_wav_as_tensor", return_value=fake_audio_dict):
         with patch("wisper_transcribe.speaker_manager._load_embedding_model"):
             with pytest.raises(ValueError, match="No segments found for speaker"):
                 extract_embedding(

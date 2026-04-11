@@ -1,6 +1,7 @@
 import pytest
 
-from wisper_transcribe.formatter import _format_timestamp, to_markdown, update_speaker_names
+from wisper_transcribe.formatter import to_markdown, update_speaker_names
+from wisper_transcribe.time_utils import format_timestamp as _format_timestamp
 from wisper_transcribe.models import AlignedSegment, TranscriptionSegment
 
 

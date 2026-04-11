@@ -12,14 +12,8 @@ from .audio_utils import SUPPORTED_EXTENSIONS, convert_to_wav, get_duration, val
 from .config import check_ffmpeg, get_device, get_hf_token, load_config
 from .formatter import to_markdown
 from .models import TranscriptionSegment
+from .time_utils import format_duration
 from .transcriber import transcribe
-
-
-def _seconds_to_hhmmss(seconds: float) -> str:
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    return f"{h}:{m:02d}:{s:02d}"
 
 
 _MAX_PLAYBACK_SECONDS = 10.0
@@ -204,6 +198,145 @@ def _run_parallel_transcribe_diarize(
     return segments, diarization
 
 
+def _interactive_enroll(
+    wav_path: Path,
+    aligned_segments: list,
+    diarization: list,
+    unique_speakers: list[str],
+    device: str,
+    play_audio: bool,
+    similarity_threshold: float,
+) -> tuple[dict[str, str], list[dict]]:
+    """Run the interactive speaker enrollment wizard.
+
+    Presents each detected speaker with a sample utterance, optional audio
+    playback, and similarity-ranked existing profiles.  Returns
+    ``(speaker_map, speaker_metadata)`` for use by the formatter.
+    """
+    from .speaker_manager import (
+        _cosine_similarity, enroll_speaker, extract_embedding, load_profiles, update_embedding,
+    )
+    import numpy as np
+    import click
+
+    speaker_map: dict[str, str] = {}
+    speaker_metadata: list[dict] = []
+
+    existing_profiles = load_profiles()
+    enrolled_embeddings: dict[str, np.ndarray] = {}
+    for pname, prof in existing_profiles.items():
+        if prof.embedding_path.exists():
+            enrolled_embeddings[pname] = np.load(str(prof.embedding_path))
+
+    click.echo(f"\n  Found {len(unique_speakers)} speaker(s). Let's name them.")
+
+    for i, label in enumerate(unique_speakers, 1):
+        sample = next(
+            (s for s in aligned_segments if s.speaker == label and s.text.strip()),
+            None,
+        )
+        sample_ts = f"{int(sample.start // 60):02d}:{int(sample.start % 60):02d}" if sample else "??"
+        sample_text = sample.text.strip() if sample else "(no sample)"
+        click.echo(f"\n  Speaker {i} of {len(unique_speakers)} (heard at {sample_ts}):")
+        click.echo(f'    "{sample_text[:80]}"')
+
+        if play_audio and sample:
+            _play_excerpt(wav_path, sample.start, sample.end)
+
+        # Show existing speakers ranked by voice similarity
+        ranked_names: list[str] = []
+        if enrolled_embeddings:
+            ranked: list[tuple[str, float]] = []
+            try:
+                query_emb = extract_embedding(wav_path, diarization, label, device)
+                for pname, emb in enrolled_embeddings.items():
+                    ranked.append((pname, _cosine_similarity(query_emb, emb)))
+                ranked.sort(key=lambda x: x[1], reverse=True)
+            except Exception:
+                ranked = [(pname, 0.0) for pname in sorted(enrolled_embeddings)]
+            ranked_names = [pname for pname, _ in ranked]
+
+            click.echo("  Existing speakers:")
+            for idx, (pname, score) in enumerate(ranked, 1):
+                p = existing_profiles[pname]
+                role_str = f" ({p.role})" if p.role else ""
+                score_str = f" — {score:.0%}" if score > 0 else ""
+                match_str = " ★" if score >= similarity_threshold else ""
+                click.echo(f"    {idx}. {p.display_name}{role_str}{score_str}{match_str}")
+            click.echo("  Enter a number to select, or type a new name.")
+
+        # Name prompt — supports 'r' replay and numeric selection
+        name = _prompt_speaker_name(
+            enrolled_embeddings, ranked_names, existing_profiles,
+            play_audio, sample, wav_path,
+        )
+
+        # If user picked an existing profile, skip re-enrollment
+        is_existing = name in {p.display_name for p in existing_profiles.values()}
+        if is_existing:
+            profile_key = next(k for k, p in existing_profiles.items() if p.display_name == name)
+            role = existing_profiles[profile_key].role
+            click.echo(f"  Using existing profile for {name}.")
+            if click.confirm(
+                f"  Add this episode's audio to improve future recognition of {name}?",
+                default=False,
+            ):
+                try:
+                    new_emb = extract_embedding(wav_path, diarization, label, device)
+                    update_embedding(profile_key, new_emb)
+                    click.echo(f"  Updated voice profile for {name}.")
+                except Exception as exc:
+                    click.echo(f"  Could not update profile: {exc}")
+        else:
+            role = click.prompt("  Role (DM/Player/Guest, optional)", default="").strip()
+            notes = click.prompt("  Notes (optional)", default="").strip()
+            enroll_speaker(
+                name=name.lower().replace(" ", "_"),
+                display_name=name,
+                role=role,
+                audio_path=wav_path,
+                segments=diarization,
+                speaker_label=label,
+                device=device,
+                data_dir=None,
+                notes=notes,
+            )
+
+        speaker_map[label] = name
+        speaker_metadata.append({"name": name, "role": role})
+
+    click.echo(f"\n  Enrolled {len(unique_speakers)} speakers.")
+    return speaker_map, speaker_metadata
+
+
+def _prompt_speaker_name(
+    enrolled_embeddings: dict,
+    ranked_names: list[str],
+    existing_profiles: dict,
+    play_audio: bool,
+    sample,
+    wav_path: Path,
+) -> str:
+    """Prompt the user to name a speaker, supporting replay and numeric selection."""
+    import click
+
+    while True:
+        prompt_hint = " (or 'r' to replay)" if play_audio and sample else ""
+        raw = click.prompt(f"  Who is this?{prompt_hint}").strip()
+        if play_audio and sample and raw.lower() == "r":
+            _play_excerpt(wav_path, sample.start, sample.end)
+            continue
+        if enrolled_embeddings and raw.isdigit():
+            idx = int(raw) - 1
+            if 0 <= idx < len(ranked_names):
+                return existing_profiles[ranked_names[idx]].display_name
+            else:
+                click.echo(f"  Please enter a number between 1 and {len(ranked_names)}, or a name.")
+                continue
+        if raw:
+            return raw
+
+
 def process_file(
     path: Path,
     output_dir: Optional[Path] = None,
@@ -346,114 +479,15 @@ def process_file(
             )
 
             if enroll_speakers:
-                from .speaker_manager import (
-                    _cosine_similarity, enroll_speaker, extract_embedding, load_profiles
+                speaker_map, speaker_metadata = _interactive_enroll(
+                    wav_path=wav_path,
+                    aligned_segments=aligned_segments,
+                    diarization=diarization,
+                    unique_speakers=unique_speakers,
+                    device=device,
+                    play_audio=play_audio,
+                    similarity_threshold=config.get("similarity_threshold", 0.65),
                 )
-                import numpy as np
-                import click
-                speaker_map = {}
-                existing_profiles = load_profiles()
-                # Pre-load enrolled embeddings once for the whole enrollment session
-                enrolled_embeddings: dict[str, np.ndarray] = {}
-                for pname, prof in existing_profiles.items():
-                    if prof.embedding_path.exists():
-                        enrolled_embeddings[pname] = np.load(str(prof.embedding_path))
-                click.echo(f"\n  Found {len(unique_speakers)} speaker(s). Let's name them.")
-                for i, label in enumerate(unique_speakers, 1):
-                    # Show a sample line for this speaker
-                    sample = next(
-                        (s for s in aligned_segments if s.speaker == label and s.text.strip()),
-                        None,
-                    )
-                    sample_ts = f"{int(sample.start // 60):02d}:{int(sample.start % 60):02d}" if sample else "??"
-                    sample_text = sample.text.strip() if sample else "(no sample)"
-                    click.echo(f"\n  Speaker {i} of {len(unique_speakers)} (heard at {sample_ts}):")
-                    click.echo(f'    "{sample_text[:80]}"')
-
-                    # Offer replay loop if --play-audio is set
-                    if play_audio and sample:
-                        _play_excerpt(wav_path, sample.start, sample.end)
-
-                    # Show existing speakers ranked by voice similarity
-                    if enrolled_embeddings:
-                        # Try to score this speaker against enrolled profiles
-                        ranked: list[tuple[str, float]] = []
-                        try:
-                            query_emb = extract_embedding(wav_path, diarization, label, device)
-                            for pname, emb in enrolled_embeddings.items():
-                                ranked.append((pname, _cosine_similarity(query_emb, emb)))
-                            ranked.sort(key=lambda x: x[1], reverse=True)
-                        except Exception:
-                            # Fallback to alphabetical if extraction fails
-                            ranked = [(pname, 0.0) for pname in sorted(enrolled_embeddings)]
-                        ranked_names = [pname for pname, _ in ranked]
-
-                        threshold = config.get("similarity_threshold", 0.65)
-                        click.echo("  Existing speakers:")
-                        for idx, (pname, score) in enumerate(ranked, 1):
-                            p = existing_profiles[pname]
-                            role_str = f" ({p.role})" if p.role else ""
-                            score_str = f" — {score:.0%}" if score > 0 else ""
-                            match_str = " ★" if score >= threshold else ""
-                            click.echo(f"    {idx}. {p.display_name}{role_str}{score_str}{match_str}")
-                        click.echo("  Enter a number to select, or type a new name.")
-
-                    # Name prompt — loop to support 'r' replay and numeric selection
-                    name = ""
-                    while True:
-                        prompt_hint = " (or 'r' to replay)" if play_audio and sample else ""
-                        raw = click.prompt(f"  Who is this?{prompt_hint}").strip()
-                        if play_audio and sample and raw.lower() == "r":
-                            _play_excerpt(wav_path, sample.start, sample.end)
-                            continue
-                        if enrolled_embeddings and raw.isdigit():
-                            idx = int(raw) - 1
-                            if 0 <= idx < len(ranked_names):
-                                name = existing_profiles[ranked_names[idx]].display_name
-                                break
-                            else:
-                                click.echo(f"  Please enter a number between 1 and {len(ranked_names)}, or a name.")
-                                continue
-                        if raw:
-                            name = raw
-                            break
-
-                    # If user picked an existing profile, skip re-enrollment
-                    is_existing = name in {p.display_name for p in existing_profiles.values()}
-                    if is_existing:
-                        profile_key = next(k for k, p in existing_profiles.items() if p.display_name == name)
-                        role = existing_profiles[profile_key].role
-                        notes = ""
-                        click.echo(f"  Using existing profile for {name}.")
-                        if click.confirm(
-                            f"  Add this episode's audio to improve future recognition of {name}?",
-                            default=False,
-                        ):
-                            from .speaker_manager import update_embedding
-                            try:
-                                new_emb = extract_embedding(wav_path, diarization, label, device)
-                                update_embedding(profile_key, new_emb)
-                                click.echo(f"  Updated voice profile for {name}.")
-                            except Exception as exc:
-                                click.echo(f"  Could not update profile: {exc}")
-                    else:
-                        role = click.prompt("  Role (DM/Player/Guest, optional)", default="").strip()
-                        notes = click.prompt("  Notes (optional)", default="").strip()
-                        enroll_speaker(
-                            name=name.lower().replace(" ", "_"),
-                            display_name=name,
-                            role=role,
-                            audio_path=wav_path,
-                            segments=diarization,
-                            speaker_label=label,
-                            device=device,
-                            data_dir=None,
-                            notes=notes,
-                        )
-
-                    speaker_map[label] = name
-                    speaker_metadata.append({"name": name, "role": role})
-                click.echo(f"\n  Enrolled {len(unique_speakers)} speakers.")
             else:
                 from .speaker_manager import match_speakers
                 matches = match_speakers(
@@ -484,7 +518,7 @@ def process_file(
         "title": path.stem.replace("_", " ").replace("-", " ").title(),
         "source_file": path.name,
         "date_processed": datetime.date.today().isoformat(),
-        "duration": _seconds_to_hhmmss(duration),
+        "duration": format_duration(duration),
         "speakers": speaker_metadata,
     }
 

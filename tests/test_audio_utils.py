@@ -77,3 +77,61 @@ def test_get_duration(mock_audio_segment):
 
     duration = get_duration(Path("fake.mp3"))
     assert duration == 90.0
+
+
+# ---------------------------------------------------------------------------
+# load_wav_as_tensor
+# ---------------------------------------------------------------------------
+
+def test_load_wav_as_tensor_mono_int16(tmp_path):
+    """Mono int16 WAV is normalised to float32 with shape (1, time)."""
+    import numpy as np
+    import scipy.io.wavfile as wavfile
+    import torch
+
+    from wisper_transcribe.audio_utils import load_wav_as_tensor
+
+    wav = tmp_path / "mono.wav"
+    data = np.array([0, 16383, 32767, -32768], dtype=np.int16)
+    wavfile.write(str(wav), 16000, data)
+
+    result = load_wav_as_tensor(wav)
+    assert "waveform" in result
+    assert "sample_rate" in result
+    assert result["sample_rate"] == 16000
+    assert result["waveform"].dtype == torch.float32
+    assert result["waveform"].shape == (1, 4)
+    assert result["waveform"].max().item() <= 1.0
+
+
+def test_load_wav_as_tensor_stereo(tmp_path):
+    """Stereo WAV is transposed to (channels, time)."""
+    import numpy as np
+    import scipy.io.wavfile as wavfile
+
+    from wisper_transcribe.audio_utils import load_wav_as_tensor
+
+    wav = tmp_path / "stereo.wav"
+    data = np.zeros((100, 2), dtype=np.int16)
+    wavfile.write(str(wav), 16000, data)
+
+    result = load_wav_as_tensor(wav)
+    assert result["waveform"].shape == (2, 100)
+
+
+def test_load_wav_as_tensor_float32_passthrough(tmp_path):
+    """Float32 WAV data is not re-normalised."""
+    import numpy as np
+    import scipy.io.wavfile as wavfile
+
+    from wisper_transcribe.audio_utils import load_wav_as_tensor
+
+    wav = tmp_path / "float.wav"
+    data = np.array([0.0, 0.5, -0.5, 1.0], dtype=np.float32)
+    wavfile.write(str(wav), 16000, data)
+
+    result = load_wav_as_tensor(wav)
+    assert result["waveform"].shape == (1, 4)
+    np.testing.assert_array_almost_equal(
+        result["waveform"].numpy().flatten(), data, decimal=5
+    )
