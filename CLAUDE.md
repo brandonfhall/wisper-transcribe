@@ -11,7 +11,7 @@ Keeping docs in sync with code is **non-optional** — treat it as part of the d
 | Doc | Update when |
 |-----|-------------|
 | `architecture.md` | Any new module, pipeline change, design decision, config key, or test count change. Update: module map entry, relevant design-decision section, config key list, Known Constraints table, test count. |
-| `README.md` | Any user-facing change: new CLI flag, changed flag behaviour, new command, changed env variable, Docker change, or anything that affects how a user runs or configures wisper. |
+| `README.md` | Any user-facing change: new CLI flag, changed flag behaviour, new command, changed env variable, Docker change, or anything that affects how a user runs or configures wisper. Do **not** put test counts in README — they belong in `architecture.md` only. |
 
 Both files must be updated **in the same commit** as the code change, not as a follow-up.
 
