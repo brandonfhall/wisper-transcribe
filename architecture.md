@@ -257,6 +257,7 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - Coverage: run `pytest tests/ -v --cov --cov-report=term-missing`
 - Web tests use `fastapi.testclient.TestClient`; routes are tested via HTTP with all ML calls mocked — no GPU/network needed
 - Security tests in `tests/test_path_traversal.py` cover path traversal (null-byte, dotdot), regex-busting payloads, open-redirect/CRLF payloads, and unit tests for `_validate_job_id()`
+- OWASP regression tests in `tests/test_owasp.py` cover A03 XSS (markdown rendering via `_sanitize_html` + endpoint integration), A05 security response headers (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Content-Security-Policy`), and A09 no-stack-trace-in-error-response
 - `tests/test_debug_log.py` covers `Logger` (file mode, verbose mode, combined), `setup_logging()`, singleton lifecycle, and `WISPER_DEBUG` env side-effect
 - `tests/conftest.py` provides an `autouse` fixture that patches `wisper_transcribe.pipeline.load_config` with a safe baseline config (prevents real user config — e.g. `parallel_stages=True` — from leaking into tests that don't explicitly patch it)
 - `tests/test_time_utils.py` covers shared `format_timestamp()` and `format_duration()` helpers
@@ -331,6 +332,16 @@ All web route handlers follow a consistent two-layer defence pattern enforced by
 **Error messages:** Internal exception text is never placed in redirect URLs or error responses. Routes use generic error codes (e.g. `?error=enroll_failed`).
 
 **Output directory:** The `start_transcribe` form handler ignores any user-supplied `output_dir` and always writes to `_default_output_dir()`. Accepting arbitrary paths from form data would allow writing outside the data directory.
+
+**XSS (A03) — markdown rendering:**
+`transcript_detail` renders transcript markdown to HTML and injects it with Jinja's `| safe` filter. Before injection, `_sanitize_html()` in `transcripts.py` strips `<script>` elements and `on*` event-handler attributes from the rendered HTML. This defends against a `fix-speaker` payload where a malicious speaker name containing raw HTML ends up in a transcript file on disk.
+
+**Security response headers (A05):**
+`_SecurityHeadersMiddleware` in `app.py` attaches the following headers to every response:
+- `X-Content-Type-Options: nosniff` — prevents MIME-type sniffing
+- `X-Frame-Options: SAMEORIGIN` — clickjacking protection
+- `Referrer-Policy: strict-origin-when-cross-origin` — limits referrer leakage
+- `Content-Security-Policy` — restricts resource origins; `script-src` currently includes `'unsafe-inline'` because several templates contain inline `<script>` blocks. Migrating those to `app.js` and switching to a nonce-based policy is a tracked hardening task.
 
 ### Transcript Filename Handling
 Transcript filenames may contain arbitrary Unicode characters (spaces, em-dashes, parentheses, etc.). All URL path parameters that correspond to filenames use the **two-layer path guard** (basename + abspath/startswith) rather than an allowlist regex — allowlist regex would block valid unicode filenames. This allows episode titles like "Episode 2 – O Captain! My (Dead) Captain!" to work correctly.

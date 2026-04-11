@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from urllib.parse import quote
 
@@ -22,6 +23,18 @@ def _output_dir(request: Request) -> Path:
         out_dir = Path(get_data_dir()) / "output"
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir
+
+
+def _sanitize_html(html: str) -> str:
+    """Strip script elements and inline event handlers from rendered HTML (A03 XSS).
+
+    Defends against XSS if a malicious speaker name or other user-controlled
+    content ends up embedded in a transcript markdown file and is then rendered
+    with Jinja's ``| safe`` filter.
+    """
+    html = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.IGNORECASE | re.DOTALL)
+    html = re.sub(r'\s+on\w+\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]*)', "", html, flags=re.IGNORECASE)
+    return html
 
 
 def _parse_frontmatter(content: str) -> tuple[dict, str]:
@@ -100,7 +113,7 @@ async def transcript_detail(request: Request, name: str) -> HTMLResponse:
     meta, body = _parse_frontmatter(content)
 
     import markdown as _md
-    html_body = _md.markdown(body, extensions=["nl2br"])
+    html_body = _sanitize_html(_md.markdown(body, extensions=["nl2br"]))
 
     return templates.TemplateResponse(
         request,

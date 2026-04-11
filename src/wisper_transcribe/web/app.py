@@ -11,6 +11,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
+from starlette.responses import Response as StarletteResponse
 
 from .jobs import JobQueue
 
@@ -61,6 +64,35 @@ except Exception:
     __version__ = "unknown"
 
 
+# Content-Security-Policy: script-src allows 'unsafe-inline' because several
+# templates still use inline <script> blocks and onclick handlers.  Moving those
+# to app.js and switching to a nonce-based policy would eliminate this exception
+# (tracked as a future hardening task).
+_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "media-src 'self'; "
+    "connect-src 'self'; "
+    "frame-ancestors 'none';"
+)
+
+
+class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add defensive HTTP headers to every response (A05 Security Misconfiguration)."""
+
+    async def dispatch(
+        self, request: StarletteRequest, call_next  # type: ignore[override]
+    ) -> StarletteResponse:
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "SAMEORIGIN"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Content-Security-Policy"] = _CSP
+        return response
+
+
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
 
@@ -79,6 +111,8 @@ def create_app() -> FastAPI:
         version=__version__,
         lifespan=lifespan,
     )
+
+    app.add_middleware(_SecurityHeadersMiddleware)
 
     # Store shared state
     app.state.job_queue = job_queue

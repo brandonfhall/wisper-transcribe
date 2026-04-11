@@ -47,6 +47,7 @@ wisper server --reload                # dev mode; http://localhost:8080
 - **Never push to `main` directly.** All changes go through a PR.
 - **Tests must pass locally before pushing.** CI blocks merges on failure.
 - **Commit at least once per phase.** Pause for user review after each phase commit before starting the next.
+- **Always commit when a todo list is completed and files have changed.** When all todos are marked done, run tests and commit immediately — do not wait to be asked.
 - **Branch naming:** `feat/...` or `fix/...`
 - **CI matrix:** Python 3.10–3.13 are blocking; 3.14 is `continue-on-error: true` (non-blocking).
 - **Update docs** per the Documentation Rules section above — both `architecture.md` and `README.md` in the same commit as the code change.
