@@ -25,6 +25,9 @@ on:
       - pyproject.toml
       - src/**
 
+permissions:
+  contents: read
+
 jobs:
   docker-cpu-build:
     name: Build CPU image (smoke test)
