@@ -470,4 +470,8 @@ wisper shows list
 wisper transcribe audio.mp3 --show test-campaign   # matches alice only
 wisper transcribe audio.mp3                        # global match, unchanged
 wisper server --reload   # verify /shows page + transcribe show dropdown
+
 ```
+
+# Known Issues. 
+- On the web interface while doing speaker enrollment the "play" button will change to "stop" but clicking on it just restarts the audio file. 
