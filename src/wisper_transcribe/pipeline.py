@@ -290,7 +290,7 @@ def _interactive_enroll(
         else:
             role = click.prompt("  Role (DM/Player/Guest, optional)", default="").strip()
             notes = click.prompt("  Notes (optional)", default="").strip()
-            enroll_speaker(
+            new_profile = enroll_speaker(
                 name=name.lower().replace(" ", "_"),
                 display_name=name,
                 role=role,
@@ -301,6 +301,13 @@ def _interactive_enroll(
                 data_dir=None,
                 notes=notes,
             )
+            # Refresh in-memory dicts so subsequent speakers in this file see
+            # the new enrollment in the ranked candidates list.
+            existing_profiles[new_profile.name] = new_profile
+            try:
+                enrolled_embeddings[new_profile.name] = np.load(str(new_profile.embedding_path))
+            except Exception:
+                pass
 
         speaker_map[label] = name
         speaker_metadata.append({"name": name, "role": role})
