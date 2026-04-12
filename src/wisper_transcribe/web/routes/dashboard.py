@@ -37,7 +37,7 @@ async def dashboard(request: Request) -> HTMLResponse:
             "transcript_count": transcript_count,
             "speaker_count": speaker_count,
             "device": device,
-            "model": config.get("model", "medium"),
+            "model": config.get("model", "large-v3-turbo"),
             "hf_token_set": hf_token_set,
         },
     )

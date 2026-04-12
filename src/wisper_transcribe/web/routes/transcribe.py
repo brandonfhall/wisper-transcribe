@@ -76,7 +76,7 @@ async def transcribe_form(request: Request) -> HTMLResponse:
 async def start_transcribe(
     request: Request,
     file: Annotated[UploadFile, File()],
-    model_size: Annotated[str, Form()] = "medium",
+    model_size: Annotated[str, Form()] = "large-v3-turbo",
     language: Annotated[str, Form()] = "en",
     device: Annotated[str, Form()] = "auto",
     num_speakers: Annotated[Optional[str], Form()] = None,

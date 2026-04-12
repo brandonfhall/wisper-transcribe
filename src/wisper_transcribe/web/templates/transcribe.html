@@ -28,8 +28,8 @@
         <div>
           <label class="form-label" for="model_size">Model</label>
           <select id="model_size" name="model_size" class="form-input">
-            {% for m in ["tiny","base","small","medium","large-v3"] %}
-            <option value="{{ m }}" {% if m == "medium" %}selected{% endif %}>{{ m }}</option>
+            {% for m in ["tiny","base","small","medium","large-v3","large-v3-turbo"] %}
+            <option value="{{ m }}" {% if m == "large-v3-turbo" %}selected{% endif %}>{{ m }}</option>
             {% endfor %}
           </select>
         </div>
