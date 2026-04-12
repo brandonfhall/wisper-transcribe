@@ -193,3 +193,26 @@ def test_suppress_called_before_speechbrain_import_in_diarizer():
     assert any(isinstance(f, _SilenceFilter) for f in logger.filters), (
         "torch logger not silenced — suppress() may be running after speechbrain import"
     )
+
+
+def test_suppress_called_at_module_level_in_speaker_manager():
+    """_suppress() must run at module level in speaker_manager.py.
+
+    Regression test: wisper enroll bypasses diarizer.py entirely and loads
+    pyannote.audio (embedding model + Lightning) directly through
+    speaker_manager._load_embedding_model().  If suppress() is not called
+    before that import path, Lightning checkpoint-upgrade, migration-shim,
+    TF32, and torch flop_counter warnings all leak to the terminal.
+
+    Verify that importing speaker_manager leaves the torch logger silenced,
+    proving suppress() ran before any ML package could fire.
+    """
+    from wisper_transcribe._noise_suppress import _SilenceFilter
+
+    import wisper_transcribe.speaker_manager  # noqa: F401
+
+    logger = logging.getLogger("torch")
+    assert any(isinstance(f, _SilenceFilter) for f in logger.filters), (
+        "torch logger not silenced after importing speaker_manager — "
+        "_suppress() call is missing or mis-ordered in speaker_manager.py"
+    )

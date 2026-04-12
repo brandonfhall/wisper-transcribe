@@ -6,6 +6,11 @@ from typing import Optional
 
 import numpy as np
 
+# Must be in place before pyannote.audio (and Lightning) are imported so that
+# checkpoint-upgrade, migration-shim, and TF32 warnings are suppressed.
+from ._noise_suppress import suppress_third_party_noise as _suppress
+_suppress()
+
 from .config import get_data_dir
 from .models import DiarizationSegment, SpeakerProfile
 
