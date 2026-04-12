@@ -447,6 +447,73 @@ def test_enroll_existing_speakers_ranked_by_similarity(
 
 
 # ---------------------------------------------------------------------------
+# Regression: newly enrolled speaker must appear for subsequent speakers
+# ---------------------------------------------------------------------------
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=600.0)
+@patch("wisper_transcribe.pipeline.transcribe")
+@patch("wisper_transcribe.pipeline.get_hf_token", return_value="fake-token")
+@patch("wisper_transcribe.diarizer.diarize", return_value=[])
+@patch("wisper_transcribe.aligner.align")
+def test_newly_enrolled_speaker_appears_for_subsequent_speakers(
+    mock_align, mock_diarize, mock_hf_token,
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg,
+    tmp_path, capsys,
+):
+    """A speaker enrolled for SPEAKER_00 must appear in the candidates list for SPEAKER_01.
+
+    Regression for: _interactive_enroll() loaded existing_profiles / enrolled_embeddings
+    once and never refreshed them mid-loop, so a speaker just enrolled in iteration N
+    was invisible to iteration N+1.
+    """
+    import numpy as np
+    from wisper_transcribe.models import SpeakerProfile
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    mock_convert.return_value = audio
+    mock_transcribe.return_value = [
+        TranscriptionSegment(start=0.0, end=5.0, text="Hello from Brad"),
+        TranscriptionSegment(start=5.0, end=10.0, text="Hello from Carol"),
+    ]
+    mock_align.return_value = [
+        AlignedSegment(start=0.0, end=5.0, text="Hello from Brad", speaker="SPEAKER_00"),
+        AlignedSegment(start=5.0, end=10.0, text="Hello from Carol", speaker="SPEAKER_01"),
+    ]
+
+    # Pre-create an embedding file that the mock enroll_speaker will point to.
+    brad_npy = tmp_path / "brad.npy"
+    brad_emb = np.zeros(512, dtype=np.float32)
+    np.save(str(brad_npy), brad_emb)
+
+    brad_profile = SpeakerProfile(
+        name="brad", display_name="Brad", role="",
+        embedding_path=brad_npy,
+        enrolled_date="2026-01-01", enrollment_source="session01.mp3",
+    )
+
+    # No pre-existing profiles; Brad is enrolled fresh during this session.
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        with patch("wisper_transcribe.speaker_manager.extract_embedding", return_value=brad_emb):
+            with patch("wisper_transcribe.speaker_manager.enroll_speaker", return_value=brad_profile):
+                # SPEAKER_00 → "Brad" (new); role/notes empty.
+                # SPEAKER_01 → "Carol" (new); role/notes empty.
+                with patch("click.prompt", side_effect=["Brad", "", "", "Carol", "", ""]):
+                    with patch("click.confirm", return_value=False):
+                        from wisper_transcribe.pipeline import process_file
+                        process_file(audio, output_dir=tmp_path, device="cpu", enroll_speakers=True)
+
+    out = capsys.readouterr().out
+    # The "Existing speakers:" block for SPEAKER_01 must mention Brad.
+    existing_block_start = out.index("Existing speakers:")
+    assert "Brad" in out[existing_block_start:], (
+        "Brad (enrolled for SPEAKER_00) should appear in the candidates list for SPEAKER_01"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Feature 3: hotwords / initial_prompt pass-through
 # ---------------------------------------------------------------------------
 
