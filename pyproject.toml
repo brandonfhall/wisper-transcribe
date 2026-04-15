@@ -42,6 +42,23 @@ dev = [
 macos = [
     "mlx-whisper",         # Apple Silicon GPU/ANE Whisper backend (macOS only)
 ]
+# LLM post-processing (wisper refine / wisper summarize). All opt-in; core
+# install stays ML-only. Ollama uses httpx (already a runtime-adjacent dep
+# via uvicorn/FastAPI) so no extra package is required for local use.
+llm-anthropic = [
+    "anthropic>=0.39.0",
+]
+llm-openai = [
+    "openai>=1.50.0",
+]
+llm-google = [
+    "google-genai>=0.3.0",
+]
+llm-all = [
+    "anthropic>=0.39.0",
+    "openai>=1.50.0",
+    "google-genai>=0.3.0",
+]
 
 [project.scripts]
 wisper = "wisper_transcribe.cli:main"
