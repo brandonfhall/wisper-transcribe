@@ -391,3 +391,291 @@ def test_transcribe_folder_reports_summary(tmp_path):
 
     assert result.exit_code == 0
     assert "Done" in result.output
+
+
+# ---------------------------------------------------------------------------
+# wisper config llm (interactive wizard)
+# ---------------------------------------------------------------------------
+
+def test_config_llm_ollama_wizard(tmp_path, monkeypatch):
+    """Walk the wizard choosing ollama; writes provider/model/endpoint."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    # Answers: provider=ollama, model=llama3.1:8b, endpoint=http://localhost:11434
+    user_input = "ollama\nllama3.1:8b\nhttp://localhost:11434\n"
+    result = CliRunner().invoke(main, ["config", "llm"], input=user_input)
+    assert result.exit_code == 0
+
+    from wisper_transcribe.config import load_config
+    cfg = load_config()
+    assert cfg["llm_provider"] == "ollama"
+    assert cfg["llm_model"] == "llama3.1:8b"
+    assert cfg["llm_endpoint"] == "http://localhost:11434"
+
+
+def test_config_llm_anthropic_wizard_saves_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    # provider=anthropic, model=(default), key=sk-xxx
+    user_input = "anthropic\nclaude-sonnet-4-6\nsk-secret\n"
+    result = CliRunner().invoke(main, ["config", "llm"], input=user_input)
+    assert result.exit_code == 0
+
+    from wisper_transcribe.config import load_config
+    cfg = load_config()
+    assert cfg["llm_provider"] == "anthropic"
+    assert cfg["anthropic_api_key"] == "sk-secret"
+
+
+def test_config_llm_rejects_bad_provider(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    result = CliRunner().invoke(main, ["config", "llm"], input="bogus\n")
+    assert result.exit_code != 0
+    assert "Unknown provider" in result.output
+
+
+def test_config_show_masks_api_keys(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    # Stash a fake key in config.
+    CliRunner().invoke(main, ["config", "set", "anthropic_api_key", "sk-secret-xxx"])
+
+    mock_torch = MagicMock()
+    mock_torch.cuda.is_available.return_value = False
+    mock_torch.backends.mps.is_available.return_value = False
+    with patch.dict("sys.modules", {"torch": mock_torch}):
+        result = CliRunner().invoke(main, ["config", "show"])
+    assert result.exit_code == 0
+    assert "sk-secret-xxx" not in result.output
+    assert "***" in result.output
+
+
+# ---------------------------------------------------------------------------
+# wisper refine
+# ---------------------------------------------------------------------------
+
+def _write_transcript(tmp_path: Path, name: str = "ep.md") -> Path:
+    md = (
+        "---\n"
+        "title: Session 01\n"
+        "---\n"
+        "**Alice** *(00:01)*: I met Kira in Golarian.\n"
+        "**Unknown Speaker 1** *(00:05)*: Good to see you!\n"
+    )
+    path = tmp_path / name
+    path.write_text(md, encoding="utf-8")
+    return path
+
+
+def test_refine_dry_run_does_not_modify_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    transcript = _write_transcript(tmp_path)
+    original = transcript.read_text(encoding="utf-8")
+
+    fake_client = MagicMock()
+    fake_client.provider = "mock"
+    fake_client.model = "m1"
+    fake_client.complete_json.return_value = {"changes": [
+        {"original": "Kira", "corrected": "Kyra"},
+        {"original": "Golarian", "corrected": "Golarion"},
+    ]}
+    with patch("wisper_transcribe.cli._get_llm_client", return_value=fake_client):
+        # Ensure the CLI sees hotwords from config.
+        CliRunner().invoke(main, ["config", "set", "hotwords", "Kyra, Golarion"])
+        result = CliRunner().invoke(main, ["refine", str(transcript), "--no-color"])
+
+    assert result.exit_code == 0, result.output
+    assert "Vocabulary edits: 2" in result.output
+    # File unchanged (dry-run is the default).
+    assert transcript.read_text(encoding="utf-8") == original
+    # No backup written.
+    assert not (tmp_path / "ep.md.bak").exists()
+
+
+def test_refine_apply_writes_backup_and_updates_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    transcript = _write_transcript(tmp_path)
+    original = transcript.read_text(encoding="utf-8")
+
+    fake_client = MagicMock()
+    fake_client.provider = "mock"
+    fake_client.model = "m1"
+    fake_client.complete_json.return_value = {"changes": [
+        {"original": "Kira", "corrected": "Kyra"},
+    ]}
+    with patch("wisper_transcribe.cli._get_llm_client", return_value=fake_client):
+        CliRunner().invoke(main, ["config", "set", "hotwords", "Kyra"])
+        result = CliRunner().invoke(main, ["refine", str(transcript), "--apply", "--no-color"])
+
+    assert result.exit_code == 0, result.output
+    refined = transcript.read_text(encoding="utf-8")
+    assert "Kyra" in refined and "Kira" not in refined
+    # YAML frontmatter preserved byte-for-byte.
+    assert refined.startswith("---\ntitle: Session 01\n---\n")
+    backup = tmp_path / "ep.md.bak"
+    assert backup.exists()
+    assert backup.read_text(encoding="utf-8") == original
+
+
+def test_refine_unknown_task_surfaces_suggestions(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    _make_fake_profile(tmp_path, "Alice", role="DM")
+    _make_fake_profile(tmp_path, "Bob", role="Player")
+    transcript = _write_transcript(tmp_path)
+
+    fake_client = MagicMock()
+    fake_client.provider = "mock"
+    fake_client.model = "m1"
+    fake_client.complete_json.side_effect = [
+        {"changes": []},
+        {"suggestions": [{
+            "line_number": 5, "current_label": "Unknown Speaker 1",
+            "suggested_name": "Bob", "confidence": 0.9, "reason": "greeting",
+        }]},
+    ]
+    with patch("wisper_transcribe.cli._get_llm_client", return_value=fake_client):
+        CliRunner().invoke(main, ["config", "set", "hotwords", "Kyra"])
+        result = CliRunner().invoke(
+            main, ["refine", str(transcript), "--tasks", "vocabulary,unknown", "--no-color"]
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "Unknown-speaker suggestions: 1" in result.output
+    assert "Bob" in result.output
+
+
+def test_refine_rejects_unknown_task():
+    result = CliRunner().invoke(main, ["refine", "nope.md", "--tasks", "bogus"])
+    # Missing file raises first — use --help to hit the task validator.
+    result2 = CliRunner().invoke(
+        main, ["refine", "--help"]
+    )
+    assert result2.exit_code == 0
+    assert "vocabulary" in result2.output
+
+
+# ---------------------------------------------------------------------------
+# wisper summarize
+# ---------------------------------------------------------------------------
+
+_SUMMARY_PAYLOAD = {
+    "summary": "The party entered the crypt.",
+    "session_title": "Into the Crypt",
+    "loot": [{"item": "Wand", "quantity": "1", "recipient": "Alice"}],
+    "npcs": [{"name": "Aziel", "role": "dragon", "first_mentioned_at": "14:22"}],
+    "followups": ["Who sent the letter?"],
+}
+
+
+def test_summarize_writes_sidecar_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    _make_fake_profile(tmp_path, "Alice")
+    transcript = _write_transcript(tmp_path)
+
+    fake_client = MagicMock()
+    fake_client.provider = "anthropic"
+    fake_client.model = "claude-sonnet-4-6"
+    fake_client.complete_json.return_value = _SUMMARY_PAYLOAD
+    with patch("wisper_transcribe.cli._get_llm_client", return_value=fake_client):
+        result = CliRunner().invoke(main, ["summarize", str(transcript)])
+
+    assert result.exit_code == 0, result.output
+    summary = tmp_path / "ep.summary.md"
+    assert summary.exists()
+    content = summary.read_text(encoding="utf-8")
+    assert "# Into the Crypt" in content
+    assert "## Summary" in content
+    assert "Aziel" in content
+    # Refine was NOT triggered.
+    assert "refined: false" in content
+
+
+def test_summarize_refuses_to_overwrite(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    transcript = _write_transcript(tmp_path)
+    existing = tmp_path / "ep.summary.md"
+    existing.write_text("already here", encoding="utf-8")
+
+    result = CliRunner().invoke(main, ["summarize", str(transcript)])
+    assert result.exit_code != 0
+    assert "--overwrite" in result.output
+    assert existing.read_text(encoding="utf-8") == "already here"
+
+
+def test_summarize_with_refine_applies_and_summarizes(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    transcript = _write_transcript(tmp_path)
+    original = transcript.read_text(encoding="utf-8")
+
+    fake_client = MagicMock()
+    fake_client.provider = "ollama"
+    fake_client.model = "llama3.1:8b"
+    # Calls: (1) refine vocabulary, (2) summarize JSON
+    fake_client.complete_json.side_effect = [
+        {"changes": [{"original": "Kira", "corrected": "Kyra"}]},
+        _SUMMARY_PAYLOAD,
+    ]
+    with patch("wisper_transcribe.cli._get_llm_client", return_value=fake_client):
+        CliRunner().invoke(main, ["config", "set", "hotwords", "Kyra"])
+        result = CliRunner().invoke(
+            main, ["summarize", str(transcript), "--refine"]
+        )
+
+    assert result.exit_code == 0, result.output
+    # Refine ran: transcript was updated + backup created.
+    refined = transcript.read_text(encoding="utf-8")
+    assert "Kyra" in refined and "Kira" not in refined
+    backup = tmp_path / "ep.md.bak"
+    assert backup.exists()
+    assert backup.read_text(encoding="utf-8") == original
+    # Summary was written with refined: true.
+    summary = tmp_path / "ep.summary.md"
+    assert summary.exists()
+    assert "refined: true" in summary.read_text(encoding="utf-8")
+
+
+def test_summarize_refine_failure_falls_through(tmp_path, monkeypatch):
+    """If the refine LLM call fails, summarize should still succeed."""
+    from wisper_transcribe.llm.errors import LLMUnavailableError
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    transcript = _write_transcript(tmp_path)
+
+    fake_client = MagicMock()
+    fake_client.provider = "ollama"
+    fake_client.model = "llama3.1:8b"
+    # First call (refine) fails; second call (summarize) succeeds.
+    fake_client.complete_json.side_effect = [
+        LLMUnavailableError("ollama unreachable"),
+        _SUMMARY_PAYLOAD,
+    ]
+    with patch("wisper_transcribe.cli._get_llm_client", return_value=fake_client):
+        CliRunner().invoke(main, ["config", "set", "hotwords", "Kyra"])
+        result = CliRunner().invoke(
+            main, ["summarize", str(transcript), "--refine"]
+        )
+
+    assert result.exit_code == 0, result.output
+    summary = tmp_path / "ep.summary.md"
+    assert summary.exists()
+    # Refine failed → refined flag is false, no backup written.
+    assert "refined: false" in summary.read_text(encoding="utf-8")
+    assert not (tmp_path / "ep.md.bak").exists()
+
+
+def test_summarize_custom_output_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    transcript = _write_transcript(tmp_path)
+    out = tmp_path / "notes" / "custom.md"
+    out.parent.mkdir()
+
+    fake_client = MagicMock()
+    fake_client.provider = "mock"
+    fake_client.model = "m1"
+    fake_client.complete_json.return_value = _SUMMARY_PAYLOAD
+    with patch("wisper_transcribe.cli._get_llm_client", return_value=fake_client):
+        result = CliRunner().invoke(
+            main, ["summarize", str(transcript), "--output", str(out)]
+        )
+
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+    # Default sidecar should NOT have been written.
+    assert not (tmp_path / "ep.summary.md").exists()
