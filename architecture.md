@@ -398,22 +398,19 @@ URL-encoding is applied at every point where a filename is embedded in a URL or 
 - JavaScript in `job_detail.html` uses `encodeURIComponent(stem)` when constructing the post-SSE transcript link.
 
 ### Progress Display (Web)
-The job detail page shows a live progress bar driven by SSE events from `GET /transcribe/jobs/{id}/stream`.
+The job detail page shows a unified progress bar and step pills driven by SSE events from `GET /transcribe/jobs/{id}/stream`.
 
-**Sequential mode** (default, `parallel_stages=False`):
-- Three step indicators (T / D / F) advance one at a time.
-- The overall bar maps per-phase tqdm percentages: transcription → 0–60%, diarization → 60–90%, formatting → 100% on done.
-- ETA and speed counter are parsed from the tqdm string and shown below the bar.
+**Step pills:** Each active step type gets a colored pill (gray=pending, indigo+pulse=active, green=done). Steps shown depend on job type:
+- Transcription-only: T → D → F
+- Transcription with post-processing: T → D → F → R (if `post_refine`) → S (if `post_summarize`)
+- Standalone refine: R only
+- Standalone summarize: S only
 
-**Parallel mode** (`parallel_stages=True`):
-- Activated when the log line "Running transcription and diarization concurrently" is received.
-- Two stacked mini-bars appear: green for Transcribing, indigo for Diarizing.
-- Both T and D step dots pulse simultaneously; D does **not** wait for T.
-- Channel progress arrives as `channel_progress` SSE events (`{"type": "channel_progress", "channel": "transcribe"|"diarize", "message": "..."}`).
-- The transcribe bar shows the raw tqdm percentage (0–100%).
-- The diarize bar maps pyannote's three sub-steps: Segmentation → 0–40%, Embedding → 40–80%, Clustering → 80–100%. The current sub-step name and ETA are shown under the bar.
-- The overall bar shows the average of both channel percentages, capped at 90% until the job completes.
-- On completion, both mini-bars snap to 100%, both dots turn solid green, and the F dot activates for formatting.
+**Single bar:** The bar is divided into equal slices, one per step. As each step's tqdm percentage arrives, it fills within that step's slice. Phase is detected from log keywords (`transcrib`, `diariz`, `format`, `refine`, `summariz`) to activate the correct step. For parallel mode (`channel_progress` events), each channel maps to its step slice.
+
+**ETA and rate:** Parsed from tqdm progress strings and shown live below the bar. When no tqdm data arrives for ≥5 s (e.g. during LLM steps which have no tqdm), an estimator ticks the bar forward ~1% every 5 s up to 90% of the current step's slice, providing visual feedback until the `done` event fires.
+
+**Parallel mode** (`parallel_stages=True`, `channel_progress` SSE events): T and D slices update from their respective channels concurrently. The bar shows whichever channel is further ahead.
 
 ### Transcript Management (Web)
 - Transcripts list page: each card is fully clickable via the **overlay link pattern** (card is a `div` with an `absolute inset-0` `<a>` underneath, action buttons use `relative z-10` to sit above). This avoids the invalid-HTML problem of nesting `<form>` inside `<a>`.

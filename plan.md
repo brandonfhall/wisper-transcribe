@@ -1,4 +1,4 @@
-# Wisper-Transcribe: Backlog & Future Work
+# Wisper-Transcribe: Backlog & Active Work
 
 ## Project Context
 
@@ -7,6 +7,26 @@ Podcast transcription tool for tabletop RPG actual-play recordings (D&D, Pathfin
 **Hardware:** NVIDIA RTX 3090 (Windows), Apple M5 Mac. Both platforms supported.
 **Processing:** Fully local — no cloud APIs. CLI + web UI.
 **Stack:** faster-whisper + pyannote-audio. See [architecture.md](architecture.md) for full technical reference and [README.md](README.md) for user docs.
+
+---
+
+## In Progress
+
+### Progress Bar Redesign (April 2026)
+
+**Status:** Template rewritten. Tests pass (404). Needs: commit, architecture.md update, README update (if user-facing).
+
+**What changed in `job_detail.html`:**
+- Removed the dual T/D/F dot + separate progress bar layout
+- Single unified progress bar spanning all steps; each step occupies an equal slice
+- Steps shown: T → D → F for transcription; R for refine-only; S for summarize-only; T → D → F → R/S when post-processing is chained (only R/S shown if `job.post_refine`/`job.post_summarize`)
+- Each step pill shows: pending (gray), active (indigo + pulse), done (green)
+- ETA + speed/rate shown live from tqdm data; when no tqdm data for 5 s, a slow creep estimator advances the bar 1% per 5 s up to 90% of the current step slice
+- Phase detection added for refine/summarize log keywords (`connecting to ollama`, `refining`, `summarizing`) to activate R/S steps
+
+**Where to pick up:** Run `.venv/bin/pytest tests/ -v`, then commit `job_detail.html` + `tailwind.min.css` + `architecture.md` + `README.md` (no user-facing flag changes, but architecture.md needs the progress section updated). Then push.
+
+**Known gap:** ETA for LLM steps is estimated only (no tqdm data from LLM providers). The 5 s creep estimator covers this — it will slowly advance the R/S bar until the `done` event fires.
 
 ---
 
@@ -82,30 +102,6 @@ Re-score `Unknown Speaker N` labels at a looser secondary threshold (~0.40) afte
 **Architecture note:** If a second backend is ever added, use an abstract `TranscriptionBackend` interface in `transcriber.py` and `DiarizationBackend` in `diarizer.py`. Keep pipeline module backend-agnostic.
 
 **When to revisit:** When (a) CTranslate2 adds Intel GPU support, (b) a user actually needs this, or (c) OpenVINO's Whisper API stabilizes. Don't build speculatively.
-
----
-
-## Recommendations
-
-*Research completed April 2026. Findings grounded in full codebase review.*
-
----
-
-### DM Character Voice Handling — Recommendation
-
-**Viable path: Implement Approach 1 now; defer Approach 2.**
-
-Approach 1 delivers the core use case (~20 lines, uses existing `notes` field, no schema migration) and provides a clean migration path to Approach 2 when needed.
-
-**Approach 1 implementation plan:**
-
-- `pipeline.py` — after `match_speakers()` returns `speaker_map`, add a post-processing pass: for each profile whose `notes` matches `"voice_of:<key>"`, the display label is the profile's `display_name` (e.g., `"DM (as Aziel)"`). Character voice profiles are excluded from the YAML frontmatter `speakers:` list.
-- `cli.py` — in the enrollment interactive flow (the `wisper transcribe --enroll-speakers` dialog), add an optional prompt after naming a new speaker: *"Is this a character voice performed by an existing speaker? [y/N]"*. If yes, prompt for which speaker and write `notes = "voice_of:<key>"`. Also add `[voice of DM]` annotation to `wisper speakers list` output.
-- Scope: ~20 lines `pipeline.py`, ~15 lines `cli.py`. Tests: 3–4 in `test_pipeline.py`, 1 in `test_speaker_manager.py`.
-
-**Migration to Approach 2:** When Approach 2 ships (structured `attributed_to: Optional[str]` + `character_name: Optional[str]` fields on `SpeakerProfile`), `load_profiles()` reads existing profiles and auto-migrates any `notes = "voice_of:<key>"` to the new fields on first load. Non-breaking. The `character_voice_format` config key and runtime format control are Approach 2 additions.
-
-**Do not implement Approach 1 and 2 simultaneously.** The scope increase (models.py + speaker_manager.py + formatter.py + config.py + type change to `speaker_map`) is not justified until Approach 1 is validated in use.
 
 ---
 
@@ -308,220 +304,58 @@ POST /shows/{slug}/members/{key}/remove
 
 ---
 
-#### Verification
+## Manual Test Plans
 
-```bash
-.venv/bin/pytest tests/test_show_manager.py -v
-.venv/bin/pytest tests/ -v
+### LLM Post-processing CLI (T1–T5) — code complete; manual verification pending
 
-wisper shows create "Test Campaign"
-wisper shows add-member test-campaign alice --role DM
-wisper shows list
-wisper transcribe audio.mp3 --show test-campaign   # matches alice only
-wisper transcribe audio.mp3                        # global match, unchanged
-wisper server --reload   # verify /shows page + transcribe show dropdown
+**T1 — `wisper refine`**
 
-```
+T1.1 Dry-run: `wisper refine session.md` → diff printed, file unchanged.
+T1.2 No terms: `wisper refine session.md` with no hotwords → skipping warning.
+T1.3 Apply + backup: `wisper refine session.md --apply` → `.bak` created.
+T1.4 No-color: `wisper refine session.md --no-color | cat` → no ANSI codes.
+T1.5 Unknown task: `wisper refine session.md --tasks unknown` → suggestions only.
+T1.6 Both tasks: `wisper refine session.md --tasks vocabulary,unknown`.
+T1.7 YAML frontmatter unchanged after `--apply`.
 
-# Known Issues. 
-_(none)_
+**T2 — `wisper summarize`**
 
----
+T2.1 Basic: `wisper summarize session.md` → sidecar with all sections.
+T2.2 No overwrite: second run without `--overwrite` → error.
+T2.3 Overwrite: `wisper summarize session.md --overwrite` → clean regeneration.
+T2.4 Custom path: `wisper summarize session.md --output /tmp/recap.md`.
+T2.5 Sections filter: `--sections summary,loot` → only those sections present.
+T2.6 Wiki-links: enrolled speaker names become `[[Name]]` in body.
+T2.7 Non-enrolled: unenrolled names stay plain text.
+T2.8 Refine flag: `wisper summarize session.md --refine` → `refined: true` in frontmatter.
 
-# Manual Test Plan — `wisper refine` and `wisper summarize`
+**T3 — Combined flow**
 
-### Pre-requisites
+T3.1 Refine failure still produces summary (bad endpoint → WARN + summary written).
+T3.2 `--refine-tasks vocabulary,unknown` → both passes + unresolved speakers in output.
 
-- Have at least one transcribed `.md` file with YAML frontmatter (`---`)
-- Optionally: enroll 1–2 speakers (`wisper transcribe … --enroll-speakers`) so you have profiles to test against
-- Configure your LLM: `wisper config llm` (pick Ollama if you have it running locally, or a cloud provider)
+**T4 — LLM config integration**
 
----
+T4.1 Provider flag beats config.
+T4.2 `wisper config llm` wizard round-trip → keys masked in `config show`.
+T4.3 Env var beats config key for API access.
 
-### Test Group 1 — `wisper refine` (vocabulary pass)
+**T5 — Edge cases**
 
-**T1.1 — Dry-run default (nothing written)**
-```bash
-wisper refine session.md
-```
-Expected: prints provider/model, vocab edit count, colored diff to stdout. The `.md` file is **not** modified. No `.bak` created.
+T5.1 No-frontmatter transcript handled gracefully.
+T5.2 Empty transcript body — no crash.
+T5.3 Read-only directory — clean error.
 
-**T1.2 — No known terms (empty hotwords + no profiles)**
-```bash
-wisper config set hotwords ""
-wisper refine session.md
-```
-Expected: prints `"fix_vocabulary: no hotwords or character names provided; skipping"` warning, `Vocabulary edits: 0`.
+### Web UI LLM post-processing (W1–W5) — code complete; manual verification pending
 
-**T1.3 — Apply mode writes backup**
-```bash
-wisper refine session.md --apply
-ls session.md.bak   # must exist
-```
-Expected: `session.md.bak` created with original content; `session.md` contains the refined text.
+W1 Post-process checkboxes on transcribe form → campaign notes appear after job.
+W2 Standalone summarize from transcript detail → job progress page → notes.
+W3 Campaign Notes page renders with metadata.
+W4 Delete transcript removes summary sidecar.
+W5 Summary badge on transcripts list page.
 
-**T1.4 — `--no-color` flag**
-```bash
-wisper refine session.md --no-color | cat
-```
-Expected: diff output has no ANSI escape codes.
+### Progress bar redesign (P1–P3) — code complete; manual verification pending
 
-**T1.5 — Unknown-speaker task**
-```bash
-wisper refine session.md --tasks unknown
-```
-Expected: prints `Unknown-speaker suggestions: N (never auto-applied)`. If there are `Unknown Speaker N` lines in the transcript and matching enrolled profiles, suggestions are printed but the file is unchanged.
-
-**T1.6 — Both tasks together**
-```bash
-wisper refine session.md --tasks vocabulary,unknown
-```
-Expected: runs both passes; shows both edit count and suggestion count.
-
-**T1.7 — YAML frontmatter is not modified**
-After `--apply`, confirm the `---` block in the output file is identical to the original.
-
----
-
-### Test Group 2 — `wisper summarize`
-
-**T2.1 — Basic summary generation**
-```bash
-wisper summarize session.md
-```
-Expected: creates `session.summary.md`. File has `---` YAML frontmatter with `type: session-summary`, `provider:`, `model:`, `refined: false`. Sections `## Summary`, `## Loot & Inventory`, `## NPCs`, `## Follow-ups` all present.
-
-**T2.2 — Refuse to overwrite without flag**
-```bash
-wisper summarize session.md          # creates the sidecar
-wisper summarize session.md          # second run — should error
-```
-Expected: second run exits with `"Summary file exists: … Pass --overwrite to replace it."`.
-
-**T2.3 — `--overwrite` replaces existing sidecar**
-```bash
-wisper summarize session.md --overwrite
-```
-Expected: exits cleanly, file regenerated.
-
-**T2.4 — Custom output path**
-```bash
-wisper summarize session.md --output /tmp/recap.md
-ls /tmp/recap.md
-```
-Expected: file written to the specified path, not alongside the transcript.
-
-**T2.5 — `--sections` filter**
-```bash
-wisper summarize session.md --overwrite --sections summary,loot
-```
-Expected: output has `## Summary` and `## Loot & Inventory` but **no** `## NPCs` or `## Follow-ups`.
-
-**T2.6 — `[[wiki-links]]` for enrolled speakers**
-Enroll a speaker named "Alice". Run summarize on a transcript that mentions Alice. Confirm `[[Alice]]` appears in the summary body (not in YAML frontmatter).
-
-**T2.7 — Unknown names stay plain**
-A name that isn't enrolled (e.g. "Aziel the Dragon") should appear as plain text, not `[[Aziel the Dragon]]`.
-
-**T2.8 — `refined: true` in frontmatter**
-```bash
-wisper summarize session.md --refine --overwrite
-```
-Expected: `session.summary.md` frontmatter contains `refined: true`; `session.md.bak` is created.
-
----
-
-### Test Group 3 — `wisper summarize --refine` (combined flow)
-
-**T3.1 — Refine failure still produces summary**
-Simulate a bad LLM endpoint:
-```bash
-wisper summarize session.md --refine --endpoint http://localhost:9999 --provider ollama --overwrite
-```
-Expected: prints `WARN: refine step failed (…); summarizing original.` to stderr; still writes `session.summary.md` with `refined: false`.
-
-**T3.2 — `--refine-tasks vocabulary,unknown`**
-```bash
-wisper summarize session.md --refine --refine-tasks vocabulary,unknown --overwrite
-```
-Expected: runs both refine passes; any unresolved speaker suggestions appear in the `## Unresolved Speakers` section of the summary.
-
----
-
-### Test Group 4 — LLM config integration
-
-**T4.1 — Provider override via flag beats config**
-```bash
-wisper config set llm_provider ollama
-wisper summarize session.md --provider anthropic --model claude-haiku-4-5-20251001
-```
-Expected: summary frontmatter shows `provider: anthropic`, `model: claude-haiku-4-5-20251001`.
-
-**T4.2 — `wisper config llm` wizard round-trip**
-```bash
-wisper config llm
-wisper config show
-```
-Expected: the provider/model/key you entered appears masked (`***`) in `config show`.
-
-**T4.3 — `ANTHROPIC_API_KEY` env var takes precedence**
-Set `ANTHROPIC_API_KEY=abc123` in env and a different key in config. Confirm the API call uses the env var key (observable via a deliberate wrong env var → API error).
-
----
-
-### Test Group 5 — Edge cases
-
-**T5.1 — Transcript with no frontmatter**
-```bash
-echo "**Alice**: Hello." > nofm.md
-wisper refine nofm.md
-wisper summarize nofm.md
-```
-Expected: both commands handle it gracefully (no crash); summary output is written.
-
-**T5.2 — Empty transcript body**
-A file that has only the YAML frontmatter block. Both commands should soft-fail or produce empty sections without crashing.
-
-**T5.3 — `--apply` on a read-only directory**
-Expected: clean error message, not an unhandled Python traceback.
-
----
-
-## Web UI — LLM Post-processing (Phase in progress, April 2026)
-
-### What was built
-
-LLM refine and summarize are now accessible from the web interface:
-
-- **Transcribe form** — "LLM Post-processing" section at the bottom of the Options panel; checkboxes for "Refine vocabulary" and "Generate campaign summary". Both run as a chained post-process step after transcription completes, captured into the same job log.
-- **Transcript detail page** — "LLM Post-processing" collapsible panel with Refine and Summarize buttons. Each submits a standalone LLM job and redirects to the job progress page.
-- **Campaign Notes link** — appears on the transcript detail page and transcript list cards when a `.summary.md` sidecar exists. Links to `/transcripts/<name>/summary`.
-- **Summary detail page** — `/transcripts/<name>/summary` renders the `.summary.md` with metadata (LLM provider/model, generated date, NPC list), body, and a "Regenerate" button.
-- **Job detail page** — LLM jobs suppress the T/D/F step indicators and show a single step dot (R for Refine, S for Summarize). On completion, shows "View Transcript" + "View Campaign Notes" (if summary was generated).
-- **File storage** — Summary `.summary.md` files live in the same `output/` directory as transcripts. The transcripts list filters them out of the main card view; they are surfaced only through their transcript's detail page.
-
-### Manual test plan (web UI)
-
-**W1 — Post-process checkboxes on transcribe form**
-Upload an audio file. Tick "Generate campaign summary". Start transcription. After the job completes, confirm:
-- Job log shows "Generating campaign summary for …"
-- "View Campaign Notes" button appears on job completion
-- `output/<stem>.summary.md` exists
-- Transcript card on the list page shows "Campaign notes available" and the notes icon
-
-**W2 — Standalone Summarize from transcript detail**
-Navigate to an existing transcript. Open "LLM Post-processing". Click "Generate Campaign Summary". Confirm redirect to job page, progress log streams, and on completion "View Campaign Notes" appears.
-
-**W3 — Campaign Notes page**
-Open `/transcripts/<name>/summary`. Confirm rendered summary with metadata card (LLM provider, generated date, NPC chips). Click "← Transcript" to return.
-
-**W4 — Delete transcript also removes summary**
-Delete a transcript that has a summary. Confirm both `.md` and `.summary.md` are removed from the output dir.
-
-**W5 — Summary badge on list page**
-After creating a summary, navigate to `/transcripts`. Confirm the card shows the green notes icon and "Campaign notes available" text.
-
-### Documentation TODO (do before merging to main)
-
-- [ ] `architecture.md` — add new web routes to route table, update module map for jobs.py changes (LLM job types), update test count
-- [ ] `README.md` — add web LLM post-processing to feature list and usage docs
+P1 Transcription-only job: T → D → F pills advance, bar fills across all three slices, ETA/rate shown during T and D.
+P2 Transcription + post-summarize: T → D → F → S pills shown; S activates on "Summarizing…" log line; estimator creeps bar during S when no tqdm data.
+P3 Standalone summarize job: only S pill shown; bar fills from 0 → 100 via estimator + done event.
