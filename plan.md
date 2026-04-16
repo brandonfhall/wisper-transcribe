@@ -325,3 +325,162 @@ wisper server --reload   # verify /shows page + transcribe show dropdown
 
 # Known Issues. 
 - On the web interface while doing speaker enrollment the "play" button will change to "stop" but clicking on it just restarts the audio file. 
+
+---
+
+# Manual Test Plan — `wisper refine` and `wisper summarize`
+
+### Pre-requisites
+
+- Have at least one transcribed `.md` file with YAML frontmatter (`---`)
+- Optionally: enroll 1–2 speakers (`wisper transcribe … --enroll-speakers`) so you have profiles to test against
+- Configure your LLM: `wisper config llm` (pick Ollama if you have it running locally, or a cloud provider)
+
+---
+
+### Test Group 1 — `wisper refine` (vocabulary pass)
+
+**T1.1 — Dry-run default (nothing written)**
+```bash
+wisper refine session.md
+```
+Expected: prints provider/model, vocab edit count, colored diff to stdout. The `.md` file is **not** modified. No `.bak` created.
+
+**T1.2 — No known terms (empty hotwords + no profiles)**
+```bash
+wisper config set hotwords ""
+wisper refine session.md
+```
+Expected: prints `"fix_vocabulary: no hotwords or character names provided; skipping"` warning, `Vocabulary edits: 0`.
+
+**T1.3 — Apply mode writes backup**
+```bash
+wisper refine session.md --apply
+ls session.md.bak   # must exist
+```
+Expected: `session.md.bak` created with original content; `session.md` contains the refined text.
+
+**T1.4 — `--no-color` flag**
+```bash
+wisper refine session.md --no-color | cat
+```
+Expected: diff output has no ANSI escape codes.
+
+**T1.5 — Unknown-speaker task**
+```bash
+wisper refine session.md --tasks unknown
+```
+Expected: prints `Unknown-speaker suggestions: N (never auto-applied)`. If there are `Unknown Speaker N` lines in the transcript and matching enrolled profiles, suggestions are printed but the file is unchanged.
+
+**T1.6 — Both tasks together**
+```bash
+wisper refine session.md --tasks vocabulary,unknown
+```
+Expected: runs both passes; shows both edit count and suggestion count.
+
+**T1.7 — YAML frontmatter is not modified**
+After `--apply`, confirm the `---` block in the output file is identical to the original.
+
+---
+
+### Test Group 2 — `wisper summarize`
+
+**T2.1 — Basic summary generation**
+```bash
+wisper summarize session.md
+```
+Expected: creates `session.summary.md`. File has `---` YAML frontmatter with `type: session-summary`, `provider:`, `model:`, `refined: false`. Sections `## Summary`, `## Loot & Inventory`, `## NPCs`, `## Follow-ups` all present.
+
+**T2.2 — Refuse to overwrite without flag**
+```bash
+wisper summarize session.md          # creates the sidecar
+wisper summarize session.md          # second run — should error
+```
+Expected: second run exits with `"Summary file exists: … Pass --overwrite to replace it."`.
+
+**T2.3 — `--overwrite` replaces existing sidecar**
+```bash
+wisper summarize session.md --overwrite
+```
+Expected: exits cleanly, file regenerated.
+
+**T2.4 — Custom output path**
+```bash
+wisper summarize session.md --output /tmp/recap.md
+ls /tmp/recap.md
+```
+Expected: file written to the specified path, not alongside the transcript.
+
+**T2.5 — `--sections` filter**
+```bash
+wisper summarize session.md --overwrite --sections summary,loot
+```
+Expected: output has `## Summary` and `## Loot & Inventory` but **no** `## NPCs` or `## Follow-ups`.
+
+**T2.6 — `[[wiki-links]]` for enrolled speakers**
+Enroll a speaker named "Alice". Run summarize on a transcript that mentions Alice. Confirm `[[Alice]]` appears in the summary body (not in YAML frontmatter).
+
+**T2.7 — Unknown names stay plain**
+A name that isn't enrolled (e.g. "Aziel the Dragon") should appear as plain text, not `[[Aziel the Dragon]]`.
+
+**T2.8 — `refined: true` in frontmatter**
+```bash
+wisper summarize session.md --refine --overwrite
+```
+Expected: `session.summary.md` frontmatter contains `refined: true`; `session.md.bak` is created.
+
+---
+
+### Test Group 3 — `wisper summarize --refine` (combined flow)
+
+**T3.1 — Refine failure still produces summary**
+Simulate a bad LLM endpoint:
+```bash
+wisper summarize session.md --refine --endpoint http://localhost:9999 --provider ollama --overwrite
+```
+Expected: prints `WARN: refine step failed (…); summarizing original.` to stderr; still writes `session.summary.md` with `refined: false`.
+
+**T3.2 — `--refine-tasks vocabulary,unknown`**
+```bash
+wisper summarize session.md --refine --refine-tasks vocabulary,unknown --overwrite
+```
+Expected: runs both refine passes; any unresolved speaker suggestions appear in the `## Unresolved Speakers` section of the summary.
+
+---
+
+### Test Group 4 — LLM config integration
+
+**T4.1 — Provider override via flag beats config**
+```bash
+wisper config set llm_provider ollama
+wisper summarize session.md --provider anthropic --model claude-haiku-4-5-20251001
+```
+Expected: summary frontmatter shows `provider: anthropic`, `model: claude-haiku-4-5-20251001`.
+
+**T4.2 — `wisper config llm` wizard round-trip**
+```bash
+wisper config llm
+wisper config show
+```
+Expected: the provider/model/key you entered appears masked (`***`) in `config show`.
+
+**T4.3 — `ANTHROPIC_API_KEY` env var takes precedence**
+Set `ANTHROPIC_API_KEY=abc123` in env and a different key in config. Confirm the API call uses the env var key (observable via a deliberate wrong env var → API error).
+
+---
+
+### Test Group 5 — Edge cases
+
+**T5.1 — Transcript with no frontmatter**
+```bash
+echo "**Alice**: Hello." > nofm.md
+wisper refine nofm.md
+wisper summarize nofm.md
+```
+Expected: both commands handle it gracefully (no crash); summary output is written.
+
+**T5.2 — Empty transcript body**
+A file that has only the YAML frontmatter block. Both commands should soft-fail or produce empty sections without crashing.
+
+**T5.3 — `--apply` on a read-only directory**
+Expected: clean error message, not an unhandled Python traceback.

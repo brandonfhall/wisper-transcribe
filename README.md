@@ -715,4 +715,5 @@ WISPER_DEBUG=1 wisper transcribe session.mp3
 - [x] Parallel stage processing: concurrent transcription + diarization via `ProcessPoolExecutor` (`parallel_stages` config key); parallel progress bars in web UI
 - [x] Logging overhaul: `Logger` class (`debug_log.py`), `--debug` writes timestamped log file, `--verbose` surfaces ML library output; `_noise_suppress.py` extracted for subprocess safety; `_SilenceFilter` hardens Lightning logger suppression
 - [x] `large-v3-turbo` model: added to `--model` choices and set as the new default (distilled large-v3, ~8× faster with minimal accuracy loss)
-- [x] Code quality: extracted shared `time_utils.py` helpers, deduplicated pipeline/formatter/diarizer; test coverage expanded to 81% (272 tests)
+- [x] Code quality: extracted shared `time_utils.py` helpers, deduplicated pipeline/formatter/diarizer
+- [x] LLM post-processing: `wisper refine` (vocabulary correction, unknown-speaker ID) and `wisper summarize` (campaign notes with loot, NPCs, follow-ups) — multi-provider (Ollama / Anthropic / OpenAI / Google)
