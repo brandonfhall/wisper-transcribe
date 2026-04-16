@@ -17,7 +17,11 @@ async def dashboard(request: Request) -> HTMLResponse:
     queue = get_queue(request)
     config = load_config()
     device = get_device()
-    hf_token_set = bool(config.get("hf_token") or __import__("os").environ.get("HUGGINGFACE_TOKEN"))
+    hf_token_set = bool(
+        config.get("hf_token")
+        or __import__("os").environ.get("HUGGINGFACE_TOKEN")
+        or __import__("os").environ.get("HF_TOKEN")
+    )
 
     # Count transcripts in output dirs
     output_dir = Path(get_data_dir()) / "output" if not (Path.cwd() / "output").exists() else Path.cwd() / "output"

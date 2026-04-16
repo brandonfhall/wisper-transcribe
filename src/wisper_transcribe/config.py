@@ -142,18 +142,26 @@ def get_device() -> str:
 def get_hf_token(config: Optional[dict] = None) -> str:
     """Return HuggingFace token from env var, config, or interactive prompt.
 
+    Accepts HUGGINGFACE_TOKEN or HF_TOKEN (huggingface_hub's canonical name).
+    Whichever is found is propagated to both env vars so third-party libraries
+    (e.g. mlx-whisper) that only look for HF_TOKEN also see it.
+
     Raises RuntimeError if no token is found and stdin is not a tty.
     """
     import os
 
-    token = os.environ.get("HUGGINGFACE_TOKEN", "")
+    token = os.environ.get("HUGGINGFACE_TOKEN", "") or os.environ.get("HF_TOKEN", "")
     if token:
+        os.environ.setdefault("HUGGINGFACE_TOKEN", token)
+        os.environ.setdefault("HF_TOKEN", token)
         return token
 
     if config is None:
         config = load_config()
     token = config.get("hf_token", "")
     if token:
+        os.environ.setdefault("HUGGINGFACE_TOKEN", token)
+        os.environ.setdefault("HF_TOKEN", token)
         return token
 
     # Interactive prompt as last resort

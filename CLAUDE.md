@@ -135,7 +135,8 @@ Every security control must have a corresponding test in `tests/test_path_traver
 |----------|---------|
 | `WISPER_DATA_DIR` | Override data dir (Docker bind mount) |
 | `WISPER_DEBUG` | Set `1` to disable warning suppression |
-| `HUGGINGFACE_TOKEN` | HF token alternative to `config.toml` |
+| `HUGGINGFACE_TOKEN` | HF token alternative to `config.toml`; `HF_TOKEN` is also accepted (alias) — both are propagated to `os.environ` once resolved |
+| `HF_TOKEN` | Alias for `HUGGINGFACE_TOKEN`; accepted by `get_hf_token()` and propagated to both vars |
 
 ---
 

@@ -113,6 +113,23 @@ def test_job_detail_unknown_returns_404(client):
     assert resp.status_code == 404
 
 
+def test_job_detail_nav_contains_config_link(client, tmp_path):
+    """The Config nav link must be present on the job detail page (sticky nav regression guard)."""
+    audio_file = tmp_path / "nav_test.mp3"
+    audio_file.write_bytes(b"fake")
+    with open(audio_file, "rb") as f:
+        post_resp = client.post(
+            "/transcribe",
+            files={"file": ("nav_test.mp3", f, "audio/mpeg")},
+            data={},
+            follow_redirects=False,
+        )
+    job_url = post_resp.headers["location"]
+    resp = client.get(job_url)
+    assert resp.status_code == 200
+    assert b'href="/config"' in resp.content
+
+
 def test_cancel_job_redirects(client, tmp_path):
     """POST /transcribe/jobs/<id>/cancel marks job cancelled and redirects."""
     audio_file = tmp_path / "test.mp3"
