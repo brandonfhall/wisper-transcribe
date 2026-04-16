@@ -56,6 +56,15 @@ source .venv/bin/activate
 pip install -e .
 ```
 
+**Optional cloud-LLM extras** (only needed if you want `wisper refine` / `wisper summarize` to hit a cloud provider — Ollama works out of the box with no extras):
+
+```bash
+pip install -e '.[llm-anthropic]'   # Anthropic (Claude)
+pip install -e '.[llm-openai]'      # OpenAI (GPT)
+pip install -e '.[llm-google]'      # Google (Gemini)
+pip install -e '.[llm-all]'         # all three
+```
+
 > **Windows CUDA users:** `pip install` from PyPI installs the CPU-only PyTorch build by default. After the steps above, run this extra command to get GPU support:
 > ```powershell
 > pip install "torch>=2.8.0" "torchaudio>=2.8.0" --index-url https://download.pytorch.org/whl/cu126 --force-reinstall
@@ -89,6 +98,14 @@ wisper config set hf_token hf_abc123...
 export HUGGINGFACE_TOKEN=hf_abc123...   # Mac/Linux
 $env:HUGGINGFACE_TOKEN="hf_abc123..."  # Windows PowerShell
 ```
+
+**Optional — configure an LLM for `refine` / `summarize`:**
+
+```bash
+wisper config llm
+```
+
+Walks you through provider (Ollama / Anthropic / OpenAI / Google), model, and API key or endpoint. Skip this if you're not planning to use the LLM post-processing commands.
 
 
 
@@ -301,15 +318,77 @@ wisper fix session03.md --speaker "Alice" --name "Diana"
 
 Add `--re-enroll` to also update the voice profile (currently prompts manual steps).
 
+### `wisper refine`
+
+LLM-assisted cleanup of an existing transcript. Two tasks:
+
+- **`vocabulary`** *(default)* — fixes proper-noun misspellings (Whisper renders "Kyra" as "Kira", "Golarion" as "Golarian"). Edits are validated against your configured `hotwords` + enrolled character names — freeform rewrites are rejected.
+- **`unknown`** — suggests identities for `Unknown Speaker N` labels based on surrounding dialogue. Suggestions are **never auto-applied** (rendered to stdout / sidecar only); confirm with `wisper fix`.
+
+```bash
+wisper refine session05.md                              # dry-run; prints coloured diff
+wisper refine session05.md --apply                      # writes session05.md.bak, updates in place
+wisper refine session05.md --tasks vocabulary,unknown   # run both passes
+wisper refine session05.md --provider anthropic         # override default provider
+```
+
+Options: `--tasks`, `--provider {ollama,anthropic,openai,google}`, `--model NAME`, `--endpoint URL` (ollama), `--dry-run/--apply`, `--no-color`.
+
+Safety: YAML frontmatter is never sent to the LLM and is preserved byte-for-byte. Network failures soft-fail with a warning and leave the transcript untouched.
+
+### `wisper summarize`
+
+Generate campaign notes from a transcript — a session recap, loot/inventory changes, notable NPCs, and follow-up plot hooks — written to `<stem>.summary.md` as an Obsidian-ready sidecar.
+
+```bash
+wisper summarize session05.md                        # writes session05.summary.md
+wisper summarize session05.md --overwrite            # replace existing sidecar
+wisper summarize session05.md --refine               # refine-then-summarize (atomic)
+wisper summarize session05.md --sections summary,loot  # only these sections
+wisper summarize session05.md --output recap.md      # custom output path
+wisper summarize session05.md --provider openai --model gpt-4o-mini
+```
+
+Options: `--provider`, `--model`, `--endpoint`, `--output PATH`, `--sections summary,loot,npcs,followups`, `--overwrite`, `--refine`, `--refine-tasks`.
+
+Output format:
+```markdown
+---
+type: session-summary
+source: "Episode 47.md"
+refined: true
+provider: anthropic
+model: claude-sonnet-4-6
+---
+# Session 47 — Summary
+## Summary
+…
+## Loot & Inventory
+- [[Thorin]] gained **+120 gp** from the chest
+## NPCs
+- Aziel — dragon, guarding the hoard (first at 14:22)
+## Follow-ups
+- [ ] Who sent the letter?
+```
+
+Character names are wrapped in `[[wiki-links]]` only when they match an enrolled speaker profile — unknown names stay plain so they don't create orphan Obsidian pages.
+
+With `--refine`, vocabulary edits are applied in place (same `.md.bak` guarantee as `wisper refine --apply`) before summarization. If the refine step fails, the summary is still written with `refined: false` recorded in its frontmatter.
+
 ### `wisper config`
 
 ```bash
-wisper config show                        # print all settings
+wisper config show                        # print all settings (API keys masked as ***)
 wisper config set model large-v3          # use the big model by default
 wisper config set hf_token hf_abc123...   # store HuggingFace token
 wisper config set similarity_threshold 0.70  # stricter speaker matching
 wisper config path                        # show where config.toml lives
+wisper config llm                         # interactive wizard: provider + model + key/endpoint
 ```
+
+**`wisper config llm`** is the recommended way to configure `refine` / `summarize`. It walks you through the provider (Ollama / Anthropic / OpenAI / Google), model name, and either the endpoint (Ollama) or API key (cloud) in one flow. API keys can alternatively be set via the `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GOOGLE_API_KEY` environment variables — env vars always take precedence over the stored value, and stored values are masked as `***` in `wisper config show`.
+
+Relevant keys: `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`.
 
 ### `wisper server`
 
@@ -567,6 +646,9 @@ docker compose run wisper nvidia-smi
 | `WISPER_DATA_DIR` | Override config/profile storage path — used automatically in Docker |
 | `WISPER_DEBUG` | Set to `1` to disable warning suppression and see raw dependency output |
 | `HUGGINGFACE_TOKEN` | HF token as an alternative to `wisper config set hf_token` |
+| `ANTHROPIC_API_KEY` | Anthropic API key for `refine` / `summarize` — takes precedence over stored config |
+| `OPENAI_API_KEY` | OpenAI API key — takes precedence over stored config |
+| `GOOGLE_API_KEY` | Google (Gemini) API key — takes precedence over stored config |
 
 ## Debugging and Verbose Output
 

@@ -35,8 +35,17 @@ src/wisper_transcribe/
 ├── formatter.py        Markdown output, YAML frontmatter, dynamic version from __version__
 ├── audio_utils.py      validate_audio(), convert_to_wav(), get_duration(), load_wav_as_tensor()
 ├── time_utils.py       Shared time formatting: format_timestamp(), format_duration()
-├── config.py           load_config(), save_config(), get_device(), get_hf_token(), check_ffmpeg()
-├── models.py           Dataclasses: TranscriptionSegment, DiarizationSegment, AlignedSegment, SpeakerProfile
+├── config.py           load_config(), save_config(), get_device(), get_hf_token(), get_llm_api_key(), resolve_llm_model(), check_ffmpeg()
+├── models.py           Dataclasses: TranscriptionSegment, DiarizationSegment, AlignedSegment, SpeakerProfile, Edit, SpeakerSuggestion, LootChange, NPCMention, SummaryNote
+├── refine.py           LLM-driven transcript refinement: vocabulary correction + unknown-speaker ID (edit-distance guarded, frontmatter-preserving)
+├── summarize.py        Campaign-notes generation (session recap, loot, NPCs, follow-ups) → Obsidian-ready sidecar markdown
+├── llm/                Provider-agnostic LLM client package (Ollama, Anthropic, OpenAI, Google)
+│   ├── base.py         LLMClient ABC: complete() + complete_json(schema)
+│   ├── errors.py       LLMUnavailableError (soft-fail) / LLMResponseError
+│   ├── ollama.py       httpx REST wrapper for local Ollama
+│   ├── anthropic.py    Anthropic SDK; JSON via forced tool_use
+│   ├── openai.py       OpenAI SDK; JSON via response_format json_schema strict mode
+│   └── google.py       google-genai SDK; JSON via response_schema
 ├── static/             Vendored web assets: htmx.min.js, tailwind.min.css (pre-built), wisp.svg, app.js
 └── web/                Phase 11: FastAPI web UI
     ├── app.py          FastAPI application factory (create_app()), module-level app instance for uvicorn
@@ -104,6 +113,18 @@ Audio file
                8. WRITE          Path.write_text()
                   • Output: <stem>.md alongside input file (or --output dir)
 ```
+
+### Optional post-processing (LLM)
+
+After the core pipeline has written `<stem>.md`, two opt-in commands operate on the transcript file:
+
+```
+<stem>.md ──► wisper refine    ──► (dry-run diff) or (<stem>.md.bak + updated <stem>.md)
+           ──► wisper summarize ──► <stem>.summary.md  (Obsidian-ready sidecar)
+           ──► wisper summarize --refine  ──► refine in-place, then summarize (atomic)
+```
+
+Both commands are provider-agnostic (Ollama / Anthropic / OpenAI / Google) via the `llm/` package. Neither modifies the input silently: `refine` is dry-run by default; `summarize` refuses to overwrite an existing sidecar without `--overwrite`.
 
 ---
 
@@ -221,6 +242,21 @@ Interaction with `--workers N` folder mode: when both `parallel_stages=True` and
 ### pyproject.toml torch version
 `torch>=2.8.0` is required because `pyannote-audio 4.x` declares this minimum. The CUDA build must be installed from `https://download.pytorch.org/whl/cu126` — PyPI only ships the CPU-only build. The `setup.ps1` script handles this automatically on Windows.
 
+### LLM post-processing (`refine.py`, `summarize.py`, `llm/`)
+Post-processing of an already-written transcript is split into two shapes:
+
+- **`refine.py` — surgical.** `fix_vocabulary()` asks the LLM for `{original, corrected}` pairs in batches of ~25 lines, then validates each proposed substitution against the known hotwords + enrolled character names via `difflib.get_close_matches(..., cutoff=0.7)`. Freeform rewrites ("The party stepped in" → "The heroes proceeded") are rejected with a `UserWarning`. `identify_unknown_speakers()` runs a 20-line sliding window with 5-line overlap and only keeps suggestions with confidence ≥ 0.75 **and** a `suggested_name` that matches an enrolled `SpeakerProfile.display_name` — so the LLM cannot hallucinate new identities. Unknown-speaker suggestions are **never auto-applied**; they surface as rendered output only.
+- **`summarize.py` — generative.** One structured-JSON call produces a `SummaryNote` (summary paragraph, loot list, NPC list, follow-ups). `render_markdown()` emits an Obsidian-compatible sidecar: YAML frontmatter (`type: session-summary`, `provider`, `model`, `refined`), then `## Summary / ## Loot & Inventory / ## NPCs / ## Follow-ups`. Names are wrapped in `[[wiki-links]]` only when they match an enrolled speaker's `display_name` or a name listed in their `notes` — unknown names stay plain to avoid creating orphan vault pages.
+
+The `llm/` package wraps each provider behind a single `LLMClient` ABC with `complete(system, user)` and `complete_json(system, user, schema)`. Provider differences (Anthropic's forced `tool_use`, OpenAI's `response_format={"type": "json_schema", "strict": true}`, Google's `response_schema`, Ollama's `format="json"`) are entirely internal. SDKs are **lazy-imported inside each client class** so a user with only Ollama installed never hits an `anthropic`/`openai`/`google-genai` import error — missing package raises `LLMUnavailableError` with an install hint.
+
+Safety invariants the implementation enforces:
+1. **YAML frontmatter is never sent to the LLM and is preserved byte-for-byte** — `parse_transcript()` splits the document into `(frontmatter_dict, body, raw_frontmatter_str)` and only the body is passed downstream. Reassembly uses the original raw string, not a re-serialised copy.
+2. **Dry-run default on refine**; `--apply` writes `<stem>.md.bak` before overwriting.
+3. **Cloud providers are opt-in**: default config is `llm_provider = "ollama"`. Cloud usage requires an explicit config change + API key (via env var preferred).
+4. **Soft-fail network model**: unreachable Ollama, 429/500 from cloud, or missing package → `warnings.warn()` + early return. In the `summarize --refine` flow, a refine failure still produces a summary with `refined: false` recorded in frontmatter.
+5. **API key lookup is env-var first** (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`), then config — matching the existing `get_hf_token()` pattern. Keys are masked as `***` in `wisper config show`.
+
 ---
 
 ## Data Storage
@@ -244,7 +280,7 @@ wisper-transcribe/       ← get_data_dir()
         └── <name>.npy   512-dim float32 voice embeddings (gitignored)
 ```
 
-Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`, `hotwords`, `use_mlx`, `parallel_stages`.
+Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`, `hotwords`, `use_mlx`, `parallel_stages`, `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`.
 
 ---
 
@@ -263,7 +299,10 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - `tests/conftest.py` provides an `autouse` fixture that patches `wisper_transcribe.pipeline.load_config` with a safe baseline config (prevents real user config — e.g. `parallel_stages=True` — from leaking into tests that don't explicitly patch it)
 - `tests/test_time_utils.py` covers shared `format_timestamp()` and `format_duration()` helpers
 - `tests/test_noise_suppress.py` covers warning filters, logger levels, `WISPER_DEBUG` bypass, missing absl, speechbrain deprecations, checkpoint upgrade warnings, and module-level suppress placement in `diarizer.py` and `speaker_manager.py`
-- Test count: 315 (all mocked, all passing, 81% coverage)
+- `tests/test_refine.py` covers `parse_transcript` (frontmatter / no-frontmatter / invalid YAML), vocabulary edit-distance guard, `apply_edits` idempotency, unknown-speaker confidence filter + hallucinated-name rejection, `render_diff` plain/coloured, and `refine_transcript` frontmatter preservation
+- `tests/test_summarize.py` covers structured-output parsing, enrolled-player NPC filtering, `render_markdown` section presence + placeholders, `[[wiki-link]]` rules (enrolled-only, whole-word, idempotent), `unresolved_speakers` section, and the `sections` filter
+- `tests/test_llm_clients.py` mocks httpx for Ollama and injects fake `anthropic` / `openai` / `google.genai` modules via `sys.modules` to cover the lazy-import path; each client's `complete()` and `complete_json()` are tested for happy path + SDK error + missing-SDK → `LLMUnavailableError`
+- Test count: 380 (all mocked, all passing)
 
 **CI matrix** (`.github/workflows/ci.yml`):
 - Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)

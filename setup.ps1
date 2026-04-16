@@ -89,12 +89,35 @@ if (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
     }
 }
 
+# ── Optional cloud LLM extras ────────────────────────────────────────────────
+Write-Step "Optional: cloud LLM extras (wisper refine / wisper summarize)"
+Write-Host ""
+Write-Host "   wisper refine and wisper summarize use an LLM to clean up transcripts" -ForegroundColor Gray
+Write-Host "   and generate campaign notes. Ollama (local) works out of the box." -ForegroundColor Gray
+Write-Host "   Install an extra only if you want to use a cloud provider." -ForegroundColor Gray
+Write-Host ""
+Write-Host "     a) Anthropic (Claude)"
+Write-Host "     b) OpenAI (GPT)"
+Write-Host "     c) Google (Gemini)"
+Write-Host "     d) All three"
+Write-Host "     s) Skip (use Ollama or configure later)"
+Write-Host ""
+$LLMChoice = Read-Host "   Choice [a/b/c/d/s]"
+switch ($LLMChoice.ToLower()) {
+    "a" { & $pip install -e ".[llm-anthropic]" -q; Write-OK "anthropic SDK installed" }
+    "b" { & $pip install -e ".[llm-openai]"    -q; Write-OK "openai SDK installed" }
+    "c" { & $pip install -e ".[llm-google]"    -q; Write-OK "google-genai SDK installed" }
+    "d" { & $pip install -e ".[llm-all]"       -q; Write-OK "all LLM SDKs installed" }
+    default { Write-OK "Skipped — use 'wisper config llm' to set up a provider at any time" }
+}
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "Setup complete!" -ForegroundColor Green
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor White
-Write-Host "  1. Activate venv:     .venv\Scripts\activate"
-Write-Host "  2. Run setup wizard:  wisper setup   (configures HF token + pre-downloads models)"
-Write-Host "  3. First session:     wisper transcribe session01.mp3 --enroll-speakers"
+Write-Host "  1. Activate venv:       .venv\Scripts\activate"
+Write-Host "  2. Run setup wizard:    wisper setup   (HF token, model download, LLM config)"
+Write-Host "  3. First session:       wisper transcribe session01.mp3 --enroll-speakers"
+Write-Host "  4. LLM config (later):  wisper config llm"
 Write-Host ""

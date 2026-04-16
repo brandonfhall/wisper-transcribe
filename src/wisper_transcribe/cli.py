@@ -238,6 +238,61 @@ def setup():
             click.echo(f"   WARN: model download failed: {e}", err=True)
             click.echo("   Models will download automatically on first transcription run.")
 
+    # ── LLM post-processing (opt-in) ──────────────────────────────────────────
+    click.echo("\n>> LLM post-processing (wisper refine / wisper summarize)")
+    click.echo("   These commands clean up transcripts and generate campaign notes.")
+    click.echo("   The default provider is Ollama (local — no API key required).")
+    click.echo("   Cloud providers (Anthropic, OpenAI, Google) need an API key.")
+    want_llm = click.confirm("   Configure an LLM provider now?", default=False)
+    if want_llm:
+        from .config import LLM_PROVIDERS
+
+        provider = click.prompt(
+            f"   Provider [{'/'.join(LLM_PROVIDERS)}]",
+            default=config.get("llm_provider", "ollama"),
+            show_default=False,
+        ).strip().lower()
+        if provider not in LLM_PROVIDERS:
+            click.echo(f"   WARN: unknown provider {provider!r} — skipping LLM setup", err=True)
+        else:
+            provider_defaults = {
+                "ollama": "llama3.1:8b",
+                "anthropic": "claude-sonnet-4-6",
+                "openai": "gpt-4o-mini",
+                "google": "gemini-1.5-flash",
+            }
+            suggested_model = config.get("llm_model", "") or provider_defaults[provider]
+            model_choice = click.prompt(
+                f"   Model [{suggested_model}]", default=suggested_model, show_default=False
+            ).strip()
+            config["llm_provider"] = provider
+            config["llm_model"] = model_choice
+
+            if provider == "ollama":
+                endpoint = config.get("llm_endpoint", "http://localhost:11434") or "http://localhost:11434"
+                endpoint = click.prompt(
+                    f"   Endpoint [{endpoint}]", default=endpoint, show_default=False
+                ).strip()
+                config["llm_endpoint"] = endpoint
+            else:
+                env_map = {
+                    "anthropic": ("ANTHROPIC_API_KEY", "anthropic_api_key"),
+                    "openai": ("OPENAI_API_KEY", "openai_api_key"),
+                    "google": ("GOOGLE_API_KEY", "google_api_key"),
+                }
+                env_name, config_key = env_map[provider]
+                click.echo(f"\n   Tip: the env var {env_name} always takes precedence if set.")
+                click.echo("   Leave blank to set it later via the env var.")
+                entered = click.prompt("   API key", default="", show_default=False,
+                                       hide_input=True).strip()
+                if entered:
+                    config[config_key] = entered
+
+            save_config(config)
+            click.echo(f"   OK  : LLM config saved ({provider} / {model_choice})")
+    else:
+        click.echo("   Skipped — run 'wisper config llm' any time to configure this.")
+
     # ── Done ──────────────────────────────────────────────────────────────────
     click.echo("")
     click.echo("=" * 42)
@@ -245,6 +300,8 @@ def setup():
     click.echo("")
     click.echo("Next steps:")
     click.echo("  wisper transcribe <file.mp3> --enroll-speakers")
+    click.echo("  wisper refine session.md --dry-run       # optional: LLM vocabulary cleanup")
+    click.echo("  wisper summarize session.md              # optional: generate campaign notes")
     click.echo("")
 
 
