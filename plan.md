@@ -324,7 +324,7 @@ wisper server --reload   # verify /shows page + transcribe show dropdown
 ```
 
 # Known Issues. 
-- On the web interface while doing speaker enrollment the "play" button will change to "stop" but clicking on it just restarts the audio file. 
+_(none)_
 
 ---
 
