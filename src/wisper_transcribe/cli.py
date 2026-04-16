@@ -262,9 +262,22 @@ def setup():
                 "google": "gemini-1.5-flash",
             }
             suggested_model = config.get("llm_model", "") or provider_defaults[provider]
-            model_choice = click.prompt(
-                f"   Model [{suggested_model}]", default=suggested_model, show_default=False
-            ).strip()
+            ollama_models = _get_ollama_models() if provider == "ollama" else []
+            if ollama_models:
+                click.echo("")
+                click.echo("   Installed Ollama models:")
+                for i, (name, size) in enumerate(ollama_models, 1):
+                    suffix = f"  ({size})" if size else ""
+                    click.echo(f"   {i}. {name}{suffix}")
+                raw = click.prompt(
+                    f"   Model — number or name [{suggested_model}]",
+                    default=suggested_model, show_default=False,
+                ).strip()
+                model_choice = ollama_models[int(raw) - 1][0] if (raw.isdigit() and 1 <= int(raw) <= len(ollama_models)) else raw
+            else:
+                model_choice = click.prompt(
+                    f"   Model [{suggested_model}]", default=suggested_model, show_default=False
+                ).strip()
             config["llm_provider"] = provider
             config["llm_model"] = model_choice
 
@@ -385,6 +398,33 @@ def config_path():
     click.echo(get_config_path())
 
 
+def _get_ollama_models() -> list[tuple[str, str]]:
+    """Return (name, size) pairs for models installed in the local Ollama instance.
+
+    Calls ``ollama list`` via subprocess. Returns an empty list if ollama is
+    not on PATH, not running, or exits non-zero — callers fall back to a plain
+    text prompt in that case.
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["ollama", "list"], capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    models: list[tuple[str, str]] = []
+    for line in result.stdout.strip().splitlines()[1:]:  # skip header row
+        parts = line.split()
+        if not parts:
+            continue
+        name = parts[0]
+        size = f"{parts[2]} {parts[3]}" if len(parts) >= 4 else ""
+        models.append((name, size))
+    return models
+
+
 @config.command("llm")
 def config_llm():
     """Interactive wizard for LLM provider, model, and API key / endpoint.
@@ -417,8 +457,21 @@ def config_llm():
         "google": "gemini-1.5-flash",
     }
     suggested_model = cfg.get("llm_model", "") or provider_defaults[provider]
-    model = click.prompt(f"Model [{suggested_model}]", default=suggested_model,
-                         show_default=False).strip()
+    ollama_models = _get_ollama_models() if provider == "ollama" else []
+    if ollama_models:
+        click.echo("")
+        click.echo("Installed Ollama models:")
+        for i, (name, size) in enumerate(ollama_models, 1):
+            suffix = f"  ({size})" if size else ""
+            click.echo(f"  {i}. {name}{suffix}")
+        raw = click.prompt(
+            f"Model — number or name [{suggested_model}]",
+            default=suggested_model, show_default=False,
+        ).strip()
+        model = ollama_models[int(raw) - 1][0] if (raw.isdigit() and 1 <= int(raw) <= len(ollama_models)) else raw
+    else:
+        model = click.prompt(f"Model [{suggested_model}]", default=suggested_model,
+                             show_default=False).strip()
 
     cfg["llm_provider"] = provider
     cfg["llm_model"] = model

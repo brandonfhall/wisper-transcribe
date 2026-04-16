@@ -425,6 +425,70 @@ def test_config_llm_anthropic_wizard_saves_key(tmp_path, monkeypatch):
     assert cfg["anthropic_api_key"] == "sk-secret"
 
 
+def test_config_llm_ollama_pick_by_number(tmp_path, monkeypatch):
+    """When ollama models are listed, user can pick by number."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    fake_models = [("gemma4:e4b", "9.6 GB"), ("mistral-nemo:latest", "7.1 GB")]
+    # provider=ollama, model=1 (first in list), endpoint=default
+    user_input = "ollama\n1\nhttp://localhost:11434\n"
+    with patch("wisper_transcribe.cli._get_ollama_models", return_value=fake_models):
+        result = CliRunner().invoke(main, ["config", "llm"], input=user_input)
+    assert result.exit_code == 0, result.output
+    assert "gemma4:e4b" in result.output
+
+    from wisper_transcribe.config import load_config
+    assert load_config()["llm_model"] == "gemma4:e4b"
+
+
+def test_config_llm_ollama_pick_by_name(tmp_path, monkeypatch):
+    """When ollama models are listed, user can still type a name instead of a number."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    fake_models = [("gemma4:e4b", "9.6 GB"), ("mistral-nemo:latest", "7.1 GB")]
+    user_input = "ollama\nmistral-nemo:latest\nhttp://localhost:11434\n"
+    with patch("wisper_transcribe.cli._get_ollama_models", return_value=fake_models):
+        result = CliRunner().invoke(main, ["config", "llm"], input=user_input)
+    assert result.exit_code == 0, result.output
+
+    from wisper_transcribe.config import load_config
+    assert load_config()["llm_model"] == "mistral-nemo:latest"
+
+
+def test_config_llm_ollama_no_models_falls_back_to_text(tmp_path, monkeypatch):
+    """When _get_ollama_models returns [], falls back to plain text prompt."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    user_input = "ollama\nllama3.1:8b\nhttp://localhost:11434\n"
+    with patch("wisper_transcribe.cli._get_ollama_models", return_value=[]):
+        result = CliRunner().invoke(main, ["config", "llm"], input=user_input)
+    assert result.exit_code == 0, result.output
+
+    from wisper_transcribe.config import load_config
+    assert load_config()["llm_model"] == "llama3.1:8b"
+
+
+def test_get_ollama_models_parses_list_output():
+    """_get_ollama_models parses `ollama list` stdout into (name, size) pairs."""
+    fake_stdout = (
+        "NAME                    ID              SIZE      MODIFIED\n"
+        "gemma4:e4b              c6eb396dbd59    9.6 GB    13 days ago\n"
+        "mistral-nemo:latest     e7e06d107c6c    7.1 GB    6 days ago\n"
+    )
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=fake_stdout)
+        from wisper_transcribe.cli import _get_ollama_models
+        models = _get_ollama_models()
+    assert models == [("gemma4:e4b", "9.6 GB"), ("mistral-nemo:latest", "7.1 GB")]
+
+
+def test_get_ollama_models_returns_empty_on_failure():
+    """_get_ollama_models returns [] when ollama is missing or exits non-zero."""
+    from wisper_transcribe.cli import _get_ollama_models
+    with patch("subprocess.run", side_effect=FileNotFoundError("ollama not found")):
+        assert _get_ollama_models() == []
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=1, stdout="")
+        assert _get_ollama_models() == []
+
+
 def test_config_llm_rejects_bad_provider(tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     result = CliRunner().invoke(main, ["config", "llm"], input="bogus\n")

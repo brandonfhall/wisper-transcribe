@@ -302,7 +302,7 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - `tests/test_refine.py` covers `parse_transcript` (frontmatter / no-frontmatter / invalid YAML), vocabulary edit-distance guard, `apply_edits` idempotency, unknown-speaker confidence filter + hallucinated-name rejection, `render_diff` plain/coloured, and `refine_transcript` frontmatter preservation
 - `tests/test_summarize.py` covers structured-output parsing, enrolled-player NPC filtering, `render_markdown` section presence + placeholders, `[[wiki-link]]` rules (enrolled-only, whole-word, idempotent), `unresolved_speakers` section, and the `sections` filter
 - `tests/test_llm_clients.py` mocks httpx for Ollama and injects fake `anthropic` / `openai` / `google.genai` modules via `sys.modules` to cover the lazy-import path; each client's `complete()` and `complete_json()` are tested for happy path + SDK error + missing-SDK → `LLMUnavailableError`
-- Test count: 380 (all mocked, all passing)
+- Test count: 385 (all mocked, all passing)
 
 **CI matrix** (`.github/workflows/ci.yml`):
 - Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)
