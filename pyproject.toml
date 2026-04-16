@@ -10,6 +10,7 @@ requires-python = ">=3.10"
 dependencies = [
     "faster-whisper>=1.1.0",
     "pyannote-audio>=4.0",
+    "omegaconf>=2.3",        # undeclared transitive dep of pyannote-audio; required at import time
     "torch>=2.8.0",
     "torchaudio>=2.8.0",
     "click>=8.1",

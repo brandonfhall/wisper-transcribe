@@ -105,7 +105,7 @@ echo "     d) All three           →  pip install -e '.[llm-all]'"
 echo "     s) Skip (use Ollama or configure later)"
 echo ""
 read -r -p "   Choice [a/b/c/d/s]: " LLM_CHOICE
-case "${LLM_CHOICE,,}" in
+case "$(echo "$LLM_CHOICE" | tr '[:upper:]' '[:lower:]')" in
     a) "$PIP" install -e ".[llm-anthropic]" -q && ok "anthropic SDK installed" ;;
     b) "$PIP" install -e ".[llm-openai]"    -q && ok "openai SDK installed" ;;
     c) "$PIP" install -e ".[llm-google]"    -q && ok "google-genai SDK installed" ;;
