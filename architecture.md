@@ -49,12 +49,12 @@ src/wisper_transcribe/
 ├── static/             Vendored web assets: htmx.min.js, tailwind.min.css (pre-built), wisp.svg, app.js
 └── web/                Phase 11: FastAPI web UI
     ├── app.py          FastAPI application factory (create_app()), module-level app instance for uvicorn
-    ├── jobs.py         In-memory job queue, JobQueue class, asyncio background worker, SSE progress via tqdm.write patch
+    ├── jobs.py         In-memory job queue, JobQueue class, asyncio background worker, SSE progress via tqdm.write patch; LLM job types (refine/summarize) with stderr capture
     └── routes/
         ├── __init__.py     Jinja2 templates setup, shared get_queue() helper, urlencode filter
         ├── dashboard.py    GET /, GET /jobs (HTMX partial)
-        ├── transcribe.py   GET/POST /transcribe, GET /transcribe/jobs/{id}, SSE /jobs/{id}/stream, enrollment wizard
-        ├── transcripts.py  GET/POST /transcripts, transcript detail, download, delete, fix-speaker
+        ├── transcribe.py   GET/POST /transcribe (+ post_refine/post_summarize flags), GET /transcribe/jobs/{id}, SSE /jobs/{id}/stream, enrollment wizard
+        ├── transcripts.py  GET/POST /transcripts, transcript detail, download, delete, fix-speaker; POST /transcripts/{name}/refine, POST /transcripts/{name}/summarize; GET /transcripts/{name}/summary, GET /transcripts/{name}/summary/download
         ├── speakers.py     GET/POST /speakers, enroll, rename, remove
         └── config.py       GET/POST /config
 ```
@@ -306,7 +306,8 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - `tests/test_refine.py` covers `parse_transcript` (frontmatter / no-frontmatter / invalid YAML), vocabulary edit-distance guard, `apply_edits` idempotency, unknown-speaker confidence filter + hallucinated-name rejection, `render_diff` plain/coloured, and `refine_transcript` frontmatter preservation
 - `tests/test_summarize.py` covers structured-output parsing, enrolled-player NPC filtering, `render_markdown` section presence + placeholders, `[[wiki-link]]` rules (enrolled-only, whole-word, idempotent), `unresolved_speakers` section, and the `sections` filter
 - `tests/test_llm_clients.py` mocks httpx for Ollama and injects fake `anthropic` / `openai` / `google.genai` modules via `sys.modules` to cover the lazy-import path; each client's `complete()` and `complete_json()` are tested for happy path + SDK error + missing-SDK → `LLMUnavailableError`
-- Test count: 385 (all mocked, all passing)
+- `tests/test_web_routes.py` covers web routes including refine/summarize job submission, summary sidecar rendering, summary download, summary-badge logic on the transcript list, and deletion of summary sidecars alongside transcripts
+- Test count: 396 (all mocked, all passing)
 
 **CI matrix** (`.github/workflows/ci.yml`):
 - Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)
@@ -415,8 +416,15 @@ The job detail page shows a live progress bar driven by SSE events from `GET /tr
 
 ### Transcript Management (Web)
 - Transcripts list page: each card is fully clickable via the **overlay link pattern** (card is a `div` with an `absolute inset-0` `<a>` underneath, action buttons use `relative z-10` to sit above). This avoids the invalid-HTML problem of nesting `<form>` inside `<a>`.
-- Delete: `POST /transcripts/{name}/delete` removes the `.md` file and redirects to `/transcripts`.
+- Summary sidecars (`.summary.md`) are **filtered out of the transcript list** — they appear only as a green notes icon and "Campaign notes available" label on their parent transcript's card.
+- Delete: `POST /transcripts/{name}/delete` removes both the `.md` file and its `.summary.md` sidecar (if present) and redirects to `/transcripts`.
 - Dashboard stat cards link to their respective sections (Active Jobs → `/transcribe`, Transcripts → `/transcripts`, Enrolled Speakers → `/speakers`).
+
+### LLM Post-processing (Web)
+- **Inline after transcription**: the `/transcribe` form has a "LLM Post-processing" checkbox group (`post_refine`, `post_summarize`). When checked, the options are stripped from kwargs before `process_file()` and stored as `Job.post_refine` / `Job.post_summarize`; after transcription completes, `_run_post_process()` chains into `_do_llm_work()` in the same job thread. LLM status messages (Ollama streaming output) are captured into `job.log_lines` via `_StderrCapture` (redirects `sys.stderr` for the job thread duration — safe because the queue runs one job at a time).
+- **Standalone from transcript detail**: `POST /transcripts/{name}/refine` and `POST /transcripts/{name}/summarize` call `queue.submit_llm()`, which enqueues a `Job` with `job_type="refine"` or `"summarize"`. The browser is redirected to `/transcribe/jobs/{id}` — the same job detail / SSE streaming page used for transcription jobs. The job detail page suppresses the T/D/F step indicators for LLM jobs and shows a single step dot (R or S).
+- **Campaign Notes page**: `GET /transcripts/{name}/summary` renders `.summary.md` as HTML with a metadata card (LLM provider/model, generated date, NPC chips) and a "Regenerate" button. `GET /transcripts/{name}/summary/download` serves the raw `.summary.md` file.
+- **Job completion actions**: the SSE `done` event now includes `summary_path` and `job_type`; the JS in `job_detail.html` conditionally shows "View Campaign Notes" when `summary_path` is set and hides "Name Speakers" for non-transcription jobs.
 
 ### Navigation Styling
 Nav link styles (`nav-link`, `nav-active`, `nav-divider`, `mobile-nav-link`) are defined in `static/input.css` as Tailwind component-layer classes, not in an inline `<style>` block in `base.html`. This ensures they are included in the compiled `tailwind.min.css` and benefit from purging. Links display as pill buttons: transparent border at rest, `border-green-500 bg-green-800` on hover, `border-green-400 bg-green-800` for the active page.

@@ -484,3 +484,44 @@ A file that has only the YAML frontmatter block. Both commands should soft-fail 
 
 **T5.3 — `--apply` on a read-only directory**
 Expected: clean error message, not an unhandled Python traceback.
+
+---
+
+## Web UI — LLM Post-processing (Phase in progress, April 2026)
+
+### What was built
+
+LLM refine and summarize are now accessible from the web interface:
+
+- **Transcribe form** — "LLM Post-processing" section at the bottom of the Options panel; checkboxes for "Refine vocabulary" and "Generate campaign summary". Both run as a chained post-process step after transcription completes, captured into the same job log.
+- **Transcript detail page** — "LLM Post-processing" collapsible panel with Refine and Summarize buttons. Each submits a standalone LLM job and redirects to the job progress page.
+- **Campaign Notes link** — appears on the transcript detail page and transcript list cards when a `.summary.md` sidecar exists. Links to `/transcripts/<name>/summary`.
+- **Summary detail page** — `/transcripts/<name>/summary` renders the `.summary.md` with metadata (LLM provider/model, generated date, NPC list), body, and a "Regenerate" button.
+- **Job detail page** — LLM jobs suppress the T/D/F step indicators and show a single step dot (R for Refine, S for Summarize). On completion, shows "View Transcript" + "View Campaign Notes" (if summary was generated).
+- **File storage** — Summary `.summary.md` files live in the same `output/` directory as transcripts. The transcripts list filters them out of the main card view; they are surfaced only through their transcript's detail page.
+
+### Manual test plan (web UI)
+
+**W1 — Post-process checkboxes on transcribe form**
+Upload an audio file. Tick "Generate campaign summary". Start transcription. After the job completes, confirm:
+- Job log shows "Generating campaign summary for …"
+- "View Campaign Notes" button appears on job completion
+- `output/<stem>.summary.md` exists
+- Transcript card on the list page shows "Campaign notes available" and the notes icon
+
+**W2 — Standalone Summarize from transcript detail**
+Navigate to an existing transcript. Open "LLM Post-processing". Click "Generate Campaign Summary". Confirm redirect to job page, progress log streams, and on completion "View Campaign Notes" appears.
+
+**W3 — Campaign Notes page**
+Open `/transcripts/<name>/summary`. Confirm rendered summary with metadata card (LLM provider, generated date, NPC chips). Click "← Transcript" to return.
+
+**W4 — Delete transcript also removes summary**
+Delete a transcript that has a summary. Confirm both `.md` and `.summary.md` are removed from the output dir.
+
+**W5 — Summary badge on list page**
+After creating a summary, navigate to `/transcripts`. Confirm the card shows the green notes icon and "Campaign notes available" text.
+
+### Documentation TODO (do before merging to main)
+
+- [ ] `architecture.md` — add new web routes to route table, update module map for jobs.py changes (LLM job types), update test count
+- [ ] `README.md` — add web LLM post-processing to feature list and usage docs

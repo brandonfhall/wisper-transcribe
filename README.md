@@ -400,7 +400,7 @@ wisper server --port 9000      # custom port
 wisper server --reload         # dev mode — auto-reloads on code changes
 ```
 
-Open `http://localhost:8080` in your browser. All features available via the CLI are also accessible through the web UI: transcription, speaker enrollment, transcript browsing, config management.
+Open `http://localhost:8080` in your browser. All features available via the CLI are also accessible through the web UI: transcription, speaker enrollment, transcript browsing, LLM post-processing, config management.
 
 ---
 
@@ -420,8 +420,8 @@ wisper server
 | Page | URL | Description |
 |------|-----|-------------|
 | Dashboard | `/` | Job queue, system status (device, model, HF token), quick upload |
-| Transcribe | `/transcribe` | Drag-and-drop upload, all transcription options, live progress stream |
-| Transcripts | `/transcripts` | Browse output files, view rendered markdown, download, delete |
+| Transcribe | `/transcribe` | Drag-and-drop upload, all transcription options, live progress stream; optional "Refine vocabulary" and "Generate campaign summary" post-processing checkboxes |
+| Transcripts | `/transcripts` | Browse output files, view rendered markdown, download, delete; green notes icon on cards that have a campaign summary |
 | Speakers | `/speakers` | Enroll, rename, remove speaker profiles |
 | Config | `/config` | View and edit all settings |
 
@@ -429,12 +429,23 @@ wisper server
 
 The interactive CLI enrollment prompt is replaced by a post-job wizard. After transcription completes, click **Name Speakers** on the job detail page. Each detected speaker has a **Play sample** button so you can hear the voice before assigning a name. Existing profiles are shown as click-to-fill options ranked by voice similarity.
 
+### LLM Post-processing in the web UI
+
+**Option 1 — at transcription time:**
+In the Transcribe form, expand the Options panel and tick "Refine vocabulary" and/or "Generate campaign summary" under LLM Post-processing. Both run automatically after transcription completes as part of the same job, with Ollama status messages streamed to the progress log.
+
+**Option 2 — from the Transcript detail page:**
+Open any transcript and expand "LLM Post-processing". Click **Refine Vocabulary** or **Generate Campaign Summary** to queue a standalone LLM job. You are redirected to the job progress page, which streams status messages in real time.
+
+**Campaign Notes:**
+When a `.summary.md` sidecar exists, the transcript detail page shows a green "Campaign Notes available" panel with **View Notes** and **Download** buttons. Campaign notes are also accessible via the transcript list card (green notes icon). The notes page shows the session recap, loot, NPCs, and follow-up items rendered as HTML.
+
 ### Job management
 
-- The job detail page shows a **real-time progress bar** with per-phase step indicators (Transcribing → Diarizing → Formatting), an ETA, and a live speed counter (e.g. `5.2s/s`).
-- A **Stop Job** button lets you cancel any pending or running transcription.
+- The job detail page shows a **real-time progress bar** with per-phase step indicators. For transcription jobs: Transcribing → Diarizing → Formatting with ETA and speed counter. For LLM jobs: a single step indicator (R for Refine, S for Summarize) with Ollama streaming messages in the log.
+- A **Stop Job** button lets you cancel any pending or running job.
 - Transcripts are saved to `./output/` (or `data_dir/output`) and are immediately visible on the Transcripts page after the job completes.
-- Transcripts can be **deleted** from the Transcripts page (trash icon with confirmation).
+- Transcripts can be **deleted** from the Transcripts page (trash icon with confirmation). Deleting a transcript also removes its `.summary.md` sidecar if present.
 
 ### Offline-first
 

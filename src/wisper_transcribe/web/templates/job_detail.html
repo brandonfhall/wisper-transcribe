@@ -32,7 +32,8 @@
   <div class="card" id="progress-card">
     <h2 class="text-base font-semibold text-gray-900 mb-4">Progress</h2>
 
-    <!-- Step indicators -->
+    {% if job.job_type == "transcription" %}
+    <!-- Transcription step indicators (T / D / F) -->
     <div class="flex items-center gap-2 mb-4">
       {% set steps = [("transcribe", "Transcribing"), ("diarize", "Diarizing"), ("format", "Formatting")] %}
       {% for step_id, step_label in steps %}
@@ -77,6 +78,19 @@
         <div id="diarize-meta" class="text-xs text-gray-400 mt-0.5 h-3"></div>
       </div>
     </div>
+    {% else %}
+    <!-- LLM job step indicator (single step) -->
+    <div class="flex items-center gap-3 mb-4">
+      <div id="step_dot_llm"
+           class="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold
+           {% if job.status == 'completed' %}bg-green-600{% elif job.status == 'running' %}bg-indigo-500 animate-pulse{% else %}bg-gray-300{% endif %}">
+        {% if job.job_type == "refine" %}R{% else %}S{% endif %}
+      </div>
+      <span class="text-sm font-medium {% if job.status == 'completed' %}text-green-700{% elif job.status == 'running' %}text-indigo-600{% else %}text-gray-400{% endif %}">
+        {% if job.job_type == "refine" %}Refining vocabulary…{% else %}Generating campaign summary…{% endif %}
+      </span>
+    </div>
+    {% endif %}
 
     <!-- Overall progress bar -->
     <div class="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
@@ -115,11 +129,16 @@
     {% if job.status == "completed" %}
       {% if job.output_path %}
         <a href="/transcripts/{{ job.output_path | stem | urlencode }}" class="btn-primary">View Transcript</a>
-        <a href="/transcribe/jobs/{{ job.id }}/enroll" class="btn-secondary">Name Speakers</a>
+        {% if job.job_type == "transcription" %}
+          <a href="/transcribe/jobs/{{ job.id }}/enroll" class="btn-secondary">Name Speakers</a>
+        {% endif %}
+        {% if job.summary_path %}
+          <a href="/transcripts/{{ job.output_path | stem | urlencode }}/summary" class="btn-secondary">View Campaign Notes</a>
+        {% endif %}
       {% endif %}
     {% elif job.status in ("pending", "running") %}
       <form method="post" action="/transcribe/jobs/{{ job.id }}/cancel"
-            onsubmit="return confirm('Cancel this transcription job?')">
+            onsubmit="return confirm('Cancel this job?')">
         <button type="submit" class="btn-danger">Stop Job</button>
       </form>
     {% elif job.status == "failed" %}
@@ -346,9 +365,16 @@
       if (evt.status === 'completed') allDone();
       if (evt.status === 'completed' && evt.output_path) {
         const stem = evt.output_path.replace(/\\/g, '/').split('/').pop().replace('.md', '');
+        const enrollBtn = evt.job_type === 'transcription'
+          ? `<a href="/transcribe/jobs/{{ job.id }}/enroll" class="btn-secondary">Name Speakers</a>`
+          : '';
+        const summaryBtn = evt.summary_path
+          ? `<a href="/transcripts/${encodeURIComponent(stem)}/summary" class="btn-secondary">View Campaign Notes</a>`
+          : '';
         actions.innerHTML = `
           <a href="/transcripts/${encodeURIComponent(stem)}" class="btn-primary">View Transcript</a>
-          <a href="/transcribe/jobs/{{ job.id }}/enroll" class="btn-secondary">Name Speakers</a>
+          ${enrollBtn}
+          ${summaryBtn}
           <a href="/" class="btn-secondary">Back to Dashboard</a>`;
       } else if (evt.status === 'failed') {
         if (progressBar) progressBar.classList.replace('bg-green-600', 'bg-red-500');

@@ -87,6 +87,8 @@ async def start_transcribe(
     vad: Annotated[Optional[str], Form()] = None,
     include_timestamps: Annotated[bool, Form()] = True,
     initial_prompt: Annotated[Optional[str], Form()] = None,
+    post_refine: Annotated[Optional[str], Form()] = None,
+    post_summarize: Annotated[Optional[str], Form()] = None,
 ) -> RedirectResponse:
     """Accept an uploaded audio file, save it to a temp location, enqueue job."""
     # Save uploaded file to a persistent temp location (job must outlive request)
@@ -140,6 +142,8 @@ async def start_transcribe(
         initial_prompt=initial_prompt or None,
         output_dir=out_path,
         enroll_speakers=False,  # Web enrollment is post-job wizard
+        post_refine=(post_refine == "1"),
+        post_summarize=(post_summarize == "1"),
     )
 
     return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
@@ -217,6 +221,8 @@ async def job_stream(request: Request, job_id: str) -> StreamingResponse:
                     "type": "done",
                     "status": job.status,
                     "output_path": job.output_path,
+                    "summary_path": job.summary_path,
+                    "job_type": job.job_type,
                     "error": job.error,
                 })
                 yield f"data: {final}\n\n"

@@ -1,4 +1,4 @@
-"""Transcripts route — browse and view markdown transcripts."""
+"""Transcripts route — browse, view, and post-process markdown transcripts."""
 from __future__ import annotations
 
 import html as _html_module
@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, Request
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
 
 from . import templates
 
@@ -17,7 +17,6 @@ router = APIRouter(prefix="/transcripts")
 
 def _output_dir(request: Request) -> Path:
     """Resolve the output directory for transcripts."""
-    # Allow overriding via query param for testing, otherwise default to ./output
     out_dir = Path("output")
     if not out_dir.exists():
         from wisper_transcribe.config import get_data_dir
@@ -65,7 +64,6 @@ class _HtmlSanitizer(HTMLParser):
 
     def handle_data(self, data: str) -> None:  # type: ignore[override]
         if not self._skip_depth:
-            # Re-escape so decoded entities remain valid in the output HTML.
             self._output.append(_html_module.escape(data))
 
     def get_output(self) -> str:
@@ -73,7 +71,7 @@ class _HtmlSanitizer(HTMLParser):
 
 
 def _sanitize_html(html_input: str) -> str:
-    """Return *html_input* with script elements and on* handlers removed (A03 XSS)."""
+    """Return *html_input* with script elements and on* handlers removed."""
     sanitizer = _HtmlSanitizer()
     sanitizer.feed(html_input)
     return sanitizer.get_output()
@@ -98,35 +96,62 @@ def _get_safe_transcript_path(request: Request, name: str) -> Path | None:
     """Resolve and sanitize transcript path, mitigating path traversal."""
     if not name or "\x00" in name:
         return None
-        
-    # os.path.basename is recognized as a sanitizer by static analysis tools (e.g., CodeQL)
+
     safe_name = os.path.basename(name)
     if safe_name != name or safe_name in {".", ".."}:
         return None
-        
+
     out_dir = _output_dir(request).resolve()
-    
-    # Use os.path.abspath and .startswith() to satisfy CodeQL's path traversal queries
+
     base_dir = os.path.abspath(str(out_dir))
     if not base_dir.endswith(os.sep):
         base_dir += os.sep
-        
+
     target_path = os.path.abspath(os.path.join(str(out_dir), f"{safe_name}.md"))
     if not target_path.startswith(base_dir):
         return None
-        
-    # Reconstruct Path from the validated string to ensure taint is dropped
+
+    return Path(target_path)
+
+
+def _get_safe_summary_path(request: Request, name: str) -> Path | None:
+    """Like _get_safe_transcript_path but for .summary.md sidecar files."""
+    if not name or "\x00" in name:
+        return None
+
+    safe_name = os.path.basename(name)
+    if safe_name != name or safe_name in {".", ".."}:
+        return None
+
+    out_dir = _output_dir(request).resolve()
+
+    base_dir = os.path.abspath(str(out_dir))
+    if not base_dir.endswith(os.sep):
+        base_dir += os.sep
+
+    target_path = os.path.abspath(
+        os.path.join(str(out_dir), f"{safe_name}.summary.md")
+    )
+    if not target_path.startswith(base_dir):
+        return None
+
     return Path(target_path)
 
 
 @router.get("", response_class=HTMLResponse)
 async def transcripts_list(request: Request) -> HTMLResponse:
     out_dir = _output_dir(request)
-    files = sorted(out_dir.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
+    # Exclude .summary.md sidecars — they are shown via the transcript detail page
+    files = sorted(
+        [f for f in out_dir.glob("*.md") if not f.name.endswith(".summary.md")],
+        key=lambda f: f.stat().st_mtime,
+        reverse=True,
+    )
 
     items = []
     for f in files:
         meta, _ = _parse_frontmatter(f.read_text(encoding="utf-8"))
+        summary_file = f.with_name(f"{f.stem}.summary.md")
         items.append({
             "stem": f.stem,
             "name": f.name,
@@ -134,6 +159,7 @@ async def transcripts_list(request: Request) -> HTMLResponse:
             "date_processed": meta.get("date_processed", ""),
             "duration": meta.get("duration", ""),
             "speakers": meta.get("speakers", []),
+            "has_summary": summary_file.exists(),
         })
 
     return templates.TemplateResponse(
@@ -157,6 +183,16 @@ async def transcript_detail(request: Request, name: str) -> HTMLResponse:
     import markdown as _md
     html_body = _sanitize_html(_md.markdown(body, extensions=["nl2br"]))
 
+    # Check for summary sidecar
+    summary_path = _get_safe_summary_path(request, name)
+    has_summary = bool(summary_path and summary_path.exists())
+
+    # Load current LLM config for display
+    from wisper_transcribe.config import load_config
+    cfg = load_config()
+    llm_provider = cfg.get("llm_provider", "ollama") or "ollama"
+    llm_model = cfg.get("llm_model", "") or ""
+
     return templates.TemplateResponse(
         request,
         "transcript_detail.html",
@@ -166,6 +202,9 @@ async def transcript_detail(request: Request, name: str) -> HTMLResponse:
             "meta": meta,
             "html_body": html_body,
             "raw_path": str(md_path),
+            "has_summary": has_summary,
+            "llm_provider": llm_provider,
+            "llm_model": llm_model,
         },
     )
 
@@ -186,12 +225,16 @@ async def transcript_download(request: Request, name: str):
 
 @router.post("/{name}/delete", response_class=HTMLResponse)
 async def delete_transcript(request: Request, name: str) -> HTMLResponse:
-    """Delete a transcript .md file from the output directory."""
+    """Delete a transcript .md file (and its summary sidecar if present)."""
     md_path = _get_safe_transcript_path(request, name)
     if not md_path:
         return HTMLResponse(content="Invalid name", status_code=400)
     if md_path.exists():
         md_path.unlink()
+    # Also remove summary sidecar if present
+    summary_path = _get_safe_summary_path(request, name)
+    if summary_path and summary_path.exists():
+        summary_path.unlink()
     return HTMLResponse(
         content="",
         status_code=303,
@@ -222,4 +265,99 @@ async def fix_speaker(request: Request, name: str) -> HTMLResponse:
         content="",
         status_code=303,
         headers={"Location": f"/transcripts/{quote(name)}"},
+    )
+
+
+@router.post("/{name}/refine", response_class=HTMLResponse)
+async def post_refine(request: Request, name: str) -> HTMLResponse:
+    """Submit a vocabulary-refine LLM job for an existing transcript."""
+    md_path = _get_safe_transcript_path(request, name)
+    if not md_path:
+        return HTMLResponse(content="Invalid name", status_code=400)
+    if not md_path.exists():
+        return HTMLResponse(content="Transcript not found", status_code=404)
+
+    from . import get_queue
+    from ..jobs import JOB_REFINE
+
+    queue = get_queue(request)
+    job = queue.submit_llm(
+        transcript_path=str(md_path),
+        job_type=JOB_REFINE,
+        name=name,
+    )
+    return HTMLResponse(
+        content="",
+        status_code=303,
+        headers={"Location": f"/transcribe/jobs/{job.id}"},
+    )
+
+
+@router.post("/{name}/summarize", response_class=HTMLResponse)
+async def post_summarize(request: Request, name: str) -> HTMLResponse:
+    """Submit a campaign-summary LLM job for an existing transcript."""
+    md_path = _get_safe_transcript_path(request, name)
+    if not md_path:
+        return HTMLResponse(content="Invalid name", status_code=400)
+    if not md_path.exists():
+        return HTMLResponse(content="Transcript not found", status_code=404)
+
+    from . import get_queue
+    from ..jobs import JOB_SUMMARIZE
+
+    queue = get_queue(request)
+    job = queue.submit_llm(
+        transcript_path=str(md_path),
+        job_type=JOB_SUMMARIZE,
+        name=name,
+    )
+    return HTMLResponse(
+        content="",
+        status_code=303,
+        headers={"Location": f"/transcribe/jobs/{job.id}"},
+    )
+
+
+@router.get("/{name}/summary", response_class=HTMLResponse)
+async def summary_detail(request: Request, name: str) -> HTMLResponse:
+    """Render the campaign-notes summary for a transcript."""
+    md_path = _get_safe_transcript_path(request, name)
+    if not md_path:
+        return HTMLResponse(content="Invalid name", status_code=400)
+
+    summary_path = _get_safe_summary_path(request, name)
+    if not summary_path or not summary_path.exists():
+        return HTMLResponse(content="Summary not found", status_code=404)
+
+    content = summary_path.read_text(encoding="utf-8")
+    meta, body = _parse_frontmatter(content)
+
+    import markdown as _md
+    html_body = _sanitize_html(_md.markdown(body, extensions=["nl2br"]))
+
+    return templates.TemplateResponse(
+        request,
+        "summary_detail.html",
+        {
+            "request": request,
+            "name": name,
+            "meta": meta,
+            "html_body": html_body,
+            "title": meta.get("title", f"{name} — Campaign Notes"),
+        },
+    )
+
+
+@router.get("/{name}/summary/download")
+async def summary_download(request: Request, name: str):
+    """Download the .summary.md sidecar file."""
+    summary_path = _get_safe_summary_path(request, name)
+    if not summary_path:
+        return HTMLResponse(content="Invalid name", status_code=400)
+    if not summary_path.exists():
+        return HTMLResponse(content="Summary not found", status_code=404)
+    return FileResponse(
+        path=str(summary_path),
+        media_type="text/markdown",
+        filename=summary_path.name,
     )
