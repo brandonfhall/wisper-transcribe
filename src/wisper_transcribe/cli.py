@@ -898,6 +898,9 @@ def summarize(transcript: Path, provider: Optional[str], model: Optional[str],
         )
 
     client = _get_llm_client(provider, model, endpoint)
+    click.echo(
+        f"Summarizing with {client.provider} / {client.model} ...", err=True
+    )
     profiles = load_profiles()
     original = transcript.read_text(encoding="utf-8")
 
@@ -907,6 +910,7 @@ def summarize(transcript: Path, provider: Optional[str], model: Optional[str],
     refined_flag = False
     if do_refine:
         refine_tasks = _parse_tasks(refine_tasks_raw, ("vocabulary", "unknown"))
+        click.echo("Running refine step first...", err=True)
         cfg = load_config()
         hotwords = list(cfg.get("hotwords", []) or [])
         character_names: list[str] = []

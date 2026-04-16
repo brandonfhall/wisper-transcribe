@@ -53,11 +53,17 @@ class OllamaClient(LLMClient):
                                 write=self.timeout, pool=10.0)
 
         parts: list[str] = []
-        started = False
+        token_count = 0
         try:
+            sys.stderr.write(f"  Connecting to Ollama ({self.endpoint})...\n")
+            sys.stderr.flush()
             with httpx.stream("POST", url, json=stream_payload,
                               timeout=timeout) as resp:
                 resp.raise_for_status()
+                sys.stderr.write(
+                    f"  Waiting for {self.model} to start generating...\n"
+                )
+                sys.stderr.flush()
                 for line in resp.iter_lines():
                     if not line:
                         continue
@@ -67,20 +73,18 @@ class OllamaClient(LLMClient):
                         continue
                     token = (chunk.get("message") or {}).get("content", "")
                     if token:
-                        if not started:
-                            sys.stderr.write(
-                                f"  Asking Ollama ({self.model}): "
-                            )
+                        if token_count == 0:
+                            sys.stderr.write(f"  Generating ({self.model}): ")
                             sys.stderr.flush()
-                            started = True
                         parts.append(token)
-                        if len(parts) % _DOT_INTERVAL == 0:
+                        token_count += 1
+                        if token_count % _DOT_INTERVAL == 0:
                             sys.stderr.write("·")
                             sys.stderr.flush()
                     if chunk.get("done"):
                         break
         except httpx.HTTPError as exc:
-            if started:
+            if token_count > 0:
                 sys.stderr.write("\n")
                 sys.stderr.flush()
             raise LLMUnavailableError(
@@ -88,7 +92,7 @@ class OllamaClient(LLMClient):
                 f"Is the Ollama daemon running? Try: `ollama serve`"
             ) from exc
 
-        if started:
+        if token_count > 0:
             sys.stderr.write("\n")
             sys.stderr.flush()
 
