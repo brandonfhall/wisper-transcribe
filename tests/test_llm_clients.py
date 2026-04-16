@@ -59,37 +59,59 @@ def test_get_client_anthropic_missing_key(tmp_path, monkeypatch):
 # OllamaClient
 # ---------------------------------------------------------------------------
 
-def _fake_httpx_response(payload: dict, status: int = 200):
+def _fake_stream_context(chunks: list[dict], raise_on_enter: Exception | None = None):
+    """Build a mock ``httpx.stream()`` context manager.
+
+    ``chunks`` is a list of dicts that will be JSON-serialised and yielded as
+    lines by ``resp.iter_lines()``.  Set ``raise_on_enter`` to an
+    ``httpx.HTTPError`` subclass instance to simulate a connection failure.
+    """
+    import httpx as _httpx
+
     resp = MagicMock()
-    resp.status_code = status
-    resp.json.return_value = payload
     resp.raise_for_status = MagicMock()
-    return resp
+    resp.iter_lines.return_value = iter(json.dumps(c) for c in chunks)
+
+    cm = MagicMock()
+    if raise_on_enter is not None:
+        cm.__enter__ = MagicMock(side_effect=raise_on_enter)
+    else:
+        cm.__enter__ = MagicMock(return_value=resp)
+    cm.__exit__ = MagicMock(return_value=False)
+    return cm
+
+
+def _ollama_chunks(content: str) -> list[dict]:
+    """Turn a content string into a minimal list of streaming chunks."""
+    return [
+        {"message": {"role": "assistant", "content": content}, "done": False},
+        {"message": {"role": "assistant", "content": ""}, "done": True},
+    ]
 
 
 def test_ollama_complete_ok():
     from wisper_transcribe.llm.ollama import OllamaClient
 
     client = OllamaClient(model="llama3.1:8b")
-    fake_resp = _fake_httpx_response({"message": {"content": "hi there"}})
-    with patch("httpx.post", return_value=fake_resp) as mock_post:
+    fake_cm = _fake_stream_context(_ollama_chunks("hi there"))
+    with patch("httpx.stream", return_value=fake_cm) as mock_stream:
         result = client.complete("sys", "user msg")
     assert result == "hi there"
-    args, kwargs = mock_post.call_args
+    _, kwargs = mock_stream.call_args
     assert kwargs["json"]["model"] == "llama3.1:8b"
     assert kwargs["json"]["messages"][0]["role"] == "system"
+    assert kwargs["json"]["stream"] is True
 
 
 def test_ollama_complete_json_ok():
     from wisper_transcribe.llm.ollama import OllamaClient
 
     client = OllamaClient(model="llama3.1:8b")
-    fake_resp = _fake_httpx_response(
-        {"message": {"content": json.dumps({"changes": [{"original": "a", "corrected": "b"}]})}}
-    )
-    with patch("httpx.post", return_value=fake_resp):
+    payload = json.dumps({"changes": [{"original": "a", "corrected": "b"}]})
+    fake_cm = _fake_stream_context(_ollama_chunks(payload))
+    with patch("httpx.stream", return_value=fake_cm):
         data = client.complete_json("sys", "user",
-                                     {"type": "object", "properties": {"changes": {"type": "array"}}})
+                                    {"type": "object", "properties": {"changes": {"type": "array"}}})
     assert data == {"changes": [{"original": "a", "corrected": "b"}]}
 
 
@@ -98,7 +120,8 @@ def test_ollama_http_error_raises_unavailable():
     import httpx
 
     client = OllamaClient(model="llama3.1:8b")
-    with patch("httpx.post", side_effect=httpx.ConnectError("refused")):
+    fake_cm = _fake_stream_context([], raise_on_enter=httpx.ConnectError("refused"))
+    with patch("httpx.stream", return_value=fake_cm):
         with pytest.raises(LLMUnavailableError, match="Ollama request failed"):
             client.complete("sys", "user")
 
@@ -107,8 +130,8 @@ def test_ollama_bad_json_raises_response_error():
     from wisper_transcribe.llm.ollama import OllamaClient
 
     client = OllamaClient(model="llama3.1:8b")
-    fake_resp = _fake_httpx_response({"message": {"content": "not valid json"}})
-    with patch("httpx.post", return_value=fake_resp):
+    fake_cm = _fake_stream_context(_ollama_chunks("not valid json"))
+    with patch("httpx.stream", return_value=fake_cm):
         with pytest.raises(LLMResponseError, match="did not parse"):
             client.complete_json("sys", "user", {"type": "object"})
 

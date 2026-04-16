@@ -1,28 +1,42 @@
-"""Ollama client — local LLM via httpx REST wrapper.
+"""Ollama client — local LLM via httpx streaming REST wrapper.
 
-Uses the `/api/chat` endpoint with `format="json"` for structured output.
-httpx is already a dev/runtime dependency; no new package required.
+Uses the ``/api/chat`` endpoint with ``stream=True`` to avoid read-timeouts
+on long transcripts.  Each chunk is a newline-delimited JSON object; tokens
+are accumulated and the full content string is returned once the final chunk
+arrives.  A connect/write timeout (``self.timeout``) guards against Ollama
+not being reachable, but there is intentionally no per-chunk read timeout —
+the model delivers tokens continuously so there is no long idle gap between
+bytes.
 """
 from __future__ import annotations
 
 import json
-from typing import Optional
+import sys
 
 from .base import LLMClient
 from .errors import LLMResponseError, LLMUnavailableError
+
+_DOT_INTERVAL = 50   # print a progress dot every N content tokens
 
 
 class OllamaClient(LLMClient):
     provider = "ollama"
 
     def __init__(self, model: str, endpoint: str = "http://localhost:11434",
-                 temperature: float = 0.2, timeout: float = 120.0):
+                 temperature: float = 0.2, timeout: float = 30.0):
         self.model = model
         self.endpoint = endpoint.rstrip("/")
         self.temperature = temperature
-        self.timeout = timeout
+        self.timeout = timeout   # connect / write timeout in seconds
 
-    def _post_chat(self, payload: dict) -> dict:
+    def _post_chat(self, payload: dict) -> str:
+        """POST to /api/chat with streaming and return the full content string.
+
+        Prints ``  Asking Ollama (model)… ·····`` to stderr while the model
+        generates so the user knows progress is being made.  Uses
+        ``connect=self.timeout`` but ``read=None`` so a slow model on a long
+        transcript never times out mid-stream.
+        """
         try:
             import httpx
         except ImportError as exc:  # pragma: no cover — httpx is a core dep
@@ -31,36 +45,65 @@ class OllamaClient(LLMClient):
             ) from exc
 
         url = f"{self.endpoint}/api/chat"
+        stream_payload = dict(payload)
+        stream_payload["stream"] = True
+
+        # Short connect/write timeout; no read timeout while streaming.
+        timeout = httpx.Timeout(connect=self.timeout, read=None,
+                                write=self.timeout, pool=10.0)
+
+        parts: list[str] = []
+        started = False
         try:
-            resp = httpx.post(url, json=payload, timeout=self.timeout)
-            resp.raise_for_status()
+            with httpx.stream("POST", url, json=stream_payload,
+                              timeout=timeout) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    token = (chunk.get("message") or {}).get("content", "")
+                    if token:
+                        if not started:
+                            sys.stderr.write(
+                                f"  Asking Ollama ({self.model}): "
+                            )
+                            sys.stderr.flush()
+                            started = True
+                        parts.append(token)
+                        if len(parts) % _DOT_INTERVAL == 0:
+                            sys.stderr.write("·")
+                            sys.stderr.flush()
+                    if chunk.get("done"):
+                        break
         except httpx.HTTPError as exc:
+            if started:
+                sys.stderr.write("\n")
+                sys.stderr.flush()
             raise LLMUnavailableError(
                 f"Ollama request failed ({url}): {exc}. "
                 f"Is the Ollama daemon running? Try: `ollama serve`"
             ) from exc
 
-        try:
-            return resp.json()
-        except ValueError as exc:
-            raise LLMResponseError(f"Ollama returned non-JSON response: {exc}") from exc
+        if started:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+
+        return "".join(parts)
 
     def complete(self, system: str, user: str) -> str:
         payload = {
             "model": self.model,
-            "stream": False,
             "options": {"temperature": self.temperature},
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
         }
-        data = self._post_chat(payload)
-        msg = data.get("message") or {}
-        text = msg.get("content", "")
-        if not isinstance(text, str):
-            raise LLMResponseError("Ollama response `message.content` was not a string")
-        return text
+        return self._post_chat(payload)
 
     def complete_json(self, system: str, user: str, schema: dict) -> dict:
         # Ollama supports `format="json"` (free-form JSON) and newer versions
@@ -68,7 +111,6 @@ class OllamaClient(LLMClient):
         # rely on the prompt to steer shape.
         payload = {
             "model": self.model,
-            "stream": False,
             "format": schema if schema else "json",
             "options": {"temperature": self.temperature},
             "messages": [
@@ -76,11 +118,7 @@ class OllamaClient(LLMClient):
                 {"role": "user", "content": user},
             ],
         }
-        data = self._post_chat(payload)
-        msg = data.get("message") or {}
-        text = msg.get("content", "")
-        if not isinstance(text, str):
-            raise LLMResponseError("Ollama response `message.content` was not a string")
+        text = self._post_chat(payload)
         try:
             return json.loads(text)
         except json.JSONDecodeError as exc:
