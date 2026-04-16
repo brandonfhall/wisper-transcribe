@@ -27,6 +27,8 @@ A task is not complete until all three are true — in this order:
 
 When a todo list reaches 100% completed, execute steps 1–3 immediately without waiting to be asked.
 
+Commits are authorized as part of completing any task per the Definition of Done — no separate permission required.
+
 ---
 
 ## Commands
@@ -57,6 +59,7 @@ wisper server --reload                # dev mode; http://localhost:8080
 ## Git / CI Rules
 
 - **Never push to `main` directly.** All changes go through a PR.
+- **Push frequently when running in the Claude Code app** — after each commit, push the branch so work is available to pick up from another device. Use `git push -u origin <branch>`.
 - **After committing a phase, pause for user review before starting the next.**
 - **Branch naming:** `feat/...` or `fix/...`
 - **CI matrix:** Python 3.10–3.13 are blocking; 3.14 is `continue-on-error: true` (non-blocking).
