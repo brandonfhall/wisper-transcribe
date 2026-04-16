@@ -296,6 +296,84 @@ def test_config_post_bool_field_unchecked(client):
     assert captured.get("vad_filter") is False
 
 
+def test_config_llm_fields_visible(client):
+    """LLM provider select and model input appear on the config page."""
+    with patch("wisper_transcribe.web.routes.config.load_config",
+               return_value={"llm_provider": "ollama", "llm_model": ""}), \
+         patch("wisper_transcribe.web.routes.config.get_config_path",
+               return_value=Path("/tmp/config.toml")):
+        resp = client.get("/config")
+    assert resp.status_code == 200
+    assert b"llm_provider" in resp.content
+    assert b"llm_model" in resp.content
+    assert b"llm_endpoint" in resp.content
+    assert b"llm_temperature" in resp.content
+    assert b"anthropic_api_key" in resp.content
+
+
+def test_config_post_saves_llm_fields(client):
+    """Saving LLM provider, model, endpoint, and temperature persists correctly."""
+    captured = {}
+
+    def fake_save(cfg):
+        captured.update(cfg)
+
+    with patch("wisper_transcribe.web.routes.config.load_config", return_value={}), \
+         patch("wisper_transcribe.web.routes.config.save_config", side_effect=fake_save):
+        client.post(
+            "/config",
+            data={
+                "llm_provider": "anthropic",
+                "llm_model": "claude-sonnet-4-6",
+                "llm_endpoint": "http://localhost:11434",
+                "llm_temperature": "0.3",
+            },
+            follow_redirects=False,
+        )
+
+    assert captured.get("llm_provider") == "anthropic"
+    assert captured.get("llm_model") == "claude-sonnet-4-6"
+    assert captured.get("llm_temperature") == 0.3
+
+
+def test_config_post_saves_api_key_when_non_empty(client):
+    """A non-empty API key is saved to config."""
+    captured = {}
+
+    def fake_save(cfg):
+        captured.update(cfg)
+
+    with patch("wisper_transcribe.web.routes.config.load_config", return_value={}), \
+         patch("wisper_transcribe.web.routes.config.save_config", side_effect=fake_save):
+        client.post(
+            "/config",
+            data={"anthropic_api_key": "sk-ant-test123"},
+            follow_redirects=False,
+        )
+
+    assert captured.get("anthropic_api_key") == "sk-ant-test123"
+
+
+def test_config_post_does_not_overwrite_api_key_with_empty(client):
+    """An empty API key field must not overwrite an existing key."""
+    captured = {}
+
+    def fake_save(cfg):
+        captured.update(cfg)
+
+    existing = {"anthropic_api_key": "sk-ant-existing"}
+    with patch("wisper_transcribe.web.routes.config.load_config", return_value=dict(existing)), \
+         patch("wisper_transcribe.web.routes.config.save_config", side_effect=fake_save):
+        # Submit with blank API key
+        client.post(
+            "/config",
+            data={"anthropic_api_key": ""},
+            follow_redirects=False,
+        )
+
+    assert captured.get("anthropic_api_key") == "sk-ant-existing"
+
+
 # ---------------------------------------------------------------------------
 # Speakers
 # ---------------------------------------------------------------------------
