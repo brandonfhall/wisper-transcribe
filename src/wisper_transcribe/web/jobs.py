@@ -382,12 +382,13 @@ class JobQueue:
         try:
             output_path = process_file(Path(job.input_path), **job.kwargs)
             job.output_path = str(output_path)
-            job.status = COMPLETED
             _extract_speaker_excerpts(job, output_path)
 
-            # Chain LLM post-processing if requested
+            # Chain LLM post-processing if requested; defer COMPLETED until done
             if job.post_refine or job.post_summarize:
                 self._run_post_process(job, Path(output_path))
+
+            job.status = COMPLETED
 
         except InterruptedError:
             job.status = FAILED

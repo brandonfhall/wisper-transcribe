@@ -12,6 +12,27 @@ Podcast transcription tool for tabletop RPG actual-play recordings (D&D, Pathfin
 
 ## Backlog
 
+### Distribution — Tier 3: PyPI + pipx (future)
+
+**Goal:** `pipx install wisper-transcribe` — fully isolated, one command, no venv management.
+
+**What's needed:**
+1. **Publish to PyPI** — `pyproject.toml` is already correctly structured. Steps:
+   - Create a PyPI account and API token
+   - Add a GitHub Actions release workflow (`.github/workflows/publish.yml`) that runs `python -m build && twine upload` on a `v*` tag push
+   - `pip install build twine` (dev deps, not in `pyproject.toml`)
+2. **pipx install story** — once on PyPI:
+   ```bash
+   pipx install wisper-transcribe           # base install (Ollama LLM)
+   pipx inject wisper-transcribe anthropic  # cloud LLM extras
+   ```
+3. **Entry-point completeness** — `wisper server` must download `htmx.min.js` on first run if missing (Docker build does this; local pip installs do not). Add a startup check in `app.py` that downloads it if the placeholder is detected.
+4. **Version pinning strategy** — ML dependencies (torch, pyannote, faster-whisper) move fast. Consider using `>=` lower bounds (as now) but adding a tested upper bound for major ML versions to prevent surprise breakage on pip installs.
+
+**Why not now:** Requires cutting releases, managing PyPI credentials, and the htmx download story. Good to do once the tool is stable enough to version properly.
+
+---
+
 ### DM Character Voice Handling
 
 **Problem:** When a DM does a character voice (dragon accent, goblin voice, NPC), pyannote assigns it a different SPEAKER_XX label than their regular speech. Typical similarity scores: DM normal vs. DM profile ~0.80–0.90, DM character voice vs. DM profile ~0.35–0.55 — often below the 0.65 match threshold, so character voices fall through to `Unknown Speaker N`.

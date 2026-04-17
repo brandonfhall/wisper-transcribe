@@ -6,98 +6,91 @@ Runs entirely offline. No cloud APIs. Outputs clean markdown files ready for Not
 
 ---
 
-## Requirements
+## Getting Started
 
-- Python 3.10+
-- [ffmpeg](https://ffmpeg.org/download.html) installed and on your PATH
-- A free [HuggingFace token](https://huggingface.co/settings/tokens) (for speaker diarization)
-- GPU recommended but not required (CPU works, just slower)
+Pick the path that fits you. All three end up at the same web UI on `http://localhost:8080`.
 
-**Windows (CUDA):** 
-- Install ffmpeg via `winget install Gyan.FFmpeg.Shared`
-- Install CUDA Toolkit via `winget install Nvidia.CUDA` (Restart your terminal/VS Code after installing)
-- *Note: If you encounter `cublas64_12.dll` or `zlibwapi.dll` not found errors, manually download NVIDIA cuDNN and place its `.dll` files in your CUDA `bin` directory (usually `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x\bin`).*
+### Option A — Double-click launcher *(recommended for most users)*
 
-**Mac:** Install ffmpeg via `brew install ffmpeg`
+**Requirements:** Python 3.10+ and [ffmpeg](https://ffmpeg.org/download.html) installed.
+
+| Platform | Steps |
+|----------|-------|
+| **macOS** | Double-click `start.command` in Finder. First run sets everything up automatically. |
+| **Windows** | Double-click `start.bat`. First run sets everything up automatically. |
+| **Linux** | Run `bash start.sh` in a terminal. |
+
+The first run takes 5–10 minutes (creates a virtualenv and installs ~2 GB of ML models). Subsequent launches are instant.
+
+After the server starts, your browser opens automatically to `http://localhost:8080`. Press `Ctrl+C` in the terminal to stop.
+
+### Option B — Docker *(server / shared use)*
+
+**Requirements:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Mac/Windows) or Docker Engine (Linux).
+
+```bash
+# 1. Copy the env template and fill in your HuggingFace token
+cp .env.example .env
+#    → open .env in a text editor and set HF_TOKEN=hf_...
+
+# 2. Start the web UI (CPU — works on any machine)
+make start
+
+# 3. Open http://localhost:8080
+```
+
+For GPU acceleration (NVIDIA only):
+```bash
+make start-gpu
+```
+
+See the [Docker section](#docker) below for the full volume layout and CLI usage.
+
+### Option C — Developer / CLI
+
+```bash
+# 1. Run the setup script (creates .venv, installs deps, CUDA PyTorch on Windows)
+bash setup.sh      # Mac/Linux
+.\setup.ps1        # Windows PowerShell
+
+# 2. First-time wizard (HF token + model download)
+.venv/bin/wisper setup        # Mac/Linux
+.venv\Scripts\wisper setup    # Windows
+
+# 3. Transcribe
+.venv/bin/wisper transcribe session01.mp3 --enroll-speakers
+
+# 4. Or start the web UI
+.venv/bin/wisper server
+```
 
 ---
 
-## Installation
+## First-time Setup (HuggingFace Token)
 
-### Quick setup (recommended)
+Speaker diarization (identifying who is speaking) requires a **free** HuggingFace token. You only need to do this once.
 
-Run the setup script — it handles the venv, package install, and CUDA PyTorch in one step:
+1. Create a free account at [huggingface.co](https://huggingface.co) and generate a token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) with **"Read access to contents of all repos under your personal namespace"**.
 
-```powershell
-# Windows
-.\setup.ps1
-```
+2. Accept the model license agreements (free, one-time):
+   - [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
+   - [pyannote/embedding](https://huggingface.co/pyannote/embedding)
 
-```bash
-# Mac/Linux
-chmod +x setup.sh
-./setup.sh
-```
-
-### Manual setup
+3. Enter the token when prompted by `wisper setup`, or set it via the web UI Config page, or via env var:
 
 ```bash
-git clone <repo>
-cd wisper-transcribe
+# Docker / .env file
+HF_TOKEN=hf_abc123...
 
-python -m venv .venv
+# Local env var
+export HF_TOKEN=hf_abc123...          # Mac/Linux
+$env:HF_TOKEN="hf_abc123..."          # Windows PowerShell
 
-# Windows
-.venv\Scripts\activate
-
-# Mac/Linux
-source .venv/bin/activate
-
-pip install -e .
-```
-
-**Optional cloud-LLM extras** (only needed if you want `wisper refine` / `wisper summarize` to hit a cloud provider — Ollama works out of the box with no extras):
-
-```bash
-pip install -e '.[llm-anthropic]'   # Anthropic (Claude)
-pip install -e '.[llm-openai]'      # OpenAI (GPT)
-pip install -e '.[llm-google]'      # Google (Gemini)
-pip install -e '.[llm-all]'         # all three
-```
-
-> **Windows CUDA users:** `pip install` from PyPI installs the CPU-only PyTorch build by default. After the steps above, run this extra command to get GPU support:
-> ```powershell
-> pip install "torch>=2.8.0" "torchaudio>=2.8.0" --index-url https://download.pytorch.org/whl/cu126 --force-reinstall
-> ```
-> `pyannote-audio 4.x` requires `torch>=2.8.0`, which lives on the CUDA 12.6 index (`cu126`). The `cu124` index only goes up to 2.6.0 and will cause a dependency conflict.
->
-> Verify it worked: `python -c "import torch; print(torch.cuda.is_available())"` should print `True`.
-> The setup script (`setup.ps1`) handles this automatically.
-
-### One-time setup
-
-Run the setup wizard — it checks ffmpeg, prompts for your HuggingFace token, and pre-downloads all models so your first transcription run starts immediately:
-
-```bash
-wisper setup
-```
-
-*Note: When creating your HuggingFace token, ensure it has **"Read access to contents of all repos under your personal namespace"**.*
-
-You must also accept the model license agreements on HuggingFace (free, one-time — links shown by `wisper setup`):
-- [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
-- [pyannote/embedding](https://huggingface.co/pyannote/embedding)
-
-`pyannote/segmentation-3.0` is a sub-dependency of `speaker-diarization-3.1` and will be downloaded automatically — you do not need to accept it separately.
-
-Alternatively, set the token manually or via environment variable:
-
-```bash
+# Or store it permanently
 wisper config set hf_token hf_abc123...
-
-export HUGGINGFACE_TOKEN=hf_abc123...   # Mac/Linux
-$env:HUGGINGFACE_TOKEN="hf_abc123..."  # Windows PowerShell
 ```
+
+> **Note:** `pyannote/segmentation-3.0` is downloaded automatically as a sub-dependency — you do not need to accept it separately.
 
 **Optional — configure an LLM for `refine` / `summarize`:**
 
@@ -106,6 +99,50 @@ wisper config llm
 ```
 
 Walks you through provider (Ollama / Anthropic / OpenAI / Google), model, and API key or endpoint. Skip this if you're not planning to use the LLM post-processing commands.
+
+---
+
+## Requirements
+
+- Python 3.10+ (for Option A/C)
+- [ffmpeg](https://ffmpeg.org/download.html) on your PATH
+- A free [HuggingFace token](https://huggingface.co/settings/tokens)
+- GPU recommended but not required (CPU works, just slower)
+
+**Windows CUDA:**
+- Install ffmpeg via `winget install Gyan.FFmpeg.Shared`
+- `setup.ps1` auto-installs the CUDA 12.6 PyTorch wheels
+- *If you see `cublas64_12.dll` / `zlibwapi.dll` errors: place NVIDIA cuDNN DLLs in your CUDA `bin` dir*
+
+**Mac:** `brew install ffmpeg`
+
+---
+
+## Installation (Developer / manual)
+
+```bash
+git clone <repo>
+cd wisper-transcribe
+python -m venv .venv
+source .venv/bin/activate       # Mac/Linux
+# .venv\Scripts\activate        # Windows
+pip install -e .
+```
+
+**Optional cloud-LLM extras** (Ollama works out of the box — only needed for cloud providers):
+
+```bash
+pip install -e '.[llm-anthropic]'   # Anthropic (Claude)
+pip install -e '.[llm-openai]'      # OpenAI (GPT)
+pip install -e '.[llm-google]'      # Google (Gemini)
+pip install -e '.[llm-all]'         # all three
+```
+
+> **Windows CUDA:** `pip install` gives CPU-only PyTorch by default. After setup, run:
+> ```powershell
+> pip install "torch>=2.8.0" "torchaudio>=2.8.0" --index-url https://download.pytorch.org/whl/cu126 --force-reinstall
+> ```
+> `setup.ps1` handles this automatically.
 
 
 
@@ -586,49 +623,48 @@ Run wisper entirely in a container — no Python environment setup, no CUDA DLL 
 
 ### Prerequisites
 
-- Docker ≥ 19.03
-- For GPU: NVIDIA driver installed on host (`nvidia-smi` must work) + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Mac/Windows) or Docker Engine + Compose v2 (Linux)
+- For GPU: NVIDIA driver on host (`nvidia-smi` must work) + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
 
 ### Quick start
 
 ```bash
-# Build the GPU image (~8 GB — includes PyTorch CUDA wheels)
-docker compose build
+# 1. Configure your tokens
+cp .env.example .env
+#    Open .env and set HF_TOKEN=hf_...  (and any LLM API keys you need)
 
-# First-time setup (token + model download — takes a few minutes)
-docker compose run wisper wisper setup
+# 2. Build and start (CPU — works everywhere)
+make start
+# → http://localhost:8080
 
-# Transcribe with speaker enrollment
+# OR — GPU (NVIDIA only)
+make start-gpu
+```
+
+On first run the server will download the Whisper and pyannote models (~2 GB) into `./cache/` — this only happens once.
+
+### Makefile targets
+
+| Command | Description |
+|---------|-------------|
+| `make start` | CPU web UI at `http://localhost:8080` |
+| `make start-gpu` | GPU web UI |
+| `make stop` | Stop all containers |
+| `make logs` | Follow container logs |
+| `make build` | (Re)build all images |
+| `make shell` | Shell in the CPU container |
+| `make shell-gpu` | Shell in the GPU container |
+| `make setup` | Local (non-Docker) setup |
+| `make test` | Run the test suite |
+
+### CLI via Docker
+
+```bash
 # Place audio files in ./input/ first
+docker compose run wisper-cpu wisper transcribe /app/input/session01.mp3 --enroll-speakers
+
+# GPU variant
 docker compose run wisper wisper transcribe /app/input/session01.mp3 --enroll-speakers
-
-# Subsequent sessions — automatic speaker matching
-docker compose run wisper wisper transcribe /app/input/session02.mp3
-# Output appears in ./output/
-```
-
-### CPU-only (CLI)
-
-```bash
-docker compose build wisper-cpu
-docker compose run wisper-cpu wisper transcribe /app/input/session.mp3
-```
-
-### Web UI
-
-```bash
-# GPU web server
-docker compose up wisper-web
-# → Open http://localhost:8080
-
-# CPU-only web server
-docker compose up wisper-cpu-web
-# → Open http://localhost:8080
-```
-
-First-time setup (token + model download) still required:
-```bash
-docker compose run wisper-web wisper setup
 ```
 
 ### Volume layout
@@ -640,7 +676,7 @@ docker compose run wisper-web wisper setup
 | `./input/` | `/app/input` | Your audio files |
 | `./output/` | `/app/output` | Transcribed `.md` files |
 
-These directories are created automatically on first run. Speaker profiles and model downloads persist across container restarts.
+All directories are created automatically on first run and persist across container restarts.
 
 ### Verify GPU passthrough
 
@@ -654,9 +690,10 @@ docker compose run wisper nvidia-smi
 
 | Variable | Purpose |
 |----------|---------|
-| `WISPER_DATA_DIR` | Override config/profile storage path — used automatically in Docker |
+| `HF_TOKEN` | HuggingFace token — preferred name (used by Docker `.env` and all HF libraries) |
+| `HUGGINGFACE_TOKEN` | Alias for `HF_TOKEN`; both are accepted and propagated to each other |
+| `WISPER_DATA_DIR` | Override config/profile storage path — set automatically in Docker |
 | `WISPER_DEBUG` | Set to `1` to disable warning suppression and see raw dependency output |
-| `HUGGINGFACE_TOKEN` | HF token as an alternative to `wisper config set hf_token` |
 | `ANTHROPIC_API_KEY` | Anthropic API key for `refine` / `summarize` — takes precedence over stored config |
 | `OPENAI_API_KEY` | OpenAI API key — takes precedence over stored config |
 | `GOOGLE_API_KEY` | Google (Gemini) API key — takes precedence over stored config |
@@ -728,3 +765,4 @@ WISPER_DEBUG=1 wisper transcribe session.mp3
 - [x] `large-v3-turbo` model: added to `--model` choices and set as the new default (distilled large-v3, ~8× faster with minimal accuracy loss)
 - [x] Code quality: extracted shared `time_utils.py` helpers, deduplicated pipeline/formatter/diarizer
 - [x] LLM post-processing: `wisper refine` (vocabulary correction, unknown-speaker ID) and `wisper summarize` (campaign notes with loot, NPCs, follow-ups) — multi-provider (Ollama / Anthropic / OpenAI / Google)
+- [x] Distribution: double-click launchers (`start.command` macOS, `start.bat` Windows, `start.sh` Linux), `Makefile` for Docker workflows, `.env.example` for token configuration

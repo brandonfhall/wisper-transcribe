@@ -137,6 +137,47 @@ def test_cancel_completed_job_returns_false():
     assert q.cancel(job.id) is False
 
 
+def test_run_job_completed_after_post_process(tmp_path):
+    """COMPLETED status must not be set until _run_post_process finishes.
+
+    Regression test: previously job.status = COMPLETED was set before
+    _run_post_process() was called, causing the SSE stream to fire 'done'
+    while Ollama was still generating the campaign summary.
+    """
+    from wisper_transcribe.web.jobs import Job, JobQueue, COMPLETED, RUNNING
+    from datetime import datetime
+
+    out_md = tmp_path / "out.md"
+    out_md.write_text("---\nspeakers: []\n---\n# Session\n")
+
+    status_during_post_process: list[str] = []
+
+    def fake_post_process(job: Job, transcript_path) -> None:
+        # Record job status at the moment post-processing runs
+        status_during_post_process.append(job.status)
+
+    q = JobQueue()
+    job = Job(
+        id="pp-test",
+        status=RUNNING,
+        created_at=datetime.now(),
+        input_path=str(tmp_path / "audio.mp3"),
+        kwargs={"no_diarize": True, "device": "cpu"},
+        post_summarize=True,
+    )
+
+    with patch("wisper_transcribe.web.jobs.process_file", return_value=out_md):
+        with patch.object(q, "_run_post_process", side_effect=fake_post_process):
+            q._run_job(job)
+
+    # Post-process must have been called while job was still RUNNING
+    assert status_during_post_process == [RUNNING], (
+        f"Expected RUNNING during post-process, got {status_during_post_process}"
+    )
+    # After _run_job returns, job must be COMPLETED
+    assert job.status == COMPLETED
+
+
 def test_run_job_tqdm_patch_restores_original(tmp_path):
     """tqdm.write should be restored to its original after job completes."""
     import tqdm as _tqdm

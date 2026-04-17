@@ -308,7 +308,8 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - `tests/test_llm_clients.py` mocks httpx for Ollama and injects fake `anthropic` / `openai` / `google.genai` modules via `sys.modules` to cover the lazy-import path; each client's `complete()` and `complete_json()` are tested for happy path + SDK error + missing-SDK → `LLMUnavailableError`
 - `tests/test_web_routes.py` covers web routes including refine/summarize job submission, summary sidecar rendering, summary download, summary-badge logic on the transcript list, deletion of summary sidecars alongside transcripts, LLM config field rendering, LLM config save (provider/model/temperature), non-empty API key save, empty API key not overwriting an existing key, and Config nav link presence on the job detail page
 - `tests/test_config.py` covers `get_hf_token()` accepting `HF_TOKEN` as an alias for `HUGGINGFACE_TOKEN` and propagating whichever is set to both env vars
-- Test count: 404 (all mocked, all passing)
+- `tests/test_web_jobs.py` covers job queue CRUD, tqdm patch/restore, error recording, cancellation, and a regression test that `job.status = COMPLETED` is not set until after `_run_post_process()` finishes
+- Test count: 405 (all mocked, all passing)
 
 **CI matrix** (`.github/workflows/ci.yml`):
 - Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)
@@ -433,7 +434,14 @@ Nav link styles (`nav-link`, `nav-active`, `nav-divider`, `mobile-nav-link`) are
 - `static/tailwind.min.css`: rebuilt automatically on server startup by `app._build_tailwind()` (mtime-checked; skips if already current). `pytailwindcss` is a main dependency (no Node.js required). Docker builds also invoke the build step so images are self-contained. Manual rebuild: `python -m pytailwindcss -i ./src/wisper_transcribe/static/input.css -o ./src/wisper_transcribe/static/tailwind.min.css --minify`
 
 ### Docker Web Services
-`docker-compose.yml` defines `wisper-web` (GPU) and `wisper-cpu-web` (CPU), both exposing port 8080. Same image as CLI services, different `command: ["server", "--host", "0.0.0.0", "--port", "8080"]`.
+`docker-compose.yml` defines four services: `wisper` / `wisper-cpu` (CLI) and `wisper-web` / `wisper-cpu-web` (web UI, port 8080). All services share a common YAML anchor (`x-volumes`, `x-env`) so volume mounts and environment variables are declared once. Environment variables (`HF_TOKEN`, `HUGGINGFACE_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`) are read from a `.env` file (copy `.env.example → .env`). `Makefile` provides `make start` / `make start-gpu` / `make stop` / `make logs` / `make build` targets as a convenience layer over `docker compose`.
+
+### Distribution Launchers
+Three double-click launcher scripts handle first-time setup and server start for end users:
+- `start.command` (macOS) — `.command` extension opens Terminal on double-click; checks for `.venv`, calls `bash setup.sh` on first run, then starts `wisper server` and opens the browser.
+- `start.bat` (Windows) — double-click batch file; calls `setup.ps1` on first run via `powershell -ExecutionPolicy Bypass`, then launches the server and opens `http://localhost:8080`.
+- `start.sh` (Linux) — equivalent for Linux desktops with `xdg-open` for browser launch.
+Both `start.command` and `start.sh` are committed with the execute bit set (`git update-index --chmod=+x`).
 
 ---
 
