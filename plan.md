@@ -10,26 +10,6 @@ Podcast transcription tool for tabletop RPG actual-play recordings (D&D, Pathfin
 
 ---
 
-## In Progress
-
-### Progress Bar Redesign (April 2026)
-
-**Status:** Template rewritten. Tests pass (404). Needs: commit, architecture.md update, README update (if user-facing).
-
-**What changed in `job_detail.html`:**
-- Removed the dual T/D/F dot + separate progress bar layout
-- Single unified progress bar spanning all steps; each step occupies an equal slice
-- Steps shown: T → D → F for transcription; R for refine-only; S for summarize-only; T → D → F → R/S when post-processing is chained (only R/S shown if `job.post_refine`/`job.post_summarize`)
-- Each step pill shows: pending (gray), active (indigo + pulse), done (green)
-- ETA + speed/rate shown live from tqdm data; when no tqdm data for 5 s, a slow creep estimator advances the bar 1% per 5 s up to 90% of the current step slice
-- Phase detection added for refine/summarize log keywords (`connecting to ollama`, `refining`, `summarizing`) to activate R/S steps
-
-**Where to pick up:** Run `.venv/bin/pytest tests/ -v`, then commit `job_detail.html` + `tailwind.min.css` + `architecture.md` + `README.md` (no user-facing flag changes, but architecture.md needs the progress section updated). Then push.
-
-**Known gap:** ETA for LLM steps is estimated only (no tqdm data from LLM providers). The 5 s creep estimator covers this — it will slowly advance the R/S bar until the `done` event fires.
-
----
-
 ## Backlog
 
 ### DM Character Voice Handling
