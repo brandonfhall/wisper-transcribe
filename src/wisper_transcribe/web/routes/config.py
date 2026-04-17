@@ -5,7 +5,12 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from . import templates
-from wisper_transcribe.config import get_config_path, load_config, save_config
+from wisper_transcribe.config import (
+    LLM_PROVIDERS,
+    get_config_path,
+    load_config,
+    save_config,
+)
 
 router = APIRouter(prefix="/config")
 
@@ -23,6 +28,19 @@ _CONFIG_FIELDS = [
     ("hf_token",            "secret","HuggingFace access token", None),
 ]
 
+_LLM_FIELDS = [
+    ("llm_provider",       "select", "LLM provider",                list(LLM_PROVIDERS)),
+    ("llm_model",          "str",    "Model name (blank = default)", None),
+    ("llm_endpoint",       "str",    "Ollama endpoint URL",          None),
+    ("llm_temperature",    "float",  "Sampling temperature (0–1)",   None),
+    ("anthropic_api_key",  "secret", "Anthropic API key",            None),
+    ("openai_api_key",     "secret", "OpenAI API key",               None),
+    ("google_api_key",     "secret", "Google API key",               None),
+]
+
+# Keys that must not be overwritten with an empty string
+_LLM_SECRET_FIELD_KEYS = frozenset({"anthropic_api_key", "openai_api_key", "google_api_key"})
+
 
 @router.get("", response_class=HTMLResponse)
 async def config_show(request: Request) -> HTMLResponse:
@@ -36,20 +54,17 @@ async def config_show(request: Request) -> HTMLResponse:
             "config": config,
             "config_path": str(config_path),
             "fields": _CONFIG_FIELDS,
+            "llm_fields": _LLM_FIELDS,
             "saved": request.query_params.get("saved") == "1",
         },
     )
 
 
-@router.post("", response_class=HTMLResponse)
-async def config_save(request: Request) -> RedirectResponse:
-    form = await request.form()
-    config = load_config()
-
-    for key, type_, _desc, _choices in _CONFIG_FIELDS:
+def _apply_fields(config: dict, form, fields) -> None:
+    """Write validated form values into *config* in-place."""
+    for key, type_, _desc, _choices in fields:
         raw = form.get(key)
         if raw is None:
-            # Unchecked checkboxes are absent from form data
             if type_ == "bool":
                 config[key] = False
             continue
@@ -66,8 +81,21 @@ async def config_save(request: Request) -> RedirectResponse:
                 config[key] = float(raw)
             except ValueError:
                 pass
+        elif type_ == "secret":
+            # Never overwrite an existing secret with an empty submission
+            if raw:
+                config[key] = raw
         else:
             config[key] = raw
+
+
+@router.post("", response_class=HTMLResponse)
+async def config_save(request: Request) -> RedirectResponse:
+    form = await request.form()
+    config = load_config()
+
+    _apply_fields(config, form, _CONFIG_FIELDS)
+    _apply_fields(config, form, _LLM_FIELDS)
 
     save_config(config)
     return RedirectResponse(url="/config?saved=1", status_code=303)

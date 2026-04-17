@@ -57,6 +57,72 @@
       </div>
     </div>
 
+    <!-- LLM Post-processing -->
+    <div class="card space-y-4">
+      <div>
+        <h2 class="text-base font-semibold text-gray-900">LLM Post-processing</h2>
+        <p class="text-xs text-gray-500 mt-1">Used by <em>Refine</em> and <em>Summarize</em>. Ollama runs locally; cloud providers require an API key.</p>
+      </div>
+
+      <!-- Provider -->
+      <div>
+        <label class="form-label" for="cfg_llm_provider">llm_provider <span class="text-gray-400 font-normal text-xs">— LLM provider</span></label>
+        <select id="cfg_llm_provider" name="llm_provider" class="form-input" onchange="llmProviderChanged(this.value)">
+          {% for p in ["ollama", "anthropic", "openai", "google"] %}
+          <option value="{{ p }}" {% if config.get('llm_provider', 'ollama') == p %}selected{% endif %}>{{ p }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <!-- Model -->
+      <div>
+        <label class="form-label" for="cfg_llm_model">llm_model <span class="text-gray-400 font-normal text-xs">— Model name (blank = default)</span></label>
+        <input type="text" id="cfg_llm_model" name="llm_model"
+               value="{{ config.get('llm_model', '') }}"
+               class="form-input font-mono text-sm"
+               placeholder="e.g. llama3.1:8b, claude-sonnet-4-6, gpt-4o-mini"/>
+      </div>
+
+      <!-- Endpoint (Ollama only) -->
+      <div id="llm_endpoint_row">
+        <label class="form-label" for="cfg_llm_endpoint">llm_endpoint <span class="text-gray-400 font-normal text-xs">— Ollama endpoint URL</span></label>
+        <input type="text" id="cfg_llm_endpoint" name="llm_endpoint"
+               value="{{ config.get('llm_endpoint', 'http://localhost:11434') }}"
+               class="form-input font-mono text-sm"/>
+      </div>
+
+      <!-- Temperature -->
+      <div>
+        <label class="form-label" for="cfg_llm_temperature">llm_temperature <span class="text-gray-400 font-normal text-xs">— Sampling temperature (0–1)</span></label>
+        <input type="number" id="cfg_llm_temperature" name="llm_temperature"
+               value="{{ config.get('llm_temperature', 0.2) }}"
+               step="0.05" min="0" max="1"
+               class="form-input w-32"/>
+      </div>
+
+      <!-- Cloud API keys -->
+      <div id="llm_anthropic_row" class="hidden">
+        <label class="form-label" for="cfg_anthropic_api_key">anthropic_api_key <span class="text-gray-400 font-normal text-xs">— Anthropic API key (env <code>ANTHROPIC_API_KEY</code> takes precedence)</span></label>
+        <input type="password" id="cfg_anthropic_api_key" name="anthropic_api_key"
+               class="form-input font-mono text-sm"
+               placeholder="sk-ant-… (leave blank to keep existing)"/>
+      </div>
+
+      <div id="llm_openai_row" class="hidden">
+        <label class="form-label" for="cfg_openai_api_key">openai_api_key <span class="text-gray-400 font-normal text-xs">— OpenAI API key (env <code>OPENAI_API_KEY</code> takes precedence)</span></label>
+        <input type="password" id="cfg_openai_api_key" name="openai_api_key"
+               class="form-input font-mono text-sm"
+               placeholder="sk-… (leave blank to keep existing)"/>
+      </div>
+
+      <div id="llm_google_row" class="hidden">
+        <label class="form-label" for="cfg_google_api_key">google_api_key <span class="text-gray-400 font-normal text-xs">— Google API key (env <code>GOOGLE_API_KEY</code> takes precedence)</span></label>
+        <input type="password" id="cfg_google_api_key" name="google_api_key"
+               class="form-input font-mono text-sm"
+               placeholder="AIza… (leave blank to keep existing)"/>
+      </div>
+    </div>
+
     <div class="flex gap-4">
       <button type="submit" class="btn-primary">Save Configuration</button>
       <a href="/" class="btn-secondary">Cancel</a>
@@ -65,4 +131,15 @@
   </form>
 
 </div>
+
+<script>
+function llmProviderChanged(provider) {
+  document.getElementById('llm_endpoint_row').classList.toggle('hidden', provider !== 'ollama');
+  document.getElementById('llm_anthropic_row').classList.toggle('hidden', provider !== 'anthropic');
+  document.getElementById('llm_openai_row').classList.toggle('hidden', provider !== 'openai');
+  document.getElementById('llm_google_row').classList.toggle('hidden', provider !== 'google');
+}
+// Apply on page load
+llmProviderChanged(document.getElementById('cfg_llm_provider').value);
+</script>
 {% endblock %}

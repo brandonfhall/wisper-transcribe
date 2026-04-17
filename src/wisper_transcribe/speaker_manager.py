@@ -122,9 +122,11 @@ def _load_embedding_model(device: str):
 
 
 def _get_hf_token() -> str:
-    from .config import load_config
-    import os
-    return os.environ.get("HUGGINGFACE_TOKEN", "") or load_config().get("hf_token", "")
+    from .config import get_hf_token
+    try:
+        return get_hf_token()
+    except (RuntimeError, Exception):
+        return ""
 
 
 def extract_embedding(

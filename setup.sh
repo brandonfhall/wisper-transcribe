@@ -91,12 +91,35 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     fi
 fi
 
+# ── Optional cloud LLM extras ─────────────────────────────────────────────
+step "Optional: cloud LLM extras (wisper refine / wisper summarize)"
+echo ""
+echo "   wisper refine and wisper summarize use an LLM to clean up transcripts"
+echo "   and generate campaign notes. Ollama (local) works out of the box."
+echo "   Install an extra only if you want to use a cloud provider."
+echo ""
+echo "     a) Anthropic (Claude)  →  pip install -e '.[llm-anthropic]'"
+echo "     b) OpenAI (GPT)        →  pip install -e '.[llm-openai]'"
+echo "     c) Google (Gemini)     →  pip install -e '.[llm-google]'"
+echo "     d) All three           →  pip install -e '.[llm-all]'"
+echo "     s) Skip (use Ollama or configure later)"
+echo ""
+read -r -p "   Choice [a/b/c/d/s]: " LLM_CHOICE
+case "$(echo "$LLM_CHOICE" | tr '[:upper:]' '[:lower:]')" in
+    a) "$PIP" install -e ".[llm-anthropic]" -q && ok "anthropic SDK installed" ;;
+    b) "$PIP" install -e ".[llm-openai]"    -q && ok "openai SDK installed" ;;
+    c) "$PIP" install -e ".[llm-google]"    -q && ok "google-genai SDK installed" ;;
+    d) "$PIP" install -e ".[llm-all]"       -q && ok "all LLM SDKs installed" ;;
+    *) ok "Skipped — use 'wisper config llm' to set up a provider at any time" ;;
+esac
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}Setup complete!${NC}"
 echo ""
 echo "Next steps:"
-echo "  1. Activate venv:     source .venv/bin/activate"
-echo "  2. Run setup wizard:  wisper setup   (configures HF token + pre-downloads models)"
-echo "  3. First session:     wisper transcribe session01.mp3 --enroll-speakers"
+echo "  1. Activate venv:       source .venv/bin/activate"
+echo "  2. Run setup wizard:    wisper setup   (HF token, model download, LLM config)"
+echo "  3. First session:       wisper transcribe session01.mp3 --enroll-speakers"
+echo "  4. LLM config (later):  wisper config llm"
 echo ""

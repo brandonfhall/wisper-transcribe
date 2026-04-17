@@ -113,6 +113,23 @@ def test_job_detail_unknown_returns_404(client):
     assert resp.status_code == 404
 
 
+def test_job_detail_nav_contains_config_link(client, tmp_path):
+    """The Config nav link must be present on the job detail page (sticky nav regression guard)."""
+    audio_file = tmp_path / "nav_test.mp3"
+    audio_file.write_bytes(b"fake")
+    with open(audio_file, "rb") as f:
+        post_resp = client.post(
+            "/transcribe",
+            files={"file": ("nav_test.mp3", f, "audio/mpeg")},
+            data={},
+            follow_redirects=False,
+        )
+    job_url = post_resp.headers["location"]
+    resp = client.get(job_url)
+    assert resp.status_code == 200
+    assert b'href="/config"' in resp.content
+
+
 def test_cancel_job_redirects(client, tmp_path):
     """POST /transcribe/jobs/<id>/cancel marks job cancelled and redirects."""
     audio_file = tmp_path / "test.mp3"
@@ -296,6 +313,84 @@ def test_config_post_bool_field_unchecked(client):
     assert captured.get("vad_filter") is False
 
 
+def test_config_llm_fields_visible(client):
+    """LLM provider select and model input appear on the config page."""
+    with patch("wisper_transcribe.web.routes.config.load_config",
+               return_value={"llm_provider": "ollama", "llm_model": ""}), \
+         patch("wisper_transcribe.web.routes.config.get_config_path",
+               return_value=Path("/tmp/config.toml")):
+        resp = client.get("/config")
+    assert resp.status_code == 200
+    assert b"llm_provider" in resp.content
+    assert b"llm_model" in resp.content
+    assert b"llm_endpoint" in resp.content
+    assert b"llm_temperature" in resp.content
+    assert b"anthropic_api_key" in resp.content
+
+
+def test_config_post_saves_llm_fields(client):
+    """Saving LLM provider, model, endpoint, and temperature persists correctly."""
+    captured = {}
+
+    def fake_save(cfg):
+        captured.update(cfg)
+
+    with patch("wisper_transcribe.web.routes.config.load_config", return_value={}), \
+         patch("wisper_transcribe.web.routes.config.save_config", side_effect=fake_save):
+        client.post(
+            "/config",
+            data={
+                "llm_provider": "anthropic",
+                "llm_model": "claude-sonnet-4-6",
+                "llm_endpoint": "http://localhost:11434",
+                "llm_temperature": "0.3",
+            },
+            follow_redirects=False,
+        )
+
+    assert captured.get("llm_provider") == "anthropic"
+    assert captured.get("llm_model") == "claude-sonnet-4-6"
+    assert captured.get("llm_temperature") == 0.3
+
+
+def test_config_post_saves_api_key_when_non_empty(client):
+    """A non-empty API key is saved to config."""
+    captured = {}
+
+    def fake_save(cfg):
+        captured.update(cfg)
+
+    with patch("wisper_transcribe.web.routes.config.load_config", return_value={}), \
+         patch("wisper_transcribe.web.routes.config.save_config", side_effect=fake_save):
+        client.post(
+            "/config",
+            data={"anthropic_api_key": "sk-ant-test123"},
+            follow_redirects=False,
+        )
+
+    assert captured.get("anthropic_api_key") == "sk-ant-test123"
+
+
+def test_config_post_does_not_overwrite_api_key_with_empty(client):
+    """An empty API key field must not overwrite an existing key."""
+    captured = {}
+
+    def fake_save(cfg):
+        captured.update(cfg)
+
+    existing = {"anthropic_api_key": "sk-ant-existing"}
+    with patch("wisper_transcribe.web.routes.config.load_config", return_value=dict(existing)), \
+         patch("wisper_transcribe.web.routes.config.save_config", side_effect=fake_save):
+        # Submit with blank API key
+        client.post(
+            "/config",
+            data={"anthropic_api_key": ""},
+            follow_redirects=False,
+        )
+
+    assert captured.get("anthropic_api_key") == "sk-ant-existing"
+
+
 # ---------------------------------------------------------------------------
 # Speakers
 # ---------------------------------------------------------------------------
@@ -356,6 +451,140 @@ def test_speakers_rename_updates_display_name(client):
 
     assert resp.status_code == 303
     assert profiles["alice"].display_name == "Alice (DM)"
+
+
+# ---------------------------------------------------------------------------
+# LLM post-processing routes (refine / summarize / summary view)
+# ---------------------------------------------------------------------------
+
+_TRANSCRIPT_MD = (
+    "---\ntitle: Session 01\ndate_processed: '2026-04-07'\n"
+    "speakers:\n  - name: Alice\n    role: DM\n---\n\n"
+    "**Alice** *(00:00)*: Hello, world."
+)
+
+_SUMMARY_MD = (
+    "---\ntype: session-summary\nsource: \"session01.md\"\n"
+    "generated_at: '2026-04-07T12:00:00'\nprovider: ollama\n"
+    "model: \"llama3.1:8b\"\nrefined: false\n---\n\n"
+    "# Session 01\n\n## Summary\n\nThe party gathered.\n"
+)
+
+
+def test_transcripts_list_excludes_summary_files(client, tmp_path):
+    """Summary sidecars must not appear as independent cards in the transcript list."""
+    (tmp_path / "session01.md").write_text(_TRANSCRIPT_MD)
+    (tmp_path / "session01.summary.md").write_text(_SUMMARY_MD)
+    with patch("wisper_transcribe.web.routes.transcripts._output_dir", return_value=tmp_path):
+        resp = client.get("/transcripts")
+    assert resp.status_code == 200
+    # The main transcript card should appear once
+    assert resp.content.count(b"session01") >= 1
+    # The summary card should NOT appear as a separate entry
+    # (the summary is shown as an icon within the transcript card, not its own card)
+    html = resp.content.decode()
+    assert "session01.summary" not in html or html.count("session01.summary") <= 2  # href only
+
+
+def test_transcript_detail_shows_summary_link(client, tmp_path):
+    """When a .summary.md sidecar exists, the detail page shows the Campaign Notes panel."""
+    (tmp_path / "session01.md").write_text(_TRANSCRIPT_MD)
+    (tmp_path / "session01.summary.md").write_text(_SUMMARY_MD)
+    with patch("wisper_transcribe.web.routes.transcripts._output_dir", return_value=tmp_path):
+        resp = client.get("/transcripts/session01")
+    assert resp.status_code == 200
+    assert b"Campaign Notes" in resp.content
+
+
+def test_transcript_detail_no_summary_link_when_absent(client, tmp_path):
+    """Without a sidecar the Campaign Notes panel must not appear."""
+    (tmp_path / "session01.md").write_text(_TRANSCRIPT_MD)
+    with patch("wisper_transcribe.web.routes.transcripts._output_dir", return_value=tmp_path):
+        resp = client.get("/transcripts/session01")
+    assert resp.status_code == 200
+    assert b"Campaign Notes available" not in resp.content
+
+
+@pytest.mark.filterwarnings("ignore:fix_vocabulary:UserWarning")
+def test_post_refine_queues_job_and_redirects(client, tmp_path):
+    """POST /transcripts/<name>/refine submits an LLM job and redirects."""
+    (tmp_path / "session01.md").write_text(_TRANSCRIPT_MD)
+    with patch("wisper_transcribe.web.routes.transcripts._output_dir", return_value=tmp_path):
+        resp = client.post("/transcripts/session01/refine", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"].startswith("/transcribe/jobs/")
+
+
+@pytest.mark.filterwarnings("ignore:fix_vocabulary:UserWarning")
+def test_post_summarize_queues_job_and_redirects(client, tmp_path):
+    """POST /transcripts/<name>/summarize submits an LLM job and redirects."""
+    (tmp_path / "session01.md").write_text(_TRANSCRIPT_MD)
+    with patch("wisper_transcribe.web.routes.transcripts._output_dir", return_value=tmp_path):
+        resp = client.post("/transcripts/session01/summarize", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"].startswith("/transcribe/jobs/")
+
+
+def test_post_refine_nonexistent_transcript_404(client, tmp_path):
+    with patch("wisper_transcribe.web.routes.transcripts._output_dir", return_value=tmp_path):
+        resp = client.post("/transcripts/nonexistent/refine", follow_redirects=False)
+    assert resp.status_code == 404
+
+
+def test_summary_detail_renders(client, tmp_path):
+    """GET /transcripts/<name>/summary renders the summary markdown."""
+    (tmp_path / "session01.md").write_text(_TRANSCRIPT_MD)
+    (tmp_path / "session01.summary.md").write_text(_SUMMARY_MD)
+    with patch("wisper_transcribe.web.routes.transcripts._output_dir", return_value=tmp_path):
+        resp = client.get("/transcripts/session01/summary")
+    assert resp.status_code == 200
+    assert b"Session 01" in resp.content
+    assert b"Transcript" in resp.content  # back-link
+
+
+def test_summary_detail_not_found(client, tmp_path):
+    (tmp_path / "session01.md").write_text(_TRANSCRIPT_MD)
+    with patch("wisper_transcribe.web.routes.transcripts._output_dir", return_value=tmp_path):
+        resp = client.get("/transcripts/session01/summary")
+    assert resp.status_code == 404
+
+
+def test_summary_download(client, tmp_path):
+    """GET /transcripts/<name>/summary/download serves the .summary.md file."""
+    (tmp_path / "session01.md").write_text(_TRANSCRIPT_MD)
+    (tmp_path / "session01.summary.md").write_text(_SUMMARY_MD)
+    with patch("wisper_transcribe.web.routes.transcripts._output_dir", return_value=tmp_path):
+        resp = client.get("/transcripts/session01/summary/download")
+    assert resp.status_code == 200
+    assert b"session-summary" in resp.content
+
+
+def test_delete_transcript_also_removes_summary(client, tmp_path):
+    """Deleting a transcript removes the .summary.md sidecar too."""
+    md = tmp_path / "session01.md"
+    sm = tmp_path / "session01.summary.md"
+    md.write_text(_TRANSCRIPT_MD)
+    sm.write_text(_SUMMARY_MD)
+    with patch("wisper_transcribe.web.routes.transcripts._output_dir", return_value=tmp_path):
+        resp = client.post("/transcripts/session01/delete", follow_redirects=False)
+    assert resp.status_code == 303
+    assert not md.exists()
+    assert not sm.exists()
+
+
+def test_transcribe_post_accepts_post_processing_flags(client, tmp_path):
+    """post_refine and post_summarize checkboxes must not cause a 422."""
+    audio_file = tmp_path / "test.mp3"
+    audio_file.write_bytes(b"fake mp3")
+    with open(audio_file, "rb") as f:
+        resp = client.post(
+            "/transcribe",
+            files={"file": ("test.mp3", f, "audio/mpeg")},
+            data={"post_refine": "1", "post_summarize": "1"},
+            follow_redirects=False,
+        )
+    assert resp.status_code == 303
+    assert resp.headers["location"].startswith("/transcribe/jobs/")
 
 
 def test_speakers_rename_empty_name_no_change(client):

@@ -33,7 +33,36 @@ DEFAULTS = {
     # Each subprocess gets its own copy of the module-level model globals.
     # Disabled by default — enable after benchmarking on your hardware.
     "parallel_stages": False,
+    # LLM post-processing (wisper refine / wisper summarize). Opt-in, CLI-only MVP.
+    # Default provider is local Ollama; cloud providers require explicit config + key.
+    "llm_provider": "ollama",                 # ollama | anthropic | openai | google
+    "llm_model": "",                          # blank → per-provider default via resolve_llm_model()
+    "llm_endpoint": "http://localhost:11434", # ollama only
+    "llm_temperature": 0.2,
+    "anthropic_api_key": "",                  # env ANTHROPIC_API_KEY takes precedence
+    "openai_api_key": "",                     # env OPENAI_API_KEY takes precedence
+    "google_api_key": "",                     # env GOOGLE_API_KEY takes precedence
 }
+
+LLM_PROVIDERS = ("ollama", "anthropic", "openai", "google")
+
+# Per-provider default model names. Override via config (llm_model) or CLI (--model).
+_LLM_DEFAULT_MODELS = {
+    "ollama": "llama3.1:8b",
+    "anthropic": "claude-sonnet-4-6",
+    "openai": "gpt-4o-mini",
+    "google": "gemini-1.5-flash",
+}
+
+# env var → config key mapping for LLM API keys. Keys are never logged.
+_LLM_API_KEY_ENV = {
+    "anthropic": ("ANTHROPIC_API_KEY", "anthropic_api_key"),
+    "openai": ("OPENAI_API_KEY", "openai_api_key"),
+    "google": ("GOOGLE_API_KEY", "google_api_key"),
+}
+
+# config-key set used by config_show to mask secrets when printing settings.
+LLM_SECRET_KEYS = frozenset({"anthropic_api_key", "openai_api_key", "google_api_key"})
 
 COMPUTE_TYPES = ("auto", "float16", "int8_float16", "int8", "float32")
 
@@ -113,18 +142,26 @@ def get_device() -> str:
 def get_hf_token(config: Optional[dict] = None) -> str:
     """Return HuggingFace token from env var, config, or interactive prompt.
 
+    Accepts HUGGINGFACE_TOKEN or HF_TOKEN (huggingface_hub's canonical name).
+    Whichever is found is propagated to both env vars so third-party libraries
+    (e.g. mlx-whisper) that only look for HF_TOKEN also see it.
+
     Raises RuntimeError if no token is found and stdin is not a tty.
     """
     import os
 
-    token = os.environ.get("HUGGINGFACE_TOKEN", "")
+    token = os.environ.get("HUGGINGFACE_TOKEN", "") or os.environ.get("HF_TOKEN", "")
     if token:
+        os.environ.setdefault("HUGGINGFACE_TOKEN", token)
+        os.environ.setdefault("HF_TOKEN", token)
         return token
 
     if config is None:
         config = load_config()
     token = config.get("hf_token", "")
     if token:
+        os.environ.setdefault("HUGGINGFACE_TOKEN", token)
+        os.environ.setdefault("HF_TOKEN", token)
         return token
 
     # Interactive prompt as last resort
@@ -149,3 +186,59 @@ def get_hf_token(config: Optional[dict] = None) -> str:
         save_config(cfg)
         click.echo("Token saved to config.")
     return token
+
+
+def get_llm_api_key(provider: str, config: Optional[dict] = None) -> Optional[str]:
+    """Return the API key for a cloud LLM provider.
+
+    Resolution order (mirrors get_hf_token):
+    1. Environment variable (ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY)
+    2. Config file key (anthropic_api_key / openai_api_key / google_api_key)
+    3. None
+
+    `ollama` has no key and always returns None. Unknown providers raise ValueError.
+    The returned key is never logged anywhere; callers must pass it directly to the
+    provider SDK.
+    """
+    import os
+
+    if provider == "ollama":
+        return None
+    if provider not in _LLM_API_KEY_ENV:
+        raise ValueError(f"Unknown LLM provider: {provider!r}")
+
+    env_name, config_key = _LLM_API_KEY_ENV[provider]
+    env_value = os.environ.get(env_name, "").strip()
+    if env_value:
+        return env_value
+
+    if config is None:
+        config = load_config()
+    stored = config.get(config_key, "")
+    return stored.strip() if stored else None
+
+
+def resolve_llm_model(provider: str, override: Optional[str] = None,
+                      config: Optional[dict] = None) -> str:
+    """Return the model name to use for a given provider.
+
+    Resolution order:
+    1. `override` argument (from CLI --model)
+    2. `llm_model` in config (if non-empty)
+    3. Per-provider default (_LLM_DEFAULT_MODELS)
+
+    Unknown providers raise ValueError.
+    """
+    if provider not in _LLM_DEFAULT_MODELS:
+        raise ValueError(f"Unknown LLM provider: {provider!r}")
+
+    if override:
+        return override
+
+    if config is None:
+        config = load_config()
+    stored = config.get("llm_model", "") or ""
+    if stored.strip():
+        return stored.strip()
+
+    return _LLM_DEFAULT_MODELS[provider]

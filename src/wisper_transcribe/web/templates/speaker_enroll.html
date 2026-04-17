@@ -33,6 +33,7 @@
                  src="/transcribe/jobs/{{ job.id }}/excerpt/{{ speaker_name }}"
                  preload="none" class="hidden"></audio>
           <button type="button"
+                  data-audio-id="audio_{{ loop.index }}"
                   onclick="playExcerpt('audio_{{ loop.index }}', this)"
                   class="inline-flex items-center gap-1 text-xs px-3 py-1 rounded-full border border-green-500 text-green-700 hover:bg-green-50 transition-colors">
             <svg class="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 20 20">
@@ -81,21 +82,37 @@
 </div>
 
 <script>
+const _PLAY_HTML = '<svg class="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 20 20"><path d="M6.3 2.841A1.5 1.5 0 004 4.11v11.78a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/></svg> Play sample';
+const _STOP_HTML = '<svg class="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 20 20"><path d="M5.75 3a.75.75 0 00-.75.75v12.5c0 .414.336.75.75.75h1.5a.75.75 0 00.75-.75V3.75A.75.75 0 007.25 3h-1.5zM12.75 3a.75.75 0 00-.75.75v12.5c0 .414.336.75.75.75h1.5a.75.75 0 00.75-.75V3.75A.75.75 0 0014.25 3h-1.5z"/></svg> Stop';
+
+function _resetPlayBtn(b) {
+  b.innerHTML = _PLAY_HTML;
+  b.dataset.playing = '';
+}
+
 function playExcerpt(audioId, btn) {
-  // Stop any currently playing excerpt
+  // Stop any other playing excerpt and reset its button.
   document.querySelectorAll('audio').forEach(a => {
-    if (a.id !== audioId) { a.pause(); a.currentTime = 0; }
+    if (a.id !== audioId) {
+      a.pause();
+      a.currentTime = 0;
+      const other = document.querySelector(`button[data-audio-id="${a.id}"]`);
+      if (other) _resetPlayBtn(other);
+    }
   });
+
   const audio = document.getElementById(audioId);
-  if (audio.paused) {
-    audio.play();
-    btn.innerHTML = '<svg class="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 20 20"><path d="M5.75 3a.75.75 0 00-.75.75v12.5c0 .414.336.75.75.75h1.5a.75.75 0 00.75-.75V3.75A.75.75 0 007.25 3h-1.5zM12.75 3a.75.75 0 00-.75.75v12.5c0 .414.336.75.75.75h1.5a.75.75 0 00.75-.75V3.75A.75.75 0 0014.25 3h-1.5z"/></svg> Stop';
-    audio.onended = () => {
-      btn.innerHTML = '<svg class="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 20 20"><path d="M6.3 2.841A1.5 1.5 0 004 4.11v11.78a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/></svg> Play sample';
-    };
+  // Use dataset.playing as the source of truth — audio.paused is unreliable
+  // immediately after play() with preload="none" (async load race condition).
+  if (btn.dataset.playing) {
+    audio.pause();
+    audio.currentTime = 0;
+    _resetPlayBtn(btn);
   } else {
-    audio.pause(); audio.currentTime = 0;
-    btn.innerHTML = '<svg class="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 20 20"><path d="M6.3 2.841A1.5 1.5 0 004 4.11v11.78a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/></svg> Play sample';
+    btn.dataset.playing = '1';
+    btn.innerHTML = _STOP_HTML;
+    audio.play();
+    audio.onended = () => _resetPlayBtn(btn);
   }
 }
 </script>

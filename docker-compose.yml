@@ -1,21 +1,44 @@
 name: wisper-transcribe
 
+# ── Quick start ───────────────────────────────────────────────────────────────
+# 1. cp .env.example .env  →  fill in HF_TOKEN (and optional API keys)
+# 2. make start            →  CPU web UI at http://localhost:8080
+#    make start-gpu        →  GPU web UI (requires NVIDIA Container Toolkit)
+#
 # Local bind-mount directories (created automatically by Docker on first run):
 #   ./cache/   — HuggingFace model downloads (~2 GB, persisted across restarts)
 #   ./data/    — wisper config.toml + speaker profiles (persisted)
 #   ./input/   — place your audio files here before running
 #   ./output/  — transcribed .md files appear here
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Shared volume and env blocks reused by every service
+x-volumes: &volumes
+  - ./cache:/root/.cache/huggingface   # HF model cache
+  - ./data:/data                       # config + speaker profiles
+  - ./input:/app/input                 # audio input
+  - ./output:/app/output               # transcript output
+
+x-env: &env
+  WISPER_DATA_DIR: /data
+  # Token and API keys are read from .env (copy .env.example → .env)
+  HF_TOKEN: ${HF_TOKEN:-}
+  HUGGINGFACE_TOKEN: ${HF_TOKEN:-}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
 
 services:
 
-  # ── GPU service (default) ──────────────────────────────────────────────────
-  # Requires: NVIDIA driver on host + NVIDIA Container Toolkit installed.
-  # Verify with: docker compose run wisper nvidia-smi
+  # ── GPU CLI ───────────────────────────────────────────────────────────────
+  # docker compose run wisper wisper transcribe /app/input/session.mp3
   wisper:
     build:
       context: .
       target: gpu
     image: wisper-transcribe:gpu
+    volumes: *volumes
+    environment: *env
     deploy:
       resources:
         reservations:
@@ -23,33 +46,23 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    volumes:
-      - ./cache:/root/.cache/huggingface   # HF model cache
-      - ./data:/data                       # config + speaker profiles
-      - ./input:/app/input                 # audio input
-      - ./output:/app/output               # transcript output
-    stdin_open: true   # required for interactive enrollment prompts
+    stdin_open: true
     tty: true
 
-  # ── CPU service ────────────────────────────────────────────────────────────
-  # Use on machines without an NVIDIA GPU, or for CI/testing.
+  # ── CPU CLI ───────────────────────────────────────────────────────────────
+  # docker compose run wisper-cpu wisper transcribe /app/input/session.mp3
   wisper-cpu:
     build:
       context: .
       target: cpu
     image: wisper-transcribe:cpu
-    volumes:
-      - ./cache:/root/.cache/huggingface
-      - ./data:/data
-      - ./input:/app/input
-      - ./output:/app/output
+    volumes: *volumes
+    environment: *env
     stdin_open: true
     tty: true
 
-  # ── GPU web service ────────────────────────────────────────────────────────
-  # Browser-based UI for transcription, speaker management, and config.
-  # Visit http://localhost:8080 after starting.
-  #   docker compose up wisper-web
+  # ── GPU web UI ────────────────────────────────────────────────────────────
+  # make start-gpu  →  http://localhost:8080
   wisper-web:
     build:
       context: .
@@ -58,13 +71,8 @@ services:
     command: ["server", "--host", "0.0.0.0", "--port", "8080"]
     ports:
       - "8080:8080"
-    volumes:
-      - ./cache:/root/.cache/huggingface
-      - ./data:/data
-      - ./input:/app/input
-      - ./output:/app/output
-    environment:
-      - WISPER_DATA_DIR=/data
+    volumes: *volumes
+    environment: *env
     deploy:
       resources:
         reservations:
@@ -73,9 +81,8 @@ services:
               count: all
               capabilities: [gpu]
 
-  # ── CPU web service ─────────────────────────────────────────────────────────
-  # Web UI without GPU (uses CPU for inference — slower but no NVIDIA required).
-  #   docker compose up wisper-cpu-web
+  # ── CPU web UI ────────────────────────────────────────────────────────────
+  # make start  →  http://localhost:8080
   wisper-cpu-web:
     build:
       context: .
@@ -84,10 +91,5 @@ services:
     command: ["server", "--host", "0.0.0.0", "--port", "8080"]
     ports:
       - "8080:8080"
-    volumes:
-      - ./cache:/root/.cache/huggingface
-      - ./data:/data
-      - ./input:/app/input
-      - ./output:/app/output
-    environment:
-      - WISPER_DATA_DIR=/data
+    volumes: *volumes
+    environment: *env

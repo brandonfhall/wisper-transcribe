@@ -35,17 +35,26 @@ src/wisper_transcribe/
 ├── formatter.py        Markdown output, YAML frontmatter, dynamic version from __version__
 ├── audio_utils.py      validate_audio(), convert_to_wav(), get_duration(), load_wav_as_tensor()
 ├── time_utils.py       Shared time formatting: format_timestamp(), format_duration()
-├── config.py           load_config(), save_config(), get_device(), get_hf_token(), check_ffmpeg()
-├── models.py           Dataclasses: TranscriptionSegment, DiarizationSegment, AlignedSegment, SpeakerProfile
+├── config.py           load_config(), save_config(), get_device(), get_hf_token(), get_llm_api_key(), resolve_llm_model(), check_ffmpeg()
+├── models.py           Dataclasses: TranscriptionSegment, DiarizationSegment, AlignedSegment, SpeakerProfile, Edit, SpeakerSuggestion, LootChange, NPCMention, SummaryNote
+├── refine.py           LLM-driven transcript refinement: vocabulary correction + unknown-speaker ID (edit-distance guarded, frontmatter-preserving)
+├── summarize.py        Campaign-notes generation (session recap, loot, NPCs, follow-ups) → Obsidian-ready sidecar markdown
+├── llm/                Provider-agnostic LLM client package (Ollama, Anthropic, OpenAI, Google)
+│   ├── base.py         LLMClient ABC: complete() + complete_json(schema)
+│   ├── errors.py       LLMUnavailableError (soft-fail) / LLMResponseError
+│   ├── ollama.py       httpx REST wrapper for local Ollama
+│   ├── anthropic.py    Anthropic SDK; JSON via forced tool_use
+│   ├── openai.py       OpenAI SDK; JSON via response_format json_schema strict mode
+│   └── google.py       google-genai SDK; JSON via response_schema
 ├── static/             Vendored web assets: htmx.min.js, tailwind.min.css (pre-built), wisp.svg, app.js
 └── web/                Phase 11: FastAPI web UI
     ├── app.py          FastAPI application factory (create_app()), module-level app instance for uvicorn
-    ├── jobs.py         In-memory job queue, JobQueue class, asyncio background worker, SSE progress via tqdm.write patch
+    ├── jobs.py         In-memory job queue, JobQueue class, asyncio background worker, SSE progress via tqdm.write patch; LLM job types (refine/summarize) with stderr capture
     └── routes/
         ├── __init__.py     Jinja2 templates setup, shared get_queue() helper, urlencode filter
         ├── dashboard.py    GET /, GET /jobs (HTMX partial)
-        ├── transcribe.py   GET/POST /transcribe, GET /transcribe/jobs/{id}, SSE /jobs/{id}/stream, enrollment wizard
-        ├── transcripts.py  GET/POST /transcripts, transcript detail, download, delete, fix-speaker
+        ├── transcribe.py   GET/POST /transcribe (+ post_refine/post_summarize flags), GET /transcribe/jobs/{id}, SSE /jobs/{id}/stream, enrollment wizard
+        ├── transcripts.py  GET/POST /transcripts, transcript detail, download, delete, fix-speaker; POST /transcripts/{name}/refine, POST /transcripts/{name}/summarize; GET /transcripts/{name}/summary, GET /transcripts/{name}/summary/download
         ├── speakers.py     GET/POST /speakers, enroll, rename, remove
         └── config.py       GET/POST /config
 ```
@@ -104,6 +113,18 @@ Audio file
                8. WRITE          Path.write_text()
                   • Output: <stem>.md alongside input file (or --output dir)
 ```
+
+### Optional post-processing (LLM)
+
+After the core pipeline has written `<stem>.md`, two opt-in commands operate on the transcript file:
+
+```
+<stem>.md ──► wisper refine    ──► (dry-run diff) or (<stem>.md.bak + updated <stem>.md)
+           ──► wisper summarize ──► <stem>.summary.md  (Obsidian-ready sidecar)
+           ──► wisper summarize --refine  ──► refine in-place, then summarize (atomic)
+```
+
+Both commands are provider-agnostic (Ollama / Anthropic / OpenAI / Google) via the `llm/` package. Neither modifies the input silently: `refine` is dry-run by default; `summarize` refuses to overwrite an existing sidecar without `--overwrite`.
 
 ---
 
@@ -221,6 +242,23 @@ Interaction with `--workers N` folder mode: when both `parallel_stages=True` and
 ### pyproject.toml torch version
 `torch>=2.8.0` is required because `pyannote-audio 4.x` declares this minimum. The CUDA build must be installed from `https://download.pytorch.org/whl/cu126` — PyPI only ships the CPU-only build. The `setup.ps1` script handles this automatically on Windows.
 
+### LLM post-processing (`refine.py`, `summarize.py`, `llm/`)
+Post-processing of an already-written transcript is split into two shapes:
+
+- **`refine.py` — surgical.** `fix_vocabulary()` asks the LLM for `{original, corrected}` pairs in batches of ~25 lines, then validates each proposed substitution against the known hotwords + enrolled character names via `difflib.get_close_matches(..., cutoff=0.7)`. Freeform rewrites ("The party stepped in" → "The heroes proceeded") are rejected with a `UserWarning`. `identify_unknown_speakers()` runs a 20-line sliding window with 5-line overlap and only keeps suggestions with confidence ≥ 0.75 **and** a `suggested_name` that matches an enrolled `SpeakerProfile.display_name` — so the LLM cannot hallucinate new identities. Unknown-speaker suggestions are **never auto-applied**; they surface as rendered output only.
+- **`summarize.py` — generative.** One structured-JSON call produces a `SummaryNote` (summary paragraph, loot list, NPC list, follow-ups). `render_markdown()` emits an Obsidian-compatible sidecar: YAML frontmatter (`type: session-summary`, `provider`, `model`, `refined`), then `## Summary / ## Loot & Inventory / ## NPCs / ## Follow-ups`. Names are wrapped in `[[wiki-links]]` only when they match an enrolled speaker's `display_name` or a name listed in their `notes` — unknown names stay plain to avoid creating orphan vault pages.
+
+The `llm/` package wraps each provider behind a single `LLMClient` ABC with `complete(system, user)` and `complete_json(system, user, schema)`. Provider differences (Anthropic's forced `tool_use`, OpenAI's `response_format={"type": "json_schema", "strict": true}`, Google's `response_schema`, Ollama's `format="json"`) are entirely internal. SDKs are **lazy-imported inside each client class** so a user with only Ollama installed never hits an `anthropic`/`openai`/`google-genai` import error — missing package raises `LLMUnavailableError` with an install hint.
+
+**Ollama streaming.** `OllamaClient._post_chat()` uses `httpx.stream()` with `read=None` (no per-chunk read timeout) so long transcripts never hit a read deadline mid-generation. A connect/write timeout (`self.timeout`, default 30 s) still guards against Ollama not being reachable. While streaming, a live dot-progress line is written to stderr (one `·` per 50 tokens) so the user can see the model is working. `wisper config llm` and `wisper setup` call `ollama list` via subprocess and display a numbered model picker when Ollama is running — falls back to a plain text prompt if the command is unavailable.
+
+Safety invariants the implementation enforces:
+1. **YAML frontmatter is never sent to the LLM and is preserved byte-for-byte** — `parse_transcript()` splits the document into `(frontmatter_dict, body, raw_frontmatter_str)` and only the body is passed downstream. Reassembly uses the original raw string, not a re-serialised copy.
+2. **Dry-run default on refine**; `--apply` writes `<stem>.md.bak` before overwriting.
+3. **Cloud providers are opt-in**: default config is `llm_provider = "ollama"`. Cloud usage requires an explicit config change + API key (via env var preferred).
+4. **Soft-fail network model**: unreachable Ollama, 429/500 from cloud, or missing package → `warnings.warn()` + early return. In the `summarize --refine` flow, a refine failure still produces a summary with `refined: false` recorded in frontmatter.
+5. **API key lookup is env-var first** (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`), then config — matching the existing `get_hf_token()` pattern. Keys are masked as `***` in `wisper config show`.
+
 ---
 
 ## Data Storage
@@ -244,7 +282,9 @@ wisper-transcribe/       ← get_data_dir()
         └── <name>.npy   512-dim float32 voice embeddings (gitignored)
 ```
 
-Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`, `hotwords`, `use_mlx`, `parallel_stages`.
+Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`, `hotwords`, `use_mlx`, `parallel_stages`, `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`.
+
+> **`omegaconf` dependency note:** `omegaconf` is an undeclared transitive requirement of `pyannote-audio` — it is required at import time but not listed in pyannote's package metadata. `wisper-transcribe` declares it explicitly in `pyproject.toml` to ensure it is always installed.
 
 ---
 
@@ -263,7 +303,13 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - `tests/conftest.py` provides an `autouse` fixture that patches `wisper_transcribe.pipeline.load_config` with a safe baseline config (prevents real user config — e.g. `parallel_stages=True` — from leaking into tests that don't explicitly patch it)
 - `tests/test_time_utils.py` covers shared `format_timestamp()` and `format_duration()` helpers
 - `tests/test_noise_suppress.py` covers warning filters, logger levels, `WISPER_DEBUG` bypass, missing absl, speechbrain deprecations, checkpoint upgrade warnings, and module-level suppress placement in `diarizer.py` and `speaker_manager.py`
-- Test count: 315 (all mocked, all passing, 81% coverage)
+- `tests/test_refine.py` covers `parse_transcript` (frontmatter / no-frontmatter / invalid YAML), vocabulary edit-distance guard, `apply_edits` idempotency, unknown-speaker confidence filter + hallucinated-name rejection, `render_diff` plain/coloured, and `refine_transcript` frontmatter preservation
+- `tests/test_summarize.py` covers structured-output parsing, enrolled-player NPC filtering, `render_markdown` section presence + placeholders, `[[wiki-link]]` rules (enrolled-only, whole-word, idempotent), `unresolved_speakers` section, and the `sections` filter
+- `tests/test_llm_clients.py` mocks httpx for Ollama and injects fake `anthropic` / `openai` / `google.genai` modules via `sys.modules` to cover the lazy-import path; each client's `complete()` and `complete_json()` are tested for happy path + SDK error + missing-SDK → `LLMUnavailableError`
+- `tests/test_web_routes.py` covers web routes including refine/summarize job submission, summary sidecar rendering, summary download, summary-badge logic on the transcript list, deletion of summary sidecars alongside transcripts, LLM config field rendering, LLM config save (provider/model/temperature), non-empty API key save, empty API key not overwriting an existing key, and Config nav link presence on the job detail page
+- `tests/test_config.py` covers `get_hf_token()` accepting `HF_TOKEN` as an alias for `HUGGINGFACE_TOKEN` and propagating whichever is set to both env vars
+- `tests/test_web_jobs.py` covers job queue CRUD, tqdm patch/restore, error recording, cancellation, and a regression test that `job.status = COMPLETED` is not set until after `_run_post_process()` finishes
+- Test count: 405 (all mocked, all passing)
 
 **CI matrix** (`.github/workflows/ci.yml`):
 - Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)
@@ -353,37 +399,49 @@ URL-encoding is applied at every point where a filename is embedded in a URL or 
 - JavaScript in `job_detail.html` uses `encodeURIComponent(stem)` when constructing the post-SSE transcript link.
 
 ### Progress Display (Web)
-The job detail page shows a live progress bar driven by SSE events from `GET /transcribe/jobs/{id}/stream`.
+The job detail page shows a unified progress bar and step pills driven by SSE events from `GET /transcribe/jobs/{id}/stream`.
 
-**Sequential mode** (default, `parallel_stages=False`):
-- Three step indicators (T / D / F) advance one at a time.
-- The overall bar maps per-phase tqdm percentages: transcription → 0–60%, diarization → 60–90%, formatting → 100% on done.
-- ETA and speed counter are parsed from the tqdm string and shown below the bar.
+**Step pills:** Each active step type gets a colored pill (gray=pending, indigo+pulse=active, green=done). Steps shown depend on job type:
+- Transcription-only: T → D → F
+- Transcription with post-processing: T → D → F → R (if `post_refine`) → S (if `post_summarize`)
+- Standalone refine: R only
+- Standalone summarize: S only
 
-**Parallel mode** (`parallel_stages=True`):
-- Activated when the log line "Running transcription and diarization concurrently" is received.
-- Two stacked mini-bars appear: green for Transcribing, indigo for Diarizing.
-- Both T and D step dots pulse simultaneously; D does **not** wait for T.
-- Channel progress arrives as `channel_progress` SSE events (`{"type": "channel_progress", "channel": "transcribe"|"diarize", "message": "..."}`).
-- The transcribe bar shows the raw tqdm percentage (0–100%).
-- The diarize bar maps pyannote's three sub-steps: Segmentation → 0–40%, Embedding → 40–80%, Clustering → 80–100%. The current sub-step name and ETA are shown under the bar.
-- The overall bar shows the average of both channel percentages, capped at 90% until the job completes.
-- On completion, both mini-bars snap to 100%, both dots turn solid green, and the F dot activates for formatting.
+**Single bar:** The bar is divided into equal slices, one per step. As each step's tqdm percentage arrives, it fills within that step's slice. Phase is detected from log keywords (`transcrib`, `diariz`, `format`, `refine`, `summariz`) to activate the correct step. For parallel mode (`channel_progress` events), each channel maps to its step slice.
+
+**ETA and rate:** Parsed from tqdm progress strings and shown live below the bar. When no tqdm data arrives for ≥5 s (e.g. during LLM steps which have no tqdm), an estimator ticks the bar forward ~1% every 5 s up to 90% of the current step's slice, providing visual feedback until the `done` event fires.
+
+**Parallel mode** (`parallel_stages=True`, `channel_progress` SSE events): T and D slices update from their respective channels concurrently. The bar shows whichever channel is further ahead.
 
 ### Transcript Management (Web)
 - Transcripts list page: each card is fully clickable via the **overlay link pattern** (card is a `div` with an `absolute inset-0` `<a>` underneath, action buttons use `relative z-10` to sit above). This avoids the invalid-HTML problem of nesting `<form>` inside `<a>`.
-- Delete: `POST /transcripts/{name}/delete` removes the `.md` file and redirects to `/transcripts`.
+- Summary sidecars (`.summary.md`) are **filtered out of the transcript list** — they appear only as a green notes icon and "Campaign notes available" label on their parent transcript's card.
+- Delete: `POST /transcripts/{name}/delete` removes both the `.md` file and its `.summary.md` sidecar (if present) and redirects to `/transcripts`.
 - Dashboard stat cards link to their respective sections (Active Jobs → `/transcribe`, Transcripts → `/transcripts`, Enrolled Speakers → `/speakers`).
 
+### LLM Post-processing (Web)
+- **Inline after transcription**: the `/transcribe` form has a "LLM Post-processing" checkbox group (`post_refine`, `post_summarize`). When checked, the options are stripped from kwargs before `process_file()` and stored as `Job.post_refine` / `Job.post_summarize`; after transcription completes, `_run_post_process()` chains into `_do_llm_work()` in the same job thread. LLM status messages (Ollama streaming output) are captured into `job.log_lines` via `_StderrCapture` (redirects `sys.stderr` for the job thread duration — safe because the queue runs one job at a time).
+- **Standalone from transcript detail**: `POST /transcripts/{name}/refine` and `POST /transcripts/{name}/summarize` call `queue.submit_llm()`, which enqueues a `Job` with `job_type="refine"` or `"summarize"`. The browser is redirected to `/transcribe/jobs/{id}` — the same job detail / SSE streaming page used for transcription jobs. The job detail page suppresses the T/D/F step indicators for LLM jobs and shows a single step dot (R or S).
+- **Campaign Notes page**: `GET /transcripts/{name}/summary` renders `.summary.md` as HTML with a metadata card (LLM provider/model, generated date, NPC chips) and a "Regenerate" button. `GET /transcripts/{name}/summary/download` serves the raw `.summary.md` file.
+- **Job completion actions**: the SSE `done` event now includes `summary_path` and `job_type`; the JS in `job_detail.html` conditionally shows "View Campaign Notes" when `summary_path` is set and hides "Name Speakers" for non-transcription jobs.
+- **LLM config page**: `GET/POST /config` exposes a dedicated "LLM Post-processing" card. Fields: `llm_provider` (select: ollama/anthropic/openai/google), `llm_model` (text), `llm_endpoint` (text, Ollama only), `llm_temperature` (number). Three secret fields (`anthropic_api_key`, `openai_api_key`, `google_api_key`) are password inputs that are **never overwritten with an empty submission** — leaving a key blank preserves the existing stored value. A JS snippet hides/shows the endpoint and cloud API key rows based on the selected provider. A note reminds users that env vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`) take precedence over config-stored keys.
+
 ### Navigation Styling
-Nav link styles (`nav-link`, `nav-active`, `nav-divider`, `mobile-nav-link`) are defined in `static/input.css` as Tailwind component-layer classes, not in an inline `<style>` block in `base.html`. This ensures they are included in the compiled `tailwind.min.css` and benefit from purging. Links display as pill buttons: transparent border at rest, `border-green-500 bg-green-800` on hover, `border-green-400 bg-green-800` for the active page.
+Nav link styles (`nav-link`, `nav-active`, `nav-divider`, `mobile-nav-link`) are defined in `static/input.css` as Tailwind component-layer classes, not in an inline `<style>` block in `base.html`. This ensures they are included in the compiled `tailwind.min.css` and benefit from purging. Links display as pill buttons: transparent border at rest, `border-green-500 bg-green-800` on hover, `border-green-400 bg-green-800` for the active page. The nav bar uses `sticky top-0 z-50` so it remains visible when the user scrolls down on long pages (e.g. the job detail page with a full log terminal).
 
 ### Offline Assets
 - `static/htmx.min.js`: placeholder committed to repo; real file downloaded during `docker build` via `curl`. For local use: `curl -sL https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js -o src/wisper_transcribe/static/htmx.min.js`
 - `static/tailwind.min.css`: rebuilt automatically on server startup by `app._build_tailwind()` (mtime-checked; skips if already current). `pytailwindcss` is a main dependency (no Node.js required). Docker builds also invoke the build step so images are self-contained. Manual rebuild: `python -m pytailwindcss -i ./src/wisper_transcribe/static/input.css -o ./src/wisper_transcribe/static/tailwind.min.css --minify`
 
 ### Docker Web Services
-`docker-compose.yml` defines `wisper-web` (GPU) and `wisper-cpu-web` (CPU), both exposing port 8080. Same image as CLI services, different `command: ["server", "--host", "0.0.0.0", "--port", "8080"]`.
+`docker-compose.yml` defines four services: `wisper` / `wisper-cpu` (CLI) and `wisper-web` / `wisper-cpu-web` (web UI, port 8080). All services share a common YAML anchor (`x-volumes`, `x-env`) so volume mounts and environment variables are declared once. Environment variables (`HF_TOKEN`, `HUGGINGFACE_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`) are read from a `.env` file (copy `.env.example → .env`). `Makefile` provides `make start` / `make start-gpu` / `make stop` / `make logs` / `make build` targets as a convenience layer over `docker compose`.
+
+### Distribution Launchers
+Three double-click launcher scripts handle first-time setup and server start for end users:
+- `start.command` (macOS) — `.command` extension opens Terminal on double-click; checks for `.venv`, calls `bash setup.sh` on first run, then starts `wisper server` and opens the browser.
+- `start.bat` (Windows) — double-click batch file; calls `setup.ps1` on first run via `powershell -ExecutionPolicy Bypass`, then launches the server and opens `http://localhost:8080`.
+- `start.sh` (Linux) — equivalent for Linux desktops with `xdg-open` for browser launch.
+Both `start.command` and `start.sh` are committed with the execute bit set (`git update-index --chmod=+x`).
 
 ---
 

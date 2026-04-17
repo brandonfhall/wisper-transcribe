@@ -1,4 +1,4 @@
-# Wisper-Transcribe: Backlog & Future Work
+# Wisper-Transcribe: Backlog & Active Work
 
 ## Project Context
 
@@ -11,6 +11,27 @@ Podcast transcription tool for tabletop RPG actual-play recordings (D&D, Pathfin
 ---
 
 ## Backlog
+
+### Distribution — Tier 3: PyPI + pipx (future)
+
+**Goal:** `pipx install wisper-transcribe` — fully isolated, one command, no venv management.
+
+**What's needed:**
+1. **Publish to PyPI** — `pyproject.toml` is already correctly structured. Steps:
+   - Create a PyPI account and API token
+   - Add a GitHub Actions release workflow (`.github/workflows/publish.yml`) that runs `python -m build && twine upload` on a `v*` tag push
+   - `pip install build twine` (dev deps, not in `pyproject.toml`)
+2. **pipx install story** — once on PyPI:
+   ```bash
+   pipx install wisper-transcribe           # base install (Ollama LLM)
+   pipx inject wisper-transcribe anthropic  # cloud LLM extras
+   ```
+3. **Entry-point completeness** — `wisper server` must download `htmx.min.js` on first run if missing (Docker build does this; local pip installs do not). Add a startup check in `app.py` that downloads it if the placeholder is detected.
+4. **Version pinning strategy** — ML dependencies (torch, pyannote, faster-whisper) move fast. Consider using `>=` lower bounds (as now) but adding a tested upper bound for major ML versions to prevent surprise breakage on pip installs.
+
+**Why not now:** Requires cutting releases, managing PyPI credentials, and the htmx download story. Good to do once the tool is stable enough to version properly.
+
+---
 
 ### DM Character Voice Handling
 
@@ -63,116 +84,6 @@ Re-score `Unknown Speaker N` labels at a looser secondary threshold (~0.40) afte
 
 ---
 
-### Local LLM Post-Processing (`wisper refine`)
-
-**Concept:** After the primary pipeline produces a `.md` transcript, run a local LLM agent pass to clean up errors that are mechanical for an LLM but hard for heuristic code: vocabulary misspellings, obviously wrong speaker assignments, and unknown speaker identification from context.
-
-**Local LLM target:** Ollama (primary). Simple REST API, free, runs on Windows/Mac without extra setup. `llama3.2:3b` (fast, fits 4 GB VRAM) or `llama3.1:8b` (better quality, 8 GB) are the recommended starting models. LM Studio is a secondary target (same OpenAI-compatible API, same code path). Neither requires a new Python ML dependency — just `httpx` or the lightweight `ollama` package for REST calls.
-
-New config keys:
-```toml
-llm_endpoint = "http://localhost:11434"   # Ollama default
-llm_model = "llama3.2"
-```
-
-New CLI command: `wisper refine <transcript.md>`
-
-#### Tasks, ranked by feasibility
-
-**Task 1 — Vocabulary / hotword spelling correction** *(HIGH feasibility, LOW risk)*
-
-Whisper often transcribes unknown proper nouns phonetically: "Kyra" → "Kira", "Golarion" → "Golarian", "Zeldris" → "Zeldis". The hotwords list and speaker notes are available at post-processing time and can be fed directly to the LLM as ground truth.
-
-Approach:
-- Process 20–30 transcript lines per request
-- Prompt: "These proper nouns must be spelled exactly as given: [list]. Correct any misspellings in the lines below. Return JSON: `{changes: [{original, corrected}]}`. Change nothing else."
-- Validate output: accept only changes that are plausible substitutions of known terms (soundex or edit-distance check on the diff)
-
-Context source: `config["hotwords"]` + `SpeakerProfile.notes` for all enrolled profiles (character names often end up in notes).
-
-**Task 2 — Multi-speaker segment detection** *(MEDIUM feasibility, MEDIUM risk)*
-
-When diarization misses a speaker switch mid-segment, the merged block contains two voices. Example:
-```
-**DM**: The door creaks open. Right! I attack the skeleton.
-```
-The `"Right! I attack"` is almost certainly a player response that got captured in the same diarization window.
-
-Approach:
-- Heuristic pre-filter: flag segments where a single block contains both narration-style text AND first-person game actions ("I roll", "I attack", "I cast", "I want to...") — these are the highest-probability candidates
-- Send flagged segment + surrounding 5 segments for context
-- Prompt: "Does this segment sound like one continuous speaker or two? If two, where is the split? Return JSON: `{single_speaker: bool, split_after: '<exact text>'}`"
-- IMPORTANT: After `_merge_consecutive()` in formatter.py, the original segment-level timestamps are gone — only the start timestamp of the merged block remains. Split segments can only inherit the block's start time.
-
-**Task 3 — Speaker assignment from context** *(LOW-MEDIUM feasibility, HIGH risk)*
-
-A segment labeled DM that says "I rolled a nat 20!" is obviously a player. Context-based reassignment using known speaker roles and character names.
-
-Approach:
-- Provide LLM with: enrolled speaker list + roles + character names from profile notes
-- Send a window of 20 segments around the suspect segment
-- Prompt: "Based on context and these speaker roles, does the assignment seem correct? Return JSON: `{correct: bool, likely_speaker: str, confidence: float, reason: str}`"
-- **Only suggest, never auto-apply.** Speaker reassignment is the highest-risk change.
-- Apply only if confidence > 0.85 AND user has `--apply-suggestions` flag
-
-**Task 4 — Unknown speaker identification from context** *(MEDIUM feasibility, MEDIUM risk)*
-
-`Unknown Speaker N` labels in the transcript can sometimes be resolved from surrounding dialogue. Collect all "Unknown Speaker N" occurrences with surrounding segments, provide enrolled speaker list + known character names, ask the LLM to identify. Threshold: confidence > 0.75 to suggest; never auto-apply.
-
-#### Architecture
-
-**New module:** `src/wisper_transcribe/llm_fixer.py`
-- `OllamaClient` — thin REST wrapper, handles chat and generate endpoints
-- `fix_vocabulary(lines, hotwords, character_names) → list[Edit]`
-- `detect_multi_speaker(lines, context_window) → list[SplitSuggestion]`
-- `suggest_speaker_fixes(lines, profiles) → list[SpeakerSuggestion]`
-- `apply_edits(transcript_text, edits) → str` — surgical line-level substitution, never rewrites structure
-
-**New CLI command:** `wisper refine <transcript.md>`
-```
-  --tasks vocabulary,speakers,unknown   # which fix types to run (default: vocabulary)
-  --dry-run                             # show proposed changes without writing (DEFAULT ON)
-  --apply                               # actually write changes to file (requires explicit flag)
-  --model NAME                          # override llm_model from config
-  --endpoint URL                        # override llm_endpoint from config
-```
-
-`--dry-run` is the default. Changes are printed as a colored diff; user must explicitly pass `--apply` to write. A `.md.bak` backup is always written before applying.
-
-**Optional `--llm-fix` on `wisper transcribe`:** Runs vocabulary correction automatically after the pipeline (the lowest-risk task only). Skipped if Ollama is not reachable — emits a warning, does not abort.
-
-#### Context window management
-
-A 3-hour session at ~150 wpm ≈ 27,000 words ≈ 35,000 tokens. Most local models have 128K context, but processing 35K tokens in one shot is slow on local hardware.
-
-- **Vocabulary pass:** 25 lines per request, no overlap needed (stateless)
-- **Speaker detection / unknown speaker:** 20-line sliding window, 5-line overlap for context continuity
-- Tasks run independently; vocabulary first (cheap), speaker detection second (expensive)
-
-#### Safety principles
-
-1. `--dry-run` on by default — never silently modify a transcript
-2. Backup (`.md.bak`) always created before `--apply`
-3. Vocabulary changes only accepted if they are a known-term substitution (validated by edit distance against hotwords list); reject freeform rewrites
-4. Speaker reassignment is **suggestion only** — never auto-applied regardless of confidence
-5. YAML frontmatter is **never touched** by the LLM — only the markdown body lines
-6. Ollama connectivity failure is a soft warning, not an error
-7. All changes logged to `refine.log` alongside the transcript
-
-#### What NOT to build
-
-- Grammar/style improvements — verbatim record, not polished prose
-- Content summarization — NotebookLM handles this
-- Automatic full-transcript rewrite — hallucination risk too high
-
-#### Dependencies
-
-- `ollama` Python package (optional; fallback to `httpx` raw REST)
-- No new ML models required
-- Feature is entirely opt-in; missing `llm_endpoint`/`llm_model` in config → early exit with setup message
-
----
-
 ### Long-Term — Intel GPU Support
 
 **Status:** Research complete (April 2026). Not actionable yet — blocked by upstream dependencies.
@@ -192,70 +103,6 @@ A 3-hour session at ~150 wpm ≈ 27,000 words ≈ 35,000 tokens. Most local mode
 **Architecture note:** If a second backend is ever added, use an abstract `TranscriptionBackend` interface in `transcriber.py` and `DiarizationBackend` in `diarizer.py`. Keep pipeline module backend-agnostic.
 
 **When to revisit:** When (a) CTranslate2 adds Intel GPU support, (b) a user actually needs this, or (c) OpenVINO's Whisper API stabilizes. Don't build speculatively.
-
----
-
-## Recommendations
-
-*Research completed April 2026. Findings grounded in full codebase review.*
-
----
-
-### DM Character Voice Handling — Recommendation
-
-**Viable path: Implement Approach 1 now; defer Approach 2.**
-
-Approach 1 delivers the core use case (~20 lines, uses existing `notes` field, no schema migration) and provides a clean migration path to Approach 2 when needed.
-
-**Approach 1 implementation plan:**
-
-- `pipeline.py` — after `match_speakers()` returns `speaker_map`, add a post-processing pass: for each profile whose `notes` matches `"voice_of:<key>"`, the display label is the profile's `display_name` (e.g., `"DM (as Aziel)"`). Character voice profiles are excluded from the YAML frontmatter `speakers:` list.
-- `cli.py` — in the enrollment interactive flow (the `wisper transcribe --enroll-speakers` dialog), add an optional prompt after naming a new speaker: *"Is this a character voice performed by an existing speaker? [y/N]"*. If yes, prompt for which speaker and write `notes = "voice_of:<key>"`. Also add `[voice of DM]` annotation to `wisper speakers list` output.
-- Scope: ~20 lines `pipeline.py`, ~15 lines `cli.py`. Tests: 3–4 in `test_pipeline.py`, 1 in `test_speaker_manager.py`.
-
-**Migration to Approach 2:** When Approach 2 ships (structured `attributed_to: Optional[str]` + `character_name: Optional[str]` fields on `SpeakerProfile`), `load_profiles()` reads existing profiles and auto-migrates any `notes = "voice_of:<key>"` to the new fields on first load. Non-breaking. The `character_voice_format` config key and runtime format control are Approach 2 additions.
-
-**Do not implement Approach 1 and 2 simultaneously.** The scope increase (models.py + speaker_manager.py + formatter.py + config.py + type change to `speaker_map`) is not justified until Approach 1 is validated in use.
-
----
-
-### Local LLM Post-Processing — Recommendation
-
-**Viable path: Build Task A (vocabulary correction) + Task D (unknown speaker ID). Defer Task B and Task C.**
-
-**Task B (multi-speaker detection) deferred:** `_merge_consecutive()` in `formatter.py` destroys per-segment timestamps before the LLM sees the transcript. The LLM can detect that a block contains two voices but cannot propose an accurate split point — only the block's start timestamp survives the merge. This requires refactoring the formatter pipeline to preserve segment-level timestamps through the merge step before Task B is feasible.
-
-**Task C (speaker reassignment) deferred:** High risk of silent errors in actual-play content where player speaking styles overlap. Defer until vocabulary correction and unknown-speaker ID are validated in production.
-
-**Implementation plan for Task A + Task D:**
-
-New file `src/wisper_transcribe/llm_fixer.py`:
-- `OllamaClient` — thin `httpx` wrapper around Ollama's REST API (no new dependency; `httpx` is already in dev deps). Soft-fails with a warning if Ollama is unreachable.
-- `fix_vocabulary(lines: list[str], hotwords: list[str], character_names: list[str]) -> list[str]` — batches 25 lines per request; validates each proposed change against the hotwords list using edit-distance before accepting (rejects freeform LLM rewrites).
-- `identify_unknown_speakers(lines: list[str], profiles: list[SpeakerProfile]) -> list[SpeakerSuggestion]` — 20-line sliding window with 5-line overlap; returns `SpeakerSuggestion(line_idx, current_label, suggested_name, confidence, reason)`; only surfaces suggestions with confidence ≥ 0.75.
-- Scope: ~150–200 lines.
-
-`cli.py` — new `wisper refine <transcript.md>` command:
-- `--dry-run` (default on) — prints colored diff, writes nothing
-- `--apply` — writes `.md.bak` backup then overwrites transcript
-- `--tasks vocabulary,unknown` (default: `vocabulary`)
-- `--model NAME` / `--endpoint URL` — override config
-- YAML frontmatter is never modified
-- Scope: ~80–100 lines.
-
-`config.py` — add `llm_endpoint = "http://localhost:11434"` and `llm_model = "llama3"` to DEFAULTS. 2 lines.
-
-`tests/test_llm_fixer.py` — mock `httpx` calls; test batch slicing; test edit-distance guard rejects freeform changes; test dry-run produces diff without writing; test `.md.bak` created on apply; test Ollama unreachable produces warning not error.
-
-**Batch processing note:** A 3-hour session at ~1 line per 10 seconds ≈ 1,080 lines. Vocabulary at 25 lines/request ≈ 43 requests. At ~2 seconds per local Ollama request ≈ ~90 seconds total — acceptable. Document expected runtime in `--help` text.
-
-**Safety principles (all required):**
-1. `--dry-run` on by default — no silent transcript modification
-2. `.md.bak` always written before `--apply`
-3. Vocabulary changes accepted only if the substitution matches a known hotword/character name by edit-distance
-4. Unknown speaker suggestions: warn prominently when confidence is below 0.85 even if above the 0.75 suggestion threshold
-5. YAML frontmatter is never passed to the LLM or modified
-6. Ollama unreachable → `warnings.warn(...)`, early return; does not abort pipeline
 
 ---
 
@@ -458,20 +305,58 @@ POST /shows/{slug}/members/{key}/remove
 
 ---
 
-#### Verification
+## Manual Test Plans
 
-```bash
-.venv/bin/pytest tests/test_show_manager.py -v
-.venv/bin/pytest tests/ -v
+### LLM Post-processing CLI (T1–T5) — code complete; manual verification pending
 
-wisper shows create "Test Campaign"
-wisper shows add-member test-campaign alice --role DM
-wisper shows list
-wisper transcribe audio.mp3 --show test-campaign   # matches alice only
-wisper transcribe audio.mp3                        # global match, unchanged
-wisper server --reload   # verify /shows page + transcribe show dropdown
+**T1 — `wisper refine`**
 
-```
+T1.1 Dry-run: `wisper refine session.md` → diff printed, file unchanged.
+T1.2 No terms: `wisper refine session.md` with no hotwords → skipping warning.
+T1.3 Apply + backup: `wisper refine session.md --apply` → `.bak` created.
+T1.4 No-color: `wisper refine session.md --no-color | cat` → no ANSI codes.
+T1.5 Unknown task: `wisper refine session.md --tasks unknown` → suggestions only.
+T1.6 Both tasks: `wisper refine session.md --tasks vocabulary,unknown`.
+T1.7 YAML frontmatter unchanged after `--apply`.
 
-# Known Issues. 
-- On the web interface while doing speaker enrollment the "play" button will change to "stop" but clicking on it just restarts the audio file. 
+**T2 — `wisper summarize`**
+
+T2.1 Basic: `wisper summarize session.md` → sidecar with all sections.
+T2.2 No overwrite: second run without `--overwrite` → error.
+T2.3 Overwrite: `wisper summarize session.md --overwrite` → clean regeneration.
+T2.4 Custom path: `wisper summarize session.md --output /tmp/recap.md`.
+T2.5 Sections filter: `--sections summary,loot` → only those sections present.
+T2.6 Wiki-links: enrolled speaker names become `[[Name]]` in body.
+T2.7 Non-enrolled: unenrolled names stay plain text.
+T2.8 Refine flag: `wisper summarize session.md --refine` → `refined: true` in frontmatter.
+
+**T3 — Combined flow**
+
+T3.1 Refine failure still produces summary (bad endpoint → WARN + summary written).
+T3.2 `--refine-tasks vocabulary,unknown` → both passes + unresolved speakers in output.
+
+**T4 — LLM config integration**
+
+T4.1 Provider flag beats config.
+T4.2 `wisper config llm` wizard round-trip → keys masked in `config show`.
+T4.3 Env var beats config key for API access.
+
+**T5 — Edge cases**
+
+T5.1 No-frontmatter transcript handled gracefully.
+T5.2 Empty transcript body — no crash.
+T5.3 Read-only directory — clean error.
+
+### Web UI LLM post-processing (W1–W5) — code complete; manual verification pending
+
+W1 Post-process checkboxes on transcribe form → campaign notes appear after job.
+W2 Standalone summarize from transcript detail → job progress page → notes.
+W3 Campaign Notes page renders with metadata.
+W4 Delete transcript removes summary sidecar.
+W5 Summary badge on transcripts list page.
+
+### Progress bar redesign (P1–P3) — code complete; manual verification pending
+
+P1 Transcription-only job: T → D → F pills advance, bar fills across all three slices, ETA/rate shown during T and D.
+P2 Transcription + post-summarize: T → D → F → S pills shown; S activates on "Summarizing…" log line; estimator creeps bar during S when no tqdm data.
+P3 Standalone summarize job: only S pill shown; bar fills from 0 → 100 via estimator + done event.

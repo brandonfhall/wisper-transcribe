@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+
+  <div class="flex items-center gap-4">
+    <a href="/transcripts/{{ name }}" class="text-indigo-600 hover:underline text-sm">← Transcript</a>
+    <h1 class="text-2xl font-bold text-gray-900 flex-1">{{ title }}</h1>
+    <a href="/transcripts/{{ name }}/summary/download" class="btn-secondary text-sm">Download .md</a>
+  </div>
+
+  <!-- Metadata -->
+  {% if meta %}
+  <div class="card">
+    <dl class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
+      {% if meta.generated_at %}<div><dt class="font-medium text-gray-500">Generated</dt><dd>{{ meta.generated_at }}</dd></div>{% endif %}
+      {% if meta.provider or meta.model %}
+      <div class="sm:col-span-2">
+        <dt class="font-medium text-gray-500">LLM</dt>
+        <dd class="font-mono text-xs">{{ meta.provider }}{% if meta.model %} / {{ meta.model }}{% endif %}</dd>
+      </div>
+      {% endif %}
+      {% if meta.source %}
+      <div class="sm:col-span-2">
+        <dt class="font-medium text-gray-500">Source transcript</dt>
+        <dd class="font-mono text-xs truncate">{{ meta.source }}</dd>
+      </div>
+      {% endif %}
+    </dl>
+    {% if meta.npcs %}
+    <div class="mt-4">
+      <p class="text-sm font-medium text-gray-500 mb-2">NPCs mentioned</p>
+      <div class="flex flex-wrap gap-2">
+        {% for npc_name in meta.npcs %}
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800">
+          {{ npc_name }}
+        </span>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <!-- Summary body -->
+  <div class="card prose prose-indigo max-w-none">
+    {{ html_body | safe }}
+  </div>
+
+  <!-- Re-generate action -->
+  <div class="card bg-gray-50">
+    <p class="text-sm text-gray-600 mb-3">Want to regenerate these notes with updated speakers or vocabulary?</p>
+    <div class="flex gap-3 flex-wrap">
+      <form method="post" action="/transcripts/{{ name }}/summarize">
+        <button type="submit" class="btn-secondary text-sm"
+                onclick="return confirm('Regenerate campaign notes? The existing file will be overwritten.')">
+          Regenerate Summary
+        </button>
+      </form>
+      <a href="/transcripts/{{ name }}" class="btn-secondary text-sm">View Transcript</a>
+    </div>
+  </div>
+
+</div>
+{% endblock %}

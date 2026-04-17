@@ -12,6 +12,7 @@ Keeping docs in sync with code is **non-optional** — treat it as part of the d
 |-----|-------------|
 | `architecture.md` | Any new module, pipeline change, design decision, config key, or test count change. Update: module map entry, relevant design-decision section, config key list, Known Constraints table, test count. |
 | `README.md` | Any user-facing change: new CLI flag, changed flag behaviour, new command, changed env variable, Docker change, or anything that affects how a user runs or configures wisper. Do **not** put test counts in README — they belong in `architecture.md` only. |
+| `plan.md` | All active plans, research findings, and open design decisions live here. When work is completed, remove it from `plan.md` — unless the context directly informs a remaining action item, in which case keep only the relevant excerpt. |
 
 Both files must be updated **in the same commit** as the code change, not as a follow-up.
 
@@ -26,6 +27,8 @@ A task is not complete until all three are true — in this order:
 3. **Committed** — all changed files in a single `git commit`
 
 When a todo list reaches 100% completed, execute steps 1–3 immediately without waiting to be asked.
+
+Commits are authorized as part of completing any task per the Definition of Done — no separate permission required.
 
 ---
 
@@ -57,6 +60,7 @@ wisper server --reload                # dev mode; http://localhost:8080
 ## Git / CI Rules
 
 - **Never push to `main` directly.** All changes go through a PR.
+- **Push frequently when running in the Claude Code app** — after each commit, push the branch so work is available to pick up from another device. Use `git push -u origin <branch>`.
 - **After committing a phase, pause for user review before starting the next.**
 - **Branch naming:** `feat/...` or `fix/...`
 - **CI matrix:** Python 3.10–3.13 are blocking; 3.14 is `continue-on-error: true` (non-blocking).
@@ -131,7 +135,8 @@ Every security control must have a corresponding test in `tests/test_path_traver
 |----------|---------|
 | `WISPER_DATA_DIR` | Override data dir (Docker bind mount) |
 | `WISPER_DEBUG` | Set `1` to disable warning suppression |
-| `HUGGINGFACE_TOKEN` | HF token alternative to `config.toml` |
+| `HUGGINGFACE_TOKEN` | HF token alternative to `config.toml`; `HF_TOKEN` is also accepted (alias) — both are propagated to `os.environ` once resolved |
+| `HF_TOKEN` | Alias for `HUGGINGFACE_TOKEN`; accepted by `get_hf_token()` and propagated to both vars |
 
 ---
 

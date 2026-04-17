@@ -84,18 +84,50 @@ def test_check_ffmpeg_called_process_error():
 
 def test_get_hf_token_env_var_wins(monkeypatch):
     monkeypatch.setenv("HUGGINGFACE_TOKEN", "hf_from_env")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
     from wisper_transcribe.config import get_hf_token
     assert get_hf_token({"hf_token": "hf_from_config"}) == "hf_from_env"
 
 
+def test_get_hf_token_hf_token_alias_accepted(monkeypatch):
+    """HF_TOKEN (huggingface_hub's canonical name) should be accepted as an alias."""
+    monkeypatch.delenv("HUGGINGFACE_TOKEN", raising=False)
+    monkeypatch.setenv("HF_TOKEN", "hf_alias_token")
+    from wisper_transcribe.config import get_hf_token
+    assert get_hf_token({}) == "hf_alias_token"
+
+
+def test_get_hf_token_propagates_to_hf_token_env(monkeypatch):
+    """When resolved from HUGGINGFACE_TOKEN, HF_TOKEN must be set so third-party libs see it."""
+    monkeypatch.setenv("HUGGINGFACE_TOKEN", "hf_propagate")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    import os
+    from wisper_transcribe.config import get_hf_token
+    get_hf_token({})
+    assert os.environ.get("HF_TOKEN") == "hf_propagate"
+
+
+def test_get_hf_token_propagates_from_config(monkeypatch):
+    """When resolved from config, both env vars must be set."""
+    monkeypatch.delenv("HUGGINGFACE_TOKEN", raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    import os
+    from wisper_transcribe.config import get_hf_token
+    get_hf_token({"hf_token": "hf_from_cfg"})
+    assert os.environ.get("HUGGINGFACE_TOKEN") == "hf_from_cfg"
+    assert os.environ.get("HF_TOKEN") == "hf_from_cfg"
+
+
 def test_get_hf_token_config_fallback(monkeypatch):
     monkeypatch.delenv("HUGGINGFACE_TOKEN", raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
     from wisper_transcribe.config import get_hf_token
     assert get_hf_token({"hf_token": "hf_from_config"}) == "hf_from_config"
 
 
 def test_get_hf_token_non_tty_raises(monkeypatch):
     monkeypatch.delenv("HUGGINGFACE_TOKEN", raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
     with patch("sys.stdin.isatty", return_value=False):
         from wisper_transcribe.config import get_hf_token
         with pytest.raises(RuntimeError, match="HuggingFace token required"):

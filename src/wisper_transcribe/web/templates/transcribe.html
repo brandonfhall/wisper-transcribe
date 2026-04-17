@@ -82,6 +82,23 @@
           </label>
         </div>
 
+        <!-- LLM post-processing -->
+        <div class="sm:col-span-2 pt-2 border-t border-gray-100">
+          <p class="text-sm font-medium text-gray-700 mb-2">LLM Post-processing
+            <span class="ml-1 text-xs text-gray-400 font-normal">(runs after transcription — requires LLM configured)</span>
+          </p>
+          <div class="flex flex-wrap gap-6">
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" name="post_refine" value="1" class="rounded text-indigo-600"/>
+              <span class="text-sm text-gray-700">Refine vocabulary</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" name="post_summarize" value="1" class="rounded text-indigo-600"/>
+              <span class="text-sm text-gray-700">Generate campaign summary</span>
+            </label>
+          </div>
+        </div>
+
       </div>
     </details>
 

@@ -238,6 +238,74 @@ def setup():
             click.echo(f"   WARN: model download failed: {e}", err=True)
             click.echo("   Models will download automatically on first transcription run.")
 
+    # ── LLM post-processing (opt-in) ──────────────────────────────────────────
+    click.echo("\n>> LLM post-processing (wisper refine / wisper summarize)")
+    click.echo("   These commands clean up transcripts and generate campaign notes.")
+    click.echo("   The default provider is Ollama (local — no API key required).")
+    click.echo("   Cloud providers (Anthropic, OpenAI, Google) need an API key.")
+    want_llm = click.confirm("   Configure an LLM provider now?", default=False)
+    if want_llm:
+        from .config import LLM_PROVIDERS
+
+        provider = click.prompt(
+            f"   Provider [{'/'.join(LLM_PROVIDERS)}]",
+            default=config.get("llm_provider", "ollama"),
+            show_default=False,
+        ).strip().lower()
+        if provider not in LLM_PROVIDERS:
+            click.echo(f"   WARN: unknown provider {provider!r} — skipping LLM setup", err=True)
+        else:
+            provider_defaults = {
+                "ollama": "llama3.1:8b",
+                "anthropic": "claude-sonnet-4-6",
+                "openai": "gpt-4o-mini",
+                "google": "gemini-1.5-flash",
+            }
+            suggested_model = config.get("llm_model", "") or provider_defaults[provider]
+            ollama_models = _get_ollama_models() if provider == "ollama" else []
+            if ollama_models:
+                click.echo("")
+                click.echo("   Installed Ollama models:")
+                for i, (name, size) in enumerate(ollama_models, 1):
+                    suffix = f"  ({size})" if size else ""
+                    click.echo(f"   {i}. {name}{suffix}")
+                raw = click.prompt(
+                    f"   Model — number or name [{suggested_model}]",
+                    default=suggested_model, show_default=False,
+                ).strip()
+                model_choice = ollama_models[int(raw) - 1][0] if (raw.isdigit() and 1 <= int(raw) <= len(ollama_models)) else raw
+            else:
+                model_choice = click.prompt(
+                    f"   Model [{suggested_model}]", default=suggested_model, show_default=False
+                ).strip()
+            config["llm_provider"] = provider
+            config["llm_model"] = model_choice
+
+            if provider == "ollama":
+                endpoint = config.get("llm_endpoint", "http://localhost:11434") or "http://localhost:11434"
+                endpoint = click.prompt(
+                    f"   Endpoint [{endpoint}]", default=endpoint, show_default=False
+                ).strip()
+                config["llm_endpoint"] = endpoint
+            else:
+                env_map = {
+                    "anthropic": ("ANTHROPIC_API_KEY", "anthropic_api_key"),
+                    "openai": ("OPENAI_API_KEY", "openai_api_key"),
+                    "google": ("GOOGLE_API_KEY", "google_api_key"),
+                }
+                env_name, config_key = env_map[provider]
+                click.echo(f"\n   Tip: the env var {env_name} always takes precedence if set.")
+                click.echo("   Leave blank to set it later via the env var.")
+                entered = click.prompt("   API key", default="", show_default=False,
+                                       hide_input=True).strip()
+                if entered:
+                    config[config_key] = entered
+
+            save_config(config)
+            click.echo(f"   OK  : LLM config saved ({provider} / {model_choice})")
+    else:
+        click.echo("   Skipped — run 'wisper config llm' any time to configure this.")
+
     # ── Done ──────────────────────────────────────────────────────────────────
     click.echo("")
     click.echo("=" * 42)
@@ -245,6 +313,8 @@ def setup():
     click.echo("")
     click.echo("Next steps:")
     click.echo("  wisper transcribe <file.mp3> --enroll-speakers")
+    click.echo("  wisper refine session.md --dry-run       # optional: LLM vocabulary cleanup")
+    click.echo("  wisper summarize session.md              # optional: generate campaign notes")
     click.echo("")
 
 
@@ -292,8 +362,10 @@ def config_show():
     click.echo("─" * 50)
     click.echo("Settings")
     click.echo("─" * 50)
+    from .config import LLM_SECRET_KEYS
+    secret_keys = {"hf_token"} | set(LLM_SECRET_KEYS)
     for k, v in cfg.items():
-        display = "***" if k == "hf_token" and v else repr(v)
+        display = "***" if k in secret_keys and v else repr(v)
         click.echo(f"  {k:<22} = {display}")
 
 
@@ -324,6 +396,115 @@ def config_path():
     from .config import get_config_path
 
     click.echo(get_config_path())
+
+
+def _get_ollama_models() -> list[tuple[str, str]]:
+    """Return (name, size) pairs for models installed in the local Ollama instance.
+
+    Calls ``ollama list`` via subprocess. Returns an empty list if ollama is
+    not on PATH, not running, or exits non-zero — callers fall back to a plain
+    text prompt in that case.
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["ollama", "list"], capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    models: list[tuple[str, str]] = []
+    for line in result.stdout.strip().splitlines()[1:]:  # skip header row
+        parts = line.split()
+        if not parts:
+            continue
+        name = parts[0]
+        size = f"{parts[2]} {parts[3]}" if len(parts) >= 4 else ""
+        models.append((name, size))
+    return models
+
+
+@config.command("llm")
+def config_llm():
+    """Interactive wizard for LLM provider, model, and API key / endpoint.
+
+    Applies to both local (Ollama) and cloud (Anthropic / OpenAI / Google).
+    Mirrors the HF-token setup flow. API keys can alternatively be set via
+    environment variables (ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY),
+    which always take precedence over stored config values.
+    """
+    from .config import LLM_PROVIDERS, load_config, save_config
+
+    cfg = load_config()
+    current_provider = cfg.get("llm_provider", "ollama")
+
+    click.echo("")
+    click.echo("LLM provider configuration")
+    click.echo("─" * 40)
+    provider = click.prompt(
+        f"Provider [{'/'.join(LLM_PROVIDERS)}]",
+        default=current_provider,
+        show_default=False,
+    ).strip().lower()
+    if provider not in LLM_PROVIDERS:
+        raise click.ClickException(f"Unknown provider: {provider!r}")
+
+    provider_defaults = {
+        "ollama": "llama3.1:8b",
+        "anthropic": "claude-sonnet-4-6",
+        "openai": "gpt-4o-mini",
+        "google": "gemini-1.5-flash",
+    }
+    suggested_model = cfg.get("llm_model", "") or provider_defaults[provider]
+    ollama_models = _get_ollama_models() if provider == "ollama" else []
+    if ollama_models:
+        click.echo("")
+        click.echo("Installed Ollama models:")
+        for i, (name, size) in enumerate(ollama_models, 1):
+            suffix = f"  ({size})" if size else ""
+            click.echo(f"  {i}. {name}{suffix}")
+        raw = click.prompt(
+            f"Model — number or name [{suggested_model}]",
+            default=suggested_model, show_default=False,
+        ).strip()
+        model = ollama_models[int(raw) - 1][0] if (raw.isdigit() and 1 <= int(raw) <= len(ollama_models)) else raw
+    else:
+        model = click.prompt(f"Model [{suggested_model}]", default=suggested_model,
+                             show_default=False).strip()
+
+    cfg["llm_provider"] = provider
+    cfg["llm_model"] = model
+
+    if provider == "ollama":
+        endpoint = cfg.get("llm_endpoint", "http://localhost:11434") or "http://localhost:11434"
+        endpoint = click.prompt(f"Endpoint [{endpoint}]", default=endpoint,
+                                show_default=False).strip()
+        cfg["llm_endpoint"] = endpoint
+    else:
+        env_name_map = {
+            "anthropic": "ANTHROPIC_API_KEY",
+            "openai": "OPENAI_API_KEY",
+            "google": "GOOGLE_API_KEY",
+        }
+        config_key_map = {
+            "anthropic": "anthropic_api_key",
+            "openai": "openai_api_key",
+            "google": "google_api_key",
+        }
+        env_name = env_name_map[provider]
+        config_key = config_key_map[provider]
+        click.echo(
+            f"\nAPI key: the env var {env_name} always takes precedence if set.\n"
+            "Leave blank to keep the current stored value (or rely on the env var)."
+        )
+        entered = click.prompt("API key", default="", show_default=False, hide_input=True).strip()
+        if entered:
+            cfg[config_key] = entered
+
+    save_config(cfg)
+    click.echo("")
+    click.echo(f"Saved. Test with: wisper summarize <file.md> --provider {provider}")
 
 
 # ---------------------------------------------------------------------------
@@ -527,3 +708,263 @@ def fix(transcript: Path, speaker: str, new_name: str, re_enroll: bool):
     if re_enroll:
         click.echo("Re-enrollment from fix is not yet automated. "
                    "Run: wisper enroll <name> --audio <original_file> --update")
+
+
+# ---------------------------------------------------------------------------
+# wisper refine  /  wisper summarize
+# ---------------------------------------------------------------------------
+
+_LLM_PROVIDER_CHOICE = click.Choice(["ollama", "anthropic", "openai", "google"])
+
+
+def _get_llm_client(provider: Optional[str], model: Optional[str],
+                    endpoint: Optional[str]):
+    """Resolve provider/model/endpoint from CLI flags + config and return a
+    client. Wraps LLMUnavailableError into a click.ClickException so the CLI
+    exits cleanly with a user-friendly message.
+    """
+    from .config import load_config
+    from .llm import get_client
+    from .llm.errors import LLMUnavailableError
+
+    cfg = load_config()
+    effective_provider = (provider or cfg.get("llm_provider", "ollama")).strip().lower()
+    if model:
+        cfg = dict(cfg)
+        cfg["llm_model"] = model
+    if endpoint and effective_provider == "ollama":
+        cfg = dict(cfg)
+        cfg["llm_endpoint"] = endpoint
+
+    try:
+        return get_client(effective_provider, config=cfg)
+    except LLMUnavailableError as exc:
+        raise click.ClickException(str(exc))
+    except ValueError as exc:
+        raise click.ClickException(str(exc))
+
+
+def _parse_tasks(raw: str, allowed: tuple[str, ...]) -> list[str]:
+    tasks = [t.strip().lower() for t in raw.split(",") if t.strip()]
+    bad = [t for t in tasks if t not in allowed]
+    if bad:
+        raise click.ClickException(
+            f"Unknown task(s): {', '.join(bad)}. Allowed: {', '.join(allowed)}"
+        )
+    return tasks
+
+
+@main.command()
+@click.argument("transcript", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--tasks", "tasks_raw", default="vocabulary", show_default=True,
+              help="Comma-separated subset of: vocabulary, unknown")
+@click.option("--provider", default=None, type=_LLM_PROVIDER_CHOICE,
+              help="LLM provider (default: llm_provider from config)")
+@click.option("--model", default=None, help="Model override (default: llm_model from config)")
+@click.option("--endpoint", default=None, help="Ollama endpoint override")
+@click.option("--dry-run/--apply", "dry_run", default=True, show_default=True,
+              help="--dry-run prints a colored diff without writing; --apply writes .md.bak and overwrites the transcript")
+@click.option("--no-color", is_flag=True, default=False, help="Disable ANSI colors in diff output")
+def refine(transcript: Path, tasks_raw: str, provider: Optional[str],
+           model: Optional[str], endpoint: Optional[str], dry_run: bool,
+           no_color: bool):
+    """Refine a transcript with an LLM pass.
+
+    Two surgical passes are available:
+    - vocabulary: fixes phonetic misspellings of proper nouns using the
+      configured hotwords and enrolled character names as ground truth.
+      Edits are validated by edit-distance; freeform rewrites are rejected.
+    - unknown: surfaces suggestions to resolve "Unknown Speaker N" labels.
+      NEVER auto-applied regardless of confidence; suggestions are printed
+      alongside the diff for manual review via `wisper fix`.
+
+    YAML frontmatter is never sent to the LLM and is never modified.
+    Dry-run is on by default; pass --apply to write changes (a .md.bak is
+    created first).
+    """
+    from .config import load_config
+    from .refine import refine_transcript
+    from .llm.errors import LLMUnavailableError, LLMResponseError
+    from .speaker_manager import load_profiles
+
+    tasks = _parse_tasks(tasks_raw, ("vocabulary", "unknown"))
+
+    cfg = load_config()
+    hotwords: list[str] = list(cfg.get("hotwords", []) or [])
+    profiles = load_profiles()
+    # Character names are conventionally stored in profile.notes (CLAUDE.md).
+    character_names: list[str] = []
+    for p in profiles.values():
+        if p.notes:
+            for token in p.notes.replace(";", ",").split(","):
+                t = token.strip()
+                if t and not t.lower().startswith("voice_of:"):
+                    character_names.append(t)
+
+    client = _get_llm_client(provider, model, endpoint)
+    original = transcript.read_text(encoding="utf-8")
+
+    try:
+        refined_md, applied_edits, suggestions = refine_transcript(
+            original,
+            client=client,
+            hotwords=hotwords,
+            character_names=character_names,
+            profiles=profiles,
+            tasks=tasks,
+        )
+    except (LLMUnavailableError, LLMResponseError) as exc:
+        raise click.ClickException(str(exc))
+
+    # Summary counts
+    click.echo(f"Provider: {client.provider} / model: {client.model}")
+    click.echo(f"Vocabulary edits: {len(applied_edits)}")
+    click.echo(f"Unknown-speaker suggestions: {len(suggestions)} "
+               f"(never auto-applied)")
+
+    if suggestions:
+        click.echo("\nUnresolved speakers:")
+        for s in suggestions:
+            reason = f" — {s.reason}" if s.reason else ""
+            click.echo(f"  line {s.line_idx + 1}: {s.current_label} → "
+                       f"{s.suggested_name} ({s.confidence:.0%}){reason}")
+
+    if not applied_edits:
+        click.echo("\nNo vocabulary changes to apply.")
+        return
+
+    from .refine import render_diff
+    diff = render_diff(original, refined_md, colour=not no_color)
+    if diff.strip():
+        click.echo("\n" + diff)
+
+    if dry_run:
+        click.echo("\n(dry-run) — pass --apply to write changes. "
+                   f"A backup {transcript.name}.bak will be created first.")
+        return
+
+    backup = transcript.with_suffix(transcript.suffix + ".bak")
+    backup.write_text(original, encoding="utf-8")
+    transcript.write_text(refined_md, encoding="utf-8")
+    click.echo(f"\nWrote {transcript}. Backup at {backup}.")
+
+
+@main.command()
+@click.argument("transcript", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--provider", default=None, type=_LLM_PROVIDER_CHOICE,
+              help="LLM provider (default: llm_provider from config)")
+@click.option("--model", default=None, help="Model override (default: llm_model from config)")
+@click.option("--endpoint", default=None, help="Ollama endpoint override")
+@click.option("--output", "output_path", type=click.Path(dir_okay=False, path_type=Path),
+              default=None,
+              help="Output path (default: <transcript>.summary.md alongside input)")
+@click.option("--sections", "sections_raw",
+              default="summary,loot,npcs,followups", show_default=True,
+              help="Comma-separated subset of: summary, loot, npcs, followups")
+@click.option("--overwrite", is_flag=True, default=False,
+              help="Overwrite existing summary file")
+@click.option("--refine", "do_refine", is_flag=True, default=False,
+              help="Run vocabulary refine on the transcript first (writes .md.bak, updates transcript)")
+@click.option("--refine-tasks", "refine_tasks_raw", default="vocabulary", show_default=True,
+              help="Which refine tasks to run when --refine is set. Subset of: vocabulary, unknown")
+def summarize(transcript: Path, provider: Optional[str], model: Optional[str],
+              endpoint: Optional[str], output_path: Optional[Path],
+              sections_raw: str, overwrite: bool, do_refine: bool,
+              refine_tasks_raw: str):
+    """Generate a campaign-notes summary file from a transcript.
+
+    Produces an Obsidian-friendly `<stem>.summary.md` with sections for the
+    session recap, loot/inventory changes, notable NPCs, and plot follow-ups.
+    Character names matching enrolled speakers or their `notes` are wrapped
+    in `[[wiki-links]]`; unknown names are rendered plain.
+
+    Pass `--refine` to run vocabulary refine on the transcript first (same
+    behaviour as `wisper refine --apply`). Any unknown-speaker suggestions
+    from `--refine-tasks unknown` are written to an `## Unresolved Speakers`
+    section of the summary file — they are never auto-applied.
+    """
+    from .config import load_config
+    from .refine import refine_transcript
+    from .summarize import default_summary_path, render_markdown, summarize_transcript
+    from .llm.errors import LLMUnavailableError, LLMResponseError
+    from .speaker_manager import load_profiles
+
+    sections = _parse_tasks(sections_raw, ("summary", "loot", "npcs", "followups"))
+
+    out_path = output_path or default_summary_path(transcript)
+    if out_path.exists() and not overwrite:
+        raise click.ClickException(
+            f"Summary file exists: {out_path}. Pass --overwrite to replace it."
+        )
+
+    client = _get_llm_client(provider, model, endpoint)
+    click.echo(
+        f"Summarizing with {client.provider} / {client.model} ...", err=True
+    )
+    profiles = load_profiles()
+    original = transcript.read_text(encoding="utf-8")
+
+    # Optional refine-then-summarize flow.
+    current_md = original
+    unresolved: list = []
+    refined_flag = False
+    if do_refine:
+        refine_tasks = _parse_tasks(refine_tasks_raw, ("vocabulary", "unknown"))
+        click.echo("Running refine step first...", err=True)
+        cfg = load_config()
+        hotwords = list(cfg.get("hotwords", []) or [])
+        character_names: list[str] = []
+        for p in profiles.values():
+            if p.notes:
+                for token in p.notes.replace(";", ",").split(","):
+                    t = token.strip()
+                    if t and not t.lower().startswith("voice_of:"):
+                        character_names.append(t)
+        try:
+            refined_md, applied_edits, unresolved = refine_transcript(
+                current_md,
+                client=client,
+                hotwords=hotwords,
+                character_names=character_names,
+                profiles=profiles,
+                tasks=refine_tasks,
+            )
+        except (LLMUnavailableError, LLMResponseError) as exc:
+            # Fall through to summarize-only with a warning; never abort the
+            # combined flow just because refine failed.
+            click.echo(f"WARN: refine step failed ({exc}); summarizing original.", err=True)
+            refined_md, applied_edits = current_md, []
+
+        if applied_edits and refined_md != current_md:
+            backup = transcript.with_suffix(transcript.suffix + ".bak")
+            backup.write_text(current_md, encoding="utf-8")
+            transcript.write_text(refined_md, encoding="utf-8")
+            click.echo(f"Refine applied {len(applied_edits)} edit(s). "
+                       f"Backup: {backup}")
+            current_md = refined_md
+            refined_flag = True
+        elif applied_edits:
+            # Edits returned but after apply they produced identical text —
+            # treat as no-op but still mark refined=True for provenance.
+            refined_flag = True
+
+    try:
+        note = summarize_transcript(
+            current_md, profiles, client,
+            sections=sections,
+            source_transcript=transcript.name,
+            unresolved_speakers=unresolved,
+            refined=refined_flag,
+        )
+    except (LLMUnavailableError, LLMResponseError) as exc:
+        raise click.ClickException(str(exc))
+
+    body = render_markdown(note, profiles=profiles, sections=sections)
+    out_path.write_text(body, encoding="utf-8")
+    click.echo(f"Wrote {out_path}")
+    click.echo(
+        f"  sections: {', '.join(sections)} | "
+        f"loot: {len(note.loot)} | npcs: {len(note.npcs)} | "
+        f"follow-ups: {len(note.followups)} | "
+        f"unresolved speakers: {len(note.unresolved_speakers)}"
+    )
