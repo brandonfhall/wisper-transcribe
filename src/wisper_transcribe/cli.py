@@ -255,39 +255,50 @@ def setup():
         if provider not in LLM_PROVIDERS:
             click.echo(f"   WARN: unknown provider {provider!r} — skipping LLM setup", err=True)
         else:
+            from .config import _LLM_DEFAULT_ENDPOINTS
             provider_defaults = {
                 "ollama": "llama3.1:8b",
+                "lmstudio": "",
                 "anthropic": "claude-sonnet-4-6",
                 "openai": "gpt-4o-mini",
                 "google": "gemini-1.5-flash",
             }
-            suggested_model = config.get("llm_model", "") or provider_defaults[provider]
-            ollama_models = _get_ollama_models() if provider == "ollama" else []
-            if ollama_models:
-                click.echo("")
-                click.echo("   Installed Ollama models:")
-                for i, (name, size) in enumerate(ollama_models, 1):
-                    suffix = f"  ({size})" if size else ""
-                    click.echo(f"   {i}. {name}{suffix}")
-                raw = click.prompt(
-                    f"   Model — number or name [{suggested_model}]",
-                    default=suggested_model, show_default=False,
-                ).strip()
-                model_choice = ollama_models[int(raw) - 1][0] if (raw.isdigit() and 1 <= int(raw) <= len(ollama_models)) else raw
-            else:
-                model_choice = click.prompt(
-                    f"   Model [{suggested_model}]", default=suggested_model, show_default=False
-                ).strip()
-            config["llm_provider"] = provider
-            config["llm_model"] = model_choice
+            suggested_model = config.get("llm_model", "") or provider_defaults.get(provider, "")
 
-            if provider == "ollama":
-                endpoint = config.get("llm_endpoint", "http://localhost:11434") or "http://localhost:11434"
+            if provider in ("ollama", "lmstudio"):
+                default_ep = _LLM_DEFAULT_ENDPOINTS.get(provider, "http://localhost:11434")
+                endpoint = config.get("llm_endpoint") or default_ep
                 endpoint = click.prompt(
                     f"   Endpoint [{endpoint}]", default=endpoint, show_default=False
                 ).strip()
                 config["llm_endpoint"] = endpoint
+
+                local_models = _get_ollama_models() if provider == "ollama" else _get_lmstudio_models(endpoint)
+                if local_models:
+                    click.echo("")
+                    label = "Ollama" if provider == "ollama" else "LM Studio"
+                    click.echo(f"   Installed {label} models:")
+                    for i, (name, size) in enumerate(local_models, 1):
+                        suffix = f"  ({size})" if size else ""
+                        click.echo(f"   {i}. {name}{suffix}")
+                    raw = click.prompt(
+                        f"   Model — number or name [{suggested_model}]",
+                        default=suggested_model, show_default=False,
+                    ).strip()
+                    model_choice = local_models[int(raw) - 1][0] if (raw.isdigit() and 1 <= int(raw) <= len(local_models)) else raw
+                else:
+                    model_choice = click.prompt(
+                        f"   Model [{suggested_model}]", default=suggested_model, show_default=False
+                    ).strip()
             else:
+                model_choice = click.prompt(
+                    f"   Model [{suggested_model}]", default=suggested_model, show_default=False
+                ).strip()
+
+            config["llm_provider"] = provider
+            config["llm_model"] = model_choice
+
+            if provider not in ("ollama", "lmstudio"):
                 env_map = {
                     "anthropic": ("ANTHROPIC_API_KEY", "anthropic_api_key"),
                     "openai": ("OPENAI_API_KEY", "openai_api_key"),
@@ -425,6 +436,22 @@ def _get_ollama_models() -> list[tuple[str, str]]:
     return models
 
 
+def _get_lmstudio_models(endpoint: str = "http://localhost:1234") -> list[tuple[str, str]]:
+    """Return (id, size) pairs for models loaded in the local LM Studio instance.
+
+    Queries ``GET /v1/models`` via httpx.  Returns an empty list if LM Studio
+    is not running or the request fails — callers fall back to a plain text prompt.
+    """
+    try:
+        import httpx
+        r = httpx.get(f"{endpoint.rstrip('/')}/v1/models", timeout=3.0)
+        r.raise_for_status()
+        data = r.json()
+        return [(m["id"], "") for m in data.get("data", []) if m.get("id")]
+    except Exception:
+        return []
+
+
 @config.command("llm")
 def config_llm():
     """Interactive wizard for LLM provider, model, and API key / endpoint.
@@ -450,25 +477,43 @@ def config_llm():
     if provider not in LLM_PROVIDERS:
         raise click.ClickException(f"Unknown provider: {provider!r}")
 
+    from .config import _LLM_DEFAULT_ENDPOINTS
     provider_defaults = {
         "ollama": "llama3.1:8b",
+        "lmstudio": "",
         "anthropic": "claude-sonnet-4-6",
         "openai": "gpt-4o-mini",
         "google": "gemini-1.5-flash",
     }
-    suggested_model = cfg.get("llm_model", "") or provider_defaults[provider]
-    ollama_models = _get_ollama_models() if provider == "ollama" else []
-    if ollama_models:
-        click.echo("")
-        click.echo("Installed Ollama models:")
-        for i, (name, size) in enumerate(ollama_models, 1):
-            suffix = f"  ({size})" if size else ""
-            click.echo(f"  {i}. {name}{suffix}")
-        raw = click.prompt(
-            f"Model — number or name [{suggested_model}]",
-            default=suggested_model, show_default=False,
-        ).strip()
-        model = ollama_models[int(raw) - 1][0] if (raw.isdigit() and 1 <= int(raw) <= len(ollama_models)) else raw
+    suggested_model = cfg.get("llm_model", "") or provider_defaults.get(provider, "")
+
+    if provider in ("ollama", "lmstudio"):
+        default_ep = _LLM_DEFAULT_ENDPOINTS.get(provider, "http://localhost:11434")
+        endpoint = cfg.get("llm_endpoint") or default_ep
+        endpoint = click.prompt(f"Endpoint [{endpoint}]", default=endpoint,
+                                show_default=False).strip()
+        cfg["llm_endpoint"] = endpoint
+
+        if provider == "ollama":
+            local_models = _get_ollama_models()
+        else:
+            local_models = _get_lmstudio_models(endpoint)
+
+        if local_models:
+            click.echo("")
+            label = "Ollama" if provider == "ollama" else "LM Studio"
+            click.echo(f"Installed {label} models:")
+            for i, (name, size) in enumerate(local_models, 1):
+                suffix = f"  ({size})" if size else ""
+                click.echo(f"  {i}. {name}{suffix}")
+            raw = click.prompt(
+                f"Model — number or name [{suggested_model}]",
+                default=suggested_model, show_default=False,
+            ).strip()
+            model = local_models[int(raw) - 1][0] if (raw.isdigit() and 1 <= int(raw) <= len(local_models)) else raw
+        else:
+            model = click.prompt(f"Model [{suggested_model}]", default=suggested_model,
+                                 show_default=False).strip()
     else:
         model = click.prompt(f"Model [{suggested_model}]", default=suggested_model,
                              show_default=False).strip()
@@ -476,12 +521,7 @@ def config_llm():
     cfg["llm_provider"] = provider
     cfg["llm_model"] = model
 
-    if provider == "ollama":
-        endpoint = cfg.get("llm_endpoint", "http://localhost:11434") or "http://localhost:11434"
-        endpoint = click.prompt(f"Endpoint [{endpoint}]", default=endpoint,
-                                show_default=False).strip()
-        cfg["llm_endpoint"] = endpoint
-    else:
+    if provider not in ("ollama", "lmstudio"):
         env_name_map = {
             "anthropic": "ANTHROPIC_API_KEY",
             "openai": "OPENAI_API_KEY",

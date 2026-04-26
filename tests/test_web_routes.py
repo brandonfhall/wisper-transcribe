@@ -442,6 +442,62 @@ def test_ollama_status_running_no_models(client):
     assert data["models"] == []
 
 
+def test_lmstudio_status_running_with_models(client):
+    """Returns running=True and model list when LM Studio responds."""
+    fake_resp = MagicMock()
+    fake_resp.raise_for_status = MagicMock()
+    fake_resp.json.return_value = {"data": [{"id": "phi-3"}, {"id": "llama-3.2-1b"}]}
+
+    with patch("httpx.get", return_value=fake_resp):
+        resp = client.get("/config/lmstudio-status?endpoint=http://localhost:1234")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["running"] is True
+    assert len(data["models"]) == 2
+    assert data["models"][0]["name"] == "phi-3"
+
+
+def test_lmstudio_status_not_reachable(client):
+    """Returns running=False when LM Studio server is not running."""
+    import httpx as _httpx
+
+    with patch("httpx.get", side_effect=_httpx.ConnectError("refused")):
+        resp = client.get("/config/lmstudio-status")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["running"] is False
+    assert data["models"] == []
+
+
+def test_lmstudio_status_running_no_models(client):
+    """Returns running=True with empty list when server is up but nothing loaded."""
+    fake_resp = MagicMock()
+    fake_resp.raise_for_status = MagicMock()
+    fake_resp.json.return_value = {"data": []}
+
+    with patch("httpx.get", return_value=fake_resp):
+        resp = client.get("/config/lmstudio-status")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["running"] is True
+    assert data["models"] == []
+
+
+def test_lmstudio_status_uses_custom_endpoint(client):
+    """The endpoint query param is forwarded to /v1/models."""
+    fake_resp = MagicMock()
+    fake_resp.raise_for_status = MagicMock()
+    fake_resp.json.return_value = {"data": []}
+
+    with patch("httpx.get", return_value=fake_resp) as mock_get:
+        client.get("/config/lmstudio-status?endpoint=http://myhost:1234")
+
+    mock_get.assert_called_once_with("http://myhost:1234/v1/models", timeout=3.0)
+
+
 def test_ollama_status_uses_custom_endpoint(client):
     """The endpoint query param is forwarded to the Ollama /api/tags URL."""
     fake_resp = MagicMock()

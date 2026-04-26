@@ -62,6 +62,22 @@ async def ollama_status(endpoint: str = "http://localhost:11434") -> JSONRespons
         return JSONResponse({"running": False, "models": []})
 
 
+@router.get("/lmstudio-status", response_class=JSONResponse)
+async def lmstudio_status(endpoint: str = "http://localhost:1234") -> JSONResponse:
+    """Return LM Studio reachability and loaded model list for the config UI."""
+    import httpx
+
+    url = endpoint.rstrip("/") + "/v1/models"
+    try:
+        r = httpx.get(url, timeout=3.0)
+        r.raise_for_status()
+        data = r.json()
+        models = [{"name": m["id"], "size": ""} for m in data.get("data", []) if m.get("id")]
+        return JSONResponse({"running": True, "models": models})
+    except Exception:
+        return JSONResponse({"running": False, "models": []})
+
+
 @router.get("", response_class=HTMLResponse)
 async def config_show(request: Request) -> HTMLResponse:
     config = load_config()
