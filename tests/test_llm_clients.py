@@ -147,6 +147,28 @@ def test_ollama_404_raises_model_not_found():
             client.complete("sys", "user")
 
 
+def test_ollama_non404_http_status_raises_generic():
+    """A non-404 HTTP error (e.g. 500) raises LLMUnavailableError with a generic message."""
+    from wisper_transcribe.llm.ollama import OllamaClient
+    import httpx
+
+    client = OllamaClient(model="llama3.1:8b")
+    req = httpx.Request("POST", "http://localhost:11434/api/chat")
+    fake_resp = httpx.Response(500, request=req)
+    status_exc = httpx.HTTPStatusError("500 Internal Server Error", request=req, response=fake_resp)
+
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock(side_effect=status_exc)
+    resp.iter_lines.return_value = iter([])
+    cm = MagicMock()
+    cm.__enter__ = MagicMock(return_value=resp)
+    cm.__exit__ = MagicMock(return_value=False)
+
+    with patch("httpx.stream", return_value=cm):
+        with pytest.raises(LLMUnavailableError, match="Ollama request failed"):
+            client.complete("sys", "user")
+
+
 def test_ollama_bad_json_raises_response_error():
     from wisper_transcribe.llm.ollama import OllamaClient
 

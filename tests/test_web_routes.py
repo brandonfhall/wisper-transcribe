@@ -427,6 +427,33 @@ def test_ollama_status_not_reachable(client):
     assert data["models"] == []
 
 
+def test_ollama_status_running_no_models(client):
+    """Returns running=True with empty list when Ollama is up but has no models."""
+    fake_resp = MagicMock()
+    fake_resp.raise_for_status = MagicMock()
+    fake_resp.json.return_value = {"models": []}
+
+    with patch("httpx.get", return_value=fake_resp):
+        resp = client.get("/config/ollama-status")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["running"] is True
+    assert data["models"] == []
+
+
+def test_ollama_status_uses_custom_endpoint(client):
+    """The endpoint query param is forwarded to the Ollama /api/tags URL."""
+    fake_resp = MagicMock()
+    fake_resp.raise_for_status = MagicMock()
+    fake_resp.json.return_value = {"models": []}
+
+    with patch("httpx.get", return_value=fake_resp) as mock_get:
+        client.get("/config/ollama-status?endpoint=http://myhost:11435")
+
+    mock_get.assert_called_once_with("http://myhost:11435/api/tags", timeout=3.0)
+
+
 # ---------------------------------------------------------------------------
 # Speakers
 # ---------------------------------------------------------------------------
