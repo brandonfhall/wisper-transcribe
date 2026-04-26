@@ -115,14 +115,35 @@ def test_ollama_complete_json_ok():
     assert data == {"changes": [{"original": "a", "corrected": "b"}]}
 
 
-def test_ollama_http_error_raises_unavailable():
+def test_ollama_connect_error_mentions_daemon():
     from wisper_transcribe.llm.ollama import OllamaClient
     import httpx
 
     client = OllamaClient(model="llama3.1:8b")
     fake_cm = _fake_stream_context([], raise_on_enter=httpx.ConnectError("refused"))
     with patch("httpx.stream", return_value=fake_cm):
-        with pytest.raises(LLMUnavailableError, match="Ollama request failed"):
+        with pytest.raises(LLMUnavailableError, match="Cannot connect to Ollama"):
+            client.complete("sys", "user")
+
+
+def test_ollama_404_raises_model_not_found():
+    from wisper_transcribe.llm.ollama import OllamaClient
+    import httpx
+
+    client = OllamaClient(model="nosuchmodel:7b")
+    req = httpx.Request("POST", "http://localhost:11434/api/chat")
+    fake_resp = httpx.Response(404, request=req)
+    status_exc = httpx.HTTPStatusError("404 Not Found", request=req, response=fake_resp)
+
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock(side_effect=status_exc)
+    resp.iter_lines.return_value = iter([])
+    cm = MagicMock()
+    cm.__enter__ = MagicMock(return_value=resp)
+    cm.__exit__ = MagicMock(return_value=False)
+
+    with patch("httpx.stream", return_value=cm):
+        with pytest.raises(LLMUnavailableError, match="not found in Ollama"):
             client.complete("sys", "user")
 
 

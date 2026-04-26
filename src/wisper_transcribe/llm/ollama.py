@@ -83,13 +83,33 @@ class OllamaClient(LLMClient):
                             sys.stderr.flush()
                     if chunk.get("done"):
                         break
+        except httpx.HTTPStatusError as exc:
+            if token_count > 0:
+                sys.stderr.write("\n")
+                sys.stderr.flush()
+            if exc.response.status_code == 404:
+                raise LLMUnavailableError(
+                    f"Model {self.model!r} not found in Ollama. "
+                    f"Run: `ollama pull {self.model}` — or pick an installed model "
+                    f"with `wisper config llm` / the web Config page."
+                ) from exc
+            raise LLMUnavailableError(
+                f"Ollama request failed ({url}): {exc}"
+            ) from exc
+        except httpx.ConnectError as exc:
+            if token_count > 0:
+                sys.stderr.write("\n")
+                sys.stderr.flush()
+            raise LLMUnavailableError(
+                f"Cannot connect to Ollama at {self.endpoint}. "
+                f"Is the daemon running? Try: `ollama serve`"
+            ) from exc
         except httpx.HTTPError as exc:
             if token_count > 0:
                 sys.stderr.write("\n")
                 sys.stderr.flush()
             raise LLMUnavailableError(
-                f"Ollama request failed ({url}): {exc}. "
-                f"Is the Ollama daemon running? Try: `ollama serve`"
+                f"Ollama request failed ({url}): {exc}"
             ) from exc
 
         if token_count > 0:

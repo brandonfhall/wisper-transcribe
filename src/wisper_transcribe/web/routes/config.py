@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from . import templates
 from wisper_transcribe.config import (
@@ -40,6 +40,26 @@ _LLM_FIELDS = [
 
 # Keys that must not be overwritten with an empty string
 _LLM_SECRET_FIELD_KEYS = frozenset({"anthropic_api_key", "openai_api_key", "google_api_key"})
+
+
+@router.get("/ollama-status", response_class=JSONResponse)
+async def ollama_status(endpoint: str = "http://localhost:11434") -> JSONResponse:
+    """Return Ollama reachability and installed model list for the config UI."""
+    import httpx
+
+    url = endpoint.rstrip("/") + "/api/tags"
+    try:
+        r = httpx.get(url, timeout=3.0)
+        r.raise_for_status()
+        data = r.json()
+        models = []
+        for m in data.get("models", []):
+            size_bytes = m.get("size", 0)
+            size_str = f"{size_bytes / 1e9:.1f} GB" if size_bytes else ""
+            models.append({"name": m["name"], "size": size_str})
+        return JSONResponse({"running": True, "models": models})
+    except Exception:
+        return JSONResponse({"running": False, "models": []})
 
 
 @router.get("", response_class=HTMLResponse)

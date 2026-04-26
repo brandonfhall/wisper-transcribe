@@ -74,6 +74,19 @@
         </select>
       </div>
 
+      <!-- Ollama status + model picker (shown only when ollama is selected) -->
+      <div id="ollama_picker_row" class="hidden space-y-1">
+        <div class="flex items-center gap-3">
+          <span id="ollama_status_line" class="text-xs text-gray-500">Checking Ollama…</span>
+          <button type="button" onclick="loadOllamaStatus()"
+                  class="text-xs text-indigo-600 hover:underline">↻ Refresh</button>
+        </div>
+        <select id="ollama_model_picker"
+                class="form-input font-mono text-sm hidden"
+                onchange="document.getElementById('cfg_llm_model').value = this.value">
+        </select>
+      </div>
+
       <!-- Model -->
       <div>
         <label class="form-label" for="cfg_llm_model">llm_model <span class="text-gray-400 font-normal text-xs">— Model name (blank = default)</span></label>
@@ -133,13 +146,59 @@
 </div>
 
 <script>
+async function loadOllamaStatus() {
+  const endpoint = document.getElementById('cfg_llm_endpoint').value || 'http://localhost:11434';
+  const statusLine = document.getElementById('ollama_status_line');
+  const picker = document.getElementById('ollama_model_picker');
+  const modelInput = document.getElementById('cfg_llm_model');
+
+  statusLine.textContent = 'Checking Ollama…';
+  statusLine.className = 'text-xs text-gray-500';
+  picker.classList.add('hidden');
+
+  try {
+    const r = await fetch('/config/ollama-status?endpoint=' + encodeURIComponent(endpoint));
+    const data = await r.json();
+    if (data.running && data.models.length > 0) {
+      const current = modelInput.value;
+      picker.innerHTML = data.models.map(m =>
+        '<option value="' + m.name + '"' + (m.name === current ? ' selected' : '') + '>' +
+        m.name + (m.size ? ' (' + m.size + ')' : '') + '</option>'
+      ).join('');
+      if (current && !data.models.find(m => m.name === current)) {
+        picker.insertAdjacentHTML('afterbegin',
+          '<option value="' + current + '" selected>' + current + ' (not installed)</option>');
+      }
+      picker.classList.remove('hidden');
+      statusLine.textContent = '✓ Ollama running · ' + data.models.length +
+        ' model' + (data.models.length !== 1 ? 's' : '') + ' installed — pick one above or type below';
+      statusLine.className = 'text-xs text-green-600';
+    } else if (data.running) {
+      statusLine.textContent = '✓ Ollama running · No models installed. Run: ollama pull <model>';
+      statusLine.className = 'text-xs text-yellow-600';
+    } else {
+      statusLine.textContent = '✗ Ollama not reachable · Start with: ollama serve';
+      statusLine.className = 'text-xs text-red-500';
+    }
+  } catch (e) {
+    statusLine.textContent = 'Could not check Ollama status';
+    statusLine.className = 'text-xs text-gray-400';
+  }
+}
+
 function llmProviderChanged(provider) {
   document.getElementById('llm_endpoint_row').classList.toggle('hidden', provider !== 'ollama');
   document.getElementById('llm_anthropic_row').classList.toggle('hidden', provider !== 'anthropic');
   document.getElementById('llm_openai_row').classList.toggle('hidden', provider !== 'openai');
   document.getElementById('llm_google_row').classList.toggle('hidden', provider !== 'google');
+  document.getElementById('ollama_picker_row').classList.toggle('hidden', provider !== 'ollama');
+  if (provider === 'ollama') loadOllamaStatus();
 }
 // Apply on page load
 llmProviderChanged(document.getElementById('cfg_llm_provider').value);
+// Re-check when endpoint URL changes
+document.getElementById('cfg_llm_endpoint').addEventListener('change', function() {
+  if (document.getElementById('cfg_llm_provider').value === 'ollama') loadOllamaStatus();
+});
 </script>
 {% endblock %}

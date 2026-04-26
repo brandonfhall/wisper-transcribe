@@ -391,6 +391,42 @@ def test_config_post_does_not_overwrite_api_key_with_empty(client):
     assert captured.get("anthropic_api_key") == "sk-ant-existing"
 
 
+def test_ollama_status_running_with_models(client):
+    """Returns running=True and parsed model list when Ollama responds."""
+    fake_body = {
+        "models": [
+            {"name": "gemma4:e4b", "size": 9_600_000_000},
+            {"name": "qwen3.6:27b", "size": 17_000_000_000},
+        ]
+    }
+    fake_resp = MagicMock()
+    fake_resp.raise_for_status = MagicMock()
+    fake_resp.json.return_value = fake_body
+
+    with patch("httpx.get", return_value=fake_resp):
+        resp = client.get("/config/ollama-status?endpoint=http://localhost:11434")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["running"] is True
+    assert len(data["models"]) == 2
+    assert data["models"][0]["name"] == "gemma4:e4b"
+    assert "GB" in data["models"][0]["size"]
+
+
+def test_ollama_status_not_reachable(client):
+    """Returns running=False when Ollama cannot be reached."""
+    import httpx as _httpx
+
+    with patch("httpx.get", side_effect=_httpx.ConnectError("refused")):
+        resp = client.get("/config/ollama-status")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["running"] is False
+    assert data["models"] == []
+
+
 # ---------------------------------------------------------------------------
 # Speakers
 # ---------------------------------------------------------------------------
