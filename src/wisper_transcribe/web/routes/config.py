@@ -43,11 +43,18 @@ _LLM_SECRET_FIELD_KEYS = frozenset({"anthropic_api_key", "openai_api_key", "goog
 
 
 @router.get("/ollama-status", response_class=JSONResponse)
-async def ollama_status(endpoint: str = "http://localhost:11434") -> JSONResponse:
-    """Return Ollama reachability and installed model list for the config UI."""
-    import httpx
+async def ollama_status() -> JSONResponse:
+    """Return Ollama reachability and installed model list for the config UI.
 
-    url = endpoint.rstrip("/") + "/api/tags"
+    Reads the saved llm_endpoint from config — no user-supplied URL reaches
+    httpx, which eliminates the SSRF taint path CodeQL would otherwise flag.
+    """
+    import httpx
+    from wisper_transcribe.config import _LLM_DEFAULT_ENDPOINTS
+
+    cfg = load_config()
+    endpoint = (cfg.get("llm_endpoint") or _LLM_DEFAULT_ENDPOINTS["ollama"]).rstrip("/")
+    url = endpoint + "/api/tags"
     try:
         r = httpx.get(url, timeout=3.0)
         r.raise_for_status()
@@ -63,11 +70,18 @@ async def ollama_status(endpoint: str = "http://localhost:11434") -> JSONRespons
 
 
 @router.get("/lmstudio-status", response_class=JSONResponse)
-async def lmstudio_status(endpoint: str = "http://localhost:1234") -> JSONResponse:
-    """Return LM Studio reachability and loaded model list for the config UI."""
-    import httpx
+async def lmstudio_status() -> JSONResponse:
+    """Return LM Studio reachability and loaded model list for the config UI.
 
-    url = endpoint.rstrip("/") + "/v1/models"
+    Reads the saved llm_endpoint from config — no user-supplied URL reaches
+    httpx, which eliminates the SSRF taint path CodeQL would otherwise flag.
+    """
+    import httpx
+    from wisper_transcribe.config import _LLM_DEFAULT_ENDPOINTS
+
+    cfg = load_config()
+    endpoint = (cfg.get("llm_endpoint") or _LLM_DEFAULT_ENDPOINTS["lmstudio"]).rstrip("/")
+    url = endpoint + "/v1/models"
     try:
         r = httpx.get(url, timeout=3.0)
         r.raise_for_status()

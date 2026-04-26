@@ -403,8 +403,10 @@ def test_ollama_status_running_with_models(client):
     fake_resp.raise_for_status = MagicMock()
     fake_resp.json.return_value = fake_body
 
-    with patch("httpx.get", return_value=fake_resp):
-        resp = client.get("/config/ollama-status?endpoint=http://localhost:11434")
+    with patch("wisper_transcribe.web.routes.config.load_config",
+               return_value={"llm_endpoint": "http://localhost:11434"}), \
+         patch("httpx.get", return_value=fake_resp):
+        resp = client.get("/config/ollama-status")
 
     assert resp.status_code == 200
     data = resp.json()
@@ -418,7 +420,8 @@ def test_ollama_status_not_reachable(client):
     """Returns running=False when Ollama cannot be reached."""
     import httpx as _httpx
 
-    with patch("httpx.get", side_effect=_httpx.ConnectError("refused")):
+    with patch("wisper_transcribe.web.routes.config.load_config", return_value={}), \
+         patch("httpx.get", side_effect=_httpx.ConnectError("refused")):
         resp = client.get("/config/ollama-status")
 
     assert resp.status_code == 200
@@ -433,7 +436,8 @@ def test_ollama_status_running_no_models(client):
     fake_resp.raise_for_status = MagicMock()
     fake_resp.json.return_value = {"models": []}
 
-    with patch("httpx.get", return_value=fake_resp):
+    with patch("wisper_transcribe.web.routes.config.load_config", return_value={}), \
+         patch("httpx.get", return_value=fake_resp):
         resp = client.get("/config/ollama-status")
 
     assert resp.status_code == 200
@@ -448,8 +452,10 @@ def test_lmstudio_status_running_with_models(client):
     fake_resp.raise_for_status = MagicMock()
     fake_resp.json.return_value = {"data": [{"id": "phi-3"}, {"id": "llama-3.2-1b"}]}
 
-    with patch("httpx.get", return_value=fake_resp):
-        resp = client.get("/config/lmstudio-status?endpoint=http://localhost:1234")
+    with patch("wisper_transcribe.web.routes.config.load_config",
+               return_value={"llm_endpoint": "http://localhost:1234"}), \
+         patch("httpx.get", return_value=fake_resp):
+        resp = client.get("/config/lmstudio-status")
 
     assert resp.status_code == 200
     data = resp.json()
@@ -462,7 +468,8 @@ def test_lmstudio_status_not_reachable(client):
     """Returns running=False when LM Studio server is not running."""
     import httpx as _httpx
 
-    with patch("httpx.get", side_effect=_httpx.ConnectError("refused")):
+    with patch("wisper_transcribe.web.routes.config.load_config", return_value={}), \
+         patch("httpx.get", side_effect=_httpx.ConnectError("refused")):
         resp = client.get("/config/lmstudio-status")
 
     assert resp.status_code == 200
@@ -477,7 +484,8 @@ def test_lmstudio_status_running_no_models(client):
     fake_resp.raise_for_status = MagicMock()
     fake_resp.json.return_value = {"data": []}
 
-    with patch("httpx.get", return_value=fake_resp):
+    with patch("wisper_transcribe.web.routes.config.load_config", return_value={}), \
+         patch("httpx.get", return_value=fake_resp):
         resp = client.get("/config/lmstudio-status")
 
     assert resp.status_code == 200
@@ -486,26 +494,30 @@ def test_lmstudio_status_running_no_models(client):
     assert data["models"] == []
 
 
-def test_lmstudio_status_uses_custom_endpoint(client):
-    """The endpoint query param is forwarded to /v1/models."""
+def test_lmstudio_status_uses_saved_config_endpoint(client):
+    """Status check uses the saved config endpoint, not a query parameter."""
     fake_resp = MagicMock()
     fake_resp.raise_for_status = MagicMock()
     fake_resp.json.return_value = {"data": []}
 
-    with patch("httpx.get", return_value=fake_resp) as mock_get:
-        client.get("/config/lmstudio-status?endpoint=http://myhost:1234")
+    with patch("wisper_transcribe.web.routes.config.load_config",
+               return_value={"llm_endpoint": "http://myhost:1234"}), \
+         patch("httpx.get", return_value=fake_resp) as mock_get:
+        client.get("/config/lmstudio-status")
 
     mock_get.assert_called_once_with("http://myhost:1234/v1/models", timeout=3.0)
 
 
-def test_ollama_status_uses_custom_endpoint(client):
-    """The endpoint query param is forwarded to the Ollama /api/tags URL."""
+def test_ollama_status_uses_saved_config_endpoint(client):
+    """Status check uses the saved config endpoint, not a query parameter."""
     fake_resp = MagicMock()
     fake_resp.raise_for_status = MagicMock()
     fake_resp.json.return_value = {"models": []}
 
-    with patch("httpx.get", return_value=fake_resp) as mock_get:
-        client.get("/config/ollama-status?endpoint=http://myhost:11435")
+    with patch("wisper_transcribe.web.routes.config.load_config",
+               return_value={"llm_endpoint": "http://myhost:11435"}), \
+         patch("httpx.get", return_value=fake_resp) as mock_get:
+        client.get("/config/ollama-status")
 
     mock_get.assert_called_once_with("http://myhost:11435/api/tags", timeout=3.0)
 

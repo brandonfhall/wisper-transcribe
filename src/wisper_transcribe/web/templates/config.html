@@ -171,7 +171,7 @@ async function loadOllamaStatus() {
   picker.classList.add('hidden');
 
   try {
-    const r = await fetch('/config/ollama-status?endpoint=' + encodeURIComponent(endpoint));
+    const r = await fetch('/config/ollama-status');
     const data = await r.json();
     if (data.running && data.models.length > 0) {
       const current = modelInput.value;
@@ -218,7 +218,7 @@ async function loadLMStudioStatus() {
   picker.classList.add('hidden');
 
   try {
-    const r = await fetch('/config/lmstudio-status?endpoint=' + encodeURIComponent(endpoint));
+    const r = await fetch('/config/lmstudio-status');
     const data = await r.json();
     if (data.running && data.models.length > 0) {
       const current = modelInput.value;
