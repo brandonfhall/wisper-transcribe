@@ -372,9 +372,11 @@ All web route handlers follow a consistent two-layer defence pattern enforced by
 `Path.resolve()` on tainted input is **not** used — CodeQL does not recognise it as a sanitiser.
 
 **Open redirect (CWE-601) — job ID routes (`cancel_job`, `enroll_form`, `enroll_submit`):**
-`_validate_job_id(job_id)` in `transcribe.py` applies both layers:
+`_validate_job_id(job_id)` in `transcribe.py` gates access with two layers:
 1. `re.match(r"^[\w\-]+$", job_id)` rejects everything except alphanumeric/hyphen.
-2. `os.path.basename(os.path.abspath(os.path.join("_guard", job_id)))` round-trip produces a string CodeQL's taint tracker treats as clean. `re.match().group(1)` alone is **still considered tainted** by CodeQL even after format validation; the `os.path` round-trip is required.
+2. `os.path.basename(os.path.abspath(os.path.join("_guard", job_id)))` round-trip. `re.match().group(1)` alone is **still considered tainted** by CodeQL even after format validation; the `os.path` round-trip is required.
+
+After validation, redirect URLs use **`job.id`** (the server-generated `uuid4` string stored on the `Job` object) rather than `safe_id` (the validated but still-tainted user value). Because `job.id` is set at job creation from `uuid.uuid4()` — never from request data — CodeQL's taint tracker sees no user-controlled data flowing into the `Location` header, fully resolving the `py/url-redirection` alerts.
 
 **Error messages:** Internal exception text is never placed in redirect URLs or error responses. Routes use generic error codes (e.g. `?error=enroll_failed`).
 

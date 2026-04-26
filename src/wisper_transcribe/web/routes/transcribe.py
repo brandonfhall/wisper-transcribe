@@ -158,7 +158,12 @@ async def cancel_job(request: Request, job_id: str) -> Response:
 
     queue = _get_queue(request)
     queue.cancel(safe_id)
-    return RedirectResponse(url=f"/transcribe/jobs/{safe_id}", status_code=303)
+    # Use server-generated job.id (UUID) instead of safe_id so CodeQL's
+    # py/url-redirection taint tracker sees no user-controlled data in the URL.
+    job = queue.get(safe_id)
+    if job is None:
+        return RedirectResponse(url="/transcribe", status_code=303)
+    return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
 
 
 @router.get("/jobs/{job_id}", response_class=HTMLResponse)
@@ -252,7 +257,7 @@ async def enroll_form(request: Request, job_id: str) -> Response:
     if job is None:
         return HTMLResponse(content="Job not found", status_code=404)
     if job.status != COMPLETED:
-        return RedirectResponse(url=f"/transcribe/jobs/{safe_id}", status_code=303)
+        return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
 
     from wisper_transcribe.speaker_manager import load_profiles
 
@@ -314,8 +319,10 @@ async def enroll_submit(request: Request, job_id: str) -> Response:
 
     queue = _get_queue(request)
     job = queue.get(safe_id)
-    if job is None or job.status != COMPLETED or not job.output_path:
-        return RedirectResponse(url=f"/transcribe/jobs/{safe_id}", status_code=303)
+    if job is None:
+        return HTMLResponse(content="Job not found", status_code=404)
+    if job.status != COMPLETED or not job.output_path:
+        return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
 
     form_data = await request.form()
     # Form fields: speaker_<label> = display_name
