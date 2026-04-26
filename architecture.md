@@ -33,7 +33,7 @@ src/wisper_transcribe/
 ├── aligner.py          Merge transcription segments with diarization labels (max-overlap)
 ├── speaker_manager.py  Profile CRUD, embedding extraction, cosine-similarity matching, EMA updates
 ├── formatter.py        Markdown output, YAML frontmatter, dynamic version from __version__
-├── audio_utils.py      validate_audio(), convert_to_wav(), get_duration(), load_wav_as_tensor()
+├── audio_utils.py      validate_audio(), convert_to_wav(), get_duration(), load_wav_as_tensor(); VIDEO_EXTENSIONS / AUDIO_EXTENSIONS sets
 ├── time_utils.py       Shared time formatting: format_timestamp(), format_duration()
 ├── config.py           load_config(), save_config(), get_device(), get_hf_token(), get_llm_api_key(), resolve_llm_model(), check_ffmpeg()
 ├── models.py           Dataclasses: TranscriptionSegment, DiarizationSegment, AlignedSegment, SpeakerProfile, Edit, SpeakerSuggestion, LootChange, NPCMention, SummaryNote
@@ -74,9 +74,10 @@ Audio file
     │
     ▼
 2. CONVERT          audio_utils.convert_to_wav()
-   • pydub exports to 16kHz mono WAV (temp file)
-   • Input file is never modified
-   • WAV files skip conversion (returned as-is)
+   • Video files (mp4, mkv, mov, avi, webm, …): ffmpeg subprocess with
+     -map 0:a:0 -ac 1 -ar 16000 -vn → first audio track only, 16kHz mono WAV
+   • Audio files: pydub exports to 16kHz mono WAV (temp file)
+   • Input file is never modified; 16kHz mono WAVs returned unchanged
     │
     ├──────────────────────────────────────────────────────┐
     ▼                                                      ▼
@@ -311,7 +312,7 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - `tests/test_web_routes.py` covers web routes including refine/summarize job submission, summary sidecar rendering, summary download, summary-badge logic on the transcript list, deletion of summary sidecars alongside transcripts, LLM config field rendering, LLM config save (provider/model/temperature), non-empty API key save, empty API key not overwriting an existing key, Config nav link presence on the job detail page, and the `/config/ollama-status` endpoint (running + models, running + empty model list, not reachable, custom endpoint forwarded)
 - `tests/test_config.py` covers `get_hf_token()` accepting `HF_TOKEN` as an alias for `HUGGINGFACE_TOKEN` and propagating whichever is set to both env vars
 - `tests/test_web_jobs.py` covers job queue CRUD, tqdm patch/restore, error recording, cancellation, and a regression test that `job.status = COMPLETED` is not set until after `_run_post_process()` finishes
-- Test count: 427 (all mocked, all passing)
+- Test count: 441 (all mocked, all passing)
 
 **CI matrix** (`.github/workflows/ci.yml`):
 - Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)

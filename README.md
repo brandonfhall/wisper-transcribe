@@ -288,7 +288,10 @@ Checks ffmpeg, detects your GPU (CUDA/MPS/CPU), prompts for your HuggingFace tok
 ```
 wisper transcribe <path>
 
-  path                     Audio file or folder of audio files
+  path                     Audio or video file, or folder of files
+                           Audio: mp3 wav m4a flac ogg
+                           Video: mp4 mkv mov avi webm m4v flv ts mts m2ts
+                           (video: first audio track extracted automatically)
 
   -o, --output DIR         Output directory (default: same as input)
   -m, --model SIZE         tiny / base / small / medium / large-v3 / large-v3-turbo

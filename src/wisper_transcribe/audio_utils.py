@@ -1,9 +1,18 @@
+import subprocess
 import tempfile
 from pathlib import Path
 
 from pydub import AudioSegment
 
-SUPPORTED_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".mp4"}
+# Audio-only formats handled by pydub.
+AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac", ".ogg"}
+
+# Video container formats — audio is extracted via ffmpeg with explicit
+# stream mapping so only the first audio track is used.
+VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mkv", ".mov", ".avi", ".webm",
+                    ".flv", ".ts", ".mts", ".m2ts"}
+
+SUPPORTED_EXTENSIONS = AUDIO_EXTENSIONS | VIDEO_EXTENSIONS
 
 
 def validate_audio(path: Path) -> None:
@@ -13,17 +22,65 @@ def validate_audio(path: Path) -> None:
         raise ValueError(f"Audio file not found: {path}")
     if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
         raise ValueError(
-            f"Unsupported audio format '{path.suffix}'. "
-            f"Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
+            f"Unsupported format '{path.suffix}'. "
+            f"Supported audio: {', '.join(sorted(AUDIO_EXTENSIONS))}. "
+            f"Supported video: {', '.join(sorted(VIDEO_EXTENSIONS))}."
         )
 
 
-def convert_to_wav(path: Path) -> Path:
-    """Convert audio to 16kHz mono WAV using pydub. Returns a temp file path.
+def _extract_first_audio_track(video_path: Path) -> Path:
+    """Extract the first audio stream from a video file as a 16kHz mono WAV.
 
-    If the file is already a 16kHz mono WAV, returns the original path unchanged.
+    Uses ffmpeg with ``-map 0:a:0`` so only stream 0 is taken regardless of
+    how many audio tracks the container holds.  Raises ValueError on ffmpeg
+    failure (e.g. no audio track) and RuntimeError if ffmpeg is not on PATH.
+    """
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp.close()
+    out_path = Path(tmp.name)
+
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", str(video_path),
+                "-map", "0:a:0",   # first audio stream only
+                "-ac", "1",        # mono
+                "-ar", "16000",    # 16 kHz
+                "-vn",             # drop video stream
+                str(out_path),
+            ],
+            capture_output=True,
+            timeout=600,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "ffmpeg not found. Install it to process video files: "
+            "https://ffmpeg.org/download.html"
+        ) from exc
+
+    if result.returncode != 0:
+        stderr = result.stderr.decode(errors="replace")[-400:]
+        raise ValueError(
+            f"ffmpeg could not extract audio from {video_path.name!r}. "
+            f"Does the file have an audio track?\nffmpeg: {stderr}"
+        )
+
+    return out_path
+
+
+def convert_to_wav(path: Path) -> Path:
+    """Convert an audio or video file to a 16kHz mono WAV.
+
+    Video files: ffmpeg extracts only the first audio track (``-map 0:a:0``).
+    Audio files: pydub handles conversion; already-correct WAVs are returned
+    unchanged.
     """
     path = Path(path)
+
+    if path.suffix.lower() in VIDEO_EXTENSIONS:
+        return _extract_first_audio_track(path)
+
     audio = AudioSegment.from_file(str(path))
 
     if (
