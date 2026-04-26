@@ -391,6 +391,137 @@ def test_config_post_does_not_overwrite_api_key_with_empty(client):
     assert captured.get("anthropic_api_key") == "sk-ant-existing"
 
 
+def test_ollama_status_running_with_models(client):
+    """Returns running=True and parsed model list when Ollama responds."""
+    fake_body = {
+        "models": [
+            {"name": "gemma4:e4b", "size": 9_600_000_000},
+            {"name": "qwen3.6:27b", "size": 17_000_000_000},
+        ]
+    }
+    fake_resp = MagicMock()
+    fake_resp.raise_for_status = MagicMock()
+    fake_resp.json.return_value = fake_body
+
+    with patch("wisper_transcribe.web.routes.config.load_config",
+               return_value={"llm_endpoint": "http://localhost:11434"}), \
+         patch("httpx.get", return_value=fake_resp):
+        resp = client.get("/config/ollama-status")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["running"] is True
+    assert len(data["models"]) == 2
+    assert data["models"][0]["name"] == "gemma4:e4b"
+    assert "GB" in data["models"][0]["size"]
+
+
+def test_ollama_status_not_reachable(client):
+    """Returns running=False when Ollama cannot be reached."""
+    import httpx as _httpx
+
+    with patch("wisper_transcribe.web.routes.config.load_config", return_value={}), \
+         patch("httpx.get", side_effect=_httpx.ConnectError("refused")):
+        resp = client.get("/config/ollama-status")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["running"] is False
+    assert data["models"] == []
+
+
+def test_ollama_status_running_no_models(client):
+    """Returns running=True with empty list when Ollama is up but has no models."""
+    fake_resp = MagicMock()
+    fake_resp.raise_for_status = MagicMock()
+    fake_resp.json.return_value = {"models": []}
+
+    with patch("wisper_transcribe.web.routes.config.load_config", return_value={}), \
+         patch("httpx.get", return_value=fake_resp):
+        resp = client.get("/config/ollama-status")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["running"] is True
+    assert data["models"] == []
+
+
+def test_lmstudio_status_running_with_models(client):
+    """Returns running=True and model list when LM Studio responds."""
+    fake_resp = MagicMock()
+    fake_resp.raise_for_status = MagicMock()
+    fake_resp.json.return_value = {"data": [{"id": "phi-3"}, {"id": "llama-3.2-1b"}]}
+
+    with patch("wisper_transcribe.web.routes.config.load_config",
+               return_value={"llm_endpoint": "http://localhost:1234"}), \
+         patch("httpx.get", return_value=fake_resp):
+        resp = client.get("/config/lmstudio-status")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["running"] is True
+    assert len(data["models"]) == 2
+    assert data["models"][0]["name"] == "phi-3"
+
+
+def test_lmstudio_status_not_reachable(client):
+    """Returns running=False when LM Studio server is not running."""
+    import httpx as _httpx
+
+    with patch("wisper_transcribe.web.routes.config.load_config", return_value={}), \
+         patch("httpx.get", side_effect=_httpx.ConnectError("refused")):
+        resp = client.get("/config/lmstudio-status")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["running"] is False
+    assert data["models"] == []
+
+
+def test_lmstudio_status_running_no_models(client):
+    """Returns running=True with empty list when server is up but nothing loaded."""
+    fake_resp = MagicMock()
+    fake_resp.raise_for_status = MagicMock()
+    fake_resp.json.return_value = {"data": []}
+
+    with patch("wisper_transcribe.web.routes.config.load_config", return_value={}), \
+         patch("httpx.get", return_value=fake_resp):
+        resp = client.get("/config/lmstudio-status")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["running"] is True
+    assert data["models"] == []
+
+
+def test_lmstudio_status_uses_saved_config_endpoint(client):
+    """Status check uses the saved config endpoint, not a query parameter."""
+    fake_resp = MagicMock()
+    fake_resp.raise_for_status = MagicMock()
+    fake_resp.json.return_value = {"data": []}
+
+    with patch("wisper_transcribe.web.routes.config.load_config",
+               return_value={"llm_endpoint": "http://myhost:1234"}), \
+         patch("httpx.get", return_value=fake_resp) as mock_get:
+        client.get("/config/lmstudio-status")
+
+    mock_get.assert_called_once_with("http://myhost:1234/v1/models", timeout=3.0)
+
+
+def test_ollama_status_uses_saved_config_endpoint(client):
+    """Status check uses the saved config endpoint, not a query parameter."""
+    fake_resp = MagicMock()
+    fake_resp.raise_for_status = MagicMock()
+    fake_resp.json.return_value = {"models": []}
+
+    with patch("wisper_transcribe.web.routes.config.load_config",
+               return_value={"llm_endpoint": "http://myhost:11435"}), \
+         patch("httpx.get", return_value=fake_resp) as mock_get:
+        client.get("/config/ollama-status")
+
+    mock_get.assert_called_once_with("http://myhost:11435/api/tags", timeout=3.0)
+
+
 # ---------------------------------------------------------------------------
 # Speakers
 # ---------------------------------------------------------------------------

@@ -36,8 +36,15 @@ def get_client(provider: str, config: Optional[dict] = None) -> LLMClient:
 
     if provider == "ollama":
         from .ollama import OllamaClient
-        endpoint = config.get("llm_endpoint", "http://localhost:11434") or "http://localhost:11434"
+        from ..config import _LLM_DEFAULT_ENDPOINTS
+        endpoint = config.get("llm_endpoint") or _LLM_DEFAULT_ENDPOINTS["ollama"]
         return OllamaClient(model=model, endpoint=endpoint, temperature=temperature)
+
+    if provider == "lmstudio":
+        from .lmstudio import LMStudioClient
+        from ..config import _LLM_DEFAULT_ENDPOINTS
+        endpoint = config.get("llm_endpoint") or _LLM_DEFAULT_ENDPOINTS["lmstudio"]
+        return LMStudioClient(model=model, endpoint=endpoint, temperature=temperature)
 
     api_key = get_llm_api_key(provider, config=config)
     if not api_key:

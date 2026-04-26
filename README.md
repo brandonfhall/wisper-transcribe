@@ -369,7 +369,7 @@ wisper refine session05.md --tasks vocabulary,unknown   # run both passes
 wisper refine session05.md --provider anthropic         # override default provider
 ```
 
-Options: `--tasks`, `--provider {ollama,anthropic,openai,google}`, `--model NAME`, `--endpoint URL` (ollama), `--dry-run/--apply`, `--no-color`.
+Options: `--tasks`, `--provider {ollama,lmstudio,anthropic,openai,google}`, `--model NAME`, `--endpoint URL` (ollama/lmstudio), `--dry-run/--apply`, `--no-color`.
 
 Safety: YAML frontmatter is never sent to the LLM and is preserved byte-for-byte. Network failures soft-fail with a warning and leave the transcript untouched.
 
@@ -423,7 +423,7 @@ wisper config path                        # show where config.toml lives
 wisper config llm                         # interactive wizard: provider + model + key/endpoint
 ```
 
-**`wisper config llm`** is the recommended way to configure `refine` / `summarize`. It walks you through the provider (Ollama / Anthropic / OpenAI / Google), model name, and either the endpoint (Ollama) or API key (cloud) in one flow. API keys can alternatively be set via the `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GOOGLE_API_KEY` environment variables — env vars always take precedence over the stored value, and stored values are masked as `***` in `wisper config show`.
+**`wisper config llm`** is the recommended way to configure `refine` / `summarize`. It walks you through the provider (Ollama / LM Studio / Anthropic / OpenAI / Google), endpoint (local providers), model name, and API key (cloud providers) in one flow. For Ollama and LM Studio the wizard lists installed/loaded models so you can pick by number. API keys can alternatively be set via the `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GOOGLE_API_KEY` environment variables — env vars always take precedence over the stored value, and stored values are masked as `***` in `wisper config show`.
 
 Relevant keys: `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`.
 

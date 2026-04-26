@@ -101,6 +101,15 @@ Use `_validate_job_id()` (defined in `transcribe.py`) for every job ID that appe
 
 `re.match().group(1)` is **still considered tainted** by CodeQL even after a format check. The `os.path` round-trip is required to break the taint chain.
 
+**Prefer server-generated IDs in redirect URLs.** Even after `_validate_job_id()`, CodeQL may still track the validated value as tainted. The cleanest solution is to look up the server object (e.g. a `Job`) using the validated ID and then use the object's own `id` field (set from `uuid.uuid4()` at creation — never from user input) in the redirect URL. This removes user-controlled data from the taint sink entirely:
+```python
+safe_id = _validate_job_id(job_id)
+job = queue.get(safe_id)
+if job is None:
+    return RedirectResponse(url="/transcribe", status_code=303)
+return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)  # job.id is UUID, not tainted
+```
+
 #### Never reflect user input into error messages or redirect parameters
 Exception messages, file paths, and internal state must not appear in redirect `Location` headers or in HTML error responses. Use a generic error code (e.g. `?error=enroll_failed`) instead of `?error={str(exc)}`.
 
@@ -123,7 +132,7 @@ Every security control must have a corresponding test in `tests/test_path_traver
 | Always `get_data_dir()` from `config.py` for user data | Respects `WISPER_DATA_DIR` env var (Docker) |
 | URL-encode transcript stems in templates with `\| urlencode` filter | Filenames may contain em-dashes, spaces, `!`, `()` |
 | Use `os.path.basename` + `abspath/startswith` for path guards, not `Path.resolve()` | CodeQL only recognises `os.path` as a path sanitiser |
-| Use `_validate_job_id()` for job IDs in redirects | Breaks CodeQL taint chain; regex alone is insufficient |
+| Use `_validate_job_id()` then redirect via `job.id` (UUID) | `_validate_job_id` gates access; `job.id` (uuid4, untainted) breaks CodeQL taint chain in redirect URL |
 | Redirect `Location` headers use `urllib.parse.quote(name)` | latin-1 codec rejects non-ASCII characters |
 | Never put `str(exc)` in a redirect URL or error response | Information disclosure; use generic error codes |
 

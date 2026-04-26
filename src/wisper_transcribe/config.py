@@ -37,21 +37,28 @@ DEFAULTS = {
     # Default provider is local Ollama; cloud providers require explicit config + key.
     "llm_provider": "ollama",                 # ollama | anthropic | openai | google
     "llm_model": "",                          # blank → per-provider default via resolve_llm_model()
-    "llm_endpoint": "http://localhost:11434", # ollama only
+    "llm_endpoint": "http://localhost:11434", # ollama default; lmstudio default is :1234
     "llm_temperature": 0.2,
     "anthropic_api_key": "",                  # env ANTHROPIC_API_KEY takes precedence
     "openai_api_key": "",                     # env OPENAI_API_KEY takes precedence
     "google_api_key": "",                     # env GOOGLE_API_KEY takes precedence
 }
 
-LLM_PROVIDERS = ("ollama", "anthropic", "openai", "google")
+LLM_PROVIDERS = ("ollama", "lmstudio", "anthropic", "openai", "google")
 
 # Per-provider default model names. Override via config (llm_model) or CLI (--model).
 _LLM_DEFAULT_MODELS = {
     "ollama": "llama3.1:8b",
+    "lmstudio": "",          # blank → use whatever model is loaded in LM Studio
     "anthropic": "claude-sonnet-4-6",
     "openai": "gpt-4o-mini",
     "google": "gemini-1.5-flash",
+}
+
+# Per-provider default endpoint URLs (local providers only).
+_LLM_DEFAULT_ENDPOINTS = {
+    "ollama":    "http://localhost:11434",
+    "lmstudio":  "http://localhost:1234",
 }
 
 # env var → config key mapping for LLM API keys. Keys are never logged.

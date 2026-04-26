@@ -39,10 +39,11 @@ src/wisper_transcribe/
 ├── models.py           Dataclasses: TranscriptionSegment, DiarizationSegment, AlignedSegment, SpeakerProfile, Edit, SpeakerSuggestion, LootChange, NPCMention, SummaryNote
 ├── refine.py           LLM-driven transcript refinement: vocabulary correction + unknown-speaker ID (edit-distance guarded, frontmatter-preserving)
 ├── summarize.py        Campaign-notes generation (session recap, loot, NPCs, follow-ups) → Obsidian-ready sidecar markdown
-├── llm/                Provider-agnostic LLM client package (Ollama, Anthropic, OpenAI, Google)
+├── llm/                Provider-agnostic LLM client package (Ollama, LM Studio, Anthropic, OpenAI, Google)
 │   ├── base.py         LLMClient ABC: complete() + complete_json(schema)
 │   ├── errors.py       LLMUnavailableError (soft-fail) / LLMResponseError
-│   ├── ollama.py       httpx REST wrapper for local Ollama
+│   ├── ollama.py       httpx streaming REST wrapper for local Ollama (/api/chat, NDJSON)
+│   ├── lmstudio.py     httpx streaming REST wrapper for LM Studio (/v1/chat/completions, SSE)
 │   ├── anthropic.py    Anthropic SDK; JSON via forced tool_use
 │   ├── openai.py       OpenAI SDK; JSON via response_format json_schema strict mode
 │   └── google.py       google-genai SDK; JSON via response_schema
@@ -305,11 +306,12 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - `tests/test_noise_suppress.py` covers warning filters, logger levels, `WISPER_DEBUG` bypass, missing absl, speechbrain deprecations, checkpoint upgrade warnings, and module-level suppress placement in `diarizer.py` and `speaker_manager.py`
 - `tests/test_refine.py` covers `parse_transcript` (frontmatter / no-frontmatter / invalid YAML), vocabulary edit-distance guard, `apply_edits` idempotency, unknown-speaker confidence filter + hallucinated-name rejection, `render_diff` plain/coloured, and `refine_transcript` frontmatter preservation
 - `tests/test_summarize.py` covers structured-output parsing, enrolled-player NPC filtering, `render_markdown` section presence + placeholders, `[[wiki-link]]` rules (enrolled-only, whole-word, idempotent), `unresolved_speakers` section, and the `sections` filter
-- `tests/test_llm_clients.py` mocks httpx for Ollama and injects fake `anthropic` / `openai` / `google.genai` modules via `sys.modules` to cover the lazy-import path; each client's `complete()` and `complete_json()` are tested for happy path + SDK error + missing-SDK → `LLMUnavailableError`
-- `tests/test_web_routes.py` covers web routes including refine/summarize job submission, summary sidecar rendering, summary download, summary-badge logic on the transcript list, deletion of summary sidecars alongside transcripts, LLM config field rendering, LLM config save (provider/model/temperature), non-empty API key save, empty API key not overwriting an existing key, and Config nav link presence on the job detail page
+- `tests/test_llm_clients.py` mocks httpx for Ollama and injects fake `anthropic` / `openai` / `google.genai` modules via `sys.modules` to cover the lazy-import path; each client's `complete()` and `complete_json()` are tested for happy path + SDK error + missing-SDK → `LLMUnavailableError`; `ConnectError` raises with a "daemon not running" message; a 404 `HTTPStatusError` raises with a "not found in Ollama" message; a non-404 `HTTPStatusError` (e.g. 500) raises with a generic "Ollama request failed" message
+- `tests/test_lmstudio_client.py` covers `LMStudioClient` happy paths (`complete`, `complete_json`, SSE token accumulation, `json_object` response format), all three error branches (ConnectError, 404, non-404), bad JSON → `LLMResponseError`, and non-SSE line filtering; also tests `get_client("lmstudio")` wiring and default endpoint
+- `tests/test_web_routes.py` covers web routes including refine/summarize job submission, summary sidecar rendering, summary download, summary-badge logic on the transcript list, deletion of summary sidecars alongside transcripts, LLM config field rendering, LLM config save (provider/model/temperature), non-empty API key save, empty API key not overwriting an existing key, Config nav link presence on the job detail page, and the `/config/ollama-status` endpoint (running + models, running + empty model list, not reachable, custom endpoint forwarded)
 - `tests/test_config.py` covers `get_hf_token()` accepting `HF_TOKEN` as an alias for `HUGGINGFACE_TOKEN` and propagating whichever is set to both env vars
 - `tests/test_web_jobs.py` covers job queue CRUD, tqdm patch/restore, error recording, cancellation, and a regression test that `job.status = COMPLETED` is not set until after `_run_post_process()` finishes
-- Test count: 405 (all mocked, all passing)
+- Test count: 427 (all mocked, all passing)
 
 **CI matrix** (`.github/workflows/ci.yml`):
 - Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)
@@ -372,9 +374,11 @@ All web route handlers follow a consistent two-layer defence pattern enforced by
 `Path.resolve()` on tainted input is **not** used — CodeQL does not recognise it as a sanitiser.
 
 **Open redirect (CWE-601) — job ID routes (`cancel_job`, `enroll_form`, `enroll_submit`):**
-`_validate_job_id(job_id)` in `transcribe.py` applies both layers:
+`_validate_job_id(job_id)` in `transcribe.py` gates access with two layers:
 1. `re.match(r"^[\w\-]+$", job_id)` rejects everything except alphanumeric/hyphen.
-2. `os.path.basename(os.path.abspath(os.path.join("_guard", job_id)))` round-trip produces a string CodeQL's taint tracker treats as clean. `re.match().group(1)` alone is **still considered tainted** by CodeQL even after format validation; the `os.path` round-trip is required.
+2. `os.path.basename(os.path.abspath(os.path.join("_guard", job_id)))` round-trip. `re.match().group(1)` alone is **still considered tainted** by CodeQL even after format validation; the `os.path` round-trip is required.
+
+After validation, redirect URLs use **`job.id`** (the server-generated `uuid4` string stored on the `Job` object) rather than `safe_id` (the validated but still-tainted user value). Because `job.id` is set at job creation from `uuid.uuid4()` — never from request data — CodeQL's taint tracker sees no user-controlled data flowing into the `Location` header, fully resolving the `py/url-redirection` alerts.
 
 **Error messages:** Internal exception text is never placed in redirect URLs or error responses. Routes use generic error codes (e.g. `?error=enroll_failed`).
 
@@ -414,7 +418,7 @@ The job detail page shows a unified progress bar and step pills driven by SSE ev
 **Parallel mode** (`parallel_stages=True`, `channel_progress` SSE events): T and D slices update from their respective channels concurrently. The bar shows whichever channel is further ahead.
 
 ### Transcript Management (Web)
-- Transcripts list page: each card is fully clickable via the **overlay link pattern** (card is a `div` with an `absolute inset-0` `<a>` underneath, action buttons use `relative z-10` to sit above). This avoids the invalid-HTML problem of nesting `<form>` inside `<a>`.
+- Transcripts list page: each card is fully clickable via the **overlay link pattern** (card is a `div` with an `absolute inset-0 z-10` `<a>` covering the whole card; non-interactive content divs carry no z-index so the overlay sits above them; action buttons use `relative z-50` to sit above the overlay). This avoids the invalid-HTML problem of nesting `<form>` inside `<a>`.
 - Summary sidecars (`.summary.md`) are **filtered out of the transcript list** — they appear only as a green notes icon and "Campaign notes available" label on their parent transcript's card.
 - Delete: `POST /transcripts/{name}/delete` removes both the `.md` file and its `.summary.md` sidecar (if present) and redirects to `/transcripts`.
 - Dashboard stat cards link to their respective sections (Active Jobs → `/transcribe`, Transcripts → `/transcripts`, Enrolled Speakers → `/speakers`).
@@ -425,6 +429,10 @@ The job detail page shows a unified progress bar and step pills driven by SSE ev
 - **Campaign Notes page**: `GET /transcripts/{name}/summary` renders `.summary.md` as HTML with a metadata card (LLM provider/model, generated date, NPC chips) and a "Regenerate" button. `GET /transcripts/{name}/summary/download` serves the raw `.summary.md` file.
 - **Job completion actions**: the SSE `done` event now includes `summary_path` and `job_type`; the JS in `job_detail.html` conditionally shows "View Campaign Notes" when `summary_path` is set and hides "Name Speakers" for non-transcription jobs.
 - **LLM config page**: `GET/POST /config` exposes a dedicated "LLM Post-processing" card. Fields: `llm_provider` (select: ollama/anthropic/openai/google), `llm_model` (text), `llm_endpoint` (text, Ollama only), `llm_temperature` (number). Three secret fields (`anthropic_api_key`, `openai_api_key`, `google_api_key`) are password inputs that are **never overwritten with an empty submission** — leaving a key blank preserves the existing stored value. A JS snippet hides/shows the endpoint and cloud API key rows based on the selected provider. A note reminds users that env vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`) take precedence over config-stored keys.
+- **Ollama status + model picker**: `GET /config/ollama-status?endpoint=<url>` queries Ollama's `/api/tags` endpoint (3 s connect timeout) and returns `{"running": bool, "models": [{"name", "size"}]}`. When `ollama` is selected on the config page, JS calls this endpoint and renders a status badge ("✓ Ollama running · N models installed") and a `<select>` populated with installed models; choosing one fills the `llm_model` text input. A ↻ Refresh button and a `change` listener on the endpoint field trigger a re-check. When Ollama is unreachable the badge shows the error and the text input remains editable for manual entry.
+- **LM Studio support**: `LMStudioClient` (`llm/lmstudio.py`) uses the OpenAI-compatible API at `http://localhost:1234` (default). It streams via SSE (`data: {...}` lines), accumulates tokens with dot-progress output identical to `OllamaClient`, and uses `response_format: {"type": "json_object"}` for structured output. `GET /config/lmstudio-status?endpoint=<url>` queries `/v1/models` and returns the same `{running, models}` shape as the Ollama status endpoint. The config page shows a parallel status badge and model picker when `lmstudio` is selected. The endpoint field placeholder switches between `:11434` and `:1234` based on the selected provider. `wisper config llm` prompts for endpoint first (defaults to `:1234`), then lists loaded models for selection. `_LLM_DEFAULT_ENDPOINTS` in `config.py` holds per-provider endpoint defaults.
+- **Ollama error messages**: `OllamaClient._post_chat` distinguishes three failure modes: `httpx.ConnectError` → "Cannot connect to Ollama … daemon running?" message; `httpx.HTTPStatusError` 404 → "Model '…' not found in Ollama. Run: `ollama pull …`"; other `httpx.HTTPError` → generic failed message without the misleading daemon hint.
+- **Ollama model picker XSS prevention**: the model-picker JS uses `document.createElement('option')` + `.textContent` assignment (never `innerHTML` or `insertAdjacentHTML` with string concatenation) so model names returned by the Ollama server cannot inject HTML.
 
 ### Navigation Styling
 Nav link styles (`nav-link`, `nav-active`, `nav-divider`, `mobile-nav-link`) are defined in `static/input.css` as Tailwind component-layer classes, not in an inline `<style>` block in `base.html`. This ensures they are included in the compiled `tailwind.min.css` and benefit from purging. Links display as pill buttons: transparent border at rest, `border-green-500 bg-green-800` on hover, `border-green-400 bg-green-800` for the active page. The nav bar uses `sticky top-0 z-50` so it remains visible when the user scrolls down on long pages (e.g. the job detail page with a full log terminal).

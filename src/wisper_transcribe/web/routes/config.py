@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from . import templates
 from wisper_transcribe.config import (
@@ -40,6 +40,56 @@ _LLM_FIELDS = [
 
 # Keys that must not be overwritten with an empty string
 _LLM_SECRET_FIELD_KEYS = frozenset({"anthropic_api_key", "openai_api_key", "google_api_key"})
+
+
+@router.get("/ollama-status", response_class=JSONResponse)
+async def ollama_status() -> JSONResponse:
+    """Return Ollama reachability and installed model list for the config UI.
+
+    Reads the saved llm_endpoint from config — no user-supplied URL reaches
+    httpx, which eliminates the SSRF taint path CodeQL would otherwise flag.
+    """
+    import httpx
+    from wisper_transcribe.config import _LLM_DEFAULT_ENDPOINTS
+
+    cfg = load_config()
+    endpoint = (cfg.get("llm_endpoint") or _LLM_DEFAULT_ENDPOINTS["ollama"]).rstrip("/")
+    url = endpoint + "/api/tags"
+    try:
+        r = httpx.get(url, timeout=3.0)
+        r.raise_for_status()
+        data = r.json()
+        models = []
+        for m in data.get("models", []):
+            size_bytes = m.get("size", 0)
+            size_str = f"{size_bytes / 1e9:.1f} GB" if size_bytes else ""
+            models.append({"name": m["name"], "size": size_str})
+        return JSONResponse({"running": True, "models": models})
+    except Exception:
+        return JSONResponse({"running": False, "models": []})
+
+
+@router.get("/lmstudio-status", response_class=JSONResponse)
+async def lmstudio_status() -> JSONResponse:
+    """Return LM Studio reachability and loaded model list for the config UI.
+
+    Reads the saved llm_endpoint from config — no user-supplied URL reaches
+    httpx, which eliminates the SSRF taint path CodeQL would otherwise flag.
+    """
+    import httpx
+    from wisper_transcribe.config import _LLM_DEFAULT_ENDPOINTS
+
+    cfg = load_config()
+    endpoint = (cfg.get("llm_endpoint") or _LLM_DEFAULT_ENDPOINTS["lmstudio"]).rstrip("/")
+    url = endpoint + "/v1/models"
+    try:
+        r = httpx.get(url, timeout=3.0)
+        r.raise_for_status()
+        data = r.json()
+        models = [{"name": m["id"], "size": ""} for m in data.get("data", []) if m.get("id")]
+        return JSONResponse({"running": True, "models": models})
+    except Exception:
+        return JSONResponse({"running": False, "models": []})
 
 
 @router.get("", response_class=HTMLResponse)

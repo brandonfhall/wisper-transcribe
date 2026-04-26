@@ -1,12 +1,9 @@
-"""Ollama client — local LLM via httpx streaming REST wrapper.
+"""LM Studio client — local LLM via OpenAI-compatible streaming REST API.
 
-Uses the ``/api/chat`` endpoint with ``stream=True`` to avoid read-timeouts
-on long transcripts.  Each chunk is a newline-delimited JSON object; tokens
-are accumulated and the full content string is returned once the final chunk
-arrives.  A connect/write timeout (``self.timeout``) guards against Ollama
-not being reachable, but there is intentionally no per-chunk read timeout —
-the model delivers tokens continuously so there is no long idle gap between
-bytes.
+LM Studio exposes an OpenAI-compatible server (default http://localhost:1234).
+Uses ``POST /v1/chat/completions`` with ``stream=True`` and SSE parsing so
+long transcripts never hit a read timeout.  A short connect/write timeout
+guards against the server not being reachable.
 """
 from __future__ import annotations
 
@@ -19,10 +16,10 @@ from .errors import LLMResponseError, LLMUnavailableError
 _DOT_INTERVAL = 50   # print a progress dot every N content tokens
 
 
-class OllamaClient(LLMClient):
-    provider = "ollama"
+class LMStudioClient(LLMClient):
+    provider = "lmstudio"
 
-    def __init__(self, model: str, endpoint: str = "http://localhost:11434",
+    def __init__(self, model: str, endpoint: str = "http://localhost:1234",
                  temperature: float = 0.2, timeout: float = 30.0):
         self.model = model
         self.endpoint = endpoint.rstrip("/")
@@ -30,12 +27,11 @@ class OllamaClient(LLMClient):
         self.timeout = timeout   # connect / write timeout in seconds
 
     def _post_chat(self, payload: dict) -> str:
-        """POST to /api/chat with streaming and return the full content string.
+        """POST to /v1/chat/completions with SSE streaming; return full content.
 
-        Prints ``  Asking Ollama (model)… ·····`` to stderr while the model
-        generates so the user knows progress is being made.  Uses
-        ``connect=self.timeout`` but ``read=None`` so a slow model on a long
-        transcript never times out mid-stream.
+        Prints progress dots to stderr while the model generates.  Uses
+        ``connect=self.timeout`` but ``read=None`` so generation on slow
+        hardware never times out mid-stream.
         """
         try:
             import httpx
@@ -44,18 +40,17 @@ class OllamaClient(LLMClient):
                 "httpx not installed. Run: pip install httpx"
             ) from exc
 
-        url = f"{self.endpoint}/api/chat"
+        url = f"{self.endpoint}/v1/chat/completions"
         stream_payload = dict(payload)
         stream_payload["stream"] = True
 
-        # Short connect/write timeout; no read timeout while streaming.
         timeout = httpx.Timeout(connect=self.timeout, read=None,
                                 write=self.timeout, pool=10.0)
 
         parts: list[str] = []
         token_count = 0
         try:
-            sys.stderr.write(f"  Connecting to Ollama ({self.endpoint})...\n")
+            sys.stderr.write(f"  Connecting to LM Studio ({self.endpoint})...\n")
             sys.stderr.flush()
             with httpx.stream("POST", url, json=stream_payload,
                               timeout=timeout) as resp:
@@ -65,13 +60,16 @@ class OllamaClient(LLMClient):
                 )
                 sys.stderr.flush()
                 for line in resp.iter_lines():
-                    if not line:
+                    if not line or line == "data: [DONE]":
+                        continue
+                    if not line.startswith("data: "):
                         continue
                     try:
-                        chunk = json.loads(line)
+                        chunk = json.loads(line[6:])
                     except json.JSONDecodeError:
                         continue
-                    token = (chunk.get("message") or {}).get("content", "")
+                    choices = chunk.get("choices") or []
+                    token = (choices[0].get("delta") or {}).get("content", "") if choices else ""
                     if token:
                         if token_count == 0:
                             sys.stderr.write(f"  Generating ({self.model}): ")
@@ -81,7 +79,7 @@ class OllamaClient(LLMClient):
                         if token_count % _DOT_INTERVAL == 0:
                             sys.stderr.write("·")
                             sys.stderr.flush()
-                    if chunk.get("done"):
+                    if choices and choices[0].get("finish_reason") == "stop":
                         break
         except httpx.HTTPStatusError as exc:
             if token_count > 0:
@@ -89,27 +87,28 @@ class OllamaClient(LLMClient):
                 sys.stderr.flush()
             if exc.response.status_code == 404:
                 raise LLMUnavailableError(
-                    f"Model {self.model!r} not found in Ollama. "
-                    f"Run: `ollama pull {self.model}` — or pick an installed model "
-                    f"with `wisper config llm` / the web Config page."
+                    f"Model {self.model!r} not found in LM Studio. "
+                    f"Load a model in the LM Studio UI first, then pick it on "
+                    f"the Config page or run `wisper config llm`."
                 ) from exc
             raise LLMUnavailableError(
-                f"Ollama request failed ({url}): {exc}"
+                f"LM Studio request failed ({url}): {exc}"
             ) from exc
         except httpx.ConnectError as exc:
             if token_count > 0:
                 sys.stderr.write("\n")
                 sys.stderr.flush()
             raise LLMUnavailableError(
-                f"Cannot connect to Ollama at {self.endpoint}. "
-                f"Is the daemon running? Try: `ollama serve`"
+                f"Cannot connect to LM Studio at {self.endpoint}. "
+                f"Is the local server running? Enable it in LM Studio → "
+                f"Developer → Local Server."
             ) from exc
         except httpx.HTTPError as exc:
             if token_count > 0:
                 sys.stderr.write("\n")
                 sys.stderr.flush()
             raise LLMUnavailableError(
-                f"Ollama request failed ({url}): {exc}"
+                f"LM Studio request failed ({url}): {exc}"
             ) from exc
 
         if token_count > 0:
@@ -121,7 +120,7 @@ class OllamaClient(LLMClient):
     def complete(self, system: str, user: str) -> str:
         payload = {
             "model": self.model,
-            "options": {"temperature": self.temperature},
+            "temperature": self.temperature,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -130,13 +129,10 @@ class OllamaClient(LLMClient):
         return self._post_chat(payload)
 
     def complete_json(self, system: str, user: str, schema: dict) -> dict:
-        # Ollama supports `format="json"` (free-form JSON) and newer versions
-        # accept a JSON schema dict. Pass the schema if available; otherwise
-        # rely on the prompt to steer shape.
         payload = {
             "model": self.model,
-            "format": schema if schema else "json",
-            "options": {"temperature": self.temperature},
+            "temperature": self.temperature,
+            "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -147,5 +143,5 @@ class OllamaClient(LLMClient):
             return json.loads(text)
         except json.JSONDecodeError as exc:
             raise LLMResponseError(
-                f"Ollama JSON response did not parse: {exc}. Raw: {text[:200]!r}"
+                f"LM Studio JSON response did not parse: {exc}. Raw: {text[:200]!r}"
             ) from exc

@@ -61,16 +61,42 @@
     <div class="card space-y-4">
       <div>
         <h2 class="text-base font-semibold text-gray-900">LLM Post-processing</h2>
-        <p class="text-xs text-gray-500 mt-1">Used by <em>Refine</em> and <em>Summarize</em>. Ollama runs locally; cloud providers require an API key.</p>
+        <p class="text-xs text-gray-500 mt-1">Used by <em>Refine</em> and <em>Summarize</em>. Ollama and LM Studio run locally; cloud providers require an API key.</p>
       </div>
 
       <!-- Provider -->
       <div>
         <label class="form-label" for="cfg_llm_provider">llm_provider <span class="text-gray-400 font-normal text-xs">— LLM provider</span></label>
         <select id="cfg_llm_provider" name="llm_provider" class="form-input" onchange="llmProviderChanged(this.value)">
-          {% for p in ["ollama", "anthropic", "openai", "google"] %}
+          {% for p in ["ollama", "lmstudio", "anthropic", "openai", "google"] %}
           <option value="{{ p }}" {% if config.get('llm_provider', 'ollama') == p %}selected{% endif %}>{{ p }}</option>
           {% endfor %}
+        </select>
+      </div>
+
+      <!-- Ollama status + model picker (shown only when ollama is selected) -->
+      <div id="ollama_picker_row" class="hidden space-y-1">
+        <div class="flex items-center gap-3">
+          <span id="ollama_status_line" class="text-xs text-gray-500">Checking Ollama…</span>
+          <button type="button" onclick="loadOllamaStatus()"
+                  class="text-xs text-indigo-600 hover:underline">↻ Refresh</button>
+        </div>
+        <select id="ollama_model_picker"
+                class="form-input font-mono text-sm hidden"
+                onchange="document.getElementById('cfg_llm_model').value = this.value">
+        </select>
+      </div>
+
+      <!-- LM Studio status + model picker (shown only when lmstudio is selected) -->
+      <div id="lmstudio_picker_row" class="hidden space-y-1">
+        <div class="flex items-center gap-3">
+          <span id="lmstudio_status_line" class="text-xs text-gray-500">Checking LM Studio…</span>
+          <button type="button" onclick="loadLMStudioStatus()"
+                  class="text-xs text-indigo-600 hover:underline">↻ Refresh</button>
+        </div>
+        <select id="lmstudio_model_picker"
+                class="form-input font-mono text-sm hidden"
+                onchange="document.getElementById('cfg_llm_model').value = this.value">
         </select>
       </div>
 
@@ -83,12 +109,13 @@
                placeholder="e.g. llama3.1:8b, claude-sonnet-4-6, gpt-4o-mini"/>
       </div>
 
-      <!-- Endpoint (Ollama only) -->
+      <!-- Endpoint (Ollama / LM Studio only) -->
       <div id="llm_endpoint_row">
-        <label class="form-label" for="cfg_llm_endpoint">llm_endpoint <span class="text-gray-400 font-normal text-xs">— Ollama endpoint URL</span></label>
+        <label class="form-label" for="cfg_llm_endpoint">llm_endpoint <span class="text-gray-400 font-normal text-xs">— Local server URL</span></label>
         <input type="text" id="cfg_llm_endpoint" name="llm_endpoint"
                value="{{ config.get('llm_endpoint', 'http://localhost:11434') }}"
-               class="form-input font-mono text-sm"/>
+               class="form-input font-mono text-sm"
+               placeholder="http://localhost:11434"/>
       </div>
 
       <!-- Temperature -->
@@ -133,13 +160,124 @@
 </div>
 
 <script>
+async function loadOllamaStatus() {
+  const endpoint = document.getElementById('cfg_llm_endpoint').value || 'http://localhost:11434';
+  const statusLine = document.getElementById('ollama_status_line');
+  const picker = document.getElementById('ollama_model_picker');
+  const modelInput = document.getElementById('cfg_llm_model');
+
+  statusLine.textContent = 'Checking Ollama…';
+  statusLine.className = 'text-xs text-gray-500';
+  picker.classList.add('hidden');
+
+  try {
+    const r = await fetch('/config/ollama-status');
+    const data = await r.json();
+    if (data.running && data.models.length > 0) {
+      const current = modelInput.value;
+      picker.replaceChildren();
+      data.models.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m.name;
+        opt.textContent = m.name + (m.size ? ' (' + m.size + ')' : '');
+        if (m.name === current) opt.selected = true;
+        picker.appendChild(opt);
+      });
+      if (current && !data.models.find(m => m.name === current)) {
+        const opt = document.createElement('option');
+        opt.value = current;
+        opt.textContent = current + ' (not installed)';
+        opt.selected = true;
+        picker.insertBefore(opt, picker.firstChild);
+      }
+      picker.classList.remove('hidden');
+      statusLine.textContent = '✓ Ollama running · ' + data.models.length +
+        ' model' + (data.models.length !== 1 ? 's' : '') + ' installed — pick one above or type below';
+      statusLine.className = 'text-xs text-green-600';
+    } else if (data.running) {
+      statusLine.textContent = '✓ Ollama running · No models installed. Run: ollama pull <model>';
+      statusLine.className = 'text-xs text-yellow-600';
+    } else {
+      statusLine.textContent = '✗ Ollama not reachable · Start with: ollama serve';
+      statusLine.className = 'text-xs text-red-500';
+    }
+  } catch (e) {
+    statusLine.textContent = 'Could not check Ollama status';
+    statusLine.className = 'text-xs text-gray-400';
+  }
+}
+
+async function loadLMStudioStatus() {
+  const endpoint = document.getElementById('cfg_llm_endpoint').value || 'http://localhost:1234';
+  const statusLine = document.getElementById('lmstudio_status_line');
+  const picker = document.getElementById('lmstudio_model_picker');
+  const modelInput = document.getElementById('cfg_llm_model');
+
+  statusLine.textContent = 'Checking LM Studio…';
+  statusLine.className = 'text-xs text-gray-500';
+  picker.classList.add('hidden');
+
+  try {
+    const r = await fetch('/config/lmstudio-status');
+    const data = await r.json();
+    if (data.running && data.models.length > 0) {
+      const current = modelInput.value;
+      picker.replaceChildren();
+      data.models.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m.name;
+        opt.textContent = m.name;
+        if (m.name === current) opt.selected = true;
+        picker.appendChild(opt);
+      });
+      if (current && !data.models.find(m => m.name === current)) {
+        const opt = document.createElement('option');
+        opt.value = current;
+        opt.textContent = current + ' (not loaded)';
+        opt.selected = true;
+        picker.insertBefore(opt, picker.firstChild);
+      }
+      picker.classList.remove('hidden');
+      statusLine.textContent = '✓ LM Studio running · ' + data.models.length +
+        ' model' + (data.models.length !== 1 ? 's' : '') + ' loaded — pick one above or type below';
+      statusLine.className = 'text-xs text-green-600';
+    } else if (data.running) {
+      statusLine.textContent = '✓ LM Studio running · No models loaded. Load a model in the LM Studio UI first.';
+      statusLine.className = 'text-xs text-yellow-600';
+    } else {
+      statusLine.textContent = '✗ LM Studio not reachable · Enable the local server in LM Studio → Developer → Local Server';
+      statusLine.className = 'text-xs text-red-500';
+    }
+  } catch (e) {
+    statusLine.textContent = 'Could not check LM Studio status';
+    statusLine.className = 'text-xs text-gray-400';
+  }
+}
+
+const _EP_DEFAULTS = { ollama: 'http://localhost:11434', lmstudio: 'http://localhost:1234' };
+
 function llmProviderChanged(provider) {
-  document.getElementById('llm_endpoint_row').classList.toggle('hidden', provider !== 'ollama');
+  const isLocal = provider === 'ollama' || provider === 'lmstudio';
+  document.getElementById('llm_endpoint_row').classList.toggle('hidden', !isLocal);
   document.getElementById('llm_anthropic_row').classList.toggle('hidden', provider !== 'anthropic');
   document.getElementById('llm_openai_row').classList.toggle('hidden', provider !== 'openai');
   document.getElementById('llm_google_row').classList.toggle('hidden', provider !== 'google');
+  document.getElementById('ollama_picker_row').classList.toggle('hidden', provider !== 'ollama');
+  document.getElementById('lmstudio_picker_row').classList.toggle('hidden', provider !== 'lmstudio');
+  if (isLocal) {
+    const epInput = document.getElementById('cfg_llm_endpoint');
+    epInput.placeholder = _EP_DEFAULTS[provider] || 'http://localhost:11434';
+  }
+  if (provider === 'ollama') loadOllamaStatus();
+  if (provider === 'lmstudio') loadLMStudioStatus();
 }
 // Apply on page load
 llmProviderChanged(document.getElementById('cfg_llm_provider').value);
+// Re-check when endpoint URL changes
+document.getElementById('cfg_llm_endpoint').addEventListener('change', function() {
+  const p = document.getElementById('cfg_llm_provider').value;
+  if (p === 'ollama') loadOllamaStatus();
+  if (p === 'lmstudio') loadLMStudioStatus();
+});
 </script>
 {% endblock %}

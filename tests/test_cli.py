@@ -398,10 +398,10 @@ def test_transcribe_folder_reports_summary(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_config_llm_ollama_wizard(tmp_path, monkeypatch):
-    """Walk the wizard choosing ollama; writes provider/model/endpoint."""
+    """Walk the wizard choosing ollama; writes provider/endpoint/model."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-    # Answers: provider=ollama, model=llama3.1:8b, endpoint=http://localhost:11434
-    user_input = "ollama\nllama3.1:8b\nhttp://localhost:11434\n"
+    # New order: provider → endpoint → model
+    user_input = "ollama\nhttp://localhost:11434\nllama3.1:8b\n"
     result = CliRunner().invoke(main, ["config", "llm"], input=user_input)
     assert result.exit_code == 0
 
@@ -429,8 +429,8 @@ def test_config_llm_ollama_pick_by_number(tmp_path, monkeypatch):
     """When ollama models are listed, user can pick by number."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     fake_models = [("gemma4:e4b", "9.6 GB"), ("mistral-nemo:latest", "7.1 GB")]
-    # provider=ollama, model=1 (first in list), endpoint=default
-    user_input = "ollama\n1\nhttp://localhost:11434\n"
+    # New order: provider → endpoint → model-number
+    user_input = "ollama\nhttp://localhost:11434\n1\n"
     with patch("wisper_transcribe.cli._get_ollama_models", return_value=fake_models):
         result = CliRunner().invoke(main, ["config", "llm"], input=user_input)
     assert result.exit_code == 0, result.output
@@ -444,7 +444,8 @@ def test_config_llm_ollama_pick_by_name(tmp_path, monkeypatch):
     """When ollama models are listed, user can still type a name instead of a number."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     fake_models = [("gemma4:e4b", "9.6 GB"), ("mistral-nemo:latest", "7.1 GB")]
-    user_input = "ollama\nmistral-nemo:latest\nhttp://localhost:11434\n"
+    # New order: provider → endpoint → model-name
+    user_input = "ollama\nhttp://localhost:11434\nmistral-nemo:latest\n"
     with patch("wisper_transcribe.cli._get_ollama_models", return_value=fake_models):
         result = CliRunner().invoke(main, ["config", "llm"], input=user_input)
     assert result.exit_code == 0, result.output
@@ -456,13 +457,42 @@ def test_config_llm_ollama_pick_by_name(tmp_path, monkeypatch):
 def test_config_llm_ollama_no_models_falls_back_to_text(tmp_path, monkeypatch):
     """When _get_ollama_models returns [], falls back to plain text prompt."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-    user_input = "ollama\nllama3.1:8b\nhttp://localhost:11434\n"
+    # New order: provider → endpoint → model
+    user_input = "ollama\nhttp://localhost:11434\nllama3.1:8b\n"
     with patch("wisper_transcribe.cli._get_ollama_models", return_value=[]):
         result = CliRunner().invoke(main, ["config", "llm"], input=user_input)
     assert result.exit_code == 0, result.output
 
     from wisper_transcribe.config import load_config
     assert load_config()["llm_model"] == "llama3.1:8b"
+
+
+def test_config_llm_lmstudio_wizard(tmp_path, monkeypatch):
+    """Walk the wizard choosing lmstudio; writes provider/endpoint/model."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    fake_models = [("phi-3", "")]
+    user_input = "lmstudio\nhttp://localhost:1234\n1\n"
+    with patch("wisper_transcribe.cli._get_lmstudio_models", return_value=fake_models):
+        result = CliRunner().invoke(main, ["config", "llm"], input=user_input)
+    assert result.exit_code == 0, result.output
+
+    from wisper_transcribe.config import load_config
+    cfg = load_config()
+    assert cfg["llm_provider"] == "lmstudio"
+    assert cfg["llm_model"] == "phi-3"
+    assert cfg["llm_endpoint"] == "http://localhost:1234"
+
+
+def test_config_llm_lmstudio_no_models_falls_back_to_text(tmp_path, monkeypatch):
+    """When _get_lmstudio_models returns [], falls back to plain text prompt."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    user_input = "lmstudio\nhttp://localhost:1234\nmy-model\n"
+    with patch("wisper_transcribe.cli._get_lmstudio_models", return_value=[]):
+        result = CliRunner().invoke(main, ["config", "llm"], input=user_input)
+    assert result.exit_code == 0, result.output
+
+    from wisper_transcribe.config import load_config
+    assert load_config()["llm_model"] == "my-model"
 
 
 def test_get_ollama_models_parses_list_output():
