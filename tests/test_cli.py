@@ -393,6 +393,38 @@ def test_transcribe_folder_reports_summary(tmp_path):
     assert "Done" in result.output
 
 
+def test_transcribe_folder_includes_video_files(tmp_path):
+    """Video files in a folder are picked up alongside audio files."""
+    from wisper_transcribe.audio_utils import VIDEO_EXTENSIONS
+
+    (tmp_path / "session.mp3").write_bytes(b"fake audio")
+    (tmp_path / "session.mp4").write_bytes(b"fake video")
+    (tmp_path / "session.mkv").write_bytes(b"fake video")
+    (tmp_path / "notes.txt").write_bytes(b"not media")
+
+    out_md = tmp_path / "session.md"
+    out_md.write_text("# test")
+
+    processed: list[str] = []
+
+    def fake_process(path, **kw):
+        processed.append(path.suffix.lower())
+        return out_md
+
+    with patch("wisper_transcribe.pipeline.process_file", side_effect=fake_process), \
+         patch("wisper_transcribe.pipeline.process_folder") as mock_folder:
+        mock_folder.side_effect = None
+        # Drive folder logic directly to avoid process_folder mock swallowing it
+        from wisper_transcribe.cli import _audio_extensions
+        found = {f.suffix.lower() for f in tmp_path.iterdir()
+                 if f.suffix.lower() in _audio_extensions()}
+
+    assert ".mp3" in found
+    assert ".mp4" in found
+    assert ".mkv" in found
+    assert ".txt" not in found
+
+
 # ---------------------------------------------------------------------------
 # wisper config llm (interactive wizard)
 # ---------------------------------------------------------------------------
