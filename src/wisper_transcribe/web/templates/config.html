@@ -161,13 +161,20 @@ async function loadOllamaStatus() {
     const data = await r.json();
     if (data.running && data.models.length > 0) {
       const current = modelInput.value;
-      picker.innerHTML = data.models.map(m =>
-        '<option value="' + m.name + '"' + (m.name === current ? ' selected' : '') + '>' +
-        m.name + (m.size ? ' (' + m.size + ')' : '') + '</option>'
-      ).join('');
+      picker.replaceChildren();
+      data.models.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m.name;
+        opt.textContent = m.name + (m.size ? ' (' + m.size + ')' : '');
+        if (m.name === current) opt.selected = true;
+        picker.appendChild(opt);
+      });
       if (current && !data.models.find(m => m.name === current)) {
-        picker.insertAdjacentHTML('afterbegin',
-          '<option value="' + current + '" selected>' + current + ' (not installed)</option>');
+        const opt = document.createElement('option');
+        opt.value = current;
+        opt.textContent = current + ' (not installed)';
+        opt.selected = true;
+        picker.insertBefore(opt, picker.firstChild);
       }
       picker.classList.remove('hidden');
       statusLine.textContent = '✓ Ollama running · ' + data.models.length +
