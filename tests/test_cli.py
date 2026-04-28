@@ -15,6 +15,24 @@ import pytest
 from click.testing import CliRunner
 
 from wisper_transcribe.cli import main
+# Import these before any autouse patch replaces them in the module namespace.
+from wisper_transcribe.cli import _get_ollama_models as _real_get_ollama_models
+from wisper_transcribe.cli import _get_lmstudio_models as _real_get_lmstudio_models
+
+
+# ---------------------------------------------------------------------------
+# Safety: prevent any test from accidentally launching Ollama or LM Studio.
+# Both _get_ollama_models (subprocess.run ["ollama", "list"]) and
+# _get_lmstudio_models (httpx.get to localhost:1234) hit real processes.
+# Tests that need specific model lists patch these further inside their scope.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def mock_local_llm_queries():
+    """Block all real Ollama/LM Studio queries for every test in this module."""
+    with patch("wisper_transcribe.cli._get_ollama_models", return_value=[]), \
+         patch("wisper_transcribe.cli._get_lmstudio_models", return_value=[]):
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -288,9 +306,7 @@ def test_config_set_hotwords_list(tmp_path, monkeypatch):
 def test_setup_detects_ffmpeg(monkeypatch):
     """Setup wizard detects ffmpeg and reports OK."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(Path(__file__).parent / "tmp_setup"))
-    with patch("wisper_transcribe.config.check_ffmpeg"), \
-         patch("wisper_transcribe.cli._get_ollama_models", return_value=[]), \
-         patch("wisper_transcribe.cli._get_lmstudio_models", return_value=[]):
+    with patch("wisper_transcribe.config.check_ffmpeg"):
         mock_torch = MagicMock()
         mock_torch.cuda.is_available.return_value = False
         mock_torch.backends.mps.is_available.return_value = False
@@ -436,8 +452,7 @@ def test_config_llm_ollama_wizard(tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     # New order: provider → endpoint → model
     user_input = "ollama\nhttp://localhost:11434\nllama3.1:8b\n"
-    with patch("wisper_transcribe.cli._get_ollama_models", return_value=[]):
-        result = CliRunner().invoke(main, ["config", "llm"], input=user_input)
+    result = CliRunner().invoke(main, ["config", "llm"], input=user_input)
     assert result.exit_code == 0
 
     from wisper_transcribe.config import load_config
@@ -537,21 +552,44 @@ def test_get_ollama_models_parses_list_output():
         "gemma4:e4b              c6eb396dbd59    9.6 GB    13 days ago\n"
         "mistral-nemo:latest     e7e06d107c6c    7.1 GB    6 days ago\n"
     )
+    # subprocess is imported lazily inside the function, so patch at the module level
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=fake_stdout)
-        from wisper_transcribe.cli import _get_ollama_models
-        models = _get_ollama_models()
+        models = _real_get_ollama_models()
     assert models == [("gemma4:e4b", "9.6 GB"), ("mistral-nemo:latest", "7.1 GB")]
 
 
 def test_get_ollama_models_returns_empty_on_failure():
     """_get_ollama_models returns [] when ollama is missing or exits non-zero."""
-    from wisper_transcribe.cli import _get_ollama_models
     with patch("subprocess.run", side_effect=FileNotFoundError("ollama not found")):
-        assert _get_ollama_models() == []
+        assert _real_get_ollama_models() == []
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=1, stdout="")
-        assert _get_ollama_models() == []
+        assert _real_get_ollama_models() == []
+
+
+def test_get_lmstudio_models_parses_response():
+    """_get_lmstudio_models parses the /v1/models JSON into (id, "") pairs."""
+    fake_response = MagicMock()
+    fake_response.raise_for_status = MagicMock()
+    fake_response.json.return_value = {
+        "data": [
+            {"id": "lmstudio-community/gemma-3-12b"},
+            {"id": "mistral-7b-instruct"},
+        ]
+    }
+    # httpx is imported lazily inside the function, so patch at the httpx module level
+    with patch("httpx.get", return_value=fake_response):
+        models = _real_get_lmstudio_models()
+    assert models == [("lmstudio-community/gemma-3-12b", ""), ("mistral-7b-instruct", "")]
+
+
+def test_get_lmstudio_models_returns_empty_on_failure():
+    """_get_lmstudio_models returns [] when LM Studio is unreachable."""
+    with patch("httpx.get", side_effect=Exception("connection refused")):
+        assert _real_get_lmstudio_models() == []
+    with patch("httpx.get", side_effect=Exception("timeout")):
+        assert _real_get_lmstudio_models() == []
 
 
 def test_config_llm_rejects_bad_provider(tmp_path, monkeypatch):
