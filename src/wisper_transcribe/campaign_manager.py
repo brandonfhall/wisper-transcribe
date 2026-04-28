@@ -1,0 +1,195 @@
+"""Campaign manager — CRUD for per-campaign speaker rosters.
+
+Campaigns are an optional layer over the global speaker profile store.
+Voice embeddings remain global (one .npy per person); campaigns hold
+roster references with per-campaign role/character overrides.
+
+Data lives at:
+    $DATA_DIR/campaigns/campaigns.json
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+from datetime import date
+from pathlib import Path
+from typing import Optional
+
+from .config import get_data_dir
+from .models import Campaign, CampaignMember
+
+
+# ---------------------------------------------------------------------------
+# Path helpers
+# ---------------------------------------------------------------------------
+
+def get_campaigns_dir(data_dir: Optional[Path] = None) -> Path:
+    base = Path(data_dir) if data_dir else get_data_dir()
+    return base / "campaigns"
+
+
+def get_campaigns_path(data_dir: Optional[Path] = None) -> Path:
+    return get_campaigns_dir(data_dir) / "campaigns.json"
+
+
+# ---------------------------------------------------------------------------
+# Slug helpers
+# ---------------------------------------------------------------------------
+
+def _make_slug(name: str) -> str:
+    """Convert a display name to a URL/filesystem-safe slug."""
+    return re.sub(r"[^\w]+", "-", name.lower()).strip("-")
+
+
+def _validate_campaign_slug(slug: str) -> Optional[str]:
+    """Two-layer security guard for campaign slugs.
+
+    Returns the sanitised slug on success, None on rejection.
+    Mirrors the _validate_job_id pattern from web/routes/transcribe.py so
+    CodeQL's taint tracker recognises the result as clean.
+    """
+    if not slug or "\x00" in slug:
+        return None
+
+    safe = os.path.basename(slug)
+    if safe != slug or safe in {".", ".."}:
+        return None
+
+    if not re.match(r"^[\w\-]+$", safe):
+        return None
+
+    # os.path round-trip breaks the CodeQL taint chain
+    _guard_base = os.path.abspath("_campaigns_guard")
+    if not _guard_base.endswith(os.sep):
+        _guard_base += os.sep
+    _guard_path = os.path.abspath(os.path.join(_guard_base, safe))
+    if not _guard_path.startswith(_guard_base):
+        return None
+
+    return os.path.basename(_guard_path)
+
+
+# ---------------------------------------------------------------------------
+# Load / save
+# ---------------------------------------------------------------------------
+
+def load_campaigns(data_dir: Optional[Path] = None) -> dict[str, Campaign]:
+    """Load all campaigns from campaigns.json. Returns {} when file is absent."""
+    path = get_campaigns_path(data_dir)
+    if not path.exists():
+        return {}
+
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+
+    campaigns: dict[str, Campaign] = {}
+    for slug, data in raw.items():
+        members: dict[str, CampaignMember] = {}
+        for profile_key, mdata in data.get("members", {}).items():
+            members[profile_key] = CampaignMember(
+                profile_key=profile_key,
+                role=mdata.get("role", ""),
+                character=mdata.get("character", ""),
+            )
+        campaigns[slug] = Campaign(
+            slug=slug,
+            display_name=data.get("display_name", slug),
+            created=data.get("created", ""),
+            members=members,
+        )
+    return campaigns
+
+
+def save_campaigns(campaigns: dict[str, Campaign], data_dir: Optional[Path] = None) -> None:
+    """Persist campaigns to campaigns.json, creating parent directories as needed."""
+    path = get_campaigns_path(data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    raw: dict = {}
+    for slug, campaign in campaigns.items():
+        raw[slug] = {
+            "display_name": campaign.display_name,
+            "created": campaign.created,
+            "members": {
+                key: {"role": m.role, "character": m.character}
+                for key, m in campaign.members.items()
+            },
+        }
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(raw, f, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# CRUD
+# ---------------------------------------------------------------------------
+
+def create_campaign(display_name: str, data_dir: Optional[Path] = None) -> Campaign:
+    """Create a new campaign. Raises ValueError for empty name or duplicate slug."""
+    display_name = display_name.strip()
+    if not display_name:
+        raise ValueError("Campaign display name cannot be empty")
+
+    slug = _make_slug(display_name)
+    if not slug:
+        raise ValueError(f"Cannot derive a valid slug from name: {display_name!r}")
+
+    campaigns = load_campaigns(data_dir)
+    if slug in campaigns:
+        raise ValueError(f"Campaign with slug {slug!r} already exists")
+
+    campaign = Campaign(
+        slug=slug,
+        display_name=display_name,
+        created=date.today().isoformat(),
+        members={},
+    )
+    campaigns[slug] = campaign
+    save_campaigns(campaigns, data_dir)
+    return campaign
+
+
+def delete_campaign(slug: str, data_dir: Optional[Path] = None) -> None:
+    """Delete a campaign. Raises KeyError if not found. Never touches profiles or embeddings."""
+    campaigns = load_campaigns(data_dir)
+    if slug not in campaigns:
+        raise KeyError(f"Campaign {slug!r} not found")
+    del campaigns[slug]
+    save_campaigns(campaigns, data_dir)
+
+
+def add_member(
+    slug: str,
+    profile_key: str,
+    role: str = "",
+    character: str = "",
+    data_dir: Optional[Path] = None,
+) -> None:
+    """Add or update a profile's membership in a campaign. Raises KeyError if campaign missing."""
+    campaigns = load_campaigns(data_dir)
+    if slug not in campaigns:
+        raise KeyError(f"Campaign {slug!r} not found")
+    campaigns[slug].members[profile_key] = CampaignMember(
+        profile_key=profile_key,
+        role=role,
+        character=character,
+    )
+    save_campaigns(campaigns, data_dir)
+
+
+def remove_member(slug: str, profile_key: str, data_dir: Optional[Path] = None) -> None:
+    """Remove a profile from a campaign roster. No-op if profile not in roster."""
+    campaigns = load_campaigns(data_dir)
+    if slug not in campaigns:
+        raise KeyError(f"Campaign {slug!r} not found")
+    campaigns[slug].members.pop(profile_key, None)
+    save_campaigns(campaigns, data_dir)
+
+
+def get_campaign_profile_keys(slug: str, data_dir: Optional[Path] = None) -> set[str]:
+    """Return the set of profile keys enrolled in a campaign. Empty set if slug unknown."""
+    campaigns = load_campaigns(data_dir)
+    if slug not in campaigns:
+        return set()
+    return set(campaigns[slug].members.keys())

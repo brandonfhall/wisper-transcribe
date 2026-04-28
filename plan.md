@@ -106,202 +106,100 @@ Re-score `Unknown Speaker N` labels at a looser secondary threshold (~0.40) afte
 
 ---
 
-### Multi-Show / Multi-Campaign Support
+### Multi-Campaign Support — Active Implementation
 
-**Problem:** All speaker profiles live in a single flat global namespace. There is no concept of a "show," "campaign," or "podcast." The same person can be DM in one game and a player in another, but role metadata is stored once per person — not once per show. Every transcription matches against every enrolled profile with no scoping.
+**Branch:** `claude/review-whisper-campaign-R6pJT`
 
----
-
-#### The Math: Does Separating Profiles Improve Matching Accuracy?
-
-**No — but it's still worth doing for UX and role metadata.**
-
-pyannote's 512-dim embeddings are person-specific voice fingerprints. Cosine similarity between two *different* people is typically **0.20–0.45**; the match threshold is **0.65**. This gap is wide enough that 30 profiles from multiple shows do **not** meaningfully increase false-positive risk — the threshold filters them out.
-
-| Scenario | Global profiles | Full per-show isolation |
-|---|---|---|
-| 3 shows × 6 players = 18 profiles | No false positives (threshold handles it) | No accuracy improvement |
-| Same person in 2 shows | ✅ One enrollment, recognized everywhere | ❌ Must re-enroll per show |
-| Alice is DM in Game A, Player in Game B | Role metadata wrong (one global role) | ✅ Per-show role override |
-
-**Verdict:** Full directory isolation wastes enrollment effort and breaks cross-show recognition. The right model is **shared voice embeddings + per-show rosters** with per-show role/character overrides.
+**Architecture decision (locked):** Shared voice embeddings + per-campaign rosters. Voice embeddings stay global in `profiles/`. Campaigns are additive JSON rosters stored in `campaigns/campaigns.json`. Voice transfer between campaigns = add the existing profile to the new campaign; the same .npy embedding is reused automatically. No migration of existing data.
 
 ---
 
-#### Recommended Architecture: Shows with Rosters
-
-**Data layout — additive, no migration required:**
+#### Data Layout
 
 ```
 $DATA_DIR/
 ├── config.toml
 ├── profiles/
-│   ├── speakers.json          # unchanged — global, one entry per PERSON
+│   ├── speakers.json          # unchanged — global
 │   └── embeddings/
-│       └── alice.npy          # one .npy per person, forever
-└── shows/
-    └── shows.json             # new — all shows + rosters
+│       └── alice.npy          # unchanged — one per person
+└── campaigns/
+    └── campaigns.json         # new — keyed by slug
 ```
 
-**`shows.json` schema:**
-
+`campaigns.json` schema:
 ```json
 {
   "dnd-mondays": {
     "display_name": "D&D Mondays",
-    "created": "2026-04-11",
+    "created": "2026-04-28",
     "members": {
-      "alice": { "role": "DM",     "character": "" },
-      "bob":   { "role": "Player", "character": "Thorin Oakenshield" }
-    }
-  },
-  "pathfinder-fridays": {
-    "display_name": "Pathfinder Fridays",
-    "created": "2026-04-11",
-    "members": {
-      "alice": { "role": "Player", "character": "Kyra" },
-      "carol": { "role": "DM",     "character": "" }
+      "alice": { "role": "DM", "character": "" },
+      "bob":   { "role": "Player", "character": "Thorin" }
     }
   }
 }
 ```
 
-- `members` keys are `profile_key` values from `profiles/speakers.json`
-- `role` and `character` are per-show overrides of the global `SpeakerProfile.role`
-- A profile can belong to zero, one, or many shows
-- Deleting a show does not delete the underlying profile
+---
+
+#### Phase Checklist
+
+- [ ] **Phase 1 — Core data layer**
+  - [ ] `models.py`: Add `CampaignMember`, `Campaign` dataclasses
+  - [ ] `campaign_manager.py`: New module (load/save/create/delete/add-remove-member/validate-slug)
+  - [ ] `tests/test_campaign_manager.py`: ~15 unit tests (pure disk I/O, no ML mocks needed)
+  - [ ] Verify: `.venv/bin/pytest tests/test_campaign_manager.py tests/test_models.py -v`
+
+- [ ] **Phase 2 — Pipeline integration**
+  - [ ] `speaker_manager.py:match_speakers()`: Add `profile_filter: Optional[set[str]] = None`
+  - [ ] `pipeline.py:process_file()`: Add `campaign: Optional[str] = None`; resolve filter via `get_campaign_profile_keys()`
+  - [ ] `pipeline.py:process_folder()`: Thread `campaign` param through to `process_file()` calls
+  - [ ] `tests/test_speaker_manager.py`: Append 3 profile_filter tests
+  - [ ] `tests/test_pipeline.py`: Append 2 campaign kwarg tests
+  - [ ] Verify: `.venv/bin/pytest tests/test_speaker_manager.py tests/test_pipeline.py -v`
+
+- [ ] **Phase 3 — CLI**
+  - [ ] `cli.py`: New `campaigns` command group (list/create/delete/show/add-member/remove-member)
+  - [ ] `cli.py`: Add `--campaign` option to `transcribe` and `speakers test`
+  - [ ] `tests/test_cli.py`: Append 5 campaigns tests
+  - [ ] Verify: `.venv/bin/pytest tests/test_cli.py -v`
+
+- [ ] **Phase 4 — Web routes**
+  - [ ] `web/routes/campaigns.py`: New router (6 routes; all slugs validated before disk I/O; redirects via server-side `campaign.slug`)
+  - [ ] `web/templates/campaigns.html`: List + create form + per-campaign roster management
+  - [ ] `web/app.py`: Register campaigns router
+  - [ ] `web/routes/transcribe.py`: Accept `campaign` form field; validate; pass to `queue.submit()`
+  - [ ] `web/templates/transcribe.html`: Add `<select name="campaign">` dropdown
+  - [ ] `tests/test_web_routes.py`: Append 8 campaigns route tests
+  - [ ] `tests/test_path_traversal.py`: Append 6 slug security tests
+  - [ ] Verify: `.venv/bin/pytest tests/test_web_routes.py tests/test_path_traversal.py -v`
+
+- [ ] **Phase 5 — Documentation (own commit)**
+  - [ ] `architecture.md`: Module map, data layout, design decisions, updated test count
+  - [ ] `README.md`: `wisper campaigns` command docs + voice transfer explanation
+  - [ ] `plan.md`: Remove this section (work complete)
+  - [ ] Final verify: `.venv/bin/pytest tests/ -v` all green, then commit + push
+
+> **Commit cadence:** one commit + push per phase on branch `claude/review-whisper-campaign-R6pJT`. Tests must pass before each commit.
 
 ---
 
-#### New Dataclasses (`models.py`)
+#### Security Checklist (apply to every campaign route)
 
-```python
-@dataclass
-class ShowMember:
-    profile_key: str       # FK → speakers.json key
-    role: str              # per-show role override ("DM", "Player", etc.)
-    character: str = ""    # optional character name for this show
-
-@dataclass
-class Show:
-    slug: str              # URL/filesystem-safe key (e.g. "dnd-mondays")
-    display_name: str      # human name
-    created: str           # ISO date
-    members: dict[str, ShowMember]  # keyed by profile_key
-```
+1. Validate slug with `_validate_campaign_slug()` (from `campaign_manager.py`) before any disk I/O
+2. Redirect URLs use `campaign.slug` from the server-side `Campaign` object, never raw form input
+3. Error responses use generic codes: `?error=create_failed`, `?error=unknown_profile`, `?error=invalid_campaign`
+4. `profile_key` values validated by membership in `load_profiles()`, never used in path construction
+5. Tests in `test_path_traversal.py` cover: null-byte, dotdot, slash, CRLF, and error-message-leak cases
 
 ---
 
-#### New Module: `show_manager.py`
+#### Backward Compatibility
 
-```python
-def get_shows_path(data_dir=None) -> Path
-def load_shows(data_dir=None) -> dict[str, Show]
-def save_shows(shows, data_dir=None) -> None
-def create_show(slug, display_name, data_dir=None) -> Show
-def delete_show(slug, data_dir=None) -> None
-def add_member(slug, profile_key, role, character, data_dir=None) -> None
-def remove_member(slug, profile_key, data_dir=None) -> None
-def get_show_profile_keys(slug, data_dir=None) -> set[str]  # for match filtering
-```
-
-Slug generation: `re.sub(r'[^\w]+', '-', name.lower()).strip('-')` — same convention as existing profile keys.
-
----
-
-#### Changes to Existing Code
-
-**`speaker_manager.py` — `match_speakers()`**
-
-Add `profile_filter: set[str] | None = None`. When set, only profiles in that set are candidates. `None` = global match (today's behavior, unchanged).
-
-```python
-def match_speakers(..., profile_filter: set[str] | None = None):
-    profiles = load_profiles(data_dir)
-    if profile_filter is not None:
-        profiles = {k: v for k, v in profiles.items() if k in profile_filter}
-    # rest unchanged
-```
-
-**`pipeline.py` — `process_file()`**
-
-Add `show: str | None = None`. When set, resolves profile filter via `get_show_profile_keys(show)` before calling `match_speakers()`.
-
-**`web/jobs.py`** — `show` flows through `queue.submit(show=show)` → `job.kwargs` → `process_file()`. No structural change to `JobQueue`.
-
----
-
-#### CLI Changes (`cli.py`)
-
-New command group:
-
-```
-wisper shows list
-wisper shows create "D&D Mondays"           # slug auto-derived: dnd-mondays
-wisper shows delete dnd-mondays
-wisper shows add-member dnd-mondays alice --role DM --character ""
-wisper shows remove-member dnd-mondays alice
-wisper shows info dnd-mondays               # list members with roles
-```
-
-Modified commands (`--show` always optional — omitting preserves current behavior):
-
-```
-wisper transcribe session.mp3 --show dnd-mondays   # scope matching to roster
-wisper speakers list --show dnd-mondays             # filter display by show
-wisper speakers test audio.mp3 --show dnd-mondays   # scope test match
-```
-
----
-
-#### Web UI Changes
-
-**New page `/shows`:** list shows, create/delete show, per-show detail with roster management (add/remove members, set role/character).
-
-**Modified pages:**
-- `/transcribe` form: optional "Show" dropdown (default: all speakers). Populated from `load_shows()`.
-- `/speakers` list: optional filter by show (tab or dropdown).
-
-**New routes (`web/routes/shows.py`):**
-
-```
-GET  /shows
-POST /shows
-GET  /shows/{slug}
-POST /shows/{slug}/delete
-POST /shows/{slug}/members
-POST /shows/{slug}/members/{key}/remove
-```
-
----
-
-#### File Changelist
-
-| File | Change |
-|------|--------|
-| `src/wisper_transcribe/models.py` | Add `ShowMember`, `Show` dataclasses |
-| `src/wisper_transcribe/show_manager.py` | **New** — CRUD for shows/rosters |
-| `src/wisper_transcribe/speaker_manager.py` | Add `profile_filter` param to `match_speakers()` |
-| `src/wisper_transcribe/pipeline.py` | Add `show` param to `process_file()` |
-| `src/wisper_transcribe/cli.py` | Add `shows` command group; add `--show` to `transcribe`, `speakers list`, `speakers test` |
-| `src/wisper_transcribe/web/routes/shows.py` | **New** — show management routes |
-| `src/wisper_transcribe/web/routes/transcribe.py` | Pass `show` from form to job kwargs |
-| `src/wisper_transcribe/web/routes/speakers.py` | Optional show filter on list |
-| `src/wisper_transcribe/web/templates/shows.html` | **New** — show list/detail UI |
-| `src/wisper_transcribe/web/app.py` | Register shows router |
-| `tests/test_show_manager.py` | **New** — unit tests for all show_manager functions |
-| `tests/test_web_routes.py` | Add show route tests |
-| `architecture.md` | Update module map, data layout, design decisions |
-| `README.md` | Document `wisper shows` commands and `--show` flag |
-
----
-
-#### Migration / Backward Compatibility
-
-- `shows.json` absent on first run → `load_shows()` returns `{}`
-- `--show` omitted everywhere → `profile_filter=None` → identical behavior to today
-- Existing enrolled profiles untouched; no file moves, no schema migrations
-- If a profile is deleted but still referenced in a show roster, `match_speakers()` silently skips it (existing behavior — missing `.npy` is already handled)
+- `campaigns.json` absent → `load_campaigns()` returns `{}`
+- `--campaign` omitted → `profile_filter=None` → identical behavior to today
+- Existing profiles and embeddings untouched
 
 ---
 
