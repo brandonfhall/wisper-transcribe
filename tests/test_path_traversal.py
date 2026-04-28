@@ -227,3 +227,91 @@ def test_speakers_enroll_error_does_not_leak_exception(client: TestClient):
     assert "secret" not in location
     assert "internal" not in location
     assert "home" not in location
+
+# ---------------------------------------------------------------------------
+# Campaign slug path traversal + open-redirect guards
+# ---------------------------------------------------------------------------
+
+_CAMPAIGN_SLUG_PAYLOADS = [
+    "\x00",
+    "../etc/passwd",
+    "a/b/c",
+    "evil\r\nHeader: injected",
+    "javascript:alert(1)",
+    ".",
+    "..",
+]
+
+
+@pytest.mark.parametrize("payload", _CAMPAIGN_SLUG_PAYLOADS)
+def test_campaigns_detail_path_traversal_blocked(client, payload):
+    from urllib.parse import quote
+    resp = client.get(f"/campaigns/{quote(payload, safe='')}", follow_redirects=False)
+    assert resp.status_code in (400, 303)
+    location = resp.headers.get("location", "")
+    # Must never contain the raw payload characters
+    assert "\x00" not in location
+    assert ".." not in location
+
+
+@pytest.mark.parametrize("payload", _CAMPAIGN_SLUG_PAYLOADS)
+def test_campaigns_delete_path_traversal_blocked(client, payload):
+    from urllib.parse import quote
+    resp = client.post(
+        f"/campaigns/{quote(payload, safe='')}/delete", follow_redirects=False
+    )
+    assert resp.status_code in (400, 303)
+
+
+@pytest.mark.parametrize("payload", _CAMPAIGN_SLUG_PAYLOADS)
+def test_campaigns_add_member_path_traversal_blocked(client, payload):
+    from urllib.parse import quote
+    resp = client.post(
+        f"/campaigns/{quote(payload, safe='')}/members",
+        data={"profile_key": "alice", "role": "", "character": ""},
+        follow_redirects=False,
+    )
+    assert resp.status_code in (400, 303)
+
+
+@pytest.mark.parametrize("payload", _CAMPAIGN_SLUG_PAYLOADS)
+def test_campaigns_remove_member_path_traversal_blocked(client, payload):
+    from urllib.parse import quote
+    resp = client.post(
+        f"/campaigns/{quote(payload, safe='')}/members/alice/remove",
+        follow_redirects=False,
+    )
+    assert resp.status_code in (400, 303)
+
+
+def test_campaigns_create_error_does_not_leak_exception(client, tmp_path, monkeypatch):
+    """A create_campaign failure must produce generic ?error= code, not exception text."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    with patch(
+        "wisper_transcribe.web.routes.campaigns.create_campaign",
+        side_effect=ValueError("internal path /home/secret revealed"),
+    ):
+        resp = client.post(
+            "/campaigns",
+            data={"display_name": "Test"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    location = resp.headers.get("location", "")
+    assert "error=create_failed" in location
+    assert "secret" not in location
+    assert "internal" not in location
+    assert "home" not in location
+
+
+def test_validate_campaign_slug_accepts_valid_slugs():
+    from wisper_transcribe.campaign_manager import _validate_campaign_slug
+    for slug in ["dnd-mondays", "abc_123", "UPPER", "my-campaign-1"]:
+        assert _validate_campaign_slug(slug) is not None, f"should accept {slug!r}"
+
+
+def test_validate_campaign_slug_rejects_invalid_slugs():
+    from wisper_transcribe.campaign_manager import _validate_campaign_slug
+    for slug in ["", "\x00", "../etc", "a/b", "evil\r\n", "javascript:x", ".", ".."]:
+        assert _validate_campaign_slug(slug) is None, f"should reject {slug!r}"

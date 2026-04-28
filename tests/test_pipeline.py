@@ -1114,3 +1114,79 @@ def test_patch_tqdm_for_queue_log_tuple_format():
     finally:
         _tqdm_mod.tqdm.write = orig_write
         _tqdm_mod.tqdm.__init__ = orig_init
+
+
+# ---------------------------------------------------------------------------
+# campaign param — process_file passes profile_filter to match_speakers
+# ---------------------------------------------------------------------------
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=60.0)
+@patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
+@patch("wisper_transcribe.pipeline.get_hf_token", return_value="fake-token")
+@patch("wisper_transcribe.diarizer.diarize")
+@patch("wisper_transcribe.aligner.align")
+@patch("wisper_transcribe.speaker_manager.match_speakers", return_value={})
+def test_process_file_passes_campaign_profile_filter(
+    mock_match, mock_align, mock_diarize, mock_hf_token,
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg,
+    tmp_path, monkeypatch,
+):
+    """When campaign is set, match_speakers receives the campaign's profile_filter."""
+    from wisper_transcribe.models import DiarizationSegment, AlignedSegment
+    from wisper_transcribe.pipeline import process_file
+    import wisper_transcribe.campaign_manager as cm
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    mock_convert.return_value = audio
+
+    diar_seg = DiarizationSegment(0.0, 5.0, "SPEAKER_00")
+    mock_diarize.return_value = [diar_seg]
+    mock_align.return_value = [AlignedSegment(0.0, 5.0, "SPEAKER_00", "Hello")]
+
+    # Create a campaign with alice as sole member
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    cm.create_campaign("Test Game", data_dir=tmp_path)
+    cm.add_member("test-game", "alice", data_dir=tmp_path)
+
+    process_file(audio, output_dir=tmp_path, device="cpu", campaign="test-game")
+
+    mock_match.assert_called_once()
+    call_kwargs = mock_match.call_args.kwargs
+    assert call_kwargs.get("profile_filter") == {"alice"}
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=60.0)
+@patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
+@patch("wisper_transcribe.pipeline.get_hf_token", return_value="fake-token")
+@patch("wisper_transcribe.diarizer.diarize")
+@patch("wisper_transcribe.aligner.align")
+@patch("wisper_transcribe.speaker_manager.match_speakers", return_value={})
+def test_process_file_no_campaign_passes_none_filter(
+    mock_match, mock_align, mock_diarize, mock_hf_token,
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg,
+    tmp_path,
+):
+    """When campaign is not set, match_speakers receives profile_filter=None."""
+    from wisper_transcribe.models import DiarizationSegment, AlignedSegment
+    from wisper_transcribe.pipeline import process_file
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    mock_convert.return_value = audio
+
+    diar_seg = DiarizationSegment(0.0, 5.0, "SPEAKER_00")
+    mock_diarize.return_value = [diar_seg]
+    mock_align.return_value = [AlignedSegment(0.0, 5.0, "SPEAKER_00", "Hello")]
+
+    process_file(audio, output_dir=tmp_path, device="cpu")
+
+    mock_match.assert_called_once()
+    call_kwargs = mock_match.call_args.kwargs
+    assert call_kwargs.get("profile_filter") is None

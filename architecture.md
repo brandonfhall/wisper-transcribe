@@ -36,7 +36,8 @@ src/wisper_transcribe/
 ├── audio_utils.py      validate_audio(), convert_to_wav(), get_duration(), load_wav_as_tensor(); VIDEO_EXTENSIONS / AUDIO_EXTENSIONS sets
 ├── time_utils.py       Shared time formatting: format_timestamp(), format_duration()
 ├── config.py           load_config(), save_config(), get_device(), get_hf_token(), get_llm_api_key(), resolve_llm_model(), check_ffmpeg()
-├── models.py           Dataclasses: TranscriptionSegment, DiarizationSegment, AlignedSegment, SpeakerProfile, Edit, SpeakerSuggestion, LootChange, NPCMention, SummaryNote
+├── campaign_manager.py Campaign CRUD: load/save/create/delete campaigns, add/remove roster members, _validate_campaign_slug() security gatekeeper
+├── models.py           Dataclasses: TranscriptionSegment, DiarizationSegment, AlignedSegment, SpeakerProfile, CampaignMember, Campaign, Edit, SpeakerSuggestion, LootChange, NPCMention, SummaryNote
 ├── refine.py           LLM-driven transcript refinement: vocabulary correction + unknown-speaker ID (edit-distance guarded, frontmatter-preserving)
 ├── summarize.py        Campaign-notes generation (session recap, loot, NPCs, follow-ups) → Obsidian-ready sidecar markdown
 ├── llm/                Provider-agnostic LLM client package (Ollama, LM Studio, Anthropic, OpenAI, Google)
@@ -57,6 +58,7 @@ src/wisper_transcribe/
         ├── transcribe.py   GET/POST /transcribe (+ post_refine/post_summarize flags), GET /transcribe/jobs/{id}, SSE /jobs/{id}/stream, enrollment wizard
         ├── transcripts.py  GET/POST /transcripts, transcript detail, download, delete, fix-speaker; POST /transcripts/{name}/refine, POST /transcripts/{name}/summarize; GET /transcripts/{name}/summary, GET /transcripts/{name}/summary/download
         ├── speakers.py     GET/POST /speakers, enroll, rename, remove
+        ├── campaigns.py    GET/POST /campaigns, campaign detail, roster add/remove, delete
         └── config.py       GET/POST /config
 ```
 
@@ -254,6 +256,9 @@ The `llm/` package wraps each provider behind a single `LLMClient` ABC with `com
 
 **Ollama streaming.** `OllamaClient._post_chat()` uses `httpx.stream()` with `read=None` (no per-chunk read timeout) so long transcripts never hit a read deadline mid-generation. A connect/write timeout (`self.timeout`, default 30 s) still guards against Ollama not being reachable. While streaming, a live dot-progress line is written to stderr (one `·` per 50 tokens) so the user can see the model is working. `wisper config llm` and `wisper setup` call `ollama list` via subprocess and display a numbered model picker when Ollama is running — falls back to a plain text prompt if the command is unavailable.
 
+### Shared voice embeddings + per-campaign rosters
+Full directory isolation per campaign would break cross-campaign recognition (re-enroll the same person for every game). Instead, campaigns are an **additive roster layer** over the global profile store. A `Campaign` holds a set of `profile_key` → `CampaignMember` entries; the voice embeddings in `profiles/embeddings/` remain global and are reused automatically. When `campaign=<slug>` is provided to `process_file()` or `match_speakers()`, a `profile_filter` set is computed via `get_campaign_profile_keys()` and passed to `match_speakers()`, which filters candidates before cosine-similarity scoring. `profile_filter=None` (default, when no campaign is specified) preserves the existing global-match behavior. Deleting a campaign never touches profiles or embeddings.
+
 Safety invariants the implementation enforces:
 1. **YAML frontmatter is never sent to the LLM and is preserved byte-for-byte** — `parse_transcript()` splits the document into `(frontmatter_dict, body, raw_frontmatter_str)` and only the body is passed downstream. Reassembly uses the original raw string, not a re-serialised copy.
 2. **Dry-run default on refine**; `--apply` writes `<stem>.md.bak` before overwriting.
@@ -278,11 +283,15 @@ All user data lives **outside the repo** in the OS-native user data directory, u
 ```
 wisper-transcribe/       ← get_data_dir()
 ├── config.toml
-└── profiles/
-    ├── speakers.json    name → SpeakerProfile metadata
-    └── embeddings/
-        └── <name>.npy   512-dim float32 voice embeddings (gitignored)
+├── profiles/
+│   ├── speakers.json    name → SpeakerProfile metadata (global — one entry per person)
+│   └── embeddings/
+│       └── <name>.npy   512-dim float32 voice embeddings (gitignored)
+└── campaigns/
+    └── campaigns.json   slug → Campaign metadata + per-campaign roster (additive layer)
 ```
+
+**Campaign data model:** Campaigns hold rosters of `profile_key` references to the global `speakers.json`. Voice embeddings remain global — adding a speaker to a second campaign reuses their existing `.npy` automatically (voice transfer). Deleting a campaign never touches profiles or embeddings. `campaigns.json` absent on first run → `load_campaigns()` returns `{}`.
 
 Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`, `hotwords`, `use_mlx`, `parallel_stages`, `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`.
 
@@ -310,10 +319,12 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - `tests/test_llm_clients.py` mocks httpx for Ollama and injects fake `anthropic` / `openai` / `google.genai` modules via `sys.modules` to cover the lazy-import path; each client's `complete()` and `complete_json()` are tested for happy path + SDK error + missing-SDK → `LLMUnavailableError`; `ConnectError` raises with a "daemon not running" message; a 404 `HTTPStatusError` raises with a "not found in Ollama" message; a non-404 `HTTPStatusError` (e.g. 500) raises with a generic "Ollama request failed" message
 - `tests/test_lmstudio_client.py` covers `LMStudioClient` happy paths (`complete`, `complete_json`, SSE token accumulation, `json_object` response format), all three error branches (ConnectError, 404, non-404), bad JSON → `LLMResponseError`, and non-SSE line filtering; also tests `get_client("lmstudio")` wiring and default endpoint
 - `tests/test_audio_utils.py` covers `validate_audio` (missing file, unsupported extension, all supported extensions including all video formats, case-insensitive), `convert_to_wav` (already-correct WAV passthrough, mp3 pydub conversion, all 10 video extensions trigger the ffmpeg Popen path with correct `-map 0:a:0 -progress pipe:1` args, progress lines drive tqdm bar, ffmpeg failure → `ValueError`, missing ffmpeg → `RuntimeError`), `_probe_duration` (ffprobe mock), `get_duration`, and `load_wav_as_tensor` (mono/stereo/float32); tqdm output suppressed via `TQDM_DISABLE` autouse fixture
-- `tests/test_web_routes.py` covers web routes including video file uploads (mp4, mkv, mov, webm accepted and queued), refine/summarize job submission, summary sidecar rendering, summary download, summary-badge logic on the transcript list, deletion of summary sidecars alongside transcripts, LLM config field rendering, LLM config save (provider/model/temperature), non-empty API key save, empty API key not overwriting an existing key, Config nav link presence on the job detail page, and the `/config/ollama-status` and `/config/lmstudio-status` endpoints
+- `tests/test_web_routes.py` covers web routes including video file uploads (mp4, mkv, mov, webm accepted and queued), refine/summarize job submission, summary sidecar rendering, summary download, summary-badge logic on the transcript list, deletion of summary sidecars alongside transcripts, LLM config field rendering, LLM config save (provider/model/temperature), non-empty API key save, empty API key not overwriting an existing key, Config nav link presence on the job detail page, the `/config/ollama-status` and `/config/lmstudio-status` endpoints, and full campaign CRUD routes (`/campaigns`, `/campaigns/{slug}`, member add/remove, campaign delete) including create-then-redirect via server-generated slug and transcribe form campaign select
 - `tests/test_config.py` covers `get_hf_token()` accepting `HF_TOKEN` as an alias for `HUGGINGFACE_TOKEN` and propagating whichever is set to both env vars
 - `tests/test_web_jobs.py` covers job queue CRUD, tqdm patch/restore, error recording, cancellation, and a regression test that `job.status = COMPLETED` is not set until after `_run_post_process()` finishes
-- Test count: 448 (all mocked, all passing)
+- `tests/test_campaign_manager.py` covers load/save roundtrip, `create_campaign` (slug generation, duplicate rejection, empty-name rejection), `delete_campaign` (profile files untouched), `add_member` / `remove_member`, `get_campaign_profile_keys`, `_make_slug` punctuation stripping, and `_validate_campaign_slug` (parametrized accept/reject with null-byte, dotdot, slash, CRLF payloads)
+- `tests/test_path_traversal.py` covers path traversal for campaign routes (null-byte, dotdot, slash, CRLF, `javascript:`, `.`, `..` payloads) for detail, delete, add-member, and remove-member; create error does not leak exception text; unit tests for `_validate_campaign_slug`
+- Test count: ~495 (all mocked, all passing)
 
 **CI matrix** (`.github/workflows/ci.yml`):
 - Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)

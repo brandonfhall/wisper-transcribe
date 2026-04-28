@@ -762,3 +762,177 @@ def test_speakers_rename_empty_name_no_change(client):
     assert resp.status_code == 303
     mock_save.assert_not_called()  # empty name: no save
     assert profiles["alice"].display_name == "Alice"  # unchanged
+
+
+# ---------------------------------------------------------------------------
+# Campaigns routes
+# ---------------------------------------------------------------------------
+
+def test_campaigns_index_empty(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    with patch("wisper_transcribe.web.routes.campaigns.load_campaigns", return_value={}), \
+         patch("wisper_transcribe.web.routes.campaigns.load_profiles", return_value={}):
+        resp = client.get("/campaigns")
+    assert resp.status_code == 200
+    assert "No campaigns" in resp.text
+
+
+def test_campaigns_create_and_redirect(client, tmp_path, monkeypatch):
+    """POST /campaigns creates a campaign and redirects via the server-generated slug."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.models import Campaign
+    created_campaign = Campaign(slug="dnd-mondays", display_name="D&D Mondays",
+                                created="2026-04-28", members={})
+
+    with patch("wisper_transcribe.web.routes.campaigns.create_campaign",
+               return_value=created_campaign) as mock_create:
+        resp = client.post(
+            "/campaigns",
+            data={"display_name": "D&D Mondays"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    location = resp.headers.get("location", "")
+    # Location must be the server-generated slug, not arbitrary user input
+    assert "/campaigns/dnd-mondays" in location
+    mock_create.assert_called_once_with("D&D Mondays")
+
+
+def test_campaigns_create_empty_name_rejected(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    resp = client.post(
+        "/campaigns",
+        data={"display_name": "  "},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "error=invalid_name" in resp.headers.get("location", "")
+
+
+def test_campaign_detail_unknown_slug(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    with patch("wisper_transcribe.web.routes.campaigns.load_campaigns", return_value={}):
+        resp = client.get("/campaigns/does-not-exist", follow_redirects=False)
+    # Redirect with error, not a traceback
+    assert resp.status_code == 303
+    assert "error=not_found" in resp.headers.get("location", "")
+
+
+def test_campaign_add_member_persists(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.models import SpeakerProfile, Campaign, CampaignMember
+    import numpy as np
+
+    # Create real campaign + profile
+    (tmp_path / "profiles" / "embeddings").mkdir(parents=True)
+    fake_emb = tmp_path / "profiles" / "embeddings" / "alice.npy"
+    np.save(str(fake_emb), np.zeros(512))
+
+    from wisper_transcribe.campaign_manager import create_campaign
+    from wisper_transcribe.speaker_manager import save_profiles
+    create_campaign("Test Game", data_dir=tmp_path)
+    save_profiles(
+        {"alice": SpeakerProfile(
+            name="alice", display_name="Alice", role="",
+            embedding_path=fake_emb, enrolled_date="2026-04-28",
+            enrollment_source="test.mp3",
+        )},
+        data_dir=tmp_path,
+    )
+
+    resp = client.post(
+        "/campaigns/test-game/members",
+        data={"profile_key": "alice", "role": "DM", "character": ""},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "/campaigns/test-game" in resp.headers.get("location", "")
+
+    from wisper_transcribe.campaign_manager import load_campaigns
+    loaded = load_campaigns(tmp_path)
+    assert "alice" in loaded["test-game"].members
+    assert loaded["test-game"].members["alice"].role == "DM"
+
+
+def test_campaign_add_unknown_profile_rejects(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+    create_campaign("Test Game", data_dir=tmp_path)
+
+    with patch("wisper_transcribe.web.routes.campaigns.load_profiles", return_value={}):
+        resp = client.post(
+            "/campaigns/test-game/members",
+            data={"profile_key": "nobody", "role": "", "character": ""},
+            follow_redirects=False,
+        )
+    assert resp.status_code == 303
+    assert "error=unknown_profile" in resp.headers.get("location", "")
+
+
+def test_campaign_remove_member_does_not_delete_profile(client, tmp_path, monkeypatch):
+    """Removing a member from a campaign never deletes the profile or embedding."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    import numpy as np
+    from wisper_transcribe.models import SpeakerProfile
+    from wisper_transcribe.campaign_manager import create_campaign, add_member
+    from wisper_transcribe.speaker_manager import save_profiles
+
+    (tmp_path / "profiles" / "embeddings").mkdir(parents=True)
+    fake_emb = tmp_path / "profiles" / "embeddings" / "alice.npy"
+    np.save(str(fake_emb), np.zeros(512))
+    save_profiles(
+        {"alice": SpeakerProfile(
+            name="alice", display_name="Alice", role="",
+            embedding_path=fake_emb, enrolled_date="2026-04-28",
+            enrollment_source="test.mp3",
+        )},
+        data_dir=tmp_path,
+    )
+    create_campaign("Test Game", data_dir=tmp_path)
+    add_member("test-game", "alice", data_dir=tmp_path)
+
+    resp = client.post("/campaigns/test-game/members/alice/remove", follow_redirects=False)
+    assert resp.status_code == 303
+    # Profile and embedding must still exist
+    assert fake_emb.exists()
+    from wisper_transcribe.campaign_manager import get_campaign_profile_keys
+    assert "alice" not in get_campaign_profile_keys("test-game", data_dir=tmp_path)
+
+
+def test_transcribe_form_includes_campaign_select(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.models import Campaign
+    campaigns = {"dnd-mondays": Campaign(slug="dnd-mondays", display_name="D&D Mondays",
+                                        created="2026-04-28", members={})}
+    with patch("wisper_transcribe.web.routes.transcribe.load_campaigns", return_value=campaigns):
+        resp = client.get("/transcribe")
+    assert resp.status_code == 200
+    assert 'name="campaign"' in resp.text
+    assert "D&amp;D Mondays" in resp.text or "D&D Mondays" in resp.text
+
+
+def test_transcribe_post_with_campaign_passes_to_queue(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.web.jobs import Job
+    import uuid
+
+    fake_job = MagicMock(spec=Job)
+    fake_job.id = str(uuid.uuid4())
+
+    with patch("wisper_transcribe.web.routes.transcribe.load_campaigns", return_value={}), \
+         patch("wisper_transcribe.web.routes.transcribe._default_output_dir",
+               return_value=tmp_path), \
+         patch.object(
+             client.app.state.job_queue, "submit", return_value=fake_job
+         ) as mock_submit:
+        resp = client.post(
+            "/transcribe",
+            files={"file": ("session.mp3", b"fake", "audio/mpeg")},
+            data={"campaign": "dnd-mondays"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    call_kwargs = mock_submit.call_args.kwargs
+    assert call_kwargs.get("campaign") == "dnd-mondays"

@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block title %}Campaigns{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+
+  <div class="flex items-center justify-between">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Campaigns</h1>
+      <p class="mt-1 text-sm text-gray-500">{{ campaigns | length }} campaign{% if campaigns | length != 1 %}s{% endif %}</p>
+    </div>
+  </div>
+
+  {% if request.query_params.get('error') == 'create_failed' %}
+  <div class="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-700">
+    Could not create campaign. A campaign with that name may already exist.
+  </div>
+  {% elif request.query_params.get('error') == 'invalid_name' %}
+  <div class="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-700">
+    Invalid campaign name.
+  </div>
+  {% elif request.query_params.get('error') == 'unknown_profile' %}
+  <div class="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-700">
+    That speaker is not enrolled. Enroll them first under <a href="/speakers" class="underline">Speakers</a>.
+  </div>
+  {% endif %}
+
+  <!-- Create form -->
+  <div class="card">
+    <h2 class="text-lg font-semibold text-gray-800 mb-3">New Campaign</h2>
+    <form method="post" action="/campaigns" class="flex gap-2 items-end">
+      <div class="flex-1">
+        <label class="block text-sm font-medium text-gray-700 mb-1">Campaign name</label>
+        <input type="text" name="display_name" required placeholder="e.g. D&amp;D Mondays"
+               class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-1 focus:ring-green-500 focus:border-green-500"/>
+      </div>
+      <button type="submit" class="btn-primary">Create</button>
+    </form>
+  </div>
+
+  {% if active_campaign %}
+  <!-- Campaign detail -->
+  <div class="card space-y-4">
+    <div class="flex items-center justify-between">
+      <div>
+        <h2 class="text-xl font-bold text-gray-900">{{ active_campaign.display_name }}</h2>
+        <p class="text-xs text-gray-400">slug: {{ active_campaign.slug }} · created {{ active_campaign.created }}</p>
+      </div>
+      <form method="post" action="/campaigns/{{ active_campaign.slug }}/delete"
+            onsubmit="return confirm('Delete campaign \'{{ active_campaign.display_name }}\'? This does not remove enrolled speakers.')">
+        <button type="submit" class="text-xs text-red-600 border border-red-300 rounded px-2 py-1 hover:bg-red-50">Delete campaign</button>
+      </form>
+    </div>
+
+    <!-- Add member -->
+    {% if unenrolled %}
+    <form method="post" action="/campaigns/{{ active_campaign.slug }}/members" class="flex gap-2 items-end flex-wrap">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Add speaker</label>
+        <select name="profile_key" class="border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-1 focus:ring-green-500">
+          {% for key, p in unenrolled.items() %}
+          <option value="{{ key }}">{{ p.display_name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Role</label>
+        <input type="text" name="role" placeholder="DM / Player"
+               class="border border-gray-300 rounded-md px-3 py-2 text-sm w-28 focus:ring-1 focus:ring-green-500"/>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Character</label>
+        <input type="text" name="character" placeholder="optional"
+               class="border border-gray-300 rounded-md px-3 py-2 text-sm w-32 focus:ring-1 focus:ring-green-500"/>
+      </div>
+      <button type="submit" class="btn-primary">Add</button>
+    </form>
+    {% else %}
+    <p class="text-sm text-gray-500">All enrolled speakers are already in this campaign.</p>
+    {% endif %}
+
+    <!-- Roster -->
+    {% if active_campaign.members %}
+    <div class="overflow-x-auto">
+    <table class="min-w-full divide-y divide-gray-200 text-sm">
+      <thead class="bg-gray-50">
+        <tr>
+          <th class="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Speaker</th>
+          <th class="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Role</th>
+          <th class="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Character</th>
+          <th class="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="bg-white divide-y divide-gray-200">
+        {% for key, member in active_campaign.members.items() %}
+        <tr>
+          <td class="px-4 py-3 font-medium text-gray-900">
+            {% if key in profiles %}{{ profiles[key].display_name }}{% else %}<span class="text-gray-400 italic">removed: {{ key }}</span>{% endif %}
+          </td>
+          <td class="px-4 py-3 text-gray-500">{{ member.role or "—" }}</td>
+          <td class="px-4 py-3 text-gray-500">{{ member.character or "—" }}</td>
+          <td class="px-4 py-3">
+            <form method="post" action="/campaigns/{{ active_campaign.slug }}/members/{{ key }}/remove">
+              <button type="submit" class="text-xs text-red-600 hover:underline">Remove</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+    <p class="text-sm text-gray-500">No members yet. Add speakers above.</p>
+    {% endif %}
+  </div>
+
+  {% elif campaigns %}
+  <!-- Campaign list -->
+  <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+    {% for slug, c in campaigns.items() %}
+    <a href="/campaigns/{{ slug }}" class="card block hover:shadow-md transition-shadow">
+      <h3 class="font-semibold text-gray-900">{{ c.display_name }}</h3>
+      <p class="text-xs text-gray-400 mt-1">slug: {{ slug }}</p>
+      <p class="text-sm text-gray-600 mt-2">{{ c.members | length }} member{% if c.members | length != 1 %}s{% endif %}</p>
+      <p class="text-xs text-gray-400">Created {{ c.created }}</p>
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="card text-center py-12">
+    <svg class="h-12 w-12 text-gray-300 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke-width="1" stroke="currentColor">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 010 3.75H5.625a1.875 1.875 0 010-3.75z"/>
+    </svg>
+    <p class="text-gray-500">No campaigns yet.</p>
+    <p class="text-sm text-gray-400 mt-1">Use the form above to create your first campaign.</p>
+  </div>
+  {% endif %}
+
+</div>
+{% endblock %}

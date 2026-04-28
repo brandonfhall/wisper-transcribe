@@ -82,6 +82,19 @@
           </label>
         </div>
 
+        <!-- Campaign filter -->
+        {% if campaigns %}
+        <div class="sm:col-span-2 pt-2 border-t border-gray-100">
+          <label class="form-label" for="campaign">Campaign <span class="text-gray-400 font-normal">(optional — scope speaker matching to this roster)</span></label>
+          <select id="campaign" name="campaign" class="form-input">
+            <option value="">All speakers (no filter)</option>
+            {% for slug, c in campaigns.items() %}
+            <option value="{{ slug }}">{{ c.display_name }} ({{ c.members | length }} member{% if c.members | length != 1 %}s{% endif %})</option>
+            {% endfor %}
+          </select>
+        </div>
+        {% endif %}
+
         <!-- LLM post-processing -->
         <div class="sm:col-span-2 pt-2 border-t border-gray-100">
           <p class="text-sm font-medium text-gray-700 mb-2">LLM Post-processing

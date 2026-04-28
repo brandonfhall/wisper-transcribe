@@ -257,13 +257,21 @@ def match_speakers(
     data_dir: Optional[Path] = None,
     device: str = "cpu",
     threshold: float = 0.65,
+    profile_filter: Optional[set] = None,
 ) -> dict[str, str]:
     """Match anonymous speaker labels to enrolled profiles via cosine similarity.
 
     Returns a mapping like {"SPEAKER_00": "Alice", "SPEAKER_01": "Unknown Speaker 1"}.
     Returns an empty dict if no profiles are enrolled.
+
+    profile_filter: when provided, only profiles whose key is in this set are
+    considered candidates.  None (default) uses all enrolled profiles.
     """
     profiles = load_profiles(data_dir)
+    if profile_filter is not None:
+        profiles = {k: v for k, v in profiles.items() if k in profile_filter}
+        if not profiles:
+            return {}
     if not profiles:
         return {}
 
