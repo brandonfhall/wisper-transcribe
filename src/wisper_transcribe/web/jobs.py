@@ -175,6 +175,13 @@ class Job:
     # For summarize jobs: path to the generated .summary.md file
     summary_path: Optional[str] = None
 
+    @property
+    def is_video(self) -> bool:
+        """True when the input file is a video container (not a pure audio file)."""
+        from pathlib import Path as _Path
+        from wisper_transcribe.audio_utils import VIDEO_EXTENSIONS
+        return _Path(self.input_path or "").suffix.lower() in VIDEO_EXTENSIONS
+
 
 class JobQueue:
     """In-memory job queue backed by a single asyncio background worker."""

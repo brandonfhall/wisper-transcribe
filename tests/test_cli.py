@@ -288,7 +288,9 @@ def test_config_set_hotwords_list(tmp_path, monkeypatch):
 def test_setup_detects_ffmpeg(monkeypatch):
     """Setup wizard detects ffmpeg and reports OK."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(Path(__file__).parent / "tmp_setup"))
-    with patch("wisper_transcribe.config.check_ffmpeg"):
+    with patch("wisper_transcribe.config.check_ffmpeg"), \
+         patch("wisper_transcribe.cli._get_ollama_models", return_value=[]), \
+         patch("wisper_transcribe.cli._get_lmstudio_models", return_value=[]):
         mock_torch = MagicMock()
         mock_torch.cuda.is_available.return_value = False
         mock_torch.backends.mps.is_available.return_value = False
@@ -434,7 +436,8 @@ def test_config_llm_ollama_wizard(tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     # New order: provider → endpoint → model
     user_input = "ollama\nhttp://localhost:11434\nllama3.1:8b\n"
-    result = CliRunner().invoke(main, ["config", "llm"], input=user_input)
+    with patch("wisper_transcribe.cli._get_ollama_models", return_value=[]):
+        result = CliRunner().invoke(main, ["config", "llm"], input=user_input)
     assert result.exit_code == 0
 
     from wisper_transcribe.config import load_config

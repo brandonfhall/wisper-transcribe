@@ -99,61 +99,120 @@ def test_get_duration(mock_audio_segment):
 # Video extraction (_extract_first_audio_track / convert_to_wav for video)
 # ---------------------------------------------------------------------------
 
-def _fake_ffmpeg_success(out_path: str):
-    """Return a mock subprocess.CompletedProcess that writes a minimal WAV stub."""
-    from unittest.mock import MagicMock
-    Path(out_path).write_bytes(b"RIFF" + b"\x00" * 36)  # stub WAV header
-    m = MagicMock()
-    m.returncode = 0
-    return m
+def _make_mock_popen(out_path_idx: int = -1, returncode: int = 0,
+                     progress_lines: list[bytes] | None = None):
+    """Build a Popen mock that creates the output WAV and yields progress lines."""
+    progress_lines = progress_lines or [b"progress=end\n"]
+
+    def _side_effect(cmd, **kw):
+        Path(cmd[out_path_idx]).write_bytes(b"RIFF" + b"\x00" * 36)
+        mock_proc = MagicMock()
+        mock_proc.stdout = iter(progress_lines)
+        mock_proc.stderr = iter([])
+        mock_proc.returncode = returncode
+        mock_proc.wait = MagicMock()
+        return mock_proc
+
+    return _side_effect
+
+
+@pytest.fixture(autouse=True)
+def _disable_tqdm(monkeypatch):
+    """Disable tqdm output for all tests in this module to keep them fast."""
+    monkeypatch.setenv("TQDM_DISABLE", "1")
+
+
+def _mock_ffprobe(duration: float | None):
+    """Return a subprocess.run mock for ffprobe returning the given duration."""
+    r = MagicMock()
+    r.returncode = 0 if duration is not None else 1
+    r.stdout = str(duration) if duration is not None else ""
+    return r
 
 
 def test_convert_to_wav_video_calls_ffmpeg(tmp_path):
-    """Video files go through _extract_first_audio_track, not pydub."""
+    """Video files go through _extract_first_audio_track (Popen), not pydub."""
     mp4_file = tmp_path / "session.mp4"
     mp4_file.write_bytes(b"fake mp4")
 
     from wisper_transcribe.audio_utils import convert_to_wav
 
-    with patch("wisper_transcribe.audio_utils.subprocess.run") as mock_run:
-        mock_run.side_effect = lambda cmd, **kw: _fake_ffmpeg_success(cmd[-1])
+    with patch("wisper_transcribe.audio_utils.subprocess.run",
+               return_value=_mock_ffprobe(None)), \
+         patch("wisper_transcribe.audio_utils.subprocess.Popen",
+               side_effect=_make_mock_popen()) as mock_popen:
         result = convert_to_wav(mp4_file)
 
     assert result.suffix == ".wav"
-    cmd = mock_run.call_args[0][0]
+    cmd = mock_popen.call_args[0][0]
     assert "-map" in cmd and "0:a:0" in cmd
     assert "-ac" in cmd and "1" in cmd
     assert "-ar" in cmd and "16000" in cmd
     assert "-vn" in cmd
+    assert "-progress" in cmd
 
 
 @pytest.mark.parametrize("ext", [".mkv", ".mov", ".avi", ".webm", ".m4v", ".flv", ".ts", ".mts", ".m2ts"])
 def test_convert_to_wav_all_video_extensions(tmp_path, ext):
-    """All VIDEO_EXTENSIONS trigger the ffmpeg path."""
+    """All VIDEO_EXTENSIONS trigger the ffmpeg (Popen) path."""
     video_file = tmp_path / f"clip{ext}"
     video_file.write_bytes(b"fake video")
 
     from wisper_transcribe.audio_utils import convert_to_wav
 
-    with patch("wisper_transcribe.audio_utils.subprocess.run") as mock_run:
-        mock_run.side_effect = lambda cmd, **kw: _fake_ffmpeg_success(cmd[-1])
+    with patch("wisper_transcribe.audio_utils.subprocess.run",
+               return_value=_mock_ffprobe(None)), \
+         patch("wisper_transcribe.audio_utils.subprocess.Popen",
+               side_effect=_make_mock_popen()):
         result = convert_to_wav(video_file)
 
     assert result.suffix == ".wav"
 
 
+def test_convert_to_wav_video_reports_progress(tmp_path):
+    """When ffprobe returns a duration the tqdm bar is updated by out_time lines."""
+    mp4_file = tmp_path / "session.mp4"
+    mp4_file.write_bytes(b"fake mp4")
+
+    progress_lines = [
+        b"out_time=00:00:30.000000\n",
+        b"out_time=00:01:00.000000\n",
+        b"progress=end\n",
+    ]
+
+    from wisper_transcribe.audio_utils import convert_to_wav
+
+    with patch("wisper_transcribe.audio_utils.subprocess.run",
+               return_value=_mock_ffprobe(120.0)), \
+         patch("wisper_transcribe.audio_utils.subprocess.Popen",
+               side_effect=_make_mock_popen(progress_lines=progress_lines)):
+        result = convert_to_wav(mp4_file)
+
+    assert result.suffix == ".wav"
+
+
 def test_extract_first_audio_track_ffmpeg_failure(tmp_path):
-    """Non-zero ffmpeg exit raises ValueError with helpful message."""
+    """Non-zero ffmpeg exit code raises ValueError with helpful message."""
     mp4_file = tmp_path / "bad.mp4"
     mp4_file.write_bytes(b"fake")
 
     from wisper_transcribe.audio_utils import convert_to_wav
 
-    mock_result = MagicMock()
-    mock_result.returncode = 1
-    mock_result.stderr = b"Invalid data found when processing input"
+    def _failing_popen(cmd, **kw):
+        # Don't create the output file; set returncode = 1
+        mock_proc = MagicMock()
+        mock_proc.stdout.__iter__ = lambda _: iter([b"progress=end\n"])
+        mock_proc.stderr.__iter__ = lambda _: iter(
+            [b"Invalid data found when processing input\n"]
+        )
+        mock_proc.returncode = 1
+        mock_proc.wait = MagicMock()
+        return mock_proc
 
-    with patch("wisper_transcribe.audio_utils.subprocess.run", return_value=mock_result):
+    with patch("wisper_transcribe.audio_utils.subprocess.run",
+               return_value=_mock_ffprobe(None)), \
+         patch("wisper_transcribe.audio_utils.subprocess.Popen",
+               side_effect=_failing_popen):
         with pytest.raises(ValueError, match="audio track"):
             convert_to_wav(mp4_file)
 
@@ -166,6 +225,8 @@ def test_extract_first_audio_track_ffmpeg_not_found(tmp_path):
     from wisper_transcribe.audio_utils import convert_to_wav
 
     with patch("wisper_transcribe.audio_utils.subprocess.run",
+               return_value=_mock_ffprobe(None)), \
+         patch("wisper_transcribe.audio_utils.subprocess.Popen",
                side_effect=FileNotFoundError("ffmpeg not found")):
         with pytest.raises(RuntimeError, match="ffmpeg not found"):
             convert_to_wav(mp4_file)
