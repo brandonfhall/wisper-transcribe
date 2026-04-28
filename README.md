@@ -288,7 +288,10 @@ Checks ffmpeg, detects your GPU (CUDA/MPS/CPU), prompts for your HuggingFace tok
 ```
 wisper transcribe <path>
 
-  path                     Audio file or folder of audio files
+  path                     Audio or video file, or folder of files
+                           Audio: mp3 wav m4a flac ogg
+                           Video: mp4 mkv mov avi webm m4v flv ts mts m2ts
+                           (video: first audio track extracted automatically)
 
   -o, --output DIR         Output directory (default: same as input)
   -m, --model SIZE         tiny / base / small / medium / large-v3 / large-v3-turbo
@@ -557,11 +560,15 @@ The `--vocab-file` flag takes precedence over the stored config when both are pr
 
 ---
 
-## Supported Audio Formats
+## Supported Formats
 
-`.mp3`, `.wav`, `.m4a`, `.flac`, `.ogg`, `.mp4`
+**Audio:** `.mp3` `.wav` `.m4a` `.flac` `.ogg`
 
-All formats are automatically converted to 16kHz mono WAV internally before processing. Your original files are never modified.
+**Video:** `.mp4` `.m4v` `.mkv` `.mov` `.avi` `.webm` `.flv` `.ts` `.mts` `.m2ts`
+
+Video files are handled by extracting only the **first audio track** (`ffmpeg -map 0:a:0`). This works correctly with multi-track recordings where track 0 is a combined mix — the separate mic/system audio tracks are ignored. Your original files are never modified.
+
+All formats are converted to 16kHz mono WAV internally before transcription.
 
 ---
 

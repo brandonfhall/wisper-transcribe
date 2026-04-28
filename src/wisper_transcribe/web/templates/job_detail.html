@@ -36,6 +36,7 @@
       {% set steps = [("transcribe","T","Transcribe"), ("diarize","D","Diarize"), ("format","F","Format")] %}
       {% if job.post_refine %}{% set steps = steps + [("refine","R","Refine")] %}{% endif %}
       {% if job.post_summarize %}{% set steps = steps + [("summarize","S","Summarize")] %}{% endif %}
+      {% if job.is_video %}{% set steps = [("extract","E","Extract")] + steps %}{% endif %}
     {% elif job.job_type == "refine" %}
       {% set steps = [("refine","R","Refine")] %}
     {% else %}
@@ -144,6 +145,7 @@
   // template always agree.  Order matters: bar slices are equal widths.
   const STEPS = [
     {% if job.job_type == "transcription" %}
+      {% if job.is_video %}'extract',{% endif %}
       'transcribe', 'diarize', 'format',
       {% if job.post_refine %}'refine',{% endif %}
       {% if job.post_summarize %}'summarize',{% endif %}
@@ -207,6 +209,7 @@
     activeIdx = idx;
     setStepActive(STEPS[idx]);
     if (stepLabel) stepLabel.textContent = {
+      extract:    'Extracting audio…',
       transcribe: 'Transcribing…',
       diarize:    'Diarizing…',
       format:     'Formatting…',
@@ -243,7 +246,10 @@
   // ── Phase detection from log lines ────────────────────────────────────────
   function detectPhase(msg) {
     const lower = msg.toLowerCase();
-    if (lower.includes('transcrib') || lower.includes('whisper') || lower.includes('loading model')) {
+    if (lower.includes('extracting audio') || lower.includes('audio extraction')) {
+      const ei = STEPS.indexOf('extract');
+      if (ei >= 0) activateStep(ei);
+    } else if (lower.includes('transcrib') || lower.includes('whisper') || lower.includes('loading model')) {
       activateStep(STEPS.indexOf('transcribe'));
     } else if (lower.includes('diariz') || lower.includes('pyannote') || lower.includes('align')) {
       activateStep(STEPS.indexOf('diarize'));
@@ -282,7 +288,10 @@
       if (pct !== null) {
         // Map to the correct step slice
         let idx = activeIdx;
-        if (lower.includes('transcrib')) {
+        if (lower.includes('extracting audio')) {
+          idx = STEPS.indexOf('extract');
+          if (idx >= 0) activateStep(idx);
+        } else if (lower.includes('transcrib')) {
           idx = STEPS.indexOf('transcribe');
           if (idx >= 0) activateStep(idx);
         } else if (lower.includes('segmentation') || lower.includes('embedding') || lower.includes('clustering')) {

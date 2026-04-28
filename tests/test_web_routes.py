@@ -76,6 +76,27 @@ def test_transcribe_post_queues_job_and_redirects(client, tmp_path):
     assert location.startswith("/transcribe/jobs/")
 
 
+@pytest.mark.parametrize("filename,mime", [
+    ("session.mp4",  "video/mp4"),
+    ("session.mkv",  "video/x-matroska"),
+    ("session.mov",  "video/quicktime"),
+    ("session.webm", "video/webm"),
+])
+def test_transcribe_post_accepts_video_upload(client, tmp_path, filename, mime):
+    """Video files are accepted by the upload route and queued as jobs."""
+    video_file = tmp_path / filename
+    video_file.write_bytes(b"fake video")
+    with open(video_file, "rb") as f:
+        resp = client.post(
+            "/transcribe",
+            files={"file": (filename, f, mime)},
+            data={},
+            follow_redirects=False,
+        )
+    assert resp.status_code == 303
+    assert resp.headers["location"].startswith("/transcribe/jobs/")
+
+
 def test_transcribe_output_dir_field_is_ignored(client, tmp_path):
     """output_dir is no longer a form parameter — posting it must not cause a 422."""
     audio_file = tmp_path / "test.mp3"

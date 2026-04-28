@@ -15,6 +15,24 @@ import pytest
 from click.testing import CliRunner
 
 from wisper_transcribe.cli import main
+# Import these before any autouse patch replaces them in the module namespace.
+from wisper_transcribe.cli import _get_ollama_models as _real_get_ollama_models
+from wisper_transcribe.cli import _get_lmstudio_models as _real_get_lmstudio_models
+
+
+# ---------------------------------------------------------------------------
+# Safety: prevent any test from accidentally launching Ollama or LM Studio.
+# Both _get_ollama_models (subprocess.run ["ollama", "list"]) and
+# _get_lmstudio_models (httpx.get to localhost:1234) hit real processes.
+# Tests that need specific model lists patch these further inside their scope.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def mock_local_llm_queries():
+    """Block all real Ollama/LM Studio queries for every test in this module."""
+    with patch("wisper_transcribe.cli._get_ollama_models", return_value=[]), \
+         patch("wisper_transcribe.cli._get_lmstudio_models", return_value=[]):
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +411,38 @@ def test_transcribe_folder_reports_summary(tmp_path):
     assert "Done" in result.output
 
 
+def test_transcribe_folder_includes_video_files(tmp_path):
+    """Video files in a folder are picked up alongside audio files."""
+    from wisper_transcribe.audio_utils import VIDEO_EXTENSIONS
+
+    (tmp_path / "session.mp3").write_bytes(b"fake audio")
+    (tmp_path / "session.mp4").write_bytes(b"fake video")
+    (tmp_path / "session.mkv").write_bytes(b"fake video")
+    (tmp_path / "notes.txt").write_bytes(b"not media")
+
+    out_md = tmp_path / "session.md"
+    out_md.write_text("# test")
+
+    processed: list[str] = []
+
+    def fake_process(path, **kw):
+        processed.append(path.suffix.lower())
+        return out_md
+
+    with patch("wisper_transcribe.pipeline.process_file", side_effect=fake_process), \
+         patch("wisper_transcribe.pipeline.process_folder") as mock_folder:
+        mock_folder.side_effect = None
+        # Drive folder logic directly to avoid process_folder mock swallowing it
+        from wisper_transcribe.cli import _audio_extensions
+        found = {f.suffix.lower() for f in tmp_path.iterdir()
+                 if f.suffix.lower() in _audio_extensions()}
+
+    assert ".mp3" in found
+    assert ".mp4" in found
+    assert ".mkv" in found
+    assert ".txt" not in found
+
+
 # ---------------------------------------------------------------------------
 # wisper config llm (interactive wizard)
 # ---------------------------------------------------------------------------
@@ -502,21 +552,44 @@ def test_get_ollama_models_parses_list_output():
         "gemma4:e4b              c6eb396dbd59    9.6 GB    13 days ago\n"
         "mistral-nemo:latest     e7e06d107c6c    7.1 GB    6 days ago\n"
     )
+    # subprocess is imported lazily inside the function, so patch at the module level
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=fake_stdout)
-        from wisper_transcribe.cli import _get_ollama_models
-        models = _get_ollama_models()
+        models = _real_get_ollama_models()
     assert models == [("gemma4:e4b", "9.6 GB"), ("mistral-nemo:latest", "7.1 GB")]
 
 
 def test_get_ollama_models_returns_empty_on_failure():
     """_get_ollama_models returns [] when ollama is missing or exits non-zero."""
-    from wisper_transcribe.cli import _get_ollama_models
     with patch("subprocess.run", side_effect=FileNotFoundError("ollama not found")):
-        assert _get_ollama_models() == []
+        assert _real_get_ollama_models() == []
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=1, stdout="")
-        assert _get_ollama_models() == []
+        assert _real_get_ollama_models() == []
+
+
+def test_get_lmstudio_models_parses_response():
+    """_get_lmstudio_models parses the /v1/models JSON into (id, "") pairs."""
+    fake_response = MagicMock()
+    fake_response.raise_for_status = MagicMock()
+    fake_response.json.return_value = {
+        "data": [
+            {"id": "lmstudio-community/gemma-3-12b"},
+            {"id": "mistral-7b-instruct"},
+        ]
+    }
+    # httpx is imported lazily inside the function, so patch at the httpx module level
+    with patch("httpx.get", return_value=fake_response):
+        models = _real_get_lmstudio_models()
+    assert models == [("lmstudio-community/gemma-3-12b", ""), ("mistral-7b-instruct", "")]
+
+
+def test_get_lmstudio_models_returns_empty_on_failure():
+    """_get_lmstudio_models returns [] when LM Studio is unreachable."""
+    with patch("httpx.get", side_effect=Exception("connection refused")):
+        assert _real_get_lmstudio_models() == []
+    with patch("httpx.get", side_effect=Exception("timeout")):
+        assert _real_get_lmstudio_models() == []
 
 
 def test_config_llm_rejects_bad_provider(tmp_path, monkeypatch):

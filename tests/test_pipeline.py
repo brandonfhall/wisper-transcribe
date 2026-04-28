@@ -152,6 +152,30 @@ def test_process_file_frontmatter_metadata(
 @patch("wisper_transcribe.pipeline.validate_audio")
 @patch("wisper_transcribe.pipeline.convert_to_wav")
 @patch("wisper_transcribe.pipeline.get_duration", return_value=600.0)
+@patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
+def test_process_file_video_input(
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg, tmp_path
+):
+    """process_file accepts a video file path; convert_to_wav is called on it."""
+    video = tmp_path / "session.mp4"
+    video.write_bytes(b"fake mp4")
+    wav = tmp_path / "converted.wav"
+    wav.write_bytes(b"fake wav")
+    mock_convert.return_value = wav
+
+    from wisper_transcribe.pipeline import process_file
+
+    out = process_file(video, output_dir=tmp_path, device="cpu", model_size="tiny", no_diarize=True)
+
+    mock_convert.assert_called_once_with(video)
+    assert out.exists()
+    assert out.suffix == ".md"
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=600.0)
 @patch("wisper_transcribe.pipeline.transcribe")
 @patch("wisper_transcribe.pipeline.get_hf_token", return_value="fake-token")
 @patch("wisper_transcribe.diarizer.diarize", return_value=[])
