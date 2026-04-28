@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Resp
 
 from ..jobs import COMPLETED, FAILED
 from . import get_queue as _get_queue, templates
+from wisper_transcribe.campaign_manager import _validate_campaign_slug as _validate_campaign_slug_cm, load_campaigns
 
 router = APIRouter(prefix="/transcribe")
 
@@ -65,7 +66,6 @@ def _default_output_dir() -> Path:
 @router.get("", response_class=HTMLResponse)
 async def transcribe_form(request: Request) -> HTMLResponse:
     """Render the upload / options form."""
-    from wisper_transcribe.campaign_manager import load_campaigns
     campaigns = load_campaigns()
     return templates.TemplateResponse(
         request,
@@ -131,8 +131,7 @@ async def start_transcribe(
     # Validate campaign slug if provided — use server-side object for redirect URL.
     safe_campaign: Optional[str] = None
     if campaign and campaign.strip():
-        from wisper_transcribe.campaign_manager import _validate_campaign_slug
-        safe_campaign = _validate_campaign_slug(campaign.strip())
+        safe_campaign = _validate_campaign_slug_cm(campaign.strip())
         if safe_campaign is None:
             return RedirectResponse(url="/transcribe?error=invalid_campaign", status_code=303)
 
