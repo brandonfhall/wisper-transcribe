@@ -39,6 +39,7 @@ dependencies = [
 dev = [
     "pytest-cov",
     "httpx>=0.28.1",         # async HTTP client for SSE streaming tests
+    "isort",
 ]
 macos = [
     "mlx-whisper",         # Apple Silicon GPU/ANE Whisper backend (macOS only)
