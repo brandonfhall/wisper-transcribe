@@ -2,8 +2,9 @@
 .SYNOPSIS
     First-time setup for wisper-transcribe on Windows with CUDA support.
 .DESCRIPTION
-    Creates a virtual environment, installs the package, installs PyTorch with
-    CUDA 12.4 support (required for GPU acceleration), and checks ffmpeg.
+    Creates a virtual environment, installs PyTorch (CUDA or CPU build),
+    then installs the package so that all ML dependencies resolve against
+    the correct torch variant from the start.
 .EXAMPLE
     .\setup.ps1
 #>
@@ -14,6 +15,41 @@ function Write-Step($msg) { Write-Host "`n>> $msg" -ForegroundColor Cyan }
 function Write-OK($msg)   { Write-Host "   OK  : $msg" -ForegroundColor Green }
 function Write-Warn($msg) { Write-Host "   WARN: $msg" -ForegroundColor Yellow }
 function Write-Fail($msg) { Write-Host "   FAIL: $msg" -ForegroundColor Red; exit 1 }
+
+# Runs a pip command with a Write-Progress bar so the user can see the install is running.
+# Captures stdout/stderr; on failure prints the captured output then exits.
+function Invoke-PipWithProgress {
+    param(
+        [string]$Activity,
+        [string[]]$PipArgs
+    )
+    $tmpOut = [System.IO.Path]::GetTempFileName()
+    $tmpErr = [System.IO.Path]::GetTempFileName()
+    $resolvedPip = (Resolve-Path $pip).Path
+    $proc = Start-Process -FilePath $resolvedPip `
+        -ArgumentList $PipArgs `
+        -RedirectStandardOutput $tmpOut `
+        -RedirectStandardError  $tmpErr `
+        -PassThru -NoNewWindow
+    $i = 0
+    while (-not $proc.HasExited) {
+        # Crawl 0.5 ppt/s → reaches 90 % in ~3 min, then holds until done
+        $pct = [Math]::Min(90, [Math]::Floor($i * 0.5))
+        Write-Progress -Activity $Activity -Status "This may take several minutes..." -PercentComplete $pct
+        $i++
+        Start-Sleep -Milliseconds 1000
+    }
+    Write-Progress -Activity $Activity -Completed
+    if ($proc.ExitCode -ne 0) {
+        $out = Get-Content $tmpOut -Raw -ErrorAction SilentlyContinue
+        $err = Get-Content $tmpErr -Raw -ErrorAction SilentlyContinue
+        if ($out) { Write-Host $out }
+        if ($err) { Write-Host $err -ForegroundColor Red }
+        Remove-Item $tmpOut, $tmpErr -ErrorAction SilentlyContinue
+        Write-Fail "$Activity failed (exit code $($proc.ExitCode))"
+    }
+    Remove-Item $tmpOut, $tmpErr -ErrorAction SilentlyContinue
+}
 
 Write-Host ""
 Write-Host "wisper-transcribe setup (Windows)" -ForegroundColor White
@@ -44,24 +80,33 @@ if (-not (Test-Path ".venv")) {
 $pip    = ".\.venv\Scripts\pip.exe"
 $python = ".\.venv\Scripts\python.exe"
 
-# ── Install package ───────────────────────────────────────────────────────────
-Write-Step "Installing wisper-transcribe..."
-& $pip install -e . -q
-Write-OK "wisper-transcribe installed"
-
 # ── PyTorch installation ─────────────────────────────────────────────────────
-# Check if a CUDA-capable GPU is available via nvidia-smi or torch
+# Install PyTorch BEFORE the package. If torch is installed after, pip pulls
+# the CPU-only PyPI build as a transitive dependency first, and packages like
+# faster-whisper and torchaudio bind to that build. A subsequent force-reinstall
+# of the CUDA wheels replaces torch itself but leaves those packages referencing
+# stale internals — causing "module 'torch' has no attribute '_utils'" at runtime.
+# Installing the correct build first means pip reuses it for all dependents.
 $hasNvidia = & nvidia-smi --list-gpus 2>$null
 if ($null -eq $hasNvidia) { $hasNvidia = $false }
 
 if ($hasNvidia) {
-    Write-Step "NVIDIA GPU detected. Installing PyTorch with CUDA 12.6 support..."
-    Write-Host "   (default pip install gets CPU-only PyTorch — this installs the GPU build)" -ForegroundColor Gray
-    & $pip install "torch>=2.8.0" "torchaudio>=2.8.0" --index-url https://download.pytorch.org/whl/cu126 --force-reinstall -q
+    Write-Step "NVIDIA GPU detected — installing PyTorch with CUDA 12.6 first (~2 GB)..."
+    Write-Host "   (PyPI torch is CPU-only; installing the GPU build before the package)" -ForegroundColor Gray
+    Invoke-PipWithProgress "Downloading PyTorch + CUDA 12.6 (~2 GB)" @(
+        "install", "torch>=2.8.0", "torchaudio>=2.8.0",
+        "--index-url", "https://download.pytorch.org/whl/cu126", "-q"
+    )
 } else {
-    Write-Step "No NVIDIA GPU detected. Installing PyTorch (CPU build)..."
-    & $pip install "torch>=2.8.0" "torchaudio>=2.8.0" -q
+    Write-Step "No NVIDIA GPU detected — installing PyTorch (CPU build)..."
+    Invoke-PipWithProgress "Installing PyTorch (CPU build)" @("install", "torch>=2.8.0", "torchaudio>=2.8.0", "-q")
 }
+
+# ── Install package ───────────────────────────────────────────────────────────
+# torch is already present; pip will not pull the CPU fallback from PyPI.
+Write-Step "Installing wisper-transcribe (this may take several minutes)..."
+Invoke-PipWithProgress "Installing wisper-transcribe" @("install", "-e", ".", "-q")
+Write-OK "wisper-transcribe installed"
 
 $cudaAvailable = & $python -c "import torch; print(torch.cuda.is_available())"
 if ($cudaAvailable -eq "True") {
@@ -89,26 +134,113 @@ if (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
     }
 }
 
-# ── Optional cloud LLM extras ────────────────────────────────────────────────
-Write-Step "Optional: cloud LLM extras (wisper refine / wisper summarize)"
+# ── LLM Post-processing setup ─────────────────────────────────────────────────
+$wisper = ".\.venv\Scripts\wisper.exe"
+
+Write-Step "LLM Post-processing setup (wisper refine / wisper summarize)"
 Write-Host ""
-Write-Host "   wisper refine and wisper summarize use an LLM to clean up transcripts" -ForegroundColor Gray
-Write-Host "   and generate campaign notes. Ollama (local) works out of the box." -ForegroundColor Gray
-Write-Host "   Install an extra only if you want to use a cloud provider." -ForegroundColor Gray
+Write-Host "   Vocabulary correction and campaign notes need an LLM provider." -ForegroundColor Gray
+Write-Host "   Local providers (Ollama / LM Studio) need no API key." -ForegroundColor Gray
 Write-Host ""
+
+# Probe Ollama and LM Studio
+$ollamaRunning = $false; $ollamaModels = @()
+try {
+    $r = Invoke-RestMethod -Uri "http://localhost:11434/api/tags" -TimeoutSec 2 -ErrorAction Stop
+    $ollamaRunning = $true
+    $ollamaModels  = @($r.models | ForEach-Object { $_.name })
+} catch {}
+
+$lmRunning = $false; $lmModels = @()
+try {
+    $r = Invoke-RestMethod -Uri "http://localhost:1234/v1/models" -TimeoutSec 2 -ErrorAction Stop
+    $lmRunning = $true
+    $lmModels  = @($r.data | ForEach-Object { $_.id })
+} catch {}
+
+$ollamaTag = if ($ollamaRunning) { "  [running — $($ollamaModels.Count) model(s) available]" } else { "  [not running]" }
+$lmTag     = if ($lmRunning)     { "  [running — $($lmModels.Count) model(s) loaded]"        } else { "  [not running]" }
+
+Write-Host "   LOCAL — no API key needed:"
+Write-Host "     o) Ollama     — localhost:11434$ollamaTag"
+Write-Host "     l) LM Studio  — localhost:1234$lmTag"
+Write-Host ""
+Write-Host "   CLOUD — requires API key:"
 Write-Host "     a) Anthropic (Claude)"
 Write-Host "     b) OpenAI (GPT)"
 Write-Host "     c) Google (Gemini)"
-Write-Host "     d) All three"
-Write-Host "     s) Skip (use Ollama or configure later)"
+Write-Host "     d) All three cloud SDKs"
 Write-Host ""
-$LLMChoice = Read-Host "   Choice [a/b/c/d/s]"
+Write-Host "     s) Skip — configure later with: wisper config llm"
+Write-Host ""
+
+# Let user pick a model from a list; returns model name or $null
+function Invoke-ModelPicker($provider, $models) {
+    if ($models.Count -eq 0) {
+        Write-Warn "$provider is running but has no models — load one then run: wisper config llm"
+        return $null
+    }
+    Write-Host ""
+    Write-Host "   Available $provider models:" -ForegroundColor Gray
+    for ($i = 0; $i -lt $models.Count; $i++) {
+        $hint = if ($i -eq 0) { "  <- suggested" } else { "" }
+        Write-Host "     $($i + 1)) $($models[$i])$hint"
+    }
+    Write-Host ""
+    $pick = Read-Host "   Pick a number [1] or Enter to configure later"
+    if ([string]::IsNullOrWhiteSpace($pick)) { $pick = "1" }
+    if ($pick -match '^\d+$') {
+        $idx = [int]$pick - 1
+        if ($idx -ge 0 -and $idx -lt $models.Count) { return $models[$idx] }
+    }
+    return $null
+}
+
+$LLMChoice = Read-Host "   Choice [o/l/a/b/c/d/s]"
 switch ($LLMChoice.ToLower()) {
-    "a" { & $pip install -e ".[llm-anthropic]" -q; Write-OK "anthropic SDK installed" }
-    "b" { & $pip install -e ".[llm-openai]"    -q; Write-OK "openai SDK installed" }
-    "c" { & $pip install -e ".[llm-google]"    -q; Write-OK "google-genai SDK installed" }
-    "d" { & $pip install -e ".[llm-all]"       -q; Write-OK "all LLM SDKs installed" }
-    default { Write-OK "Skipped — use 'wisper config llm' to set up a provider at any time" }
+    "o" {
+        if ($ollamaRunning) {
+            $model = Invoke-ModelPicker "Ollama" $ollamaModels
+            if ($model) {
+                & $wisper config set llm_provider ollama
+                & $wisper config set llm_model $model
+                Write-OK "Ollama configured — model: $model"
+            } else {
+                Write-OK "Ollama selected — run 'wisper config llm' to set a model"
+            }
+        } else {
+            Write-Host ""
+            Write-Host "   Ollama is not running. To use it:" -ForegroundColor Gray
+            Write-Host "     1. Install from https://ollama.com" -ForegroundColor Gray
+            Write-Host "     2. Pull a model: ollama pull llama3.2" -ForegroundColor Gray
+            Write-Host "     3. Configure:    wisper config llm" -ForegroundColor Gray
+            Write-OK "Skipped — configure later with 'wisper config llm'"
+        }
+    }
+    "l" {
+        if ($lmRunning) {
+            $model = Invoke-ModelPicker "LM Studio" $lmModels
+            if ($model) {
+                & $wisper config set llm_provider lmstudio
+                & $wisper config set llm_model $model
+                Write-OK "LM Studio configured — model: $model"
+            } else {
+                Write-OK "LM Studio selected — run 'wisper config llm' to set a model"
+            }
+        } else {
+            Write-Host ""
+            Write-Host "   LM Studio is not running. To use it:" -ForegroundColor Gray
+            Write-Host "     1. Install from https://lmstudio.ai" -ForegroundColor Gray
+            Write-Host "     2. Download a model and start the local server" -ForegroundColor Gray
+            Write-Host "     3. Configure: wisper config llm" -ForegroundColor Gray
+            Write-OK "Skipped — configure later with 'wisper config llm'"
+        }
+    }
+    "a" { Invoke-PipWithProgress "Installing Anthropic SDK"    @("install", "-e", ".[llm-anthropic]", "-q"); Write-OK "anthropic SDK installed" }
+    "b" { Invoke-PipWithProgress "Installing OpenAI SDK"       @("install", "-e", ".[llm-openai]",    "-q"); Write-OK "openai SDK installed" }
+    "c" { Invoke-PipWithProgress "Installing Google Genai SDK" @("install", "-e", ".[llm-google]",    "-q"); Write-OK "google-genai SDK installed" }
+    "d" { Invoke-PipWithProgress "Installing all LLM SDKs"    @("install", "-e", ".[llm-all]",        "-q"); Write-OK "all LLM SDKs installed" }
+    default { Write-OK "Skipped — configure later with 'wisper config llm'" }
 }
 
 # ── Done ──────────────────────────────────────────────────────────────────────

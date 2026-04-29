@@ -18,6 +18,34 @@ ok()   { echo -e "   ${GREEN}OK  : $1${NC}"; }
 warn() { echo -e "   ${YELLOW}WARN: $1${NC}"; }
 fail() { echo -e "   ${RED}FAIL: $1${NC}"; exit 1; }
 
+# Runs a pip install in the background while showing a spinner.
+# Usage: pip_with_spinner "Description" install -e . -q
+# Captures output; on failure prints it then exits.
+pip_with_spinner() {
+    local desc="$1"; shift
+    local log; log=$(mktemp)
+    "$PIP" "$@" > "$log" 2>&1 &
+    local pid=$!
+    local spinstr='|/-\'
+    local i=0
+    printf "   "
+    while kill -0 "$pid" 2>/dev/null; do
+        local spin_char="${spinstr:$((i % 4)):1}"
+        printf "\r   %s  %s..." "$spin_char" "$desc"
+        sleep 0.4
+        i=$((i + 1))
+    done
+    printf "\r   \033[K"   # clear spinner line
+    wait "$pid"
+    local exit_code=$?
+    if [ "$exit_code" -ne 0 ]; then
+        cat "$log"
+        rm -f "$log"
+        fail "$desc failed (exit code $exit_code)"
+    fi
+    rm -f "$log"
+}
+
 echo ""
 echo "wisper-transcribe setup (Mac/Linux)"
 echo "====================================="
@@ -49,8 +77,8 @@ PIP=".venv/bin/pip"
 PYTHON=".venv/bin/python"
 
 # ── Install package ───────────────────────────────────────────────────────────
-step "Installing wisper-transcribe..."
-"$PIP" install -e . -q
+step "Installing wisper-transcribe (this may take several minutes)..."
+pip_with_spinner "Installing wisper-transcribe" install -e . -q
 ok "wisper-transcribe installed"
 
 # ── ffmpeg ────────────────────────────────────────────────────────────────────
@@ -91,26 +119,137 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     fi
 fi
 
-# ── Optional cloud LLM extras ─────────────────────────────────────────────
-step "Optional: cloud LLM extras (wisper refine / wisper summarize)"
+# ── LLM Post-processing setup ─────────────────────────────────────────────────
+WISPER=".venv/bin/wisper"
+
+step "LLM Post-processing setup (wisper refine / wisper summarize)"
 echo ""
-echo "   wisper refine and wisper summarize use an LLM to clean up transcripts"
-echo "   and generate campaign notes. Ollama (local) works out of the box."
-echo "   Install an extra only if you want to use a cloud provider."
+echo -e "   ${GRAY}Vocabulary correction and campaign notes need an LLM provider.${NC}"
+echo -e "   ${GRAY}Local providers (Ollama / LM Studio) need no API key.${NC}"
 echo ""
-echo "     a) Anthropic (Claude)  →  pip install -e '.[llm-anthropic]'"
-echo "     b) OpenAI (GPT)        →  pip install -e '.[llm-openai]'"
-echo "     c) Google (Gemini)     →  pip install -e '.[llm-google]'"
-echo "     d) All three           →  pip install -e '.[llm-all]'"
-echo "     s) Skip (use Ollama or configure later)"
+
+# Probe Ollama — outputs "count\nmodel1\nmodel2\n..." or nothing
+OLLAMA_RUNNING=false; OLLAMA_MODELS=""
+_ollama_raw=$(curl -sf --max-time 2 http://localhost:11434/api/tags 2>/dev/null) || true
+if [ -n "$_ollama_raw" ]; then
+    _parsed=$(echo "$_ollama_raw" | python3 -c "
+import json,sys
+ms=[m['name'] for m in json.load(sys.stdin).get('models',[])]
+print(len(ms))
+for m in ms: print(m)
+" 2>/dev/null) || true
+    if [ -n "$_parsed" ]; then
+        OLLAMA_RUNNING=true
+        _ollama_count=$(echo "$_parsed" | head -1)
+        OLLAMA_MODELS=$(echo "$_parsed" | tail -n +2)
+        ollama_tag="${GREEN}[running — ${_ollama_count} model(s) available]${NC}"
+    fi
+fi
+$OLLAMA_RUNNING || ollama_tag="${GRAY}[not running]${NC}"
+
+# Probe LM Studio
+LM_RUNNING=false; LM_MODELS=""
+_lm_raw=$(curl -sf --max-time 2 http://localhost:1234/v1/models 2>/dev/null) || true
+if [ -n "$_lm_raw" ]; then
+    _parsed=$(echo "$_lm_raw" | python3 -c "
+import json,sys
+ms=[m['id'] for m in json.load(sys.stdin).get('data',[])]
+print(len(ms))
+for m in ms: print(m)
+" 2>/dev/null) || true
+    if [ -n "$_parsed" ]; then
+        LM_RUNNING=true
+        _lm_count=$(echo "$_parsed" | head -1)
+        LM_MODELS=$(echo "$_parsed" | tail -n +2)
+        lm_tag="${GREEN}[running — ${_lm_count} model(s) loaded]${NC}"
+    fi
+fi
+$LM_RUNNING || lm_tag="${GRAY}[not running]${NC}"
+
+echo    "   LOCAL — no API key needed:"
+echo -e "     o) Ollama     — localhost:11434  $ollama_tag"
+echo -e "     l) LM Studio  — localhost:1234   $lm_tag"
 echo ""
-read -r -p "   Choice [a/b/c/d/s]: " LLM_CHOICE
+echo    "   CLOUD — requires API key:"
+echo    "     a) Anthropic (Claude)"
+echo    "     b) OpenAI (GPT)"
+echo    "     c) Google (Gemini)"
+echo    "     d) All three cloud SDKs"
+echo ""
+echo    "     s) Skip — configure later with: wisper config llm"
+echo ""
+
+# pick_model <provider> <newline-separated model list>
+# Sets PICKED_MODEL to the chosen model name, or "" if skipped.
+pick_model() {
+    local provider="$1" model_list="$2"
+    PICKED_MODEL=""
+    if [ -z "$model_list" ]; then
+        warn "$provider is running but has no models — load one then run: wisper config llm"
+        return
+    fi
+    echo ""
+    echo -e "   ${GRAY}Available $provider models:${NC}"
+    local i=1
+    while IFS= read -r m; do
+        local hint=""; [ $i -eq 1 ] && hint="  <- suggested"
+        echo "     $i) $m$hint"
+        i=$((i + 1))
+    done <<< "$model_list"
+    echo ""
+    read -r -p "   Pick a number [1] or Enter to configure later: " _pick
+    [ -z "$_pick" ] && _pick="1"
+    if [[ "$_pick" =~ ^[0-9]+$ ]]; then
+        local sel; sel=$(echo "$model_list" | sed -n "${_pick}p")
+        [ -n "$sel" ] && PICKED_MODEL="$sel"
+    fi
+}
+
+read -r -p "   Choice [o/l/a/b/c/d/s]: " LLM_CHOICE
 case "$(echo "$LLM_CHOICE" | tr '[:upper:]' '[:lower:]')" in
-    a) "$PIP" install -e ".[llm-anthropic]" -q && ok "anthropic SDK installed" ;;
-    b) "$PIP" install -e ".[llm-openai]"    -q && ok "openai SDK installed" ;;
-    c) "$PIP" install -e ".[llm-google]"    -q && ok "google-genai SDK installed" ;;
-    d) "$PIP" install -e ".[llm-all]"       -q && ok "all LLM SDKs installed" ;;
-    *) ok "Skipped — use 'wisper config llm' to set up a provider at any time" ;;
+    o)
+        if $OLLAMA_RUNNING; then
+            pick_model "Ollama" "$OLLAMA_MODELS"
+            if [ -n "$PICKED_MODEL" ]; then
+                "$WISPER" config set llm_provider ollama
+                "$WISPER" config set llm_model "$PICKED_MODEL"
+                ok "Ollama configured — model: $PICKED_MODEL"
+            else
+                ok "Ollama selected — run 'wisper config llm' to set a model"
+            fi
+        else
+            echo ""
+            echo -e "   ${GRAY}Ollama is not running. To use it:${NC}"
+            echo -e "   ${GRAY}  1. Install from https://ollama.com${NC}"
+            echo -e "   ${GRAY}  2. Pull a model: ollama pull llama3.2${NC}"
+            echo -e "   ${GRAY}  3. Configure:    wisper config llm${NC}"
+            ok "Skipped — configure later with 'wisper config llm'"
+        fi
+        ;;
+    l)
+        if $LM_RUNNING; then
+            pick_model "LM Studio" "$LM_MODELS"
+            if [ -n "$PICKED_MODEL" ]; then
+                "$WISPER" config set llm_provider lmstudio
+                "$WISPER" config set llm_model "$PICKED_MODEL"
+                ok "LM Studio configured — model: $PICKED_MODEL"
+            else
+                ok "LM Studio selected — run 'wisper config llm' to set a model"
+            fi
+        else
+            echo ""
+            echo -e "   ${GRAY}LM Studio is not running. To use it:${NC}"
+            echo -e "   ${GRAY}  1. Install from https://lmstudio.ai${NC}"
+            echo -e "   ${GRAY}  2. Download a model and start the local server${NC}"
+            echo -e "   ${GRAY}  3. Configure: wisper config llm${NC}"
+            ok "Skipped — configure later with 'wisper config llm'"
+        fi
+        ;;
+    a) pip_with_spinner "Installing Anthropic SDK"    install -e ".[llm-anthropic]" -q && ok "anthropic SDK installed" ;;
+    b) pip_with_spinner "Installing OpenAI SDK"       install -e ".[llm-openai]"    -q && ok "openai SDK installed" ;;
+    c) pip_with_spinner "Installing Google Genai SDK" install -e ".[llm-google]"    -q && ok "google-genai SDK installed" ;;
+    d) pip_with_spinner "Installing all LLM SDKs"    install -e ".[llm-all]"        -q && ok "all LLM SDKs installed" ;;
+    *) ok "Skipped — configure later with 'wisper config llm'" ;;
 esac
 
 # ── Done ──────────────────────────────────────────────────────────────────────
