@@ -2,8 +2,9 @@
 .SYNOPSIS
     First-time setup for wisper-transcribe on Windows with CUDA support.
 .DESCRIPTION
-    Creates a virtual environment, installs the package, installs PyTorch with
-    CUDA 12.4 support (required for GPU acceleration), and checks ffmpeg.
+    Creates a virtual environment, installs PyTorch (CUDA or CPU build),
+    then installs the package so that all ML dependencies resolve against
+    the correct torch variant from the start.
 .EXAMPLE
     .\setup.ps1
 #>
@@ -79,28 +80,33 @@ if (-not (Test-Path ".venv")) {
 $pip    = ".\.venv\Scripts\pip.exe"
 $python = ".\.venv\Scripts\python.exe"
 
-# ── Install package ───────────────────────────────────────────────────────────
-Write-Step "Installing wisper-transcribe (this may take several minutes)..."
-Invoke-PipWithProgress "Installing wisper-transcribe" @("install", "-e", ".", "-q")
-Write-OK "wisper-transcribe installed"
-
 # ── PyTorch installation ─────────────────────────────────────────────────────
-# Check if a CUDA-capable GPU is available via nvidia-smi or torch
+# Install PyTorch BEFORE the package. If torch is installed after, pip pulls
+# the CPU-only PyPI build as a transitive dependency first, and packages like
+# faster-whisper and torchaudio bind to that build. A subsequent force-reinstall
+# of the CUDA wheels replaces torch itself but leaves those packages referencing
+# stale internals — causing "module 'torch' has no attribute '_utils'" at runtime.
+# Installing the correct build first means pip reuses it for all dependents.
 $hasNvidia = & nvidia-smi --list-gpus 2>$null
 if ($null -eq $hasNvidia) { $hasNvidia = $false }
 
 if ($hasNvidia) {
-    Write-Step "NVIDIA GPU detected. Installing PyTorch with CUDA 12.6 support..."
-    Write-Host "   (default pip install gets CPU-only PyTorch — this installs the GPU build, ~2 GB)" -ForegroundColor Gray
+    Write-Step "NVIDIA GPU detected — installing PyTorch with CUDA 12.6 first (~2 GB)..."
+    Write-Host "   (PyPI torch is CPU-only; installing the GPU build before the package)" -ForegroundColor Gray
     Invoke-PipWithProgress "Downloading PyTorch + CUDA 12.6 (~2 GB)" @(
         "install", "torch>=2.8.0", "torchaudio>=2.8.0",
-        "--index-url", "https://download.pytorch.org/whl/cu126",
-        "--force-reinstall", "-q"
+        "--index-url", "https://download.pytorch.org/whl/cu126", "-q"
     )
 } else {
-    Write-Step "No NVIDIA GPU detected. Installing PyTorch (CPU build)..."
+    Write-Step "No NVIDIA GPU detected — installing PyTorch (CPU build)..."
     Invoke-PipWithProgress "Installing PyTorch (CPU build)" @("install", "torch>=2.8.0", "torchaudio>=2.8.0", "-q")
 }
+
+# ── Install package ───────────────────────────────────────────────────────────
+# torch is already present; pip will not pull the CPU fallback from PyPI.
+Write-Step "Installing wisper-transcribe (this may take several minutes)..."
+Invoke-PipWithProgress "Installing wisper-transcribe" @("install", "-e", ".", "-q")
+Write-OK "wisper-transcribe installed"
 
 $cudaAvailable = & $python -c "import torch; print(torch.cuda.is_available())"
 if ($cudaAvailable -eq "True") {
