@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Resp
 
 from ..jobs import COMPLETED, FAILED
 from . import get_queue as _get_queue, templates
+from wisper_transcribe.campaign_manager import _validate_campaign_slug as _validate_campaign_slug_cm, load_campaigns
 
 router = APIRouter(prefix="/transcribe")
 
@@ -65,10 +66,11 @@ def _default_output_dir() -> Path:
 @router.get("", response_class=HTMLResponse)
 async def transcribe_form(request: Request) -> HTMLResponse:
     """Render the upload / options form."""
+    campaigns = load_campaigns()
     return templates.TemplateResponse(
         request,
         "transcribe.html",
-        {"request": request},
+        {"request": request, "campaigns": campaigns},
     )
 
 
@@ -89,6 +91,7 @@ async def start_transcribe(
     initial_prompt: Annotated[Optional[str], Form()] = None,
     post_refine: Annotated[Optional[str], Form()] = None,
     post_summarize: Annotated[Optional[str], Form()] = None,
+    campaign: Annotated[Optional[str], Form()] = None,
 ) -> RedirectResponse:
     """Accept an uploaded audio file, save it to a temp location, enqueue job."""
     # Save uploaded file to a persistent temp location (job must outlive request)
@@ -125,6 +128,13 @@ async def start_transcribe(
     # meaningful name instead of a temp-file UUID.
     original_stem = Path(file.filename or "upload").stem
 
+    # Validate campaign slug if provided — use server-side object for redirect URL.
+    safe_campaign: Optional[str] = None
+    if campaign and campaign.strip():
+        safe_campaign = _validate_campaign_slug_cm(campaign.strip())
+        if safe_campaign is None:
+            return RedirectResponse(url="/transcribe?error=invalid_campaign", status_code=303)
+
     queue = _get_queue(request)
     job = queue.submit(
         input_path=tmp.name,
@@ -144,6 +154,7 @@ async def start_transcribe(
         enroll_speakers=False,  # Web enrollment is post-job wizard
         post_refine=(post_refine == "1"),
         post_summarize=(post_summarize == "1"),
+        campaign=safe_campaign,
     )
 
     return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)

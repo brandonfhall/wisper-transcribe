@@ -321,6 +321,8 @@ wisper transcribe <path>
   --overwrite              Re-process files that already have output
   --workers INT            Parallel workers for folder processing — CPU only;
                            clamped to 1 on GPU (default: 1)
+  --campaign SLUG          Restrict speaker matching to this campaign's roster.
+                           Run `wisper campaigns list` to see available slugs.
   --verbose                Show detailed progress; surfaces ML library log output
                            (pyannote, faster-whisper) on the console at DEBUG level
   --debug                  Write a full timestamped log to ./logs/wisper_<timestamp>.log
@@ -344,8 +346,35 @@ wisper speakers list                    # show all enrolled profiles
 wisper speakers remove "Alice"          # delete a profile
 wisper speakers rename "Alice" "Alicia" # rename a profile
 wisper speakers reset                   # delete ALL profiles and embeddings (with confirmation)
-wisper speakers test session03.mp3      # preview match results without writing output
+wisper speakers test session03.mp3                         # preview match results without writing output
+wisper speakers test session03.mp3 --campaign d-d-mondays  # restrict to campaign roster
 ```
+
+### `wisper campaigns`
+
+Campaigns let you track multiple games with separate player rosters. Speaker voice embeddings stay global — adding a player to a second campaign reuses their existing voice profile with no re-enrollment required.
+
+```bash
+wisper campaigns list                                    # show all campaigns
+wisper campaigns create "D&D Mondays"                   # create a campaign (prints the slug)
+wisper campaigns show d-d-mondays                       # roster table with roles/characters
+wisper campaigns add-member d-d-mondays alice --role DM # add a player (must be enrolled)
+wisper campaigns add-member d-d-mondays bob --role Player --character "Theron"
+wisper campaigns remove-member d-d-mondays charlie      # remove from roster only (keeps voice profile)
+wisper campaigns delete d-d-mondays                     # delete campaign (with confirmation)
+```
+
+**Scoping transcription to a campaign:**
+
+```bash
+wisper transcribe session12.mp3 --campaign d-d-mondays --num-speakers 5
+```
+
+With `--campaign`, speaker matching is restricted to that campaign's enrolled members — players from other campaigns won't appear in the output. Omitting `--campaign` uses all enrolled profiles as before.
+
+**Voice transfer between campaigns:** Because embeddings are stored globally, adding an existing speaker profile to a new campaign automatically gives that campaign the benefit of all previously recorded voice data. No re-enrollment needed.
+
+---
 
 ### `wisper fix`
 

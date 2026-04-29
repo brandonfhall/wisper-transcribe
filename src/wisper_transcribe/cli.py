@@ -49,6 +49,8 @@ def main():
 @click.option("--verbose", is_flag=True, default=False, help="Show detailed progress")
 @click.option("--debug", is_flag=True, default=False,
               help="Write full debug log to ./logs/wisper_<timestamp>.log")
+@click.option("--campaign", default=None,
+              help="Scope speaker matching to this campaign's roster (slug, e.g. dnd-mondays)")
 def transcribe(
     path: Path,
     output_dir: Optional[Path],
@@ -70,6 +72,7 @@ def transcribe(
     workers: int,
     verbose: bool,
     debug: bool,
+    campaign: Optional[str],
 ):
     """Transcribe an audio file (or folder of files) to markdown."""
     if debug or verbose:
@@ -104,6 +107,7 @@ def transcribe(
         vad_filter=vad,
         initial_prompt=initial_prompt,
         hotwords=hotwords,
+        campaign=campaign,
     )
 
     if path.is_dir():
@@ -681,7 +685,8 @@ def speakers_rename(old_name: str, new_name: str):
 @speakers.command("test")
 @click.argument("audio", type=click.Path(exists=True, path_type=Path))
 @click.option("-n", "--num-speakers", default=None, type=int)
-def speakers_test(audio: Path, num_speakers: Optional[int]):
+@click.option("--campaign", default=None, help="Scope matching to this campaign's roster")
+def speakers_test(audio: Path, num_speakers: Optional[int], campaign: Optional[str]):
     """Show speaker matching results for an audio file without writing output."""
     from .audio_utils import convert_to_wav
     from .config import get_device, get_hf_token, load_config
@@ -694,8 +699,19 @@ def speakers_test(audio: Path, num_speakers: Optional[int]):
 
     wav_path = convert_to_wav(audio)
     diarization = diarize(wav_path, hf_token=hf_token, device=device, num_speakers=num_speakers)
+
+    profile_filter = None
+    if campaign:
+        from .campaign_manager import _validate_campaign_slug, get_campaign_profile_keys
+        safe = _validate_campaign_slug(campaign)
+        if safe is None:
+            raise click.ClickException(f"Invalid campaign slug: {campaign!r}")
+        profile_filter = get_campaign_profile_keys(safe)
+        click.echo(f"  Campaign filter: {safe} ({len(profile_filter)} member(s))")
+
     matches = match_speakers(wav_path, diarization, device=device,
-                             threshold=config.get("similarity_threshold", 0.65))
+                             threshold=config.get("similarity_threshold", 0.65),
+                             profile_filter=profile_filter)
 
     if not matches:
         click.echo("No enrolled profiles to match against.")
@@ -725,6 +741,148 @@ def speakers_reset(yes: bool):
 
     reset_profiles()
     click.echo(f"Removed {count} speaker(s). Database is now empty.")
+
+
+# ---------------------------------------------------------------------------
+# wisper campaigns
+# ---------------------------------------------------------------------------
+
+@main.group()
+def campaigns():
+    """Manage campaigns (per-show speaker rosters)."""
+
+
+@campaigns.command("list")
+def campaigns_list():
+    """List all campaigns."""
+    from .campaign_manager import load_campaigns
+
+    data = load_campaigns()
+    if not data:
+        click.echo("No campaigns. Run: wisper campaigns create \"My Campaign\"")
+        return
+
+    click.echo(f"{'Slug':<25} {'Name':<30} {'Members':<8} {'Created'}")
+    click.echo("-" * 72)
+    for slug, c in sorted(data.items()):
+        click.echo(f"{slug:<25} {c.display_name:<30} {len(c.members):<8} {c.created}")
+
+
+@campaigns.command("create")
+@click.argument("display_name")
+def campaigns_create(display_name: str):
+    """Create a new campaign. The slug is auto-derived from the name."""
+    from .campaign_manager import create_campaign
+
+    try:
+        campaign = create_campaign(display_name)
+    except ValueError as exc:
+        raise click.ClickException(str(exc))
+
+    click.echo(f"Created campaign {campaign.display_name!r} (slug: {campaign.slug})")
+
+
+@campaigns.command("delete")
+@click.argument("slug")
+@click.option("--yes", is_flag=True, default=False, help="Skip confirmation prompt")
+def campaigns_delete(slug: str, yes: bool):
+    """Delete a campaign. Does not affect enrolled speaker profiles."""
+    from .campaign_manager import _validate_campaign_slug, delete_campaign
+
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        raise click.ClickException(f"Invalid campaign slug: {slug!r}")
+
+    if not yes:
+        click.confirm(f"Delete campaign {safe!r}?", abort=True)
+
+    try:
+        delete_campaign(safe)
+    except KeyError:
+        raise click.ClickException(f"Campaign {safe!r} not found.")
+
+    click.echo(f"Deleted campaign {safe!r}.")
+
+
+@campaigns.command("show")
+@click.argument("slug")
+def campaigns_show(slug: str):
+    """Show the roster for a campaign."""
+    from .campaign_manager import _validate_campaign_slug, load_campaigns
+    from .speaker_manager import load_profiles
+
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        raise click.ClickException(f"Invalid campaign slug: {slug!r}")
+
+    data = load_campaigns()
+    if safe not in data:
+        raise click.ClickException(f"Campaign {safe!r} not found.")
+
+    campaign = data[safe]
+    profiles = load_profiles()
+
+    click.echo(f"Campaign: {campaign.display_name} (slug: {campaign.slug})")
+    click.echo(f"Created:  {campaign.created}")
+    click.echo("")
+
+    if not campaign.members:
+        click.echo("  No members yet. Run: wisper campaigns add-member <slug> <profile_key>")
+        return
+
+    click.echo(f"  {'Profile Key':<20} {'Display Name':<20} {'Role':<12} {'Character'}")
+    click.echo("  " + "-" * 64)
+    for key, m in sorted(campaign.members.items()):
+        display = profiles[key].display_name if key in profiles else f"(removed: {key})"
+        click.echo(f"  {key:<20} {display:<20} {m.role:<12} {m.character}")
+
+
+@campaigns.command("add-member")
+@click.argument("slug")
+@click.argument("profile_key")
+@click.option("--role", default="", help="Per-campaign role (e.g. DM, Player)")
+@click.option("--character", default="", help="Character name for this campaign")
+def campaigns_add_member(slug: str, profile_key: str, role: str, character: str):
+    """Add a speaker to a campaign roster."""
+    from .campaign_manager import _validate_campaign_slug, add_member
+    from .speaker_manager import load_profiles
+
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        raise click.ClickException(f"Invalid campaign slug: {slug!r}")
+
+    profiles = load_profiles()
+    if profile_key not in profiles:
+        raise click.ClickException(
+            f"Speaker {profile_key!r} is not enrolled. Run: wisper speakers list"
+        )
+
+    try:
+        add_member(safe, profile_key, role=role, character=character)
+    except KeyError:
+        raise click.ClickException(f"Campaign {safe!r} not found.")
+
+    display = profiles[profile_key].display_name
+    click.echo(f"Added {display!r} to campaign {safe!r}.")
+
+
+@campaigns.command("remove-member")
+@click.argument("slug")
+@click.argument("profile_key")
+def campaigns_remove_member(slug: str, profile_key: str):
+    """Remove a speaker from a campaign roster."""
+    from .campaign_manager import _validate_campaign_slug, remove_member
+
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        raise click.ClickException(f"Invalid campaign slug: {slug!r}")
+
+    try:
+        remove_member(safe, profile_key)
+    except KeyError:
+        raise click.ClickException(f"Campaign {safe!r} not found.")
+
+    click.echo(f"Removed {profile_key!r} from campaign {safe!r}.")
 
 
 # ---------------------------------------------------------------------------

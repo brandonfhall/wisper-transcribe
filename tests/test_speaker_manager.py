@@ -299,3 +299,90 @@ def test_extract_embedding_no_matching_segments_raises(tmp_path):
                     segments,
                     speaker_label="SPEAKER_00",
                 )
+
+
+# ---------------------------------------------------------------------------
+# match_speakers — profile_filter
+# ---------------------------------------------------------------------------
+
+def test_match_speakers_with_profile_filter(tmp_path):
+    """Profiles outside the filter must never be returned as matches."""
+    from wisper_transcribe.speaker_manager import match_speakers
+
+    alice_emb = np.array([1.0, 0.0, 0.0])
+    bob_emb   = np.array([0.0, 1.0, 0.0])
+    charlie_emb = np.array([0.0, 0.0, 1.0])
+    _write_profile(tmp_path, "alice", alice_emb)
+    _write_profile(tmp_path, "bob", bob_emb)
+    _write_profile(tmp_path, "charlie", charlie_emb)
+
+    segs = _fake_diarization(["SPEAKER_00", "SPEAKER_01", "SPEAKER_02"])
+
+    def fake_extract(audio_path, segments, label, device="cpu"):
+        mapping = {
+            "SPEAKER_00": alice_emb,
+            "SPEAKER_01": bob_emb,
+            "SPEAKER_02": charlie_emb,
+        }
+        return mapping[label]
+
+    with patch("wisper_transcribe.speaker_manager.extract_embedding", side_effect=fake_extract):
+        result = match_speakers(
+            Path("fake.wav"),
+            segs,
+            data_dir=tmp_path,
+            threshold=0.65,
+            profile_filter={"alice", "bob"},
+        )
+
+    assert result["SPEAKER_00"] == "Alice"
+    assert result["SPEAKER_01"] == "Bob"
+    # Charlie is filtered out — SPEAKER_02 must not map to Charlie
+    assert "Charlie" not in result.values()
+
+
+def test_match_speakers_empty_profile_filter_returns_empty(tmp_path):
+    """An empty profile_filter set means zero candidate profiles — always returns {}."""
+    from wisper_transcribe.speaker_manager import match_speakers
+
+    alice_emb = np.array([1.0, 0.0, 0.0])
+    _write_profile(tmp_path, "alice", alice_emb)
+    segs = _fake_diarization(["SPEAKER_00"])
+
+    with patch("wisper_transcribe.speaker_manager.extract_embedding", return_value=alice_emb):
+        result = match_speakers(
+            Path("fake.wav"),
+            segs,
+            data_dir=tmp_path,
+            threshold=0.65,
+            profile_filter=set(),
+        )
+
+    assert result == {}
+
+
+def test_match_speakers_none_filter_uses_all_profiles(tmp_path):
+    """profile_filter=None (default) preserves existing global-match behaviour."""
+    from wisper_transcribe.speaker_manager import match_speakers
+
+    alice_emb = np.array([1.0, 0.0, 0.0])
+    bob_emb   = np.array([0.0, 1.0, 0.0])
+    _write_profile(tmp_path, "alice", alice_emb)
+    _write_profile(tmp_path, "bob", bob_emb)
+
+    segs = _fake_diarization(["SPEAKER_00", "SPEAKER_01"])
+
+    def fake_extract(audio_path, segments, label, device="cpu"):
+        return alice_emb if label == "SPEAKER_00" else bob_emb
+
+    with patch("wisper_transcribe.speaker_manager.extract_embedding", side_effect=fake_extract):
+        result = match_speakers(
+            Path("fake.wav"),
+            segs,
+            data_dir=tmp_path,
+            threshold=0.65,
+            profile_filter=None,
+        )
+
+    assert result["SPEAKER_00"] == "Alice"
+    assert result["SPEAKER_01"] == "Bob"

@@ -846,3 +846,115 @@ def test_summarize_custom_output_path(tmp_path, monkeypatch):
     assert out.exists()
     # Default sidecar should NOT have been written.
     assert not (tmp_path / "ep.summary.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# wisper campaigns
+# ---------------------------------------------------------------------------
+
+def test_campaigns_create_and_list(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    runner = CliRunner()
+
+    result = runner.invoke(main, ["campaigns", "create", "D&D Mondays"])
+    assert result.exit_code == 0, result.output
+    assert "d-d-mondays" in result.output
+
+    result = runner.invoke(main, ["campaigns", "list"])
+    assert result.exit_code == 0, result.output
+    assert "d-d-mondays" in result.output
+    assert "D&D Mondays" in result.output
+
+
+def test_campaigns_list_empty(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    result = CliRunner().invoke(main, ["campaigns", "list"])
+    assert result.exit_code == 0
+    assert "No campaigns" in result.output
+
+
+def test_campaigns_delete_requires_confirm(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    runner = CliRunner()
+    runner.invoke(main, ["campaigns", "create", "Test Campaign"])
+
+    result = runner.invoke(main, ["campaigns", "delete", "test-campaign"], input="n\n")
+    assert result.exit_code != 0
+
+
+def test_campaigns_delete_with_yes(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    runner = CliRunner()
+    runner.invoke(main, ["campaigns", "create", "Test Campaign"])
+
+    result = runner.invoke(main, ["campaigns", "delete", "test-campaign", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "Deleted" in result.output
+
+
+def test_campaigns_add_unknown_profile_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    runner = CliRunner()
+    runner.invoke(main, ["campaigns", "create", "Test Campaign"])
+
+    result = runner.invoke(main, ["campaigns", "add-member", "test-campaign", "nobody"])
+    assert result.exit_code != 0
+    assert "not enrolled" in result.output
+
+
+def test_campaigns_add_then_show(tmp_path, monkeypatch):
+    """add-member then show displays the member with correct role."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    runner = CliRunner()
+
+    # Create a fake enrolled speaker
+    from wisper_transcribe.speaker_manager import save_profiles
+    from wisper_transcribe.models import SpeakerProfile
+    (tmp_path / "profiles" / "embeddings").mkdir(parents=True)
+    fake_emb = tmp_path / "profiles" / "embeddings" / "alice.npy"
+    import numpy as np
+    np.save(str(fake_emb), np.zeros(512))
+    save_profiles(
+        {"alice": SpeakerProfile(
+            name="alice", display_name="Alice", role="",
+            embedding_path=fake_emb, enrolled_date="2026-04-28",
+            enrollment_source="test.mp3",
+        )},
+        data_dir=tmp_path,
+    )
+
+    runner.invoke(main, ["campaigns", "create", "Test Campaign"])
+    result = runner.invoke(main, ["campaigns", "add-member", "test-campaign", "alice", "--role", "DM"])
+    assert result.exit_code == 0, result.output
+
+    result = runner.invoke(main, ["campaigns", "show", "test-campaign"])
+    assert result.exit_code == 0, result.output
+    assert "Alice" in result.output
+    assert "DM" in result.output
+
+
+def test_campaigns_invalid_slug_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    result = CliRunner().invoke(main, ["campaigns", "show", "../etc/passwd"])
+    assert result.exit_code != 0
+    assert "Invalid" in result.output
+
+
+def test_transcribe_passes_campaign_to_process_file(tmp_path, monkeypatch):
+    """--campaign is forwarded to process_file as the campaign kwarg."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+
+    captured = {}
+
+    def fake_process_file(path, **kwargs):
+        captured.update(kwargs)
+        return tmp_path / "session.md"
+
+    with patch("wisper_transcribe.pipeline.process_file", side_effect=fake_process_file):
+        result = CliRunner().invoke(
+            main, ["transcribe", str(audio), "--campaign", "dnd-mondays"]
+        )
+
+    assert captured.get("campaign") == "dnd-mondays", result.output

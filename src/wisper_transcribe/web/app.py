@@ -121,6 +121,7 @@ def create_app() -> FastAPI:
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
     # Register routers
+    from .routes import campaigns as campaigns_router
     from .routes import config as config_router
     from .routes import dashboard as dashboard_router
     from .routes import speakers as speakers_router
@@ -132,6 +133,7 @@ def create_app() -> FastAPI:
     app.include_router(transcripts_router.router)
     app.include_router(speakers_router.router)
     app.include_router(config_router.router)
+    app.include_router(campaigns_router.router)
 
     return app
 

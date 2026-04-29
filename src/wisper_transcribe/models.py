@@ -36,6 +36,28 @@ class SpeakerProfile:
 
 
 # ---------------------------------------------------------------------------
+# Campaign management
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CampaignMember:
+    """A speaker profile's membership in a specific campaign, with per-campaign overrides."""
+    profile_key: str
+    role: str = ""
+    character: str = ""
+
+
+@dataclass
+class Campaign:
+    """A named campaign (game session series) with a roster of enrolled speakers."""
+    slug: str
+    display_name: str
+    created: str
+    members: dict = field(default_factory=dict)  # dict[str, CampaignMember]
+
+
+# ---------------------------------------------------------------------------
 # LLM post-processing (wisper refine / wisper summarize)
 # ---------------------------------------------------------------------------
 

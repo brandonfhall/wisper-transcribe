@@ -362,6 +362,7 @@ def process_file(
     vad_filter: Optional[bool] = None,
     initial_prompt: Optional[str] = None,
     hotwords: Optional[list[str]] = None,
+    campaign: Optional[str] = None,
 ) -> Path:
     """Run the full pipeline on a single audio file. Returns path to output .md."""
     from .config import resolve_compute_type
@@ -497,12 +498,18 @@ def process_file(
                 )
             else:
                 from .speaker_manager import match_speakers
+                profile_filter: Optional[set] = None
+                if campaign:
+                    from .campaign_manager import get_campaign_profile_keys
+                    profile_filter = get_campaign_profile_keys(campaign)
+                    tqdm.write(f"  Campaign filter: {campaign} ({len(profile_filter)} member(s))")
                 matches = match_speakers(
                     audio_path=wav_path,
                     diarization_segments=diarization,
                     data_dir=None,
                     device=device,
                     threshold=config.get("similarity_threshold", 0.65),
+                    profile_filter=profile_filter,
                 )
                 if matches:
                     speaker_map = matches

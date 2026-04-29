@@ -55,6 +55,8 @@
         <span class="nav-divider"></span>
         <a href="/speakers"     class="nav-link {% if request.url.path.startswith('/speakers') %}nav-active{% endif %}">Speakers</a>
         <span class="nav-divider"></span>
+        <a href="/campaigns"    class="nav-link {% if request.url.path.startswith('/campaigns') %}nav-active{% endif %}">Campaigns</a>
+        <span class="nav-divider"></span>
         <a href="/config"       class="nav-link {% if request.url.path.startswith('/config') %}nav-active{% endif %}">Config</a>
       </div>
 
@@ -75,6 +77,7 @@
       <a href="/transcribe"  class="mobile-nav-link">Transcribe</a>
       <a href="/transcripts" class="mobile-nav-link">Transcripts</a>
       <a href="/speakers"    class="mobile-nav-link">Speakers</a>
+      <a href="/campaigns"   class="mobile-nav-link">Campaigns</a>
       <a href="/config"      class="mobile-nav-link">Config</a>
     </div>
   </div>
