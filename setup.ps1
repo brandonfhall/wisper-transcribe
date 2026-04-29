@@ -134,26 +134,113 @@ if (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
     }
 }
 
-# ── Optional cloud LLM extras ────────────────────────────────────────────────
-Write-Step "Optional: cloud LLM extras (wisper refine / wisper summarize)"
+# ── LLM Post-processing setup ─────────────────────────────────────────────────
+$wisper = ".\.venv\Scripts\wisper.exe"
+
+Write-Step "LLM Post-processing setup (wisper refine / wisper summarize)"
 Write-Host ""
-Write-Host "   wisper refine and wisper summarize use an LLM to clean up transcripts" -ForegroundColor Gray
-Write-Host "   and generate campaign notes. Ollama (local) works out of the box." -ForegroundColor Gray
-Write-Host "   Install an extra only if you want to use a cloud provider." -ForegroundColor Gray
+Write-Host "   Vocabulary correction and campaign notes need an LLM provider." -ForegroundColor Gray
+Write-Host "   Local providers (Ollama / LM Studio) need no API key." -ForegroundColor Gray
 Write-Host ""
+
+# Probe Ollama and LM Studio
+$ollamaRunning = $false; $ollamaModels = @()
+try {
+    $r = Invoke-RestMethod -Uri "http://localhost:11434/api/tags" -TimeoutSec 2 -ErrorAction Stop
+    $ollamaRunning = $true
+    $ollamaModels  = @($r.models | ForEach-Object { $_.name })
+} catch {}
+
+$lmRunning = $false; $lmModels = @()
+try {
+    $r = Invoke-RestMethod -Uri "http://localhost:1234/v1/models" -TimeoutSec 2 -ErrorAction Stop
+    $lmRunning = $true
+    $lmModels  = @($r.data | ForEach-Object { $_.id })
+} catch {}
+
+$ollamaTag = if ($ollamaRunning) { "  [running — $($ollamaModels.Count) model(s) available]" } else { "  [not running]" }
+$lmTag     = if ($lmRunning)     { "  [running — $($lmModels.Count) model(s) loaded]"        } else { "  [not running]" }
+
+Write-Host "   LOCAL — no API key needed:"
+Write-Host "     o) Ollama     — localhost:11434$ollamaTag"
+Write-Host "     l) LM Studio  — localhost:1234$lmTag"
+Write-Host ""
+Write-Host "   CLOUD — requires API key:"
 Write-Host "     a) Anthropic (Claude)"
 Write-Host "     b) OpenAI (GPT)"
 Write-Host "     c) Google (Gemini)"
-Write-Host "     d) All three"
-Write-Host "     s) Skip (use Ollama or configure later)"
+Write-Host "     d) All three cloud SDKs"
 Write-Host ""
-$LLMChoice = Read-Host "   Choice [a/b/c/d/s]"
+Write-Host "     s) Skip — configure later with: wisper config llm"
+Write-Host ""
+
+# Let user pick a model from a list; returns model name or $null
+function Invoke-ModelPicker($provider, $models) {
+    if ($models.Count -eq 0) {
+        Write-Warn "$provider is running but has no models — load one then run: wisper config llm"
+        return $null
+    }
+    Write-Host ""
+    Write-Host "   Available $provider models:" -ForegroundColor Gray
+    for ($i = 0; $i -lt $models.Count; $i++) {
+        $hint = if ($i -eq 0) { "  <- suggested" } else { "" }
+        Write-Host "     $($i + 1)) $($models[$i])$hint"
+    }
+    Write-Host ""
+    $pick = Read-Host "   Pick a number [1] or Enter to configure later"
+    if ([string]::IsNullOrWhiteSpace($pick)) { $pick = "1" }
+    if ($pick -match '^\d+$') {
+        $idx = [int]$pick - 1
+        if ($idx -ge 0 -and $idx -lt $models.Count) { return $models[$idx] }
+    }
+    return $null
+}
+
+$LLMChoice = Read-Host "   Choice [o/l/a/b/c/d/s]"
 switch ($LLMChoice.ToLower()) {
-    "a" { Invoke-PipWithProgress "Installing Anthropic SDK" @("install", "-e", ".[llm-anthropic]", "-q"); Write-OK "anthropic SDK installed" }
-    "b" { Invoke-PipWithProgress "Installing OpenAI SDK"    @("install", "-e", ".[llm-openai]",    "-q"); Write-OK "openai SDK installed" }
-    "c" { Invoke-PipWithProgress "Installing Google Genai SDK" @("install", "-e", ".[llm-google]", "-q"); Write-OK "google-genai SDK installed" }
-    "d" { Invoke-PipWithProgress "Installing all LLM SDKs" @("install", "-e", ".[llm-all]",        "-q"); Write-OK "all LLM SDKs installed" }
-    default { Write-OK "Skipped — use 'wisper config llm' to set up a provider at any time" }
+    "o" {
+        if ($ollamaRunning) {
+            $model = Invoke-ModelPicker "Ollama" $ollamaModels
+            if ($model) {
+                & $wisper config set llm_provider ollama
+                & $wisper config set llm_model $model
+                Write-OK "Ollama configured — model: $model"
+            } else {
+                Write-OK "Ollama selected — run 'wisper config llm' to set a model"
+            }
+        } else {
+            Write-Host ""
+            Write-Host "   Ollama is not running. To use it:" -ForegroundColor Gray
+            Write-Host "     1. Install from https://ollama.com" -ForegroundColor Gray
+            Write-Host "     2. Pull a model: ollama pull llama3.2" -ForegroundColor Gray
+            Write-Host "     3. Configure:    wisper config llm" -ForegroundColor Gray
+            Write-OK "Skipped — configure later with 'wisper config llm'"
+        }
+    }
+    "l" {
+        if ($lmRunning) {
+            $model = Invoke-ModelPicker "LM Studio" $lmModels
+            if ($model) {
+                & $wisper config set llm_provider lmstudio
+                & $wisper config set llm_model $model
+                Write-OK "LM Studio configured — model: $model"
+            } else {
+                Write-OK "LM Studio selected — run 'wisper config llm' to set a model"
+            }
+        } else {
+            Write-Host ""
+            Write-Host "   LM Studio is not running. To use it:" -ForegroundColor Gray
+            Write-Host "     1. Install from https://lmstudio.ai" -ForegroundColor Gray
+            Write-Host "     2. Download a model and start the local server" -ForegroundColor Gray
+            Write-Host "     3. Configure: wisper config llm" -ForegroundColor Gray
+            Write-OK "Skipped — configure later with 'wisper config llm'"
+        }
+    }
+    "a" { Invoke-PipWithProgress "Installing Anthropic SDK"    @("install", "-e", ".[llm-anthropic]", "-q"); Write-OK "anthropic SDK installed" }
+    "b" { Invoke-PipWithProgress "Installing OpenAI SDK"       @("install", "-e", ".[llm-openai]",    "-q"); Write-OK "openai SDK installed" }
+    "c" { Invoke-PipWithProgress "Installing Google Genai SDK" @("install", "-e", ".[llm-google]",    "-q"); Write-OK "google-genai SDK installed" }
+    "d" { Invoke-PipWithProgress "Installing all LLM SDKs"    @("install", "-e", ".[llm-all]",        "-q"); Write-OK "all LLM SDKs installed" }
+    default { Write-OK "Skipped — configure later with 'wisper config llm'" }
 }
 
 # ── Done ──────────────────────────────────────────────────────────────────────
