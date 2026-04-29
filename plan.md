@@ -10,6 +10,50 @@ Podcast transcription tool for tabletop RPG actual-play recordings (D&D, Pathfin
 
 ---
 
+## Active / Next Up
+
+### Campaign-based Transcript Organization
+
+**Goal:** Let users organize transcripts into campaigns in both the CLI and the web UI. A transcript that belongs to a campaign is displayed inside a campaign "folder"; transcripts with no campaign are displayed as normal flat items.
+
+**CLI changes (`cli.py`, `campaign_manager.py`)**
+- `wisper transcripts move <transcript-stem> --campaign <name>` — assign an existing transcript to a campaign (or `--no-campaign` to remove it)
+- `wisper transcripts list [--campaign <name>]` — filter the list by campaign; without the flag, all transcripts are shown grouped by campaign then ungrouped
+
+**Web UI changes (transcripts list page + backend route)**
+- Backend: group transcripts by their campaign association; return two buckets — `campaigns` (name → list of transcripts) and `uncampaigned` (flat list)
+- Template: render each campaign as a collapsible folder row (click to expand/collapse, JS-free via `<details>`/`<summary>` or htmx); uncampaigned transcripts render as normal rows below
+- "Move to campaign" action on the transcript detail page — dropdown of existing campaigns + a "none" option; POST → redirect back
+- Transcripts list search/filter bar gains a campaign dropdown filter
+
+**Data layer**
+- `CampaignMember` already links transcripts to campaigns by stem. The campaign_manager already has `get_campaigns_for_transcript()` and `get_transcripts_for_campaign()`. No schema changes needed.
+
+**Tests**
+- `test_campaign_manager.py`: `move_transcript_to_campaign`, `remove_transcript_from_campaign`
+- `test_transcribe.py`: new list-by-campaign route, move-to-campaign POST
+
+---
+
+### Speaker Enrollment — Web Post-Transcription Wizard (Bug)
+
+**Problem:** The "Name Speakers" wizard shown after a transcription job (`POST /transcribe/jobs/{job_id}/enroll`) only renames speakers in the transcript markdown — it does **not** call `enroll_speaker()`, so no voice embedding or profile is ever saved. On the next job the speakers are unrecognised again.
+
+**Root cause:** `transcribe.py` `enroll_submit()` (lines ~325–355) calls `formatter.update_speaker_names()` but never calls `speaker_manager.enroll_speaker()`. The standalone `/speakers/enroll` page and the CLI (`pipeline._interactive_enroll()`) both call `enroll_speaker()` correctly.
+
+**What needs to change:**
+- `enroll_submit()` must also call `enroll_speaker()` for each labelled speaker, extracting embeddings from the job's audio file using the diarization segments stored on the job.
+- Must work for transcripts inside and outside a campaign — profiles are stored globally (`$DATA_DIR/profiles/`), campaigns are just roster filters, so no campaign-specific path needed.
+- If a profile already exists for the given name, offer the EMA embedding update path (same as CLI re-enrollment).
+- The job object must still hold the original audio path and diarization segments at the time the enrollment form is submitted (confirm they're not discarded after job completion).
+
+**Tests to add (`tests/test_transcribe.py`):**
+- `POST /transcribe/jobs/{id}/enroll` persists a profile to `speakers.json`
+- `POST /transcribe/jobs/{id}/enroll` writes an embedding `.npy` file
+- Re-enrolling an existing name updates the embedding rather than erroring
+
+---
+
 ## Backlog
 
 ### Distribution — Tier 3: PyPI + pipx (future)
@@ -108,6 +152,8 @@ Re-score `Unknown Speaker N` labels at a looser secondary threshold (~0.40) afte
 
 
 ## Manual Test Plans
+
+> These are code-complete features that haven't been manually walked through end-to-end yet. Verify on a real recording before closing them out.
 
 ### LLM Post-processing CLI (T1–T5) — code complete; manual verification pending
 
