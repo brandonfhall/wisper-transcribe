@@ -363,6 +363,7 @@ def process_file(
     initial_prompt: Optional[str] = None,
     hotwords: Optional[list[str]] = None,
     campaign: Optional[str] = None,
+    _result_store: Optional[dict] = None,
 ) -> Path:
     """Run the full pipeline on a single audio file. Returns path to output .md."""
     from .config import resolve_compute_type
@@ -479,6 +480,8 @@ def process_file(
             )
 
         if diarization is not None:
+            if _result_store is not None:
+                _result_store["diarization_segments"] = list(diarization)
             aligned_segments = align(segments, diarization)
 
             unique_speakers = sorted(
@@ -545,6 +548,15 @@ def process_file(
 
     out_path.write_text(content, encoding="utf-8")
     tqdm.write(f"  Wrote {out_path.name}")
+
+    # Associate transcript with campaign so the list view can group it.
+    if campaign:
+        try:
+            from .campaign_manager import move_transcript_to_campaign
+            move_transcript_to_campaign(out_path.stem, campaign)
+        except Exception:
+            pass  # Non-fatal — transcript is still written
+
     return out_path
 
 

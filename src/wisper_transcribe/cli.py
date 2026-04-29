@@ -886,6 +886,105 @@ def campaigns_remove_member(slug: str, profile_key: str):
 
 
 # ---------------------------------------------------------------------------
+# wisper transcripts
+# ---------------------------------------------------------------------------
+
+
+@main.group()
+def transcripts():
+    """Manage transcripts — list, move to campaign, or unlink from a campaign."""
+
+
+@transcripts.command("list")
+@click.option("--campaign", default=None, help="Show only transcripts for this campaign slug")
+def transcripts_list(campaign: Optional[str]):
+    """List transcripts, grouped by campaign."""
+    from wisper_transcribe.campaign_manager import load_campaigns, _validate_campaign_slug
+    from wisper_transcribe.config import get_data_dir
+    from pathlib import Path as _Path
+
+    if campaign:
+        safe = _validate_campaign_slug(campaign)
+        if safe is None:
+            raise click.ClickException("Invalid campaign slug")
+
+    out_dir = _Path("output")
+    if not out_dir.exists():
+        out_dir = _Path(get_data_dir()) / "output"
+
+    all_stems = sorted(p.stem for p in out_dir.glob("*.md") if not p.stem.endswith(".summary"))
+
+    campaigns = load_campaigns()
+
+    # Build stem → campaign slug mapping
+    stem_to_campaign: dict[str, str] = {}
+    for slug, c in campaigns.items():
+        for stem in c.transcripts:
+            stem_to_campaign[stem] = slug
+
+    if campaign:
+        stems = [s for s in all_stems if stem_to_campaign.get(s) == campaign]
+        if not stems:
+            click.echo(f"No transcripts found for campaign {campaign!r}.")
+            return
+        for stem in stems:
+            click.echo(stem)
+        return
+
+    # Grouped output
+    printed_any = False
+    for slug, c in campaigns.items():
+        campaign_stems = [s for s in all_stems if stem_to_campaign.get(s) == slug]
+        if not campaign_stems:
+            continue
+        click.echo(f"\n📁 {c.display_name} [{slug}]")
+        for stem in campaign_stems:
+            click.echo(f"   {stem}")
+        printed_any = True
+
+    uncampaigned = [s for s in all_stems if s not in stem_to_campaign]
+    if uncampaigned:
+        if printed_any:
+            click.echo("\n(no campaign)")
+        for stem in uncampaigned:
+            click.echo(f"   {stem}")
+    elif not printed_any:
+        click.echo("No transcripts found.")
+
+
+@transcripts.command("move")
+@click.argument("stem")
+@click.option("--campaign", default=None, help="Campaign slug to assign (omit to unlink)")
+@click.option("--no-campaign", "unlink", is_flag=True, default=False, help="Remove campaign association")
+def transcripts_move(stem: str, campaign: Optional[str], unlink: bool):
+    """Assign a transcript to a campaign, or remove its campaign association."""
+    from wisper_transcribe.campaign_manager import (
+        move_transcript_to_campaign,
+        remove_transcript_from_campaign,
+        _validate_campaign_slug,
+    )
+
+    if unlink:
+        remove_transcript_from_campaign(stem)
+        click.echo(f"Unlinked {stem!r} from its campaign.")
+        return
+
+    if not campaign:
+        raise click.ClickException("Provide --campaign <slug> or --no-campaign")
+
+    safe = _validate_campaign_slug(campaign)
+    if safe is None:
+        raise click.ClickException("Invalid campaign slug")
+
+    try:
+        move_transcript_to_campaign(stem, safe)
+    except KeyError as exc:
+        raise click.ClickException(str(exc))
+
+    click.echo(f"Moved {stem!r} → campaign {safe!r}.")
+
+
+# ---------------------------------------------------------------------------
 # wisper fix
 # ---------------------------------------------------------------------------
 

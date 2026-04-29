@@ -958,3 +958,81 @@ def test_transcribe_passes_campaign_to_process_file(tmp_path, monkeypatch):
         )
 
     assert captured.get("campaign") == "dnd-mondays", result.output
+
+
+# ---------------------------------------------------------------------------
+# wisper transcripts
+# ---------------------------------------------------------------------------
+
+
+def test_transcripts_list_empty(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    # No output directory — should not crash
+    result = CliRunner().invoke(main, ["transcripts", "list"])
+    assert result.exit_code == 0
+
+
+def test_transcripts_list_shows_ungrouped_stems(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    out = tmp_path / "output"
+    out.mkdir()
+    (out / "session01.md").write_text("hello")
+    result = CliRunner().invoke(main, ["transcripts", "list"])
+    assert result.exit_code == 0
+    assert "session01" in result.output
+
+
+def test_transcripts_list_grouped_by_campaign(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    out = tmp_path / "output"
+    out.mkdir()
+    (out / "session01.md").write_text("hello")
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    create_campaign("D&D Mondays", data_dir=tmp_path)
+    move_transcript_to_campaign("session01", "d-d-mondays", data_dir=tmp_path)
+    result = CliRunner().invoke(main, ["transcripts", "list"])
+    assert result.exit_code == 0
+    assert "D&D Mondays" in result.output
+    assert "session01" in result.output
+
+
+def test_transcripts_list_campaign_filter(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    out = tmp_path / "output"
+    out.mkdir()
+    (out / "session01.md").write_text("hello")
+    (out / "session02.md").write_text("hello")
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    create_campaign("Alpha", data_dir=tmp_path)
+    move_transcript_to_campaign("session01", "alpha", data_dir=tmp_path)
+    result = CliRunner().invoke(main, ["transcripts", "list", "--campaign", "alpha"])
+    assert result.exit_code == 0
+    assert "session01" in result.output
+    assert "session02" not in result.output
+
+
+def test_transcripts_move_assigns_campaign(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign, get_campaign_for_transcript
+    create_campaign("Alpha", data_dir=tmp_path)
+    result = CliRunner().invoke(main, ["transcripts", "move", "session01", "--campaign", "alpha"])
+    assert result.exit_code == 0
+    assert get_campaign_for_transcript("session01", data_dir=tmp_path) == "alpha"
+
+
+def test_transcripts_move_unlinks(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import (
+        create_campaign, move_transcript_to_campaign, get_campaign_for_transcript
+    )
+    create_campaign("Alpha", data_dir=tmp_path)
+    move_transcript_to_campaign("session01", "alpha", data_dir=tmp_path)
+    result = CliRunner().invoke(main, ["transcripts", "move", "session01", "--no-campaign"])
+    assert result.exit_code == 0
+    assert get_campaign_for_transcript("session01", data_dir=tmp_path) is None
+
+
+def test_transcripts_move_invalid_slug_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    result = CliRunner().invoke(main, ["transcripts", "move", "session01", "--campaign", "../evil"])
+    assert result.exit_code != 0

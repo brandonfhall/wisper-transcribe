@@ -351,5 +351,33 @@ async def enroll_submit(request: Request, job_id: str) -> Response:
             content = update_speaker_names(content, old_name, new_name)
         out_path.write_text(content, encoding="utf-8")
 
+        # Enroll each labelled speaker so voice profiles are persisted.
+        # old_name is the raw diarization label (e.g. "SPEAKER_00"); new_name is
+        # the display name typed in the wizard.  Failures are logged but never
+        # surfaced as HTTP errors — the transcript rename already happened.
+        if job.diarization_segments:
+            from wisper_transcribe.speaker_manager import enroll_speaker
+            device = job.kwargs.get("device", "cpu")
+            if device == "auto":
+                from wisper_transcribe.transcriber import get_device
+                device = get_device()
+            for old_label, display_name in renames.items():
+                profile_key = display_name.lower().replace(" ", "_")
+                try:
+                    enroll_speaker(
+                        name=profile_key,
+                        display_name=display_name,
+                        role="",
+                        audio_path=Path(job.input_path),
+                        segments=job.diarization_segments,
+                        speaker_label=old_label,
+                        device=device,
+                    )
+                except Exception as exc:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "enroll_speaker failed for %s: %s", display_name, exc
+                    )
+
     transcript_name = Path(job.output_path).stem
     return RedirectResponse(url=f"/transcripts/{quote(transcript_name, safe='')}", status_code=303)

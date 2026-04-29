@@ -10,6 +10,14 @@ from urllib.parse import quote
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
 
+from wisper_transcribe.campaign_manager import (
+    _validate_campaign_slug,
+    get_campaign_for_transcript,
+    load_campaigns,
+    move_transcript_to_campaign,
+    remove_transcript_from_campaign,
+)
+
 from . import templates
 
 router = APIRouter(prefix="/transcripts")
@@ -148,6 +156,14 @@ async def transcripts_list(request: Request) -> HTMLResponse:
         reverse=True,
     )
 
+    campaigns = load_campaigns()
+
+    # Build stem → campaign slug mapping
+    stem_to_campaign: dict[str, str] = {}
+    for slug, c in campaigns.items():
+        for stem in c.transcripts:
+            stem_to_campaign[stem] = slug
+
     items = []
     for f in files:
         meta, _ = _parse_frontmatter(f.read_text(encoding="utf-8"))
@@ -160,12 +176,18 @@ async def transcripts_list(request: Request) -> HTMLResponse:
             "duration": meta.get("duration", ""),
             "speakers": meta.get("speakers", []),
             "has_summary": summary_file.exists(),
+            "campaign_slug": stem_to_campaign.get(f.stem),
         })
 
     return templates.TemplateResponse(
         request,
         "transcripts.html",
-        {"request": request, "transcripts": items},
+        {
+            "request": request,
+            "transcripts": items,
+            "campaigns": campaigns,
+            "stem_to_campaign": stem_to_campaign,
+        },
     )
 
 
@@ -193,6 +215,9 @@ async def transcript_detail(request: Request, name: str) -> HTMLResponse:
     llm_provider = cfg.get("llm_provider", "ollama") or "ollama"
     llm_model = cfg.get("llm_model", "") or ""
 
+    campaigns = load_campaigns()
+    current_campaign_slug = get_campaign_for_transcript(md_path.stem)
+
     return templates.TemplateResponse(
         request,
         "transcript_detail.html",
@@ -205,6 +230,8 @@ async def transcript_detail(request: Request, name: str) -> HTMLResponse:
             "has_summary": has_summary,
             "llm_provider": llm_provider,
             "llm_model": llm_model,
+            "campaigns": campaigns,
+            "current_campaign_slug": current_campaign_slug,
         },
     )
 
@@ -360,4 +387,40 @@ async def summary_download(request: Request, name: str):
         path=str(summary_path),
         media_type="text/markdown",
         filename=summary_path.name,
+    )
+
+
+@router.post("/{name}/campaign", response_class=HTMLResponse)
+async def assign_campaign(request: Request, name: str) -> HTMLResponse:
+    """Assign or remove a campaign association for a transcript."""
+    safe_name = _get_safe_transcript_path(request, name)
+    if not safe_name:
+        return HTMLResponse(content="Invalid name", status_code=400)
+
+    form = await request.form()
+    campaign_slug = str(form.get("campaign", "")).strip()
+
+    if campaign_slug:
+        safe_slug = _validate_campaign_slug(campaign_slug)
+        if safe_slug is None:
+            return HTMLResponse(
+                content="",
+                status_code=303,
+                headers={"Location": f"/transcripts/{quote(name)}?error=invalid_campaign"},
+            )
+        try:
+            move_transcript_to_campaign(safe_name.stem, safe_slug)
+        except KeyError:
+            return HTMLResponse(
+                content="",
+                status_code=303,
+                headers={"Location": f"/transcripts/{quote(name)}?error=not_found"},
+            )
+    else:
+        remove_transcript_from_campaign(safe_name.stem)
+
+    return HTMLResponse(
+        content="",
+        status_code=303,
+        headers={"Location": f"/transcripts/{quote(name)}"},
     )

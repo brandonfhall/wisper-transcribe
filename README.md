@@ -376,6 +376,24 @@ With `--campaign`, speaker matching is restricted to that campaign's enrolled me
 
 ---
 
+### `wisper transcripts`
+
+Organize and view transcript-to-campaign associations from the command line:
+
+```bash
+wisper transcripts list                          # list all transcripts, grouped by campaign
+wisper transcripts list --campaign d-d-mondays  # show only transcripts for a specific campaign
+wisper transcripts move session12 --campaign d-d-mondays   # assign a transcript to a campaign
+wisper transcripts move session12 --no-campaign            # remove campaign association
+```
+
+Notes:
+- `session12` is the transcript stem (filename without `.md`).
+- `wisper transcripts list` without `--campaign` shows ungrouped transcripts first, then each campaign folder.
+- A transcript can belong to at most one campaign at a time; assigning to a new campaign automatically removes the previous association.
+
+---
+
 ### `wisper fix`
 
 Fix a wrong speaker assignment in an existing transcript:

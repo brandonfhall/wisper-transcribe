@@ -936,3 +936,179 @@ def test_transcribe_post_with_campaign_passes_to_queue(client, tmp_path, monkeyp
     assert resp.status_code == 303
     call_kwargs = mock_submit.call_args.kwargs
     assert call_kwargs.get("campaign") == "dnd-mondays"
+
+
+# ---------------------------------------------------------------------------
+# Transcript campaign grouping
+# ---------------------------------------------------------------------------
+
+
+def test_transcripts_list_groups_by_campaign(client, tmp_path, monkeypatch):
+    """Transcripts belonging to a campaign appear under its folder section."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    (tmp_path / "session01.md").write_text("---\ntitle: Session 01\n---\n")
+    from wisper_transcribe.models import Campaign
+    campaigns = {"alpha": Campaign(slug="alpha", display_name="Alpha Game",
+                                  created="2026-04-28", members={},
+                                  transcripts=["session01"])}
+    with patch("wisper_transcribe.web.routes.transcripts._output_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.web.routes.transcripts.load_campaigns", return_value=campaigns):
+        resp = client.get("/transcripts")
+    assert resp.status_code == 200
+    assert "Alpha Game" in resp.text
+    assert "session01" in resp.text
+
+
+def test_transcripts_list_shows_uncampaigned(client, tmp_path, monkeypatch):
+    """Transcripts with no campaign appear in the ungrouped section."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    (tmp_path / "orphan.md").write_text("---\ntitle: Orphan\n---\n")
+    with patch("wisper_transcribe.web.routes.transcripts._output_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.web.routes.transcripts.load_campaigns", return_value={}):
+        resp = client.get("/transcripts")
+    assert resp.status_code == 200
+    assert "orphan" in resp.text
+
+
+def test_transcript_detail_shows_campaign_dropdown(client, tmp_path, monkeypatch):
+    """Transcript detail page shows the campaign assignment dropdown when campaigns exist."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    md = tmp_path / "session01.md"
+    md.write_text("---\ntitle: Session 01\n---\n\nHello.")
+    from wisper_transcribe.models import Campaign
+    campaigns = {"alpha": Campaign(slug="alpha", display_name="Alpha Game",
+                                  created="2026-04-28", members={}, transcripts=[])}
+    with patch("wisper_transcribe.web.routes.transcripts._output_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.web.routes.transcripts.load_campaigns", return_value=campaigns), \
+         patch("wisper_transcribe.web.routes.transcripts.get_campaign_for_transcript",
+               return_value=None):
+        resp = client.get("/transcripts/session01")
+    assert resp.status_code == 200
+    assert 'name="campaign"' in resp.text
+    assert "Alpha Game" in resp.text
+
+
+def test_assign_campaign_moves_transcript(client, tmp_path, monkeypatch):
+    """POST /transcripts/{name}/campaign persists the assignment."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    md = tmp_path / "session01.md"
+    md.write_text("---\ntitle: Session 01\n---\n")
+    from wisper_transcribe.campaign_manager import create_campaign, get_campaign_for_transcript
+    create_campaign("Test Game", data_dir=tmp_path)
+
+    with patch("wisper_transcribe.web.routes.transcripts._output_dir", return_value=tmp_path):
+        resp = client.post(
+            "/transcripts/session01/campaign",
+            data={"campaign": "test-game"},
+            follow_redirects=False,
+        )
+    assert resp.status_code == 303
+    assert get_campaign_for_transcript("session01", data_dir=tmp_path) == "test-game"
+
+
+def test_assign_campaign_unlinks_when_empty(client, tmp_path, monkeypatch):
+    """POST with empty campaign field removes the association."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    md = tmp_path / "session01.md"
+    md.write_text("---\ntitle: Session 01\n---\n")
+    from wisper_transcribe.campaign_manager import (
+        create_campaign, move_transcript_to_campaign, get_campaign_for_transcript
+    )
+    create_campaign("Test Game", data_dir=tmp_path)
+    move_transcript_to_campaign("session01", "test-game", data_dir=tmp_path)
+
+    with patch("wisper_transcribe.web.routes.transcripts._output_dir", return_value=tmp_path):
+        resp = client.post(
+            "/transcripts/session01/campaign",
+            data={"campaign": ""},
+            follow_redirects=False,
+        )
+    assert resp.status_code == 303
+    assert get_campaign_for_transcript("session01", data_dir=tmp_path) is None
+
+
+# ---------------------------------------------------------------------------
+# Enrollment bug fix — enroll_submit must call enroll_speaker()
+# ---------------------------------------------------------------------------
+
+
+def test_enroll_submit_calls_enroll_speaker_when_segments_present(
+    client, tmp_path, monkeypatch
+):
+    """enroll_submit() must call enroll_speaker() for each rename when diarization_segments exist."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+
+    # Set up a completed job with diarization_segments
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from datetime import datetime
+    import uuid
+
+    transcript = tmp_path / "session01.md"
+    transcript.write_text(
+        "---\nspeakers:\n  - name: SPEAKER_00\n---\n\n**SPEAKER_00** *(00:00)*: Hello."
+    )
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"fake")
+
+    fake_segment = MagicMock()
+    fake_segment.speaker = "SPEAKER_00"
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(audio),
+        kwargs={"device": "cpu"},
+        output_path=str(transcript),
+        diarization_segments=[fake_segment],
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    with patch("wisper_transcribe.speaker_manager.enroll_speaker") as mock_enroll:
+        resp = client.post(
+            f"/transcribe/jobs/{job.id}/enroll",
+            data={"speaker_SPEAKER_00": "Alice"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    mock_enroll.assert_called_once()
+    call_kwargs = mock_enroll.call_args.kwargs
+    assert call_kwargs["display_name"] == "Alice"
+    assert call_kwargs["name"] == "alice"
+    assert call_kwargs["speaker_label"] == "SPEAKER_00"
+
+
+def test_enroll_submit_skips_enroll_when_no_segments(client, tmp_path, monkeypatch):
+    """enroll_submit() must not call enroll_speaker() when no diarization_segments are stored."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from datetime import datetime
+    import uuid
+
+    transcript = tmp_path / "session01.md"
+    transcript.write_text("---\nspeakers:\n  - name: SPEAKER_00\n---\n\nHello.")
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"fake")
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(audio),
+        kwargs={"device": "cpu"},
+        output_path=str(transcript),
+        diarization_segments=[],  # no segments
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    with patch("wisper_transcribe.speaker_manager.enroll_speaker") as mock_enroll:
+        resp = client.post(
+            f"/transcribe/jobs/{job.id}/enroll",
+            data={"speaker_SPEAKER_00": "Bob"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    mock_enroll.assert_not_called()
