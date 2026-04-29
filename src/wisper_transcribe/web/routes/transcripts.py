@@ -10,6 +10,14 @@ from urllib.parse import quote
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
 
+from wisper_transcribe.campaign_manager import (
+    _validate_campaign_slug,
+    get_campaign_for_transcript,
+    load_campaigns,
+    move_transcript_to_campaign,
+    remove_transcript_from_campaign,
+)
+
 from . import templates
 
 router = APIRouter(prefix="/transcripts")
@@ -148,8 +156,6 @@ async def transcripts_list(request: Request) -> HTMLResponse:
         reverse=True,
     )
 
-    from wisper_transcribe.campaign_manager import load_campaigns
-
     campaigns = load_campaigns()
 
     # Build stem → campaign slug mapping
@@ -209,7 +215,6 @@ async def transcript_detail(request: Request, name: str) -> HTMLResponse:
     llm_provider = cfg.get("llm_provider", "ollama") or "ollama"
     llm_model = cfg.get("llm_model", "") or ""
 
-    from wisper_transcribe.campaign_manager import load_campaigns, get_campaign_for_transcript
     campaigns = load_campaigns()
     current_campaign_slug = get_campaign_for_transcript(md_path.stem)
 
@@ -388,14 +393,6 @@ async def summary_download(request: Request, name: str):
 @router.post("/{name}/campaign", response_class=HTMLResponse)
 async def assign_campaign(request: Request, name: str) -> HTMLResponse:
     """Assign or remove a campaign association for a transcript."""
-    from typing import Annotated, Optional
-    from fastapi import Form
-    from wisper_transcribe.campaign_manager import (
-        _validate_campaign_slug,
-        move_transcript_to_campaign,
-        remove_transcript_from_campaign,
-    )
-
     safe_name = _get_safe_transcript_path(request, name)
     if not safe_name:
         return HTMLResponse(content="Invalid name", status_code=400)
