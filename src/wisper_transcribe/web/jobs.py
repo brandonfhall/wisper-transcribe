@@ -161,6 +161,8 @@ class Job:
     finished_at: Optional[datetime] = None
     # Set after transcription completes when enroll flow is needed
     diarization_labels: list[str] = field(default_factory=list)
+    # Full diarization segments retained for post-job enrollment (enroll_submit uses these)
+    diarization_segments: list = field(default_factory=list)
     # speaker_label -> path to a short audio excerpt (for enrollment wizard)
     speaker_excerpts: dict[str, str] = field(default_factory=dict)
     # Threading event set by cancel() to signal the worker to abort
@@ -387,7 +389,9 @@ class JobQueue:
         _tqdm_module.tqdm.write = capturing_write  # type: ignore[method-assign]
         _tqdm_module.tqdm.__init__ = capturing_init  # type: ignore[method-assign]
         try:
-            output_path = process_file(Path(job.input_path), **job.kwargs)
+            _result_store: dict = {}
+            output_path = process_file(Path(job.input_path), _result_store=_result_store, **job.kwargs)
+            job.diarization_segments = _result_store.get("diarization_segments", [])
             job.output_path = str(output_path)
             _extract_speaker_excerpts(job, output_path)
 

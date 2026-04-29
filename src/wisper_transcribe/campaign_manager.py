@@ -97,6 +97,7 @@ def load_campaigns(data_dir: Optional[Path] = None) -> dict[str, Campaign]:
             display_name=data.get("display_name", slug),
             created=data.get("created", ""),
             members=members,
+            transcripts=list(data.get("transcripts", [])),
         )
     return campaigns
 
@@ -115,6 +116,7 @@ def save_campaigns(campaigns: dict[str, Campaign], data_dir: Optional[Path] = No
                 key: {"role": m.role, "character": m.character}
                 for key, m in campaign.members.items()
             },
+            "transcripts": list(campaign.transcripts),
         }
 
     with open(path, "w", encoding="utf-8") as f:
@@ -193,3 +195,56 @@ def get_campaign_profile_keys(slug: str, data_dir: Optional[Path] = None) -> set
     if slug not in campaigns:
         return set()
     return set(campaigns[slug].members.keys())
+
+
+# ---------------------------------------------------------------------------
+# Transcript association
+# ---------------------------------------------------------------------------
+
+
+def move_transcript_to_campaign(
+    stem: str, slug: str, data_dir: Optional[Path] = None
+) -> None:
+    """Associate a transcript stem with a campaign.
+
+    Removes the stem from any other campaign first (one transcript → one campaign).
+    Raises KeyError if the target campaign slug is not found.
+    """
+    campaigns = load_campaigns(data_dir)
+    if slug not in campaigns:
+        raise KeyError(f"Campaign {slug!r} not found")
+    # Remove from any existing campaign first
+    for s, c in campaigns.items():
+        if stem in c.transcripts and s != slug:
+            c.transcripts.remove(stem)
+    if stem not in campaigns[slug].transcripts:
+        campaigns[slug].transcripts.append(stem)
+    save_campaigns(campaigns, data_dir)
+
+
+def remove_transcript_from_campaign(stem: str, data_dir: Optional[Path] = None) -> None:
+    """Disassociate a transcript stem from whichever campaign it belongs to (no-op if none)."""
+    campaigns = load_campaigns(data_dir)
+    changed = False
+    for c in campaigns.values():
+        if stem in c.transcripts:
+            c.transcripts.remove(stem)
+            changed = True
+    if changed:
+        save_campaigns(campaigns, data_dir)
+
+
+def get_campaign_for_transcript(stem: str, data_dir: Optional[Path] = None) -> Optional[str]:
+    """Return the slug of the campaign that owns this transcript stem, or None."""
+    for slug, c in load_campaigns(data_dir).items():
+        if stem in c.transcripts:
+            return slug
+    return None
+
+
+def get_transcripts_for_campaign(slug: str, data_dir: Optional[Path] = None) -> list[str]:
+    """Return the list of transcript stems for a campaign. Empty list if slug unknown."""
+    campaigns = load_campaigns(data_dir)
+    if slug not in campaigns:
+        return []
+    return list(campaigns[slug].transcripts)

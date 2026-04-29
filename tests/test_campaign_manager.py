@@ -10,10 +10,14 @@ from wisper_transcribe.campaign_manager import (
     add_member,
     create_campaign,
     delete_campaign,
+    get_campaign_for_transcript,
     get_campaign_profile_keys,
     get_campaigns_path,
+    get_transcripts_for_campaign,
     load_campaigns,
+    move_transcript_to_campaign,
     remove_member,
+    remove_transcript_from_campaign,
     save_campaigns,
 )
 from wisper_transcribe.models import Campaign, CampaignMember
@@ -214,3 +218,71 @@ def test_validate_campaign_slug_accepts_valid(slug):
 def test_validate_campaign_slug_rejects_invalid(slug):
     result = _validate_campaign_slug(slug)
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Transcript association
+# ---------------------------------------------------------------------------
+
+
+def test_move_transcript_to_campaign(tmp_path):
+    create_campaign("Alpha", data_dir=tmp_path)
+    move_transcript_to_campaign("session01", "alpha", data_dir=tmp_path)
+    assert "session01" in get_transcripts_for_campaign("alpha", data_dir=tmp_path)
+
+
+def test_move_transcript_changes_campaign(tmp_path):
+    create_campaign("Alpha", data_dir=tmp_path)
+    create_campaign("Beta", data_dir=tmp_path)
+    move_transcript_to_campaign("session01", "alpha", data_dir=tmp_path)
+    move_transcript_to_campaign("session01", "beta", data_dir=tmp_path)
+    assert "session01" not in get_transcripts_for_campaign("alpha", data_dir=tmp_path)
+    assert "session01" in get_transcripts_for_campaign("beta", data_dir=tmp_path)
+
+
+def test_move_transcript_unknown_campaign_raises(tmp_path):
+    with pytest.raises(KeyError):
+        move_transcript_to_campaign("session01", "no-such-slug", data_dir=tmp_path)
+
+
+def test_remove_transcript_from_campaign(tmp_path):
+    create_campaign("Alpha", data_dir=tmp_path)
+    move_transcript_to_campaign("session01", "alpha", data_dir=tmp_path)
+    remove_transcript_from_campaign("session01", data_dir=tmp_path)
+    assert "session01" not in get_transcripts_for_campaign("alpha", data_dir=tmp_path)
+
+
+def test_remove_transcript_noop_when_not_associated(tmp_path):
+    create_campaign("Alpha", data_dir=tmp_path)
+    remove_transcript_from_campaign("orphan", data_dir=tmp_path)  # must not raise
+
+
+def test_get_campaign_for_transcript_returns_slug(tmp_path):
+    create_campaign("Alpha", data_dir=tmp_path)
+    move_transcript_to_campaign("session01", "alpha", data_dir=tmp_path)
+    assert get_campaign_for_transcript("session01", data_dir=tmp_path) == "alpha"
+
+
+def test_get_campaign_for_transcript_returns_none_when_not_associated(tmp_path):
+    create_campaign("Alpha", data_dir=tmp_path)
+    assert get_campaign_for_transcript("orphan", data_dir=tmp_path) is None
+
+
+def test_get_transcripts_for_campaign_returns_empty_for_unknown_slug(tmp_path):
+    assert get_transcripts_for_campaign("no-such", data_dir=tmp_path) == []
+
+
+def test_transcripts_persisted_in_json(tmp_path):
+    create_campaign("Alpha", data_dir=tmp_path)
+    move_transcript_to_campaign("session01", "alpha", data_dir=tmp_path)
+    campaigns = load_campaigns(tmp_path)
+    assert "session01" in campaigns["alpha"].transcripts
+
+
+def test_transcripts_loaded_from_existing_json(tmp_path):
+    """Campaigns.json with existing transcripts field loads correctly."""
+    create_campaign("Alpha", data_dir=tmp_path)
+    move_transcript_to_campaign("s01", "alpha", data_dir=tmp_path)
+    move_transcript_to_campaign("s02", "alpha", data_dir=tmp_path)
+    fresh = load_campaigns(tmp_path)
+    assert set(fresh["alpha"].transcripts) == {"s01", "s02"}

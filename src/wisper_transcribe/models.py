@@ -54,7 +54,8 @@ class Campaign:
     slug: str
     display_name: str
     created: str
-    members: dict = field(default_factory=dict)  # dict[str, CampaignMember]
+    members: dict = field(default_factory=dict)       # dict[str, CampaignMember]
+    transcripts: list = field(default_factory=list)   # list[str] — transcript stems
 
 
 # ---------------------------------------------------------------------------
