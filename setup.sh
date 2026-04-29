@@ -18,6 +18,34 @@ ok()   { echo -e "   ${GREEN}OK  : $1${NC}"; }
 warn() { echo -e "   ${YELLOW}WARN: $1${NC}"; }
 fail() { echo -e "   ${RED}FAIL: $1${NC}"; exit 1; }
 
+# Runs a pip install in the background while showing a spinner.
+# Usage: pip_with_spinner "Description" install -e . -q
+# Captures output; on failure prints it then exits.
+pip_with_spinner() {
+    local desc="$1"; shift
+    local log; log=$(mktemp)
+    "$PIP" "$@" > "$log" 2>&1 &
+    local pid=$!
+    local spinstr='|/-\'
+    local i=0
+    printf "   "
+    while kill -0 "$pid" 2>/dev/null; do
+        local spin_char="${spinstr:$((i % 4)):1}"
+        printf "\r   %s  %s..." "$spin_char" "$desc"
+        sleep 0.4
+        i=$((i + 1))
+    done
+    printf "\r   \033[K"   # clear spinner line
+    wait "$pid"
+    local exit_code=$?
+    if [ "$exit_code" -ne 0 ]; then
+        cat "$log"
+        rm -f "$log"
+        fail "$desc failed (exit code $exit_code)"
+    fi
+    rm -f "$log"
+}
+
 echo ""
 echo "wisper-transcribe setup (Mac/Linux)"
 echo "====================================="
@@ -49,8 +77,8 @@ PIP=".venv/bin/pip"
 PYTHON=".venv/bin/python"
 
 # ── Install package ───────────────────────────────────────────────────────────
-step "Installing wisper-transcribe..."
-"$PIP" install -e . -q
+step "Installing wisper-transcribe (this may take several minutes)..."
+pip_with_spinner "Installing wisper-transcribe" install -e . -q
 ok "wisper-transcribe installed"
 
 # ── ffmpeg ────────────────────────────────────────────────────────────────────
@@ -106,10 +134,10 @@ echo "     s) Skip (use Ollama or configure later)"
 echo ""
 read -r -p "   Choice [a/b/c/d/s]: " LLM_CHOICE
 case "$(echo "$LLM_CHOICE" | tr '[:upper:]' '[:lower:]')" in
-    a) "$PIP" install -e ".[llm-anthropic]" -q && ok "anthropic SDK installed" ;;
-    b) "$PIP" install -e ".[llm-openai]"    -q && ok "openai SDK installed" ;;
-    c) "$PIP" install -e ".[llm-google]"    -q && ok "google-genai SDK installed" ;;
-    d) "$PIP" install -e ".[llm-all]"       -q && ok "all LLM SDKs installed" ;;
+    a) pip_with_spinner "Installing Anthropic SDK"    install -e ".[llm-anthropic]" -q && ok "anthropic SDK installed" ;;
+    b) pip_with_spinner "Installing OpenAI SDK"       install -e ".[llm-openai]"    -q && ok "openai SDK installed" ;;
+    c) pip_with_spinner "Installing Google Genai SDK" install -e ".[llm-google]"    -q && ok "google-genai SDK installed" ;;
+    d) pip_with_spinner "Installing all LLM SDKs"    install -e ".[llm-all]"        -q && ok "all LLM SDKs installed" ;;
     *) ok "Skipped — use 'wisper config llm' to set up a provider at any time" ;;
 esac
 

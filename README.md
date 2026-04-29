@@ -492,6 +492,7 @@ wisper server
 | Transcribe | `/transcribe` | Drag-and-drop upload, all transcription options, live progress stream; optional "Refine vocabulary" and "Generate campaign summary" post-processing checkboxes |
 | Transcripts | `/transcripts` | Browse output files, view rendered markdown, download, delete; green notes icon on cards that have a campaign summary |
 | Speakers | `/speakers` | Enroll, rename, remove speaker profiles |
+| Campaigns | `/campaigns` | Create and manage campaigns; add/remove roster members; scope transcription to a campaign |
 | Config | `/config` | View and edit all settings |
 
 ### Speaker enrollment in the web UI
@@ -631,11 +632,13 @@ Speaker profiles and config are stored in your OS user data directory — separa
 ```
 wisper-transcribe/
 ├── config.toml          settings
-└── profiles/
-    ├── speakers.json    speaker registry
-    └── embeddings/
-        ├── alice.npy    voice fingerprint
-        └── bob.npy
+├── profiles/
+│   ├── speakers.json    speaker registry (global — one entry per person)
+│   └── embeddings/
+│       ├── alice.npy    voice fingerprint
+│       └── bob.npy
+└── campaigns/
+    └── campaigns.json   campaign rosters (additive layer over global profiles)
 ```
 
 ---
