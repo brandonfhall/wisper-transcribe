@@ -464,6 +464,12 @@ Three double-click launcher scripts handle first-time setup and server start for
 - `start.sh` (Linux) — equivalent for Linux desktops with `xdg-open` for browser launch.
 Both `start.command` and `start.sh` are committed with the execute bit set (`git update-index --chmod=+x`).
 
+**Setup script LLM provider detection.** `setup.sh` and `setup.ps1` probe `localhost:11434` (Ollama `/api/tags`) and `localhost:1234` (LM Studio `/v1/models`) with a 2 s timeout before showing the LLM provider menu. When a local provider is running, the script lists installed/loaded models and lets the user pick by number — the choice is persisted via `wisper config set llm_provider …` / `llm_model …`. When neither is running, install/start hints are shown and the user can defer with `s` (skip → run `wisper config llm` later). Cloud SDK extras (`a/b/c/d` for anthropic / openai / google / all) are also offered. This eliminates a manual `wisper config llm` round-trip for the common case where Ollama or LM Studio is already running.
+
+**Setup script install order (Windows GPU).** `setup.ps1` detects an NVIDIA GPU via `nvidia-smi` and installs the CUDA build of `torch` / `torchaudio` from `https://download.pytorch.org/whl/cu126` **before** running `pip install -e .`. If the project install ran first, pip would resolve the CPU-only PyPI `torch` as a transitive dependency, and the later CUDA install would replace `torch` itself but leave `faster-whisper` / `torchaudio` linked to the CPU build's internal layout — surfacing as `torch has no attribute _utils` at transcription time. With the CUDA wheels installed first, pip reuses them when resolving the project's deps, so all ML packages bind to the same build from the start. `--force-reinstall` is no longer needed.
+
+**Setup script progress indicators.** Long-running pip installs (project, PyTorch, LLM extras) display a progress bar (PowerShell: `Write-Progress` driven by a background `Start-Process`) or a spinner (bash: background pip + spinning cursor) so the user has live feedback that setup is working.
+
 ---
 
 ## HuggingFace Models
