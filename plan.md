@@ -18,7 +18,7 @@ Podcast transcription tool for tabletop RPG actual-play recordings (D&D, Pathfin
 
 Sessions are currently recorded externally with OBS — system audio (Discord players) on one track, host mic on another, mixed down to a single file the user feeds into wisper. The host wants to fold the recording step into wisper itself: a Discord bot that joins the voice channel, records the session to disk, and surfaces the resulting file in wisper's existing transcribe / campaign / enrollment flow with no manual file shuffling.
 
-A later phase will make transcription stream live (~30–60 s lag) while recording is in progress. **v1 is batch-only by default** (record → stop → transcribe via the existing job queue), but live transcription is **conditionally promoted to v1** if the research phase finds it cheap to add on top of the per-user-track architecture (see research item 13). If the cost is non-trivial, it stays deferred.
+A later phase will make transcription stream live (~30–60 s lag) while recording is in progress. **v1 is batch-only** — research (resolved item 13 below) found the live-ticker gate fails on two hard criteria (`JobQueue` is one-job-at-a-time and would be monopolized for 4-hour sessions; realistic build estimate is 2–3 days, not <1). Live transcription stays in v2, but v1 must honour five file-format invariants so v2 can be added without a rewrite — see "v1 file-format invariants for future live transcription" below.
 
 ### V1 scope (proof of concept)
 
@@ -32,7 +32,7 @@ A later phase will make transcription stream live (~30–60 s lag) while recordi
 
 ### Out of scope for v1
 
-- Live / streaming transcription with a running ticker — **conditional**: deferred *unless* research item 13 finds it inexpensive on top of per-user tracks, in which case promoted into v1.
+- Live / streaming transcription with a running ticker — **deferred to v2** (gate failed; see resolved item 13). v1 must preserve the file-format invariants that let v2 add it without rewriting the recording layer.
 - Bot replying to Discord (live captions back, slash commands, etc.).
 - Video / screenshare capture.
 - Multi-server, multi-channel, or multi-bot operation.
@@ -47,14 +47,20 @@ A later phase will make transcription stream live (~30–60 s lag) while recordi
 | Bot hosting | **Inline** — asyncio task inside the `wisper server` process. No separate Docker service. |
 | Recording storage | `data_dir/recordings/<recording_id>/…`, sibling of `profiles/` and `campaigns/` |
 | Audio shape | Per-user tracks **and** a mixed combined track, both retained on disk |
-| File format | Segmented Opus (length **(research)**), concatenated at session end |
-| Transcription path | Existing `JobQueue.submit()` consumes the combined track; no parallel pipeline |
+| Discord library | **Pycord (py-cord)** — only library with documented stable per-user voice receive; MIT-licensed; active maintainer team. See resolved item 1 + Phase 0 DAVE risk. |
+| Audio file format | **Segmented Opus-in-Ogg** (`.ogg` per segment), one complete self-contained Ogg bitstream per segment file. No mid-stream truncation hazard; ffmpeg / pydub handle natively. |
+| Segment length | **60 seconds** per segment file. 240 segments per 4-hour session × 7 streams (6 users + mixed); `ffmpeg -f concat -c copy` finalizes in 2–4 s. |
+| Per-user silence handling | **Continuous-with-DTX**: every user's track is wall-clock-aligned; `libopus` DTX (`OPUS_SET_DTX(1)`) drops silent periods to ~400 bit/s comfort-noise. No sidecar timestamp manifest needed. |
+| Mixing strategy | **Real-time PCM mixing** during recording (~2 % of one CPU core for 6 users). Deferred `ffmpeg amix` was 2–48 minutes for a 4-hour session — too slow for "stop and transcribe". A `--remix` repair flag may be added later from per-user tracks without format changes. |
+| Transcription hand-off | Existing `JobQueue.submit()` consumes a **copy** of the combined track at `output/<recording_id>.wav` (not the original `recordings/<id>/final/combined.wav`). The queue's internal `shutil.move()` rename ([jobs.py:241–244](src/wisper_transcribe/web/jobs.py#L241-L244)) would otherwise relocate the recording's source file. Pass `original_stem=recording_id`, `output_dir=_default_output_dir()`, `campaign=recording.campaign_slug`. |
 | Speaker enrollment | Discord-ID binding on roster (Option A) **+** auto-enroll on first hear (Option B). Voice-print fallback (Option C) deferred to v2. |
 | Reconnect | Auto-rejoin on Discord disconnect with backoff. Mark session degraded but keep recording. |
 | Discord token | Same handling as `HF_TOKEN`: env var (`DISCORD_BOT_TOKEN`) wins, then config, then web-UI input. Masked in `wisper config show`. |
 | CLI parity | Surface every server-side action as a `wisper record` subcommand where it makes sense; UI is the primary entry point. |
 | CLI ↔ server IPC | **HTTP on localhost.** CLI is a thin client of the same FastAPI routes the web UI uses (`POST /api/record/start`, etc.). Server writes its bind address to `data_dir/server.json` on startup; CLI reads that for discovery, with `WISPER_SERVER_URL` env var as override. If `server.json` is absent or the server is unreachable, the CLI errors out with a clear "wisper server is not running — start it with `wisper server` and try again" message. No auto-launch, no standalone-CLI bot path. |
 | Auth on record routes | **None for v1** — match the existing posture (`0.0.0.0:8080`, no auth on any route). Adding auth project-wide (token or basic username/password covering *all* routes, not just record) is tracked in Backlog → `Web UI auth (project-wide)`. Recording is destructive enough that an audit-then-ship pass is appropriate, but doing it piecemeal on record-only routes would create a confusing two-tier security model. |
+| FastAPI integration | **`BotManager` mirroring `JobQueue`.** New `web/discord_bot.py` exposes a `BotManager` class with `start()` / `stop()` that internally uses `asyncio.create_task()`. Created in `create_app()`, started in `lifespan()` after `job_queue.start()`, stopped before `job_queue.stop()` on shutdown. Stored on `app.state.bot_manager`; routes obtain it via `get_bot_manager(request)` helper alongside the existing `get_queue()`. `data_dir/server.json` is written immediately before the lifespan `yield` and deleted in the post-`yield` cleanup arm. The `wisper server` CLI ([cli.py:169](src/wisper_transcribe/cli.py#L169)) passes host/port via env var (`WISPER_BIND`) so `create_app()` can read it without a signature change. |
+| Auto-rejoin policy | **5 retries on transient failures, fatal abort on permanent ones.** Backoff schedule: `[2, 5, 15, 30, 60]` seconds (capped linear; exponential blew to 16 min by retry 4 — too long for a session). **Transient** = close codes 4009 (session timeout), 4015 (voice server crash), `TimeoutError` / socket reset. **Permanent** = 4014 (kicked), 4011 (server gone), 4022 (call ended), 4017 (DAVE required — library bug). On 4006, retry once with fresh connect, then give up. Each rejoin attempt logs to the segment manifest with timestamp + attempt number. After max retries, set `Recording.status = "degraded"` and stop accepting new segments while keeping existing ones. Surface in UI via SSE / status badge; `wisper record show` prints `[DEGRADED] reconnected Nx — last reason: <code>`. Call `await vc.disconnect(force=True)` before each retry to dodge [discord.py #10207](https://github.com/Rapptz/discord.py/issues/10207). |
 
 ### Enrollment options
 
@@ -64,7 +70,7 @@ A later phase will make transcription stream live (~30–60 s lag) while recordi
 
 **C (deferred to v2) — voice-print fallback.** Use existing wisper voice embeddings to match an unknown Discord ID to an enrolled profile via cosine similarity. Means a returning player who's already enrolled gets recognized without binding their Discord ID. Pure UX polish — A + B fully covers v1.
 
-### Data model additions (sketch — refine in research)
+### Data model additions (locked after research)
 
 ```python
 @dataclass
@@ -73,13 +79,29 @@ class Recording:
     campaign_slug: Optional[str]
     started_at: datetime
     ended_at: Optional[datetime]
-    status: Literal["recording", "completed", "failed", "transcribing", "transcribed"]
+    status: Literal["recording", "degraded", "completed", "failed", "transcribing", "transcribed"]
+    # Note: "recording" and "degraded" are distinct active states (degraded = auto-rejoin
+    # exhausted but existing segments preserved). v2 live ticker watches only while status
+    # is in {"recording", "degraded"} — invariant 5.
     voice_channel_id: str
+    guild_id: str                 # added — needed for Pycord channel resolution
     discord_speakers: dict[str, str]   # discord_user_id → tagged wisper profile name (or "")
-    combined_path: Path           # data_dir/recordings/<id>/combined.opus (or .wav after concat)
-    per_user_dir: Path            # data_dir/recordings/<id>/per-user/
+    segment_manifest: list[SegmentRecord]  # see below — append-only, atomic per invariant 2
+    combined_path: Path           # data_dir/recordings/<id>/final/combined.wav (16 kHz mono, post-stop)
+    per_user_dir: Path            # data_dir/recordings/<id>/per-user/<discord_id>/
     transcript_path: Optional[Path]
+    rejoin_log: list[RejoinAttempt]   # timestamp + close_code + attempt_number per resolved item 9
     notes: Optional[str]
+
+
+@dataclass
+class SegmentRecord:
+    index: int                    # monotonic, per stream
+    stream: Literal["mixed"] | str   # "mixed" or a discord_user_id
+    started_at: datetime
+    duration_s: float
+    path: Path                    # …/per-user/<discord_id>/NNNN.opus or …/combined/NNNN.opus
+    finalized: bool               # False while writing; True after EOS page flushed
 
 
 class CampaignMember:                # existing dataclass, new field
@@ -128,7 +150,15 @@ wisper record delete <recording_id>                # remove files + entry, with 
 
 ### Implementation phases (proposed — refine after research)
 
-**Phase 0 — Library spike (explicitly throwaway).** 1–2 day timebox. Standalone `scripts/spike_voice_receive.py`: hardcoded bot token (env var), hardcoded guild + channel, joins, captures ~60 s, dumps per-user `.opus` files, exits. Acceptance: per-user files contain audible audio; chosen library is on PyPI with non-trivial commit activity in the last 12 months; install footprint reasonable; works on Windows + macOS hosts. Deliverable: a one-page library-choice memo appended to this plan (rationale, alternatives considered, platform caveats). Spike code is **not retained** — the production bot is written from scratch in phase 3 with the lessons learned. **If the spike fails on every viable library, replan: fall back to mixed-audio capture + diarization, drop the auto-enroll story, reshape phases 4 and 7.**
+**Phase 0 — Library spike (explicitly throwaway).** 1–2 day timebox. Standalone `scripts/spike_voice_receive.py`: hardcoded bot token (env var), hardcoded guild + channel, joins, captures ~60 s, dumps per-user `.opus` files, exits. **Library is locked to Pycord** (resolved item 1) — the spike's job is to verify Pycord's `start_recording(sink, …)` actually receives per-user audio under DAVE/E2EE.
+
+**DAVE/E2EE risk (highest priority).** Discord mandated DAVE on 2026-03-02 (close code 4017 on connect). Pycord 2.8rc1 added DAVE for voice-*sending*; voice-*receive* is documented as "may not work as expected" and tracked as in-progress in [pycord #3135](https://github.com/Pycord-Development/pycord/issues/3135). The spike must verify on the latest stable + master:
+
+- Acceptance gate A — **stable Pycord works**: `pip install py-cord[voice]==<latest stable>`, run script, per-user `.opus` files have audible audio. Proceed to phase 1.
+- Acceptance gate B — **only master works**: stable fails but `pip install git+…@master` works. Proceed but pin `git+` URL in `pyproject.toml` and add a tracking comment to swap back to PyPI when the next release ships.
+- Acceptance gate C — **nothing works**: no Pycord variant receives DAVE-encrypted audio. **Replan**. Options: (a) fall back to mixed-audio capture (single track via OBS-style virtual cable inside the bot's host) + diarization, drop auto-enroll, reshape phases 4 and 7; (b) wait on Pycord upstream; (c) re-research at item-1 scope including aiortc raw-receive.
+
+Other acceptance criteria: per-user `.opus` files are well-formed Ogg/Opus (playable by `ffplay`); chosen install works on Windows + macOS hosts; deliverable is a one-page library-choice memo appended to this plan (DAVE outcome, alternatives considered, platform caveats). Spike code is **not retained** — the production bot is written from scratch in phase 3.
 
 1. **Storage layer.** `Recording` dataclass, `recording_manager.py` (CRUD + index), segmented audio writer (format chosen during research), crash-recovery on startup (`recordings.json` reconciliation with on-disk segments). No Discord deps yet — this is pure local file management with tests.
 2. **Server discovery + control plane.** `data_dir/server.json` written on `wisper server` startup; FastAPI route stubs at `/api/record/{start,stop,status,…}` returning 501 for now; CLI client (`wisper record …`) that reads `server.json`, hits the routes, and prints the "server not running" error cleanly. Lets us land the CLI↔server plumbing before there's anything to control.
@@ -137,29 +167,66 @@ wisper record delete <recording_id>                # remove files + entry, with 
 5. **Web UI.** Record control page, recordings list (campaign-grouped), recording detail page, integration with the existing transcripts page.
 6. **Auto-enroll on first hear (Option B).** "Unknown speaker" queue surfaced on the recording detail page, embedding extraction from per-user tracks.
 7. **Hand-off into JobQueue.** "Transcribe" button reuses `process_file()` via `submit()`. Recording → transcript association recorded so the existing transcripts page shows them.
-8. **(Conditional) live ticker** — only if research item 13 finds it cheap. New SSE endpoint, ticker template, chunked-segment transcribe worker. If gate fails, this phase is dropped from v1 and tracked in Future.
-9. **Tests + docs.** `test_recording_manager.py`, `test_record_cli.py`, `test_record_routes.py`. Bot integration tests use a fake voice gateway / synthesised Opus stream — no live Discord. Update `architecture.md` (new module, new pipeline branch, new config keys, new env var) and `README.md` (Discord setup walkthrough, new CLI/UI surface).
-10. **Hardening.** Auto-rejoin behaviour, crash recovery walkthrough, secret handling audit, dependency footprint check.
+8. **Tests + docs.** `test_recording_manager.py`, `test_record_cli.py`, `test_record_routes.py`, `test_discord_bot.py` (using mocked Pycord client + synthesised Opus stream — no live Discord in CI). Update `architecture.md` (new module, new pipeline branch, new config keys, new env var, file-format invariants) and `README.md` (Discord setup walkthrough per resolved item 10, new CLI/UI surface).
+9. **Hardening.** Auto-rejoin behaviour walkthrough on a real Discord server, crash recovery walkthrough (kill `wisper server` mid-session and resume), secret handling audit (token storage / masking), dependency footprint check, DAVE re-test if Pycord shipped a new release during development.
+
+(The conditional "live ticker" phase has been dropped — resolved item 13 deferred it to v2.)
 
 ### Phase commit cadence
 
 Per CLAUDE.md / user workflow: commit at the end of each numbered phase, push the branch, and pause for user review before starting the next phase.
 
-### Open research items (to be resolved before/while writing)
+### v1 file-format invariants for future live transcription (locked)
 
-1. **Discord library.** Pycord vs disnake vs discord.py main + receive cogs vs raw aiortc/`discord-ext-voice-recv`. Which has stable per-user voice receive, asyncio integration, and an active maintainer? Verify on the Python versions our CI matrix targets (3.10–3.13 blocking, 3.14 non-blocking).
-2. **Crash-survivable audio format.** Native Discord packets are Opus 48 kHz stereo (per user). Options: append-only `.ogg` per segment, raw Opus packets + sidecar metadata, segmented WAV (PCM) for simplicity. Which gives the cleanest recovery story and the lowest CPU cost?
-3. **Segment length.** Tune for: max acceptable loss on crash (≤ 1 segment), cost of concatenation at stop, FS overhead of many small files. Likely 30–120 s. Validate.
-4. **Mixing per-user → combined.** Real-time PCM mixing in Python (numpy add+clip) vs deferred `ffmpeg amix` at stop. CPU budget on the host machine while a 6-player session is recording.
-5. **FastAPI lifespan integration.** How to spin the Pycord client up at server startup, expose start/stop control to routes and CLI, and shut down cleanly on Ctrl+C without dropping the recording.
-6. **CLI ↔ server IPC.** When the user runs `wisper record stop` from a terminal but the bot is running inside `wisper server`, how does the command reach the bot? HTTP localhost endpoint with auth? Named pipe? Always-on local socket?
-7. **Discord channel discovery.** Listing guilds / voice channels the bot has access to so the UI can show a picker rather than asking for raw IDs.
-8. **Voice activity vs continuous recording.** Discord only sends audio frames for speaking users. Do we record pure silence in inactive periods (simpler timeline alignment) or rely on per-user timestamps to reconstruct gaps at concat time (smaller files, more bookkeeping)?
-9. **Auto-rejoin policy.** Backoff schedule, max retries, behaviour when the channel is gone, how to surface a degraded session in the UI.
-10. **Token / app setup UX.** Step-by-step in `wisper setup` (interactive) and `wisper config discord` (later config). Required scopes / intents / permissions to document.
-11. **Per-user track size estimate.** A 4-hour session × 6 players × Opus 48 kHz mono ≈ ? Sanity check disk usage and plan for cleanup / archive policy.
-12. **Existing job queue compatibility.** Does the existing `JobQueue` accept a `Path` to a pre-existing audio file from a non-upload source? Confirm by reading `web/jobs.py` and `pipeline.process_file()`.
-13. **Live transcription cost analysis (gate for v1 promotion).** Quantify the incremental work to stream finalized per-user Opus segments through `faster-whisper` as they land on disk and surface a ticker on `/recordings/<id>/live`. Estimate in additional modules / lines / new dependencies. Acceptance bar for promoting into v1: re-uses the existing `JobQueue` worker model, adds at most one new module + one new SSE endpoint + one new template, no new ML dependency, and adds < ~1 day to phase 8 hand-off. If the answer is bigger than that — concurrency redesign, separate worker pool, model warm-up cost on every chunk, etc. — keep it in v2 and ensure the v1 file format does not preclude it.
+Live transcription is deferred to v2 (resolved item 13), but v1 must honour these five invariants so v2 can plug in without rewriting the recording layer. **None of these are negotiable during implementation.**
+
+1. **Each segment file must be a self-contained Ogg/Opus container** — not a raw packet stream. v2's live worker will decode any finalized segment with `ffmpeg -i NNNN.opus -f f32le -ar 16000 -ac 1 pipe:1` independently of preceding segments.
+2. **Segment manifest must be append-only and atomic.** `metadata.json` (or equivalent sidecar) records each segment's finalization with a monotonic index and the owning `discord_user_id` at the moment it is closed. v2 watches this manifest for new entries.
+3. **Segment length must stay within 30–60 s.** Whisper's native context window is 30 s; >60 s segments hit the long-form chunking path with timestamp drift. v1 ships at 60 s.
+4. **Per-user track directory layout is a versioned contract.** `data_dir/recordings/<id>/per-user/<discord_id>/NNNN.opus` is fixed. Any rename in v1 breaks v2.
+5. **`Recording.status` includes a distinct `"recording"` state.** v2 watches for new segments only while status is `"recording"`; transition to `"completed"` / `"failed"` / `"degraded"` is the stop signal.
+
+### Resolved research items (Sonnet research, 2026-05-03)
+
+Each item below was researched by a sub-agent and a decision was made. Where a recommendation was adopted into the locked decisions table or the file-format invariants above, the source is noted. Where the resolution affects an implementation phase, the relevant phase number is called out.
+
+**1. Discord library.** Pycord (py-cord). Only library with documented stable `VoiceClient.start_recording(sink, …)` per-user receive (added v2.0). Latest release v2.7.2 (2026-04-14), v2.8 in RC. MIT, multi-maintainer. Discarded: `discord-ext-voice-recv` (permanent alpha, single maintainer, same DAVE gap), `discord-ext-listening` (no PyPI release), disnake / hikari / aiortc (no built-in receive or months of work). Caveat: DAVE/E2EE receive is the active risk — see Phase 0 acceptance gates.
+
+**2. Crash-survivable audio format.** Segmented Opus-in-Ogg, one self-contained `.ogg` bitstream per segment file. Beats raw-packets + sidecar (custom muxer needed at concat), segmented WAV (~32× larger), and Matroska (repair tooling). Locked in decisions table; satisfies invariant 1.
+
+**3. Segment length.** 60 seconds. 240 segments × 7 streams (6 users + mixed) for a 4-hour session; concat in 2–4 s; ≤60 s loss on crash. Locked; satisfies invariant 3.
+
+**4. Mixing per-user → combined.** Real-time PCM mixing (~2 % of one CPU core for 6 users). Deferred `ffmpeg amix` was 2–48 minutes for a 4-hour session — unacceptable for "stop and transcribe." A `--remix` repair flag from per-user tracks may be added later without format changes. Locked.
+
+**5. FastAPI lifespan integration.** New `web/discord_bot.py` with a `BotManager` class mirroring `JobQueue.start()/stop()`. Started in the lifespan async context manager after `job_queue.start()`; stopped before `job_queue.stop()` in the cleanup arm. `data_dir/server.json` written immediately before `yield`, deleted after. Stored on `app.state.bot_manager`; routes use `get_bot_manager(request)` helper alongside the existing `get_queue()` ([routes/__init__.py:19–21](src/wisper_transcribe/web/routes/__init__.py#L19-L21)). The `wisper server` CLI ([cli.py:169](src/wisper_transcribe/cli.py#L169)) sets `WISPER_BIND` env var (host:port) before `uvicorn.run()` so `create_app()` can read it without a signature change. Locked.
+
+**6. CLI ↔ server IPC.** Locked previously — HTTP on localhost, `data_dir/server.json` for discovery, `WISPER_SERVER_URL` env var override, error out clearly when server is not running.
+
+**7. Discord channel discovery.** `bot.guilds` and `guild.voice_channels` populate from the gateway cache on startup — no extra REST calls. Required intents: `guilds` + `voice_states` (both non-privileged, present in `discord.Intents.default()`). New endpoint `GET /api/record/channels` returns `[{guild_id, guild_name, voice_channels: [{id, name, members}]}]`; returns 503 if `bot_manager.client` is None or not ready. Code skeleton in research memo (not reproduced here).
+
+**8. Voice activity vs continuous recording.** Continuous-with-DTX. Enable `OPUS_SET_DTX(1)` on each per-user encoder; silence drops to ~400 bit/s comfort-noise, eliminating sidecar-manifest complexity while keeping per-user `.ogg` files directly playable. Locked.
+
+**9. Auto-rejoin policy.** Locked in decisions table (5 retries, backoff `[2,5,15,30,60]`, transient/permanent close-code split, `force=True` disconnect before retry).
+
+**10. Token / app setup UX.** Step-by-step procedure documented for the user docs:
+- Discord developer portal → New Application → Bot → Reset Token (copy once)
+- Privileged intents: all OFF (we don't need members / presence / message content)
+- Gateway intents in code: `guilds` + `voice_states`
+- OAuth2 → URL Generator → scope `bot` only; permissions: View Channels, Connect, Speak (last is required by gateway even though we never transmit)
+- Invite to server (requires Manage Server role on target guild)
+- Wire token: `wisper config discord` interactive wizard or `DISCORD_BOT_TOKEN` env var
+
+These steps must be in `README.md` first-time setup and in a `wisper config discord` wizard ([config.py](src/wisper_transcribe/config.py) extension).
+
+**11. Per-user track size estimate.** ~295 MB per 4-hour 6-player session (per-user with DTX-on + mixed track). ~15 GB/year at 50 sessions/year — well within typical disk budgets. **No automated cleanup policy needed for v1.** Recordings detail page shows per-recording disk usage with a manual delete button. The 460 MB temporary `combined.wav` (16 kHz mono PCM produced for the Whisper pipeline) is auto-deleted post-transcription; re-generate from per-user tracks on demand if needed.
+
+**12. JobQueue compatibility.** `JobQueue.submit(input_path, …)` already accepts an arbitrary string path ([jobs.py:217](src/wisper_transcribe/web/jobs.py#L217)) — no API change needed. **Critical gotcha:** `_run_job` calls `shutil.move()` to rename the file when `tmp_path.stem != original_stem` ([jobs.py:241–244](src/wisper_transcribe/web/jobs.py#L241-L244)). This would relocate the recording's source `combined.wav` out of the recordings directory. Mitigation locked in decisions table: **copy `combined.wav` to `output/<recording_id>.wav` before submitting**, then pass `original_stem=recording_id`, `output_dir=_default_output_dir()`, `campaign=recording.campaign_slug`. `_default_output_dir()` ([transcribe.py:51–63](src/wisper_transcribe/web/routes/transcribe.py#L51-L63)) should be lifted to a shared utility for reuse. Campaign association is not auto-applied by `process_file`; the new endpoint should call `move_transcript_to_campaign(recording_id, recording.campaign_slug)` after the job completes (post-completion hook on `Job` is the cleanest seam).
+
+**13. Live transcription cost gate — DEFER to v2.** Two hard gate failures:
+- **JobQueue blocking:** the existing single-worker queue cannot serve a 4-hour live-ticker session and remain available for batch jobs. Fixing requires either monopolizing the queue for the session (unacceptable UX) or introducing a second concurrent transcription path (architectural change excluded by the gate's "re-use existing JobQueue" criterion).
+- **Time:** realistic estimate is 2–3 days (locking/coordination between `LiveTickerWorker` and `JobQueue`, second `WhisperModel` instance lifecycle for a CPU `tiny`/`base` live model, SSE wiring, tests). Gate cap is <1 day.
+
+The five v1 file-format invariants above are the price of admission for a clean v2 implementation.
 
 ### Future / v2+ (NOT v1, unless promoted by research)
 
