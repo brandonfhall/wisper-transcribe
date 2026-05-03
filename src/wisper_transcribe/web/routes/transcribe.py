@@ -359,7 +359,7 @@ async def enroll_submit(request: Request, job_id: str) -> Response:
             from wisper_transcribe.speaker_manager import enroll_speaker
             device = job.kwargs.get("device", "cpu")
             if device == "auto":
-                from wisper_transcribe.transcriber import get_device
+                from wisper_transcribe.config import get_device
                 device = get_device()
             for old_label, display_name in renames.items():
                 profile_key = display_name.lower().replace(" ", "_")
