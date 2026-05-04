@@ -36,3 +36,37 @@ def _isolated_pipeline_config():
         return_value=dict(_BASE_CONFIG),
     ):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _block_real_llm_calls():
+    """Block real HTTP calls to local LLM providers during tests.
+
+    ``httpx.stream`` is the single function used by OllamaClient and
+    LMStudioClient to make HTTP requests.  Patching it here ensures no test
+    can accidentally launch a model or hit a running Ollama/LM Studio
+    instance.  Tests that need to exercise the client HTTP layer (e.g.
+    ``test_llm_clients.py``, ``test_lmstudio_client.py``) override this with
+    their own ``patch("httpx.stream", ...)`` — inner patches take precedence.
+
+    To write a test that exercises real Ollama HTTP interaction::
+
+        import httpx
+        from unittest.mock import MagicMock, patch
+
+        def test_ollama_some_new_scenario():
+            fake_cm = _fake_stream_context(_ollama_chunks("response"))
+            # Inner patch overrides the conftest block.
+            with patch("httpx.stream", return_value=fake_cm):
+                client = OllamaClient(model="llama3.1:8b")
+                result = client.complete("system", "user prompt")
+            assert result == "response"
+    """
+    def _blocked(*a, **kw):
+        raise RuntimeError(
+            "Real LLM HTTP call blocked by conftest.py. "
+            "Patch httpx.stream explicitly in your test."
+        )
+
+    with patch("httpx.stream", _blocked):
+        yield
