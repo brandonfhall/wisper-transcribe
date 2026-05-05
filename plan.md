@@ -44,10 +44,13 @@ A later phase will make transcription stream live (~30–60 s lag) while recordi
 | Decision | Choice |
 |---|---|
 | Bot lifecycle | Per-session — invoke at start, drop at stop. Not always-on. |
-| Bot hosting | **Inline** — asyncio task inside the `wisper server` process. No separate Docker service. |
+| Bot hosting | **JDA sidecar subprocess** — a small Gradle-built JAR (`discord-bot/`) launched by `BotManager` via `subprocess.Popen`. Runs inside the same Docker container as `wisper server`; communicates over a Unix socket at `data_dir/discord-bot.sock`. No separate Docker service needed. |
+| Discord library | **JDA 6.3.0 + JDAVE 0.1.8** (Java). Only confirmed working DAVE per-user voice receive as of 2026-05-04. See Phase 0 outcome. `AudioReceiveHandler.handleUserAudio()` delivers per-user decoded PCM; DAVE decryption is transparent via `DaveCryptoAdapter`. Requires Java 25 (Foreign Function & Memory API). |
+| Java build | **Gradle wrapper** inside `discord-bot/` subdirectory. Multi-stage Docker build: `FROM gradle:8-jdk25 AS java-builder` compiles a fat JAR; copied into the `base` stage alongside Python. `openjdk-25-jre-headless` added to `apt-get` in `base`. JVM flag `--enable-native-access=ALL-UNNAMED` required by JDAVE's FFM bindings. |
+| Bot↔Python IPC | Length-prefixed binary frames over a Unix socket: `[4-byte user_id_len][user_id bytes][4-byte pcm_len][pcm bytes]`. Mixed track uses `user_id = "__mixed__"`. Java side sends; Python `BotManager` reads and feeds `SegmentedOggWriter`. PCM is 48 kHz stereo (JDA native) → downsampled to 16 kHz mono by Python before Ogg write. |
+| Deployment target | **Docker-first.** The recording bot needs 24/7 uptime — a NAS, mini-PC, or VPS running Docker is the primary deployment path. Native install (`.venv`) remains supported for local dev and Mac MLX transcription. |
 | Recording storage | `data_dir/recordings/<recording_id>/…`, sibling of `profiles/` and `campaigns/` |
 | Audio shape | Per-user tracks **and** a mixed combined track, both retained on disk |
-| Discord library | **Pycord (py-cord)** — only library with documented stable per-user voice receive; MIT-licensed; active maintainer team. See resolved item 1 + Phase 0 DAVE risk. |
 | Audio file format | **Segmented Opus-in-Ogg** (`.ogg` per segment), one complete self-contained Ogg bitstream per segment file. No mid-stream truncation hazard; ffmpeg / pydub handle natively. |
 | Segment length | **60 seconds** per segment file. 240 segments per 4-hour session × 7 streams (6 users + mixed); `ffmpeg -f concat -c copy` finalizes in 2–4 s. |
 | Per-user silence handling | **Continuous-with-DTX**: every user's track is wall-clock-aligned; `libopus` DTX (`OPUS_SET_DTX(1)`) drops silent periods to ~400 bit/s comfort-noise. No sidecar timestamp manifest needed. |
@@ -60,7 +63,26 @@ A later phase will make transcription stream live (~30–60 s lag) while recordi
 | CLI ↔ server IPC | **HTTP on localhost.** CLI is a thin client of the same FastAPI routes the web UI uses (`POST /api/record/start`, etc.). Server writes its bind address to `data_dir/server.json` on startup; CLI reads that for discovery, with `WISPER_SERVER_URL` env var as override. If `server.json` is absent or the server is unreachable, the CLI errors out with a clear "wisper server is not running — start it with `wisper server` and try again" message. No auto-launch, no standalone-CLI bot path. |
 | Auth on record routes | **None for v1** — match the existing posture (`0.0.0.0:8080`, no auth on any route). Adding auth project-wide (token or basic username/password covering *all* routes, not just record) is tracked in Backlog → `Web UI auth (project-wide)`. Recording is destructive enough that an audit-then-ship pass is appropriate, but doing it piecemeal on record-only routes would create a confusing two-tier security model. |
 | FastAPI integration | **`BotManager` mirroring `JobQueue`.** New `web/discord_bot.py` exposes a `BotManager` class with `start()` / `stop()` that internally uses `asyncio.create_task()`. Created in `create_app()`, started in `lifespan()` after `job_queue.start()`, stopped before `job_queue.stop()` on shutdown. Stored on `app.state.bot_manager`; routes obtain it via `get_bot_manager(request)` helper alongside the existing `get_queue()`. `data_dir/server.json` is written immediately before the lifespan `yield` and deleted in the post-`yield` cleanup arm. The `wisper server` CLI ([cli.py:169](src/wisper_transcribe/cli.py#L169)) passes host/port via env var (`WISPER_BIND`) so `create_app()` can read it without a signature change. |
-| Auto-rejoin policy | **5 retries on transient failures, fatal abort on permanent ones.** Backoff schedule: `[2, 5, 15, 30, 60]` seconds (capped linear; exponential blew to 16 min by retry 4 — too long for a session). **Transient** = close codes 4009 (session timeout), 4015 (voice server crash), `TimeoutError` / socket reset. **Permanent** = 4014 (kicked), 4011 (server gone), 4022 (call ended), 4017 (DAVE required — library bug). On 4006, retry once with fresh connect, then give up. Each rejoin attempt logs to the segment manifest with timestamp + attempt number. After max retries, set `Recording.status = "degraded"` and stop accepting new segments while keeping existing ones. Surface in UI via SSE / status badge; `wisper record show` prints `[DEGRADED] reconnected Nx — last reason: <code>`. Call `await vc.disconnect(force=True)` before each retry to dodge [discord.py #10207](https://github.com/Rapptz/discord.py/issues/10207). |
+| Auto-rejoin policy | **5 retries on transient failures, fatal abort on permanent ones.** Backoff schedule: `[2, 5, 15, 30, 60]` seconds. **Transient** = close codes 4009 (session timeout), 4015 (voice server crash), `TimeoutError` / socket reset. **Permanent** = 4014 (kicked), 4011 (server gone), 4022 (call ended). On 4006, retry once with fresh connect, then give up. Each rejoin attempt logged to segment manifest. After max retries, `Recording.status = "degraded"` — stop accepting new segments but keep existing ones. JDA sidecar exits with a non-zero code on fatal abort; `BotManager` catches this and updates recording status. |
+
+### Docker deployment strategy
+
+**Docker is the primary deployment target for the recording bot.** A 24/7 bot needs a machine that's always on — a NAS, mini-PC, or VPS running Docker is the natural home. The existing single-image, single-service design is preserved; no separate sidecar container is needed.
+
+**Changes to the existing Docker setup:**
+
+| File | Change |
+|------|--------|
+| `Dockerfile` | Add `FROM gradle:8-jdk25 AS java-builder` stage; `COPY discord-bot/ ./discord-bot/`; `RUN gradle shadowJar`; copy fat JAR into `base`. Add `openjdk-25-jre-headless` to `base` apt-get. |
+| `docker-compose.yml` | Add `DISCORD_BOT_TOKEN` to `x-env` block. Add `./recordings:/data/recordings` to `x-volumes`. |
+| `.env.example` | Add `DISCORD_BOT_TOKEN=` placeholder. |
+
+**MLX (Apple Silicon) does not work in Docker.** Docker on macOS runs containers in a Linux VM with no access to Metal or the Apple Neural Engine. The Docker images (`cpu` and `gpu` targets) always use faster-whisper for transcription. MLX is only available via native install (`.venv`) on macOS ARM64. This is already the case — the pyproject.toml condition `sys_platform == 'darwin' and platform_machine == 'arm64'` means MLX is never installed inside a Linux container.
+
+**Practical split:**
+- **Docker on a Linux host (NAS/mini-PC/VPS)** — recommended for the recording bot; transcription uses faster-whisper CPU or CUDA
+- **Native `.venv` on macOS** — recommended if you want MLX transcription speed for one-off files; recording bot can also run this way but requires Java 25 installed locally
+- **Docker on macOS** — works for local dev and testing; transcription falls back to faster-whisper CPU (no MLX, no CUDA)
 
 ### Enrollment options
 
