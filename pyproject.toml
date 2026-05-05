@@ -40,7 +40,6 @@ dev = [
     "pytest-cov",
     "httpx>=0.28.1",         # async HTTP client for SSE streaming tests
     "isort",
-    "py-cord[voice]>=2.6.0", # Discord recording spike (Phase 0); moves to runtime deps in Phase 3
 ]
 macos = [
     "mlx-whisper",         # Apple Silicon GPU/ANE Whisper backend (macOS only)
