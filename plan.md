@@ -160,7 +160,7 @@ wisper record delete <recording_id>                # remove files + entry, with 
 
 Other acceptance criteria: per-user `.opus` files are well-formed Ogg/Opus (playable by `ffplay`); chosen install works on Windows + macOS hosts; deliverable is a one-page library-choice memo appended to this plan (DAVE outcome, alternatives considered, platform caveats). Spike code is **not retained** — the production bot is written from scratch in phase 3.
 
-1. **Storage layer.** `Recording` dataclass, `recording_manager.py` (CRUD + index), segmented audio writer (format chosen during research), crash-recovery on startup (`recordings.json` reconciliation with on-disk segments). No Discord deps yet — this is pure local file management with tests.
+1. ~~**Storage layer.**~~ **COMPLETE.** `Recording`, `SegmentRecord`, `RejoinAttempt` dataclasses added to `models.py`; `recording_manager.py` (CRUD, `_validate_recording_id`, `append_segment` with lock, `reconcile_on_startup`); `web/audio_writer.py` (`SegmentedOggWriter` with BOS/EOS Ogg pages and crash-resume, `RealtimeMixer`); `tests/test_recording_manager.py` and `tests/test_audio_writer.py`; `architecture.md` Recording Layer section. Commit: `feat(record): add recording_manager + audio_writer storage layer`.
 2. **Server discovery + control plane.** `data_dir/server.json` written on `wisper server` startup; FastAPI route stubs at `/api/record/{start,stop,status,…}` returning 501 for now; CLI client (`wisper record …`) that reads `server.json`, hits the routes, and prints the "server not running" error cleanly. Lets us land the CLI↔server plumbing before there's anything to control.
 3. **Bot core.** Chosen library integrated into `wisper server` FastAPI lifespan hook; start/stop primitives wired to the routes from phase 2; per-user + combined writer pipeline writing into the storage layer from phase 1; auto-rejoin with backoff.
 4. **Campaign / Discord ID binding.** `CampaignMember.discord_user_id`, roster UI updates, auto-tagging during recording.
@@ -1107,11 +1107,11 @@ def test_recording_transcribe_path_traversal_blocked(client, payload):
 **Docs:** `architecture.md` gets a new "Recording layer" subsection covering the modules, file layout, and the five v1 file-format invariants. `README.md` unchanged this phase (no user-facing surface yet).
 
 **Done when:**
-- [ ] All test cases above pass (`pytest tests/test_recording_manager.py tests/test_audio_writer.py -v`)
-- [ ] `_validate_recording_id` follows the four-step CodeQL pattern from Pattern 2
-- [ ] `SegmentedOggWriter` writes a complete Ogg EOS page on `finalize()` (confirmed by ffprobe in slow test)
-- [ ] `architecture.md` updated with Recording layer subsection
-- [ ] No Pycord import anywhere in these modules
+- [x] All test cases above pass (`pytest tests/test_recording_manager.py tests/test_audio_writer.py -v`)
+- [x] `_validate_recording_id` follows the four-step CodeQL pattern from Pattern 2
+- [x] `SegmentedOggWriter` writes a complete Ogg EOS page on `finalize()` (confirmed by ffprobe in slow test)
+- [x] `architecture.md` updated with Recording layer subsection
+- [x] No Pycord import anywhere in these modules
 
 **PR scope:** ONE PR. ~600 lines including tests. No external Discord deps; reviewable in isolation.
 

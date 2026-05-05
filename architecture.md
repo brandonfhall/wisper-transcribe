@@ -37,7 +37,8 @@ src/wisper_transcribe/
 ├── time_utils.py       Shared time formatting: format_timestamp(), format_duration()
 ├── config.py           load_config(), save_config(), get_device(), get_hf_token(), get_llm_api_key(), resolve_llm_model(), check_ffmpeg()
 ├── campaign_manager.py Campaign CRUD: load/save/create/delete campaigns, add/remove roster members, _validate_campaign_slug() security gatekeeper
-├── models.py           Dataclasses: TranscriptionSegment, DiarizationSegment, AlignedSegment, SpeakerProfile, CampaignMember, Campaign, Edit, SpeakerSuggestion, LootChange, NPCMention, SummaryNote
+├── recording_manager.py Recording CRUD: load/save/create/delete recordings, append_segment() (thread-safe manifest append), reconcile_on_startup() (crash recovery), _validate_recording_id() CodeQL gatekeeper
+├── models.py           Dataclasses: TranscriptionSegment, DiarizationSegment, AlignedSegment, SpeakerProfile, CampaignMember, Campaign, Edit, SpeakerSuggestion, LootChange, NPCMention, SummaryNote, SegmentRecord, RejoinAttempt, Recording
 ├── refine.py           LLM-driven transcript refinement: vocabulary correction + unknown-speaker ID (edit-distance guarded, frontmatter-preserving)
 ├── summarize.py        Campaign-notes generation (session recap, loot, NPCs, follow-ups) → Obsidian-ready sidecar markdown
 ├── llm/                Provider-agnostic LLM client package (Ollama, LM Studio, Anthropic, OpenAI, Google)
@@ -49,8 +50,9 @@ src/wisper_transcribe/
 │   ├── openai.py       OpenAI SDK; JSON via response_format json_schema strict mode
 │   └── google.py       google-genai SDK; JSON via response_schema
 ├── static/             Vendored web assets: htmx.min.js, tailwind.min.css (pre-built), wisp.svg, app.js
-└── web/                Phase 11: FastAPI web UI
+└── web/                Phase 11: FastAPI web UI; Discord recording bot infrastructure (Phase 1+)
     ├── app.py          FastAPI application factory (create_app()), module-level app instance for uvicorn
+    ├── audio_writer.py SegmentedOggWriter (rotating Ogg/Opus segment files, BOS/EOS pages, crash-resumable), RealtimeMixer (int16 PCM saturation mixing)
     ├── jobs.py         In-memory job queue, JobQueue class, asyncio background worker, SSE progress via tqdm.write patch; LLM job types (refine/summarize) with stderr capture
     └── routes/
         ├── __init__.py     Jinja2 templates setup, shared get_queue() helper, urlencode filter
@@ -287,13 +289,24 @@ wisper-transcribe/       ← get_data_dir()
 │   ├── speakers.json    name → SpeakerProfile metadata (global — one entry per person)
 │   └── embeddings/
 │       └── <name>.npy   512-dim float32 voice embeddings (gitignored)
-└── campaigns/
-    └── campaigns.json   slug → Campaign metadata + per-campaign roster (additive layer)
+├── campaigns/
+│   └── campaigns.json   slug → Campaign metadata + per-campaign roster (additive layer)
+└── recordings/
+    ├── recordings.json  id → Recording metadata index (analogous to campaigns.json)
+    └── <recording_id>/
+        ├── combined/    segmented mixed track: 0000.opus, 0001.opus, …
+        ├── per-user/
+        │   └── <discord_user_id>/  per-speaker track: 0000.opus, 0001.opus, …
+        └── final/
+            ├── combined.wav        16 kHz mono PCM produced at stop (fed to JobQueue)
+            └── transcript.md       symlinked/copied from output/ after transcription
 ```
 
 **Campaign data model:** Campaigns hold rosters of `profile_key` references to the global `speakers.json`. Voice embeddings remain global — adding a speaker to a second campaign reuses their existing `.npy` automatically (voice transfer). Deleting a campaign never touches profiles or embeddings. `campaigns.json` absent on first run → `load_campaigns()` returns `{}`.
 
-Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`, `hotwords`, `use_mlx`, `parallel_stages`, `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`.
+Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`, `hotwords`, `use_mlx`, `parallel_stages`, `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`, `discord_bot_token` (masked in `wisper config show`).
+
+**`server.json`** is written to `data_dir/server.json` immediately before the FastAPI lifespan `yield` and deleted in the post-`yield` cleanup arm.  It records the bound host/port so the `wisper record` CLI can discover the running server without a fixed port.  Format: `{"url": "http://127.0.0.1:8080"}`.  The `WISPER_SERVER_URL` env var overrides `server.json` for the CLI (useful in Docker/CI).  If `server.json` is absent and `WISPER_SERVER_URL` is unset, `wisper record` prints "wisper server is not running — start it with `wisper server` and try again" and exits 1.
 
 > **`omegaconf` dependency note:** `omegaconf` is an undeclared transitive requirement of `pyannote-audio` — it is required at import time but not listed in pyannote's package metadata. `wisper-transcribe` declares it explicitly in `pyproject.toml` to ensure it is always installed.
 
@@ -324,7 +337,9 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - `tests/test_web_jobs.py` covers job queue CRUD, tqdm patch/restore, error recording, cancellation, and a regression test that `job.status = COMPLETED` is not set until after `_run_post_process()` finishes
 - `tests/test_campaign_manager.py` covers load/save roundtrip, `create_campaign` (slug generation, duplicate rejection, empty-name rejection), `delete_campaign` (profile files untouched), `add_member` / `remove_member`, `get_campaign_profile_keys`, `_make_slug` punctuation stripping, and `_validate_campaign_slug` (parametrized accept/reject with null-byte, dotdot, slash, CRLF payloads)
 - `tests/test_path_traversal.py` covers path traversal for campaign routes (null-byte, dotdot, slash, CRLF, `javascript:`, `.`, `..` payloads) for detail, delete, add-member, and remove-member; create error does not leak exception text; unit tests for `_validate_campaign_slug`
-- Test count: ~520 (all mocked, all passing)
+- `tests/test_recording_manager.py` covers load/save roundtrip, `create_recording` (uuid4 generation, directory tree creation, status=recording), `update_recording` (field mutation, unknown-field rejection), `delete_recording` (index removal, audio files preserved), `append_segment` (manifest append, thread-safety under 8 concurrent writers), `reconcile_on_startup` (recording→failed, degraded→failed, completed untouched, corrupt JSON graceful, no-file no-op), `_validate_recording_id` (parametrized valid/invalid: null-byte, dotdot, slash, CRLF, glob chars), and `SegmentRecord` / `RejoinAttempt` JSON roundtrip
+- `tests/test_audio_writer.py` covers `_ogg_crc32` known values, `SegmentedOggWriter` single segment, rotation at 60 s (3050 packets → 2 segments), three-segment run, zero-padded segment names, EOS flag on finalized segment (binary page walk), EOS on each rotated segment, crash recovery (new writer resumes from next index), finalize with no packets, double-finalize safety, BOS flag on first page, `OpusHead` magic; `RealtimeMixer` empty streams, single-stream passthrough, two-stream sum, positive saturation clipping, negative saturation clipping, truncation to shortest stream, zero-length streams, six-user mix within range
+- Test count: ~575 (all mocked, all passing)
 
 **CI matrix** (`.github/workflows/ci.yml`):
 - Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)
@@ -342,6 +357,105 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 | MPS on Apple Silicon | faster-whisper (CTranslate2) has no MPS backend. With `mlx-whisper` installed (`pip install 'wisper-transcribe[macos]'`), transcription uses the Apple Silicon GPU/ANE via MLX Whisper. Without it, transcription falls back to CPU. pyannote diarization and speaker embeddings always run on MPS when available. |
 | Thread safety | `_model` and `_pipeline` globals are not thread-safe; parallel folder processing uses `ProcessPoolExecutor` so each worker is a separate process with isolated module state |
 | pyannote license | HuggingFace token + one-time model license acceptance required (free) |
+
+---
+
+## Recording Layer (Discord Bot — Phase 1+)
+
+### Overview
+
+The recording layer captures Discord voice sessions as segmented Opus-in-Ogg files and manages their metadata through a JSON-backed store.  It has **no dependency on Pycord or any Discord library** — those live in `web/discord_bot.py` (Phase 3).  The two modules in Phase 1 are:
+
+| Module | Responsibility |
+|--------|---------------|
+| `recording_manager.py` | CRUD for `Recording` metadata; crash reconciliation on startup |
+| `web/audio_writer.py` | `SegmentedOggWriter` (Ogg/Opus segments); `RealtimeMixer` (PCM mixing) |
+
+### Data Model
+
+```python
+Recording:
+    id: str                    # uuid4
+    voice_channel_id: str
+    guild_id: str
+    started_at: str            # ISO 8601 UTC
+    status: str                # recording | degraded | completed | failed | transcribing | transcribed
+    discord_speakers: dict     # discord_user_id → wisper profile name (or "")
+    segment_manifest: list     # list[SegmentRecord] — append-only, atomic
+    rejoin_log: list           # list[RejoinAttempt]
+    campaign_slug: Optional[str]
+    ended_at: Optional[str]
+    combined_path: Optional[str]   # absolute path to final/combined.wav
+    per_user_dir: Optional[str]    # absolute path to per-user/ directory
+    transcript_path: Optional[str]
+    notes: str
+
+SegmentRecord:
+    index: int          # monotonic per stream, 0-based
+    stream: str         # "mixed" or a discord_user_id
+    started_at: str     # ISO 8601 UTC
+    duration_s: float
+    path: str           # relative path from the recording root
+    finalized: bool     # True once EOS page is flushed
+
+RejoinAttempt:
+    timestamp: str      # ISO 8601 UTC
+    close_code: int     # Discord gateway close code
+    attempt_number: int # 1-based
+```
+
+### recording_manager.py
+
+Follows the `campaign_manager.py` pattern exactly:
+
+- `get_recordings_dir(data_dir)` / `get_recordings_path(data_dir)` — path helpers via `get_data_dir()`
+- `_validate_recording_id(id)` — four-step CodeQL guard: null-byte → `os.path.basename` → `re.match(r"^[\w\-]+$")` → `os.path.abspath` round-trip
+- `load_recordings(data_dir)` — returns `{}` on missing file; logs warning on corrupt JSON
+- `save_recordings(recordings, data_dir)` — `mkdir(parents=True, exist_ok=True)` then `json.dump`
+- `create_recording(voice_channel_id, guild_id, campaign_slug, data_dir)` — uuid4 ID, creates `combined/`, `per-user/`, `final/` subdirs, status=`"recording"`
+- `update_recording(id, data_dir, **kwargs)` — load + `setattr` + save
+- `delete_recording(id, data_dir)` — removes index entry only; audio files untouched
+- `append_segment(id, segment, data_dir)` — protected by a module-level `threading.Lock`; satisfies file-format invariant 2 (append-only, atomic)
+- `reconcile_on_startup(data_dir)` — called from FastAPI lifespan; marks any `"recording"` / `"degraded"` recordings as `"failed"` and returns the count corrected
+
+### web/audio_writer.py
+
+#### SegmentedOggWriter
+
+Writes raw Opus packets (bytes) into sequentially numbered self-contained Ogg/Opus files:
+
+```
+stream_dir/
+├── 0000.opus   # complete Ogg stream (BOS header + OpusTags + audio pages + EOS page)
+├── 0001.opus
+└── …
+```
+
+Key behaviours:
+- Each segment file is an **independent Ogg logical bitstream** with its own random serial number, `OpusHead` (BOS) page, `OpusTags` page, and a final page with the EOS flag set.
+- Rotation: after `segment_duration_s / 0.020` packets (default: 3000 packets = 60 s at 20 ms/packet), the current segment is closed with EOS and a new one opened.
+- **One-packet lookahead**: the previous packet is flushed on each `write()` call; the held packet is flushed with the EOS flag on `finalize()` or rotation.  This avoids a separate seek-and-patch step.
+- **Crash resume**: the constructor counts existing `*.opus` files in `stream_dir` and starts the next index after them.  Existing files (including partial ones without EOS) are never overwritten.
+
+#### Ogg CRC-32
+
+The Ogg container uses a non-standard MSB-first CRC with polynomial `0x04C11DB7` (not the common reflected `0xEDB88320`).  `_ogg_crc32(page_bytes)` computes this with a 256-entry lookup table built once at import time.  The checksum field at page offset 22–25 is zeroed before computing the CRC and patched in afterward, per the Ogg spec.
+
+#### RealtimeMixer
+
+Accepts a `dict[user_id → bytes]` of int16 PCM at 48 kHz mono, sums all samples element-wise, and saturates at ±32767.  Used by the bot (Phase 3) to produce the combined track from per-user audio decoded from Discord Opus packets.  Truncates to the shortest stream if lengths differ.
+
+### v1 File-Format Invariants (locked)
+
+These five invariants must be honoured throughout v1 so live transcription (v2) can plug in without rewriting the recording layer:
+
+| # | Invariant |
+|---|-----------|
+| 1 | Each segment file is a self-contained Ogg/Opus container — decodable by `ffmpeg -i NNNN.opus` without adjacent segments |
+| 2 | `segment_manifest` is append-only and each append is atomic (module-level lock + load-mutate-save) |
+| 3 | Segment length is 30–60 s (v1 ships at 60 s; Whisper's native context is 30 s, >60 s hits drift-prone long-form path) |
+| 4 | Per-user track layout `recordings/<id>/per-user/<discord_id>/NNNN.opus` is a versioned contract — any rename in v1 breaks v2 |
+| 5 | `Recording.status` uses a distinct `"recording"` state; v2 watches for new segments only while status is `"recording"` or `"degraded"` |
 
 ---
 

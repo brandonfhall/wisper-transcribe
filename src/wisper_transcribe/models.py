@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 
 @dataclass
@@ -120,3 +121,46 @@ class SummaryNote:
     provider: str = ""
     model: str = ""
     refined: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Discord recording bot
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SegmentRecord:
+    """One completed or in-progress segment file within a recording stream."""
+    index: int                 # monotonic per stream, 0-based
+    stream: str                # "mixed" or a discord_user_id
+    started_at: str            # ISO 8601 datetime string (UTC)
+    duration_s: float          # wall-clock duration of this segment
+    path: str                  # relative path from the recording root directory
+    finalized: bool            # True once the EOS page has been flushed
+
+
+@dataclass
+class RejoinAttempt:
+    """One Discord voice reconnect attempt logged by BotManager."""
+    timestamp: str             # ISO 8601 datetime string (UTC)
+    close_code: int            # Discord close code that triggered the reconnect
+    attempt_number: int        # 1-based retry number within this session
+
+
+@dataclass
+class Recording:
+    """Metadata for a single Discord voice recording session."""
+    id: str                          # uuid4
+    voice_channel_id: str
+    guild_id: str
+    started_at: str                  # ISO 8601 datetime string (UTC)
+    status: str                      # recording|degraded|completed|failed|transcribing|transcribed
+    discord_speakers: dict           # discord_user_id → wisper profile name (or "")
+    segment_manifest: list           # list[SegmentRecord]
+    rejoin_log: list                 # list[RejoinAttempt]
+    campaign_slug: Optional[str] = None
+    ended_at: Optional[str] = None   # ISO 8601 datetime string (UTC)
+    combined_path: Optional[str] = None   # absolute path to final/combined.wav (post-stop)
+    per_user_dir: Optional[str] = None    # absolute path to per-user/ directory
+    transcript_path: Optional[str] = None
+    notes: str = ""

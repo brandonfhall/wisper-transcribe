@@ -70,6 +70,9 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (skipped unless WISPER_SLOW_TESTS=1 is set)",
+]
 filterwarnings = [
     # speechbrain 1.0 deprecated-redirect noise (k2, transformers, spacy, numba, pretrained)
     "ignore:Module 'speechbrain.*' was deprecated:UserWarning",
