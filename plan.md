@@ -210,12 +210,24 @@ Committed on branch `feat/discord-recording-bot`.
 
 ---
 
-**▶ NEXT: Phase 4 — Campaign / Discord ID binding.**
+**Phase 4 — Campaign / Discord ID binding. ✅ COMPLETE (2026-05-05)**
+Committed on branch `feat/discord-recording-bot`.
+- `src/wisper_transcribe/campaign_manager.py` — `bind_discord_id()` (one-to-one enforcement), `lookup_profile_by_discord_id()`; `load_campaigns`/`save_campaigns` updated to round-trip `discord_user_id`
+- `src/wisper_transcribe/web/routes/campaigns.py` — `POST /campaigns/{slug}/members/{profile_key}/discord-id`; extracted `_validate_profile_key()` helper
+- `src/wisper_transcribe/web/templates/campaigns.html` — "Discord ID" column in roster table with Link form; `invalid_discord_id` error banner
+- `src/wisper_transcribe/web/discord_bot.py` — `_route_frame` calls `lookup_profile_by_discord_id` on first frame per user; sets profile key (or `""`) in `recording.discord_speakers`
+- `tests/test_campaign_manager.py` — 4 new tests: `test_bind_discord_id_persists`, `test_lookup_profile_by_discord_id_returns_profile_key`, `test_lookup_returns_none_for_unknown_id`, `test_bind_discord_id_overwrites_previous_binding`
+- `tests/test_discord_bot.py` — 2 new tests: `test_known_discord_id_tagged_automatically_in_manifest`, `test_unknown_discord_id_not_tagged`
+- 621 total tests
+
+---
+
+**▶ NEXT: Phase 5 — Web UI.**
 Pick up here in the next session. Branch: `feat/discord-recording-bot`.
 
 2. ~~**Server discovery + control plane.**~~ ✅ done
 3. ~~**Bot core.**~~ ✅ done
-3. **Bot core.** JDA sidecar subprocess managed by `BotManager`; per-user + combined writer pipeline writing into the Phase 1 storage layer; auto-rejoin with backoff. Sidecar path configurable so Pycord replacement is a one-file swap.
+4. ~~**Campaign / Discord ID binding.**~~ ✅ done
 4. **Campaign / Discord ID binding.** `CampaignMember.discord_user_id` (field already added in Phase 1), roster UI updates, auto-tagging during recording.
 5. **Web UI.** Record control page, recordings list (campaign-grouped), recording detail page, integration with the existing transcripts page.
 6. **Auto-enroll on first hear (Option B).** "Unknown speaker" queue surfaced on the recording detail page, embedding extraction from per-user tracks.

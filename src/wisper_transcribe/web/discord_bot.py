@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncIterator, Callable, Optional
 
+from wisper_transcribe.campaign_manager import lookup_profile_by_discord_id
 from wisper_transcribe.models import Recording, RejoinAttempt
 from wisper_transcribe.recording_manager import (
     create_recording,
@@ -241,7 +242,14 @@ class BotManager:
             )
             self._writers[user_id] = SegmentedOggWriter(stream_dir=per_user_dir)
             if user_id not in recording.discord_speakers:
-                recording.discord_speakers[user_id] = ""
+                profile_key = ""
+                if recording.campaign_slug:
+                    resolved = lookup_profile_by_discord_id(
+                        recording.campaign_slug, user_id, data_dir=self._data_dir
+                    )
+                    if resolved:
+                        profile_key = resolved
+                recording.discord_speakers[user_id] = profile_key
                 save_recording(recording, self._data_dir)
 
         self._writers[user_id].write(pcm)

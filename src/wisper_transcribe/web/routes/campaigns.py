@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Form, Request
@@ -11,6 +12,7 @@ from . import templates
 from wisper_transcribe.campaign_manager import (
     _validate_campaign_slug,
     add_member,
+    bind_discord_id,
     create_campaign,
     delete_campaign,
     load_campaigns,
@@ -125,6 +127,22 @@ async def campaign_add_member(
     return RedirectResponse(url=f"/campaigns/{safe}", status_code=303)
 
 
+def _validate_profile_key(profile_key: str) -> Optional[str]:
+    """Two-layer security guard for profile keys (mirrors _validate_campaign_slug)."""
+    if not profile_key or "\x00" in profile_key:
+        return None
+    safe_key = os.path.basename(profile_key)
+    if safe_key != profile_key or not re.match(r"^[\w\-]+$", safe_key):
+        return None
+    _guard_base = os.path.abspath("_guard")
+    if not _guard_base.endswith(os.sep):
+        _guard_base += os.sep
+    _guard_path = os.path.abspath(os.path.join(_guard_base, safe_key))
+    if not _guard_path.startswith(_guard_base):
+        return None
+    return os.path.basename(_guard_path)
+
+
 @router.post("/{slug}/members/{profile_key}/remove", response_class=HTMLResponse)
 async def campaign_remove_member(
     request: Request,
@@ -135,25 +153,48 @@ async def campaign_remove_member(
     if safe_slug is None:
         return HTMLResponse(content="Invalid campaign slug", status_code=400)
 
-    # Validate profile_key with same two-layer pattern.
-    if not profile_key or "\x00" in profile_key:
+    clean_key = _validate_profile_key(profile_key)
+    if clean_key is None:
         return HTMLResponse(content="Invalid profile key", status_code=400)
-    import re as _re
-    safe_key = os.path.basename(profile_key)
-    if safe_key != profile_key or not _re.match(r"^[\w\-]+$", safe_key):
-        return HTMLResponse(content="Invalid profile key", status_code=400)
-
-    _guard_base = os.path.abspath("_guard")
-    if not _guard_base.endswith(os.sep):
-        _guard_base += os.sep
-    _guard_path = os.path.abspath(os.path.join(_guard_base, safe_key))
-    if not _guard_path.startswith(_guard_base):
-        return HTMLResponse(content="Invalid profile key", status_code=400)
-    clean_key = os.path.basename(_guard_path)
 
     try:
         remove_member(safe_slug, clean_key)
     except KeyError:
         pass  # Campaign gone — redirect silently
+
+    return RedirectResponse(url=f"/campaigns/{safe_slug}", status_code=303)
+
+
+@router.post("/{slug}/members/{profile_key}/discord-id", response_class=HTMLResponse)
+async def campaign_bind_discord_id(
+    request: Request,
+    slug: str,
+    profile_key: str,
+    discord_user_id: Annotated[str, Form()] = "",
+) -> RedirectResponse:
+    safe_slug = _validate_campaign_slug(slug)
+    if safe_slug is None:
+        return HTMLResponse(content="Invalid campaign slug", status_code=400)
+
+    clean_key = _validate_profile_key(profile_key)
+    if clean_key is None:
+        return HTMLResponse(content="Invalid profile key", status_code=400)
+
+    # Validate discord_user_id: Discord snowflake (pure digits) or empty to clear.
+    cleaned_id: Optional[str] = None
+    stripped = discord_user_id.strip()
+    if stripped:
+        if not re.match(r"^\d+$", stripped):
+            return RedirectResponse(
+                url=f"/campaigns/{safe_slug}?error=invalid_discord_id", status_code=303
+            )
+        cleaned_id = stripped
+
+    try:
+        bind_discord_id(safe_slug, clean_key, cleaned_id)
+    except KeyError:
+        return RedirectResponse(
+            url=f"/campaigns/{safe_slug}?error=not_found", status_code=303
+        )
 
     return RedirectResponse(url=f"/campaigns/{safe_slug}", status_code=303)

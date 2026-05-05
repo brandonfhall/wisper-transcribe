@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from wisper_transcribe.campaign_manager import add_member, bind_discord_id, create_campaign
 from wisper_transcribe.recording_manager import load_recordings
 from wisper_transcribe.web.discord_bot import BotManager
 from tests._discord_fakes import (
@@ -161,3 +162,44 @@ async def test_stop_session_sets_completed_status(tmp_path):
     loaded = load_recordings(tmp_path)[rec.id]
     assert loaded.status == "completed"
     assert loaded.ended_at is not None
+
+
+# ---------------------------------------------------------------------------
+# 8. Phase 4 — Discord ID auto-tagging
+# ---------------------------------------------------------------------------
+
+async def test_known_discord_id_tagged_automatically_in_manifest(tmp_path):
+    """When a speaker's Discord ID is bound in the campaign roster, their first
+    audio frame tags recording.discord_speakers with their profile key."""
+    create_campaign("dnd-mondays", data_dir=tmp_path)
+    add_member("dnd-mondays", "alice", data_dir=tmp_path)
+    bind_discord_id("dnd-mondays", "alice", "123456789012345678", data_dir=tmp_path)
+
+    frames = [("123456789012345678", make_pcm_frame())] * 3
+    factory = scripted_source(frames)
+
+    bm = BotManager(data_dir=tmp_path, audio_source_factory=factory)
+    bm.start()
+    rec = await bm.start_session("dnd-mondays", "VC1", "G1")
+    await asyncio.wait_for(bm._task, timeout=5)
+
+    loaded = load_recordings(tmp_path)[rec.id]
+    assert loaded.discord_speakers.get("123456789012345678") == "alice"
+
+
+async def test_unknown_discord_id_not_tagged(tmp_path):
+    """A Discord ID with no roster binding gets an empty string in discord_speakers."""
+    create_campaign("dnd-mondays", data_dir=tmp_path)
+    add_member("dnd-mondays", "alice", data_dir=tmp_path)
+    # alice has no discord_user_id bound
+
+    frames = [("999999999999999999", make_pcm_frame())] * 3
+    factory = scripted_source(frames)
+
+    bm = BotManager(data_dir=tmp_path, audio_source_factory=factory)
+    bm.start()
+    rec = await bm.start_session("dnd-mondays", "VC1", "G1")
+    await asyncio.wait_for(bm._task, timeout=5)
+
+    loaded = load_recordings(tmp_path)[rec.id]
+    assert loaded.discord_speakers.get("999999999999999999") == ""

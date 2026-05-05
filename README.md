@@ -376,6 +376,16 @@ With `--campaign`, speaker matching is restricted to that campaign's enrolled me
 
 **Voice transfer between campaigns:** Because embeddings are stored globally, adding an existing speaker profile to a new campaign automatically gives that campaign the benefit of all previously recorded voice data. No re-enrollment needed.
 
+**Binding Discord IDs to campaign members:**
+
+When using the Discord recording bot, you can link each campaign member to their Discord user ID so their audio track is automatically labelled without manual intervention.
+
+1. Go to **Campaigns → [your campaign]** in the web UI.
+2. In the roster table, paste the member's Discord user ID (a numeric snowflake, e.g. `123456789012345678`) into the **Discord ID** column and click **Link**.
+3. When the bot records a session and that user speaks, their per-user track is automatically tagged with their wisper profile name in `Recording.discord_speakers`.
+
+To find a Discord user ID: enable Developer Mode in Discord → right-click the user → *Copy User ID*. Each ID can only be bound to one roster member per campaign (linking to a new member clears the old binding automatically).
+
 ---
 
 ### `wisper transcripts`
