@@ -1,4 +1,4 @@
-"""Tests for /api/record route stubs — Phase 2."""
+"""Tests for /record and /recordings HTML routes + /api/record JSON API."""
 from __future__ import annotations
 
 import json
@@ -83,3 +83,71 @@ def test_server_json_deleted_on_lifespan_shutdown(tmp_path):
             pass  # exits context manager = shutdown
         sj = tmp_path / "server.json"
         assert not sj.exists(), "server.json should be deleted after lifespan shutdown"
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — HTML routes
+# ---------------------------------------------------------------------------
+
+def test_record_page_returns_200(client):
+    c, _ = client
+    resp = c.get("/record")
+    assert resp.status_code == 200
+    assert "Record" in resp.text
+
+
+def test_recordings_list_returns_200_empty(client):
+    c, _ = client
+    resp = c.get("/recordings")
+    assert resp.status_code == 200
+    assert "Recordings" in resp.text
+    assert "No recordings yet" in resp.text
+
+
+def test_recordings_list_groups_by_campaign(client):
+    c, tmp_path = client
+    from wisper_transcribe.campaign_manager import create_campaign
+    from wisper_transcribe.recording_manager import create_recording, update_recording_status
+    create_campaign("Test Campaign", data_dir=tmp_path)
+    rec = create_recording("VC1", "G1", campaign_slug="test-campaign", data_dir=tmp_path)
+    update_recording_status(rec.id, "completed", data_dir=tmp_path)
+    resp = c.get("/recordings")
+    assert resp.status_code == 200
+    assert "Test Campaign" in resp.text
+    assert rec.id[:8] in resp.text
+
+
+def test_recording_detail_returns_200(client):
+    c, tmp_path = client
+    from wisper_transcribe.recording_manager import create_recording
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert rec.id in resp.text
+
+
+def test_recording_detail_unknown_id_redirects(client):
+    c, _ = client
+    import uuid
+    unknown_id = str(uuid.uuid4())
+    resp = c.get(f"/recordings/{unknown_id}", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "/recordings" in resp.headers["location"]
+
+
+def test_recording_delete_removes_entry(client):
+    c, tmp_path = client
+    from wisper_transcribe.recording_manager import create_recording, load_recordings
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    resp = c.post(f"/recordings/{rec.id}/delete", follow_redirects=False)
+    assert resp.status_code == 303
+    assert load_recordings(tmp_path).get(rec.id) is None
+
+
+def test_recording_live_returns_501(client):
+    c, tmp_path = client
+    from wisper_transcribe.recording_manager import create_recording
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    resp = c.get(f"/recordings/{rec.id}/live")
+    assert resp.status_code == 501
+    assert resp.json().get("detail") == "not implemented in v1"

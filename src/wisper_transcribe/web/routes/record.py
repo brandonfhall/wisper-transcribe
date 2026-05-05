@@ -1,14 +1,24 @@
-"""Record API routes — Phase 3 implements start/stop; remaining stubs are 501.
+"""Record routes — Phase 3 implements JSON start/stop API;
+Phase 5 adds HTML control panel + recordings list/detail pages.
 
 Path-traversal guards on recording_id follow the CodeQL four-step pattern.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+import asyncio
+import json
+from typing import Annotated, Optional
 
-from wisper_transcribe.recording_manager import _validate_recording_id
-from wisper_transcribe.web.routes import get_bot_manager
+from fastapi import APIRouter, Form, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+
+from wisper_transcribe.campaign_manager import load_campaigns
+from wisper_transcribe.recording_manager import (
+    _validate_recording_id,
+    delete_recording,
+    load_recordings,
+)
+from wisper_transcribe.web.routes import get_bot_manager, templates
 
 router = APIRouter()
 
@@ -33,7 +43,7 @@ def _recording_to_dict(rec) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Bot control
+# JSON API — bot control
 # ---------------------------------------------------------------------------
 
 @router.post("/api/record/start")
@@ -91,7 +101,7 @@ async def record_channels(request: Request):
 
 
 # ---------------------------------------------------------------------------
-# Recordings CRUD
+# JSON API — recordings CRUD
 # ---------------------------------------------------------------------------
 
 @router.get("/api/recordings")
@@ -101,7 +111,7 @@ async def recordings_list(request: Request):
 
 
 @router.get("/api/recordings/{recording_id}")
-async def recording_detail(recording_id: str, request: Request):
+async def recording_detail_api(recording_id: str, request: Request):
     safe_id = _validate_recording_id(recording_id)
     if safe_id is None:
         return JSONResponse({"detail": "invalid recording id"}, status_code=400)
@@ -117,8 +127,166 @@ async def recording_transcribe(recording_id: str, request: Request):
 
 
 @router.post("/api/recordings/{recording_id}/delete")
-async def recording_delete(recording_id: str, request: Request):
+async def recording_delete_api(recording_id: str, request: Request):
     safe_id = _validate_recording_id(recording_id)
     if safe_id is None:
         return JSONResponse({"detail": "invalid recording id"}, status_code=400)
     return _NOT_IMPLEMENTED
+
+
+# ---------------------------------------------------------------------------
+# HTML — control panel
+# ---------------------------------------------------------------------------
+
+@router.get("/record", response_class=HTMLResponse)
+async def record_page(request: Request) -> HTMLResponse:
+    from wisper_transcribe.config import get_data_dir
+    bm = get_bot_manager(request)
+    campaigns = load_campaigns(get_data_dir())
+    active_recording = bm.active_recording if bm else None
+    return templates.TemplateResponse(
+        request,
+        "record.html",
+        {
+            "request": request,
+            "campaigns": campaigns,
+            "active_recording": active_recording,
+        },
+    )
+
+
+@router.get("/record/sse")
+async def record_sse(request: Request) -> StreamingResponse:
+    """SSE stream of live recording session status (Pattern 6)."""
+    bm = get_bot_manager(request)
+
+    async def event_generator():
+        while True:
+            if await request.is_disconnected():
+                break
+            if bm is None or bm.active_recording is None:
+                payload = {"type": "status", "status": "idle"}
+            else:
+                rec = bm.active_recording
+                payload = {
+                    "type": "status",
+                    "status": rec.status,
+                    "recording_id": rec.id,
+                    "segment_count": len(rec.segment_manifest),
+                    "speakers": list(rec.discord_speakers.keys()),
+                    "started_at": rec.started_at.isoformat() if rec.started_at else None,
+                }
+            yield f"data: {json.dumps(payload)}\n\n"
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/record/start", response_class=HTMLResponse)
+async def record_start_html(
+    request: Request,
+    voice_channel_id: Annotated[str, Form()],
+    guild_id: Annotated[str, Form()] = "",
+    campaign_slug: Annotated[str, Form()] = "",
+) -> RedirectResponse:
+    """HTML form handler: start a session and redirect back to /record."""
+    bm = get_bot_manager(request)
+    if bm is None:
+        return RedirectResponse(url="/record?error=unavailable", status_code=303)
+    if not voice_channel_id.strip():
+        return RedirectResponse(url="/record?error=missing_channel", status_code=303)
+
+    try:
+        await bm.start_session(
+            campaign_slug=campaign_slug.strip() or None,
+            voice_channel_id=voice_channel_id.strip(),
+            guild_id=guild_id.strip(),
+        )
+    except RuntimeError:
+        return RedirectResponse(url="/record?error=already_active", status_code=303)
+
+    return RedirectResponse(url="/record", status_code=303)
+
+
+@router.post("/record/stop", response_class=HTMLResponse)
+async def record_stop_html(request: Request) -> RedirectResponse:
+    """HTML form handler: stop the active session and redirect back to /record."""
+    bm = get_bot_manager(request)
+    if bm is None or bm.active_recording is None:
+        return RedirectResponse(url="/record?error=no_session", status_code=303)
+    await bm.stop_session()
+    return RedirectResponse(url="/record", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# HTML — recordings list + detail
+# ---------------------------------------------------------------------------
+
+@router.get("/recordings", response_class=HTMLResponse)
+async def recordings_list_html(request: Request) -> HTMLResponse:
+    from wisper_transcribe.config import get_data_dir
+    data_dir = get_data_dir()
+    recordings = load_recordings(data_dir)
+    campaigns = load_campaigns(data_dir)
+    sorted_recordings = sorted(
+        recordings.values(),
+        key=lambda r: r.started_at or r.started_at,
+        reverse=True,
+    )
+    return templates.TemplateResponse(
+        request,
+        "recordings.html",
+        {
+            "request": request,
+            "recordings": sorted_recordings,
+            "campaigns": campaigns,
+        },
+    )
+
+
+@router.get("/recordings/{recording_id}/live")
+async def recording_live(recording_id: str, request: Request) -> JSONResponse:
+    safe_id = _validate_recording_id(recording_id)
+    if safe_id is None:
+        return JSONResponse({"detail": "invalid recording id"}, status_code=400)
+    return JSONResponse({"detail": "not implemented in v1"}, status_code=501)
+
+
+@router.get("/recordings/{recording_id}", response_class=HTMLResponse)
+async def recording_detail_html(recording_id: str, request: Request) -> HTMLResponse:
+    safe_id = _validate_recording_id(recording_id)
+    if safe_id is None:
+        return HTMLResponse(content="Invalid recording ID", status_code=400)
+
+    from wisper_transcribe.config import get_data_dir
+    data_dir = get_data_dir()
+    recordings = load_recordings(data_dir)
+    recording = recordings.get(safe_id)
+    if recording is None:
+        return RedirectResponse(url="/recordings?error=not_found", status_code=303)
+
+    campaigns = load_campaigns(data_dir)
+    return templates.TemplateResponse(
+        request,
+        "recording_detail.html",
+        {
+            "request": request,
+            "recording": recording,
+            "campaigns": campaigns,
+        },
+    )
+
+
+@router.post("/recordings/{recording_id}/delete", response_class=HTMLResponse)
+async def recording_delete_html(recording_id: str, request: Request) -> RedirectResponse:
+    safe_id = _validate_recording_id(recording_id)
+    if safe_id is None:
+        return HTMLResponse(content="Invalid recording ID", status_code=400)
+
+    from wisper_transcribe.config import get_data_dir
+    delete_recording(safe_id, get_data_dir())
+    return RedirectResponse(url="/recordings", status_code=303)

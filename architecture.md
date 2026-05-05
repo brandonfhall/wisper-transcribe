@@ -39,7 +39,7 @@ src/wisper_transcribe/
 ├── campaign_manager.py Campaign CRUD: load/save/create/delete campaigns, add/remove roster members, bind_discord_id() / lookup_profile_by_discord_id() Discord ID binding, _validate_campaign_slug() security gatekeeper
 ├── recording_manager.py Recording CRUD: load/save/create/delete recordings, append_segment() with per-recording mutex, reconcile_on_startup() crash recovery, _validate_recording_id() security gatekeeper
 ├── web/discord_bot.py  BotManager: start()/stop() lifecycle, start_session()/stop_session(), _session_loop with auto-rejoin (backoff [2,5,15,30,60]s), _route_frame → SegmentedOggWriter + RealtimePCMMixer + auto-tag via lookup_profile_by_discord_id(), _handle_disconnect (transient/permanent close code split), _finalise; injectable audio_source_factory for testing; _unix_socket_source placeholder (Phase 9)
-├── web/routes/record.py POST /api/record/{start,stop} implemented; GET /api/record/{status,channels} + /api/recordings CRUD still 501; path-traversal guard on recording_id
+├── web/routes/record.py Full recording UI: JSON API /api/record/{start,stop,status} + HTML routes GET /record, POST /record/{start,stop}, GET /record/sse (SSE stream), GET/DELETE /recordings, GET /recordings/{id}, GET /recordings/{id}/live (501 placeholder); _validate_recording_id() path-traversal guard; campaign-grouped recordings list (Pattern 7)
 ├── models.py           Dataclasses: TranscriptionSegment, DiarizationSegment, AlignedSegment, SpeakerProfile, CampaignMember (+ discord_user_id), Campaign, Recording, SegmentRecord, RejoinAttempt, Edit, SpeakerSuggestion, LootChange, NPCMention, SummaryNote
 ├── refine.py           LLM-driven transcript refinement: vocabulary correction + unknown-speaker ID (edit-distance guarded, frontmatter-preserving)
 ├── summarize.py        Campaign-notes generation (session recap, loot, NPCs, follow-ups) → Obsidian-ready sidecar markdown
@@ -360,11 +360,11 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - `tests/test_path_traversal.py` covers path traversal for campaign routes (null-byte, dotdot, slash, CRLF, `javascript:`, `.`, `..` payloads) for detail, delete, add-member, and remove-member; create error does not leak exception text; unit tests for `_validate_campaign_slug`
 - `tests/test_recording_manager.py` covers load/save roundtrip, UUID generation, corrupt index handling, missing metadata skip, status updates, concurrent `append_segment` (threading), crash recovery via `reconcile_on_startup`, and `_validate_recording_id` (parametrized accept/reject with null-byte, dotdot, slash, wildcard payloads)
 - `tests/test_audio_writer.py` covers `SegmentedOggWriter` rotation at 60 s, three-segment sessions, EOS page flag verification, crash-recovery (second writer resumes from next index), write return values, and `RealtimePCMMixer` (single user, clear-after-mix, clip-on-overflow, silence)
-- `tests/test_record_routes.py` covers start (201 + recording_id), missing voice_channel_id (400), stop with no session (400), path-traversal rejection, server.json lifecycle
+- `tests/test_record_routes.py` covers start (201 + recording_id), missing voice_channel_id (400), stop with no session (400), path-traversal rejection, server.json lifecycle (written on startup, deleted on shutdown), GET /record returns 200, GET /recordings empty state + campaign-grouped list, GET /recordings/{id} detail + unknown-id 303 redirect, POST /recordings/{id}/delete removes entry, GET /recordings/{id}/live returns 501
 - `tests/test_record_cli.py` covers "server not running" error, server.json discovery → HTTP POST, WISPER_SERVER_URL env var override, list output, recording_id validation
 - `tests/test_discord_bot.py` covers BotManager start/stop lifecycle, start_session recording persisted, per-user .opus files written from PCM frames, transient 4015 rejoin logged, exhausted retries → degraded, permanent 4014 → failed (no retry), stop_session → completed, known Discord ID auto-tagged to profile key on first frame, unknown Discord ID gets empty string; all via injected fake audio sources (no real JDA/Discord)
 - `tests/_discord_fakes.py`: scripted_source, multi_attempt_source, infinite_disconnect_source, blocking_source factories + make_pcm_frame / make_disconnect_frame helpers
-- Test count: ~621 (all mocked, all passing)
+- Test count: ~628 (all mocked, all passing)
 
 **CI matrix** (`.github/workflows/ci.yml`):
 - Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)
