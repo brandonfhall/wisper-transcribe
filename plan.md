@@ -228,6 +228,44 @@ These steps must be in `README.md` first-time setup and in a `wisper config disc
 
 The five v1 file-format invariants above are the price of admission for a clean v2 implementation.
 
+### Phase 0 outcome — DAVE gate result (2026-05-04)
+
+**Result: Gate C — nothing works.** Both stable Pycord and master cannot receive (or send) audio on DAVE-enabled servers.
+
+#### What was tested
+
+| Variant | Version | Voice connect | Audio receive | Failure mode |
+|---------|---------|--------------|--------------|-------------|
+| PyPI stable | 2.6.1 | Drops within 2 s | ✗ | `_MissingSentinel object has no attribute 'poll_event'` — DAVE WebSocket messages not handled at all |
+| git master | 2.8.0rc2.dev41 | Stable (2 s check passes) | ✗ | `OGGSink has no attribute '__sink_listeners__'` (API refactor); explicit `RuntimeWarning: Voice reception is currently broken due to Discord's DAVE protocol` |
+| Bot audio send (master) | 2.8.0rc2.dev41 | Drops within 1 s | n/a | Voice WS drops before `play()` can be called |
+
+Additional Python 3.14 gotchas discovered during the spike (not DAVE-related):
+- `discord.Bot()` constructor calls `asyncio.get_event_loop()`, which raises `RuntimeError` on Python 3.14 (no implicit event loop). Fix: `asyncio.set_event_loop(asyncio.new_event_loop())` before bot instantiation.
+- `OggOpusSink` was renamed to `OGGSink` in py-cord 2.6.x.
+
+#### Pycord upstream status
+
+PR [#3159](https://github.com/Pycord-Development/pycord/pull/3159) — "Voice Internals Refactor & DAVE Support":
+- Opened 2026-03-19, **still draft** as of 2026-05-04
+- Milestone: **2.9.0** (won't ship in 2.8)
+- 11 pending tasks, 0 reviews completed
+- Last substantive update: 2026-04-27 (maintainer linked related issues, no code push)
+- A community member has already reported a bug in the draft (recording doesn't finish properly)
+- **Realistic timeline: weeks to months, not days**
+
+#### Decision
+
+Park Phase 3 (bot audio core) until either:
+1. Pycord #3159 merges and is confirmed working, **or**
+2. A different library/SDK is found that already has working DAVE voice receive (research in progress — see next section)
+
+In the meantime, build Phases 1, 2, 4, 5, 7, and 8 — none of those phases touch audio capture. When the DAVE blocker is resolved, Phase 3 slots in and the rest lights up.
+
+#### Alternative library research (2026-05-04, in progress)
+
+Research agent dispatched to evaluate whether any library in any language (Node.js/discord.js, Java/JDA, Rust/Serenity+Songbird, discord.py, or others) has working DAVE voice receive as of May 2026. Results to be appended here when complete. If a working alternative is found, Phase 3 will be rewritten to use it (potentially as a subprocess/sidecar if not Python).
+
 ### Future / v2+ (NOT v1, unless promoted by research)
 
 - **Live streaming transcription** with 30–60 s ticker. Per-user tracks (no diarization) → faster-whisper chunks → live ticker UI. **Conditionally promoted to v1** if research item 13 finds it cheap on top of the chosen file format. The on-disk format chosen for v1 must not preclude this — i.e. if the writer is segmented Opus, a chunked transcribe worker must be able to pick up finalized segments as they appear.
