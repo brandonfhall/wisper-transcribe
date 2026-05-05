@@ -46,8 +46,11 @@ A later phase will make transcription stream live (~30–60 s lag) while recordi
 | Bot lifecycle | Per-session — invoke at start, drop at stop. Not always-on. |
 | Bot hosting | **JDA sidecar subprocess** — a small Gradle-built JAR (`discord-bot/`) launched by `BotManager` via `subprocess.Popen`. Runs inside the same Docker container as `wisper server`; communicates over a Unix socket at `data_dir/discord-bot.sock`. No separate Docker service needed. |
 | Discord library | **JDA 6.3.0 + JDAVE 0.1.8** (Java). Only confirmed working DAVE per-user voice receive as of 2026-05-04. See Phase 0 outcome. `AudioReceiveHandler.handleUserAudio()` delivers per-user decoded PCM; DAVE decryption is transparent via `DaveCryptoAdapter`. Requires Java 25 (Foreign Function & Memory API). |
-| Java build | **Gradle wrapper** inside `discord-bot/` subdirectory. Multi-stage Docker build: `FROM gradle:8-jdk25 AS java-builder` compiles a fat JAR; copied into the `base` stage alongside Python. `openjdk-25-jre-headless` added to `apt-get` in `base`. JVM flag `--enable-native-access=ALL-UNNAMED` required by JDAVE's FFM bindings. |
+| Java build | **Gradle 9.5 wrapper** inside `discord-bot/`. Shadow plugin `com.gradleup.shadow:9.0.0` (not the older `johnrengelman` fork — incompatible with Gradle 9). Fat JAR built with `shadowJar` + `mergeServiceFiles()`. Multi-stage Docker build: `FROM gradle:8-jdk25 AS java-builder` compiles JAR; copied into `base`. `openjdk-25-jre-headless` in `base` apt-get. JVM launch flags: `--enable-native-access=ALL-UNNAMED` (required by JDAVE FFM bindings). |
+| JDAVE wiring | `JDaveSessionFactory` lives at `club.minnced.discord.jdave.interop.JDaveSessionFactory` (package is `club.minnced.discord.jdave`, not `club.minnced.jdave`). Wire via `JDABuilder.setAudioModuleConfig(new AudioModuleConfig().withDaveSessionFactory(new JDaveSessionFactory()))`. Without this, JDA silently uses `PassthroughDaveSessionFactory` (no-op), gets close code 4017 on every connect, and loops forever. |
+| Native library gotchas | **JNA version:** JDA 6.3.0 transitively pulls JNA 4.4.0 (x86_64/i386 fat binary only — no ARM64). Force `net.java.dev.jna:jna:5.14.0` via `resolutionStrategy` in `build.gradle`. **Opus on macOS ARM64:** `opus-java-natives` bundles only `darwin/libopus.dylib` (x86_64). On macOS ARM64, load system libopus via `OpusLibrary.loadFrom(path)` before JDA initialises audio. In Docker (Linux) and on Windows, bundled natives work natively — no override needed. The production sidecar will auto-detect: if `System.getProperty("os.arch")` is `aarch64` and `os.name` contains `Mac`, load from `/opt/homebrew/lib/libopus.dylib` (or a bundled ARM64 dylib copied in via Dockerfile). |
 | Bot↔Python IPC | Length-prefixed binary frames over a Unix socket: `[4-byte user_id_len][user_id bytes][4-byte pcm_len][pcm bytes]`. Mixed track uses `user_id = "__mixed__"`. Java side sends; Python `BotManager` reads and feeds `SegmentedOggWriter`. PCM is 48 kHz stereo (JDA native) → downsampled to 16 kHz mono by Python before Ogg write. |
+| Sidecar modularity | **JDA is a stop-gap.** The Unix socket protocol is the stable interface; the subprocess implementation is swappable. When Pycord PR #3159 ships working DAVE receive, the migration is: delete `discord-bot/` (the Gradle/Java project), write a ~100-line Python replacement that emits the same length-prefixed PCM frames, update `BotManager` to launch it. `SegmentedOggWriter`, the web UI, campaigns, CLI, and all tests remain unchanged. Design Phase 3 with this swap in mind: `BotManager` should read the subprocess path from config (defaulting to the JAR) rather than hard-coding it. |
 | Deployment target | **Docker-first.** The recording bot needs 24/7 uptime — a NAS, mini-PC, or VPS running Docker is the primary deployment path. Native install (`.venv`) remains supported for local dev and Mac MLX transcription. |
 | Recording storage | `data_dir/recordings/<recording_id>/…`, sibling of `profiles/` and `campaigns/` |
 | Audio shape | Per-user tracks **and** a mixed combined track, both retained on disk |
@@ -283,6 +286,27 @@ Park Phase 3 (bot audio core) until either:
 2. A different library/SDK is found that already has working DAVE voice receive (research in progress — see next section)
 
 In the meantime, build Phases 1, 2, 4, 5, 7, and 8 — none of those phases touch audio capture. When the DAVE blocker is resolved, Phase 3 slots in and the rest lights up.
+
+#### JDA + JDAVE spike result — Gate A confirmed (2026-05-04)
+
+A throwaway Java spike (`scripts/jda-spike/`) was built and run against the live Discord server. Result: **Gate A — per-user audio received and decrypted successfully.**
+
+Key findings from the spike:
+
+| Issue encountered | Root cause | Fix |
+|---|---|---|
+| `PassthroughDaveSessionFactory` — bot loops with 4017 | `JDaveSessionFactory` not wired — JDA uses no-op passthrough by default | `JDABuilder.setAudioModuleConfig(new AudioModuleConfig().withDaveSessionFactory(new JDaveSessionFactory()))` |
+| `UnsatisfiedLinkError` on `libopus.dylib` — x86_64 arch mismatch | `opus-java-natives` bundles darwin x86_64 only; running on macOS ARM64 | Call `OpusLibrary.loadFrom("/opt/homebrew/lib/libopus.dylib")` before JDA audio init; production sidecar auto-detects arch |
+| `UnsatisfiedLinkError` on JNA native dispatch | JDA 6.3.0 pulls JNA 4.4.0 (no ARM64 macOS); JNA 5.12+ has `darwin-aarch64` | Force `net.java.dev.jna:jna:5.14.0` via Gradle `resolutionStrategy` |
+| `Unsupported class file major version 69` in Gradle | Gradle 8.x cannot run on Java 25 JVM | Use Gradle 9.5 wrapper |
+| Shadow plugin `META-INF` duplicate error | Shadow 8.1.1 (`johnrengelman`) incompatible with Gradle 9 | Switch to `com.gradleup.shadow:9.0.0` + `mergeServiceFiles()` + exclude signature files |
+
+**Verified output:** 283 audio frames received; `<user_id>_sharpshout.wav` (1 MB, 48 kHz stereo) and `__mixed__.wav` (3.6 MB) written to `scripts/spike_output/`. DAVE MLS session log line: `(session.cpp:51) Creating a new MLS session`. Spike code committed to `scripts/jda-spike/` for reference; will be deleted when Phase 3 production bot is written.
+
+**Cross-platform native library strategy (confirmed):**
+- **Linux x86-64 / ARM64 (Docker target):** bundled `opus-java-natives` + JNA 5.14 work without overrides
+- **Windows x86-64:** bundled natives work without overrides
+- **macOS ARM64 (dev/test):** requires system `libopus` (`brew install opus`) + JNA 5.14 forced; production sidecar will auto-detect and load from Homebrew path or bundled ARM64 dylib
 
 #### Alternative library research (2026-05-04, completed)
 
