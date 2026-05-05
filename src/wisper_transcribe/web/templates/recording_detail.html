@@ -99,6 +99,37 @@
   </div>
   {% endif %}
 
+  <!-- Unknown speakers -->
+  {% if recording.unbound_speakers %}
+  <div class="card">
+    <h2 class="text-base font-semibold text-gray-800 mb-2">Unknown Speakers</h2>
+    <p class="text-sm text-gray-500 mb-3">These Discord users spoke during the session but are not linked to a wisper profile. Enter a name and click <strong>Enroll</strong> to create a profile from their audio.</p>
+
+    {% if request.query_params.get('error') == 'enroll_failed' %}
+    <div class="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-700 mb-3">
+      Enrollment failed — check that the name is valid and that audio exists for this speaker.
+    </div>
+    {% elif request.query_params.get('error') == 'invalid_id' %}
+    <div class="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-700 mb-3">
+      Invalid Discord user ID.
+    </div>
+    {% endif %}
+
+    <div class="space-y-3">
+      {% for discord_id in recording.unbound_speakers %}
+      <form method="post" action="/recordings/{{ recording.id }}/enroll"
+            class="flex items-center gap-3 flex-wrap">
+        <input type="hidden" name="discord_user_id" value="{{ discord_id }}"/>
+        <span class="font-mono text-xs text-gray-700 flex-shrink-0">{{ discord_id }}</span>
+        <input type="text" name="profile_name" required placeholder="Display name (e.g. Alice)"
+               class="border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:ring-1 focus:ring-green-500 focus:border-green-500 flex-1 min-w-36"/>
+        <button type="submit" class="btn-primary text-sm flex-shrink-0">Enroll</button>
+      </form>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
   <!-- Actions -->
   <div class="card">
     <h2 class="text-base font-semibold text-gray-800 mb-3">Actions</h2>

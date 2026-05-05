@@ -222,13 +222,14 @@ Committed on branch `feat/discord-recording-bot`.
 
 ---
 
-**▶ NEXT: Phase 6 — Auto-enroll on first hear.**
+**▶ NEXT: Phase 7 — Hand-off into JobQueue.**
 Pick up here in the next session. Branch: `feat/discord-recording-bot`.
 
 2. ~~**Server discovery + control plane.**~~ ✅ done
 3. ~~**Bot core.**~~ ✅ done
 4. ~~**Campaign / Discord ID binding.**~~ ✅ done
 5. ~~**Web UI.**~~ ✅ done — Record control page (`GET /record`, `POST /record/start`, `POST /record/stop`, `GET /record/sse`), recordings list (campaign-grouped, `GET /recordings`), recording detail page (`GET /recordings/{id}`), delete (`POST /recordings/{id}/delete`), live placeholder (`GET /recordings/{id}/live` → 501). Record + Recordings nav links added to `base.html`.
+6. ~~**Auto-enroll on first hear (Option B).**~~ ✅ done — `Recording.unbound_speakers` populated during recording; recording detail page "Unknown Speakers" panel with enrollment forms; `POST /recordings/{id}/enroll` route; `enroll_speaker_from_audio_dir()` in `speaker_manager.py`; campaign binding on successful enroll.
 6. **Auto-enroll on first hear (Option B).** "Unknown speaker" queue surfaced on the recording detail page, embedding extraction from per-user tracks.
 7. **Hand-off into JobQueue.** "Transcribe" button reuses `process_file()` via `submit()`. Recording → transcript association recorded so the existing transcripts page shows them.
 8. **Tests + docs.** `test_record_cli.py`, `test_record_routes.py`, `test_discord_bot.py` (mocked JDA sidecar + synthesised PCM frames — no live Discord in CI). Update `architecture.md` and `README.md` (Discord setup walkthrough, Java 25 install requirement, new CLI/UI surface). Update install scripts (`start.command`, `start.bat`, `start.sh`) and `Dockerfile` + `docker-compose.yml` for Java 25 + JDA sidecar.

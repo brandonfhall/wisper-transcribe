@@ -531,6 +531,10 @@ wisper server
 
 The interactive CLI enrollment prompt is replaced by a post-job wizard. After transcription completes, click **Name Speakers** on the job detail page. Each detected speaker has a **Play sample** button so you can hear the voice before assigning a name. Existing profiles are shown as click-to-fill options ranked by voice similarity.
 
+### Auto-enrollment from recordings
+
+When the Discord bot records a session, any speaker whose Discord user ID is **not** bound to a campaign member is added to the recording's "Unknown Speakers" list. After the session ends, open the recording's detail page (`/recordings/{id}`) to see the panel. Enter a display name next to each unknown Discord ID and click **Enroll** — wisper extracts a voice embedding from their per-user audio track and creates a new speaker profile. The Discord ID is then bound to that profile in the campaign roster automatically, so future sessions tag them correctly without manual intervention.
+
 ### LLM Post-processing in the web UI
 
 **Option 1 — at transcription time:**

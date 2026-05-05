@@ -203,3 +203,39 @@ async def test_unknown_discord_id_not_tagged(tmp_path):
 
     loaded = load_recordings(tmp_path)[rec.id]
     assert loaded.discord_speakers.get("999999999999999999") == ""
+
+
+async def test_unknown_speaker_added_to_unbound_list(tmp_path):
+    """A Discord ID with no roster binding is appended to recording.unbound_speakers."""
+    create_campaign("dnd-mondays", data_dir=tmp_path)
+    add_member("dnd-mondays", "alice", data_dir=tmp_path)
+    # alice has no discord_user_id bound
+
+    frames = [("999999999999999999", make_pcm_frame())] * 3
+    factory = scripted_source(frames)
+
+    bm = BotManager(data_dir=tmp_path, audio_source_factory=factory)
+    bm.start()
+    rec = await bm.start_session("dnd-mondays", "VC1", "G1")
+    await asyncio.wait_for(bm._task, timeout=5)
+
+    loaded = load_recordings(tmp_path)[rec.id]
+    assert "999999999999999999" in loaded.unbound_speakers
+
+
+async def test_known_speaker_not_added_to_unbound_list(tmp_path):
+    """A Discord ID bound in the campaign roster is NOT added to unbound_speakers."""
+    create_campaign("dnd-mondays", data_dir=tmp_path)
+    add_member("dnd-mondays", "alice", data_dir=tmp_path)
+    bind_discord_id("dnd-mondays", "alice", "123456789012345678", data_dir=tmp_path)
+
+    frames = [("123456789012345678", make_pcm_frame())] * 3
+    factory = scripted_source(frames)
+
+    bm = BotManager(data_dir=tmp_path, audio_source_factory=factory)
+    bm.start()
+    rec = await bm.start_session("dnd-mondays", "VC1", "G1")
+    await asyncio.wait_for(bm._task, timeout=5)
+
+    loaded = load_recordings(tmp_path)[rec.id]
+    assert "123456789012345678" not in loaded.unbound_speakers

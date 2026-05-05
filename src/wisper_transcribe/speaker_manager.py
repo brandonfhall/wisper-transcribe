@@ -207,6 +207,56 @@ def enroll_speaker(
     return profile
 
 
+def enroll_speaker_from_audio_dir(
+    name: str,
+    display_name: str,
+    role: str,
+    per_user_dir: Path,
+    device: str = "cpu",
+    data_dir: Optional[Path] = None,
+    notes: str = "",
+) -> SpeakerProfile:
+    """Enroll a speaker from a per-user recording directory.
+
+    Concatenates all .opus files in per_user_dir (single-speaker audio) and
+    calls enroll_speaker() with a synthetic full-file DiarizationSegment.
+    """
+    import tempfile
+
+    from pydub import AudioSegment as PydubSegment
+
+    opus_files = sorted(per_user_dir.glob("*.opus"))
+    if not opus_files:
+        raise ValueError(f"No audio files found in {per_user_dir}")
+
+    combined = PydubSegment.empty()
+    for f in opus_files:
+        combined += PydubSegment.from_file(str(f), format="opus")
+
+    duration_s = combined.duration_seconds
+    if duration_s <= 0:
+        raise ValueError("No audio content found in per-user directory")
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+
+    try:
+        combined.export(str(tmp_path), format="wav")
+        return enroll_speaker(
+            name=name,
+            display_name=display_name,
+            role=role,
+            audio_path=tmp_path,
+            segments=[DiarizationSegment(0.0, duration_s, "SPEAKER_00")],
+            speaker_label="SPEAKER_00",
+            device=device,
+            data_dir=data_dir,
+            notes=notes,
+        )
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
 def _save_reference_clip(
     audio_path: Path,
     segments: list,

@@ -159,6 +159,7 @@ def _recording_to_dict(r: Recording) -> dict:
         "transcript_path": str(r.transcript_path) if r.transcript_path else None,
         "rejoin_log": [_rejoin_to_dict(rj) for rj in r.rejoin_log],
         "notes": r.notes,
+        "unbound_speakers": list(r.unbound_speakers),
     }
 
 
@@ -178,6 +179,7 @@ def _recording_from_dict(d: dict) -> Recording:
         transcript_path=Path(d["transcript_path"]) if d.get("transcript_path") else None,
         rejoin_log=[_rejoin_from_dict(r) for r in d.get("rejoin_log", [])],
         notes=d.get("notes"),
+        unbound_speakers=list(d.get("unbound_speakers", [])),
     )
 
 

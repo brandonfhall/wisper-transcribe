@@ -250,6 +250,8 @@ class BotManager:
                     if resolved:
                         profile_key = resolved
                 recording.discord_speakers[user_id] = profile_key
+                if not profile_key and user_id not in recording.unbound_speakers:
+                    recording.unbound_speakers.append(user_id)
                 save_recording(recording, self._data_dir)
 
         self._writers[user_id].write(pcm)

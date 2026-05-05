@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Form, Request
@@ -17,6 +19,7 @@ from wisper_transcribe.recording_manager import (
     _validate_recording_id,
     delete_recording,
     load_recordings,
+    save_recording,
 )
 from wisper_transcribe.web.routes import get_bot_manager, templates
 
@@ -290,3 +293,79 @@ async def recording_delete_html(recording_id: str, request: Request) -> Redirect
     from wisper_transcribe.config import get_data_dir
     delete_recording(safe_id, get_data_dir())
     return RedirectResponse(url="/recordings", status_code=303)
+
+
+@router.post("/recordings/{recording_id}/enroll")
+async def recording_enroll_html(
+    recording_id: str,
+    request: Request,
+    discord_user_id: Annotated[str, Form()] = "",
+    profile_name: Annotated[str, Form()] = "",
+):
+    """Enroll an unbound speaker from a recording into a wisper profile."""
+    safe_id = _validate_recording_id(recording_id)
+    if safe_id is None:
+        return JSONResponse({"detail": "invalid recording id"}, status_code=400)
+
+    # Validate discord_user_id: numeric snowflake 15-20 digits
+    stripped_uid = discord_user_id.strip()
+    if not stripped_uid or not re.match(r"^\d{15,20}$", stripped_uid):
+        return JSONResponse({"detail": "invalid discord_user_id"}, status_code=400)
+
+    # CodeQL path guard on stripped_uid before it enters any path construction
+    _uid_guard_base = os.path.abspath("_uid_guard") + os.sep
+    safe_uid = os.path.basename(os.path.abspath(os.path.join(_uid_guard_base, stripped_uid)))
+
+    from wisper_transcribe.config import get_data_dir
+    data_dir = get_data_dir()
+    recordings = load_recordings(data_dir)
+    recording = recordings.get(safe_id)
+    if recording is None:
+        return RedirectResponse(url="/recordings?error=not_found", status_code=303)
+
+    if safe_uid not in recording.unbound_speakers:
+        return JSONResponse({"detail": "speaker not in unbound list"}, status_code=409)
+
+    profile_key = profile_name.strip().lower().replace(" ", "_")
+    if not profile_key:
+        return RedirectResponse(
+            url=f"/recordings/{recording.id}?error=enroll_failed", status_code=303
+        )
+
+    per_user_dir = data_dir / "recordings" / recording.id / "per-user" / safe_uid
+
+    try:
+        from wisper_transcribe.speaker_manager import enroll_speaker_from_audio_dir
+        enroll_speaker_from_audio_dir(
+            name=profile_key,
+            display_name=profile_name.strip(),
+            role="player",
+            per_user_dir=per_user_dir,
+            data_dir=data_dir,
+        )
+    except Exception:
+        return RedirectResponse(
+            url=f"/recordings/{recording.id}?error=enroll_failed", status_code=303
+        )
+
+    recording.unbound_speakers = [
+        uid for uid in recording.unbound_speakers if uid != safe_uid
+    ]
+    recording.discord_speakers[safe_uid] = profile_key
+    save_recording(recording, data_dir)
+
+    if recording.campaign_slug:
+        try:
+            from wisper_transcribe.campaign_manager import add_member, bind_discord_id
+            campaigns = load_campaigns(data_dir)
+            if recording.campaign_slug in campaigns:
+                campaign = campaigns[recording.campaign_slug]
+                if profile_key not in campaign.members:
+                    add_member(recording.campaign_slug, profile_key, data_dir=data_dir)
+                bind_discord_id(
+                    recording.campaign_slug, profile_key, safe_uid, data_dir=data_dir
+                )
+        except Exception:
+            pass
+
+    return RedirectResponse(url=f"/recordings/{recording.id}", status_code=303)

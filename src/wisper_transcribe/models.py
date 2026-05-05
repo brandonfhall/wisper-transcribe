@@ -103,6 +103,7 @@ class Recording:
     transcript_path: Optional[Path]
     rejoin_log: list               # list[RejoinAttempt]
     notes: Optional[str] = None
+    unbound_speakers: list = field(default_factory=list)  # discord_user_ids heard but not bound
 
 
 # ---------------------------------------------------------------------------

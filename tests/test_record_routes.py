@@ -151,3 +151,71 @@ def test_recording_live_returns_501(client):
     resp = c.get(f"/recordings/{rec.id}/live")
     assert resp.status_code == 501
     assert resp.json().get("detail") == "not implemented in v1"
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — enrollment routes
+# ---------------------------------------------------------------------------
+
+def test_enroll_unknown_speaker_creates_profile(client):
+    """POST /recordings/{id}/enroll with a valid unbound speaker creates a profile
+    and removes the user from unbound_speakers."""
+    from pathlib import Path
+    from unittest.mock import patch
+
+    from wisper_transcribe.models import SpeakerProfile
+    from wisper_transcribe.recording_manager import create_recording, load_recordings, save_recording
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    rec.unbound_speakers = ["999999999999999999"]
+    rec.discord_speakers["999999999999999999"] = ""
+    save_recording(rec, tmp_path)
+
+    dummy_profile = SpeakerProfile(
+        name="bob",
+        display_name="Bob",
+        role="player",
+        embedding_path=Path("/fake/bob.npy"),
+        enrolled_date="2025-01-01",
+        enrollment_source="test.opus",
+    )
+
+    with patch("wisper_transcribe.speaker_manager.enroll_speaker_from_audio_dir", return_value=dummy_profile):
+        resp = c.post(
+            f"/recordings/{rec.id}/enroll",
+            data={"discord_user_id": "999999999999999999", "profile_name": "Bob"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    loaded = load_recordings(tmp_path)[rec.id]
+    assert "999999999999999999" not in loaded.unbound_speakers
+    assert loaded.discord_speakers.get("999999999999999999") == "bob"
+
+
+def test_enroll_unknown_speaker_invalid_id_returns_400(client):
+    """POST /recordings/{id}/enroll with a non-numeric discord_user_id returns 400."""
+    from wisper_transcribe.recording_manager import create_recording
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    resp = c.post(
+        f"/recordings/{rec.id}/enroll",
+        data={"discord_user_id": "not-a-snowflake", "profile_name": "Bob"},
+    )
+    assert resp.status_code == 400
+
+
+def test_enroll_already_bound_speaker_returns_409(client):
+    """POST /recordings/{id}/enroll for a user not in unbound_speakers returns 409."""
+    from wisper_transcribe.recording_manager import create_recording
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    # User never added to unbound_speakers
+    resp = c.post(
+        f"/recordings/{rec.id}/enroll",
+        data={"discord_user_id": "999999999999999999", "profile_name": "Bob"},
+    )
+    assert resp.status_code == 409
