@@ -173,27 +173,32 @@ wisper record delete <recording_id>                # remove files + entry, with 
 - `/recordings/<id>` — per-recording detail: metadata, speaker bindings (with "link to wisper profile" controls for each Discord user heard), segment list, **Transcribe** button that drops into the existing job queue, **Download combined** button.
 - (Future) `/recordings/<id>/live` — live transcript ticker. Placeholder route in v1, fully implemented later.
 
-### Implementation phases (proposed — refine after research)
+### Implementation phases
 
-**Phase 0 — Library spike (explicitly throwaway).** 1–2 day timebox. Standalone `scripts/spike_voice_receive.py`: hardcoded bot token (env var), hardcoded guild + channel, joins, captures ~60 s, dumps per-user `.opus` files, exits. **Library is locked to Pycord** (resolved item 1) — the spike's job is to verify Pycord's `start_recording(sink, …)` actually receives per-user audio under DAVE/E2EE.
+**Phase 0 — Library spike. ✅ COMPLETE (2026-05-04)**
+Gate C on Pycord (all variants blocked by DAVE). Gate A on JDA 6.3.0 + JDAVE 0.1.8 — 283 audio frames received per-user from a live DAVE-enabled channel. JDA is the production library (modular stop-gap; Pycord swap-in when PR #3159 ships). Spike code in `scripts/jda-spike/` for reference. Full outcome documented in "Phase 0 outcome" section above.
 
-**DAVE/E2EE risk (highest priority).** Discord mandated DAVE on 2026-03-02 (close code 4017 on connect). Pycord 2.8rc1 added DAVE for voice-*sending*; voice-*receive* is documented as "may not work as expected" and tracked as in-progress in [pycord #3135](https://github.com/Pycord-Development/pycord/issues/3135). The spike must verify on the latest stable + master:
+**Phase 1 — Storage layer. ✅ COMPLETE (2026-05-04)**
+Committed on branch `feat/discord-recording-bot`, commit `02bab7b`.
+- `src/wisper_transcribe/recording_manager.py` — CRUD, atomic saves, per-recording mutex, crash recovery, `_validate_recording_id()`
+- `src/wisper_transcribe/web/audio_writer.py` — `SegmentedOggWriter`, `RealtimePCMMixer`
+- `src/wisper_transcribe/models.py` — `Recording`, `SegmentRecord`, `RejoinAttempt`; `CampaignMember.discord_user_id`
+- `tests/test_recording_manager.py` + `tests/test_audio_writer.py` — 37 new tests, 595 total, all green
+- `architecture.md` updated with Recording layer subsection
 
-- Acceptance gate A — **stable Pycord works**: `pip install py-cord[voice]==<latest stable>`, run script, per-user `.opus` files have audible audio. Proceed to phase 1.
-- Acceptance gate B — **only master works**: stable fails but `pip install git+…@master` works. Proceed but pin `git+` URL in `pyproject.toml` and add a tracking comment to swap back to PyPI when the next release ships.
-- Acceptance gate C — **nothing works**: no Pycord variant receives DAVE-encrypted audio. **Replan**. Options: (a) fall back to mixed-audio capture (single track via OBS-style virtual cable inside the bot's host) + diarization, drop auto-enroll, reshape phases 4 and 7; (b) wait on Pycord upstream; (c) re-research at item-1 scope including aiortc raw-receive.
+---
 
-Other acceptance criteria: per-user `.opus` files are well-formed Ogg/Opus (playable by `ffplay`); chosen install works on Windows + macOS hosts; deliverable is a one-page library-choice memo appended to this plan (DAVE outcome, alternatives considered, platform caveats). Spike code is **not retained** — the production bot is written from scratch in phase 3.
+**▶ NEXT: Phase 2 — Server discovery + control plane.**
+Pick up here in the next session. Branch: `feat/discord-recording-bot`.
 
-1. **Storage layer.** `Recording` dataclass, `recording_manager.py` (CRUD + index), segmented audio writer (format chosen during research), crash-recovery on startup (`recordings.json` reconciliation with on-disk segments). No Discord deps yet — this is pure local file management with tests.
 2. **Server discovery + control plane.** `data_dir/server.json` written on `wisper server` startup; FastAPI route stubs at `/api/record/{start,stop,status,…}` returning 501 for now; CLI client (`wisper record …`) that reads `server.json`, hits the routes, and prints the "server not running" error cleanly. Lets us land the CLI↔server plumbing before there's anything to control.
-3. **Bot core.** Chosen library integrated into `wisper server` FastAPI lifespan hook; start/stop primitives wired to the routes from phase 2; per-user + combined writer pipeline writing into the storage layer from phase 1; auto-rejoin with backoff.
-4. **Campaign / Discord ID binding.** `CampaignMember.discord_user_id`, roster UI updates, auto-tagging during recording.
+3. **Bot core.** JDA sidecar subprocess managed by `BotManager`; per-user + combined writer pipeline writing into the Phase 1 storage layer; auto-rejoin with backoff. Sidecar path configurable so Pycord replacement is a one-file swap.
+4. **Campaign / Discord ID binding.** `CampaignMember.discord_user_id` (field already added in Phase 1), roster UI updates, auto-tagging during recording.
 5. **Web UI.** Record control page, recordings list (campaign-grouped), recording detail page, integration with the existing transcripts page.
 6. **Auto-enroll on first hear (Option B).** "Unknown speaker" queue surfaced on the recording detail page, embedding extraction from per-user tracks.
 7. **Hand-off into JobQueue.** "Transcribe" button reuses `process_file()` via `submit()`. Recording → transcript association recorded so the existing transcripts page shows them.
-8. **Tests + docs.** `test_recording_manager.py`, `test_record_cli.py`, `test_record_routes.py`, `test_discord_bot.py` (using mocked Pycord client + synthesised Opus stream — no live Discord in CI). Update `architecture.md` (new module, new pipeline branch, new config keys, new env var, file-format invariants) and `README.md` (Discord setup walkthrough per resolved item 10, new CLI/UI surface).
-9. **Hardening.** Auto-rejoin behaviour walkthrough on a real Discord server, crash recovery walkthrough (kill `wisper server` mid-session and resume), secret handling audit (token storage / masking), dependency footprint check, DAVE re-test if Pycord shipped a new release during development.
+8. **Tests + docs.** `test_record_cli.py`, `test_record_routes.py`, `test_discord_bot.py` (mocked JDA sidecar + synthesised PCM frames — no live Discord in CI). Update `architecture.md` and `README.md` (Discord setup walkthrough, Java 25 install requirement, new CLI/UI surface). Update install scripts (`start.command`, `start.bat`, `start.sh`) and `Dockerfile` + `docker-compose.yml` for Java 25 + JDA sidecar.
+9. **Hardening.** Real-server rejoin walkthrough, crash recovery test, secret audit (token masking in `wisper config show`), DAVE re-test if Pycord #3159 merged.
 
 (The conditional "live ticker" phase has been dropped — resolved item 13 deferred it to v2.)
 
