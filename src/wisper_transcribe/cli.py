@@ -163,6 +163,9 @@ def server(host: str, port: int, reload: bool, debug: bool) -> None:
             "uvicorn is required to run the web server.  "
             "Install with: pip install 'wisper-transcribe[web]' or pip install uvicorn"
         )
+    # Publish bind address so app.py can write server.json for CLI discovery.
+    os.environ["WISPER_BIND"] = f"{host}:{port}"
+
     click.echo(f"Starting wisper web UI on http://{host}:{port}")
     click.echo("Press Ctrl+C to stop.")
     uvicorn.run(
@@ -1265,3 +1268,173 @@ def summarize(transcript: Path, provider: Optional[str], model: Optional[str],
         f"follow-ups: {len(note.followups)} | "
         f"unresolved speakers: {len(note.unresolved_speakers)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# wisper record — Discord recording bot CLI client
+# ---------------------------------------------------------------------------
+
+def _get_server_url() -> str:
+    """Return the URL of the running wisper server.
+
+    Priority: WISPER_SERVER_URL env var → data_dir/server.json.
+    Raises click.ClickException with a friendly message if neither is set.
+    """
+    env_url = os.environ.get("WISPER_SERVER_URL", "").strip()
+    if env_url:
+        return env_url
+
+    from .config import get_data_dir
+    server_json = get_data_dir() / "server.json"
+    if not server_json.exists():
+        raise click.ClickException(
+            "wisper server is not running — start it with `wisper server` and try again.\n"
+            "  (Or set WISPER_SERVER_URL to override.)"
+        )
+    try:
+        import json as _json
+        data = _json.loads(server_json.read_text(encoding="utf-8"))
+        return data["url"]
+    except Exception as exc:
+        raise click.ClickException(f"Could not read server.json: {exc}")
+
+
+def _record_request(method: str, path: str, **kwargs) -> dict:
+    """Make an HTTP request to the running wisper server. Returns parsed JSON."""
+    import httpx
+    url = _get_server_url().rstrip("/") + path
+    try:
+        resp = httpx.request(method, url, timeout=10, **kwargs)
+        resp.raise_for_status()
+        return resp.json()
+    except httpx.ConnectError:
+        raise click.ClickException(
+            "Could not connect to wisper server. Is it still running?"
+        )
+    except httpx.HTTPStatusError as exc:
+        body = exc.response.text[:200]
+        raise click.ClickException(f"Server returned {exc.response.status_code}: {body}")
+
+
+@main.group()
+def record():
+    """Control the Discord recording bot."""
+
+
+@record.command("start")
+@click.option("--campaign", default=None, help="Campaign slug to associate the recording with")
+@click.option("--voice-channel", required=True, help="Discord voice channel ID to join")
+@click.option("--guild", default=None, help="Discord guild ID (required if bot is in multiple servers)")
+def record_start(campaign: Optional[str], voice_channel: str, guild: Optional[str]):
+    """Join a Discord voice channel and start recording."""
+    payload: dict = {"voice_channel_id": voice_channel}
+    if campaign:
+        payload["campaign_slug"] = campaign
+    if guild:
+        payload["guild_id"] = guild
+    result = _record_request("POST", "/api/record/start", json=payload)
+    click.echo(result)
+
+
+@record.command("stop")
+def record_stop():
+    """Stop the active recording session and queue transcription."""
+    result = _record_request("POST", "/api/record/stop")
+    click.echo(result)
+
+
+@record.command("list")
+@click.option("--campaign", default=None, help="Filter by campaign slug")
+def record_list(campaign: Optional[str]):
+    """List recordings, grouped by campaign."""
+    params = {}
+    if campaign:
+        params["campaign"] = campaign
+    result = _record_request("GET", "/api/recordings", params=params)
+    click.echo(result)
+
+
+@record.command("show")
+@click.argument("recording_id")
+def record_show(recording_id: str):
+    """Show metadata and segment info for a recording."""
+    from .recording_manager import _validate_recording_id
+    if not _validate_recording_id(recording_id):
+        raise click.ClickException(f"Invalid recording ID: {recording_id!r}")
+    result = _record_request("GET", f"/api/recordings/{recording_id}")
+    click.echo(result)
+
+
+@record.command("transcribe")
+@click.argument("recording_id")
+def record_transcribe(recording_id: str):
+    """Re-queue transcription for an existing recording."""
+    from .recording_manager import _validate_recording_id
+    if not _validate_recording_id(recording_id):
+        raise click.ClickException(f"Invalid recording ID: {recording_id!r}")
+    result = _record_request("POST", f"/api/recordings/{recording_id}/transcribe")
+    click.echo(result)
+
+
+@record.command("delete")
+@click.argument("recording_id")
+@click.confirmation_option(prompt="This will remove the recording from the index. Continue?")
+def record_delete(recording_id: str):
+    """Remove a recording entry (files on disk are not deleted)."""
+    from .recording_manager import _validate_recording_id
+    if not _validate_recording_id(recording_id):
+        raise click.ClickException(f"Invalid recording ID: {recording_id!r}")
+    result = _record_request("POST", f"/api/recordings/{recording_id}/delete")
+    click.echo(result)
+
+
+# ---------------------------------------------------------------------------
+# wisper config discord
+# ---------------------------------------------------------------------------
+
+@config.command("discord")
+def config_discord():
+    """Configure the Discord recording bot token and defaults."""
+    from .config import load_config, save_config
+
+    cfg = load_config()
+    click.echo("")
+    click.echo("wisper Discord bot configuration")
+    click.echo("=" * 42)
+    click.echo("  Get your bot token from: https://discord.com/developers/applications")
+    click.echo("  Required permissions: View Channels, Connect, Speak")
+    click.echo("")
+
+    current_token = cfg.get("discord_bot_token", "")
+    token_display = "***set***" if current_token else "not set"
+    new_token = click.prompt(
+        f"  Bot token [{token_display}]",
+        default="",
+        show_default=False,
+        hide_input=True,
+    ).strip()
+    if new_token:
+        cfg["discord_bot_token"] = new_token
+
+    current_guild = cfg.get("discord_default_guild", "")
+    new_guild = click.prompt(
+        f"  Default guild (server) ID [{current_guild or 'none'}]",
+        default=current_guild,
+        show_default=False,
+    ).strip()
+    if new_guild:
+        cfg["discord_default_guild"] = new_guild
+
+    current_channel = cfg.get("discord_default_channel", "")
+    new_channel = click.prompt(
+        f"  Default voice channel ID [{current_channel or 'none'}]",
+        default=current_channel,
+        show_default=False,
+    ).strip()
+    if new_channel:
+        cfg["discord_default_channel"] = new_channel
+
+    save_config(cfg)
+    click.echo("")
+    click.echo("  OK  : Discord config saved.")
+    click.echo("  Tip : DISCORD_BOT_TOKEN env var always takes precedence over config.")

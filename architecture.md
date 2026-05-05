@@ -38,6 +38,7 @@ src/wisper_transcribe/
 ├── config.py           load_config(), save_config(), get_device(), get_hf_token(), get_llm_api_key(), resolve_llm_model(), check_ffmpeg()
 ├── campaign_manager.py Campaign CRUD: load/save/create/delete campaigns, add/remove roster members, _validate_campaign_slug() security gatekeeper
 ├── recording_manager.py Recording CRUD: load/save/create/delete recordings, append_segment() with per-recording mutex, reconcile_on_startup() crash recovery, _validate_recording_id() security gatekeeper
+├── web/routes/record.py /api/record/{start,stop,status,channels} + /api/recordings CRUD stubs (all 501 until Phase 3); path-traversal guard on recording_id
 ├── models.py           Dataclasses: TranscriptionSegment, DiarizationSegment, AlignedSegment, SpeakerProfile, CampaignMember (+ discord_user_id), Campaign, Recording, SegmentRecord, RejoinAttempt, Edit, SpeakerSuggestion, LootChange, NPCMention, SummaryNote
 ├── refine.py           LLM-driven transcript refinement: vocabulary correction + unknown-speaker ID (edit-distance guarded, frontmatter-preserving)
 ├── summarize.py        Campaign-notes generation (session recap, loot, NPCs, follow-ups) → Obsidian-ready sidecar markdown
@@ -358,7 +359,9 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - `tests/test_path_traversal.py` covers path traversal for campaign routes (null-byte, dotdot, slash, CRLF, `javascript:`, `.`, `..` payloads) for detail, delete, add-member, and remove-member; create error does not leak exception text; unit tests for `_validate_campaign_slug`
 - `tests/test_recording_manager.py` covers load/save roundtrip, UUID generation, corrupt index handling, missing metadata skip, status updates, concurrent `append_segment` (threading), crash recovery via `reconcile_on_startup`, and `_validate_recording_id` (parametrized accept/reject with null-byte, dotdot, slash, wildcard payloads)
 - `tests/test_audio_writer.py` covers `SegmentedOggWriter` rotation at 60 s, three-segment sessions, EOS page flag verification, crash-recovery (second writer resumes from next index), write return values, and `RealtimePCMMixer` (single user, clear-after-mix, clip-on-overflow, silence)
-- Test count: ~595 (all mocked, all passing)
+- `tests/test_record_routes.py` covers 501 stubs (start, stop, status), path-traversal rejection on recording_id, server.json written on lifespan startup and deleted on shutdown
+- `tests/test_record_cli.py` covers "server not running" error, server.json discovery → HTTP POST, WISPER_SERVER_URL env var override, list output, recording_id validation
+- Test count: ~607 (all mocked, all passing)
 
 **CI matrix** (`.github/workflows/ci.yml`):
 - Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)

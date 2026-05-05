@@ -19,3 +19,8 @@ templates.env.filters["urlencode"] = lambda s: quote(str(s))
 def get_queue(request: Request) -> JobQueue:
     """Retrieve the shared JobQueue from the app state."""
     return request.app.state.job_queue
+
+
+def get_bot_manager(request: Request):
+    """Retrieve BotManager from app state. Returns None until Phase 3 wires it in."""
+    return getattr(request.app.state, "bot_manager", None)

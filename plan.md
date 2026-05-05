@@ -188,10 +188,20 @@ Committed on branch `feat/discord-recording-bot`, commit `02bab7b`.
 
 ---
 
-**▶ NEXT: Phase 2 — Server discovery + control plane.**
+**Phase 2 — Server discovery + control plane. ✅ COMPLETE (2026-05-05)**
+Committed on branch `feat/discord-recording-bot`.
+- `src/wisper_transcribe/web/app.py` — writes `server.json` (host:port) before lifespan yield, deletes on shutdown; calls `reconcile_on_startup()`; registers record router
+- `src/wisper_transcribe/web/routes/record.py` — 8 route stubs (all 501); path-traversal guard on recording_id
+- `src/wisper_transcribe/web/routes/__init__.py` — `get_bot_manager()` helper
+- `src/wisper_transcribe/cli.py` — `wisper record` group (start/stop/list/show/transcribe/delete); `wisper config discord` wizard; `WISPER_BIND` env var set before uvicorn
+- 12 new tests, 607 total, all green
+
+---
+
+**▶ NEXT: Phase 3 — Bot core.**
 Pick up here in the next session. Branch: `feat/discord-recording-bot`.
 
-2. **Server discovery + control plane.** `data_dir/server.json` written on `wisper server` startup; FastAPI route stubs at `/api/record/{start,stop,status,…}` returning 501 for now; CLI client (`wisper record …`) that reads `server.json`, hits the routes, and prints the "server not running" error cleanly. Lets us land the CLI↔server plumbing before there's anything to control.
+2. ~~**Server discovery + control plane.**~~ ✅ done
 3. **Bot core.** JDA sidecar subprocess managed by `BotManager`; per-user + combined writer pipeline writing into the Phase 1 storage layer; auto-rejoin with backoff. Sidecar path configurable so Pycord replacement is a one-file swap.
 4. **Campaign / Discord ID binding.** `CampaignMember.discord_user_id` (field already added in Phase 1), roster UI updates, auto-tagging during recording.
 5. **Web UI.** Record control page, recordings list (campaign-grouped), recording detail page, integration with the existing transcripts page.
