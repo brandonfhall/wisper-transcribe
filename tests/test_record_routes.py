@@ -20,16 +20,25 @@ def client(tmp_path):
             yield c, tmp_path
 
 
-def test_record_start_returns_501_before_bot_core(client):
+def test_record_start_creates_recording(client):
     c, _ = client
-    resp = c.post("/api/record/start", json={"voice_channel_id": "123"})
-    assert resp.status_code == 501
+    resp = c.post("/api/record/start", json={"voice_channel_id": "123", "guild_id": "G1"})
+    assert resp.status_code == 201
+    data = resp.json()
+    assert "recording_id" in data or "id" in data
+    assert data.get("status") == "recording"
 
 
-def test_record_stop_returns_501(client):
+def test_record_start_missing_voice_channel_returns_400(client):
+    c, _ = client
+    resp = c.post("/api/record/start", json={})
+    assert resp.status_code == 400
+
+
+def test_record_stop_with_no_active_session_returns_400(client):
     c, _ = client
     resp = c.post("/api/record/stop")
-    assert resp.status_code == 501
+    assert resp.status_code == 400
 
 
 def test_record_status_returns_501(client):

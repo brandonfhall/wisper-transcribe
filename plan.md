@@ -198,10 +198,23 @@ Committed on branch `feat/discord-recording-bot`.
 
 ---
 
-**▶ NEXT: Phase 3 — Bot core.**
+**Phase 3 — Bot core. ✅ COMPLETE (2026-05-05)**
+Committed on branch `feat/discord-recording-bot`.
+- `src/wisper_transcribe/web/discord_bot.py` — `BotManager` with injectable `audio_source_factory`, session loop, per-user + combined `SegmentedOggWriter` routing, `_handle_disconnect` (transient/permanent close code split, backoff `[2,5,15,30,60]`), `_finalise`; `_unix_socket_source` placeholder for Phase 9 JDA integration
+- `src/wisper_transcribe/web/app.py` — `BotManager` wired into lifespan after `job_queue.start()`
+- `src/wisper_transcribe/web/routes/record.py` — `POST /api/record/start` and `POST /api/record/stop` implemented; remaining routes still 501
+- `tests/_discord_fakes.py` — scripted/multi-attempt/infinite-disconnect/blocking source factories
+- `tests/conftest.py` — `_block_discord_network` autouse fixture patches `_unix_socket_source`
+- `tests/test_discord_bot.py` — 7 tests, all passing (no real JDA/Discord)
+- 615 total tests, all green
+
+---
+
+**▶ NEXT: Phase 4 — Campaign / Discord ID binding.**
 Pick up here in the next session. Branch: `feat/discord-recording-bot`.
 
 2. ~~**Server discovery + control plane.**~~ ✅ done
+3. ~~**Bot core.**~~ ✅ done
 3. **Bot core.** JDA sidecar subprocess managed by `BotManager`; per-user + combined writer pipeline writing into the Phase 1 storage layer; auto-rejoin with backoff. Sidecar path configurable so Pycord replacement is a one-file swap.
 4. **Campaign / Discord ID binding.** `CampaignMember.discord_user_id` (field already added in Phase 1), roster UI updates, auto-tagging during recording.
 5. **Web UI.** Record control page, recordings list (campaign-grouped), recording detail page, integration with the existing transcripts page.

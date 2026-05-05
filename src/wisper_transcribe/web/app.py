@@ -113,16 +113,23 @@ def create_app() -> FastAPI:
         cli_host = "127.0.0.1" if host in ("0.0.0.0", "") else host
         server_url = f"http://{cli_host}:{port}"
         from wisper_transcribe.config import get_data_dir
-        _sj = get_data_dir() / "server.json"
+        data_dir = get_data_dir()
+        _sj = data_dir / "server.json"
         _sj.parent.mkdir(parents=True, exist_ok=True)
         _sj.write_text(json.dumps({"url": server_url}), encoding="utf-8")
 
         from wisper_transcribe.recording_manager import reconcile_on_startup
-        reconcile_on_startup()
+        reconcile_on_startup(data_dir)
+
+        from .discord_bot import BotManager
+        bot_manager = BotManager(data_dir=data_dir)
+        bot_manager.start()
+        app.state.bot_manager = bot_manager
 
         try:
             yield
         finally:
+            await bot_manager.stop()
             await job_queue.stop()
             try:
                 _sj.unlink(missing_ok=True)
