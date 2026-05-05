@@ -262,9 +262,35 @@ Park Phase 3 (bot audio core) until either:
 
 In the meantime, build Phases 1, 2, 4, 5, 7, and 8 — none of those phases touch audio capture. When the DAVE blocker is resolved, Phase 3 slots in and the rest lights up.
 
-#### Alternative library research (2026-05-04, in progress)
+#### Alternative library research (2026-05-04, completed)
 
-Research agent dispatched to evaluate whether any library in any language (Node.js/discord.js, Java/JDA, Rust/Serenity+Songbird, discord.py, or others) has working DAVE voice receive as of May 2026. Results to be appended here when complete. If a working alternative is found, Phase 3 will be rewritten to use it (potentially as a subprocess/sidecar if not Python).
+Surveyed discord.js/@discordjs/voice (Node.js), discord.py (Python), JDA (Java), Serenity/Songbird (Rust), and Discord's own `libdave` reference library.
+
+**Result: JDA (Java) + JDAVE is the only library with confirmed, code-verified, wired-up DAVE decryption in the per-user audio receive path.**
+
+| Library | Language | DAVE receive | Notes |
+|---------|----------|-------------|-------|
+| **JDA 6.3.0 + JDAVE 0.1.8** | Java | **WORKS** | PR #2988 merged 2026-01-07; `DaveCryptoAdapter` decrypts per-user Opus before handing to `AudioReceiveHandler` |
+| Pycord | Python | Broken | PR #3159 draft, milestone 2.9.0 — weeks to months |
+| discord.py | Python | N/A | No voice receive feature exists at all (never has) |
+| @discordjs/voice | Node.js | Unknown/broken | Archived July 2023; no DAVE references |
+| Songbird (Rust) | Rust | Broken | `crypto.rs` explicitly labels its modes as "non-E2EE"; no DAVE code |
+| discord/libdave | C++/JS | Reference only | Discord's own implementation; narrow JS npm scope (MLS verification, not audio) |
+
+**JDA + JDAVE details:**
+- `DaveCryptoAdapter` applies transport decryption then calls `daveSession.decrypt(MediaType.AUDIO, userId, …)` per-user — exactly the per-speaker stream isolation the plan requires
+- `AudioReceiveHandler.handleUserAudio(UserAudio ua)` and `handleCombinedAudio(CombinedAudio ca)` API is unchanged; DAVE decryption is transparent
+- JDAVE (`club.minnced:jdave-api:0.1.8`) wraps Discord's own `discord/libdave` C++ reference library; platform natives available for macOS, Linux x86-64/ARM64, Windows x86-64
+- **Requires Java 25** (uses Foreign Function & Memory API, stable since Java 22; Java 25 is LTS)
+- JDAVE is "still very new and only tested at small scale" — treat it as beta
+- Caveat: do NOT use `udpqueue`/JDA-NAS (native send system) — it breaks audio receive even without DAVE
+
+**Revised Phase 3 approach — Java sidecar:**
+A small JDA bot (built with Gradle, run as a subprocess by `BotManager`) joins the voice channel, receives and DAVE-decrypts per-user Opus frames via `DaveCryptoAdapter`, and streams segments to the Python pipeline via stdout/Unix socket. The Python side (`recording_manager.py`, `SegmentedOggWriter`) writes the Ogg/Opus files exactly as designed. The wire format between sidecar and Python is a simple length-prefixed binary protocol: `[4-byte discord_user_id length][discord_user_id][4-byte pcm_length][pcm_bytes]`.
+
+Per-user PCM from JDA's `UserAudio.getAudioData(1.0)` arrives at 48 kHz stereo → downsample to 16 kHz mono before writing to the Ogg segment (matches Whisper's native rate). Mixed track from `CombinedAudio.getAudioData(1.0)` goes to the combined writer.
+
+This approach preserves the full original plan: per-user tracks, Discord-ID tagging, combined track, all file-format invariants. Only Phase 3 internals change (Java sidecar instead of native Pycord).
 
 ### Future / v2+ (NOT v1, unless promoted by research)
 
