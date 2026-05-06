@@ -13,7 +13,8 @@ from fastapi.testclient import TestClient
 def client(tmp_path):
     """TestClient with server.json writing patched to tmp_path."""
     import wisper_transcribe.web.app as app_module
-    with patch("wisper_transcribe.config.get_data_dir", return_value=tmp_path):
+    with patch("wisper_transcribe.config.get_data_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.web.routes.record.get_data_dir", return_value=tmp_path):
         from wisper_transcribe.web.app import create_app
         test_app = create_app()
         with TestClient(test_app) as c:
@@ -181,7 +182,7 @@ def test_enroll_unknown_speaker_creates_profile(client):
         enrollment_source="test.opus",
     )
 
-    with patch("wisper_transcribe.speaker_manager.enroll_speaker_from_audio_dir", return_value=dummy_profile):
+    with patch("wisper_transcribe.web.routes.record.enroll_speaker_from_audio_dir", return_value=dummy_profile):
         resp = c.post(
             f"/recordings/{rec.id}/enroll",
             data={"discord_user_id": "999999999999999999", "profile_name": "Bob"},

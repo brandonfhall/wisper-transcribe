@@ -9,18 +9,27 @@ import asyncio
 import json
 import os
 import re
+import shutil
+from pathlib import Path
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 
-from wisper_transcribe.campaign_manager import load_campaigns
+from wisper_transcribe.campaign_manager import (
+    add_member,
+    bind_discord_id,
+    load_campaigns,
+    move_transcript_to_campaign,
+)
+from wisper_transcribe.config import get_data_dir, load_config
 from wisper_transcribe.recording_manager import (
     _validate_recording_id,
     delete_recording,
     load_recordings,
     save_recording,
 )
+from wisper_transcribe.speaker_manager import enroll_speaker_from_audio_dir
 from wisper_transcribe.web.routes import get_bot_manager, templates
 
 router = APIRouter()
@@ -143,7 +152,6 @@ async def recording_delete_api(recording_id: str, request: Request):
 
 @router.get("/record", response_class=HTMLResponse)
 async def record_page(request: Request) -> HTMLResponse:
-    from wisper_transcribe.config import get_data_dir, load_config
     bm = get_bot_manager(request)
     data_dir = get_data_dir()
     campaigns = load_campaigns(data_dir)
@@ -236,7 +244,6 @@ async def record_stop_html(request: Request) -> RedirectResponse:
 
 @router.get("/recordings", response_class=HTMLResponse)
 async def recordings_list_html(request: Request) -> HTMLResponse:
-    from wisper_transcribe.config import get_data_dir
     data_dir = get_data_dir()
     recordings = load_recordings(data_dir)
     campaigns = load_campaigns(data_dir)
@@ -270,7 +277,6 @@ async def recording_detail_html(recording_id: str, request: Request) -> HTMLResp
     if safe_id is None:
         return HTMLResponse(content="Invalid recording ID", status_code=400)
 
-    from wisper_transcribe.config import get_data_dir
     data_dir = get_data_dir()
     recordings = load_recordings(data_dir)
     recording = recordings.get(safe_id)
@@ -295,7 +301,6 @@ async def recording_delete_html(recording_id: str, request: Request) -> Redirect
     if safe_id is None:
         return HTMLResponse(content="Invalid recording ID", status_code=400)
 
-    from wisper_transcribe.config import get_data_dir
     delete_recording(safe_id, get_data_dir())
     return RedirectResponse(url="/recordings", status_code=303)
 
@@ -321,7 +326,6 @@ async def recording_enroll_html(
     _uid_guard_base = os.path.abspath("_uid_guard") + os.sep
     safe_uid = os.path.basename(os.path.abspath(os.path.join(_uid_guard_base, stripped_uid)))
 
-    from wisper_transcribe.config import get_data_dir
     data_dir = get_data_dir()
     recordings = load_recordings(data_dir)
     recording = recordings.get(safe_id)
@@ -340,7 +344,6 @@ async def recording_enroll_html(
     per_user_dir = data_dir / "recordings" / recording.id / "per-user" / safe_uid
 
     try:
-        from wisper_transcribe.speaker_manager import enroll_speaker_from_audio_dir
         enroll_speaker_from_audio_dir(
             name=profile_key,
             display_name=profile_name.strip(),
@@ -361,7 +364,6 @@ async def recording_enroll_html(
 
     if recording.campaign_slug:
         try:
-            from wisper_transcribe.campaign_manager import add_member, bind_discord_id
             campaigns = load_campaigns(data_dir)
             if recording.campaign_slug in campaigns:
                 campaign = campaigns[recording.campaign_slug]
@@ -388,11 +390,6 @@ async def recording_transcribe_html(recording_id: str, request: Request) -> Redi
     if safe_id is None:
         return HTMLResponse(content="Invalid recording ID", status_code=400)
 
-    from pathlib import Path
-    import shutil
-
-    from wisper_transcribe.campaign_manager import move_transcript_to_campaign
-    from wisper_transcribe.config import get_data_dir
     from wisper_transcribe.web.routes.transcribe import _default_output_dir
 
     data_dir = get_data_dir()
@@ -415,7 +412,6 @@ async def recording_transcribe_html(recording_id: str, request: Request) -> Redi
 
     # Build the post-completion callback: auto-associate transcript with campaign
     def _on_complete(job):
-        from wisper_transcribe.campaign_manager import move_transcript_to_campaign as _move
         _recordings = load_recordings(data_dir)
         rec = _recordings.get(recording.id)
         if rec is None:
@@ -426,7 +422,7 @@ async def recording_transcribe_html(recording_id: str, request: Request) -> Redi
             stem = Path(job.output_path).stem
             if rec.campaign_slug:
                 try:
-                    _move(stem, rec.campaign_slug, data_dir)
+                    move_transcript_to_campaign(stem, rec.campaign_slug, data_dir)
                 except Exception:
                     pass
         save_recording(rec, data_dir)

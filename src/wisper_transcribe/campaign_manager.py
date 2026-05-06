@@ -70,6 +70,25 @@ def _validate_campaign_slug(slug: str) -> Optional[str]:
     return os.path.basename(_guard_path)
 
 
+def _validate_profile_key(profile_key: str) -> Optional[str]:
+    """Two-layer security guard for profile keys (same pattern as _validate_campaign_slug).
+
+    Returns the sanitised key on success, None on rejection.
+    """
+    if not profile_key or "\x00" in profile_key:
+        return None
+    safe_key = os.path.basename(profile_key)
+    if safe_key != profile_key or safe_key in {".", ".."} or not re.match(r"^[\w\-]+$", safe_key):
+        return None
+    _guard_base = os.path.abspath("_guard")
+    if not _guard_base.endswith(os.sep):
+        _guard_base += os.sep
+    _guard_path = os.path.abspath(os.path.join(_guard_base, safe_key))
+    if not _guard_path.startswith(_guard_base):
+        return None
+    return os.path.basename(_guard_path)
+
+
 # ---------------------------------------------------------------------------
 # Load / save
 # ---------------------------------------------------------------------------

@@ -1,7 +1,6 @@
 """Campaigns route — manage per-campaign speaker rosters."""
 from __future__ import annotations
 
-import os
 import re
 from typing import Annotated, Optional
 
@@ -11,6 +10,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from . import templates
 from wisper_transcribe.campaign_manager import (
     _validate_campaign_slug,
+    _validate_profile_key,
     add_member,
     bind_discord_id,
     create_campaign,
@@ -130,22 +130,6 @@ async def campaign_add_member(
         )
 
     return RedirectResponse(url=f"/campaigns/{campaign.slug}", status_code=303)
-
-
-def _validate_profile_key(profile_key: str) -> Optional[str]:
-    """Two-layer security guard for profile keys (mirrors _validate_campaign_slug)."""
-    if not profile_key or "\x00" in profile_key:
-        return None
-    safe_key = os.path.basename(profile_key)
-    if safe_key != profile_key or not re.match(r"^[\w\-]+$", safe_key):
-        return None
-    _guard_base = os.path.abspath("_guard")
-    if not _guard_base.endswith(os.sep):
-        _guard_base += os.sep
-    _guard_path = os.path.abspath(os.path.join(_guard_base, safe_key))
-    if not _guard_path.startswith(_guard_base):
-        return None
-    return os.path.basename(_guard_path)
 
 
 @router.post("/{slug}/members/{profile_key}/remove", response_class=HTMLResponse)
