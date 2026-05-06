@@ -1,0 +1,53 @@
+plugins {
+    id 'java'
+    id 'com.gradleup.shadow' version '9.0.0'
+}
+
+group = 'com.wisper'
+version = '0.1.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+repositories {
+    mavenCentral()
+    // JDAVE snapshots / custom repo (if needed for release builds)
+}
+
+dependencies {
+    // JDA 6.3.0 — Discord API wrapper
+    implementation 'net.dv8tion:JDA:6.3.0'
+
+    // JDAVE 0.1.8 — DAVE E2EE voice receive interop
+    implementation 'club.minnced.discord:jdave-interop:0.1.8'
+
+    // Force JNA 5.14.0: JDA 6.3.0 transitively pulls JNA 4.4.0 which is
+    // x86_64/i386 only (no ARM64). 5.14.0 adds ARM64 support.
+    implementation 'net.java.dev.jna:jna:5.14.0'
+
+    // Opus natives (bundled for Linux x86_64 and Windows x86_64)
+    implementation 'club.minnced:opus-java-natives:1.1.1'
+}
+
+configurations.all {
+    resolutionStrategy {
+        force 'net.java.dev.jna:jna:5.14.0'
+    }
+}
+
+shadowJar {
+    mergeServiceFiles()
+    manifest {
+        attributes(
+            'Main-Class': 'com.wisper.discord.Main',
+            'Implementation-Version': version
+        )
+    }
+}
+
+tasks.named('shadowJar') {
+    archiveClassifier.set('all')
+}

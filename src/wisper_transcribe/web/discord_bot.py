@@ -20,6 +20,7 @@ import asyncio
 import logging
 import os
 import struct
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncIterator, Callable, Optional
@@ -43,7 +44,64 @@ _PERMANENT = frozenset({4014, 4011, 4022})
 
 
 # ---------------------------------------------------------------------------
-# Production audio source (placeholder — real JDA launch in Phase 9)
+# JAR discovery
+# ---------------------------------------------------------------------------
+
+def _find_sidecar_jar() -> Path:
+    """Return the path to the JDA sidecar fat JAR.
+
+    Lookup order:
+      1. WISPER_SIDECAR_JAR env var
+      2. discord-bot/discord-bot-all.jar alongside the running process (Docker)
+      3. discord-bot/ directory in the package install tree
+    """
+    env = os.environ.get("WISPER_SIDECAR_JAR", "").strip()
+    if env:
+        return Path(env)
+
+    # Docker path: JAR copied alongside the app
+    cwd_jar = Path("discord-bot") / "discord-bot-all.jar"
+    if cwd_jar.exists():
+        return cwd_jar.resolve()
+
+    # Editable/development install: JAR in the repo root
+    import wisper_transcribe
+    pkg_dir = Path(wisper_transcribe.__file__).resolve().parent.parent.parent
+    repo_jar = pkg_dir / "discord-bot" / "discord-bot-all.jar"
+    if repo_jar.exists():
+        return repo_jar
+
+    raise FileNotFoundError(
+        "JDA sidecar JAR not found. Build it with: cd discord-bot && gradle shadowJar\n"
+        "Or set WISPER_SIDECAR_JAR to the path of discord-bot-all.jar"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Unix socket frame reader
+# ---------------------------------------------------------------------------
+
+async def _read_frame(reader: asyncio.StreamReader) -> Optional[tuple[str, bytes]]:
+    """Read one length-prefixed frame from the socket.
+
+    Returns (user_id, pcm_bytes) or None on EOF.
+    """
+    # user_id_len (4-byte big-endian)
+    raw_len = await reader.readexactly(4)
+    user_id_len = int.from_bytes(raw_len, "big")
+    # user_id bytes
+    raw_uid = await reader.readexactly(user_id_len)
+    user_id = raw_uid.decode("utf-8")
+    # pcm_len (4-byte big-endian)
+    raw_pcm_len = await reader.readexactly(4)
+    pcm_len = int.from_bytes(raw_pcm_len, "big")
+    # pcm bytes
+    pcm = await reader.readexactly(pcm_len)
+    return user_id, pcm
+
+
+# ---------------------------------------------------------------------------
+# Production audio source
 # ---------------------------------------------------------------------------
 
 async def _unix_socket_source(
@@ -52,15 +110,94 @@ async def _unix_socket_source(
     guild_id: str,
     token: str,
 ) -> AsyncIterator[tuple[str, bytes]]:
-    """Production: launch JDA sidecar, open Unix socket, yield PCM frames.
+    """Launch JDA sidecar, open Unix socket server, yield PCM frames.
 
-    Phase 3 placeholder — JDA subprocess launch and socket server wired up
-    in Phase 9 hardening when the discord-bot/ Gradle JAR is integrated.
-    Until then, yields nothing; start_session creates the Recording and
-    stop_session finalises it with zero audio segments.
+    Opens a Unix domain socket server, spawns the JDA fat JAR as a subprocess
+    (which connects back as a client), and yields (user_id, pcm) tuples read
+    from the wire. Control frames (__ctrl__) are yielded to the caller for
+    disconnect handling.
     """
-    return
-    yield  # pragma: no cover — makes this an async generator
+    from wisper_transcribe.config import get_data_dir
+
+    data_dir = get_data_dir()
+    socket_path = data_dir / "discord-bot.sock"
+
+    # Remove stale socket file
+    if socket_path.exists():
+        socket_path.unlink()
+
+    # Use a Future to capture the first (and only) connection
+    connected: asyncio.Future = asyncio.Future()
+
+    async def _on_connect(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        if not connected.done():
+            connected.set_result((reader, writer))
+        else:
+            writer.close()
+
+    jar = _find_sidecar_jar()
+    cmd = [
+        "java",
+        "--enable-native-access=ALL-UNNAMED",
+        "-jar", str(jar),
+        "--token", token,
+        "--guild", guild_id,
+        "--voice-channel", voice_channel_id,
+        "--socket", str(socket_path),
+    ]
+
+    log.info("Starting JDA sidecar: %s", cmd)
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=subprocess.PIPE,
+    )
+
+    server = await asyncio.start_unix_server(
+        _on_connect,
+        path=str(socket_path),
+    )
+
+    try:
+        # Wait for the Java sidecar to connect (15 s timeout)
+        reader, writer = await asyncio.wait_for(connected, timeout=15.0)
+        log.info("JDA sidecar connected on %s", socket_path)
+
+        while True:
+            try:
+                frame = await asyncio.wait_for(_read_frame(reader), timeout=1.0)
+            except asyncio.TimeoutError:
+                if proc.returncode is not None:
+                    log.info("JDA sidecar exited with code %s", proc.returncode)
+                    break
+                continue
+            except asyncio.IncompleteReadError:
+                log.info("JDA sidecar closed connection")
+                break
+
+            if frame is None:
+                break
+            yield frame
+
+    finally:
+        server.close()
+        await server.wait_closed()
+
+        if proc.returncode is None:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                proc.terminate()
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except (ProcessLookupError, asyncio.TimeoutError):
+                proc.kill()
+
+        if socket_path.exists():
+            try:
+                socket_path.unlink()
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------
