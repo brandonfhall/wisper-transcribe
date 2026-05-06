@@ -311,6 +311,98 @@ def test_campaigns_create_error_does_not_leak_exception(client, tmp_path, monkey
     assert "home" not in location
 
 
+# ---------------------------------------------------------------------------
+# Recording ID path traversal + validation
+# ---------------------------------------------------------------------------
+
+# Note: "." and ".." are omitted because httpx/TestClient automatically normalizes
+# them out of the URL path before sending the request. The _validate_recording_id
+# unit test below still covers these cases.
+_RECORDING_ID_PAYLOADS = [
+    "\x00",
+    "../etc/passwd",
+    "a/b/c",
+    "evil\r\nHeader: injected",
+    "invalid*name",
+    "id\\backslash",
+]
+
+@pytest.mark.parametrize("payload", _RECORDING_ID_PAYLOADS)
+def test_recordings_api_path_traversal_blocked(client, payload):
+    from urllib.parse import quote
+    safe = quote(payload, safe="")
+
+    # GET /api/recordings/{id}
+    resp = client.get(f"/api/recordings/{safe}")
+    assert resp.status_code in (400, 404)
+
+    # POST /api/recordings/{id}/transcribe
+    resp = client.post(f"/api/recordings/{safe}/transcribe")
+    assert resp.status_code in (400, 404)
+
+    # POST /api/recordings/{id}/delete
+    resp = client.post(f"/api/recordings/{safe}/delete")
+    assert resp.status_code in (400, 404)
+
+
+@pytest.mark.parametrize("payload", _RECORDING_ID_PAYLOADS)
+def test_recordings_html_path_traversal_blocked(client, payload):
+    from urllib.parse import quote
+    safe = quote(payload, safe="")
+
+    # GET /recordings/{id} (HTML detail)
+    resp = client.get(f"/recordings/{safe}", follow_redirects=False)
+    assert resp.status_code in (200, 303, 400, 404)
+
+    # POST /recordings/{id}/delete (HTML form)
+    resp = client.post(f"/recordings/{safe}/delete", follow_redirects=False)
+    assert resp.status_code in (303, 400, 404, 405)
+
+    # POST /recordings/{id}/enroll (HTML form)
+    resp = client.post(
+        f"/recordings/{safe}/enroll",
+        data={"discord_user_id": "123456789012345678", "profile_name": "Test"},
+        follow_redirects=False,
+    )
+    assert resp.status_code in (303, 400, 404, 409)
+
+    # POST /recordings/{id}/transcribe (HTML form)
+    resp = client.post(f"/recordings/{safe}/transcribe", follow_redirects=False)
+    assert resp.status_code in (303, 400, 404)
+
+    # GET /recordings/{id}/live
+    resp = client.get(f"/recordings/{safe}/live")
+    assert resp.status_code in (400, 404, 501)
+
+
+def test_validate_recording_id_accepts_valid_ids():
+    from wisper_transcribe.recording_manager import _validate_recording_id
+    for rid in [
+        "550e8400-e29b-41d4-a716-446655440000",
+        "abc-123",
+        "valid_id_123",
+        "a1B2c3",
+    ]:
+        assert _validate_recording_id(rid) is not None, f"should accept {rid!r}"
+
+
+def test_validate_recording_id_rejects_invalid_ids():
+    from wisper_transcribe.recording_manager import _validate_recording_id
+    for rid in [
+        "",
+        "\x00",
+        "../etc/passwd",
+        "a/b/c",
+        "evil\r\n",
+        "id!@#",
+        "id\\backslash",
+        ".",
+        "..",
+        "invalid*name",
+    ]:
+        assert _validate_recording_id(rid) is None, f"should reject {rid!r}"
+
+
 def test_validate_campaign_slug_accepts_valid_slugs():
     from wisper_transcribe.campaign_manager import _validate_campaign_slug
     for slug in ["dnd-mondays", "abc_123", "UPPER", "my-campaign-1"]:

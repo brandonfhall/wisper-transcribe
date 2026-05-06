@@ -18,18 +18,22 @@ repositories {
 }
 
 dependencies {
-    // JDA 6.3.0 — Discord API wrapper
+    // JDA 6.3.0 — Discord API wrapper (pulls in opus-java transitively)
     implementation 'net.dv8tion:JDA:6.3.0'
 
-    // JDAVE 0.1.8 — DAVE E2EE voice receive interop
-    implementation 'club.minnced.discord:jdave-interop:0.1.8'
+    // JDAVE 0.1.8 — DAVE E2EE voice receive (Maven coords: club.minnced:jdave-api)
+    // The interop class JDaveSessionFactory is inside this artifact at
+    // club.minnced.discord.jdave.interop.JDaveSessionFactory
+    implementation 'club.minnced:jdave-api:0.1.8'
+
+    // JDAVE native binaries — include all platforms so the fat JAR works everywhere
+    runtimeOnly 'club.minnced:jdave-native-linux-x86-64:0.1.8'
+    runtimeOnly 'club.minnced:jdave-native-win-x86-64:0.1.8'
+    runtimeOnly 'club.minnced:jdave-native-darwin:0.1.8'
 
     // Force JNA 5.14.0: JDA 6.3.0 transitively pulls JNA 4.4.0 which is
-    // x86_64/i386 only (no ARM64). 5.14.0 adds ARM64 support.
+    // x86_64/i386 only (no ARM64). 5.14.0 adds ARM64 + aarch64 support.
     implementation 'net.java.dev.jna:jna:5.14.0'
-
-    // Opus natives (bundled for Linux x86_64 and Windows x86_64)
-    implementation 'club.minnced:opus-java-natives:1.1.1'
 }
 
 configurations.all {
@@ -50,4 +54,5 @@ shadowJar {
 
 tasks.named('shadowJar') {
     archiveClassifier.set('all')
+    archiveVersion.set('')
 }

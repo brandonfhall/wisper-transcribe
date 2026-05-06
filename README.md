@@ -843,6 +843,16 @@ WISPER_DEBUG=1 wisper transcribe session.mp3
 
 ---
 
+## Known Limitations (v1)
+
+- **One active recording at a time.** `BotManager` manages a single Discord voice session — starting a second recording while one is active returns an error.
+- **No multi-guild / multi-channel.** The bot connects to one voice channel in one guild per session.
+- **DAVE E2EE voice receive depends on JDAVE (Java).** Discord's DAVE protocol encrypts per-user voice — only JDA+JDAVE has confirmed working decrypt as of 2026-05. When [Pycord PR #3159](https://github.com/Pycord-Development/pycord/pull/3159) ships DAVE support, the Java sidecar can be replaced with a ~100-line Python implementation. The Unix-socket wire protocol is the stable interface.
+- **Live transcription is deferred to v2.** Recordings are batch-transcribed after the session stops. Five file-format invariants are honoured so v2 can add live transcription without rewriting the recording layer.
+- **No auth on web routes.** The existing "trust your LAN" posture applies to recording start/stop controls. Project-wide auth is tracked in the backlog.
+
+---
+
 ## Roadmap
 
 - [x] Phase 1: Basic transcription

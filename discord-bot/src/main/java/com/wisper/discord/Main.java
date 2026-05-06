@@ -3,7 +3,10 @@ package com.wisper.discord;
 import net.dv8tion.jda.api.JDA;
 import net.dv8tion.jda.api.JDABuilder;
 import net.dv8tion.jda.api.OnlineStatus;
-import net.dv8tion.jda.api.audio.factory.AudioModuleConfig;
+import net.dv8tion.jda.api.audio.AudioModuleConfig;
+import net.dv8tion.jda.api.audio.AudioReceiveHandler;
+import net.dv8tion.jda.api.audio.CombinedAudio;
+import net.dv8tion.jda.api.audio.UserAudio;
 import net.dv8tion.jda.api.entities.Guild;
 import net.dv8tion.jda.api.entities.channel.concrete.VoiceChannel;
 import net.dv8tion.jda.api.events.session.ReadyEvent;
@@ -136,10 +139,39 @@ public final class Main extends ListenerAdapter {
 
         AudioManager audioManager = guild.getAudioManager();
 
-        // Register per-user audio dispatcher factory
-        audioManager.setReceivingHandler(
-                userId -> new UserAudioDispatcher(socket, userId)
-        );
+        // Single AudioReceiveHandler routes per-user and combined PCM to the socket.
+        // AudioReceiveHandler is not a functional interface (4 methods), so we must
+        // use an anonymous class — a lambda won't compile.
+        audioManager.setReceivingHandler(new AudioReceiveHandler() {
+            @Override
+            public boolean canReceiveCombined() { return true; }
+
+            @Override
+            public boolean canReceiveUser() { return true; }
+
+            @Override
+            public void handleUserAudio(@NotNull UserAudio userAudio) {
+                byte[] pcm = userAudio.getAudioData(1.0f);
+                if (pcm.length == 0) return;
+                try {
+                    socket.writeFrame(userAudio.getUser().getId(), pcm);
+                } catch (IOException e) {
+                    log.warn("Failed to write audio frame for user {}: {}",
+                            userAudio.getUser().getId(), e.getMessage());
+                }
+            }
+
+            @Override
+            public void handleCombinedAudio(@NotNull CombinedAudio combinedAudio) {
+                byte[] pcm = combinedAudio.getAudioData(1.0f);
+                if (pcm.length == 0) return;
+                try {
+                    socket.writeFrame("__mixed__", pcm);
+                } catch (IOException e) {
+                    log.warn("Failed to write mixed audio frame: {}", e.getMessage());
+                }
+            }
+        });
 
         audioManager.openAudioConnection(vc);
         log.info("Voice connection opened — recording started");
