@@ -71,8 +71,8 @@ async def record_start(request: Request):
             voice_channel_id=str(voice_channel_id),
             guild_id=str(body.get("guild_id", "")),
         )
-    except RuntimeError as exc:
-        return JSONResponse({"detail": str(exc)}, status_code=409)
+    except RuntimeError:
+        return JSONResponse({"detail": "recording already in progress"}, status_code=409)
 
     return JSONResponse(_recording_to_dict(recording), status_code=201)
 

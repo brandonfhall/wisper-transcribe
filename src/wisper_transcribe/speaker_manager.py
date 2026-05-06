@@ -225,6 +225,15 @@ def enroll_speaker_from_audio_dir(
 
     from pydub import AudioSegment as PydubSegment
 
+    # Validate per_user_dir lives under the expected recordings tree
+    from .config import get_data_dir as _get_data_dir
+    _resolved = os.path.abspath(str(per_user_dir.resolve()))
+    _recordings_base = os.path.abspath(str(Path(_get_data_dir() if data_dir is None else data_dir) / "recordings"))
+    if not _recordings_base.endswith(os.sep):
+        _recordings_base += os.sep
+    if not _resolved.startswith(_recordings_base):
+        raise ValueError("per_user_dir outside expected recordings tree")
+
     opus_files = sorted(per_user_dir.glob("*.opus"))
     if not opus_files:
         raise ValueError(f"No audio files found in {per_user_dir}")
