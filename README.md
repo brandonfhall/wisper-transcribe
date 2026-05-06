@@ -490,6 +490,36 @@ wisper config llm                         # interactive wizard: provider + model
 
 Relevant keys: `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`.
 
+### `wisper record`
+
+Control the Discord recording bot from the command line. The wisper server must be running first.
+
+```bash
+wisper record start --voice-channel <ID> --guild <ID>           # join a channel and start recording
+wisper record start --voice-channel <ID> --guild <ID> --campaign d-d-mondays  # associate with campaign
+wisper record start --preset "Weekly D&D"                       # use a saved preset
+wisper record stop                                              # stop the active session
+wisper record list                                              # list all recordings
+wisper record show <recording_id>                               # show metadata for a recording
+wisper record transcribe <recording_id>                         # re-queue transcription
+wisper record delete <recording_id>                             # remove recording entry (files kept)
+```
+
+Requires the wisper server to be running (`wisper server`). Server location is read from `data_dir/server.json` automatically; override with `WISPER_SERVER_URL`.
+
+**Managing channel presets:**
+
+```bash
+wisper config discord                                           # set bot token, default guild/channel
+wisper config discord-presets add --name "Weekly D&D" --guild <ID> --channel <ID>
+wisper config discord-presets list
+wisper config discord-presets remove "Weekly D&D"
+```
+
+Presets are also manageable via the web UI — the Record page has an inline "Save as preset" form.
+
+---
+
 ### `wisper server`
 
 Start the browser-based web UI:
@@ -791,6 +821,7 @@ docker compose run wisper nvidia-smi
 | Variable | Purpose |
 |----------|---------|
 | `DISCORD_BOT_TOKEN` | Discord bot token for the recording bot (see [Discord recording bot](#discord-recording-bot)) |
+| `WISPER_SIDECAR_JAR` | Absolute path to the JDA sidecar fat JAR (`discord-bot-all.jar`). Overrides the default search path used by `_find_sidecar_jar()`. Useful when the JAR is not in the standard repo or Docker location. |
 | `HF_TOKEN` | HuggingFace token — preferred name (used by Docker `.env` and all HF libraries) |
 | `HUGGINGFACE_TOKEN` | Alias for `HF_TOKEN`; both are accepted and propagated to each other |
 | `WISPER_DATA_DIR` | Override config/profile storage path — set automatically in Docker |

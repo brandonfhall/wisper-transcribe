@@ -543,6 +543,71 @@ def test_ollama_status_uses_saved_config_endpoint(client):
     mock_get.assert_called_once_with("http://myhost:11435/api/tags", timeout=3.0)
 
 
+def test_preset_add_valid_saves_preset(client):
+    """POST /config/presets/add with valid snowflake IDs appends a preset and redirects."""
+    captured = {}
+
+    def fake_save(cfg):
+        captured.update(cfg)
+
+    with patch("wisper_transcribe.web.routes.config.load_config",
+               return_value={"discord_presets": []}), \
+         patch("wisper_transcribe.web.routes.config.save_config", side_effect=fake_save):
+        resp = client.post(
+            "/config/presets/add",
+            data={
+                "name": "Weekly D&D",
+                "guild_id": "123456789012345678",
+                "channel_id": "876543210987654321",
+            },
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    assert "preset_saved=1" in resp.headers["location"]
+    presets = captured.get("discord_presets", [])
+    assert any(p["name"] == "Weekly D&D" for p in presets)
+    assert any(p["guild_id"] == "123456789012345678" for p in presets)
+
+
+def test_preset_add_invalid_snowflake_rejected(client):
+    """POST /config/presets/add rejects a non-numeric guild_id and does not save."""
+    with patch("wisper_transcribe.web.routes.config.load_config", return_value={}), \
+         patch("wisper_transcribe.web.routes.config.save_config") as mock_save:
+        resp = client.post(
+            "/config/presets/add",
+            data={
+                "name": "My Game",
+                "guild_id": "not-a-snowflake",
+                "channel_id": "123456789012345678",
+            },
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    assert "preset_error=invalid" in resp.headers["location"]
+    mock_save.assert_not_called()
+
+
+def test_preset_add_missing_name_rejected(client):
+    """POST /config/presets/add rejects an empty preset name and does not save."""
+    with patch("wisper_transcribe.web.routes.config.load_config", return_value={}), \
+         patch("wisper_transcribe.web.routes.config.save_config") as mock_save:
+        resp = client.post(
+            "/config/presets/add",
+            data={
+                "name": "",
+                "guild_id": "123456789012345678",
+                "channel_id": "876543210987654321",
+            },
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    assert "preset_error=invalid" in resp.headers["location"]
+    mock_save.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Speakers
 # ---------------------------------------------------------------------------

@@ -77,16 +77,20 @@ def test_wisper_server_url_env_var_overrides_server_json(runner, server_json):
     assert "192.168.1.50" in called_url
 
 
-def test_record_list_formats_output(runner, server_json):
+def test_record_list_calls_api_and_prints_response(runner, server_json):
     mock_resp = MagicMock()
     mock_resp.json.return_value = []
     mock_resp.raise_for_status = MagicMock()
 
     with patch("wisper_transcribe.config.get_data_dir", return_value=server_json), \
-         patch("httpx.request", return_value=mock_resp):
+         patch("httpx.request", return_value=mock_resp) as mock_req:
         result = runner.invoke(main, ["record", "list"])
 
     assert result.exit_code == 0
+    mock_req.assert_called_once()
+    assert mock_req.call_args[0][0] == "GET"
+    assert "/api/recordings" in mock_req.call_args[0][1]
+    assert "[]" in result.output
 
 
 def test_record_show_validates_recording_id(runner, server_json):
