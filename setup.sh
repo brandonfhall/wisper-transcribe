@@ -107,6 +107,29 @@ else
     fi
 fi
 
+# ── Java 25 (Discord recording bot) ──────────────────────────────────────────
+step "Checking Java 25+ (needed for Discord recording bot)..."
+if ! command -v java &>/dev/null; then
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        warn "Java 25+ not found — Discord recording bot unavailable."
+        warn "Install: brew install openjdk@25   or download from https://adoptium.net"
+    else
+        warn "Java 25+ not found — Discord recording bot unavailable."
+        warn "Install: sudo apt-get install openjdk-25-jre-headless   or download from https://adoptium.net"
+    fi
+elif java -version 2>&1 | head -1 | grep -qE '"25\.'; then
+    ok "Java 25 found"
+else
+    JAVA_VER=$(java -version 2>&1 | head -1)
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        warn "Java 25+ required for Discord recording bot (found: $JAVA_VER)."
+        warn "Install: brew install openjdk@25   or download from https://adoptium.net"
+    else
+        warn "Java 25+ required for Discord recording bot (found: $JAVA_VER)."
+        warn "Install: sudo apt-get install openjdk-25-jre-headless   or download from https://adoptium.net"
+    fi
+fi
+
 # ── Apple Silicon: mlx-whisper ────────────────────────────────────────────────
 if [[ "$OSTYPE" == "darwin"* ]]; then
     ARCH=$(uname -m)
