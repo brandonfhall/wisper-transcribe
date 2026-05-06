@@ -146,7 +146,13 @@ async def _unix_socket_source(
         "--socket", str(socket_path),
     ]
 
-    log.info("Starting JDA sidecar: %s", cmd)
+    safe_cmd = list(cmd)
+    try:
+        ti = safe_cmd.index("--token")
+        safe_cmd[ti + 1] = "***"
+    except (ValueError, IndexError):
+        pass
+    log.info("Starting JDA sidecar: %s", safe_cmd)
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdin=subprocess.PIPE,
