@@ -133,15 +133,42 @@
   <!-- Actions -->
   <div class="card">
     <h2 class="text-base font-semibold text-gray-800 mb-3">Actions</h2>
-    <div class="flex gap-3 flex-wrap">
-      <button disabled class="btn-primary opacity-50 cursor-not-allowed" title="Available in a later phase">
-        Transcribe
-      </button>
-      <button disabled class="btn-secondary opacity-50 cursor-not-allowed" title="Available in a later phase">
-        Download combined audio
-      </button>
+
+    {% if request.query_params.get('error') == 'not_ready' %}
+    <div class="rounded-md bg-yellow-50 border border-yellow-200 p-3 text-sm text-yellow-700 mb-3">
+      Recording must be completed before transcription can start.
     </div>
-    <p class="text-xs text-gray-400 mt-2">Transcription hand-off is implemented in Phase 7.</p>
+    {% elif request.query_params.get('error') == 'no_audio' %}
+    <div class="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-700 mb-3">
+      No combined audio file found for this recording.
+    </div>
+    {% endif %}
+
+    <div class="flex gap-3 flex-wrap items-center">
+      {% if recording.status == 'completed' %}
+      <form method="post" action="/recordings/{{ recording.id }}/transcribe">
+        <button type="submit" class="btn-primary">Transcribe</button>
+      </form>
+      {% elif recording.status == 'transcribing' %}
+      <span class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-sm bg-blue-50 text-blue-700">
+        <span class="h-1.5 w-1.5 rounded-full bg-blue-500 animate-pulse"></span>
+        Transcribing…
+      </span>
+      {% if recording.job_id %}
+      <a href="/transcribe/jobs/{{ recording.job_id }}" class="text-sm text-green-700 hover:underline">View job status</a>
+      {% endif %}
+      {% elif recording.status == 'transcribed' %}
+      <span class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-sm bg-green-50 text-green-700">
+        Transcribed
+      </span>
+      {% if recording.transcript_path %}
+      {% set stem = recording.transcript_path.stem %}
+      <a href="/transcripts/{{ stem | urlencode }}" class="text-sm text-green-700 hover:underline">View transcript</a>
+      {% endif %}
+      {% else %}
+      <span class="text-sm text-gray-500">Transcription available when recording is completed.</span>
+      {% endif %}
+    </div>
   </div>
 
 </div>

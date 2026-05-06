@@ -325,6 +325,8 @@ wisper-transcribe/       ← get_data_dir()
 4. Per-user directory layout `recordings/<id>/per-user/<discord_id>/NNNN.opus` is fixed.
 5. `Recording.status` has a distinct `"recording"` state (v2 live ticker watches for new segments only while status is `"recording"` or `"degraded"`).
 
+**Transcribe hand-off (Phase 7):** `POST /recordings/{id}/transcribe` copies `combined.wav` into the output directory and calls `job_queue.submit()` with `original_stem=recording_id`, `campaign=recording.campaign_slug`. A post-completion callback (`on_complete`) sets `Recording.status` to `"transcribed"`, records the transcript path, and calls `move_transcript_to_campaign()` to auto-associate the output with the campaign. `Recording.job_id` tracks the corresponding `Job.id` for the UI to link to job status. `Recording` statuses now include `"transcribing"` and `"transcribed"`.
+
 **Campaign data model:** Campaigns hold rosters of `profile_key` references to the global `speakers.json`. Voice embeddings remain global — adding a speaker to a second campaign reuses their existing `.npy` automatically (voice transfer). Deleting a campaign never touches profiles or embeddings. `campaigns.json` absent on first run → `load_campaigns()` returns `{}`.
 
 Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`, `hotwords`, `use_mlx`, `parallel_stages`, `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`.
@@ -364,7 +366,7 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - `tests/test_record_cli.py` covers "server not running" error, server.json discovery → HTTP POST, WISPER_SERVER_URL env var override, list output, recording_id validation
 - `tests/test_discord_bot.py` covers BotManager start/stop lifecycle, start_session recording persisted, per-user .opus files written from PCM frames, transient 4015 rejoin logged, exhausted retries → degraded, permanent 4014 → failed (no retry), stop_session → completed, known Discord ID auto-tagged to profile key on first frame, unknown Discord ID gets empty string, unknown Discord ID added to unbound_speakers, known Discord ID NOT added to unbound_speakers; all via injected fake audio sources (no real JDA/Discord)
 - `tests/_discord_fakes.py`: scripted_source, multi_attempt_source, infinite_disconnect_source, blocking_source factories + make_pcm_frame / make_disconnect_frame helpers
-- Test count: ~633 (all mocked, all passing)
+- Test count: ~637 (all mocked, all passing)
 
 **CI matrix** (`.github/workflows/ci.yml`):
 - Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)

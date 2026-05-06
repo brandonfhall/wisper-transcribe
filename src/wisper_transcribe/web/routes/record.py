@@ -369,3 +369,74 @@ async def recording_enroll_html(
             pass
 
     return RedirectResponse(url=f"/recordings/{recording.id}", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# HTML — transcribe hand-off
+# ---------------------------------------------------------------------------
+
+
+@router.post("/recordings/{recording_id}/transcribe", response_class=HTMLResponse)
+async def recording_transcribe_html(recording_id: str, request: Request) -> RedirectResponse:
+    """Hand off a completed recording to the transcription JobQueue."""
+    safe_id = _validate_recording_id(recording_id)
+    if safe_id is None:
+        return HTMLResponse(content="Invalid recording ID", status_code=400)
+
+    from pathlib import Path
+    import shutil
+
+    from wisper_transcribe.campaign_manager import move_transcript_to_campaign
+    from wisper_transcribe.config import get_data_dir
+    from wisper_transcribe.web.routes.transcribe import _default_output_dir
+
+    data_dir = get_data_dir()
+    recordings = load_recordings(data_dir)
+    recording = recordings.get(safe_id)
+    if recording is None:
+        return RedirectResponse(url="/recordings?error=not_found", status_code=303)
+
+    if recording.status not in ("completed", "transcribed"):
+        return RedirectResponse(url=f"/recordings/{recording.id}?error=not_ready", status_code=303)
+
+    if recording.combined_path is None or not recording.combined_path.exists():
+        return RedirectResponse(url=f"/recordings/{recording.id}?error=no_audio", status_code=303)
+
+    # Copy combined.wav to output dir so the transcript lands alongside existing ones
+    output_dir = _default_output_dir()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    dest = output_dir / f"{recording.id}.wav"
+    shutil.copy2(str(recording.combined_path), str(dest))
+
+    # Build the post-completion callback: auto-associate transcript with campaign
+    def _on_complete(job):
+        from wisper_transcribe.campaign_manager import move_transcript_to_campaign as _move
+        _recordings = load_recordings(data_dir)
+        rec = _recordings.get(recording.id)
+        if rec is None:
+            return
+        rec.status = "transcribed"
+        if job.output_path:
+            rec.transcript_path = Path(job.output_path)
+            stem = Path(job.output_path).stem
+            if rec.campaign_slug:
+                try:
+                    _move(stem, rec.campaign_slug, data_dir)
+                except Exception:
+                    pass
+        save_recording(rec, data_dir)
+
+    queue = request.app.state.job_queue
+    job = queue.submit(
+        str(dest),
+        original_stem=recording.id,
+        output_dir=str(output_dir),
+        campaign=recording.campaign_slug or "",
+        on_complete=_on_complete,
+    )
+
+    recording.job_id = job.id
+    recording.status = "transcribing"
+    save_recording(recording, data_dir)
+
+    return RedirectResponse(url=f"/recordings/{recording.id}", status_code=303)

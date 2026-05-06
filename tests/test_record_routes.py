@@ -219,3 +219,94 @@ def test_enroll_already_bound_speaker_returns_409(client):
         data={"discord_user_id": "999999999999999999", "profile_name": "Bob"},
     )
     assert resp.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 — transcribe hand-off
+# ---------------------------------------------------------------------------
+
+
+def test_transcribe_recording_handoff(client):
+    """POST /recordings/{id}/transcribe queues a transcription job and updates status."""
+    from wisper_transcribe.recording_manager import (
+        create_recording,
+        load_recordings,
+        save_recording,
+        update_recording_status,
+    )
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", campaign_slug="my-game", data_dir=tmp_path)
+
+    # Simulate a completed recording with a combined.wav on disk
+    combined = tmp_path / "recordings" / rec.id / "final" / "combined.wav"
+    combined.parent.mkdir(parents=True, exist_ok=True)
+    combined.write_bytes(b"fake wav data")
+    rec.combined_path = combined
+    rec.status = "completed"
+    save_recording(rec, tmp_path)
+
+    # Mock job_queue.submit to avoid real transcription on fake audio
+    from wisper_transcribe.web.jobs import Job as JobCls
+    import uuid as _uuid
+    fake_job = JobCls(
+        id=str(_uuid.uuid4()),
+        status="pending",
+        created_at=rec.started_at,
+        input_path=str(tmp_path / "output" / f"{rec.id}.wav"),
+        kwargs={},
+        name=rec.id,
+    )
+    with patch.object(
+        c.app.state.job_queue, "submit", return_value=fake_job
+    ) as mock_submit:
+        resp = c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert f"/recordings/{rec.id}" in resp.headers["location"]
+
+    loaded = load_recordings(tmp_path)[rec.id]
+    assert loaded.status == "transcribing"
+    assert loaded.job_id is not None
+    assert loaded.job_id == fake_job.id
+
+    # Verify the combined.wav was copied to output dir
+    # get_data_dir is patched to tmp_path, so _default_output_dir() → tmp_path / "output"
+    dest = tmp_path / "output" / f"{rec.id}.wav"
+    assert dest.exists()
+    mock_submit.assert_called_once()
+
+
+def test_transcribe_recording_not_completed_rejects(client):
+    """POST /recordings/{id}/transcribe rejects recordings not in completed status."""
+    from wisper_transcribe.recording_manager import create_recording
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    # Still in 'recording' status
+
+    resp = c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "error=not_ready" in resp.headers["location"]
+
+
+def test_transcribe_recording_no_audio_rejects(client):
+    """POST /recordings/{id}/transcribe rejects recordings with no combined_path."""
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    rec.status = "completed"
+    rec.combined_path = None  # no audio
+    save_recording(rec, tmp_path)
+
+    resp = c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "error=no_audio" in resp.headers["location"]
+
+
+def test_transcribe_recording_invalid_id_blocked(client):
+    """POST /recordings/{id}/transcribe blocks traversal payloads."""
+    c, _ = client
+    resp = c.post("/recordings/../evil/transcribe", follow_redirects=False)
+    assert resp.status_code in (400, 404)

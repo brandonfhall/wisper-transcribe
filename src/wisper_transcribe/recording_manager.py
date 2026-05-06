@@ -160,6 +160,7 @@ def _recording_to_dict(r: Recording) -> dict:
         "rejoin_log": [_rejoin_to_dict(rj) for rj in r.rejoin_log],
         "notes": r.notes,
         "unbound_speakers": list(r.unbound_speakers),
+        "job_id": r.job_id,
     }
 
 
@@ -180,6 +181,7 @@ def _recording_from_dict(d: dict) -> Recording:
         rejoin_log=[_rejoin_from_dict(r) for r in d.get("rejoin_log", [])],
         notes=d.get("notes"),
         unbound_speakers=list(d.get("unbound_speakers", [])),
+        job_id=d.get("job_id"),
     )
 
 

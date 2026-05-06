@@ -25,7 +25,7 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import tqdm as _tqdm_module
 
@@ -192,6 +192,7 @@ class JobQueue:
         self._jobs: dict[str, Job] = {}
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._worker_task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
+        self._on_complete_callbacks: dict[str, Callable[["Job"], None]] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -214,7 +215,13 @@ class JobQueue:
     # Public API
     # ------------------------------------------------------------------
 
-    def submit(self, input_path: str, **kwargs: Any) -> Job:
+    def submit(
+        self,
+        input_path: str,
+        *,
+        on_complete: Optional[Callable[["Job"], None]] = None,
+        **kwargs: Any,
+    ) -> Job:
         """Enqueue a transcription job.  Returns the Job immediately.
 
         If ``original_stem`` is provided in kwargs it is used as the job's
@@ -225,6 +232,9 @@ class JobQueue:
         ``post_refine`` and ``post_summarize`` booleans trigger LLM
         post-processing after transcription completes; they are also stripped
         from kwargs before forwarding to process_file.
+
+        ``on_complete`` is an optional callback invoked after the job
+        transitions to COMPLETED. It runs in the worker thread.
         """
         from pathlib import Path
         import shutil
@@ -255,6 +265,8 @@ class JobQueue:
             post_summarize=post_summarize,
         )
         self._jobs[job.id] = job
+        if on_complete is not None:
+            self._on_complete_callbacks[job.id] = on_complete
         self._queue.put_nowait(job.id)
         return job
 
@@ -400,6 +412,12 @@ class JobQueue:
                 self._run_post_process(job, Path(output_path))
 
             job.status = COMPLETED
+            _cb = self._on_complete_callbacks.pop(job.id, None)
+            if _cb is not None:
+                try:
+                    _cb(job)
+                except Exception:
+                    pass  # callback failure must not fail the job
 
         except InterruptedError:
             job.status = FAILED
