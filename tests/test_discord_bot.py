@@ -239,3 +239,83 @@ async def test_known_speaker_not_added_to_unbound_list(tmp_path):
 
     loaded = load_recordings(tmp_path)[rec.id]
     assert "123456789012345678" not in loaded.unbound_speakers
+
+
+# ---------------------------------------------------------------------------
+# 9. Multi-user simultaneous scenarios
+# ---------------------------------------------------------------------------
+
+async def test_multiple_users_speak_simultaneously(tmp_path):
+    """Interleaved frames from 3 users all produce per-user .opus files."""
+    frames = []
+    for _ in range(10):
+        frames.append(("U1", make_pcm_frame()))
+        frames.append(("U2", make_pcm_frame()))
+        frames.append(("U3", make_pcm_frame()))
+
+    factory = scripted_source(frames)
+    bm = BotManager(data_dir=tmp_path, audio_source_factory=factory)
+    bm.start()
+    rec = await bm.start_session(None, "VC1", "G1")
+    await asyncio.wait_for(bm._task, timeout=5)
+
+    rec_dir = tmp_path / "recordings" / rec.id / "per-user"
+    for uid in ("U1", "U2", "U3"):
+        user_dir = rec_dir / uid
+        assert user_dir.exists(), f"per-user/{uid}/ should exist"
+        opus_files = sorted(user_dir.glob("*.opus"))
+        assert len(opus_files) >= 1, f"{uid} should have .opus segments"
+
+
+async def test_multiple_unknown_speakers_all_in_unbound(tmp_path):
+    """Three unbound Discord IDs should all appear in unbound_speakers, no duplicates."""
+    frames = [
+        ("111111111111111111", make_pcm_frame()),
+        ("222222222222222222", make_pcm_frame()),
+        ("333333333333333333", make_pcm_frame()),
+        ("111111111111111111", make_pcm_frame()),
+        ("222222222222222222", make_pcm_frame()),
+    ]
+
+    factory = scripted_source(frames)
+    bm = BotManager(data_dir=tmp_path, audio_source_factory=factory)
+    bm.start()
+    rec = await bm.start_session(None, "VC1", "G1")
+    await asyncio.wait_for(bm._task, timeout=5)
+
+    loaded = load_recordings(tmp_path)[rec.id]
+    assert len(loaded.unbound_speakers) == 3
+    assert "111111111111111111" in loaded.unbound_speakers
+    assert "222222222222222222" in loaded.unbound_speakers
+    assert "333333333333333333" in loaded.unbound_speakers
+
+
+async def test_simultaneous_known_and_unknown_speakers(tmp_path):
+    """Known speakers tag immediately; unknown speakers land in unbound list."""
+    create_campaign("dnd-mondays", data_dir=tmp_path)
+    add_member("dnd-mondays", "alice", data_dir=tmp_path)
+    add_member("dnd-mondays", "bob", data_dir=tmp_path)
+    bind_discord_id("dnd-mondays", "alice", "111111111111111111", data_dir=tmp_path)
+    bind_discord_id("dnd-mondays", "bob", "222222222222222222", data_dir=tmp_path)
+
+    frames = [
+        ("111111111111111111", make_pcm_frame()),  # known: alice
+        ("999999999999999999", make_pcm_frame()),  # unknown
+        ("222222222222222222", make_pcm_frame()),  # known: bob
+        ("888888888888888888", make_pcm_frame()),  # unknown
+        ("111111111111111111", make_pcm_frame()),  # known: alice
+    ]
+
+    factory = scripted_source(frames)
+    bm = BotManager(data_dir=tmp_path, audio_source_factory=factory)
+    bm.start()
+    rec = await bm.start_session("dnd-mondays", "VC1", "G1")
+    await asyncio.wait_for(bm._task, timeout=5)
+
+    loaded = load_recordings(tmp_path)[rec.id]
+    assert loaded.discord_speakers.get("111111111111111111") == "alice"
+    assert loaded.discord_speakers.get("222222222222222222") == "bob"
+    assert "999999999999999999" in loaded.unbound_speakers
+    assert "888888888888888888" in loaded.unbound_speakers
+    assert "111111111111111111" not in loaded.unbound_speakers
+    assert "222222222222222222" not in loaded.unbound_speakers

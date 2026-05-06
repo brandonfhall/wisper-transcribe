@@ -23,6 +23,22 @@ if not exist ".venv\" (
     )
 )
 
+:: ── Check for Java 25 (needed by Discord recording bot) ──────────────────────
+where java >nul 2>&1
+if !errorlevel! neq 0 (
+    echo.
+    echo NOTE: Java 25+ not found. The Discord recording bot will not be available.
+    echo Install from: https://adoptium.net/
+) else (
+    for /f "tokens=3 delims=." %%v in ('java -version 2^>^&1 ^| findstr /i "version"') do (
+        if %%v LSS 25 (
+            echo.
+            echo NOTE: Java version %%v detected — Java 25+ required for Discord recording bot.
+            echo Install from: https://adoptium.net/
+        )
+    )
+)
+
 :: ── Start server ─────────────────────────────────────────────────────────────
 echo.
 echo Starting wisper at http://localhost:8080

@@ -110,6 +110,7 @@ Walks you through provider (Ollama / LM Studio / Anthropic / OpenAI / Google), m
 - [ffmpeg](https://ffmpeg.org/download.html) on your PATH
 - A free [HuggingFace token](https://huggingface.co/settings/tokens)
 - GPU recommended but not required (CPU works, just slower)
+- **Discord recording bot:** Java 25+ ([Adoptium](https://adoptium.net/) or `apt-get install openjdk-25-jre-headless`)
 
 **Windows CUDA:**
 - Install ffmpeg via `winget install Gyan.FFmpeg.Shared`
@@ -753,6 +754,30 @@ docker compose run wisper wisper transcribe /app/input/session01.mp3 --enroll-sp
 
 All directories are created automatically on first run and persist across container restarts.
 
+### Discord recording bot
+
+Record Discord voice channel sessions directly from the web UI. The bot joins your server's voice channel, captures per-user audio, and hands the recording off to the transcription pipeline — no manual file shuffling.
+
+**Prerequisites:**
+
+1. **Create a Discord bot** at [discord.com/developers/applications](https://discord.com/developers/applications)
+2. Give it a name (e.g. "Wisper") and go to the **Bot** tab
+3. Under **Privileged Gateway Intents**, enable **Server Members Intent** and **Message Content Intent**
+4. Copy the bot token — set it as `DISCORD_BOT_TOKEN` in your `.env` file
+5. **Invite the bot** to your server: go to **OAuth2 → URL Generator**, select `bot` + `applications.commands`, bot permissions: **View Channels**, **Connect**, **Speak**. Paste the generated URL in a browser.
+
+**Usage:**
+
+1. Start the server: `make start` (Docker) or `wisper server` (local)
+2. Open `http://localhost:8080/record`
+3. Select a campaign and voice channel, then click **Start Recording**
+4. When the session ends, click **Stop** — the recording appears in **Recordings**
+5. On the recording detail page, click **Transcribe** to queue it for processing
+
+The bot joins per-session (not always-on) and auto-rejoins on transient disconnects. Recordings are stored at `./recordings/` (bind-mounted in Docker) alongside your other data.
+
+> **CLI equivalent:** `wisper record start --voice-channel <ID> --campaign <slug>` — see `wisper record --help` for all subcommands.
+
 ### Verify GPU passthrough
 
 ```bash
@@ -765,6 +790,7 @@ docker compose run wisper nvidia-smi
 
 | Variable | Purpose |
 |----------|---------|
+| `DISCORD_BOT_TOKEN` | Discord bot token for the recording bot (see [Discord recording bot](#discord-recording-bot)) |
 | `HF_TOKEN` | HuggingFace token — preferred name (used by Docker `.env` and all HF libraries) |
 | `HUGGINGFACE_TOKEN` | Alias for `HF_TOKEN`; both are accepted and propagated to each other |
 | `WISPER_DATA_DIR` | Override config/profile storage path — set automatically in Docker |
@@ -841,3 +867,4 @@ WISPER_DEBUG=1 wisper transcribe session.mp3
 - [x] Code quality: extracted shared `time_utils.py` helpers, deduplicated pipeline/formatter/diarizer
 - [x] LLM post-processing: `wisper refine` (vocabulary correction, unknown-speaker ID) and `wisper summarize` (campaign notes with loot, NPCs, follow-ups) — multi-provider (Ollama / Anthropic / OpenAI / Google)
 - [x] Distribution: double-click launchers (`start.command` macOS, `start.bat` Windows, `start.sh` Linux), `Makefile` for Docker workflows, `.env.example` for token configuration
+- [x] Discord recording bot: per-user audio capture via JDA sidecar, campaign integration, enrollment from recordings, transcribe hand-off

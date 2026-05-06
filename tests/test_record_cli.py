@@ -93,3 +93,68 @@ def test_record_show_validates_recording_id(runner, server_json):
         result = runner.invoke(main, ["record", "show", "../traversal"])
     assert result.exit_code != 0
     assert "invalid" in result.output.lower()
+
+
+def test_record_stop_posts_to_server(runner, server_json):
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {"status": "completed"}
+    mock_resp.raise_for_status = MagicMock()
+
+    with patch("wisper_transcribe.config.get_data_dir", return_value=server_json), \
+         patch("httpx.request", return_value=mock_resp) as mock_req:
+        result = runner.invoke(main, ["record", "stop"])
+
+    assert result.exit_code == 0
+    mock_req.assert_called_once()
+    assert mock_req.call_args[0][0] == "POST"
+    assert "/api/record/stop" in mock_req.call_args[0][1]
+
+
+def test_record_transcribe_validates_path_traversal(runner, server_json):
+    with patch("wisper_transcribe.config.get_data_dir", return_value=server_json):
+        result = runner.invoke(main, ["record", "transcribe", "../evil"])
+    assert result.exit_code != 0
+    assert "invalid" in result.output.lower()
+
+
+def test_record_delete_validates_path_traversal(runner, server_json):
+    with patch("wisper_transcribe.config.get_data_dir", return_value=server_json):
+        result = runner.invoke(main, ["record", "delete", "invalid*name", "--yes"])
+    assert result.exit_code != 0
+    assert "invalid" in result.output.lower()
+
+
+def test_record_start_missing_voice_channel_errors(runner, server_json):
+    """record start without --voice-channel should fail (Click requires it)."""
+    with patch("wisper_transcribe.config.get_data_dir", return_value=server_json):
+        result = runner.invoke(main, ["record", "start"])
+    assert result.exit_code != 0
+
+
+def test_record_show_valid_id_requests_server(runner, server_json):
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {"id": "abc-123", "status": "recording"}
+    mock_resp.raise_for_status = MagicMock()
+
+    with patch("wisper_transcribe.config.get_data_dir", return_value=server_json), \
+         patch("httpx.request", return_value=mock_resp) as mock_req:
+        result = runner.invoke(main, ["record", "show", "abc-123"])
+
+    assert result.exit_code == 0
+    mock_req.assert_called_once()
+    assert "/api/recordings/abc-123" in mock_req.call_args[0][1]
+
+
+def test_record_transcribe_valid_id_posts_to_server(runner, server_json):
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {"status": "transcribing"}
+    mock_resp.raise_for_status = MagicMock()
+
+    with patch("wisper_transcribe.config.get_data_dir", return_value=server_json), \
+         patch("httpx.request", return_value=mock_resp) as mock_req:
+        result = runner.invoke(main, ["record", "transcribe", "abc-123"])
+
+    assert result.exit_code == 0
+    mock_req.assert_called_once()
+    assert mock_req.call_args[0][0] == "POST"
+    assert "/api/recordings/abc-123/transcribe" in mock_req.call_args[0][1]
