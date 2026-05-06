@@ -158,3 +158,49 @@ def test_record_transcribe_valid_id_posts_to_server(runner, server_json):
     mock_req.assert_called_once()
     assert mock_req.call_args[0][0] == "POST"
     assert "/api/recordings/abc-123/transcribe" in mock_req.call_args[0][1]
+
+
+# ---------------------------------------------------------------------------
+# Phase 9 — hardening
+# ---------------------------------------------------------------------------
+
+def test_discord_token_masked_in_config_show(runner, tmp_path):
+    """wisper config show masks discord_bot_token with ***."""
+    cfg_path = tmp_path / "config.toml"
+    import tomli_w
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(cfg_path, "wb") as f:
+        tomli_w.dump({"discord_bot_token": "super-secret-token", "model": "large-v3"}, f)
+
+    with patch("wisper_transcribe.config.get_data_dir", return_value=tmp_path):
+        result = runner.invoke(main, ["config", "show"])
+
+    assert result.exit_code == 0
+    assert "***" in result.output
+    assert "super-secret-token" not in result.output
+
+
+def test_config_discord_wizard_prompts_for_token(runner, tmp_path):
+    """wisper config discord prompts for a token with input hidden."""
+    with patch("wisper_transcribe.config.get_data_dir", return_value=tmp_path):
+        result = runner.invoke(main, ["config", "discord"], input="test-token-123\n\n\n")
+    assert result.exit_code == 0
+    assert "OK" in result.output or "saved" in result.output
+
+
+def test_config_discord_wizard_empty_input_preserves_existing(runner, tmp_path):
+    """wisper config discord keeps existing token when user enters nothing."""
+    cfg_path = tmp_path / "config.toml"
+    import tomli_w
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(cfg_path, "wb") as f:
+        tomli_w.dump({"discord_bot_token": "existing-token"}, f)
+
+    with patch("wisper_transcribe.config.get_data_dir", return_value=tmp_path):
+        result = runner.invoke(main, ["config", "discord"], input="\n\n\n")
+    assert result.exit_code == 0
+
+    import tomllib
+    with open(cfg_path, "rb") as f:
+        cfg = tomllib.load(f)
+    assert cfg.get("discord_bot_token") == "existing-token"

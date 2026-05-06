@@ -381,7 +381,7 @@ def config_show():
     click.echo("Settings")
     click.echo("─" * 50)
     from .config import LLM_SECRET_KEYS
-    secret_keys = {"hf_token"} | set(LLM_SECRET_KEYS)
+    secret_keys = {"hf_token", "discord_bot_token"} | set(LLM_SECRET_KEYS)
     for k, v in cfg.items():
         display = "***" if k in secret_keys and v else repr(v)
         click.echo(f"  {k:<22} = {display}")

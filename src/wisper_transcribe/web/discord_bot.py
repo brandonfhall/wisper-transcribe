@@ -177,10 +177,12 @@ class BotManager:
 
     async def _session_loop(self, recording: Recording) -> None:
         """Read audio frames, route to writers, handle reconnects."""
-        token = os.environ.get(
-            "DISCORD_BOT_TOKEN",
-            recording.voice_channel_id,  # fallback for test introspection
-        )
+        token = os.environ.get("DISCORD_BOT_TOKEN", "")
+        if not token:
+            from wisper_transcribe.config import load_config
+            token = load_config().get("discord_bot_token", "")
+        if not token:
+            token = recording.voice_channel_id  # fallback for test introspection
         attempt = 0
 
         try:

@@ -18,30 +18,18 @@
 #   docker compose run wisper wisper transcribe /app/input/session.mp3 --enroll-speakers
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ── Java sidecar builder ──────────────────────────────────────────────────────
-FROM gradle:8-jdk25 AS java-builder
-
-WORKDIR /build
-COPY discord-bot/ ./discord-bot/
-RUN cd discord-bot && gradle shadowJar --no-daemon -q
-
 # ── shared base ───────────────────────────────────────────────────────────────
 FROM python:3.12-slim AS base
 
 ARG DEBIAN_FRONTEND=noninteractive
 
 # ffmpeg is required by pydub; curl is used to download vendored HTMX at build time
-# openjdk-25-jre-headless runs the JDA sidecar JAR for Discord recording
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         curl \
-        openjdk-25-jre-headless \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-
-# Copy the JDA sidecar fat JAR from the java-builder stage
-COPY --from=java-builder /build/discord-bot/build/libs/discord-bot-all.jar ./discord-bot/
 
 # Copy package definition and source tree
 COPY pyproject.toml README.md ./
