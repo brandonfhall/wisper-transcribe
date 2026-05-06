@@ -1,6 +1,8 @@
 """Config route — view and edit application settings."""
 from __future__ import annotations
 
+import re
+
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
@@ -46,6 +48,9 @@ _DISCORD_FIELDS = [
 
 # Keys that must not be overwritten with an empty string
 _LLM_SECRET_FIELD_KEYS = frozenset({"anthropic_api_key", "openai_api_key", "google_api_key"})
+
+# Discord snowflake IDs are 17–20 decimal digits
+_SNOWFLAKE_RE = re.compile(r"^\d{17,20}$")
 
 
 @router.get("/ollama-status", response_class=JSONResponse)
@@ -145,6 +150,24 @@ def _apply_fields(config: dict, form, fields) -> None:
                 config[key] = raw
         else:
             config[key] = raw
+
+
+@router.post("/presets/add")
+async def preset_add(request: Request) -> RedirectResponse:
+    form = await request.form()
+    name = str(form.get("name", "")).strip()
+    guild_id = str(form.get("guild_id", "")).strip()
+    channel_id = str(form.get("channel_id", "")).strip()
+
+    if not name or not _SNOWFLAKE_RE.match(guild_id) or not _SNOWFLAKE_RE.match(channel_id):
+        return RedirectResponse(url="/record?preset_error=invalid", status_code=303)
+
+    config = load_config()
+    presets = list(config.get("discord_presets", []))
+    presets.append({"name": name, "guild_id": guild_id, "channel_id": channel_id})
+    config["discord_presets"] = presets
+    save_config(config)
+    return RedirectResponse(url="/record?preset_saved=1", status_code=303)
 
 
 @router.post("", response_class=HTMLResponse)

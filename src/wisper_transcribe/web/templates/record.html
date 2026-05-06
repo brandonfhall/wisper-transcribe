@@ -30,6 +30,16 @@
   </div>
   {% endif %}
 
+  {% if request.query_params.get('preset_saved') == '1' %}
+  <div class="rounded-md bg-green-50 border border-green-200 p-3 text-sm text-green-700">
+    Preset saved.
+  </div>
+  {% elif request.query_params.get('preset_error') == 'invalid' %}
+  <div class="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-700">
+    Could not save preset — Guild ID and Channel ID must be valid Discord snowflakes (17–20 digits).
+  </div>
+  {% endif %}
+
   {% if active_recording and active_recording.status in ('recording', 'degraded') %}
   <!-- Active session panel -->
   <div class="card space-y-4">
@@ -143,6 +153,23 @@
       </div>
       <button type="submit" class="btn-primary">Start Recording</button>
     </form>
+    <div class="border-t border-gray-100 pt-3 mt-1">
+      <button type="button" onclick="toggleSavePreset()"
+              class="text-sm text-green-600 hover:text-green-800">+ Save current IDs as preset</button>
+      <div id="save-preset-panel" class="hidden mt-3">
+        <form method="post" action="/config/presets/add" onsubmit="populatePresetHidden()"
+              class="flex flex-wrap gap-2 items-end">
+          <div class="flex-1 min-w-40">
+            <label class="block text-xs font-medium text-gray-600 mb-1">Preset name</label>
+            <input type="text" name="name" required placeholder="e.g. My Server — General"
+                   class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-1 focus:ring-green-500 focus:border-green-500"/>
+          </div>
+          <input type="hidden" name="guild_id" id="preset-guild-hidden"/>
+          <input type="hidden" name="channel_id" id="preset-channel-hidden"/>
+          <button type="submit" class="btn-secondary whitespace-nowrap self-end">Save preset</button>
+        </form>
+      </div>
+    </div>
   </div>
   {% endif %}
 
@@ -157,6 +184,13 @@ function applyPreset(idx) {
     document.getElementById('guild_id').value = p.guild_id;
     document.getElementById('voice_channel_id').value = p.channel_id;
   }
+}
+function toggleSavePreset() {
+  document.getElementById('save-preset-panel').classList.toggle('hidden');
+}
+function populatePresetHidden() {
+  document.getElementById('preset-guild-hidden').value = document.getElementById('guild_id').value;
+  document.getElementById('preset-channel-hidden').value = document.getElementById('voice_channel_id').value;
 }
 </script>
 {% endblock %}
