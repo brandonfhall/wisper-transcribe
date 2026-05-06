@@ -111,6 +111,3 @@ data_dir/recordings/
 - Multi-guild / multi-channel operation
 - Web UI auth (project-wide)
 
-
-## Open Bugs 
-- web UI recording tab should offer the ability to save presets. 
