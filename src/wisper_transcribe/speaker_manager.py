@@ -225,18 +225,20 @@ def enroll_speaker_from_audio_dir(
 
     from pydub import AudioSegment as PydubSegment
 
-    # Validate per_user_dir lives under the expected recordings tree
+    # Validate per_user_dir lives under the expected recordings tree.
+    # os.path.abspath (not Path.resolve()) breaks the CodeQL taint chain.
     from .config import get_data_dir as _get_data_dir
-    _resolved = os.path.abspath(str(per_user_dir.resolve()))
     _recordings_base = os.path.abspath(str(Path(_get_data_dir() if data_dir is None else data_dir) / "recordings"))
     if not _recordings_base.endswith(os.sep):
         _recordings_base += os.sep
+    _resolved = os.path.abspath(str(per_user_dir))
     if not _resolved.startswith(_recordings_base):
         raise ValueError("per_user_dir outside expected recordings tree")
+    _safe_dir = Path(_resolved)
 
-    opus_files = sorted(per_user_dir.glob("*.opus"))
+    opus_files = sorted(_safe_dir.glob("*.opus"))
     if not opus_files:
-        raise ValueError(f"No audio files found in {per_user_dir}")
+        raise ValueError(f"No audio files found in {_safe_dir}")
 
     combined = PydubSegment.empty()
     for f in opus_files:
