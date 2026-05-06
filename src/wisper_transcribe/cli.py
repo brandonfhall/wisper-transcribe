@@ -1323,10 +1323,34 @@ def record():
 
 @record.command("start")
 @click.option("--campaign", default=None, help="Campaign slug to associate the recording with")
-@click.option("--voice-channel", required=True, help="Discord voice channel ID to join")
+@click.option("--voice-channel", default=None, help="Discord voice channel ID to join")
 @click.option("--guild", default=None, help="Discord guild ID (required if bot is in multiple servers)")
-def record_start(campaign: Optional[str], voice_channel: str, guild: Optional[str]):
+@click.option("--preset", default=None, help="Use a saved preset by name (fills guild + channel)")
+def record_start(campaign: Optional[str], voice_channel: Optional[str], guild: Optional[str], preset: Optional[str]):
     """Join a Discord voice channel and start recording."""
+    from .config import load_config
+
+    if preset:
+        cfg = load_config()
+        presets = list(cfg.get("discord_presets", []) or [])
+        match = None
+        for p in presets:
+            if p["name"] == preset:
+                match = p
+                break
+        if match is None:
+            raise click.ClickException(f"No preset named {preset!r}. Run: wisper config discord-presets list")
+        if guild is None:
+            guild = match["guild_id"]
+        if voice_channel is None:
+            voice_channel = match["channel_id"]
+        click.echo(f"Using preset {preset!r}: guild={guild}, channel={voice_channel}")
+
+    if not voice_channel:
+        raise click.ClickException("--voice-channel is required. Use --preset <name> or pass --voice-channel directly.")
+    if not guild:
+        raise click.ClickException("--guild is required. Use --preset <name> or pass --guild directly.")
+
     payload: dict = {"voice_channel_id": voice_channel}
     if campaign:
         payload["campaign_slug"] = campaign
@@ -1438,3 +1462,53 @@ def config_discord():
     click.echo("")
     click.echo("  OK  : Discord config saved.")
     click.echo("  Tip : DISCORD_BOT_TOKEN env var always takes precedence over config.")
+
+
+@config.group("discord-presets")
+def config_discord_presets():
+    """Manage saved Discord channel presets for quick-select."""
+
+
+@config_discord_presets.command("add")
+@click.option("--name", required=True, help="Label for this preset (e.g. 'Weekly D&D')")
+@click.option("--guild", required=True, help="Discord guild (server) ID")
+@click.option("--channel", required=True, help="Discord voice channel ID")
+def discord_presets_add(name: str, guild: str, channel: str):
+    """Add a Discord channel preset."""
+    from .config import load_config, save_config
+    cfg = load_config()
+    presets = list(cfg.get("discord_presets", []) or [])
+    presets.append({"name": name.strip(), "guild_id": guild.strip(), "channel_id": channel.strip()})
+    cfg["discord_presets"] = presets
+    save_config(cfg)
+    click.echo(f"Added preset {name!r} (guild={guild}, channel={channel})")
+
+
+@config_discord_presets.command("list")
+def discord_presets_list():
+    """List saved Discord channel presets."""
+    from .config import load_config
+    cfg = load_config()
+    presets = list(cfg.get("discord_presets", []) or [])
+    if not presets:
+        click.echo("No presets saved. Run: wisper config discord-presets add --name <label> --guild <id> --channel <id>")
+        return
+    click.echo(f"{'Name':<25} {'Guild ID':<22} {'Channel ID'}")
+    click.echo("-" * 64)
+    for p in presets:
+        click.echo(f"{p['name']:<25} {p['guild_id']:<22} {p['channel_id']}")
+
+
+@config_discord_presets.command("remove")
+@click.argument("name")
+def discord_presets_remove(name: str):
+    """Remove a Discord channel preset by name."""
+    from .config import load_config, save_config
+    cfg = load_config()
+    presets = list(cfg.get("discord_presets", []) or [])
+    new_presets = [p for p in presets if p["name"] != name]
+    if len(new_presets) == len(presets):
+        raise click.ClickException(f"No preset named {name!r}. Run: wisper config discord-presets list")
+    cfg["discord_presets"] = new_presets
+    save_config(cfg)
+    click.echo(f"Removed preset {name!r}.")

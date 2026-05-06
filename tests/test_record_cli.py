@@ -31,7 +31,7 @@ def server_json(tmp_path):
 
 def test_record_start_errors_when_server_not_running(runner, tmp_path):
     with patch("wisper_transcribe.config.get_data_dir", return_value=tmp_path):
-        result = runner.invoke(main, ["record", "start", "--voice-channel", "123"])
+        result = runner.invoke(main, ["record", "start", "--voice-channel", "123", "--guild", "456"])
     assert result.exit_code != 0
     assert "not running" in result.output.lower() or "not running" in str(result.exception).lower()
 
@@ -48,7 +48,7 @@ def test_record_start_reads_server_json_and_posts(runner, server_json):
     with patch("wisper_transcribe.config.get_data_dir", return_value=server_json), \
          patch("httpx.request", return_value=mock_resp) as mock_req:
         result = runner.invoke(main, [
-            "record", "start", "--voice-channel", "456", "--campaign", "dnd-mondays"
+            "record", "start", "--voice-channel", "456", "--guild", "789", "--campaign", "dnd-mondays"
         ])
 
     assert result.exit_code == 0
@@ -57,6 +57,7 @@ def test_record_start_reads_server_json_and_posts(runner, server_json):
     assert call_kwargs[0][0] == "POST"
     assert "/api/record/start" in call_kwargs[0][1]
     assert call_kwargs[1]["json"]["voice_channel_id"] == "456"
+    assert call_kwargs[1]["json"]["guild_id"] == "789"
     assert call_kwargs[1]["json"]["campaign_slug"] == "dnd-mondays"
 
 

@@ -4,6 +4,7 @@
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>{% block title %}wisper{% endblock %} — wisper-transcribe</title>
+  <link rel="icon" type="image/png" href="/static/logo.png"/>
   <link rel="stylesheet" href="/static/tailwind.min.css"/>
   <script src="/static/htmx.min.js" defer></script>
   <script src="/static/app.js" defer></script>
@@ -17,31 +18,7 @@
 
       <!-- Logo + wordmark -->
       <a href="/" class="flex items-center gap-3 group">
-        <span class="wisp-logo">
-          <!-- Inline wisp SVG — will-o'-the-wisp orb -->
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="36" height="36" aria-hidden="true">
-            <defs>
-              <radialGradient id="n-glow" cx="50%" cy="50%" r="50%">
-                <stop offset="0%" stop-color="#a5b4fc" stop-opacity="0.4"/>
-                <stop offset="100%" stop-color="#4f46e5" stop-opacity="0"/>
-              </radialGradient>
-              <radialGradient id="n-orb" cx="38%" cy="35%" r="60%">
-                <stop offset="0%" stop-color="#e0e7ff"/>
-                <stop offset="45%" stop-color="#818cf8"/>
-                <stop offset="100%" stop-color="#4338ca"/>
-              </radialGradient>
-              <filter id="n-blur" x="-80%" y="-80%" width="260%" height="260%">
-                <feGaussianBlur stdDeviation="5"/>
-              </filter>
-            </defs>
-            <circle cx="32" cy="34" r="22" fill="url(#n-glow)" filter="url(#n-blur)"/>
-            <circle cx="32" cy="34" r="10" fill="url(#n-orb)"/>
-            <circle cx="28" cy="30" r="3.2" fill="white" opacity="0.35"/>
-            <circle cx="20" cy="22" r="2" fill="#a5b4fc" opacity="0.7" class="spark-1"/>
-            <circle cx="44" cy="18" r="1.4" fill="#c7d2fe" opacity="0.6" class="spark-2"/>
-            <circle cx="47" cy="43" r="1.6" fill="#818cf8" opacity="0.55" class="spark-3"/>
-          </svg>
-        </span>
+        <img src="/static/logo.png" alt="wisper" width="36" height="36" class="rounded"/>
         <span class="text-white font-bold text-xl tracking-wide group-hover:text-green-200 transition-colors">wisper</span>
       </a>
 
@@ -100,14 +77,6 @@
   {% block content %}{% endblock %}
 </main>
 
-<style>
-.spark-1 { animation: float1 3.2s ease-in-out infinite; }
-.spark-2 { animation: float2 2.8s ease-in-out infinite 0.6s; }
-.spark-3 { animation: float3 3.6s ease-in-out infinite 1.2s; }
-@keyframes float1 { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
-@keyframes float2 { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-2.5px); } }
-@keyframes float3 { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
-</style>
 
 </body>
 </html>

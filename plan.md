@@ -110,3 +110,7 @@ data_dir/recordings/
 - Discord-side slash commands
 - Multi-guild / multi-channel operation
 - Web UI auth (project-wide)
+
+
+## Open Bugs
+ (none)

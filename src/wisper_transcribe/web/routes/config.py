@@ -38,6 +38,12 @@ _LLM_FIELDS = [
     ("google_api_key",     "secret", "Google API key",               None),
 ]
 
+_DISCORD_FIELDS = [
+    ("discord_bot_token",       "secret", "Discord bot token",           None),
+    ("discord_default_guild",   "str",    "Default guild (server) ID",   None),
+    ("discord_default_channel", "str",    "Default voice channel ID",    None),
+]
+
 # Keys that must not be overwritten with an empty string
 _LLM_SECRET_FIELD_KEYS = frozenset({"anthropic_api_key", "openai_api_key", "google_api_key"})
 
@@ -105,6 +111,8 @@ async def config_show(request: Request) -> HTMLResponse:
             "config_path": str(config_path),
             "fields": _CONFIG_FIELDS,
             "llm_fields": _LLM_FIELDS,
+            "discord_fields": _DISCORD_FIELDS,
+            "discord_presets": config.get("discord_presets", []),
             "saved": request.query_params.get("saved") == "1",
         },
     )
@@ -146,6 +154,20 @@ async def config_save(request: Request) -> RedirectResponse:
 
     _apply_fields(config, form, _CONFIG_FIELDS)
     _apply_fields(config, form, _LLM_FIELDS)
+    _apply_fields(config, form, _DISCORD_FIELDS)
+
+    # Rebuild discord_presets from form data (names, guild_ids, channel_ids arrays)
+    preset_names = form.getlist("preset_name")
+    preset_guilds = form.getlist("preset_guild_id")
+    preset_channels = form.getlist("preset_channel_id")
+    presets = []
+    for i in range(len(preset_names)):
+        nm = preset_names[i].strip() if i < len(preset_names) else ""
+        gid = preset_guilds[i].strip() if i < len(preset_guilds) else ""
+        cid = preset_channels[i].strip() if i < len(preset_channels) else ""
+        if nm and gid and cid:
+            presets.append({"name": nm, "guild_id": gid, "channel_id": cid})
+    config["discord_presets"] = presets
 
     save_config(config)
     return RedirectResponse(url="/config?saved=1", status_code=303)

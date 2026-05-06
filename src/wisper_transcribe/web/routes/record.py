@@ -143,9 +143,11 @@ async def recording_delete_api(recording_id: str, request: Request):
 
 @router.get("/record", response_class=HTMLResponse)
 async def record_page(request: Request) -> HTMLResponse:
-    from wisper_transcribe.config import get_data_dir
+    from wisper_transcribe.config import get_data_dir, load_config
     bm = get_bot_manager(request)
-    campaigns = load_campaigns(get_data_dir())
+    data_dir = get_data_dir()
+    campaigns = load_campaigns(data_dir)
+    cfg = load_config()
     active_recording = bm.active_recording if bm else None
     return templates.TemplateResponse(
         request,
@@ -154,6 +156,9 @@ async def record_page(request: Request) -> HTMLResponse:
             "request": request,
             "campaigns": campaigns,
             "active_recording": active_recording,
+            "discord_presets": cfg.get("discord_presets", []),
+            "default_guild": cfg.get("discord_default_guild", ""),
+            "default_channel": cfg.get("discord_default_channel", ""),
         },
     )
 

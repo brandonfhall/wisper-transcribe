@@ -39,7 +39,7 @@ src/wisper_transcribe/
 ├── campaign_manager.py Campaign CRUD: load/save/create/delete campaigns, add/remove roster members, bind_discord_id() / lookup_profile_by_discord_id() Discord ID binding, _validate_campaign_slug() security gatekeeper
 ├── recording_manager.py Recording CRUD: load/save/create/delete recordings, append_segment() with per-recording mutex, reconcile_on_startup() crash recovery, _validate_recording_id() security gatekeeper
 ├── web/discord_bot.py  BotManager: start()/stop() lifecycle, start_session()/stop_session(), _session_loop with auto-rejoin (backoff [2,5,15,30,60]s), _route_frame → SegmentedOggWriter + RealtimePCMMixer + auto-tag via lookup_profile_by_discord_id() + unbound_speakers tracking, _handle_disconnect (transient/permanent close code split), _finalise; injectable audio_source_factory for testing; _unix_socket_source launches JDA sidecar subprocess (Java 25, JDAVE 0.1.8), _find_sidecar_jar() for JAR discovery, _read_frame() parses length-prefixed wire protocol over Unix socket
-├── web/routes/record.py Full recording UI: JSON API /api/record/{start,stop,status} + HTML routes GET /record, POST /record/{start,stop}, GET /record/sse (SSE stream), GET/DELETE /recordings, GET /recordings/{id}, POST /recordings/{id}/enroll (unknown-speaker enrollment), POST /recordings/{id}/transcribe (Phase 7 hand-off to JobQueue), GET /recordings/{id}/live (501 placeholder); _validate_recording_id() + _uid_guard path-traversal guards; campaign-grouped recordings list (Pattern 7)
+├── web/routes/record.py Full recording UI: JSON API /api/record/{start,stop,status} + HTML routes GET /record, POST /record/{start,stop}, GET /record/sse (SSE stream), GET/DELETE /recordings, GET /recordings/{id}, POST /recordings/{id}/enroll (unknown-speaker enrollment), POST /recordings/{id}/transcribe (Phase 7 hand-off to JobQueue), GET /recordings/{id}/live (501 placeholder); _validate_recording_id() + _uid_guard path-traversal guards; campaign-grouped recordings list (Pattern 7); Discord preset quick-select dropdown; pre-fills default guild/channel from config
 ├── models.py           Dataclasses: TranscriptionSegment, DiarizationSegment, AlignedSegment, SpeakerProfile, CampaignMember (+ discord_user_id), Campaign, Recording (+ unbound_speakers), SegmentRecord, RejoinAttempt, Edit, SpeakerSuggestion, LootChange, NPCMention, SummaryNote
 ├── refine.py           LLM-driven transcript refinement: vocabulary correction + unknown-speaker ID (edit-distance guarded, frontmatter-preserving)
 ├── summarize.py        Campaign-notes generation (session recap, loot, NPCs, follow-ups) → Obsidian-ready sidecar markdown
@@ -63,7 +63,7 @@ src/wisper_transcribe/
         ├── transcripts.py  GET/POST /transcripts (grouped by campaign), transcript detail (with campaign assignment dropdown), download, delete, fix-speaker; POST /transcripts/{name}/refine, POST /transcripts/{name}/summarize; GET /transcripts/{name}/summary, GET /transcripts/{name}/summary/download; POST /transcripts/{name}/campaign (move/remove campaign association)
         ├── speakers.py     GET/POST /speakers, enroll, rename, remove
         ├── campaigns.py    GET/POST /campaigns, campaign detail, roster add/remove, delete
-        └── config.py       GET/POST /config
+        ├── config.py       GET/POST /config (+ Discord bot token, default guild/channel, channel presets management)
 ```
 
 ---
@@ -329,7 +329,7 @@ wisper-transcribe/       ← get_data_dir()
 
 **Campaign data model:** Campaigns hold rosters of `profile_key` references to the global `speakers.json`. Voice embeddings remain global — adding a speaker to a second campaign reuses their existing `.npy` automatically (voice transfer). Deleting a campaign never touches profiles or embeddings. `campaigns.json` absent on first run → `load_campaigns()` returns `{}`.
 
-Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`, `hotwords`, `use_mlx`, `parallel_stages`, `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`.
+Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`, `hotwords`, `use_mlx`, `parallel_stages`, `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`, `discord_bot_token`, `discord_default_guild`, `discord_default_channel`, `discord_presets`.
 
 > **`omegaconf` dependency note:** `omegaconf` is an undeclared transitive requirement of `pyannote-audio` — it is required at import time but not listed in pyannote's package metadata. `wisper-transcribe` declares it explicitly in `pyproject.toml` to ensure it is always installed.
 

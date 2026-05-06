@@ -106,6 +106,18 @@
     <h2 class="text-lg font-semibold text-gray-800">Start Recording Session</h2>
     <p class="text-sm text-gray-500">Requires a running Discord bot with <code class="text-xs bg-gray-100 px-1 rounded">DISCORD_BOT_TOKEN</code> configured.</p>
     <form method="post" action="/record/start" class="space-y-4">
+      {% if discord_presets %}
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Quick Select Preset</label>
+        <select id="preset-select" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-1 focus:ring-green-500 focus:border-green-500"
+                onchange="applyPreset(this.value)">
+          <option value="">— Select a preset —</option>
+          {% for p in discord_presets %}
+          <option value="{{ loop.index0 }}">{{ p.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      {% endif %}
       <div class="grid gap-4 sm:grid-cols-2">
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">Campaign <span class="text-gray-400 font-normal">(optional)</span></label>
@@ -118,12 +130,14 @@
         </div>
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">Voice Channel ID</label>
-          <input type="text" name="voice_channel_id" required placeholder="e.g. 123456789012345678"
+          <input type="text" name="voice_channel_id" id="voice_channel_id" required placeholder="e.g. 123456789012345678"
+                 value="{{ default_channel }}"
                  class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-1 focus:ring-green-500 focus:border-green-500"/>
         </div>
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">Guild (Server) ID</label>
-          <input type="text" name="guild_id" required placeholder="e.g. 987654321098765432"
+          <input type="text" name="guild_id" id="guild_id" required placeholder="e.g. 987654321098765432"
+                 value="{{ default_guild }}"
                  class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-1 focus:ring-green-500 focus:border-green-500"/>
         </div>
       </div>
@@ -133,4 +147,16 @@
   {% endif %}
 
 </div>
+
+<script>
+const _presets = {{ discord_presets | tojson }};
+function applyPreset(idx) {
+  if (idx === '') return;
+  const p = _presets[parseInt(idx)];
+  if (p) {
+    document.getElementById('guild_id').value = p.guild_id;
+    document.getElementById('voice_channel_id').value = p.channel_id;
+  }
+}
+</script>
 {% endblock %}

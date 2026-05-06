@@ -57,6 +57,44 @@
       </div>
     </div>
 
+    <!-- Discord Recording Bot -->
+    <div class="card space-y-4">
+      <h2 class="text-base font-semibold text-gray-900">Discord Recording Bot</h2>
+      <p class="text-xs text-gray-500">Get your bot token from <strong>discord.com/developers/applications</strong>. Env var <code>DISCORD_BOT_TOKEN</code> takes precedence.</p>
+      <div>
+        <label class="form-label" for="cfg_discord_bot_token">discord_bot_token</label>
+        <input type="password" id="cfg_discord_bot_token" name="discord_bot_token"
+               class="form-input font-mono text-sm"
+               placeholder="{% if config.get('discord_bot_token', '') %}***set*** (leave blank to keep){% else %}Bot token…{% endif %}"/>
+      </div>
+      <div>
+        <label class="form-label" for="cfg_discord_default_guild">discord_default_guild <span class="text-gray-400 font-normal text-xs">— Default guild (server) ID</span></label>
+        <input type="text" id="cfg_discord_default_guild" name="discord_default_guild"
+               value="{{ config.get('discord_default_guild', '') }}"
+               class="form-input font-mono text-sm"
+               placeholder="e.g. 123456789012345678"/>
+      </div>
+      <div>
+        <label class="form-label" for="cfg_discord_default_channel">discord_default_channel <span class="text-gray-400 font-normal text-xs">— Default voice channel ID</span></label>
+        <input type="text" id="cfg_discord_default_channel" name="discord_default_channel"
+               value="{{ config.get('discord_default_channel', '') }}"
+               class="form-input font-mono text-sm"
+               placeholder="e.g. 987654321098765432"/>
+      </div>
+
+      <!-- Presets -->
+      <div id="preset-manager" class="space-y-3">
+        <div class="flex items-center justify-between">
+          <h3 class="text-sm font-semibold text-gray-700">Saved Channel Presets</h3>
+          <button type="button" onclick="addPresetRow()" class="text-xs text-indigo-600 hover:underline">+ Add Preset</button>
+        </div>
+        <p class="text-xs text-gray-400">Quick-select options for the record page and CLI.</p>
+        <div id="preset-rows" class="space-y-2">
+        </div>
+        <p id="preset-empty-msg" class="text-xs text-gray-400 italic hidden">No presets saved yet.</p>
+      </div>
+    </div>
+
     <!-- LLM Post-processing -->
     <div class="card space-y-4">
       <div>
@@ -279,5 +317,42 @@ document.getElementById('cfg_llm_endpoint').addEventListener('change', function(
   if (p === 'ollama') loadOllamaStatus();
   if (p === 'lmstudio') loadLMStudioStatus();
 });
+
+// Discord preset manager (vanilla JS)
+const _presetData = {{ discord_presets | tojson }};
+const _presetRows = document.getElementById('preset-rows');
+const _emptyMsg = document.getElementById('preset-empty-msg');
+
+function _makePresetRow(p, idx) {
+  const row = document.createElement('div');
+  row.className = 'flex items-center gap-2';
+  row.innerHTML =
+    '<input type="text" name="preset_name" value="' + _escAttr(p.name) + '" placeholder="Label (e.g. Weekly D&D)" class="form-input flex-1 text-sm"/>' +
+    '<input type="text" name="preset_guild_id" value="' + _escAttr(p.guild_id) + '" placeholder="Guild ID" class="form-input w-44 font-mono text-sm"/>' +
+    '<input type="text" name="preset_channel_id" value="' + _escAttr(p.channel_id) + '" placeholder="Channel ID" class="form-input w-44 font-mono text-sm"/>' +
+    '<button type="button" onclick="this.parentElement.remove();_refreshPresetEmpty()" class="text-red-400 hover:text-red-600 text-xs shrink-0">✕</button>';
+  return row;
+}
+
+function _escAttr(s) { return (s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+function addPresetRow() {
+  const row = _makePresetRow({name: '', guild_id: '', channel_id: ''});
+  _presetRows.appendChild(row);
+  _emptyMsg.classList.add('hidden');
+}
+
+function _refreshPresetEmpty() {
+  if (_presetRows.children.length === 0) {
+    _emptyMsg.classList.remove('hidden');
+  }
+}
+
+// Initial render
+if (_presetData.length === 0) {
+  _emptyMsg.classList.remove('hidden');
+} else {
+  _presetData.forEach(function(p) { _presetRows.appendChild(_makePresetRow(p)); });
+}
 </script>
 {% endblock %}

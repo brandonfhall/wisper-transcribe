@@ -42,6 +42,11 @@ DEFAULTS = {
     "anthropic_api_key": "",                  # env ANTHROPIC_API_KEY takes precedence
     "openai_api_key": "",                     # env OPENAI_API_KEY takes precedence
     "google_api_key": "",                     # env GOOGLE_API_KEY takes precedence
+    # Discord recording bot
+    "discord_bot_token": "",                  # env DISCORD_BOT_TOKEN takes precedence
+    "discord_default_guild": "",
+    "discord_default_channel": "",
+    "discord_presets": [],                    # [{"name": "...", "guild_id": "...", "channel_id": "..."}]
 }
 
 LLM_PROVIDERS = ("ollama", "lmstudio", "anthropic", "openai", "google")
