@@ -112,5 +112,5 @@ data_dir/recordings/
 - Web UI auth (project-wide)
 
 
-## Open Bugs
- (none)
+## Open Bugs 
+- web UI recording tab should offer the ability to save presets. 
