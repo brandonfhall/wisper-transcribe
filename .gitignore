@@ -58,3 +58,6 @@ example-file/*
 
 #Log folders
 logs/
+
+# Gradle build cache
+discord-bot/.gradle/
