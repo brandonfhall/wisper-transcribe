@@ -67,6 +67,12 @@
           <input type="text" id="initial_prompt" name="initial_prompt" placeholder="Fantasy RPG vocabulary…" class="form-input"/>
         </div>
 
+        <div class="sm:col-span-2">
+          <label class="form-label" for="vocab_file">Vocabulary boost <span class="text-gray-400 font-normal">(optional .txt — one word/phrase per line, <code class="text-xs">#</code> for comments)</span></label>
+          <input type="file" id="vocab_file" name="vocab_file" accept=".txt"
+                 class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-medium file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"/>
+        </div>
+
         <div class="flex items-center gap-6 sm:col-span-2">
           <label class="flex items-center gap-2 cursor-pointer">
             <input type="checkbox" name="include_timestamps" value="1" checked class="rounded text-indigo-600"/>

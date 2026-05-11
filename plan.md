@@ -316,8 +316,11 @@ These are partially covered transitively (the app fixture exercises `app.py`, ro
 
 3. ~~**Phase 3 — Output-dir + response helpers** — C2 + C3 — DONE~~
 
-4. **Phase 4 — CLI ↔ web parity (1 commit per item, user-prioritized)**
-   D1 (vocab-file upload), D2 (re-queue button + channels panel), D4 (speaker rename UI). Skip D3, D5 by default.
+4. **Phase 4 — CLI ↔ web parity** (1 commit per item):
+   - ~~D1 — vocab-file upload on /transcribe — DONE~~
+   - D2 — re-queue button on recording detail (in progress); channels panel deferred (needs Java sidecar protocol changes)
+   - ~~D4 — speaker rename UI — already present in speakers.html, no work needed~~
+   Skip D3, D5 by default.
 
 5. **Phase 5 — QoL features (1 commit per item, optional)**
    E1 (search/filter), E2 (segment browser), E4 (bot status surface), E6 (`test_web_jobs.py`). Skip E3, E5 by default.

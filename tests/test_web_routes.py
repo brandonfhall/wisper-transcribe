@@ -804,6 +804,55 @@ def test_transcribe_post_accepts_post_processing_flags(client, tmp_path):
     assert resp.headers["location"].startswith("/transcribe/jobs/")
 
 
+def test_transcribe_post_with_vocab_file_sets_hotwords(client, tmp_path, monkeypatch):
+    """Uploading a .txt vocab file parses and passes hotwords to the job queue."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.web.jobs import Job
+    import uuid
+
+    fake_job = MagicMock(spec=Job)
+    fake_job.id = str(uuid.uuid4())
+
+    vocab_content = b"# comment line\nAragorn\nGandalf\n\n  Frodo  \n"
+
+    with patch("wisper_transcribe.web.routes.transcribe.get_output_dir", return_value=tmp_path), \
+         patch.object(client.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
+        resp = client.post(
+            "/transcribe",
+            files={
+                "file": ("session.mp3", b"fake audio", "audio/mpeg"),
+                "vocab_file": ("vocab.txt", vocab_content, "text/plain"),
+            },
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    call_kwargs = mock_submit.call_args.kwargs
+    assert call_kwargs.get("hotwords") == ["Aragorn", "Gandalf", "Frodo"]
+
+
+def test_transcribe_post_no_vocab_file_hotwords_is_none(client, tmp_path, monkeypatch):
+    """Without a vocab file, hotwords is None (falls back to config defaults)."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.web.jobs import Job
+    import uuid
+
+    fake_job = MagicMock(spec=Job)
+    fake_job.id = str(uuid.uuid4())
+
+    with patch("wisper_transcribe.web.routes.transcribe.get_output_dir", return_value=tmp_path), \
+         patch.object(client.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
+        resp = client.post(
+            "/transcribe",
+            files={"file": ("session.mp3", b"fake", "audio/mpeg")},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    call_kwargs = mock_submit.call_args.kwargs
+    assert call_kwargs.get("hotwords") is None
+
+
 def test_speakers_rename_empty_name_no_change(client):
     from wisper_transcribe.models import SpeakerProfile
     fake_profile = SpeakerProfile(

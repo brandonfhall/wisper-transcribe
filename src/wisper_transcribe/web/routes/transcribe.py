@@ -55,6 +55,7 @@ async def start_transcribe(
     post_refine: Annotated[Optional[str], Form()] = None,
     post_summarize: Annotated[Optional[str], Form()] = None,
     campaign: Annotated[Optional[str], Form()] = None,
+    vocab_file: Annotated[Optional[UploadFile], File()] = None,
 ) -> RedirectResponse:
     """Accept an uploaded audio file, save it to a temp location, enqueue job."""
     # Save uploaded file to a persistent temp location (job must outlive request)
@@ -67,6 +68,15 @@ async def start_transcribe(
         tmp.write(content)
     finally:
         tmp.close()
+
+    # Parse optional vocab file into hotwords list (same logic as CLI --vocab-file)
+    hotwords: Optional[list[str]] = None
+    if vocab_file and vocab_file.filename:
+        raw = await vocab_file.read()
+        lines = raw.decode("utf-8", errors="replace").splitlines()
+        parsed = [ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")]
+        if parsed:
+            hotwords = parsed
 
     # Parse optional integer fields
     def _int_or_none(val: Optional[str]) -> Optional[int]:
@@ -118,6 +128,7 @@ async def start_transcribe(
         post_refine=(post_refine == "1"),
         post_summarize=(post_summarize == "1"),
         campaign=safe_campaign,
+        hotwords=hotwords,
     )
 
     return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
