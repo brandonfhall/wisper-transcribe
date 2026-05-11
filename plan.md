@@ -330,8 +330,7 @@ These are partially covered transitively (the app fixture exercises `app.py`, ro
    - ~~E3 — bulk delete + bulk campaign-assign on transcript list — DONE~~
    Skip E5 by default.
 
-6. **Phase 6 — Refactor (optional)**
-   C4 (`_session_loop` decomposition). Pure readability; skip if low value.
+6. ~~**Phase 6 — Refactor** — C4 (`_session_loop` decomposition) — DONE~~
 
 ---
 

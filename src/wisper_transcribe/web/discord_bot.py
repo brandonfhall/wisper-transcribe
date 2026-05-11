@@ -320,6 +320,27 @@ class BotManager:
 
     async def _session_loop(self, recording: Recording) -> None:
         """Read audio frames, route to writers, handle reconnects."""
+        token = self._resolve_discord_token(recording)
+        if token is None:
+            return
+
+        attempt = 0
+        try:
+            while not self._stop_event.is_set():
+                result = await self._run_connection_attempt(recording, token, attempt)
+                if result is None:   # fatal disconnect; status already set
+                    return
+                if result:           # transient disconnect; schedule reconnect
+                    attempt += 1
+                else:                # clean exit or stop requested
+                    break
+        except asyncio.CancelledError:
+            pass  # clean stop via stop_session()
+        finally:
+            await self._finalise(recording)
+
+    def _resolve_discord_token(self, recording: Recording) -> Optional[str]:
+        """Return the configured bot token, or None after aborting the recording."""
         token = os.environ.get("DISCORD_BOT_TOKEN", "")
         if not token:
             from wisper_transcribe.config import load_config
@@ -332,45 +353,27 @@ class BotManager:
                 recording.status = "failed"
                 recording.ended_at = datetime.now(timezone.utc)
                 save_recording(recording, self._data_dir)
-                return
-            token = "__test_token__"  # non-production source factory; token unused by sidecar
-        attempt = 0
+                return None
+            return "__test_token__"  # non-production source factory; token unused by sidecar
+        return token
 
-        try:
-            while not self._stop_event.is_set():
-                self._ensure_writers(recording)
-                source = self._source_factory(
-                    recording.id, recording.voice_channel_id, recording.guild_id, token
-                )
-                reconnecting = False
-                async for user_id, pcm in source:
-                    if self._stop_event.is_set():
-                        break
-
-                    if user_id == CTRL_USER_ID:
-                        close_code = struct.unpack("<I", pcm[:4])[0]
-                        should_retry = await self._handle_disconnect(
-                            recording, close_code, attempt
-                        )
-                        if should_retry:
-                            attempt += 1
-                            reconnecting = True
-                            break
-                        else:
-                            return  # fatal; status already set
-                    else:
-                        self._route_frame(user_id, pcm, recording)
-                else:
-                    # Source exhausted cleanly — done
-                    break
-
-                if not reconnecting:
-                    break
-
-        except asyncio.CancelledError:
-            pass  # clean stop via stop_session()
-        finally:
-            await self._finalise(recording)
+    async def _run_connection_attempt(
+        self, recording: Recording, token: str, attempt: int
+    ) -> Optional[bool]:
+        """Drive one sidecar connection. Returns True=reconnect, False=done, None=fatal."""
+        self._ensure_writers(recording)
+        source = self._source_factory(
+            recording.id, recording.voice_channel_id, recording.guild_id, token
+        )
+        async for user_id, pcm in source:
+            if self._stop_event.is_set():
+                return False
+            if user_id == CTRL_USER_ID:
+                close_code = struct.unpack("<I", pcm[:4])[0]
+                should_retry = await self._handle_disconnect(recording, close_code, attempt)
+                return True if should_retry else None
+            self._route_frame(user_id, pcm, recording)
+        return False  # source exhausted cleanly
 
     def _ensure_writers(self, recording: Recording) -> None:
         """Initialise combined writer and mixer (idempotent)."""
