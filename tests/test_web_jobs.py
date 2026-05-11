@@ -178,6 +178,69 @@ def test_run_job_completed_after_post_process(tmp_path):
     assert job.status == COMPLETED
 
 
+def test_list_recent_respects_limit():
+    q = _make_queue()
+    for i in range(5):
+        q.submit(f"/tmp/a{i}.mp3")
+    assert len(q.list_recent(limit=3)) == 3
+
+
+def test_on_complete_callback_invoked_after_completion(tmp_path):
+    """on_complete fires exactly once, after status transitions to COMPLETED."""
+    from wisper_transcribe.web.jobs import Job, JobQueue, COMPLETED
+    from datetime import datetime
+
+    out_md = tmp_path / "out.md"
+    out_md.write_text("# Session")
+
+    calls: list[Job] = []
+
+    q = JobQueue()
+    job = Job(
+        id="cb-test",
+        status="running",
+        created_at=datetime.now(),
+        input_path=str(tmp_path / "audio.mp3"),
+        kwargs={},
+    )
+    q._on_complete_callbacks[job.id] = lambda j: calls.append(j)
+
+    with patch("wisper_transcribe.web.jobs.process_file", return_value=out_md):
+        q._run_job(job)
+
+    assert len(calls) == 1
+    assert calls[0].status == COMPLETED
+    # Callback is consumed — not called a second time
+    assert job.id not in q._on_complete_callbacks
+
+
+def test_on_complete_callback_not_invoked_on_failure(tmp_path):
+    """on_complete must not fire when the job fails."""
+    from wisper_transcribe.web.jobs import Job, JobQueue, FAILED
+    from datetime import datetime
+
+    calls: list[Job] = []
+
+    q = JobQueue()
+    job = Job(
+        id="cb-fail",
+        status="running",
+        created_at=datetime.now(),
+        input_path="/tmp/bad.mp3",
+        kwargs={},
+    )
+    q._on_complete_callbacks[job.id] = lambda j: calls.append(j)
+
+    with patch("wisper_transcribe.web.jobs.process_file", side_effect=RuntimeError("oops")):
+        try:
+            q._run_job(job)
+        except RuntimeError:
+            pass
+
+    assert calls == []
+    assert job.status == FAILED
+
+
 def test_run_job_tqdm_patch_restores_original(tmp_path):
     """tqdm.write should be restored to its original after job completes."""
     import tqdm as _tqdm

@@ -326,7 +326,7 @@ These are partially covered transitively (the app fixture exercises `app.py`, ro
    - ~~E1 — client-side search/filter on transcript, recording, and speaker lists — DONE~~
    - ~~E2 — recording segment browser on detail page — DONE~~
    - ~~E4 — rejoin log on recording detail — DONE~~
-   - E6 — test_web_jobs.py
+   - ~~E6 — test_web_jobs.py — DONE (file already existed; added on_complete + list_recent tests)~~
    Skip E3, E5 by default.
 
 6. **Phase 6 — Refactor (optional)**
