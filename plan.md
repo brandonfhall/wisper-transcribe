@@ -327,10 +327,34 @@ These are partially covered transitively (the app fixture exercises `app.py`, ro
    - ~~E2 — recording segment browser on detail page — DONE~~
    - ~~E4 — rejoin log on recording detail — DONE~~
    - ~~E6 — test_web_jobs.py — DONE (file already existed; added on_complete + list_recent tests)~~
-   Skip E3, E5 by default.
+   - ~~E3 — bulk delete + bulk campaign-assign on transcript list — DONE~~
+   Skip E5 by default.
 
 6. **Phase 6 — Refactor (optional)**
    C4 (`_session_loop` decomposition). Pure readability; skip if low value.
+
+---
+
+## Pycord / DAVE Sidecar Migration Status
+
+**GitHub issue:** wisper-transcribe issue #39 — "DAVE (Discord Audio/Video E2EE) blocking voice bot audio receive" — **OPEN** (opened 2026-05-07)
+
+**Upstream PR status (Pycord #3159):** Still open as of late April 2026. Has not landed in pycord `main`.
+
+**Discord enforcement:** DAVE E2EE became mandatory for non-stage voice calls on March 2, 2026. Bots without DAVE support cannot receive voice audio.
+
+**Alternatives identified:**
+- **discord.py PR #10300** — implements DAVE receive using the `davey` dependency (OpenMLS). Status unclear but being actively worked. Issue #9948 tracks it.
+- **Current approach** (JDA sidecar) continues to work because JDA 6.x already supports DAVE.
+
+**Migration path** (from plan.md sidecar section, unchanged):
+When a Python library ships stable DAVE receive:
+1. Delete `discord-bot/` (Gradle/Java project)
+2. Write ~100-line Python replacement emitting the same length-prefixed PCM wire format
+3. Update `BotManager` to launch Python script instead of JAR
+4. Remove Java stages from `Dockerfile` and Java 25 requirement from launchers/README
+
+**Action:** Watch Pycord #3159 and discord.py #10300 for merge. No code change needed now.
 
 Each phase rebuilds Tailwind if templates change and updates `architecture.md` / `README.md` per CLAUDE.md Documentation Rules.
 

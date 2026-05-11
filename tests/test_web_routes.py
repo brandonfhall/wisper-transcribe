@@ -1226,3 +1226,80 @@ def test_enroll_submit_skips_enroll_when_no_segments(client, tmp_path, monkeypat
 
     assert resp.status_code == 303
     mock_enroll.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Bulk transcript operations (E3)
+# ---------------------------------------------------------------------------
+
+
+def test_bulk_delete_removes_multiple_transcripts(client, tmp_path, monkeypatch):
+    """POST /transcripts/bulk-delete deletes all listed stems and redirects."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    (tmp_path / "session01.md").write_text("# S1")
+    (tmp_path / "session02.md").write_text("# S2")
+    (tmp_path / "session02.summary.md").write_text("# notes")
+
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
+        resp = client.post(
+            "/transcripts/bulk-delete",
+            data={"stems": ["session01", "session02"]},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/transcripts"
+    assert not (tmp_path / "session01.md").exists()
+    assert not (tmp_path / "session02.md").exists()
+    assert not (tmp_path / "session02.summary.md").exists()
+
+
+def test_bulk_delete_skips_invalid_stems(client, tmp_path, monkeypatch):
+    """bulk-delete silently skips stems that fail path validation."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    (tmp_path / "good.md").write_text("# ok")
+
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
+        resp = client.post(
+            "/transcripts/bulk-delete",
+            data={"stems": ["good", "../../etc/passwd", "\x00bad"]},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    assert not (tmp_path / "good.md").exists()  # valid stem deleted
+
+
+def test_bulk_campaign_assigns_multiple_transcripts(client, tmp_path, monkeypatch):
+    """POST /transcripts/bulk-campaign calls move_transcript_to_campaign for each stem."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    (tmp_path / "s1.md").write_text("# S1")
+    (tmp_path / "s2.md").write_text("# S2")
+
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.web.routes.transcripts.move_transcript_to_campaign") as mock_move:
+        resp = client.post(
+            "/transcripts/bulk-campaign",
+            data={"stems": ["s1", "s2"], "campaign": "my-campaign"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    assert mock_move.call_count == 2
+    calls = {c.args[0] for c in mock_move.call_args_list}
+    assert calls == {"s1", "s2"}
+
+
+def test_bulk_campaign_invalid_slug_redirects_with_error(client, tmp_path, monkeypatch):
+    """bulk-campaign rejects an invalid campaign slug."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
+        resp = client.post(
+            "/transcripts/bulk-campaign",
+            data={"stems": ["s1"], "campaign": "../../evil"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    assert "error=invalid_campaign" in resp.headers["location"]

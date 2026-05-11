@@ -162,6 +162,52 @@ async def transcripts_list(request: Request) -> HTMLResponse:
     )
 
 
+@router.post("/bulk-delete", response_class=HTMLResponse)
+async def bulk_delete_transcripts(request: Request) -> HTMLResponse:
+    """Delete multiple transcripts (and their summary sidecars) in one request."""
+    form = await request.form()
+    stems = form.getlist("stems")
+    for stem in stems:
+        md_path = _get_safe_content_path(request, stem, ".md")
+        if md_path and md_path.exists():
+            md_path.unlink()
+        summary = _get_safe_content_path(request, stem, ".summary.md")
+        if summary and summary.exists():
+            summary.unlink()
+    return HTMLResponse(content="", status_code=303, headers={"Location": "/transcripts"})
+
+
+@router.post("/bulk-campaign", response_class=HTMLResponse)
+async def bulk_assign_campaign(request: Request) -> HTMLResponse:
+    """Assign or remove a campaign for multiple transcripts in one request."""
+    form = await request.form()
+    stems = form.getlist("stems")
+    campaign = str(form.get("campaign", "")).strip()
+
+    safe_slug: "Optional[str]" = None
+    if campaign:
+        safe_slug = _validate_campaign_slug(campaign)
+        if safe_slug is None:
+            return HTMLResponse(
+                content="", status_code=303,
+                headers={"Location": "/transcripts?error=invalid_campaign"},
+            )
+
+    for stem in stems:
+        path = _get_safe_content_path(request, stem, ".md")
+        if path is None:
+            continue
+        try:
+            if safe_slug:
+                move_transcript_to_campaign(path.stem, safe_slug)
+            else:
+                remove_transcript_from_campaign(path.stem)
+        except Exception:
+            pass
+
+    return HTMLResponse(content="", status_code=303, headers={"Location": "/transcripts"})
+
+
 @router.get("/{name}", response_class=HTMLResponse)
 async def transcript_detail(request: Request, name: str) -> HTMLResponse:
     md_path = _get_safe_content_path(request, name, ".md")

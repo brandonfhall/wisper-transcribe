@@ -7,8 +7,12 @@
 {% macro transcript_card(t) %}
 <div class="card relative hover:shadow-md hover:ring-1 hover:ring-green-300 transition-all flex flex-col" data-filterable>
   <a href="/transcripts/{{ t.stem | urlencode }}" class="absolute inset-0 rounded-lg z-10" aria-label="View {{ t.title }}"></a>
+  <label class="absolute top-2 left-2 z-50 cursor-pointer" title="Select">
+    <input type="checkbox" class="bulk-check rounded text-indigo-600"
+           data-stem="{{ t.stem }}" onchange="updateBulkBar()" onclick="event.stopPropagation()"/>
+  </label>
 
-  <div class="flex items-start justify-between">
+  <div class="flex items-start justify-between pl-6">
     <h3 class="text-sm font-semibold text-gray-900 truncate flex-1 mr-2">{{ t.title }}</h3>
     <div class="flex items-center gap-2 flex-shrink-0 relative z-50">
       {% if t.has_summary %}
@@ -59,9 +63,35 @@
   </div>
 
   {% if transcripts %}
-  <input id="list-filter" type="search" placeholder="Filter transcripts…"
-         class="form-input max-w-xs" autocomplete="off"/>
+  <div class="flex items-center gap-3 flex-wrap">
+    <input id="list-filter" type="search" placeholder="Filter transcripts…"
+           class="form-input max-w-xs" autocomplete="off"/>
+    <label class="flex items-center gap-1.5 text-sm text-gray-500 cursor-pointer select-none">
+      <input type="checkbox" id="select-all-check" class="rounded text-indigo-600" onchange="toggleSelectAll(this)"/>
+      Select all
+    </label>
+  </div>
   {% endif %}
+
+  <!-- Floating bulk action bar -->
+  <div id="bulk-bar" class="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 hidden bg-white border border-gray-200 rounded-lg shadow-lg px-4 py-3 flex items-center gap-3 flex-wrap text-sm">
+    <span class="font-medium text-gray-700"><span id="sel-count">0</span> selected</span>
+    <form id="bulk-delete-form" method="post" action="/transcripts/bulk-delete" class="contents">
+      <button type="button" onclick="bulkDelete()" class="text-xs text-red-600 border border-red-300 rounded px-2 py-1 hover:bg-red-50">Delete selected</button>
+    </form>
+    {% if campaigns %}
+    <form id="bulk-campaign-form" method="post" action="/transcripts/bulk-campaign" class="flex items-center gap-2">
+      <select name="campaign" class="text-xs border border-gray-300 rounded px-2 py-1 focus:ring-1 focus:ring-green-500">
+        <option value="">No campaign</option>
+        {% for slug, c in campaigns.items() %}
+        <option value="{{ slug }}">{{ c.display_name }}</option>
+        {% endfor %}
+      </select>
+      <button type="button" onclick="bulkCampaign()" class="text-xs text-green-700 border border-green-300 rounded px-2 py-1 hover:bg-green-50">Assign</button>
+    </form>
+    {% endif %}
+    <button type="button" onclick="clearBulkSelection()" class="text-xs text-gray-500 hover:text-gray-700">Clear</button>
+  </div>
 
   {% if transcripts %}
 
@@ -110,6 +140,7 @@
 </div>
 
 <script>
+// --- Filter ---
 (function() {
   var input = document.getElementById('list-filter');
   if (!input) return;
@@ -126,5 +157,62 @@
     });
   });
 })();
+
+// --- Bulk selection ---
+function updateBulkBar() {
+  var checked = document.querySelectorAll('.bulk-check:checked');
+  var bar = document.getElementById('bulk-bar');
+  var count = document.getElementById('sel-count');
+  if (count) count.textContent = checked.length;
+  if (bar) bar.classList.toggle('hidden', checked.length === 0);
+  var allCheck = document.getElementById('select-all-check');
+  if (allCheck) {
+    var all = document.querySelectorAll('.bulk-check');
+    allCheck.indeterminate = checked.length > 0 && checked.length < all.length;
+    allCheck.checked = all.length > 0 && checked.length === all.length;
+  }
+}
+
+function toggleSelectAll(cb) {
+  document.querySelectorAll('.bulk-check').forEach(function(el) {
+    if (el.closest('[data-filterable]') && el.closest('[data-filterable]').style.display !== 'none') {
+      el.checked = cb.checked;
+    }
+  });
+  updateBulkBar();
+}
+
+function clearBulkSelection() {
+  document.querySelectorAll('.bulk-check').forEach(function(el) { el.checked = false; });
+  var allCheck = document.getElementById('select-all-check');
+  if (allCheck) { allCheck.checked = false; allCheck.indeterminate = false; }
+  updateBulkBar();
+}
+
+function _populateStems(form) {
+  form.querySelectorAll('input[name="stems"]').forEach(function(el) { el.remove(); });
+  document.querySelectorAll('.bulk-check:checked').forEach(function(cb) {
+    var inp = document.createElement('input');
+    inp.type = 'hidden'; inp.name = 'stems'; inp.value = cb.dataset.stem;
+    form.appendChild(inp);
+  });
+}
+
+function bulkDelete() {
+  var checked = document.querySelectorAll('.bulk-check:checked');
+  if (!checked.length) return;
+  if (!confirm('Delete ' + checked.length + ' transcript(s)? This cannot be undone.')) return;
+  var form = document.getElementById('bulk-delete-form');
+  _populateStems(form);
+  form.submit();
+}
+
+function bulkCampaign() {
+  var checked = document.querySelectorAll('.bulk-check:checked');
+  if (!checked.length) return;
+  var form = document.getElementById('bulk-campaign-form');
+  _populateStems(form);
+  form.submit();
+}
 </script>
 {% endblock %}
