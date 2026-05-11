@@ -48,6 +48,87 @@ def test_record_status_returns_501(client):
     assert resp.status_code == 501
 
 
+def test_channels_no_token_returns_no_token_error(client):
+    """GET /api/record/channels returns {error: no_token} when no bot token is set."""
+    c, _ = client
+    from unittest.mock import patch
+    import os
+    with patch("wisper_transcribe.web.routes.record.load_config", return_value={}), \
+         patch.dict(os.environ, {}, clear=False) as env:
+        env.pop("DISCORD_BOT_TOKEN", None)
+        resp = c.get("/api/record/channels")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["error"] == "no_token"
+    assert data["guilds"] == []
+
+
+def test_channels_returns_voice_channels(client):
+    """GET /api/record/channels returns guilds with voice channels only."""
+    c, _ = client
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import os
+
+    guilds_resp = MagicMock()
+    guilds_resp.status_code = 200
+    guilds_resp.json.return_value = [{"id": "111111111111111111", "name": "D&D Server"}]
+    guilds_resp.raise_for_status = MagicMock()
+
+    channels_resp = MagicMock()
+    channels_resp.status_code = 200
+    channels_resp.json.return_value = [
+        {"id": "222222222222222222", "name": "Voice General", "type": 2},
+        {"id": "333333333333333333", "name": "#text-channel",  "type": 0},
+    ]
+
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(side_effect=[guilds_resp, channels_resp])
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("wisper_transcribe.web.routes.record.load_config",
+               return_value={"discord_bot_token": "Bot.token"}), \
+         patch.dict(os.environ, {}, clear=False) as env, \
+         patch("httpx.AsyncClient", return_value=mock_client):
+        env.pop("DISCORD_BOT_TOKEN", None)
+        resp = c.get("/api/record/channels")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "guilds" in data
+    assert len(data["guilds"]) == 1
+    assert data["guilds"][0]["name"] == "D&D Server"
+    voice = data["guilds"][0]["voice_channels"]
+    assert len(voice) == 1          # text channel filtered out
+    assert voice[0]["name"] == "Voice General"
+
+
+def test_channels_invalid_token_returns_error(client):
+    """GET /api/record/channels returns {error: invalid_token} on 401 from Discord."""
+    c, _ = client
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import os
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 401
+
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_resp)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("wisper_transcribe.web.routes.record.load_config",
+               return_value={"discord_bot_token": "bad-token"}), \
+         patch.dict(os.environ, {}, clear=False) as env, \
+         patch("httpx.AsyncClient", return_value=mock_client):
+        env.pop("DISCORD_BOT_TOKEN", None)
+        resp = c.get("/api/record/channels")
+
+    assert resp.status_code == 200
+    assert resp.json()["error"] == "invalid_token"
+    assert resp.json()["guilds"] == []
+
+
 def test_recording_detail_invalid_id_returns_400(client):
     c, _ = client
     resp = c.get("/api/recordings/../evil")

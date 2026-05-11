@@ -4,11 +4,6 @@
 
 ## Deferred parity gaps
 
-### D2 — Bot channel discovery (web UI)
-CLI `wisper record channels` lists all guilds and voice channels visible to the bot. There is no web equivalent. Useful when configuring presets without having to look up snowflake IDs manually.
-
-Blocked on extending the Unix socket protocol between Python (`BotManager`) and the Java JDA sidecar to support a channels-query command. Not feasible as a simple template change.
-
 ### D5 — Refine/summarize CLI vs web asymmetry
 CLI runs these synchronously with `--dry-run` preview. Web runs them as async JobQueue jobs with no dry-run. Both work; the asymmetry reflects the surface (terminal vs. browser), not a missing feature.
 

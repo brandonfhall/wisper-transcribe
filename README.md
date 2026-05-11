@@ -554,7 +554,7 @@ wisper server
 | Transcripts | `/transcripts` | Browse output files, view rendered markdown, download, delete; green notes icon on cards that have a campaign summary |
 | Speakers | `/speakers` | Enroll, rename, remove speaker profiles |
 | Campaigns | `/campaigns` | Create and manage campaigns; add/remove roster members; scope transcription to a campaign |
-| Record | `/record` | Start and stop live Discord voice channel recording sessions; shows active session with live speaker and segment counts via SSE |
+| Record | `/record` | Start and stop live Discord voice channel recording sessions; shows active session with live speaker and segment counts via SSE; **Browse bot's channels** panel lists available guilds and voice channels so you can click-to-fill IDs without leaving the page |
 | Recordings | `/recordings` | Browse all recordings, grouped by campaign; view per-recording detail (status, speakers, segments); delete entries |
 | Config | `/config` | View and edit all settings |
 
@@ -800,9 +800,10 @@ Record Discord voice channel sessions directly from the web UI. The bot joins yo
 
 1. Start the server: `make start` (Docker) or `wisper server` (local)
 2. Open `http://localhost:8080/record`
-3. Select a campaign and voice channel, then click **Start Recording**
-4. When the session ends, click **Stop** — the recording appears in **Recordings**
-5. On the recording detail page, click **Transcribe** to queue it for processing
+3. Optional: expand **Browse bot's channels** to see all guilds and voice channels the bot can see — click any channel to auto-fill the Guild ID and Voice Channel ID fields
+4. Select a campaign and voice channel, then click **Start Recording**
+5. When the session ends, click **Stop** — the recording appears in **Recordings**
+6. On the recording detail page, click **Transcribe** to queue it for processing
 
 The bot joins per-session (not always-on) and auto-rejoins on transient disconnects. Recordings are stored at `./recordings/` (bind-mounted in Docker) alongside your other data.
 

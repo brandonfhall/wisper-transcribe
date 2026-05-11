@@ -113,10 +113,50 @@ async def record_status(request: Request):
     return _NOT_IMPLEMENTED
 
 
+_DISCORD_API = "https://discord.com/api/v10"
+_VOICE_CHANNEL = 2  # Discord channel type for GUILD_VOICE
+
+
 @router.get("/api/record/channels")
 async def record_channels(request: Request):
-    """List guilds and voice channels visible to the bot. (stub)"""
-    return _NOT_IMPLEMENTED
+    """List guilds and voice channels visible to the bot via Discord REST API."""
+    import httpx
+
+    token = os.environ.get("DISCORD_BOT_TOKEN", "")
+    if not token:
+        token = load_config().get("discord_bot_token", "")
+    if not token:
+        return JSONResponse({"error": "no_token", "guilds": []})
+
+    headers = {"Authorization": f"Bot {token}"}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{_DISCORD_API}/users/@me/guilds", headers=headers)
+            if r.status_code == 401:
+                return JSONResponse({"error": "invalid_token", "guilds": []})
+            r.raise_for_status()
+            guilds = r.json()[:20]  # cap to avoid rate-limit issues
+
+            async def _fetch_voice(guild: dict) -> dict:
+                try:
+                    cr = await client.get(
+                        f"{_DISCORD_API}/guilds/{guild['id']}/channels", headers=headers
+                    )
+                    voice = sorted(
+                        [{"id": c["id"], "name": c["name"]}
+                         for c in (cr.json() if cr.status_code == 200 else [])
+                         if c.get("type") == _VOICE_CHANNEL],
+                        key=lambda c: c["name"],
+                    )
+                except Exception:
+                    voice = []
+                return {"id": guild["id"], "name": guild["name"], "voice_channels": voice}
+
+            results = await asyncio.gather(*[_fetch_voice(g) for g in guilds])
+        return JSONResponse({"guilds": list(results)})
+    except Exception:
+        log.warning("Failed to fetch Discord channels from API", exc_info=True)
+        return JSONResponse({"error": "fetch_failed", "guilds": []})
 
 
 # ---------------------------------------------------------------------------
