@@ -312,8 +312,7 @@ These are partially covered transitively (the app fixture exercises `app.py`, ro
 
 1. ~~**Phase 1 — Doc + low-risk fixes** — A1 + B1 + B2 + B3 + B4 — DONE~~
 
-2. **Phase 2 — Validator consolidation (1 commit)**
-   C1 + B5 together. Re-run `tests/test_path_traversal.py` as the regression gate. Verify CodeQL is happy via a draft PR push.
+2. ~~**Phase 2 — Validator consolidation** — C1 + B5 — DONE~~
 
 3. **Phase 3 — Output-dir + response helpers (1 commit)**
    C2 + C3.

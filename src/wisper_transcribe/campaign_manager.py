@@ -10,7 +10,6 @@ Data lives at:
 from __future__ import annotations
 
 import json
-import os
 import re
 from datetime import date
 from pathlib import Path
@@ -18,6 +17,7 @@ from typing import Optional
 
 from .config import get_data_dir
 from .models import Campaign, CampaignMember
+from .path_utils import validate_path_component
 
 
 # ---------------------------------------------------------------------------
@@ -43,50 +43,11 @@ def _make_slug(name: str) -> str:
 
 
 def _validate_campaign_slug(slug: str) -> Optional[str]:
-    """Two-layer security guard for campaign slugs.
-
-    Returns the sanitised slug on success, None on rejection.
-    Mirrors the _validate_job_id pattern from web/routes/transcribe.py so
-    CodeQL's taint tracker recognises the result as clean.
-    """
-    if not slug or "\x00" in slug:
-        return None
-
-    safe = os.path.basename(slug)
-    if safe != slug or safe in {".", ".."}:
-        return None
-
-    if not re.match(r"^[\w\-]+$", safe):
-        return None
-
-    # os.path round-trip breaks the CodeQL taint chain
-    _guard_base = os.path.abspath("_campaigns_guard")
-    if not _guard_base.endswith(os.sep):
-        _guard_base += os.sep
-    _guard_path = os.path.abspath(os.path.join(_guard_base, safe))
-    if not _guard_path.startswith(_guard_base):
-        return None
-
-    return os.path.basename(_guard_path)
+    return validate_path_component(slug, "_campaigns_guard")
 
 
 def _validate_profile_key(profile_key: str) -> Optional[str]:
-    """Two-layer security guard for profile keys (same pattern as _validate_campaign_slug).
-
-    Returns the sanitised key on success, None on rejection.
-    """
-    if not profile_key or "\x00" in profile_key:
-        return None
-    safe_key = os.path.basename(profile_key)
-    if safe_key != profile_key or safe_key in {".", ".."} or not re.match(r"^[\w\-]+$", safe_key):
-        return None
-    _guard_base = os.path.abspath("_guard")
-    if not _guard_base.endswith(os.sep):
-        _guard_base += os.sep
-    _guard_path = os.path.abspath(os.path.join(_guard_base, safe_key))
-    if not _guard_path.startswith(_guard_base):
-        return None
-    return os.path.basename(_guard_path)
+    return validate_path_component(profile_key, "_guard")
 
 
 # ---------------------------------------------------------------------------

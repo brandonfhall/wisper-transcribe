@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import re
 import tempfile
 import threading
 import uuid
@@ -21,6 +19,7 @@ from typing import Optional
 
 from .config import get_data_dir
 from .models import Recording, RejoinAttempt, SegmentRecord
+from .path_utils import validate_path_component
 
 log = logging.getLogger(__name__)
 
@@ -64,28 +63,7 @@ def get_metadata_path(recording_id: str, data_dir: Optional[Path] = None) -> Pat
 # ---------------------------------------------------------------------------
 
 def _validate_recording_id(recording_id: str) -> Optional[str]:
-    """Four-step CodeQL-safe guard for recording IDs used in file paths and redirects.
-
-    Returns the sanitised ID on success, None on rejection.
-    """
-    if not recording_id or "\x00" in recording_id:
-        return None
-
-    safe = os.path.basename(recording_id)
-    if safe != recording_id or safe in {".", ".."}:
-        return None
-
-    if not re.match(r"^[\w\-]+$", safe):
-        return None
-
-    _guard_base = os.path.abspath("_recordings_guard")
-    if not _guard_base.endswith(os.sep):
-        _guard_base += os.sep
-    _guard_path = os.path.abspath(os.path.join(_guard_base, safe))
-    if not _guard_path.startswith(_guard_base):
-        return None
-
-    return os.path.basename(_guard_path)
+    return validate_path_component(recording_id, "_recordings_guard")
 
 
 # ---------------------------------------------------------------------------
