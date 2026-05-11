@@ -324,8 +324,8 @@ These are partially covered transitively (the app fixture exercises `app.py`, ro
 
 5. **Phase 5 — QoL features** (1 commit per item):
    - ~~E1 — client-side search/filter on transcript, recording, and speaker lists — DONE~~
-   - E2 — recording segment browser on detail page
-   - E4 — rejoin log on recording detail
+   - ~~E2 — recording segment browser on detail page — DONE~~
+   - ~~E4 — rejoin log on recording detail — DONE~~
    - E6 — test_web_jobs.py
    Skip E3, E5 by default.
 
