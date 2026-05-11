@@ -35,7 +35,7 @@ src/wisper_transcribe/
 ├── formatter.py        Markdown output, YAML frontmatter, dynamic version from __version__
 ├── audio_utils.py      validate_audio(), convert_to_wav(), get_duration(), load_wav_as_tensor(); VIDEO_EXTENSIONS / AUDIO_EXTENSIONS sets
 ├── time_utils.py       Shared time formatting: format_timestamp(), format_duration()
-├── path_utils.py       Shared path-component validation: validate_path_component() — four-step CodeQL-safe guard (null-byte, basename, regex, abspath/startswith); all per-module validators delegate here
+├── path_utils.py       Shared path utilities: validate_path_component() — four-step CodeQL-safe guard; all per-module validators delegate here. get_output_dir() — single canonical output directory resolver (replaces duplicates in transcribe + transcripts routes)
 ├── config.py           load_config(), save_config(), get_device(), get_hf_token(), get_llm_api_key(), resolve_llm_model(), check_ffmpeg()
 ├── campaign_manager.py Campaign CRUD: load/save/create/delete campaigns, add/remove roster members, bind_discord_id() / lookup_profile_by_discord_id() Discord ID binding, _validate_campaign_slug() / _validate_profile_key() delegate to path_utils
 ├── recording_manager.py Recording CRUD: load/save/create/delete recordings, append_segment() with per-recording mutex, reconcile_on_startup() crash recovery, _validate_recording_id() delegates to path_utils
@@ -57,6 +57,7 @@ src/wisper_transcribe/
     ├── app.py          FastAPI application factory (create_app()), module-level app instance for uvicorn
     ├── jobs.py         In-memory job queue, JobQueue class, asyncio background worker, SSE progress via tqdm.write patch; LLM job types (refine/summarize) with stderr capture
     ├── audio_writer.py SegmentedOggWriter (rotating 60-s self-contained Ogg/Opus segments, packet-count rotation, crash-safe EOS pages), RealtimePCMMixer (48 kHz stereo → 16 kHz mono, clip-on-overflow)
+    ├── _responses.py   Shared HTTP response helpers: invalid_input_response() (400 plain-text), error_redirect() (303 ?error= redirect); used by all route modules
     └── routes/
         ├── __init__.py     Jinja2 templates setup, shared get_queue() helper, urlencode filter
         ├── dashboard.py    GET /, GET /jobs (HTMX partial)

@@ -15,7 +15,8 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Resp
 from ..jobs import COMPLETED, FAILED
 from . import get_queue as _get_queue, templates
 from wisper_transcribe.campaign_manager import _validate_campaign_slug as _validate_campaign_slug_cm, load_campaigns
-from wisper_transcribe.path_utils import validate_path_component
+from wisper_transcribe.path_utils import get_output_dir, validate_path_component
+from wisper_transcribe.web._responses import error_redirect, invalid_input_response
 
 router = APIRouter(prefix="/transcribe")
 
@@ -23,20 +24,6 @@ router = APIRouter(prefix="/transcribe")
 def _validate_job_id(job_id: str) -> str | None:
     return validate_path_component(job_id, "_guard")
 
-
-def _default_output_dir() -> Path:
-    """Return the default output directory for web-submitted transcription jobs.
-
-    Mirrors the logic in transcripts._output_dir so transcripts always land
-    where the browser can find them.
-    """
-    from wisper_transcribe.config import get_data_dir
-
-    out = Path("output")
-    if not out.exists():
-        out = Path(get_data_dir()) / "output"
-    out.mkdir(parents=True, exist_ok=True)
-    return out
 
 
 @router.get("", response_class=HTMLResponse)
@@ -98,7 +85,7 @@ async def start_transcribe(
     # page can find them.  A user-supplied path is not accepted — accepting
     # arbitrary paths from form data would allow writing outside the configured
     # data directory.
-    out_path: Path = _default_output_dir()
+    out_path: Path = get_output_dir()
 
     # Use the original filename stem as a hint so the output .md has a
     # meaningful name instead of a temp-file UUID.
@@ -109,7 +96,7 @@ async def start_transcribe(
     if campaign and campaign.strip():
         safe_campaign = _validate_campaign_slug_cm(campaign.strip())
         if safe_campaign is None:
-            return RedirectResponse(url="/transcribe?error=invalid_campaign", status_code=303)
+            return error_redirect("/transcribe", "invalid_campaign")
 
     queue = _get_queue(request)
     job = queue.submit(
@@ -141,7 +128,7 @@ async def cancel_job(request: Request, job_id: str) -> Response:
     """Cancel a pending or running job."""
     safe_id = _validate_job_id(job_id)
     if safe_id is None:
-        return HTMLResponse(content="Invalid job ID", status_code=400)
+        return invalid_input_response("Invalid job ID")
 
     queue = _get_queue(request)
     queue.cancel(safe_id)
@@ -237,7 +224,7 @@ async def enroll_form(request: Request, job_id: str) -> Response:
     """Speaker enrollment wizard for a completed job."""
     safe_id = _validate_job_id(job_id)
     if safe_id is None:
-        return HTMLResponse(content="Invalid job ID", status_code=400)
+        return invalid_input_response("Invalid job ID")
 
     queue = _get_queue(request)
     job = queue.get(safe_id)
@@ -282,11 +269,11 @@ async def enroll_form(request: Request, job_id: str) -> Response:
 async def speaker_excerpt(request: Request, job_id: str, speaker_name: str) -> Response:
     """Serve a short audio clip for a detected speaker (used in enrollment wizard)."""
     if not speaker_name or "\x00" in speaker_name:
-        return HTMLResponse(content="Invalid speaker name", status_code=400)
+        return invalid_input_response("Invalid speaker name")
         
     safe_name = os.path.basename(speaker_name)
     if safe_name != speaker_name or safe_name in {".", ".."}:
-        return HTMLResponse(content="Invalid speaker name", status_code=400)
+        return invalid_input_response("Invalid speaker name")
     queue = _get_queue(request)
     job = queue.get(job_id)
     if job is None:
@@ -302,7 +289,7 @@ async def enroll_submit(request: Request, job_id: str) -> Response:
     """Apply speaker name assignments and regenerate the transcript."""
     safe_id = _validate_job_id(job_id)
     if safe_id is None:
-        return HTMLResponse(content="Invalid job ID", status_code=400)
+        return invalid_input_response("Invalid job ID")
 
     queue = _get_queue(request)
     job = queue.get(safe_id)

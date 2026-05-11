@@ -19,18 +19,10 @@ from wisper_transcribe.campaign_manager import (
 )
 
 from . import templates
+from wisper_transcribe.path_utils import get_output_dir
+from wisper_transcribe.web._responses import invalid_input_response
 
 router = APIRouter(prefix="/transcripts")
-
-
-def _output_dir(request: Request) -> Path:
-    """Resolve the output directory for transcripts."""
-    out_dir = Path("output")
-    if not out_dir.exists():
-        from wisper_transcribe.config import get_data_dir
-        out_dir = Path(get_data_dir()) / "output"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    return out_dir
 
 
 class _HtmlSanitizer(HTMLParser):
@@ -112,7 +104,7 @@ def _get_safe_content_path(request: Request, name: str, suffix: str) -> Path | N
     if safe_name != name or safe_name in {".", ".."}:
         return None
 
-    out_dir = _output_dir(request).resolve()
+    out_dir = get_output_dir().resolve()
 
     base_dir = os.path.abspath(str(out_dir))
     if not base_dir.endswith(os.sep):
@@ -127,7 +119,7 @@ def _get_safe_content_path(request: Request, name: str, suffix: str) -> Path | N
 
 @router.get("", response_class=HTMLResponse)
 async def transcripts_list(request: Request) -> HTMLResponse:
-    out_dir = _output_dir(request)
+    out_dir = get_output_dir()
     # Exclude .summary.md sidecars — they are shown via the transcript detail page
     files = sorted(
         [f for f in out_dir.glob("*.md") if not f.name.endswith(".summary.md")],
@@ -174,7 +166,7 @@ async def transcripts_list(request: Request) -> HTMLResponse:
 async def transcript_detail(request: Request, name: str) -> HTMLResponse:
     md_path = _get_safe_content_path(request, name, ".md")
     if not md_path:
-        return HTMLResponse(content="Invalid name", status_code=400)
+        return invalid_input_response("Invalid name")
     if not md_path.exists():
         return HTMLResponse(content="Transcript not found", status_code=404)
 
@@ -219,7 +211,7 @@ async def transcript_detail(request: Request, name: str) -> HTMLResponse:
 async def transcript_download(request: Request, name: str):
     md_path = _get_safe_content_path(request, name, ".md")
     if not md_path:
-        return HTMLResponse(content="Invalid name", status_code=400)
+        return invalid_input_response("Invalid name")
     if not md_path.exists():
         return HTMLResponse(content="Transcript not found", status_code=404)
     return FileResponse(
@@ -234,7 +226,7 @@ async def delete_transcript(request: Request, name: str) -> HTMLResponse:
     """Delete a transcript .md file (and its summary sidecar if present)."""
     md_path = _get_safe_content_path(request, name, ".md")
     if not md_path:
-        return HTMLResponse(content="Invalid name", status_code=400)
+        return invalid_input_response("Invalid name")
     if md_path.exists():
         md_path.unlink()
     # Also remove summary sidecar if present
@@ -253,7 +245,7 @@ async def fix_speaker(request: Request, name: str) -> HTMLResponse:
     """Rename a speaker in an existing transcript."""
     md_path = _get_safe_content_path(request, name, ".md")
     if not md_path:
-        return HTMLResponse(content="Invalid name", status_code=400)
+        return invalid_input_response("Invalid name")
     if not md_path.exists():
         return HTMLResponse(content="Transcript not found", status_code=404)
 
@@ -279,7 +271,7 @@ async def post_refine(request: Request, name: str) -> HTMLResponse:
     """Submit a vocabulary-refine LLM job for an existing transcript."""
     md_path = _get_safe_content_path(request, name, ".md")
     if not md_path:
-        return HTMLResponse(content="Invalid name", status_code=400)
+        return invalid_input_response("Invalid name")
     if not md_path.exists():
         return HTMLResponse(content="Transcript not found", status_code=404)
 
@@ -304,7 +296,7 @@ async def post_summarize(request: Request, name: str) -> HTMLResponse:
     """Submit a campaign-summary LLM job for an existing transcript."""
     md_path = _get_safe_content_path(request, name, ".md")
     if not md_path:
-        return HTMLResponse(content="Invalid name", status_code=400)
+        return invalid_input_response("Invalid name")
     if not md_path.exists():
         return HTMLResponse(content="Transcript not found", status_code=404)
 
@@ -329,7 +321,7 @@ async def summary_detail(request: Request, name: str) -> HTMLResponse:
     """Render the campaign-notes summary for a transcript."""
     md_path = _get_safe_content_path(request, name, ".md")
     if not md_path:
-        return HTMLResponse(content="Invalid name", status_code=400)
+        return invalid_input_response("Invalid name")
 
     summary_path = _get_safe_content_path(request, name, ".summary.md")
     if not summary_path or not summary_path.exists():
@@ -359,7 +351,7 @@ async def summary_download(request: Request, name: str):
     """Download the .summary.md sidecar file."""
     summary_path = _get_safe_content_path(request, name, ".summary.md")
     if not summary_path:
-        return HTMLResponse(content="Invalid name", status_code=400)
+        return invalid_input_response("Invalid name")
     if not summary_path.exists():
         return HTMLResponse(content="Summary not found", status_code=404)
     return FileResponse(
@@ -374,7 +366,7 @@ async def assign_campaign(request: Request, name: str) -> HTMLResponse:
     """Assign or remove a campaign association for a transcript."""
     safe_name = _get_safe_content_path(request, name, ".md")
     if not safe_name:
-        return HTMLResponse(content="Invalid name", status_code=400)
+        return invalid_input_response("Invalid name")
 
     form = await request.form()
     campaign_slug = str(form.get("campaign", "")).strip()

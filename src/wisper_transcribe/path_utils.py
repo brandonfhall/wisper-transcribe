@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+from pathlib import Path
 from typing import Optional
 
 
@@ -30,3 +31,13 @@ def validate_path_component(value: str, guard_name: str = "_guard") -> Optional[
     if not _guard_path.startswith(_guard_base):
         return None
     return os.path.basename(_guard_path)
+
+
+def get_output_dir() -> Path:
+    """Return the output directory for web-submitted jobs, creating it if needed."""
+    from wisper_transcribe.config import get_data_dir
+    out = Path("output")
+    if not out.exists():
+        out = Path(get_data_dir()) / "output"
+    out.mkdir(parents=True, exist_ok=True)
+    return out

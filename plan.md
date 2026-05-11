@@ -314,8 +314,7 @@ These are partially covered transitively (the app fixture exercises `app.py`, ro
 
 2. ~~**Phase 2 — Validator consolidation** — C1 + B5 — DONE~~
 
-3. **Phase 3 — Output-dir + response helpers (1 commit)**
-   C2 + C3.
+3. ~~**Phase 3 — Output-dir + response helpers** — C2 + C3 — DONE~~
 
 4. **Phase 4 — CLI ↔ web parity (1 commit per item, user-prioritized)**
    D1 (vocab-file upload), D2 (re-queue button + channels panel), D4 (speaker rename UI). Skip D3, D5 by default.

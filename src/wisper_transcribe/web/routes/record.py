@@ -33,6 +33,7 @@ from wisper_transcribe.recording_manager import (
     load_recordings,
     save_recording,
 )
+from wisper_transcribe.web._responses import error_redirect, invalid_input_response
 from wisper_transcribe.speaker_manager import enroll_speaker_from_audio_dir
 from wisper_transcribe.web.routes import get_bot_manager, templates
 
@@ -218,9 +219,9 @@ async def record_start_html(
     """HTML form handler: start a session and redirect back to /record."""
     bm = get_bot_manager(request)
     if bm is None:
-        return RedirectResponse(url="/record?error=unavailable", status_code=303)
+        return error_redirect("/record", "unavailable")
     if not voice_channel_id.strip():
-        return RedirectResponse(url="/record?error=missing_channel", status_code=303)
+        return error_redirect("/record", "missing_channel")
 
     try:
         await bm.start_session(
@@ -229,7 +230,7 @@ async def record_start_html(
             guild_id=guild_id.strip(),
         )
     except RuntimeError:
-        return RedirectResponse(url="/record?error=already_active", status_code=303)
+        return error_redirect("/record", "already_active")
 
     return RedirectResponse(url="/record", status_code=303)
 
@@ -239,7 +240,7 @@ async def record_stop_html(request: Request) -> RedirectResponse:
     """HTML form handler: stop the active session and redirect back to /record."""
     bm = get_bot_manager(request)
     if bm is None or bm.active_recording is None:
-        return RedirectResponse(url="/record?error=no_session", status_code=303)
+        return error_redirect("/record", "no_session")
     await bm.stop_session()
     return RedirectResponse(url="/record", status_code=303)
 
@@ -281,13 +282,13 @@ async def recording_live(recording_id: str, request: Request) -> JSONResponse:
 async def recording_detail_html(recording_id: str, request: Request) -> HTMLResponse:
     safe_id = _validate_recording_id(recording_id)
     if safe_id is None:
-        return HTMLResponse(content="Invalid recording ID", status_code=400)
+        return invalid_input_response("Invalid recording ID")
 
     data_dir = get_data_dir()
     recordings = load_recordings(data_dir)
     recording = recordings.get(safe_id)
     if recording is None:
-        return RedirectResponse(url="/recordings?error=not_found", status_code=303)
+        return error_redirect("/recordings", "not_found")
 
     campaigns = load_campaigns(data_dir)
     return templates.TemplateResponse(
@@ -305,7 +306,7 @@ async def recording_detail_html(recording_id: str, request: Request) -> HTMLResp
 async def recording_delete_html(recording_id: str, request: Request) -> RedirectResponse:
     safe_id = _validate_recording_id(recording_id)
     if safe_id is None:
-        return HTMLResponse(content="Invalid recording ID", status_code=400)
+        return invalid_input_response("Invalid recording ID")
 
     delete_recording(safe_id, get_data_dir())
     return RedirectResponse(url="/recordings", status_code=303)
@@ -336,7 +337,7 @@ async def recording_enroll_html(
     recordings = load_recordings(data_dir)
     recording = recordings.get(safe_id)
     if recording is None:
-        return RedirectResponse(url="/recordings?error=not_found", status_code=303)
+        return error_redirect("/recordings", "not_found")
 
     if safe_uid not in recording.unbound_speakers:
         return JSONResponse({"detail": "speaker not in unbound list"}, status_code=409)
@@ -395,24 +396,24 @@ async def recording_transcribe_html(recording_id: str, request: Request) -> Redi
     """Hand off a completed recording to the transcription JobQueue."""
     safe_id = _validate_recording_id(recording_id)
     if safe_id is None:
-        return HTMLResponse(content="Invalid recording ID", status_code=400)
+        return invalid_input_response("Invalid recording ID")
 
-    from wisper_transcribe.web.routes.transcribe import _default_output_dir
+    from wisper_transcribe.path_utils import get_output_dir
 
     data_dir = get_data_dir()
     recordings = load_recordings(data_dir)
     recording = recordings.get(safe_id)
     if recording is None:
-        return RedirectResponse(url="/recordings?error=not_found", status_code=303)
+        return error_redirect("/recordings", "not_found")
 
     if recording.status not in ("completed", "transcribed"):
-        return RedirectResponse(url=f"/recordings/{recording.id}?error=not_ready", status_code=303)
+        return error_redirect(f"/recordings/{recording.id}", "not_ready")
 
     if recording.combined_path is None or not recording.combined_path.exists():
-        return RedirectResponse(url=f"/recordings/{recording.id}?error=no_audio", status_code=303)
+        return error_redirect(f"/recordings/{recording.id}", "no_audio")
 
     # Copy combined.wav to output dir so the transcript lands alongside existing ones
-    output_dir = _default_output_dir()
+    output_dir = get_output_dir()
     output_dir.mkdir(parents=True, exist_ok=True)
     dest = output_dir / f"{recording.id}.wav"
     shutil.copy2(str(recording.combined_path), str(dest))
