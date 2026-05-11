@@ -165,6 +165,9 @@
       {% set stem = recording.transcript_path.stem %}
       <a href="/transcripts/{{ stem | urlencode }}" class="text-sm text-green-700 hover:underline">View transcript</a>
       {% endif %}
+      <form method="post" action="/recordings/{{ recording.id }}/transcribe">
+        <button type="submit" class="text-sm text-gray-600 border border-gray-300 rounded px-2 py-1 hover:bg-gray-50">Re-transcribe</button>
+      </form>
       {% else %}
       <span class="text-sm text-gray-500">Transcription available when recording is completed.</span>
       {% endif %}

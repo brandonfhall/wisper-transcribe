@@ -318,7 +318,7 @@ These are partially covered transitively (the app fixture exercises `app.py`, ro
 
 4. **Phase 4 — CLI ↔ web parity** (1 commit per item):
    - ~~D1 — vocab-file upload on /transcribe — DONE~~
-   - D2 — re-queue button on recording detail (in progress); channels panel deferred (needs Java sidecar protocol changes)
+   - ~~D2 — re-queue button on recording detail — DONE~~; channels panel deferred (needs Java sidecar protocol changes)
    - ~~D4 — speaker rename UI — already present in speakers.html, no work needed~~
    Skip D3, D5 by default.
 

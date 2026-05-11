@@ -127,6 +127,30 @@ def test_recording_detail_returns_200(client):
     assert rec.id in resp.text
 
 
+def test_recording_detail_shows_retranscribe_button_when_transcribed(client):
+    """The Re-transcribe button appears when status is 'transcribed'."""
+    c, tmp_path = client
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    rec.status = "transcribed"
+    save_recording(rec, tmp_path)
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "Re-transcribe" in resp.text
+
+
+def test_recording_detail_no_retranscribe_button_when_completed(client):
+    """The Re-transcribe button does NOT appear for a plain 'completed' recording."""
+    c, tmp_path = client
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    rec.status = "completed"
+    save_recording(rec, tmp_path)
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "Re-transcribe" not in resp.text
+
+
 def test_recording_detail_unknown_id_redirects(client):
     c, _ = client
     import uuid
