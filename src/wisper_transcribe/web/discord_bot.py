@@ -325,7 +325,15 @@ class BotManager:
             from wisper_transcribe.config import load_config
             token = load_config().get("discord_bot_token", "")
         if not token:
-            token = recording.voice_channel_id  # fallback for test introspection
+            if self._source_factory is _unix_socket_source:
+                log.error(
+                    "No Discord bot token configured; aborting recording %s", recording.id
+                )
+                recording.status = "failed"
+                recording.ended_at = datetime.now(timezone.utc)
+                save_recording(recording, self._data_dir)
+                return
+            token = "__test_token__"  # non-production source factory; token unused by sidecar
         attempt = 0
 
         try:

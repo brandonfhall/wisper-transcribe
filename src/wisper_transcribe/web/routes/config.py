@@ -1,6 +1,7 @@
 """Config route — view and edit application settings."""
 from __future__ import annotations
 
+import logging
 import re
 
 from fastapi import APIRouter, Request
@@ -13,6 +14,8 @@ from wisper_transcribe.config import (
     load_config,
     save_config,
 )
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/config")
 
@@ -77,6 +80,7 @@ async def ollama_status() -> JSONResponse:
             models.append({"name": m["name"], "size": size_str})
         return JSONResponse({"running": True, "models": models})
     except Exception:
+        log.warning("Failed to query Ollama status", exc_info=True)
         return JSONResponse({"running": False, "models": []})
 
 
@@ -100,6 +104,7 @@ async def lmstudio_status() -> JSONResponse:
         models = [{"name": m["id"], "size": ""} for m in data.get("data", []) if m.get("id")]
         return JSONResponse({"running": True, "models": models})
     except Exception:
+        log.warning("Failed to query LM Studio status", exc_info=True)
         return JSONResponse({"running": False, "models": []})
 
 

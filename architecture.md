@@ -366,8 +366,6 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - `tests/test_record_cli.py` covers "server not running" error, server.json discovery → HTTP POST, WISPER_SERVER_URL env var override, list output, recording_id validation, stop → server POST, transcribe with path-traversal guard, delete with path-traversal guard, start missing --voice-channel error, show/transcribe valid IDs request server, token masking in config show, config discord wizard prompts, empty-input preserves existing token (14 tests)
 - `tests/test_discord_bot.py` covers BotManager start/stop lifecycle, start_session recording persisted, per-user .opus files written from PCM frames, transient 4015 rejoin logged, exhausted retries → degraded, permanent 4014 → failed (no retry), stop_session → completed, known Discord ID auto-tagged to profile key on first frame, unknown Discord ID gets empty string, unknown Discord ID added to unbound_speakers, known Discord ID NOT added to unbound_speakers, 3-user simultaneous interleaved frames → all per-user dirs populated, 3 unknown speakers all in unbound list (no duplicates), simultaneous known+unknown speakers (tagged vs unbound split); all via injected fake audio sources (no real JDA/Discord) (14 tests)
 - `tests/_discord_fakes.py`: scripted_source, multi_attempt_source, infinite_disconnect_source, blocking_source factories + make_pcm_frame / make_disconnect_frame helpers
-- Test count: 662 (all mocked, all passing)
-
 **CI matrix** (`.github/workflows/ci.yml`):
 - Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)
 - Weekly cron (Monday): same matrix + `latest-deps` job (`pip install --upgrade`) to detect forward-compatibility breakage before it hits PRs
@@ -384,6 +382,8 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 | MPS on Apple Silicon | faster-whisper (CTranslate2) has no MPS backend. With `mlx-whisper` installed (`pip install 'wisper-transcribe[macos]'`), transcription uses the Apple Silicon GPU/ANE via MLX Whisper. Without it, transcription falls back to CPU. pyannote diarization and speaker embeddings always run on MPS when available. |
 | Thread safety | `_model` and `_pipeline` globals are not thread-safe; parallel folder processing uses `ProcessPoolExecutor` so each worker is a separate process with isolated module state |
 | pyannote license | HuggingFace token + one-time model license acceptance required (free) |
+| Unauthenticated recording API | `POST /api/record/start` and `/stop` have no auth layer. v1 deployment assumes local/trusted network access only. A single-recording lock prevents concurrent abuse; Discord enforces channel join permissions server-side. Web auth is deferred to v2. |
+| Unbounded recording sessions | `BotManager._session_loop()` runs until explicitly stopped — sessions routinely last multiple hours. Disk usage scales linearly (~60 Ogg segments/hour/user). Operator is responsible for stopping sessions. |
 
 ---
 

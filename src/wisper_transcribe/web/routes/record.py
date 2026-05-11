@@ -2,11 +2,15 @@
 Phase 5 adds HTML control panel + recordings list/detail pages.
 
 Path-traversal guards on recording_id follow the CodeQL four-step pattern.
+
+Security: recording control endpoints assume local/trusted network access — see
+architecture.md Known Constraints for details.
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -31,6 +35,8 @@ from wisper_transcribe.recording_manager import (
 )
 from wisper_transcribe.speaker_manager import enroll_speaker_from_audio_dir
 from wisper_transcribe.web.routes import get_bot_manager, templates
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -352,6 +358,7 @@ async def recording_enroll_html(
             data_dir=data_dir,
         )
     except Exception:
+        log.warning("Speaker enrollment from audio dir failed", exc_info=True)
         return RedirectResponse(
             url=f"/recordings/{recording.id}?error=enroll_failed", status_code=303
         )
@@ -373,7 +380,7 @@ async def recording_enroll_html(
                     recording.campaign_slug, profile_key, safe_uid, data_dir=data_dir
                 )
         except Exception:
-            pass
+            log.warning("Failed to auto-bind discord ID to campaign", exc_info=True)
 
     return RedirectResponse(url=f"/recordings/{recording.id}", status_code=303)
 
@@ -424,7 +431,7 @@ async def recording_transcribe_html(recording_id: str, request: Request) -> Redi
                 try:
                     move_transcript_to_campaign(stem, rec.campaign_slug, data_dir)
                 except Exception:
-                    pass
+                    log.warning("Failed to move transcript to campaign in on_complete", exc_info=True)
         save_recording(rec, data_dir)
 
     queue = request.app.state.job_queue
