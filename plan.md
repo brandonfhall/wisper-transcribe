@@ -322,8 +322,12 @@ These are partially covered transitively (the app fixture exercises `app.py`, ro
    - ~~D4 — speaker rename UI — already present in speakers.html, no work needed~~
    Skip D3, D5 by default.
 
-5. **Phase 5 — QoL features (1 commit per item, optional)**
-   E1 (search/filter), E2 (segment browser), E4 (bot status surface), E6 (`test_web_jobs.py`). Skip E3, E5 by default.
+5. **Phase 5 — QoL features** (1 commit per item):
+   - ~~E1 — client-side search/filter on transcript, recording, and speaker lists — DONE~~
+   - E2 — recording segment browser on detail page
+   - E4 — rejoin log on recording detail
+   - E6 — test_web_jobs.py
+   Skip E3, E5 by default.
 
 6. **Phase 6 — Refactor (optional)**
    C4 (`_session_loop` decomposition). Pure readability; skip if low value.

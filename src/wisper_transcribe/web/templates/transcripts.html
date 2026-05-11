@@ -5,7 +5,7 @@
 
 {# Transcript card macro — defined first so calls below work #}
 {% macro transcript_card(t) %}
-<div class="card relative hover:shadow-md hover:ring-1 hover:ring-green-300 transition-all flex flex-col">
+<div class="card relative hover:shadow-md hover:ring-1 hover:ring-green-300 transition-all flex flex-col" data-filterable>
   <a href="/transcripts/{{ t.stem | urlencode }}" class="absolute inset-0 rounded-lg z-10" aria-label="View {{ t.title }}"></a>
 
   <div class="flex items-start justify-between">
@@ -59,12 +59,17 @@
   </div>
 
   {% if transcripts %}
+  <input id="list-filter" type="search" placeholder="Filter transcripts…"
+         class="form-input max-w-xs" autocomplete="off"/>
+  {% endif %}
+
+  {% if transcripts %}
 
   {# Campaign folder sections #}
   {% for slug, c in campaigns.items() %}
     {% set campaign_items = transcripts | selectattr("campaign_slug", "equalto", slug) | list %}
     {% if campaign_items %}
-    <details class="card" open>
+    <details class="card" open data-filter-section>
       <summary class="text-base font-semibold text-gray-900 cursor-pointer select-none flex items-center gap-2">
         <svg class="h-4 w-4 text-green-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z"/>
@@ -82,7 +87,7 @@
   {# Uncampaigned transcripts #}
   {% set uncampaigned = transcripts | rejectattr("campaign_slug") | list %}
   {% if uncampaigned %}
-  <div>
+  <div data-filter-section>
     {% if campaigns %}
     <h2 class="text-sm font-medium text-gray-500 mb-3">No campaign</h2>
     {% endif %}
@@ -103,4 +108,23 @@
   {% endif %}
 
 </div>
+
+<script>
+(function() {
+  var input = document.getElementById('list-filter');
+  if (!input) return;
+  input.addEventListener('input', function() {
+    var q = this.value.trim().toLowerCase();
+    document.querySelectorAll('[data-filterable]').forEach(function(el) {
+      el.style.display = (q && !el.textContent.toLowerCase().includes(q)) ? 'none' : '';
+    });
+    document.querySelectorAll('[data-filter-section]').forEach(function(sec) {
+      var any = Array.from(sec.querySelectorAll('[data-filterable]')).some(function(el) {
+        return el.style.display !== 'none';
+      });
+      sec.style.display = any ? '' : 'none';
+    });
+  });
+})();
+</script>
 {% endblock %}
