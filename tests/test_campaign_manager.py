@@ -8,6 +8,7 @@ from wisper_transcribe.campaign_manager import (
     _make_slug,
     _validate_campaign_slug,
     add_member,
+    bind_discord_id,
     create_campaign,
     delete_campaign,
     get_campaign_for_transcript,
@@ -15,6 +16,7 @@ from wisper_transcribe.campaign_manager import (
     get_campaigns_path,
     get_transcripts_for_campaign,
     load_campaigns,
+    lookup_profile_by_discord_id,
     move_transcript_to_campaign,
     remove_member,
     remove_transcript_from_campaign,
@@ -286,3 +288,47 @@ def test_transcripts_loaded_from_existing_json(tmp_path):
     move_transcript_to_campaign("s02", "alpha", data_dir=tmp_path)
     fresh = load_campaigns(tmp_path)
     assert set(fresh["alpha"].transcripts) == {"s01", "s02"}
+
+
+# ---------------------------------------------------------------------------
+# Discord ID binding
+# ---------------------------------------------------------------------------
+
+def test_bind_discord_id_persists(tmp_path):
+    create_campaign("Test", data_dir=tmp_path)
+    add_member("test", "alice", data_dir=tmp_path)
+    bind_discord_id("test", "alice", "123456789012345678", data_dir=tmp_path)
+
+    loaded = load_campaigns(tmp_path)
+    assert loaded["test"].members["alice"].discord_user_id == "123456789012345678"
+
+
+def test_lookup_profile_by_discord_id_returns_profile_key(tmp_path):
+    create_campaign("Test", data_dir=tmp_path)
+    add_member("test", "alice", data_dir=tmp_path)
+    bind_discord_id("test", "alice", "123456789012345678", data_dir=tmp_path)
+
+    result = lookup_profile_by_discord_id("test", "123456789012345678", data_dir=tmp_path)
+    assert result == "alice"
+
+
+def test_lookup_returns_none_for_unknown_id(tmp_path):
+    create_campaign("Test", data_dir=tmp_path)
+    add_member("test", "alice", data_dir=tmp_path)
+
+    result = lookup_profile_by_discord_id("test", "999999999999999999", data_dir=tmp_path)
+    assert result is None
+
+
+def test_bind_discord_id_overwrites_previous_binding(tmp_path):
+    create_campaign("Test", data_dir=tmp_path)
+    add_member("test", "alice", data_dir=tmp_path)
+    add_member("test", "bob", data_dir=tmp_path)
+
+    bind_discord_id("test", "alice", "123456789012345678", data_dir=tmp_path)
+    # Rebind the same Discord ID to bob — alice's binding should be cleared
+    bind_discord_id("test", "bob", "123456789012345678", data_dir=tmp_path)
+
+    loaded = load_campaigns(tmp_path)
+    assert loaded["test"].members["alice"].discord_user_id is None
+    assert loaded["test"].members["bob"].discord_user_id == "123456789012345678"

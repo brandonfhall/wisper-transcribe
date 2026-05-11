@@ -1,6 +1,8 @@
 """FastAPI application factory for the wisper-transcribe web UI."""
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 import sys
 from contextlib import asynccontextmanager
@@ -102,8 +104,37 @@ def create_app() -> FastAPI:
     async def lifespan(app: FastAPI):  # type: ignore[misc]
         _build_tailwind()
         job_queue.start()
-        yield
-        await job_queue.stop()
+
+        # Write server.json so CLI can discover the running server.
+        # WISPER_BIND is set by the `wisper server` CLI command; falls back to
+        # 0.0.0.0:8080. 0.0.0.0 is normalised to 127.0.0.1 for CLI use.
+        raw_bind = os.environ.get("WISPER_BIND", "0.0.0.0:8080")
+        host, _, port = raw_bind.rpartition(":")
+        cli_host = "127.0.0.1" if host in ("0.0.0.0", "") else host
+        server_url = f"http://{cli_host}:{port}"
+        from wisper_transcribe.config import get_data_dir
+        data_dir = get_data_dir()
+        _sj = data_dir / "server.json"
+        _sj.parent.mkdir(parents=True, exist_ok=True)
+        _sj.write_text(json.dumps({"url": server_url}), encoding="utf-8")
+
+        from wisper_transcribe.recording_manager import reconcile_on_startup
+        reconcile_on_startup(data_dir)
+
+        from .discord_bot import BotManager
+        bot_manager = BotManager(data_dir=data_dir)
+        bot_manager.start()
+        app.state.bot_manager = bot_manager
+
+        try:
+            yield
+        finally:
+            await bot_manager.stop()
+            await job_queue.stop()
+            try:
+                _sj.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     app = FastAPI(
         title="wisper-transcribe",
@@ -124,6 +155,7 @@ def create_app() -> FastAPI:
     from .routes import campaigns as campaigns_router
     from .routes import config as config_router
     from .routes import dashboard as dashboard_router
+    from .routes import record as record_router
     from .routes import speakers as speakers_router
     from .routes import transcribe as transcribe_router
     from .routes import transcripts as transcripts_router
@@ -134,6 +166,7 @@ def create_app() -> FastAPI:
     app.include_router(speakers_router.router)
     app.include_router(config_router.router)
     app.include_router(campaigns_router.router)
+    app.include_router(record_router.router)
 
     return app
 

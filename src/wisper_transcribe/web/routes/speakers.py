@@ -9,7 +9,9 @@ from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 
 from . import templates
+from wisper_transcribe.path_utils import validate_path_component
 from wisper_transcribe.speaker_manager import load_profiles, save_profiles
+from wisper_transcribe.web._responses import error_redirect, invalid_input_response
 
 router = APIRouter(prefix="/speakers")
 
@@ -35,30 +37,18 @@ async def speakers_list(request: Request) -> HTMLResponse:
 @router.get("/{key}/clip")
 async def speaker_clip(request: Request, key: str) -> Response:
     """Serve the reference audio clip for a speaker profile."""
-    if not key or "\x00" in key:
-        return HTMLResponse(content="Invalid key", status_code=400)
-        
-    safe_key = os.path.basename(key)
-    if safe_key != key or safe_key in {".", ".."}:
-        return HTMLResponse(content="Invalid key", status_code=400)
-
-    import re
-    if not re.match(r"^[\w\-]+$", safe_key):
-        return HTMLResponse(content="Invalid key", status_code=400)
+    safe_key = validate_path_component(key, "_speakers_key_guard")
+    if safe_key is None:
+        return invalid_input_response("Invalid key")
 
     from wisper_transcribe.speaker_manager import _get_embeddings_dir
     embeddings_dir = _get_embeddings_dir().resolve()
-
-    # Use os.path.abspath and .startswith() to satisfy CodeQL's path traversal queries
     base_dir = os.path.abspath(str(embeddings_dir))
     if not base_dir.endswith(os.sep):
         base_dir += os.sep
-        
     target_path = os.path.abspath(os.path.join(str(embeddings_dir), f"{safe_key}.mp3"))
     if not target_path.startswith(base_dir):
-        return HTMLResponse(content="Invalid key", status_code=400)
-        
-    # Reconstruct Path from the validated string to ensure taint is dropped
+        return invalid_input_response("Invalid key")
     clean_clip = Path(target_path)
 
     if not clean_clip.exists() or not clean_clip.is_file():
@@ -90,32 +80,17 @@ async def enroll_submit(
     import tempfile
 
     if not name or "\x00" in name:
-        return RedirectResponse(url="/speakers/enroll?error=invalid_name", status_code=303)
-        
+        return error_redirect("/speakers/enroll", "invalid_name")
     safe_name = os.path.basename(name)
     if safe_name != name or safe_name in {".", ".."}:
-        return RedirectResponse(url="/speakers/enroll?error=invalid_name", status_code=303)
+        return error_redirect("/speakers/enroll", "invalid_name")
 
-    import re
-    profile_key_raw = safe_name.lower().replace(" ", "_")
-    match = re.match(r"^([\w\-]+)$", profile_key_raw)
-    if not match:
-        return RedirectResponse(url="/speakers/enroll?error=invalid_name", status_code=303)
-        
-    # CodeQL's path-injection query requires an explicit .startswith() guard 
-    # on an absolute path to definitively clear cross-module taint tracking.
-    guard_base = os.path.abspath("guard")
-    if not guard_base.endswith(os.sep):
-        guard_base += os.sep
-        
-    guard_path = os.path.abspath(os.path.join(guard_base, match.group(1)))
-    if not guard_path.startswith(guard_base):
-        return RedirectResponse(url="/speakers/enroll?error=invalid_name", status_code=303)
-        
-    profile_key = os.path.basename(guard_path)
+    profile_key = validate_path_component(safe_name.lower().replace(" ", "_"), "_speakers_enroll_guard")
+    if profile_key is None:
+        return error_redirect("/speakers/enroll", "invalid_name")
 
     if audio is None:
-        return RedirectResponse(url="/speakers/enroll?error=no_audio", status_code=303)
+        return error_redirect("/speakers/enroll", "no_audio")
 
     suffix = Path(audio.filename or "audio.mp3").suffix or ".mp3"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix, prefix="wisper_enroll_")
@@ -145,7 +120,7 @@ async def enroll_submit(
         for seg in diarization:
             speaker_time[seg.speaker] += seg.end - seg.start
         if not speaker_time:
-            return RedirectResponse(url="/speakers/enroll?error=no_speech", status_code=303)
+            return error_redirect("/speakers/enroll", "no_speech")
         primary_label = max(speaker_time, key=lambda k: speaker_time[k])
 
         if update and profile_key in load_profiles():
@@ -163,7 +138,7 @@ async def enroll_submit(
                 notes=notes,
             )
     except Exception:
-        return RedirectResponse(url="/speakers/enroll?error=enroll_failed", status_code=303)
+        return error_redirect("/speakers/enroll", "enroll_failed")
 
     return RedirectResponse(url="/speakers", status_code=303)
 

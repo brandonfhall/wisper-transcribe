@@ -23,6 +23,10 @@
   <div class="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-700">
     That speaker is not enrolled. Enroll them first under <a href="/speakers" class="underline">Speakers</a>.
   </div>
+  {% elif request.query_params.get('error') == 'invalid_discord_id' %}
+  <div class="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-700">
+    Invalid Discord user ID. Paste the numeric user ID from Discord (e.g. 123456789012345678).
+  </div>
   {% endif %}
 
   <!-- Create form -->
@@ -88,6 +92,7 @@
           <th class="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Speaker</th>
           <th class="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Role</th>
           <th class="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Character</th>
+          <th class="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Discord ID</th>
           <th class="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Actions</th>
         </tr>
       </thead>
@@ -99,6 +104,14 @@
           </td>
           <td class="px-4 py-3 text-gray-500">{{ member.role or "—" }}</td>
           <td class="px-4 py-3 text-gray-500">{{ member.character or "—" }}</td>
+          <td class="px-4 py-3">
+            <form method="post" action="/campaigns/{{ active_campaign.slug }}/members/{{ key }}/discord-id" class="flex gap-1 items-center">
+              <input type="text" name="discord_user_id" value="{{ member.discord_user_id or '' }}"
+                     placeholder="Discord user ID" pattern="\d*"
+                     class="border border-gray-300 rounded px-2 py-1 text-xs w-40 focus:ring-1 focus:ring-green-500"/>
+              <button type="submit" class="text-xs text-blue-600 hover:underline">Link</button>
+            </form>
+          </td>
           <td class="px-4 py-3">
             <form method="post" action="/campaigns/{{ active_campaign.slug }}/members/{{ key }}/remove">
               <button type="submit" class="text-xs text-red-600 hover:underline">Remove</button>

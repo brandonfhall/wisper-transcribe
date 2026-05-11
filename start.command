@@ -8,6 +8,7 @@ cd "$(dirname "$0")"
 
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
+YELLOW='\033[1;33m'
 NC='\033[0m'
 
 echo ""
@@ -19,6 +20,16 @@ if [ ! -d ".venv" ]; then
     echo "First run — setting up wisper-transcribe (this takes a few minutes)..."
     echo ""
     bash setup.sh
+fi
+
+# ── Check for Java 25 (needed by Discord recording bot) ───────────────────────
+if ! command -v java &>/dev/null; then
+    echo ""
+    echo -e "${YELLOW}NOTE: Java 25+ not found. The Discord recording bot will not be available.${NC}"
+    echo "Install with: brew install openjdk@25"
+elif ! java -version 2>&1 | head -1 | grep -qE '"25\.'; then
+    echo ""
+    echo -e "${YELLOW}NOTE: Java 25+ required for Discord recording bot. Install with: brew install openjdk@25${NC}"
 fi
 
 # ── Start server ──────────────────────────────────────────────────────────────

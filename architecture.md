@@ -31,13 +31,17 @@ src/wisper_transcribe/
 ├── _noise_suppress.py  Centralised third-party warning/logging suppression (Lightning, pyannote, speechbrain); safe to call from subprocesses
 ├── debug_log.py        Centralized logging controller (Logger class); activated by --debug (file) and/or --verbose (console); tees tqdm.write() + Python logging to ./logs/wisper_<ts>.log
 ├── aligner.py          Merge transcription segments with diarization labels (max-overlap)
-├── speaker_manager.py  Profile CRUD, embedding extraction, cosine-similarity matching, EMA updates
+├── speaker_manager.py  Profile CRUD, embedding extraction, cosine-similarity matching, EMA updates; enroll_speaker_from_audio_dir() for per-user track enrollment (Phase 6)
 ├── formatter.py        Markdown output, YAML frontmatter, dynamic version from __version__
 ├── audio_utils.py      validate_audio(), convert_to_wav(), get_duration(), load_wav_as_tensor(); VIDEO_EXTENSIONS / AUDIO_EXTENSIONS sets
 ├── time_utils.py       Shared time formatting: format_timestamp(), format_duration()
+├── path_utils.py       Shared path utilities: validate_path_component() — four-step CodeQL-safe guard; all per-module validators delegate here. get_output_dir() — single canonical output directory resolver (replaces duplicates in transcribe + transcripts routes)
 ├── config.py           load_config(), save_config(), get_device(), get_hf_token(), get_llm_api_key(), resolve_llm_model(), check_ffmpeg()
-├── campaign_manager.py Campaign CRUD: load/save/create/delete campaigns, add/remove roster members, _validate_campaign_slug() security gatekeeper
-├── models.py           Dataclasses: TranscriptionSegment, DiarizationSegment, AlignedSegment, SpeakerProfile, CampaignMember, Campaign, Edit, SpeakerSuggestion, LootChange, NPCMention, SummaryNote
+├── campaign_manager.py Campaign CRUD: load/save/create/delete campaigns, add/remove roster members, bind_discord_id() / lookup_profile_by_discord_id() Discord ID binding, _validate_campaign_slug() / _validate_profile_key() delegate to path_utils
+├── recording_manager.py Recording CRUD: load/save/create/delete recordings, append_segment() with per-recording mutex, reconcile_on_startup() crash recovery, _validate_recording_id() delegates to path_utils
+├── web/discord_bot.py  BotManager: start()/stop() lifecycle, start_session()/stop_session(), _session_loop with auto-rejoin (backoff [2,5,15,30,60]s), _route_frame → SegmentedOggWriter + RealtimePCMMixer + auto-tag via lookup_profile_by_discord_id() + unbound_speakers tracking, _handle_disconnect (transient/permanent close code split), _finalise; injectable audio_source_factory for testing; _unix_socket_source launches JDA sidecar subprocess (Java 25, JDAVE 0.1.8), _find_sidecar_jar() for JAR discovery, _read_frame() parses length-prefixed wire protocol over Unix socket
+├── web/routes/record.py Full recording UI: JSON API /api/record/{start,stop,status} + /api/record/channels (Discord REST proxy — lists guilds + voice channels via bot token), /api/recordings (list), /api/recordings/{id} (detail/transcribe/delete stubs) + HTML routes GET /record (includes channel-browser panel), POST /record/{start,stop}, GET /record/sse (SSE stream), GET /recordings (campaign-grouped list), GET /recordings/{id}, POST /recordings/{id}/enroll, POST /recordings/{id}/transcribe, POST /recordings/{id}/delete, GET /recordings/{id}/live (501 placeholder); _validate_recording_id() + _uid_guard path-traversal guards; Discord preset quick-select dropdown; pre-fills default guild/channel from config
+├── models.py           Dataclasses: TranscriptionSegment, DiarizationSegment, AlignedSegment, SpeakerProfile, CampaignMember (+ discord_user_id), Campaign, Recording (+ unbound_speakers), SegmentRecord, RejoinAttempt, Edit, SpeakerSuggestion, LootChange, NPCMention, SummaryNote
 ├── refine.py           LLM-driven transcript refinement: vocabulary correction + unknown-speaker ID (edit-distance guarded, frontmatter-preserving)
 ├── summarize.py        Campaign-notes generation (session recap, loot, NPCs, follow-ups) → Obsidian-ready sidecar markdown
 ├── llm/                Provider-agnostic LLM client package (Ollama, LM Studio, Anthropic, OpenAI, Google)
@@ -49,9 +53,11 @@ src/wisper_transcribe/
 │   ├── openai.py       OpenAI SDK; JSON via response_format json_schema strict mode
 │   └── google.py       google-genai SDK; JSON via response_schema
 ├── static/             Vendored web assets: htmx.min.js, tailwind.min.css (pre-built), wisp.svg, app.js
-└── web/                Phase 11: FastAPI web UI
+└── web/                FastAPI web UI + Discord recording bot infrastructure
     ├── app.py          FastAPI application factory (create_app()), module-level app instance for uvicorn
     ├── jobs.py         In-memory job queue, JobQueue class, asyncio background worker, SSE progress via tqdm.write patch; LLM job types (refine/summarize) with stderr capture
+    ├── audio_writer.py SegmentedOggWriter (rotating 60-s self-contained Ogg/Opus segments, packet-count rotation, crash-safe EOS pages), RealtimePCMMixer (48 kHz stereo → 16 kHz mono, clip-on-overflow)
+    ├── _responses.py   Shared HTTP response helpers: invalid_input_response() (400 plain-text), error_redirect() (303 ?error= redirect); used by all route modules
     └── routes/
         ├── __init__.py     Jinja2 templates setup, shared get_queue() helper, urlencode filter
         ├── dashboard.py    GET /, GET /jobs (HTMX partial)
@@ -59,7 +65,7 @@ src/wisper_transcribe/
         ├── transcripts.py  GET/POST /transcripts (grouped by campaign), transcript detail (with campaign assignment dropdown), download, delete, fix-speaker; POST /transcripts/{name}/refine, POST /transcripts/{name}/summarize; GET /transcripts/{name}/summary, GET /transcripts/{name}/summary/download; POST /transcripts/{name}/campaign (move/remove campaign association)
         ├── speakers.py     GET/POST /speakers, enroll, rename, remove
         ├── campaigns.py    GET/POST /campaigns, campaign detail, roster add/remove, delete
-        └── config.py       GET/POST /config
+        ├── config.py       GET/POST /config (+ Discord bot token, default guild/channel, presets management), POST /config/presets/add (inline preset save from Record page; validates guild/channel as snowflakes), GET /config/ollama-status, GET /config/lmstudio-status
 ```
 
 ---
@@ -287,13 +293,45 @@ wisper-transcribe/       ← get_data_dir()
 │   ├── speakers.json    name → SpeakerProfile metadata (global — one entry per person)
 │   └── embeddings/
 │       └── <name>.npy   512-dim float32 voice embeddings (gitignored)
-└── campaigns/
-    └── campaigns.json   slug → Campaign metadata + per-campaign roster (additive layer)
+├── campaigns/
+│   └── campaigns.json   slug → Campaign metadata + per-campaign roster (additive layer)
+└── recordings/
+    ├── recordings.json              index: recording_id → true (presence marker)
+    └── <recording_id>/
+        ├── metadata.json            full Recording dataclass + segment manifest (append-only)
+        ├── per-user/
+        │   └── <discord_user_id>/
+        │       ├── 0000.opus        60-s self-contained Ogg/Opus segment (v1 file-format invariant 4)
+        │       └── 0001.opus
+        └── final/
+            └── combined.wav         16 kHz mono PCM mix, written post-stop (copied to output/ before JobQueue submit)
 ```
+
+### Recording layer
+
+`recording_manager.py` mirrors `campaign_manager.py` in structure. Key design points:
+
+- **Atomic saves** — `save_recording()` writes to a `NamedTemporaryFile` in the same directory then calls `os.replace()` (atomic on POSIX and Windows NTFS). Each call gets a unique temp filename to avoid collision under concurrent threads.
+- **Per-recording mutex** — `append_segment()` acquires a `threading.Lock` keyed by `recording_id` so concurrent mixed + per-user writers cannot produce lost-update races on the manifest.
+- **Crash recovery** — `reconcile_on_startup()` is called from `app.py` lifespan on server start. Any recording in `"recording"` or `"degraded"` status was active when the server crashed; it is marked `"failed"` with `ended_at = now`. Audio segments on disk are preserved.
+- **Security** — `_validate_recording_id()` follows the four-step CodeQL Pattern 2: null-byte check → `os.path.basename` strip → regex `^[\w\-]+$` → `os.path.abspath` round-trip to break the taint chain.
+
+`web/audio_writer.py` provides:
+- **`SegmentedOggWriter`** — writes Opus packets into rotating self-contained Ogg files. Rotation is triggered by packet count (media time) rather than wall-clock time, so tests that feed packets faster than real-time work correctly. On construction, it scans the target directory for existing `*.opus` files and starts at the next index, enabling crash recovery by a new writer instance.
+- **`RealtimePCMMixer`** — accumulates 48 kHz stereo 16-bit PCM frames from multiple Discord users and mixes them to 16 kHz mono 16-bit output suitable for Whisper.
+
+**Five v1 file-format invariants (versioned contract for future live transcription in v2):**
+1. Each segment file is a self-contained Ogg/Opus container with a valid EOS page.
+2. Segment manifest is append-only and atomic (per-recording mutex + atomic file replace).
+3. Segment length ≤ 60 s (3000 packets × 20 ms).
+4. Per-user directory layout `recordings/<id>/per-user/<discord_id>/NNNN.opus` is fixed.
+5. `Recording.status` has a distinct `"recording"` state (v2 live ticker watches for new segments only while status is `"recording"` or `"degraded"`).
+
+**Transcribe hand-off (Phase 7):** `POST /recordings/{id}/transcribe` copies `combined.wav` into the output directory and calls `job_queue.submit()` with `original_stem=recording_id`, `campaign=recording.campaign_slug`. A post-completion callback (`on_complete`) sets `Recording.status` to `"transcribed"`, records the transcript path, and calls `move_transcript_to_campaign()` to auto-associate the output with the campaign. `Recording.job_id` tracks the corresponding `Job.id` for the UI to link to job status. `Recording` statuses now include `"transcribing"` and `"transcribed"`.
 
 **Campaign data model:** Campaigns hold rosters of `profile_key` references to the global `speakers.json`. Voice embeddings remain global — adding a speaker to a second campaign reuses their existing `.npy` automatically (voice transfer). Deleting a campaign never touches profiles or embeddings. `campaigns.json` absent on first run → `load_campaigns()` returns `{}`.
 
-Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`, `hotwords`, `use_mlx`, `parallel_stages`, `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`.
+Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`, `hotwords`, `use_mlx`, `parallel_stages`, `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`, `discord_bot_token`, `discord_default_guild`, `discord_default_channel`, `discord_presets`.
 
 > **`omegaconf` dependency note:** `omegaconf` is an undeclared transitive requirement of `pyannote-audio` — it is required at import time but not listed in pyannote's package metadata. `wisper-transcribe` declares it explicitly in `pyproject.toml` to ensure it is always installed.
 
@@ -322,10 +360,14 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - `tests/test_web_routes.py` covers web routes including video file uploads (mp4, mkv, mov, webm accepted and queued), refine/summarize job submission, summary sidecar rendering, summary download, summary-badge logic on the transcript list, deletion of summary sidecars alongside transcripts, LLM config field rendering, LLM config save (provider/model/temperature), non-empty API key save, empty API key not overwriting an existing key, Config nav link presence on the job detail page, the `/config/ollama-status` and `/config/lmstudio-status` endpoints, and full campaign CRUD routes (`/campaigns`, `/campaigns/{slug}`, member add/remove, campaign delete) including create-then-redirect via server-generated slug and transcribe form campaign select
 - `tests/test_config.py` covers `get_hf_token()` accepting `HF_TOKEN` as an alias for `HUGGINGFACE_TOKEN` and propagating whichever is set to both env vars
 - `tests/test_web_jobs.py` covers job queue CRUD, tqdm patch/restore, error recording, cancellation, and a regression test that `job.status = COMPLETED` is not set until after `_run_post_process()` finishes
-- `tests/test_campaign_manager.py` covers load/save roundtrip, `create_campaign` (slug generation, duplicate rejection, empty-name rejection), `delete_campaign` (profile files untouched), `add_member` / `remove_member`, `get_campaign_profile_keys`, `_make_slug` punctuation stripping, and `_validate_campaign_slug` (parametrized accept/reject with null-byte, dotdot, slash, CRLF payloads)
-- `tests/test_path_traversal.py` covers path traversal for campaign routes (null-byte, dotdot, slash, CRLF, `javascript:`, `.`, `..` payloads) for detail, delete, add-member, and remove-member; create error does not leak exception text; unit tests for `_validate_campaign_slug`
-- Test count: ~520 (all mocked, all passing)
-
+- `tests/test_campaign_manager.py` covers load/save roundtrip, `create_campaign` (slug generation, duplicate rejection, empty-name rejection), `delete_campaign` (profile files untouched), `add_member` / `remove_member`, `get_campaign_profile_keys`, `_make_slug` punctuation stripping, `_validate_campaign_slug` (parametrized accept/reject with null-byte, dotdot, slash, CRLF payloads), `bind_discord_id` persistence + one-to-one overwrite enforcement, and `lookup_profile_by_discord_id` (known ID returns profile key, unknown ID returns None)
+- `tests/test_path_traversal.py` covers path traversal (null-byte, dotdot), regex-busting payloads, open-redirect/CRLF payloads, unit tests for `_validate_job_id()`, recording-ID path traversal for JSON API + HTML routes, `_validate_recording_id()` unit tests, campaign-slug path traversal, and `_validate_campaign_slug()` unit tests
+- `tests/test_recording_manager.py` covers load/save roundtrip, UUID generation, corrupt index handling, missing metadata skip, status updates, concurrent `append_segment` (threading), crash recovery via `reconcile_on_startup`, and `_validate_recording_id` (parametrized accept/reject with null-byte, dotdot, slash, wildcard payloads)
+- `tests/test_audio_writer.py` covers `SegmentedOggWriter` rotation at 60 s, three-segment sessions, EOS page flag verification, crash-recovery (second writer resumes from next index), write return values, and `RealtimePCMMixer` (single user, clear-after-mix, clip-on-overflow, silence)
+- `tests/test_record_routes.py` covers start (201 + recording_id), missing voice_channel_id (400), stop with no session (400), path-traversal rejection, server.json lifecycle (written on startup, deleted on shutdown), GET /record returns 200, GET /recordings empty state + campaign-grouped list, GET /recordings/{id} detail + unknown-id 303 redirect, POST /recordings/{id}/delete removes entry, GET /recordings/{id}/live returns 501, POST /recordings/{id}/enroll (valid → 303 + profile created, invalid discord_user_id → 400, user not in unbound_speakers → 409)
+- `tests/test_record_cli.py` covers "server not running" error, server.json discovery → HTTP POST, WISPER_SERVER_URL env var override, list output, recording_id validation, stop → server POST, transcribe with path-traversal guard, delete with path-traversal guard, start missing --voice-channel error, show/transcribe valid IDs request server, token masking in config show, config discord wizard prompts, empty-input preserves existing token (14 tests)
+- `tests/test_discord_bot.py` covers BotManager start/stop lifecycle, start_session recording persisted, per-user .opus files written from PCM frames, transient 4015 rejoin logged, exhausted retries → degraded, permanent 4014 → failed (no retry), stop_session → completed, known Discord ID auto-tagged to profile key on first frame, unknown Discord ID gets empty string, unknown Discord ID added to unbound_speakers, known Discord ID NOT added to unbound_speakers, 3-user simultaneous interleaved frames → all per-user dirs populated, 3 unknown speakers all in unbound list (no duplicates), simultaneous known+unknown speakers (tagged vs unbound split); all via injected fake audio sources (no real JDA/Discord) (14 tests)
+- `tests/_discord_fakes.py`: scripted_source, multi_attempt_source, infinite_disconnect_source, blocking_source factories + make_pcm_frame / make_disconnect_frame helpers
 **CI matrix** (`.github/workflows/ci.yml`):
 - Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)
 - Weekly cron (Monday): same matrix + `latest-deps` job (`pip install --upgrade`) to detect forward-compatibility breakage before it hits PRs
@@ -342,6 +384,8 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 | MPS on Apple Silicon | faster-whisper (CTranslate2) has no MPS backend. With `mlx-whisper` installed (`pip install 'wisper-transcribe[macos]'`), transcription uses the Apple Silicon GPU/ANE via MLX Whisper. Without it, transcription falls back to CPU. pyannote diarization and speaker embeddings always run on MPS when available. |
 | Thread safety | `_model` and `_pipeline` globals are not thread-safe; parallel folder processing uses `ProcessPoolExecutor` so each worker is a separate process with isolated module state |
 | pyannote license | HuggingFace token + one-time model license acceptance required (free) |
+| Unauthenticated recording API | `POST /api/record/start` and `/stop` have no auth layer. v1 deployment assumes local/trusted network access only. A single-recording lock prevents concurrent abuse; Discord enforces channel join permissions server-side. Web auth is deferred to v2. |
+| Unbounded recording sessions | `BotManager._session_loop()` runs until explicitly stopped — sessions routinely last multiple hours. Disk usage scales linearly (~60 Ogg segments/hour/user). Operator is responsible for stopping sessions. |
 
 ---
 

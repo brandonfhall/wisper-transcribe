@@ -134,6 +134,22 @@ if (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
     }
 }
 
+# ── Java 25 (Discord recording bot) ──────────────────────────────────────────
+Write-Step "Checking Java 25+ (needed for Discord recording bot)..."
+$javaCmd = Get-Command java -ErrorAction SilentlyContinue
+if (-not $javaCmd) {
+    Write-Warn "Java 25+ not found — Discord recording bot unavailable."
+    Write-Warn "Install from https://adoptium.net or via winget: winget install EclipseAdoptium.Temurin.25.JRE"
+} else {
+    $javaVersion = & java -version 2>&1 | Select-Object -First 1
+    if ($javaVersion -match '"25\.') {
+        Write-OK "Java 25 found"
+    } else {
+        Write-Warn "Java 25+ required for Discord recording bot (found: $javaVersion)."
+        Write-Warn "Install from https://adoptium.net or via winget: winget install EclipseAdoptium.Temurin.25.JRE"
+    }
+}
+
 # ── LLM Post-processing setup ─────────────────────────────────────────────────
 $wisper = ".\.venv\Scripts\wisper.exe"
 

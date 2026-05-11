@@ -1,6 +1,9 @@
 """Config route — view and edit application settings."""
 from __future__ import annotations
 
+import logging
+import re
+
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
@@ -11,6 +14,8 @@ from wisper_transcribe.config import (
     load_config,
     save_config,
 )
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/config")
 
@@ -38,8 +43,17 @@ _LLM_FIELDS = [
     ("google_api_key",     "secret", "Google API key",               None),
 ]
 
+_DISCORD_FIELDS = [
+    ("discord_bot_token",       "secret", "Discord bot token",           None),
+    ("discord_default_guild",   "str",    "Default guild (server) ID",   None),
+    ("discord_default_channel", "str",    "Default voice channel ID",    None),
+]
+
 # Keys that must not be overwritten with an empty string
 _LLM_SECRET_FIELD_KEYS = frozenset({"anthropic_api_key", "openai_api_key", "google_api_key"})
+
+# Discord snowflake IDs are 17–20 decimal digits
+_SNOWFLAKE_RE = re.compile(r"^\d{17,20}$")
 
 
 @router.get("/ollama-status", response_class=JSONResponse)
@@ -66,6 +80,7 @@ async def ollama_status() -> JSONResponse:
             models.append({"name": m["name"], "size": size_str})
         return JSONResponse({"running": True, "models": models})
     except Exception:
+        log.warning("Failed to query Ollama status", exc_info=True)
         return JSONResponse({"running": False, "models": []})
 
 
@@ -89,6 +104,7 @@ async def lmstudio_status() -> JSONResponse:
         models = [{"name": m["id"], "size": ""} for m in data.get("data", []) if m.get("id")]
         return JSONResponse({"running": True, "models": models})
     except Exception:
+        log.warning("Failed to query LM Studio status", exc_info=True)
         return JSONResponse({"running": False, "models": []})
 
 
@@ -105,6 +121,8 @@ async def config_show(request: Request) -> HTMLResponse:
             "config_path": str(config_path),
             "fields": _CONFIG_FIELDS,
             "llm_fields": _LLM_FIELDS,
+            "discord_fields": _DISCORD_FIELDS,
+            "discord_presets": config.get("discord_presets", []),
             "saved": request.query_params.get("saved") == "1",
         },
     )
@@ -139,6 +157,24 @@ def _apply_fields(config: dict, form, fields) -> None:
             config[key] = raw
 
 
+@router.post("/presets/add")
+async def preset_add(request: Request) -> RedirectResponse:
+    form = await request.form()
+    name = str(form.get("name", "")).strip()
+    guild_id = str(form.get("guild_id", "")).strip()
+    channel_id = str(form.get("channel_id", "")).strip()
+
+    if not name or not _SNOWFLAKE_RE.match(guild_id) or not _SNOWFLAKE_RE.match(channel_id):
+        return RedirectResponse(url="/record?preset_error=invalid", status_code=303)
+
+    config = load_config()
+    presets = list(config.get("discord_presets", []))
+    presets.append({"name": name, "guild_id": guild_id, "channel_id": channel_id})
+    config["discord_presets"] = presets
+    save_config(config)
+    return RedirectResponse(url="/record?preset_saved=1", status_code=303)
+
+
 @router.post("", response_class=HTMLResponse)
 async def config_save(request: Request) -> RedirectResponse:
     form = await request.form()
@@ -146,6 +182,20 @@ async def config_save(request: Request) -> RedirectResponse:
 
     _apply_fields(config, form, _CONFIG_FIELDS)
     _apply_fields(config, form, _LLM_FIELDS)
+    _apply_fields(config, form, _DISCORD_FIELDS)
+
+    # Rebuild discord_presets from form data (names, guild_ids, channel_ids arrays)
+    preset_names = form.getlist("preset_name")
+    preset_guilds = form.getlist("preset_guild_id")
+    preset_channels = form.getlist("preset_channel_id")
+    presets = []
+    for i in range(len(preset_names)):
+        nm = preset_names[i].strip() if i < len(preset_names) else ""
+        gid = preset_guilds[i].strip() if i < len(preset_guilds) else ""
+        cid = preset_channels[i].strip() if i < len(preset_channels) else ""
+        if nm and gid and cid:
+            presets.append({"name": nm, "guild_id": gid, "channel_id": cid})
+    config["discord_presets"] = presets
 
     save_config(config)
     return RedirectResponse(url="/config?saved=1", status_code=303)

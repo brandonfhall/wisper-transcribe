@@ -10,8 +10,8 @@ Keeping docs in sync with code is **non-optional** — treat it as part of the d
 
 | Doc | Update when |
 |-----|-------------|
-| `architecture.md` | Any new module, pipeline change, design decision, config key, or test count change. Update: module map entry, relevant design-decision section, config key list, Known Constraints table, test count. |
-| `README.md` | Any user-facing change: new CLI flag, changed flag behaviour, new command, changed env variable, Docker change, or anything that affects how a user runs or configures wisper. Do **not** put test counts in README — they belong in `architecture.md` only. |
+| `architecture.md` | Any new module, pipeline change, design decision, or config key change. Update: module map entry, relevant design-decision section, config key list, Known Constraints table. |
+| `README.md` | Any user-facing change: new CLI flag, changed flag behaviour, new command, changed env variable, Docker change, or anything that affects how a user runs or configures wisper. |
 | `plan.md` | All active plans, research findings, and open design decisions live here. When work is completed, remove it from `plan.md` — unless the context directly informs a remaining action item, in which case keep only the relevant excerpt. |
 
 Both files must be updated **in the same commit** as the code change, not as a follow-up.
@@ -20,11 +20,12 @@ Both files must be updated **in the same commit** as the code change, not as a f
 
 ## Definition of Done
 
-A task is not complete until all three are true — in this order:
+A task is not complete until all four are true — in this order:
 
 1. **Tests pass** — run `.venv/bin/pytest tests/ -v` and confirm green
 2. **Docs updated** — `architecture.md` updated; `README.md` updated if user-facing (per Documentation Rules above)
-3. **Committed** — all changed files in a single `git commit`
+3. **Tailwind rebuilt** — if any template (`.html` in `src/wisper_transcribe/web/templates/`) or `static/input.css` changed, rebuild: `.venv/bin/python -m pytailwindcss -i src/wisper_transcribe/static/input.css -o src/wisper_transcribe/static/tailwind.min.css --minify`. Commit the rebuilt `tailwind.min.css` alongside the template change.
+4. **Committed** — all changed files in a single `git commit`
 
 When a todo list reaches 100% completed, execute steps 1–3 immediately without waiting to be asked.
 

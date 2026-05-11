@@ -70,3 +70,22 @@ def _block_real_llm_calls():
 
     with patch("httpx.stream", _blocked):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _block_discord_network():
+    """Prevent tests from opening real Discord connections or sockets.
+
+    Replaces _unix_socket_source with a no-op generator so any BotManager
+    created without an explicit audio_source_factory does nothing instead of
+    trying to launch the JDA subprocess or bind a Unix socket.
+    Tests that need scripted audio inject their own factory via BotManager().
+    """
+    async def _null_source(*_a, **_kw):
+        return
+        yield  # makes this an async generator
+
+    with patch(
+        "wisper_transcribe.web.discord_bot._unix_socket_source", _null_source
+    ):
+        yield

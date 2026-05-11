@@ -110,6 +110,7 @@ Walks you through provider (Ollama / LM Studio / Anthropic / OpenAI / Google), m
 - [ffmpeg](https://ffmpeg.org/download.html) on your PATH
 - A free [HuggingFace token](https://huggingface.co/settings/tokens)
 - GPU recommended but not required (CPU works, just slower)
+- **Discord recording bot:** Java 25+ ([Adoptium](https://adoptium.net/) or `apt-get install openjdk-25-jre-headless`)
 
 **Windows CUDA:**
 - Install ffmpeg via `winget install Gyan.FFmpeg.Shared`
@@ -376,6 +377,16 @@ With `--campaign`, speaker matching is restricted to that campaign's enrolled me
 
 **Voice transfer between campaigns:** Because embeddings are stored globally, adding an existing speaker profile to a new campaign automatically gives that campaign the benefit of all previously recorded voice data. No re-enrollment needed.
 
+**Binding Discord IDs to campaign members:**
+
+When using the Discord recording bot, you can link each campaign member to their Discord user ID so their audio track is automatically labelled without manual intervention.
+
+1. Go to **Campaigns → [your campaign]** in the web UI.
+2. In the roster table, paste the member's Discord user ID (a numeric snowflake, e.g. `123456789012345678`) into the **Discord ID** column and click **Link**.
+3. When the bot records a session and that user speaks, their per-user track is automatically tagged with their wisper profile name in `Recording.discord_speakers`.
+
+To find a Discord user ID: enable Developer Mode in Discord → right-click the user → *Copy User ID*. Each ID can only be bound to one roster member per campaign (linking to a new member clears the old binding automatically).
+
 ---
 
 ### `wisper transcripts`
@@ -479,6 +490,36 @@ wisper config llm                         # interactive wizard: provider + model
 
 Relevant keys: `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`.
 
+### `wisper record`
+
+Control the Discord recording bot from the command line. The wisper server must be running first.
+
+```bash
+wisper record start --voice-channel <ID> --guild <ID>           # join a channel and start recording
+wisper record start --voice-channel <ID> --guild <ID> --campaign d-d-mondays  # associate with campaign
+wisper record start --preset "Weekly D&D"                       # use a saved preset
+wisper record stop                                              # stop the active session
+wisper record list                                              # list all recordings
+wisper record show <recording_id>                               # show metadata for a recording
+wisper record transcribe <recording_id>                         # re-queue transcription
+wisper record delete <recording_id>                             # remove recording entry (files kept)
+```
+
+Requires the wisper server to be running (`wisper server`). Server location is read from `data_dir/server.json` automatically; override with `WISPER_SERVER_URL`.
+
+**Managing channel presets:**
+
+```bash
+wisper config discord                                           # set bot token, default guild/channel
+wisper config discord-presets add --name "Weekly D&D" --guild <ID> --channel <ID>
+wisper config discord-presets list
+wisper config discord-presets remove "Weekly D&D"
+```
+
+Presets are also manageable via the web UI — the Record page has an inline "Save as preset" form.
+
+---
+
 ### `wisper server`
 
 Start the browser-based web UI:
@@ -513,11 +554,17 @@ wisper server
 | Transcripts | `/transcripts` | Browse output files, view rendered markdown, download, delete; green notes icon on cards that have a campaign summary |
 | Speakers | `/speakers` | Enroll, rename, remove speaker profiles |
 | Campaigns | `/campaigns` | Create and manage campaigns; add/remove roster members; scope transcription to a campaign |
+| Record | `/record` | Start and stop live Discord voice channel recording sessions; shows active session with live speaker and segment counts via SSE; **Browse bot's channels** panel lists available guilds and voice channels so you can click-to-fill IDs without leaving the page |
+| Recordings | `/recordings` | Browse all recordings, grouped by campaign; view per-recording detail (status, speakers, segments); delete entries |
 | Config | `/config` | View and edit all settings |
 
 ### Speaker enrollment in the web UI
 
 The interactive CLI enrollment prompt is replaced by a post-job wizard. After transcription completes, click **Name Speakers** on the job detail page. Each detected speaker has a **Play sample** button so you can hear the voice before assigning a name. Existing profiles are shown as click-to-fill options ranked by voice similarity.
+
+### Auto-enrollment from recordings
+
+When the Discord bot records a session, any speaker whose Discord user ID is **not** bound to a campaign member is added to the recording's "Unknown Speakers" list. After the session ends, open the recording's detail page (`/recordings/{id}`) to see the panel. Enter a display name next to each unknown Discord ID and click **Enroll** — wisper extracts a voice embedding from their per-user audio track and creates a new speaker profile. The Discord ID is then bound to that profile in the campaign roster automatically, so future sessions tag them correctly without manual intervention.
 
 ### LLM Post-processing in the web UI
 
@@ -737,6 +784,31 @@ docker compose run wisper wisper transcribe /app/input/session01.mp3 --enroll-sp
 
 All directories are created automatically on first run and persist across container restarts.
 
+### Discord recording bot
+
+Record Discord voice channel sessions directly from the web UI. The bot joins your server's voice channel, captures per-user audio, and hands the recording off to the transcription pipeline — no manual file shuffling.
+
+**Prerequisites:**
+
+1. **Create a Discord bot** at [discord.com/developers/applications](https://discord.com/developers/applications)
+2. Give it a name (e.g. "Wisper") and go to the **Bot** tab
+3. Under **Privileged Gateway Intents**, enable **Server Members Intent** and **Message Content Intent**
+4. Copy the bot token — set it as `DISCORD_BOT_TOKEN` in your `.env` file
+5. **Invite the bot** to your server: go to **OAuth2 → URL Generator**, select `bot` + `applications.commands`, bot permissions: **View Channels**, **Connect**, **Speak**. Paste the generated URL in a browser.
+
+**Usage:**
+
+1. Start the server: `make start` (Docker) or `wisper server` (local)
+2. Open `http://localhost:8080/record`
+3. Optional: expand **Browse bot's channels** to see all guilds and voice channels the bot can see — click any channel to auto-fill the Guild ID and Voice Channel ID fields
+4. Select a campaign and voice channel, then click **Start Recording**
+5. When the session ends, click **Stop** — the recording appears in **Recordings**
+6. On the recording detail page, click **Transcribe** to queue it for processing
+
+The bot joins per-session (not always-on) and auto-rejoins on transient disconnects. Recordings are stored at `./recordings/` (bind-mounted in Docker) alongside your other data.
+
+> **CLI equivalent:** `wisper record start --voice-channel <ID> --campaign <slug>` — see `wisper record --help` for all subcommands.
+
 ### Verify GPU passthrough
 
 ```bash
@@ -749,6 +821,8 @@ docker compose run wisper nvidia-smi
 
 | Variable | Purpose |
 |----------|---------|
+| `DISCORD_BOT_TOKEN` | Discord bot token for the recording bot (see [Discord recording bot](#discord-recording-bot)) |
+| `WISPER_SIDECAR_JAR` | Absolute path to the JDA sidecar fat JAR (`discord-bot-all.jar`). Overrides the default search path used by `_find_sidecar_jar()`. Useful when the JAR is not in the standard repo or Docker location. |
 | `HF_TOKEN` | HuggingFace token — preferred name (used by Docker `.env` and all HF libraries) |
 | `HUGGINGFACE_TOKEN` | Alias for `HF_TOKEN`; both are accepted and propagated to each other |
 | `WISPER_DATA_DIR` | Override config/profile storage path — set automatically in Docker |
@@ -801,6 +875,16 @@ WISPER_DEBUG=1 wisper transcribe session.mp3
 
 ---
 
+## Known Limitations (v1)
+
+- **One active recording at a time.** `BotManager` manages a single Discord voice session — starting a second recording while one is active returns an error.
+- **No multi-guild / multi-channel.** The bot connects to one voice channel in one guild per session.
+- **DAVE E2EE voice receive depends on JDAVE (Java).** Discord's DAVE protocol encrypts per-user voice — only JDA+JDAVE has confirmed working decrypt as of 2026-05. When [Pycord PR #3159](https://github.com/Pycord-Development/pycord/pull/3159) ships DAVE support, the Java sidecar can be replaced with a ~100-line Python implementation. The Unix-socket wire protocol is the stable interface.
+- **Live transcription is deferred to v2.** Recordings are batch-transcribed after the session stops. Five file-format invariants are honoured so v2 can add live transcription without rewriting the recording layer.
+- **No auth on web routes.** The existing "trust your LAN" posture applies to recording start/stop controls. Project-wide auth is tracked in the backlog.
+
+---
+
 ## Roadmap
 
 - [x] Phase 1: Basic transcription
@@ -825,3 +909,4 @@ WISPER_DEBUG=1 wisper transcribe session.mp3
 - [x] Code quality: extracted shared `time_utils.py` helpers, deduplicated pipeline/formatter/diarizer
 - [x] LLM post-processing: `wisper refine` (vocabulary correction, unknown-speaker ID) and `wisper summarize` (campaign notes with loot, NPCs, follow-ups) — multi-provider (Ollama / Anthropic / OpenAI / Google)
 - [x] Distribution: double-click launchers (`start.command` macOS, `start.bat` Windows, `start.sh` Linux), `Makefile` for Docker workflows, `.env.example` for token configuration
+- [x] Discord recording bot: per-user audio capture via JDA sidecar, campaign integration, enrollment from recordings, transcribe hand-off

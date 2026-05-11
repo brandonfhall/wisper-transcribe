@@ -1,5 +1,9 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
+from typing import Literal, Optional
 
 
 @dataclass
@@ -46,6 +50,7 @@ class CampaignMember:
     profile_key: str
     role: str = ""
     character: str = ""
+    discord_user_id: Optional[str] = None  # Phase 4: Discord ID binding
 
 
 @dataclass
@@ -56,6 +61,50 @@ class Campaign:
     created: str
     members: dict = field(default_factory=dict)       # dict[str, CampaignMember]
     transcripts: list = field(default_factory=list)   # list[str] — transcript stems
+
+
+# ---------------------------------------------------------------------------
+# Discord recording
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SegmentRecord:
+    """One audio segment file on a single stream (per-user or mixed)."""
+    index: int
+    stream: str                    # "mixed" or a discord_user_id
+    started_at: datetime
+    duration_s: float
+    path: Path
+    finalized: bool = False        # True after EOS page flushed to disk
+
+
+@dataclass
+class RejoinAttempt:
+    """One auto-rejoin event logged to the recording."""
+    timestamp: datetime
+    close_code: int
+    attempt_number: int
+
+
+@dataclass
+class Recording:
+    id: str                        # uuid4
+    campaign_slug: Optional[str]
+    started_at: datetime
+    ended_at: Optional[datetime]
+    status: Literal["recording", "degraded", "completed", "failed", "transcribing", "transcribed"]
+    voice_channel_id: str
+    guild_id: str
+    discord_speakers: dict         # discord_user_id → wisper profile name (or "")
+    segment_manifest: list         # list[SegmentRecord]
+    combined_path: Optional[Path]  # set after recording stops and mix is written
+    per_user_dir: Optional[Path]
+    transcript_path: Optional[Path]
+    rejoin_log: list               # list[RejoinAttempt]
+    notes: Optional[str] = None
+    unbound_speakers: list = field(default_factory=list)  # discord_user_ids heard but not bound
+    job_id: Optional[str] = None  # JobQueue job.id when transcription is in progress or done
 
 
 # ---------------------------------------------------------------------------

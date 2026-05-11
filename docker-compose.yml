@@ -18,12 +18,14 @@ x-volumes: &volumes
   - ./data:/data                       # config + speaker profiles
   - ./input:/app/input                 # audio input
   - ./output:/app/output               # transcript output
+  - ./recordings:/data/recordings      # Discord recording storage
 
 x-env: &env
   WISPER_DATA_DIR: /data
   # Token and API keys are read from .env (copy .env.example → .env)
   HF_TOKEN: ${HF_TOKEN:-}
   HUGGINGFACE_TOKEN: ${HF_TOKEN:-}
+  DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
   GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}

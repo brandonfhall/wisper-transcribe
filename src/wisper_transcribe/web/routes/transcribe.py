@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import tempfile
 from pathlib import Path
 from typing import Annotated, Optional
@@ -16,51 +15,15 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Resp
 from ..jobs import COMPLETED, FAILED
 from . import get_queue as _get_queue, templates
 from wisper_transcribe.campaign_manager import _validate_campaign_slug as _validate_campaign_slug_cm, load_campaigns
+from wisper_transcribe.path_utils import get_output_dir, validate_path_component
+from wisper_transcribe.web._responses import error_redirect, invalid_input_response
 
 router = APIRouter(prefix="/transcribe")
 
 
 def _validate_job_id(job_id: str) -> str | None:
-    """Validate a job ID from a URL path parameter and return a taint-clean copy.
+    return validate_path_component(job_id, "_guard")
 
-    Returns the sanitised job ID string, or None if the input is invalid.
-
-    Two-layer defence:
-    1. Strict regex — only UUID-like alphanumeric/hyphen strings pass
-       (rejects slashes, dots, null bytes, CRLF, and every other injection
-       character before any further processing).
-    2. os.path dummy guard — routes the already-safe string through
-       os.path.abspath/startswith so that CodeQL's ``py/url-redirection``
-       taint-tracking query sees an explicit path-sanitisation sink and drops
-       the taint.  re.match().group() is still considered tainted by the
-       analyser even after a format check; this pattern is the recognised way
-       to produce a taint-clean copy for redirect URLs.
-    """
-    if not re.match(r"^[\w\-]+$", job_id):
-        return None
-    # os.path round-trip clears CodeQL taint — see module docstring above.
-    _guard_base = os.path.abspath("_guard")
-    if not _guard_base.endswith(os.sep):
-        _guard_base += os.sep
-    _guard_path = os.path.abspath(os.path.join(_guard_base, job_id))
-    if not _guard_path.startswith(_guard_base):
-        return None
-    return os.path.basename(_guard_path)
-
-
-def _default_output_dir() -> Path:
-    """Return the default output directory for web-submitted transcription jobs.
-
-    Mirrors the logic in transcripts._output_dir so transcripts always land
-    where the browser can find them.
-    """
-    from wisper_transcribe.config import get_data_dir
-
-    out = Path("output")
-    if not out.exists():
-        out = Path(get_data_dir()) / "output"
-    out.mkdir(parents=True, exist_ok=True)
-    return out
 
 
 @router.get("", response_class=HTMLResponse)
@@ -92,6 +55,7 @@ async def start_transcribe(
     post_refine: Annotated[Optional[str], Form()] = None,
     post_summarize: Annotated[Optional[str], Form()] = None,
     campaign: Annotated[Optional[str], Form()] = None,
+    vocab_file: Annotated[Optional[UploadFile], File()] = None,
 ) -> RedirectResponse:
     """Accept an uploaded audio file, save it to a temp location, enqueue job."""
     # Save uploaded file to a persistent temp location (job must outlive request)
@@ -104,6 +68,15 @@ async def start_transcribe(
         tmp.write(content)
     finally:
         tmp.close()
+
+    # Parse optional vocab file into hotwords list (same logic as CLI --vocab-file)
+    hotwords: Optional[list[str]] = None
+    if vocab_file and vocab_file.filename:
+        raw = await vocab_file.read()
+        lines = raw.decode("utf-8", errors="replace").splitlines()
+        parsed = [ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")]
+        if parsed:
+            hotwords = parsed
 
     # Parse optional integer fields
     def _int_or_none(val: Optional[str]) -> Optional[int]:
@@ -122,7 +95,7 @@ async def start_transcribe(
     # page can find them.  A user-supplied path is not accepted — accepting
     # arbitrary paths from form data would allow writing outside the configured
     # data directory.
-    out_path: Path = _default_output_dir()
+    out_path: Path = get_output_dir()
 
     # Use the original filename stem as a hint so the output .md has a
     # meaningful name instead of a temp-file UUID.
@@ -133,7 +106,7 @@ async def start_transcribe(
     if campaign and campaign.strip():
         safe_campaign = _validate_campaign_slug_cm(campaign.strip())
         if safe_campaign is None:
-            return RedirectResponse(url="/transcribe?error=invalid_campaign", status_code=303)
+            return error_redirect("/transcribe", "invalid_campaign")
 
     queue = _get_queue(request)
     job = queue.submit(
@@ -155,6 +128,7 @@ async def start_transcribe(
         post_refine=(post_refine == "1"),
         post_summarize=(post_summarize == "1"),
         campaign=safe_campaign,
+        hotwords=hotwords,
     )
 
     return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
@@ -165,7 +139,7 @@ async def cancel_job(request: Request, job_id: str) -> Response:
     """Cancel a pending or running job."""
     safe_id = _validate_job_id(job_id)
     if safe_id is None:
-        return HTMLResponse(content="Invalid job ID", status_code=400)
+        return invalid_input_response("Invalid job ID")
 
     queue = _get_queue(request)
     queue.cancel(safe_id)
@@ -261,7 +235,7 @@ async def enroll_form(request: Request, job_id: str) -> Response:
     """Speaker enrollment wizard for a completed job."""
     safe_id = _validate_job_id(job_id)
     if safe_id is None:
-        return HTMLResponse(content="Invalid job ID", status_code=400)
+        return invalid_input_response("Invalid job ID")
 
     queue = _get_queue(request)
     job = queue.get(safe_id)
@@ -306,11 +280,11 @@ async def enroll_form(request: Request, job_id: str) -> Response:
 async def speaker_excerpt(request: Request, job_id: str, speaker_name: str) -> Response:
     """Serve a short audio clip for a detected speaker (used in enrollment wizard)."""
     if not speaker_name or "\x00" in speaker_name:
-        return HTMLResponse(content="Invalid speaker name", status_code=400)
+        return invalid_input_response("Invalid speaker name")
         
     safe_name = os.path.basename(speaker_name)
     if safe_name != speaker_name or safe_name in {".", ".."}:
-        return HTMLResponse(content="Invalid speaker name", status_code=400)
+        return invalid_input_response("Invalid speaker name")
     queue = _get_queue(request)
     job = queue.get(job_id)
     if job is None:
@@ -326,7 +300,7 @@ async def enroll_submit(request: Request, job_id: str) -> Response:
     """Apply speaker name assignments and regenerate the transcript."""
     safe_id = _validate_job_id(job_id)
     if safe_id is None:
-        return HTMLResponse(content="Invalid job ID", status_code=400)
+        return invalid_input_response("Invalid job ID")
 
     queue = _get_queue(request)
     job = queue.get(safe_id)

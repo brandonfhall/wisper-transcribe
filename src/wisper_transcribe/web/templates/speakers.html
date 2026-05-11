@@ -13,6 +13,11 @@
   </div>
 
   {% if profiles %}
+  <input id="list-filter" type="search" placeholder="Filter speakers…"
+         class="form-input max-w-xs" autocomplete="off"/>
+  {% endif %}
+
+  {% if profiles %}
   <div class="card overflow-hidden p-0">
     <div class="overflow-x-auto">
     <table class="min-w-full divide-y divide-gray-200 text-sm">
@@ -27,7 +32,7 @@
       </thead>
       <tbody class="bg-white divide-y divide-gray-200">
         {% for key, profile in profiles.items() %}
-        <tr>
+        <tr data-filterable>
           <td class="px-6 py-4 font-medium text-gray-900">
             {{ profile.display_name }}
             {% if has_clip and has_clip[key] %}
@@ -79,6 +84,17 @@
 </div>
 
 <script>
+(function() {
+  var input = document.getElementById('list-filter');
+  if (!input) return;
+  input.addEventListener('input', function() {
+    var q = this.value.trim().toLowerCase();
+    document.querySelectorAll('[data-filterable]').forEach(function(el) {
+      el.style.display = (q && !el.textContent.toLowerCase().includes(q)) ? 'none' : '';
+    });
+  });
+})();
+
 function playClip(audioId, btn) {
   document.querySelectorAll('audio').forEach(a => {
     if (a.id !== audioId) { a.pause(); a.currentTime = 0; }

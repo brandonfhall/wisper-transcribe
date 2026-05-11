@@ -1,7 +1,7 @@
 """Campaigns route — manage per-campaign speaker rosters."""
 from __future__ import annotations
 
-import os
+import re
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Form, Request
@@ -10,13 +10,16 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from . import templates
 from wisper_transcribe.campaign_manager import (
     _validate_campaign_slug,
+    _validate_profile_key,
     add_member,
+    bind_discord_id,
     create_campaign,
     delete_campaign,
     load_campaigns,
     remove_member,
 )
 from wisper_transcribe.speaker_manager import load_profiles
+from wisper_transcribe.web._responses import error_redirect, invalid_input_response
 
 router = APIRouter(prefix="/campaigns")
 
@@ -39,17 +42,17 @@ async def campaigns_create_post(
 ) -> RedirectResponse:
     display_name = display_name.strip()
     if not display_name:
-        return RedirectResponse(url="/campaigns?error=invalid_name", status_code=303)
+        return error_redirect("/campaigns", "invalid_name")
 
     try:
         campaign = create_campaign(display_name)
     except ValueError:
-        return RedirectResponse(url="/campaigns?error=create_failed", status_code=303)
+        return error_redirect("/campaigns", "create_failed")
 
     # Use the server-generated slug (from uuid4-like derivation), not the raw form value.
     safe = _validate_campaign_slug(campaign.slug)
     if safe is None:
-        return RedirectResponse(url="/campaigns?error=create_failed", status_code=303)
+        return error_redirect("/campaigns", "create_failed")
     return RedirectResponse(url=f"/campaigns/{safe}", status_code=303)
 
 
@@ -57,12 +60,12 @@ async def campaigns_create_post(
 async def campaign_detail(request: Request, slug: str) -> HTMLResponse:
     safe = _validate_campaign_slug(slug)
     if safe is None:
-        return HTMLResponse(content="Invalid campaign slug", status_code=400)
+        return invalid_input_response("Invalid campaign slug")
 
     campaigns = load_campaigns()
     campaign = campaigns.get(safe)
     if campaign is None:
-        return RedirectResponse(url="/campaigns?error=not_found", status_code=303)
+        return error_redirect("/campaigns", "not_found")
 
     profiles = load_profiles()
     # Profiles not yet in this campaign (for the add-member dropdown)
@@ -85,7 +88,7 @@ async def campaign_detail(request: Request, slug: str) -> HTMLResponse:
 async def campaign_delete(request: Request, slug: str) -> RedirectResponse:
     safe = _validate_campaign_slug(slug)
     if safe is None:
-        return HTMLResponse(content="Invalid campaign slug", status_code=400)
+        return invalid_input_response("Invalid campaign slug")
 
     try:
         delete_campaign(safe)
@@ -105,24 +108,29 @@ async def campaign_add_member(
 ) -> RedirectResponse:
     safe = _validate_campaign_slug(slug)
     if safe is None:
-        return HTMLResponse(content="Invalid campaign slug", status_code=400)
+        return invalid_input_response("Invalid campaign slug")
+
+    campaigns = load_campaigns()
+    campaign = campaigns.get(safe)
+    if campaign is None:
+        return error_redirect("/campaigns", "not_found")
 
     # Validate profile_key by checking it exists in the global profile store.
     # We do NOT use profile_key in path construction — membership check only.
     profiles = load_profiles()
     if profile_key not in profiles:
         return RedirectResponse(
-            url=f"/campaigns/{safe}?error=unknown_profile", status_code=303
+            url=f"/campaigns/{campaign.slug}?error=unknown_profile", status_code=303
         )
 
     try:
         add_member(safe, profile_key, role=role, character=character)
     except KeyError:
         return RedirectResponse(
-            url=f"/campaigns/{safe}?error=not_found", status_code=303
+            url=f"/campaigns/{campaign.slug}?error=not_found", status_code=303
         )
 
-    return RedirectResponse(url=f"/campaigns/{safe}", status_code=303)
+    return RedirectResponse(url=f"/campaigns/{campaign.slug}", status_code=303)
 
 
 @router.post("/{slug}/members/{profile_key}/remove", response_class=HTMLResponse)
@@ -133,27 +141,60 @@ async def campaign_remove_member(
 ) -> RedirectResponse:
     safe_slug = _validate_campaign_slug(slug)
     if safe_slug is None:
-        return HTMLResponse(content="Invalid campaign slug", status_code=400)
+        return invalid_input_response("Invalid campaign slug")
 
-    # Validate profile_key with same two-layer pattern.
-    if not profile_key or "\x00" in profile_key:
-        return HTMLResponse(content="Invalid profile key", status_code=400)
-    import re as _re
-    safe_key = os.path.basename(profile_key)
-    if safe_key != profile_key or not _re.match(r"^[\w\-]+$", safe_key):
-        return HTMLResponse(content="Invalid profile key", status_code=400)
+    clean_key = _validate_profile_key(profile_key)
+    if clean_key is None:
+        return invalid_input_response("Invalid profile key")
 
-    _guard_base = os.path.abspath("_guard")
-    if not _guard_base.endswith(os.sep):
-        _guard_base += os.sep
-    _guard_path = os.path.abspath(os.path.join(_guard_base, safe_key))
-    if not _guard_path.startswith(_guard_base):
-        return HTMLResponse(content="Invalid profile key", status_code=400)
-    clean_key = os.path.basename(_guard_path)
+    campaigns = load_campaigns()
+    campaign = campaigns.get(safe_slug)
+    if campaign is None:
+        return error_redirect("/campaigns", "not_found")
 
     try:
         remove_member(safe_slug, clean_key)
     except KeyError:
         pass  # Campaign gone — redirect silently
 
-    return RedirectResponse(url=f"/campaigns/{safe_slug}", status_code=303)
+    return RedirectResponse(url=f"/campaigns/{campaign.slug}", status_code=303)
+
+
+@router.post("/{slug}/members/{profile_key}/discord-id", response_class=HTMLResponse)
+async def campaign_bind_discord_id(
+    request: Request,
+    slug: str,
+    profile_key: str,
+    discord_user_id: Annotated[str, Form()] = "",
+) -> RedirectResponse:
+    safe_slug = _validate_campaign_slug(slug)
+    if safe_slug is None:
+        return invalid_input_response("Invalid campaign slug")
+
+    clean_key = _validate_profile_key(profile_key)
+    if clean_key is None:
+        return invalid_input_response("Invalid profile key")
+
+    campaigns = load_campaigns()
+    campaign = campaigns.get(safe_slug)
+    if campaign is None:
+        return error_redirect("/campaigns", "not_found")
+
+    # Validate discord_user_id: Discord snowflake (pure digits) or empty to clear.
+    cleaned_id: Optional[str] = None
+    stripped = discord_user_id.strip()
+    if stripped:
+        if not re.match(r"^\d+$", stripped):
+            return RedirectResponse(
+                url=f"/campaigns/{campaign.slug}?error=invalid_discord_id", status_code=303
+            )
+        cleaned_id = stripped
+
+    try:
+        bind_discord_id(safe_slug, clean_key, cleaned_id)
+    except KeyError:
+        return RedirectResponse(
+            url=f"/campaigns/{campaign.slug}?error=not_found", status_code=303
+        )
+
+    return RedirectResponse(url=f"/campaigns/{campaign.slug}", status_code=303)

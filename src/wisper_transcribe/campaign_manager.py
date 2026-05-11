@@ -10,7 +10,6 @@ Data lives at:
 from __future__ import annotations
 
 import json
-import os
 import re
 from datetime import date
 from pathlib import Path
@@ -18,6 +17,7 @@ from typing import Optional
 
 from .config import get_data_dir
 from .models import Campaign, CampaignMember
+from .path_utils import validate_path_component
 
 
 # ---------------------------------------------------------------------------
@@ -43,31 +43,11 @@ def _make_slug(name: str) -> str:
 
 
 def _validate_campaign_slug(slug: str) -> Optional[str]:
-    """Two-layer security guard for campaign slugs.
+    return validate_path_component(slug, "_campaigns_guard")
 
-    Returns the sanitised slug on success, None on rejection.
-    Mirrors the _validate_job_id pattern from web/routes/transcribe.py so
-    CodeQL's taint tracker recognises the result as clean.
-    """
-    if not slug or "\x00" in slug:
-        return None
 
-    safe = os.path.basename(slug)
-    if safe != slug or safe in {".", ".."}:
-        return None
-
-    if not re.match(r"^[\w\-]+$", safe):
-        return None
-
-    # os.path round-trip breaks the CodeQL taint chain
-    _guard_base = os.path.abspath("_campaigns_guard")
-    if not _guard_base.endswith(os.sep):
-        _guard_base += os.sep
-    _guard_path = os.path.abspath(os.path.join(_guard_base, safe))
-    if not _guard_path.startswith(_guard_base):
-        return None
-
-    return os.path.basename(_guard_path)
+def _validate_profile_key(profile_key: str) -> Optional[str]:
+    return validate_path_component(profile_key, "_guard")
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +71,7 @@ def load_campaigns(data_dir: Optional[Path] = None) -> dict[str, Campaign]:
                 profile_key=profile_key,
                 role=mdata.get("role", ""),
                 character=mdata.get("character", ""),
+                discord_user_id=mdata.get("discord_user_id"),
             )
         campaigns[slug] = Campaign(
             slug=slug,
@@ -113,7 +94,11 @@ def save_campaigns(campaigns: dict[str, Campaign], data_dir: Optional[Path] = No
             "display_name": campaign.display_name,
             "created": campaign.created,
             "members": {
-                key: {"role": m.role, "character": m.character}
+                key: {
+                    "role": m.role,
+                    "character": m.character,
+                    "discord_user_id": m.discord_user_id,
+                }
                 for key, m in campaign.members.items()
             },
             "transcripts": list(campaign.transcripts),
@@ -195,6 +180,54 @@ def get_campaign_profile_keys(slug: str, data_dir: Optional[Path] = None) -> set
     if slug not in campaigns:
         return set()
     return set(campaigns[slug].members.keys())
+
+
+# ---------------------------------------------------------------------------
+# Discord ID binding
+# ---------------------------------------------------------------------------
+
+def bind_discord_id(
+    slug: str,
+    profile_key: str,
+    discord_user_id: Optional[str],
+    data_dir: Optional[Path] = None,
+) -> None:
+    """Bind or clear the Discord user ID for a campaign member.
+
+    Enforces one-to-one mapping: if discord_user_id is already bound to another
+    member in the same campaign, that existing binding is cleared first.
+    Pass discord_user_id=None to clear the binding.
+    Raises KeyError if the campaign or member is not found.
+    """
+    campaigns = load_campaigns(data_dir)
+    if slug not in campaigns:
+        raise KeyError(f"Campaign {slug!r} not found")
+    if profile_key not in campaigns[slug].members:
+        raise KeyError(f"Member {profile_key!r} not in campaign {slug!r}")
+
+    if discord_user_id:
+        # Clear any existing binding for this discord_user_id (one-to-one)
+        for key, member in campaigns[slug].members.items():
+            if member.discord_user_id == discord_user_id and key != profile_key:
+                member.discord_user_id = None
+
+    campaigns[slug].members[profile_key].discord_user_id = discord_user_id or None
+    save_campaigns(campaigns, data_dir)
+
+
+def lookup_profile_by_discord_id(
+    slug: str,
+    discord_user_id: str,
+    data_dir: Optional[Path] = None,
+) -> Optional[str]:
+    """Return the profile_key bound to discord_user_id in the given campaign, or None."""
+    campaigns = load_campaigns(data_dir)
+    if slug not in campaigns:
+        return None
+    for profile_key, member in campaigns[slug].members.items():
+        if member.discord_user_id == discord_user_id:
+            return profile_key
+    return None
 
 
 # ---------------------------------------------------------------------------

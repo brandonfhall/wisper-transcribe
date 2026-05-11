@@ -18,6 +18,18 @@
 #   docker compose run wisper wisper transcribe /app/input/session.mp3 --enroll-speakers
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ── Java sidecar builder ──────────────────────────────────────────────────────
+# Builds the JDA+JDAVE Discord bot fat JAR.  Uses the Gradle image with JDK 25
+# pre-installed; the source tree in discord-bot/ is a placeholder that will be
+# replaced with the real JDA voice-receive implementation.
+FROM gradle:jdk25 AS java-builder
+WORKDIR /build
+COPY discord-bot/ ./discord-bot/
+RUN cd discord-bot && gradle shadowJar --no-daemon -q
+
+# ── JRE layer (extracted from JDK image) ────────────────────────────────────
+FROM eclipse-temurin:25-jre AS jre
+
 # ── shared base ───────────────────────────────────────────────────────────────
 FROM python:3.12-slim AS base
 
@@ -29,7 +41,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy Java 25 JRE for the JDA sidecar
+COPY --from=jre /opt/java/openjdk /opt/java/openjdk
+ENV JAVA_HOME=/opt/java/openjdk
+ENV PATH=$JAVA_HOME/bin:$PATH
+
 WORKDIR /app
+
+# Copy the JDA sidecar fat JAR from the java-builder stage
+COPY --from=java-builder /build/discord-bot/build/libs/discord-bot-all.jar ./discord-bot/
 
 # Copy package definition and source tree
 COPY pyproject.toml README.md ./
