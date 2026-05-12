@@ -7,7 +7,13 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from . import get_queue, templates
-from wisper_transcribe.config import get_data_dir, get_device, load_config  # noqa: F401 (get_data_dir used in template context and tests)
+from wisper_transcribe.config import (  # noqa: F401 (get_data_dir used in template context and tests)
+    get_data_dir,
+    get_device,
+    get_llm_api_key,
+    load_config,
+    resolve_llm_model,
+)
 
 router = APIRouter()
 
@@ -31,6 +37,25 @@ async def dashboard(request: Request) -> HTMLResponse:
     from wisper_transcribe.speaker_manager import load_profiles
     speaker_count = len(load_profiles())
 
+    # LLM summary for the System card. Resolve the model so we display the
+    # provider's default when llm_model is blank, rather than an empty cell.
+    llm_provider = config.get("llm_provider", "ollama")
+    try:
+        llm_model = resolve_llm_model(llm_provider, config=config)
+    except ValueError:
+        llm_model = config.get("llm_model", "") or "(unknown provider)"
+    # `llm_ready` flips false when a key-requiring provider has no key reachable
+    # via env or saved config — surfaces "needs config" without leaking the key.
+    if llm_provider in ("ollama", "lmstudio"):
+        llm_ready = True
+        llm_status_hint = config.get("llm_endpoint") or ""
+    else:
+        try:
+            llm_ready = bool(get_llm_api_key(llm_provider, config=config))
+        except ValueError:
+            llm_ready = False
+        llm_status_hint = "API key" if llm_ready else "API key missing"
+
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -43,6 +68,10 @@ async def dashboard(request: Request) -> HTMLResponse:
             "device": device,
             "model": config.get("model", "large-v3-turbo"),
             "hf_token_set": hf_token_set,
+            "llm_provider": llm_provider,
+            "llm_model": llm_model,
+            "llm_ready": llm_ready,
+            "llm_status_hint": llm_status_hint,
         },
     )
 

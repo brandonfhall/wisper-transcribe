@@ -42,6 +42,50 @@ def test_dashboard_returns_200(client, tmp_path):
     assert b"wisper" in resp.content
 
 
+def test_dashboard_shows_llm_provider_and_model(client, tmp_path, monkeypatch):
+    """System card surfaces the configured LLM provider and resolved model name."""
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    cfg = {
+        "llm_provider": "ollama",
+        "llm_model": "llama3.1:8b",
+        "llm_endpoint": "http://localhost:11434",
+    }
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
+         patch("wisper_transcribe.web.routes.dashboard.load_config", return_value=cfg), \
+         patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
+         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)):
+        resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.content.decode()
+    assert "LLM Provider" in body
+    assert "ollama" in body
+    assert "llama3.1:8b" in body
+    # Local providers are always "Ready" — no key needed
+    assert "Ready" in body
+
+
+def test_dashboard_flags_cloud_provider_missing_key(client, tmp_path, monkeypatch):
+    """A cloud provider with no env/config key shows the 'API key missing' hint."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    cfg = {
+        "llm_provider": "anthropic",
+        "llm_model": "",                 # blank → resolves to per-provider default
+        "anthropic_api_key": "",
+    }
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
+         patch("wisper_transcribe.web.routes.dashboard.load_config", return_value=cfg), \
+         patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
+         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)):
+        resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.content.decode()
+    assert "anthropic" in body
+    assert "API key missing" in body
+    # Resolved default model is shown when llm_model is blank
+    assert "claude-sonnet-4-6" in body
+
+
 def test_dashboard_jobs_partial_returns_200(client):
     resp = client.get("/jobs")
     assert resp.status_code == 200
