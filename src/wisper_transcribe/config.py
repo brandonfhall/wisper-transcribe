@@ -42,6 +42,7 @@ DEFAULTS = {
     "anthropic_api_key": "",                  # env ANTHROPIC_API_KEY takes precedence
     "openai_api_key": "",                     # env OPENAI_API_KEY takes precedence
     "google_api_key": "",                     # env GOOGLE_API_KEY takes precedence
+    "ollama_cloud_api_key": "",               # env OLLAMA_API_KEY takes precedence — used by `ollama-cloud` provider for direct ollama.com calls
     # Discord recording bot
     "discord_bot_token": "",                  # env DISCORD_BOT_TOKEN takes precedence
     "discord_default_guild": "",
@@ -49,32 +50,38 @@ DEFAULTS = {
     "discord_presets": [],                    # [{"name": "...", "guild_id": "...", "channel_id": "..."}]
 }
 
-LLM_PROVIDERS = ("ollama", "lmstudio", "anthropic", "openai", "google")
+LLM_PROVIDERS = ("ollama", "ollama-cloud", "lmstudio", "anthropic", "openai", "google")
 
 # Per-provider default model names. Override via config (llm_model) or CLI (--model).
 _LLM_DEFAULT_MODELS = {
     "ollama": "llama3.1:8b",
+    "ollama-cloud": "gpt-oss:120b",
     "lmstudio": "",          # blank → use whatever model is loaded in LM Studio
     "anthropic": "claude-sonnet-4-6",
     "openai": "gpt-4o-mini",
     "google": "gemini-1.5-flash",
 }
 
-# Per-provider default endpoint URLs (local providers only).
+# Per-provider default endpoint URLs.
+# ollama-cloud is hardcoded — ollama.com is THE endpoint for this provider, no override exposed.
 _LLM_DEFAULT_ENDPOINTS = {
-    "ollama":    "http://localhost:11434",
-    "lmstudio":  "http://localhost:1234",
+    "ollama":       "http://localhost:11434",
+    "ollama-cloud": "https://ollama.com",
+    "lmstudio":     "http://localhost:1234",
 }
 
 # env var → config key mapping for LLM API keys. Keys are never logged.
 _LLM_API_KEY_ENV = {
-    "anthropic": ("ANTHROPIC_API_KEY", "anthropic_api_key"),
-    "openai": ("OPENAI_API_KEY", "openai_api_key"),
-    "google": ("GOOGLE_API_KEY", "google_api_key"),
+    "anthropic":    ("ANTHROPIC_API_KEY", "anthropic_api_key"),
+    "openai":       ("OPENAI_API_KEY", "openai_api_key"),
+    "google":       ("GOOGLE_API_KEY", "google_api_key"),
+    "ollama-cloud": ("OLLAMA_API_KEY", "ollama_cloud_api_key"),
 }
 
 # config-key set used by config_show to mask secrets when printing settings.
-LLM_SECRET_KEYS = frozenset({"anthropic_api_key", "openai_api_key", "google_api_key"})
+LLM_SECRET_KEYS = frozenset({
+    "anthropic_api_key", "openai_api_key", "google_api_key", "ollama_cloud_api_key",
+})
 
 COMPUTE_TYPES = ("auto", "float16", "int8_float16", "int8", "float32")
 

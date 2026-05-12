@@ -486,9 +486,11 @@ wisper config path                        # show where config.toml lives
 wisper config llm                         # interactive wizard: provider + model + key/endpoint
 ```
 
-**`wisper config llm`** is the recommended way to configure `refine` / `summarize`. It walks you through the provider (Ollama / LM Studio / Anthropic / OpenAI / Google), endpoint (local providers), model name, and API key (cloud providers) in one flow. For Ollama and LM Studio the wizard lists installed/loaded models so you can pick by number. API keys can alternatively be set via the `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GOOGLE_API_KEY` environment variables — env vars always take precedence over the stored value, and stored values are masked as `***` in `wisper config show`.
+**`wisper config llm`** is the recommended way to configure `refine` / `summarize`. It walks you through the provider (Ollama / Ollama Cloud / LM Studio / Anthropic / OpenAI / Google), endpoint (local providers), model name, and API key (cloud providers) in one flow. For Ollama and LM Studio the wizard lists installed/loaded models so you can pick by number. API keys can alternatively be set via the `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, or `OLLAMA_API_KEY` environment variables — env vars always take precedence over the stored value, and stored values are masked as `***` in `wisper config show`.
 
-Relevant keys: `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`.
+**Ollama Cloud — two paths.** You can either (1) keep `llm_provider = ollama` and pick a model with `-cloud` suffix (e.g. `gpt-oss:120b-cloud`); the local daemon proxies the call to ollama.com using credentials from `ollama signin`. Or (2) set `llm_provider = ollama-cloud` and supply `OLLAMA_API_KEY` / `ollama_cloud_api_key`; wisper then calls `https://ollama.com/api/chat` directly with no local daemon required. The web config page populates the model combobox from the public ollama.com catalog in both cases.
+
+Relevant keys: `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`, `ollama_cloud_api_key`.
 
 ### `wisper record`
 
@@ -830,6 +832,7 @@ docker compose run wisper nvidia-smi
 | `ANTHROPIC_API_KEY` | Anthropic API key for `refine` / `summarize` — takes precedence over stored config |
 | `OPENAI_API_KEY` | OpenAI API key — takes precedence over stored config |
 | `GOOGLE_API_KEY` | Google (Gemini) API key — takes precedence over stored config |
+| `OLLAMA_API_KEY` | Ollama Cloud API key (used by `llm_provider = ollama-cloud` for direct ollama.com calls) — takes precedence over stored config |
 
 ## Debugging and Verbose Output
 

@@ -35,13 +35,14 @@ _CONFIG_FIELDS = [
 ]
 
 _LLM_FIELDS = [
-    ("llm_provider",       "select", "LLM provider",                list(LLM_PROVIDERS)),
-    ("llm_model",          "str",    "Model name (blank = default)", None),
-    ("llm_endpoint",       "str",    "Ollama endpoint URL",          None),
-    ("llm_temperature",    "float",  "Sampling temperature (0–1)",   None),
-    ("anthropic_api_key",  "secret", "Anthropic API key",            None),
-    ("openai_api_key",     "secret", "OpenAI API key",               None),
-    ("google_api_key",     "secret", "Google API key",               None),
+    ("llm_provider",         "select", "LLM provider",                list(LLM_PROVIDERS)),
+    ("llm_model",            "str",    "Model name (blank = default)", None),
+    ("llm_endpoint",         "str",    "Ollama endpoint URL",          None),
+    ("llm_temperature",      "float",  "Sampling temperature (0–1)",   None),
+    ("anthropic_api_key",    "secret", "Anthropic API key",            None),
+    ("openai_api_key",       "secret", "OpenAI API key",               None),
+    ("google_api_key",       "secret", "Google API key",               None),
+    ("ollama_cloud_api_key", "secret", "Ollama Cloud API key",         None),
 ]
 
 _DISCORD_FIELDS = [
@@ -51,7 +52,9 @@ _DISCORD_FIELDS = [
 ]
 
 # Keys that must not be overwritten with an empty string
-_LLM_SECRET_FIELD_KEYS = frozenset({"anthropic_api_key", "openai_api_key", "google_api_key"})
+_LLM_SECRET_FIELD_KEYS = frozenset({
+    "anthropic_api_key", "openai_api_key", "google_api_key", "ollama_cloud_api_key",
+})
 
 # Discord snowflake IDs are 17–20 decimal digits
 _SNOWFLAKE_RE = re.compile(r"^\d{17,20}$")
@@ -148,6 +151,38 @@ async def lmstudio_status() -> JSONResponse:
     except Exception:
         log.warning("Failed to query LM Studio status", exc_info=True)
         return JSONResponse({"running": False, "models": []})
+
+
+@router.get("/ollama-cloud-catalog", response_class=JSONResponse)
+async def ollama_cloud_catalog() -> JSONResponse:
+    """Return the public Ollama Cloud model catalog from https://ollama.com/api/tags.
+
+    Used by both the `ollama` provider combobox (cloud models get a `-cloud`
+    suffix for routing through the local daemon's signin proxy) and the
+    `ollama-cloud` provider combobox (bare names for direct API calls).
+    The catalog endpoint is public, so no API key is sent.
+    """
+    import httpx
+    url = "https://ollama.com/api/tags"
+    try:
+        r = httpx.get(url, timeout=5.0)
+        r.raise_for_status()
+        data = r.json()
+        models = []
+        for m in data.get("models", []):
+            name = m.get("name")
+            if not name:
+                continue
+            size_bytes = m.get("size", 0)
+            size_str = f"{size_bytes / 1e9:.0f} GB" if size_bytes else ""
+            models.append({"name": name, "size": size_str})
+        return JSONResponse({"running": True, "models": models})
+    except Exception:
+        log.warning("Failed to fetch Ollama Cloud catalog", exc_info=True)
+        return JSONResponse({
+            "running": False, "models": [],
+            "error": "Could not reach ollama.com · check your network",
+        })
 
 
 def _no_key_response(provider_label: str) -> JSONResponse:

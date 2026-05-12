@@ -106,7 +106,7 @@
       <div>
         <label class="form-label" for="cfg_llm_provider">llm_provider <span class="text-gray-400 font-normal text-xs">— LLM provider</span></label>
         <select id="cfg_llm_provider" name="llm_provider" class="form-input" onchange="llmProviderChanged(this.value)">
-          {% for p in ["ollama", "lmstudio", "anthropic", "openai", "google"] %}
+          {% for p in ["ollama", "ollama-cloud", "lmstudio", "anthropic", "openai", "google"] %}
           <option value="{{ p }}" {% if config.get('llm_provider', 'ollama') == p %}selected{% endif %}>{{ p }}</option>
           {% endfor %}
         </select>
@@ -175,6 +175,13 @@
                class="form-input font-mono text-sm"
                placeholder="AIza… (leave blank to keep existing)"/>
       </div>
+
+      <div id="llm_ollama_cloud_row" class="hidden">
+        <label class="form-label" for="cfg_ollama_cloud_api_key">ollama_cloud_api_key <span class="text-gray-400 font-normal text-xs">— Ollama Cloud API key (env <code>OLLAMA_API_KEY</code> takes precedence). Get one at <strong>ollama.com/settings/keys</strong>.</span></label>
+        <input type="password" id="cfg_ollama_cloud_api_key" name="ollama_cloud_api_key"
+               class="form-input font-mono text-sm"
+               placeholder="(leave blank to keep existing)"/>
+      </div>
     </div>
 
     <div class="flex gap-4">
@@ -191,10 +198,18 @@ const _PROVIDERS = {
   ollama: {
     label: 'Ollama', kind: 'local', method: 'GET',
     endpoint: '/config/ollama-status',
+    cloudOverlay: '/config/ollama-cloud-catalog',  // also list cloud models with -cloud suffix
+    cloudSuffix: '-cloud',
     defaultEndpoint: 'http://localhost:11434',
     emptyHint: 'No models installed. Run: ollama pull <model>',
     unreachableHint: 'Start with: ollama serve',
     notFoundSuffix: ' (not installed)',
+  },
+  'ollama-cloud': {
+    label: 'Ollama Cloud', kind: 'ollama-cloud', method: 'GET',
+    endpoint: '/config/ollama-cloud-catalog',
+    keyField: 'cfg_ollama_cloud_api_key',
+    notFoundSuffix: ' (not in catalog)',
   },
   lmstudio: {
     label: 'LM Studio', kind: 'local', method: 'GET',
@@ -297,6 +312,16 @@ function _setDiscoveredModels(models) {
   });
 })();
 
+async function _fetchProvider(cfg) {
+  if (cfg.method === 'POST') {
+    const body = new FormData();
+    const keyInput = cfg.keyField ? document.getElementById(cfg.keyField) : null;
+    if (keyInput && keyInput.value) body.append('api_key', keyInput.value);
+    return await fetch(cfg.endpoint, { method: 'POST', body });
+  }
+  return await fetch(cfg.endpoint);
+}
+
 async function loadLocalProviderStatus() {
   const provider = document.getElementById('cfg_llm_provider').value;
   const cfg = _PROVIDERS[provider];
@@ -310,31 +335,50 @@ async function loadLocalProviderStatus() {
   _setDiscoveredModels([]);
 
   try {
-    let resp;
-    if (cfg.method === 'POST') {
-      const body = new FormData();
-      const keyInput = cfg.keyField ? document.getElementById(cfg.keyField) : null;
-      if (keyInput && keyInput.value) body.append('api_key', keyInput.value);
-      resp = await fetch(cfg.endpoint, { method: 'POST', body });
-    } else {
-      resp = await fetch(cfg.endpoint);
+    // Primary fetch + optional cloud-overlay fetch in parallel (Ollama provider only).
+    const tasks = [_fetchProvider(cfg).then(r => r.json())];
+    if (cfg.cloudOverlay) {
+      tasks.push(fetch(cfg.cloudOverlay).then(r => r.json()).catch(() => ({running: false, models: []})));
     }
-    const data = await resp.json();
+    const results = await Promise.all(tasks);
+    const data = results[0];
+    const cloud = results[1];
+
+    // Build the merged model list
+    let merged = [];
+    let localCount = 0, cloudCount = 0;
     if (data.running && data.models.length > 0) {
-      _setDiscoveredModels(data.models);
+      merged = data.models.slice();
+      localCount = merged.length;
+    }
+    if (cloud && cloud.running && cloud.models.length > 0) {
+      const suffix = cfg.cloudSuffix || '';
+      const seen = new Set(merged.map(m => m.name));
+      cloud.models.forEach(m => {
+        const tagged = { name: m.name + suffix, size: '☁ ' + (m.size || 'cloud') };
+        if (!seen.has(tagged.name)) merged.push(tagged);
+      });
+      cloudCount = cloud.models.length;
+    }
+
+    if (merged.length > 0) {
+      _setDiscoveredModels(merged);
       const current = modelInput.value;
-      const notFound = current && !data.models.find(m => m.name === current);
-      const verb = cfg.kind === 'local' ? 'running' : 'connected';
-      statusLine.textContent = '✓ ' + cfg.label + ' ' + verb + ' · ' + data.models.length +
-        ' model' + (data.models.length !== 1 ? 's' : '') + ' available' +
+      const notFound = current && !merged.find(m => m.name === current);
+      const verb = cfg.kind === 'local' ? 'running' : (cfg.kind === 'ollama-cloud' ? 'catalog' : 'connected');
+      const counts = cloudCount > 0
+        ? (localCount + ' local + ' + cloudCount + ' cloud')
+        : (localCount + ' model' + (localCount !== 1 ? 's' : ''));
+      const hint = cloudCount > 0 ? ' · cloud models need `ollama signin`' : '';
+      statusLine.textContent = '✓ ' + cfg.label + ' ' + verb + ' · ' + counts + ' available' + hint +
         (notFound ? ' · current "' + current + '"' + cfg.notFoundSuffix : '');
       statusLine.className = 'text-xs ' + (notFound ? 'text-yellow-600' : 'text-green-600');
     } else if (data.running) {
       statusLine.textContent = '✓ ' + cfg.label + ' running · ' + (cfg.emptyHint || 'No models returned');
       statusLine.className = 'text-xs text-yellow-600';
     } else {
-      const hint = cfg.kind === 'local' ? cfg.unreachableHint : (data.error || 'Unavailable');
-      statusLine.textContent = '✗ ' + cfg.label + ' · ' + hint;
+      const errHint = cfg.kind === 'local' ? cfg.unreachableHint : (data.error || 'Unavailable');
+      statusLine.textContent = '✗ ' + cfg.label + ' · ' + errHint;
       statusLine.className = 'text-xs text-red-500';
     }
   } catch (e) {
@@ -346,11 +390,11 @@ async function loadLocalProviderStatus() {
 function llmProviderChanged(provider) {
   const cfg = _PROVIDERS[provider];
   const isLocal = cfg && cfg.kind === 'local';
-  const isCloud = cfg && cfg.kind === 'cloud';
   document.getElementById('llm_endpoint_row').classList.toggle('hidden', !isLocal);
   document.getElementById('llm_anthropic_row').classList.toggle('hidden', provider !== 'anthropic');
   document.getElementById('llm_openai_row').classList.toggle('hidden', provider !== 'openai');
   document.getElementById('llm_google_row').classList.toggle('hidden', provider !== 'google');
+  document.getElementById('llm_ollama_cloud_row').classList.toggle('hidden', provider !== 'ollama-cloud');
   document.getElementById('llm_local_status_row').classList.toggle('hidden', !cfg);
   // Clear discovered models when switching providers so stale suggestions don't appear
   _setDiscoveredModels([]);
@@ -370,12 +414,12 @@ document.getElementById('cfg_llm_endpoint').addEventListener('change', function(
 });
 // Re-check when an API key field is committed (blur or Enter), so typing a new key
 // then tabbing out fetches the list without requiring a manual Refresh click.
-['cfg_anthropic_api_key', 'cfg_openai_api_key', 'cfg_google_api_key'].forEach(function(id) {
+['cfg_anthropic_api_key', 'cfg_openai_api_key', 'cfg_google_api_key', 'cfg_ollama_cloud_api_key'].forEach(function(id) {
   const el = document.getElementById(id);
   if (!el) return;
   el.addEventListener('change', function() {
     const p = _PROVIDERS[document.getElementById('cfg_llm_provider').value];
-    if (p && p.kind === 'cloud' && p.keyField === id) loadLocalProviderStatus();
+    if (p && p.keyField === id) loadLocalProviderStatus();
   });
 });
 

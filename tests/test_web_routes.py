@@ -543,6 +543,40 @@ def test_ollama_status_uses_saved_config_endpoint(client):
     mock_get.assert_called_once_with("http://myhost:11435/api/tags", timeout=3.0)
 
 
+def test_ollama_cloud_catalog_running(client):
+    """Returns running=True with parsed cloud-catalog model list."""
+    fake_resp = MagicMock()
+    fake_resp.raise_for_status = MagicMock()
+    fake_resp.json.return_value = {
+        "models": [
+            {"name": "gpt-oss:120b", "size": 65_000_000_000},
+            {"name": "glm-4.7", "size": 696_000_000_000},
+        ]
+    }
+    with patch("httpx.get", return_value=fake_resp) as mock_get:
+        resp = client.get("/config/ollama-cloud-catalog")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["running"] is True
+    assert {m["name"] for m in data["models"]} == {"gpt-oss:120b", "glm-4.7"}
+    assert "GB" in data["models"][0]["size"]
+    mock_get.assert_called_once_with("https://ollama.com/api/tags", timeout=5.0)
+
+
+def test_ollama_cloud_catalog_network_error(client):
+    """Network failure returns running=False with a generic error message."""
+    import httpx as _httpx
+
+    with patch("httpx.get", side_effect=_httpx.ConnectError("refused")):
+        resp = client.get("/config/ollama-cloud-catalog")
+
+    data = resp.json()
+    assert data["running"] is False
+    assert data["models"] == []
+    assert "ollama.com" in data["error"]
+
+
 def _make_fake_sdk_page(items):
     """Build a SyncPage-like object with .data = items."""
     page = MagicMock()

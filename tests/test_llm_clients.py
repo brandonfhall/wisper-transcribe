@@ -169,6 +169,74 @@ def test_ollama_non404_http_status_raises_generic():
             client.complete("sys", "user")
 
 
+def test_ollama_cloud_client_requires_api_key():
+    """OllamaCloudClient refuses to instantiate without a key."""
+    from wisper_transcribe.llm.ollama_cloud import OllamaCloudClient
+
+    with pytest.raises(LLMUnavailableError, match="API key"):
+        OllamaCloudClient(model="gpt-oss:120b", api_key="")
+
+
+def test_ollama_cloud_client_sends_authorization_header():
+    """A request from OllamaCloudClient must include the Bearer token."""
+    from wisper_transcribe.llm.ollama_cloud import OllamaCloudClient
+
+    client = OllamaCloudClient(model="gpt-oss:120b", api_key="secret-token")
+    fake_cm = _fake_stream_context(_ollama_chunks("ok"))
+    with patch("httpx.stream", return_value=fake_cm) as mock_stream:
+        client.complete("sys", "user")
+
+    _, kwargs = mock_stream.call_args
+    assert kwargs["headers"] == {"Authorization": "Bearer secret-token"}
+    # And the default endpoint must be ollama.com, not localhost
+    assert client.endpoint == "https://ollama.com"
+
+
+def test_get_client_ollama_cloud(tmp_path, monkeypatch):
+    """Factory returns an OllamaCloudClient when provider is `ollama-cloud` and key is set."""
+    from wisper_transcribe.llm import get_client
+    from wisper_transcribe.llm.ollama_cloud import OllamaCloudClient
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OLLAMA_API_KEY", "env-token")
+    client = get_client("ollama-cloud", config={
+        "llm_provider": "ollama-cloud",
+        "llm_model": "gpt-oss:120b",
+        "llm_temperature": 0.4,
+    })
+    assert isinstance(client, OllamaCloudClient)
+    assert client.provider == "ollama-cloud"
+    assert client.api_key == "env-token"
+    assert client.endpoint == "https://ollama.com"
+
+
+def test_get_client_ollama_cloud_missing_key(tmp_path, monkeypatch):
+    """Factory raises if no API key is found in env or config."""
+    from wisper_transcribe.llm import get_client
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    with pytest.raises(LLMUnavailableError, match="No API key"):
+        get_client("ollama-cloud", config={
+            "llm_provider": "ollama-cloud",
+            "llm_model": "gpt-oss:120b",
+            "ollama_cloud_api_key": "",
+        })
+
+
+def test_ollama_local_client_omits_authorization_header():
+    """The bare OllamaClient (no api_key) must NOT send an Authorization header."""
+    from wisper_transcribe.llm.ollama import OllamaClient
+
+    client = OllamaClient(model="llama3.1:8b")  # no api_key
+    fake_cm = _fake_stream_context(_ollama_chunks("ok"))
+    with patch("httpx.stream", return_value=fake_cm) as mock_stream:
+        client.complete("sys", "user")
+
+    _, kwargs = mock_stream.call_args
+    assert kwargs["headers"] is None
+
+
 def test_ollama_bad_json_raises_response_error():
     from wisper_transcribe.llm.ollama import OllamaClient
 
