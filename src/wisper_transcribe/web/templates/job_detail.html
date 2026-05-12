@@ -350,6 +350,9 @@
     if (evt.type === 'done') {
       cursor.textContent = '';
       es.close();
+      // Terminal state — stop the estimating ticker so it can never overwrite
+      // the final "Complete"/"Failed" label or creep the bar forward.
+      stopEstimatingTicker();
       if (evt.status === 'completed') {
         allDone();
         if (evt.output_path) {
@@ -369,6 +372,8 @@
       } else if (evt.status === 'failed') {
         if (progressBar) progressBar.classList.replace('bg-green-500', 'bg-red-400');
         if (stepLabel) stepLabel.textContent = 'Failed';
+        if (progressEta)  progressEta.textContent  = '';
+        if (progressRate) progressRate.textContent = '';
         const msg = evt.error === 'Cancelled' ? 'Job was cancelled.' : `<strong>Error:</strong> ${evt.error || 'Unknown error'}`;
         actions.innerHTML = `
           <div class="rounded-md bg-red-50 border border-red-200 p-4 w-full">
@@ -379,33 +384,49 @@
     }
   };
 
-  es.onerror = function() { es.close(); };
+  es.onerror = function() { es.close(); stopEstimatingTicker(); };
 
   // ── Estimated progress ticker ─────────────────────────────────────────────
   // When no tqdm data arrives for a step, animate the bar slowly within its
   // slice to give visual feedback. Updates every 5 s; never exceeds 90% of
   // the current step's slice (leaves room for real data to take over).
+  // Stopped on any terminal state (done event or SSE error) so it can't
+  // overwrite the final label or creep the bar forward.
   let lastRealUpdate = Date.now();
   let estimating = false;
+  const ESTIMATING_TAG = ' (estimating…)';
 
   es.addEventListener('message', function() { lastRealUpdate = Date.now(); estimating = false; });
 
-  setInterval(function() {
+  let estimatingTicker = setInterval(function() {
     if (activeIdx < 0) return;
     const now = Date.now();
     if (now - lastRealUpdate < 5000) return;  // real data is fresh
-    estimating = true;
     const current = parseFloat(progressBar ? progressBar.style.width : '0') || 0;
     const sliceEnd = (activeIdx + 1) * sliceWidth * 0.90;  // 90% cap within slice
     if (current < sliceEnd) {
       // Creep forward by ~1% every 5 s
       const next = Math.min(current + 1, sliceEnd);
       setBar(next);
-      if (stepLabel && !stepLabel.textContent.includes('~')) {
-        stepLabel.textContent = stepLabel.textContent.replace('…', '') + ' (estimating…)';
+      // Only add the tag once — earlier this used a wrong sentinel ('~') and
+      // appended " (estimating…)" on every tick, producing "Failed (estimating)
+      // (estimating) (estimating)…" after a job ended.
+      if (stepLabel && !estimating) {
+        stepLabel.textContent = stepLabel.textContent.replace(ESTIMATING_TAG, '') + ESTIMATING_TAG;
+        estimating = true;
       }
     }
   }, 5000);
+
+  function stopEstimatingTicker() {
+    if (estimatingTicker) {
+      clearInterval(estimatingTicker);
+      estimatingTicker = null;
+    }
+    activeIdx = -1;
+    // Strip any leftover " (estimating…)" tag from the final label
+    if (stepLabel) stepLabel.textContent = stepLabel.textContent.replace(ESTIMATING_TAG, '');
+  }
 
 })();
 </script>
