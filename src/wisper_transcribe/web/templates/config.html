@@ -112,15 +112,23 @@
         </select>
       </div>
 
-      <!-- Model (with autocomplete datalist for local providers) -->
+      <!-- Model (combobox: free text + discovered-models dropdown) -->
       <div>
         <label class="form-label" for="cfg_llm_model">llm_model <span class="text-gray-400 font-normal text-xs">— Model name (blank = default)</span></label>
-        <input type="text" id="cfg_llm_model" name="llm_model"
-               value="{{ config.get('llm_model', '') }}"
-               list="llm_model_options"
-               class="form-input font-mono text-sm"
-               placeholder="e.g. llama3.1:8b, claude-sonnet-4-6, gpt-4o-mini"/>
-        <datalist id="llm_model_options"></datalist>
+        <div class="relative">
+          <input type="text" id="cfg_llm_model" name="llm_model"
+                 value="{{ config.get('llm_model', '') }}"
+                 autocomplete="off"
+                 class="form-input font-mono text-sm pr-10"
+                 placeholder="e.g. llama3.1:8b, claude-sonnet-4-6, gpt-4o-mini"/>
+          <button type="button" id="llm_model_toggle"
+                  class="hidden absolute inset-y-0 right-0 px-2 text-gray-400 hover:text-gray-600"
+                  aria-label="Show discovered models">▼</button>
+          <ul id="llm_model_menu"
+              role="listbox"
+              class="hidden absolute z-10 mt-1 w-full max-h-60 overflow-auto rounded-md bg-white shadow-lg ring-1 ring-black ring-opacity-5 text-sm font-mono">
+          </ul>
+        </div>
         <div id="llm_local_status_row" class="hidden mt-1 flex items-center gap-3">
           <span id="llm_local_status_line" class="text-xs text-gray-500"></span>
           <button type="button" onclick="loadLocalProviderStatus()"
@@ -198,29 +206,99 @@ const _LOCAL_PROVIDERS = {
   },
 };
 
+// Discovered-model combobox state
+let _modelOptions = [];
+
+function _modelMenuEl()   { return document.getElementById('llm_model_menu'); }
+function _modelToggleEl() { return document.getElementById('llm_model_toggle'); }
+function _modelInputEl()  { return document.getElementById('cfg_llm_model'); }
+
+function _renderModelMenu(filter) {
+  const menu = _modelMenuEl();
+  menu.replaceChildren();
+  const needle = (filter || '').toLowerCase();
+  const matches = _modelOptions.filter(m => !needle || m.name.toLowerCase().includes(needle));
+  if (matches.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'px-3 py-2 text-gray-400 italic';
+    li.textContent = _modelOptions.length === 0 ? 'No discovered models yet' : 'No matches';
+    menu.appendChild(li);
+    return;
+  }
+  matches.forEach(m => {
+    const li = document.createElement('li');
+    li.className = 'px-3 py-2 cursor-pointer hover:bg-indigo-50';
+    li.setAttribute('role', 'option');
+    li.dataset.value = m.name;
+    // Use textContent to prevent XSS from provider-returned model names
+    li.textContent = m.size ? (m.name + ' (' + m.size + ')') : m.name;
+    li.addEventListener('mousedown', function(e) {
+      // mousedown (not click) so input blur doesn't close the menu before selection lands
+      e.preventDefault();
+      _modelInputEl().value = m.name;
+      _closeModelMenu();
+    });
+    menu.appendChild(li);
+  });
+}
+
+function _openModelMenu() {
+  if (_modelOptions.length === 0) return;
+  _renderModelMenu(_modelInputEl().value);
+  _modelMenuEl().classList.remove('hidden');
+}
+function _closeModelMenu() { _modelMenuEl().classList.add('hidden'); }
+function _toggleModelMenu() {
+  if (_modelMenuEl().classList.contains('hidden')) _openModelMenu(); else _closeModelMenu();
+}
+
+function _setDiscoveredModels(models) {
+  _modelOptions = models || [];
+  _modelToggleEl().classList.toggle('hidden', _modelOptions.length === 0);
+  // Keep menu in sync if it's currently open
+  if (!_modelMenuEl().classList.contains('hidden')) _renderModelMenu(_modelInputEl().value);
+}
+
+// Wire combobox interactions once
+(function _initModelCombobox() {
+  const input = _modelInputEl();
+  const toggle = _modelToggleEl();
+  input.addEventListener('focus', _openModelMenu);
+  input.addEventListener('input', function() { _openModelMenu(); });
+  input.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') _closeModelMenu();
+  });
+  toggle.addEventListener('click', function(e) {
+    e.preventDefault();
+    input.focus();
+    _toggleModelMenu();
+  });
+  document.addEventListener('click', function(e) {
+    if (!e.target.closest('#llm_model_menu') &&
+        e.target !== input &&
+        e.target !== toggle) {
+      _closeModelMenu();
+    }
+  });
+})();
+
 async function loadLocalProviderStatus() {
   const provider = document.getElementById('cfg_llm_provider').value;
   const cfg = _LOCAL_PROVIDERS[provider];
   if (!cfg) return;
 
   const statusLine = document.getElementById('llm_local_status_line');
-  const datalist = document.getElementById('llm_model_options');
-  const modelInput = document.getElementById('cfg_llm_model');
+  const modelInput = _modelInputEl();
 
   statusLine.textContent = 'Checking ' + cfg.label + '…';
   statusLine.className = 'text-xs text-gray-500';
-  datalist.replaceChildren();
+  _setDiscoveredModels([]);
 
   try {
     const r = await fetch(cfg.endpoint);
     const data = await r.json();
     if (data.running && data.models.length > 0) {
-      data.models.forEach(m => {
-        const opt = document.createElement('option');
-        opt.value = m.name;
-        if (m.size) opt.label = m.size;
-        datalist.appendChild(opt);
-      });
+      _setDiscoveredModels(data.models);
       const current = modelInput.value;
       const notFound = current && !data.models.find(m => m.name === current);
       statusLine.textContent = '✓ ' + cfg.label + ' running · ' + data.models.length +
@@ -248,10 +326,9 @@ function llmProviderChanged(provider) {
   document.getElementById('llm_openai_row').classList.toggle('hidden', provider !== 'openai');
   document.getElementById('llm_google_row').classList.toggle('hidden', provider !== 'google');
   document.getElementById('llm_local_status_row').classList.toggle('hidden', !isLocal);
-  // Clear the datalist when switching to a cloud provider so stale suggestions don't appear
-  if (!isLocal) {
-    document.getElementById('llm_model_options').replaceChildren();
-  }
+  // Clear discovered models when switching providers so stale suggestions don't appear
+  _setDiscoveredModels([]);
+  _closeModelMenu();
   if (isLocal) {
     document.getElementById('cfg_llm_endpoint').placeholder = cfg.defaultEndpoint;
     loadLocalProviderStatus();
