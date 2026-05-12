@@ -543,6 +543,169 @@ def test_ollama_status_uses_saved_config_endpoint(client):
     mock_get.assert_called_once_with("http://myhost:11435/api/tags", timeout=3.0)
 
 
+def _make_fake_sdk_page(items):
+    """Build a SyncPage-like object with .data = items."""
+    page = MagicMock()
+    page.data = items
+    return page
+
+
+def test_anthropic_models_no_key_returns_error(client):
+    """No env, no config, no form key → running=False with hint."""
+    with patch("wisper_transcribe.web.routes.config.get_llm_api_key", return_value=None):
+        resp = client.post("/config/anthropic-models")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["running"] is False
+    assert "API key required" in data["error"]
+
+
+def test_anthropic_models_running_with_models(client):
+    """Returns chat models with display_name surfaced as `size`."""
+    fake_models = [
+        MagicMock(id="claude-sonnet-4-6", display_name="Claude Sonnet 4.6"),
+        MagicMock(id="claude-haiku-4-5", display_name="Claude Haiku 4.5"),
+    ]
+    fake_anthropic = MagicMock()
+    fake_anthropic.Anthropic.return_value.models.list.return_value = _make_fake_sdk_page(fake_models)
+
+    with patch("wisper_transcribe.web.routes.config.get_llm_api_key", return_value="sk-ant-test"), \
+         patch.dict("sys.modules", {"anthropic": fake_anthropic}):
+        resp = client.post("/config/anthropic-models")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["running"] is True
+    assert {m["name"] for m in data["models"]} == {"claude-sonnet-4-6", "claude-haiku-4-5"}
+    assert data["models"][0]["size"] in {"Claude Sonnet 4.6", "Claude Haiku 4.5"}
+
+
+def test_anthropic_models_form_key_takes_precedence(client):
+    """A non-empty api_key in the form body overrides env/config resolution."""
+    fake_anthropic = MagicMock()
+    fake_anthropic.Anthropic.return_value.models.list.return_value = _make_fake_sdk_page([])
+
+    with patch("wisper_transcribe.web.routes.config.get_llm_api_key",
+               return_value="should-not-be-used") as resolver, \
+         patch.dict("sys.modules", {"anthropic": fake_anthropic}):
+        resp = client.post("/config/anthropic-models", data={"api_key": "sk-ant-from-form"})
+
+    assert resp.status_code == 200
+    # SDK was called with the form-supplied key, not the resolver's value
+    fake_anthropic.Anthropic.assert_called_once_with(api_key="sk-ant-from-form")
+    # Resolver is never consulted when form supplies a key
+    resolver.assert_not_called()
+
+
+def test_anthropic_models_api_error_returns_running_false(client):
+    """An exception from the SDK is reported as running=False with a generic message."""
+    fake_anthropic = MagicMock()
+    fake_anthropic.Anthropic.return_value.models.list.side_effect = RuntimeError("401")
+
+    with patch("wisper_transcribe.web.routes.config.get_llm_api_key", return_value="bad-key"), \
+         patch.dict("sys.modules", {"anthropic": fake_anthropic}):
+        resp = client.post("/config/anthropic-models")
+
+    data = resp.json()
+    assert data["running"] is False
+    assert "Anthropic API call failed" in data["error"]
+    # Error message must not leak the underlying exception text (e.g. could include key fragments)
+    assert "401" not in data["error"]
+
+
+def test_openai_models_filters_to_chat_only(client):
+    """Whisper, dall-e, embedding, and instruct variants are filtered out."""
+    fake_models = [
+        MagicMock(id="gpt-4o-mini"),
+        MagicMock(id="gpt-4-turbo"),
+        MagicMock(id="o3-mini"),
+        MagicMock(id="o1"),
+        MagicMock(id="chatgpt-4o-latest"),
+        MagicMock(id="whisper-1"),               # excluded
+        MagicMock(id="dall-e-3"),                # excluded
+        MagicMock(id="text-embedding-3-large"),  # excluded
+        MagicMock(id="gpt-3.5-turbo-instruct"),  # excluded (instruct)
+        MagicMock(id="gpt-4o-audio-preview"),    # excluded (audio)
+        MagicMock(id="omni-moderation-latest"),  # excluded (moderation)
+        MagicMock(id="babbage-002"),             # excluded (babbage)
+    ]
+    fake_openai = MagicMock()
+    fake_openai.OpenAI.return_value.models.list.return_value = _make_fake_sdk_page(fake_models)
+
+    with patch("wisper_transcribe.web.routes.config.get_llm_api_key", return_value="sk-test"), \
+         patch.dict("sys.modules", {"openai": fake_openai}):
+        resp = client.post("/config/openai-models")
+
+    data = resp.json()
+    assert data["running"] is True
+    names = {m["name"] for m in data["models"]}
+    assert names == {"gpt-4o-mini", "gpt-4-turbo", "o3-mini", "o1", "chatgpt-4o-latest"}
+
+
+def test_google_models_filters_to_gemini_chat(client):
+    """Embedding, AQA, and Imagen variants are filtered out; 'models/' prefix is stripped."""
+    fake_models = [
+        MagicMock(name="m1"),
+        MagicMock(name="m2"),
+        MagicMock(name="m3"),
+        MagicMock(name="m4"),
+        MagicMock(name="m5"),
+    ]
+    # MagicMock interprets `name=` as the mock's display name, so set the attribute manually
+    fake_models[0].name = "models/gemini-2.0-flash"
+    fake_models[1].name = "models/gemini-1.5-pro"
+    fake_models[2].name = "models/text-embedding-004"    # excluded
+    fake_models[3].name = "models/aqa"                   # excluded
+    fake_models[4].name = "models/imagen-3.0-generate"   # excluded
+
+    fake_genai = MagicMock()
+    fake_genai.Client.return_value.models.list.return_value = iter(fake_models)
+
+    with patch("wisper_transcribe.web.routes.config.get_llm_api_key", return_value="AIza-test"), \
+         patch.dict("sys.modules", {"google.genai": fake_genai, "google": MagicMock(genai=fake_genai)}):
+        resp = client.post("/config/google-models")
+
+    data = resp.json()
+    assert data["running"] is True
+    names = {m["name"] for m in data["models"]}
+    assert names == {"gemini-2.0-flash", "gemini-1.5-pro"}
+
+
+def test_openai_models_sdk_missing(client):
+    """SDK not installed returns a helpful install hint."""
+    import sys
+    with patch("wisper_transcribe.web.routes.config.get_llm_api_key", return_value="sk-test"), \
+         patch.dict(sys.modules, {"openai": None}):
+        resp = client.post("/config/openai-models")
+    data = resp.json()
+    assert data["running"] is False
+    assert "wisper-transcribe[llm-openai]" in data["error"]
+
+
+def test_anthropic_models_api_key_not_in_url(client):
+    """The key must never appear in a URL — POST endpoints only."""
+    # Sanity: GET should 405
+    resp = client.get("/config/anthropic-models")
+    assert resp.status_code == 405
+
+
+def test_anthropic_models_oversized_key_rejected(client):
+    """A multi-kilobyte api_key in the form is ignored (falls back to env/config)."""
+    fake_anthropic = MagicMock()
+    fake_anthropic.Anthropic.return_value.models.list.return_value = _make_fake_sdk_page([])
+
+    with patch("wisper_transcribe.web.routes.config.get_llm_api_key",
+               return_value="sk-ant-config") as resolver, \
+         patch.dict("sys.modules", {"anthropic": fake_anthropic}):
+        resp = client.post("/config/anthropic-models",
+                           data={"api_key": "x" * 5000})
+
+    assert resp.status_code == 200
+    # Oversized form key was rejected → resolver was consulted, returning the config value
+    resolver.assert_called_once_with("anthropic")
+    fake_anthropic.Anthropic.assert_called_once_with(api_key="sk-ant-config")
+
+
 def test_preset_add_valid_saves_preset(client):
     """POST /config/presets/add with valid snowflake IDs appends a preset and redirects."""
     captured = {}

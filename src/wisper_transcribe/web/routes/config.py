@@ -11,6 +11,7 @@ from . import templates
 from wisper_transcribe.config import (
     LLM_PROVIDERS,
     get_config_path,
+    get_llm_api_key,
     load_config,
     save_config,
 )
@@ -54,6 +55,47 @@ _LLM_SECRET_FIELD_KEYS = frozenset({"anthropic_api_key", "openai_api_key", "goog
 
 # Discord snowflake IDs are 17–20 decimal digits
 _SNOWFLAKE_RE = re.compile(r"^\d{17,20}$")
+
+# Reject absurdly long API key submissions before touching any SDK
+_MAX_API_KEY_LEN = 512
+
+# OpenAI returns ~50 models including audio/image/embedding/legacy — filter to chat-likely.
+_OPENAI_CHAT_PREFIXES = ("gpt-", "chatgpt-")
+_OPENAI_REASONING_RE = re.compile(r"^o\d")  # o1, o3-mini, o4, …
+_OPENAI_DENY_SUBSTRINGS = (
+    "instruct", "audio", "realtime", "search", "transcribe", "image",
+    "tts", "dall-e", "whisper", "embedding", "moderation", "davinci",
+    "babbage", "vision",
+)
+
+
+def _is_openai_chat_model(model_id: str) -> bool:
+    if any(d in model_id for d in _OPENAI_DENY_SUBSTRINGS):
+        return False
+    if any(model_id.startswith(p) for p in _OPENAI_CHAT_PREFIXES):
+        return True
+    return bool(_OPENAI_REASONING_RE.match(model_id))
+
+
+def _is_google_chat_model(short_name: str) -> bool:
+    if any(x in short_name for x in ("embedding", "imagen", "aqa")):
+        return False
+    return "gemini" in short_name
+
+
+async def _resolve_form_api_key(request: Request, provider: str) -> str | None:
+    """Resolve the API key for *provider*: form `api_key` > env > saved config.
+
+    Form value is bounded by _MAX_API_KEY_LEN so a hostile or accidental
+    multi-megabyte submission can't reach the SDK.
+    """
+    form = await request.form()
+    raw = form.get("api_key")
+    if raw is not None:
+        raw = str(raw).strip()
+        if 0 < len(raw) <= _MAX_API_KEY_LEN:
+            return raw
+    return get_llm_api_key(provider)
 
 
 @router.get("/ollama-status", response_class=JSONResponse)
@@ -106,6 +148,116 @@ async def lmstudio_status() -> JSONResponse:
     except Exception:
         log.warning("Failed to query LM Studio status", exc_info=True)
         return JSONResponse({"running": False, "models": []})
+
+
+def _no_key_response(provider_label: str) -> JSONResponse:
+    return JSONResponse({
+        "running": False,
+        "models": [],
+        "error": f"{provider_label} API key required · enter it above and click Refresh",
+    })
+
+
+def _sdk_missing_response(install_extra: str) -> JSONResponse:
+    return JSONResponse({
+        "running": False,
+        "models": [],
+        "error": f"SDK not installed · pip install 'wisper-transcribe[{install_extra}]'",
+    })
+
+
+@router.post("/anthropic-models", response_class=JSONResponse)
+async def anthropic_models(request: Request) -> JSONResponse:
+    """List available Anthropic models for the config combobox.
+
+    POST so the freshly-typed API key travels in the request body, never in
+    a URL or log. Resolution order: form `api_key` > env ANTHROPIC_API_KEY >
+    saved config.
+    """
+    key = await _resolve_form_api_key(request, "anthropic")
+    if not key:
+        return _no_key_response("Anthropic")
+    try:
+        import anthropic
+    except ImportError:
+        return _sdk_missing_response("llm-anthropic")
+    try:
+        client = anthropic.Anthropic(api_key=key)
+        page = client.models.list()
+        models = []
+        for m in getattr(page, "data", []) or []:
+            mid = getattr(m, "id", None)
+            if not mid:
+                continue
+            label = getattr(m, "display_name", "") or ""
+            models.append({"name": mid, "size": label})
+        return JSONResponse({"running": True, "models": models})
+    except Exception:
+        log.warning("Failed to list Anthropic models", exc_info=True)
+        return JSONResponse({
+            "running": False, "models": [],
+            "error": "Anthropic API call failed · check your key and network",
+        })
+
+
+@router.post("/openai-models", response_class=JSONResponse)
+async def openai_models(request: Request) -> JSONResponse:
+    """List available OpenAI chat models. Same security pattern as anthropic_models."""
+    key = await _resolve_form_api_key(request, "openai")
+    if not key:
+        return _no_key_response("OpenAI")
+    try:
+        import openai
+    except ImportError:
+        return _sdk_missing_response("llm-openai")
+    try:
+        client = openai.OpenAI(api_key=key)
+        page = client.models.list()
+        models = []
+        for m in getattr(page, "data", []) or []:
+            mid = getattr(m, "id", None)
+            if not mid or not _is_openai_chat_model(mid):
+                continue
+            models.append({"name": mid, "size": ""})
+        models.sort(key=lambda m: m["name"])
+        return JSONResponse({"running": True, "models": models})
+    except Exception:
+        log.warning("Failed to list OpenAI models", exc_info=True)
+        return JSONResponse({
+            "running": False, "models": [],
+            "error": "OpenAI API call failed · check your key and network",
+        })
+
+
+@router.post("/google-models", response_class=JSONResponse)
+async def google_models(request: Request) -> JSONResponse:
+    """List available Google Gemini chat models. Same security pattern."""
+    key = await _resolve_form_api_key(request, "google")
+    if not key:
+        return _no_key_response("Google")
+    try:
+        from google import genai
+    except ImportError:
+        return _sdk_missing_response("llm-google")
+    try:
+        client = genai.Client(api_key=key)
+        models = []
+        for m in client.models.list():
+            full = getattr(m, "name", None)
+            if not full:
+                continue
+            short = full.split("/", 1)[-1]
+            if not _is_google_chat_model(short):
+                continue
+            models.append({"name": short, "size": ""})
+        models.sort(key=lambda m: m["name"])
+        return JSONResponse({"running": True, "models": models})
+    except Exception:
+        log.warning("Failed to list Google models", exc_info=True)
+        return JSONResponse({
+            "running": False, "models": [],
+            "error": "Google API call failed · check your key and network",
+        })
 
 
 @router.get("", response_class=HTMLResponse)

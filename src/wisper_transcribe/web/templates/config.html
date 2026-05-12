@@ -187,9 +187,9 @@
 </div>
 
 <script>
-const _LOCAL_PROVIDERS = {
+const _PROVIDERS = {
   ollama: {
-    label: 'Ollama',
+    label: 'Ollama', kind: 'local', method: 'GET',
     endpoint: '/config/ollama-status',
     defaultEndpoint: 'http://localhost:11434',
     emptyHint: 'No models installed. Run: ollama pull <model>',
@@ -197,12 +197,27 @@ const _LOCAL_PROVIDERS = {
     notFoundSuffix: ' (not installed)',
   },
   lmstudio: {
-    label: 'LM Studio',
+    label: 'LM Studio', kind: 'local', method: 'GET',
     endpoint: '/config/lmstudio-status',
     defaultEndpoint: 'http://localhost:1234',
     emptyHint: 'No models loaded. Load a model in the LM Studio UI first.',
     unreachableHint: 'Enable the local server in LM Studio → Developer → Local Server',
     notFoundSuffix: ' (not loaded)',
+  },
+  anthropic: {
+    label: 'Anthropic', kind: 'cloud', method: 'POST',
+    endpoint: '/config/anthropic-models', keyField: 'cfg_anthropic_api_key',
+    notFoundSuffix: ' (not in current list)',
+  },
+  openai: {
+    label: 'OpenAI', kind: 'cloud', method: 'POST',
+    endpoint: '/config/openai-models', keyField: 'cfg_openai_api_key',
+    notFoundSuffix: ' (not in current list)',
+  },
+  google: {
+    label: 'Google Gemini', kind: 'cloud', method: 'POST',
+    endpoint: '/config/google-models', keyField: 'cfg_google_api_key',
+    notFoundSuffix: ' (not in current list)',
   },
 };
 
@@ -284,7 +299,7 @@ function _setDiscoveredModels(models) {
 
 async function loadLocalProviderStatus() {
   const provider = document.getElementById('cfg_llm_provider').value;
-  const cfg = _LOCAL_PROVIDERS[provider];
+  const cfg = _PROVIDERS[provider];
   if (!cfg) return;
 
   const statusLine = document.getElementById('llm_local_status_line');
@@ -295,21 +310,31 @@ async function loadLocalProviderStatus() {
   _setDiscoveredModels([]);
 
   try {
-    const r = await fetch(cfg.endpoint);
-    const data = await r.json();
+    let resp;
+    if (cfg.method === 'POST') {
+      const body = new FormData();
+      const keyInput = cfg.keyField ? document.getElementById(cfg.keyField) : null;
+      if (keyInput && keyInput.value) body.append('api_key', keyInput.value);
+      resp = await fetch(cfg.endpoint, { method: 'POST', body });
+    } else {
+      resp = await fetch(cfg.endpoint);
+    }
+    const data = await resp.json();
     if (data.running && data.models.length > 0) {
       _setDiscoveredModels(data.models);
       const current = modelInput.value;
       const notFound = current && !data.models.find(m => m.name === current);
-      statusLine.textContent = '✓ ' + cfg.label + ' running · ' + data.models.length +
+      const verb = cfg.kind === 'local' ? 'running' : 'connected';
+      statusLine.textContent = '✓ ' + cfg.label + ' ' + verb + ' · ' + data.models.length +
         ' model' + (data.models.length !== 1 ? 's' : '') + ' available' +
         (notFound ? ' · current "' + current + '"' + cfg.notFoundSuffix : '');
       statusLine.className = 'text-xs ' + (notFound ? 'text-yellow-600' : 'text-green-600');
     } else if (data.running) {
-      statusLine.textContent = '✓ ' + cfg.label + ' running · ' + cfg.emptyHint;
+      statusLine.textContent = '✓ ' + cfg.label + ' running · ' + (cfg.emptyHint || 'No models returned');
       statusLine.className = 'text-xs text-yellow-600';
     } else {
-      statusLine.textContent = '✗ ' + cfg.label + ' not reachable · ' + cfg.unreachableHint;
+      const hint = cfg.kind === 'local' ? cfg.unreachableHint : (data.error || 'Unavailable');
+      statusLine.textContent = '✗ ' + cfg.label + ' · ' + hint;
       statusLine.className = 'text-xs text-red-500';
     }
   } catch (e) {
@@ -319,28 +344,39 @@ async function loadLocalProviderStatus() {
 }
 
 function llmProviderChanged(provider) {
-  const cfg = _LOCAL_PROVIDERS[provider];
-  const isLocal = !!cfg;
+  const cfg = _PROVIDERS[provider];
+  const isLocal = cfg && cfg.kind === 'local';
+  const isCloud = cfg && cfg.kind === 'cloud';
   document.getElementById('llm_endpoint_row').classList.toggle('hidden', !isLocal);
   document.getElementById('llm_anthropic_row').classList.toggle('hidden', provider !== 'anthropic');
   document.getElementById('llm_openai_row').classList.toggle('hidden', provider !== 'openai');
   document.getElementById('llm_google_row').classList.toggle('hidden', provider !== 'google');
-  document.getElementById('llm_local_status_row').classList.toggle('hidden', !isLocal);
+  document.getElementById('llm_local_status_row').classList.toggle('hidden', !cfg);
   // Clear discovered models when switching providers so stale suggestions don't appear
   _setDiscoveredModels([]);
   _closeModelMenu();
   if (isLocal) {
     document.getElementById('cfg_llm_endpoint').placeholder = cfg.defaultEndpoint;
-    loadLocalProviderStatus();
   }
+  if (cfg) loadLocalProviderStatus();
 }
+
 // Apply on page load
 llmProviderChanged(document.getElementById('cfg_llm_provider').value);
-// Re-check when endpoint URL changes
+// Re-check when endpoint URL changes (local providers only)
 document.getElementById('cfg_llm_endpoint').addEventListener('change', function() {
-  if (_LOCAL_PROVIDERS[document.getElementById('cfg_llm_provider').value]) {
-    loadLocalProviderStatus();
-  }
+  const p = _PROVIDERS[document.getElementById('cfg_llm_provider').value];
+  if (p && p.kind === 'local') loadLocalProviderStatus();
+});
+// Re-check when an API key field is committed (blur or Enter), so typing a new key
+// then tabbing out fetches the list without requiring a manual Refresh click.
+['cfg_anthropic_api_key', 'cfg_openai_api_key', 'cfg_google_api_key'].forEach(function(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener('change', function() {
+    const p = _PROVIDERS[document.getElementById('cfg_llm_provider').value];
+    if (p && p.kind === 'cloud' && p.keyField === id) loadLocalProviderStatus();
+  });
 });
 
 // Discord preset manager (vanilla JS)
