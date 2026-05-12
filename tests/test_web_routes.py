@@ -1390,6 +1390,135 @@ def test_enroll_submit_calls_enroll_speaker_when_segments_present(
     assert call_kwargs["speaker_label"] == "SPEAKER_00"
 
 
+def test_enroll_submit_adds_speaker_to_job_campaign(client, tmp_path, monkeypatch):
+    """When the job was submitted with a campaign, enrolled speakers must be added to it."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from wisper_transcribe.campaign_manager import create_campaign, get_campaign_profile_keys
+    from datetime import datetime
+    import uuid
+
+    # Pre-create the campaign that the job references
+    create_campaign("D&D Mondays")
+
+    transcript = tmp_path / "session01.md"
+    transcript.write_text(
+        "---\nspeakers:\n  - name: SPEAKER_00\n---\n\n**SPEAKER_00** *(00:00)*: Hi."
+    )
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"fake")
+    fake_segment = MagicMock()
+    fake_segment.speaker = "SPEAKER_00"
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(audio),
+        kwargs={"device": "cpu", "campaign": "d-d-mondays"},
+        output_path=str(transcript),
+        diarization_segments=[fake_segment],
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    with patch("wisper_transcribe.speaker_manager.enroll_speaker"):
+        resp = client.post(
+            f"/transcribe/jobs/{job.id}/enroll",
+            data={"speaker_SPEAKER_00": "Alice"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    # The enrolled profile must now be a member of the campaign
+    assert "alice" in get_campaign_profile_keys("d-d-mondays")
+
+
+def test_enroll_submit_no_campaign_skips_add_member(client, tmp_path, monkeypatch):
+    """No campaign on the job → add_member is never called (normal enrollment path)."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from datetime import datetime
+    import uuid
+
+    transcript = tmp_path / "session01.md"
+    transcript.write_text(
+        "---\nspeakers:\n  - name: SPEAKER_00\n---\n\n**SPEAKER_00** *(00:00)*: Hi."
+    )
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"fake")
+    fake_segment = MagicMock()
+    fake_segment.speaker = "SPEAKER_00"
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(audio),
+        kwargs={"device": "cpu"},  # no campaign
+        output_path=str(transcript),
+        diarization_segments=[fake_segment],
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    with patch("wisper_transcribe.speaker_manager.enroll_speaker"), \
+         patch("wisper_transcribe.campaign_manager.add_member") as mock_add_member:
+        resp = client.post(
+            f"/transcribe/jobs/{job.id}/enroll",
+            data={"speaker_SPEAKER_00": "Bob"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    mock_add_member.assert_not_called()
+
+
+def test_enroll_submit_skips_add_member_if_already_in_campaign(client, tmp_path, monkeypatch):
+    """If the profile is already in the campaign, add_member must not be called (avoids clobbering role/character)."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from wisper_transcribe.campaign_manager import create_campaign, add_member
+    from datetime import datetime
+    import uuid
+
+    create_campaign("D&D Mondays")
+    add_member("d-d-mondays", "alice", role="player", character="Tika")
+
+    transcript = tmp_path / "session01.md"
+    transcript.write_text(
+        "---\nspeakers:\n  - name: SPEAKER_00\n---\n\n**SPEAKER_00** *(00:00)*: Hi."
+    )
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"fake")
+    fake_segment = MagicMock()
+    fake_segment.speaker = "SPEAKER_00"
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(audio),
+        kwargs={"device": "cpu", "campaign": "d-d-mondays"},
+        output_path=str(transcript),
+        diarization_segments=[fake_segment],
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    with patch("wisper_transcribe.speaker_manager.enroll_speaker"), \
+         patch("wisper_transcribe.campaign_manager.add_member") as mock_add_member:
+        resp = client.post(
+            f"/transcribe/jobs/{job.id}/enroll",
+            data={"speaker_SPEAKER_00": "Alice"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    # add_member must not be invoked a second time — Alice is already in the roster
+    mock_add_member.assert_not_called()
+
+
 def test_enroll_submit_skips_enroll_when_no_segments(client, tmp_path, monkeypatch):
     """enroll_submit() must not call enroll_speaker() when no diarization_segments are stored."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
