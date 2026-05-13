@@ -65,7 +65,7 @@ src/wisper_transcribe/
         ├── transcripts.py  GET/POST /transcripts (grouped by campaign), transcript detail (with campaign assignment dropdown), download, delete, fix-speaker; POST /transcripts/{name}/refine, POST /transcripts/{name}/summarize; GET /transcripts/{name}/summary, GET /transcripts/{name}/summary/download; POST /transcripts/{name}/campaign (move/remove campaign association)
         ├── speakers.py     GET/POST /speakers, enroll, rename, remove
         ├── campaigns.py    GET/POST /campaigns, campaign detail, roster add/remove, delete
-        ├── config.py       GET/POST /config (+ Discord bot token, default guild/channel, presets management), POST /config/presets/add (inline preset save from Record page; validates guild/channel as snowflakes), GET /config/ollama-status, GET /config/lmstudio-status
+        ├── config.py       GET/POST /config (+ Discord bot token, default guild/channel, presets management), POST /config/presets/add (inline preset save from Record page; validates guild/channel as snowflakes), GET /config/ollama-status, GET /config/lmstudio-status, GET /config/ollama-cloud-catalog, POST /config/{anthropic,openai,google}-models (cloud model discovery via SDK), GET /config/open-data-dir (opens data directory in OS file manager via `open`/`xdg-open`/`explorer`)
 ```
 
 ---
@@ -432,11 +432,16 @@ Component classes (`sidebar`, `toolbar`, `section-head`, `hairline-*`, `pill-*`,
 ### Speaker Enrollment Web Flow
 Interactive CLI enrollment (TTY prompts) is replaced by a post-job wizard:
 1. Transcription completes with `enroll_speakers=False`; detected speakers appear in transcript as `SPEAKER_XX` labels.
-2. After `process_file()` returns, `_extract_speaker_excerpts()` parses the output markdown for each speaker's first timestamp and cuts a ~12s audio clip via ffmpeg, stored in `job.speaker_excerpts[speaker_name]`. Diarization segments are captured via `_result_store` dict and stored in `job.diarization_segments`.
-3. Dashboard shows "Name Speakers" button for completed jobs.
-4. `GET /transcribe/jobs/{id}/enroll` renders a wizard page with each detected label, a name input (plus existing profiles as click-to-fill options), and a Play/Stop button if an audio excerpt is available.
-5. `GET /transcribe/jobs/{id}/excerpt/{speaker_name}` serves the audio clip as `audio/mpeg`.
-6. `POST /transcribe/jobs/{id}/enroll` applies speaker name renames via `formatter.update_speaker_names()` and calls `speaker_manager.enroll_speaker()` for each labelled speaker to persist voice embeddings. If `job.diarization_segments` is empty (e.g. no-diarization run), enrollment is skipped silently.
+2. After `process_file()` returns, `_extract_speaker_excerpts()` parses the output markdown for each speaker's first timestamp and cuts a ~12s audio clip via ffmpeg, saved to `{stem}_excerpt_{speaker}.mp3` alongside the transcript. The first line of dialogue for each speaker is saved to `{stem}_excerpt_{speaker}.txt` (the transcript snippet shown in the wizard). Both files survive server restarts because they live on disk. The `job.speaker_excerpts` dict holds in-memory references while the job is alive.
+3. `pipeline.process_file()` now accepts a `job_id` kwarg and writes it to the transcript's YAML frontmatter as `job_id`. This lets the transcript detail page link directly back to the enrollment wizard even after navigating away.
+4. Dashboard "The desk" job rows and "The archive" transcript rows are fully clickable — running/queued/failed jobs link to `/transcribe/jobs/{id}`; completed jobs link directly to `/transcripts/{stem}`. The archive section polls `/transcripts/partials/recent` via htmx for the 6 most recent transcripts.
+5. `GET /transcribe/jobs/{id}/enroll` renders the wizard page with each detected label, a name input, existing-profiles click-to-fill options, a Play/Stop button, and an italic quote of the first detected dialogue line for that speaker.
+6. `GET /transcribe/jobs/{id}/excerpt/{speaker_name}` serves the audio clip as `audio/mpeg`. Falls back to scanning the output directory for `*_excerpt_{speaker}.mp3` when the in-memory job no longer exists (server restart recovery).
+7. The transcript detail sidebar always shows a speaker enrollment block — linking to `/transcribe/jobs/{meta.job_id}/enroll` when `job_id` is in the frontmatter, or falling back to `/speakers` for older transcripts.
+8. `POST /transcribe/jobs/{id}/enroll` applies speaker name renames via `formatter.update_speaker_names()` and calls `speaker_manager.enroll_speaker()` for each labelled speaker to persist voice embeddings. If `job.diarization_segments` is empty (e.g. no-diarization run), enrollment is skipped silently.
+
+### Startup Cleanup
+`app._cleanup_orphaned_uploads()` runs in the FastAPI lifespan on every startup. It deletes `wisper_upload_*` temp files left in `tempfile.gettempdir()` from transcription jobs that crashed mid-run. The files are only needed while a job is actively running, so anything on disk at boot time is safe to remove.
 
 ### Web Route Security
 
@@ -513,9 +518,16 @@ The job detail page shows a unified progress bar and step pills driven by SSE ev
 - **Ollama Cloud — two routing paths**: a new `ollama-cloud` provider was added to `LLM_PROVIDERS` alongside an `OllamaCloudClient` (a thin `OllamaClient` subclass with `endpoint=https://ollama.com` and a required Bearer token in the `Authorization` header). `OllamaClient` itself grew an optional `api_key` constructor parameter so the cloud subclass reuses the streaming logic verbatim. (Path A) Users can keep `llm_provider = "ollama"` and pick a cloud model with `-cloud` suffix (e.g. `gpt-oss:120b-cloud`); the local daemon recognises the suffix and proxies to ollama.com using `ollama signin` credentials — wisper code is unchanged. (Path B) Users can switch to `llm_provider = "ollama-cloud"` and supply `OLLAMA_API_KEY` / `ollama_cloud_api_key`; `OllamaCloudClient` then calls `https://ollama.com/api/chat` directly with no local daemon. `GET /config/ollama-cloud-catalog` is a single public endpoint that fetches `https://ollama.com/api/tags` (5 s timeout, no auth header sent) and is used by both paths. The web combobox fetches local `/api/tags` and the cloud catalog in parallel when `ollama` is selected, dedupes by name, and tags cloud entries with `-cloud` suffix plus a `☁` label. For `ollama-cloud` provider the catalog is shown with bare names. Hardcoded endpoint in `_LLM_DEFAULT_ENDPOINTS["ollama-cloud"] = "https://ollama.com"` (no user override exposed in UI — there is one cloud endpoint).
 
 ### Offline Assets
-- `static/htmx.min.js`: placeholder committed to repo; real file downloaded during `docker build` via `curl`. For local use: `curl -sL https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js -o src/wisper_transcribe/static/htmx.min.js`
-- `static/tailwind.min.css`: rebuilt automatically on server startup by `app._build_tailwind()` (mtime-checked; skips if already current). `pytailwindcss` is a main dependency (no Node.js required). Docker builds also invoke the build step so images are self-contained. Manual rebuild: `.venv/bin/python -m pytailwindcss -i src/wisper_transcribe/static/input.css -o src/wisper_transcribe/static/tailwind.min.css --minify`
-- `static/fonts/`: self-hosted woff2 files for Newsreader, Geist, JetBrains Mono, and Instrument Serif (latin + latin-ext subsets). All licensed under SIL OFL 1.1. Downloaded once via the Google Fonts API; committed to the repository so no internet access is required at runtime. `@font-face` declarations are in `static/input.css`.
+All web UI assets are committed directly — no network access required at runtime:
+- `static/htmx.min.js`: real HTMX 1.9.12 (48 KB, ISC) committed in full. No placeholder, no download step needed for local dev or Docker.
+- `static/tailwind.min.css`: rebuilt automatically on server startup by `app._build_tailwind()` (mtime-checked; skips if already current). `pytailwindcss` is a main dependency (no Node.js required). Manual rebuild: `.venv/bin/python -m pytailwindcss -i src/wisper_transcribe/static/input.css -o src/wisper_transcribe/static/tailwind.min.css --minify`
+- `static/fonts/`: self-hosted woff2 files for Newsreader, Geist, JetBrains Mono, and Instrument Serif (latin + latin-ext subsets). All licensed under SIL OFL 1.1. `@font-face` declarations live in `static/input.css`.
+
+**Vendor management** — `scripts/vendor.py` re-downloads all vendored assets and rebuilds Tailwind in one command:
+- `python scripts/vendor.py --check` — audit current state (shows ✓/✗ per asset)
+- `python scripts/vendor.py` — re-download htmx + font woff2s and rebuild Tailwind CSS
+
+Run this when bumping HTMX versions or adding font weights/subsets, then commit the changed files in `static/`.
 
 ### Tailwind CSS Staleness Check (CI)
 CI runs `python -m pytailwindcss ... --minify` then `git diff --exit-code -- static/tailwind.min.css`. If the committed CSS differs from what a fresh build would produce (because a template or `input.css` changed without rebuilding), the diff step fails and blocks merge. The error message tells the developer exactly which command to run to fix it.

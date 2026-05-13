@@ -28,7 +28,10 @@
       "Bash(gh pr checks *)",
       "Bash(gh run view *)",
       "Bash(.venv/bin/wisper *)",
-      "Bash(curl -sL https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js -o src/wisper_transcribe/static/htmx.min.js)"
+      "Bash(curl -sL https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js -o src/wisper_transcribe/static/htmx.min.js)",
+      "Bash(python scripts/vendor.py *)",
+      "Skill(update-config)",
+      "Skill(update-config:*)"
     ]
   }
 }

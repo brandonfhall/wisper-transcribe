@@ -48,13 +48,13 @@ Nothing else changes — `SegmentedOggWriter`, the web UI, campaigns, CLI, and a
 
 ## UI Bugs ##
 
-* on the transcript resutls page the "Generate Summary" button is shown even after a summary has been generated. Aditionally the summary is not shown on the transcript results page after it has been generated. — **OPEN**
+* on the transcript results page the "Generate Summary" button is shown even after a summary has been generated. Additionally the summary is not shown on the transcript results page after it has been generated. — **OPEN** (template logic is correct; suspected CWD mismatch between server launch dir and where the summary was written — reproduce needed)
 
-* on the transcript results page Speakers is showing a raw JSON object instaed of the speaker table. — **OPEN**
+* on the transcript results page Speakers is showing a raw JSON object instead of the speaker table. — **FIXED** (metadata loop now excludes `speakers` and `job_id`; speakers rendered as name chips)
 
-* Regression. There is not a way to name speakers in the UI on a transcript resutls page. The "Name Speakers" button is missing. — **OPEN**
+* Regression. There is not a way to name speakers in the UI on a transcript results page. The "Name Speakers" button is missing. — **FIXED** (speaker enrollment block always visible; links to job enrollment wizard when `job_id` in frontmatter, falls back to /speakers)
 
-* on the config storage page add a link to open the storage directory in the OS file explorer. — **OPEN**
+* on the config storage page add a link to open the storage directory in the OS file explorer. — **FIXED** (`GET /config/open-data-dir` + "Open in Finder →" button)
 
-* the Device and Jobs summary in the lower left corner of the page are blank and not bound to anything. — **OPEN**
+* the Device and Jobs summary in the lower left corner of the page are blank and not bound to anything. — **FIXED** (htmx now committed as real file; vanilla-JS fallback in app.js polls /api/sidebar-status)
 
