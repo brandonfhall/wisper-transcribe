@@ -119,7 +119,7 @@
         </form>
         {% else %}
         <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-signal-green);letter-spacing:0.12em;margin-bottom:12px">✓ SUMMARY AVAILABLE</div>
-        <a href="/transcripts/{{ name | urlencode }}/summary" class="btn btn-secondary" style="display:flex;width:100%;justify-content:center;margin-bottom:8px">View DM notes</a>
+        <a href="/transcripts/{{ name | urlencode }}/summary" class="btn btn-secondary" style="display:flex;width:100%;justify-content:center;margin-bottom:8px">View Summary</a>
         {% endif %}
         <div style="font-size:11.5px;color:var(--color-paper-faint);margin-top:8px;line-height:1.5">
           LLM: {{ llm_provider }}{% if llm_model %} · {{ llm_model }}{% endif %}
