@@ -136,8 +136,8 @@
             </div>
             <div style="font-size:11.5px;color:var(--color-paper-faint);margin-top:2px">{{ sub }}</div>
           </div>
-          <div class="toggle-wrap on" style="margin-top:2px">
-            <input type="checkbox" name="{{ name_attr }}" value="on" checked style="display:none"/>
+          <div class="toggle-wrap off" style="margin-top:2px" onclick="wisperToggle(this, event)">
+            <input type="checkbox" name="{{ name_attr }}" value="on" style="display:none"/>
             <div class="toggle-knob"></div>
           </div>
         </label>
@@ -187,6 +187,16 @@ function wisperModelSelect(radio) {
   document.querySelectorAll('.model-label').forEach(function(s) {
     s.style.color = s.dataset.model === radio.value ? 'var(--color-accent)' : 'var(--color-paper-dim)';
   });
+}
+
+// Toggle switch interactivity
+function wisperToggle(wrap, evt) {
+  if (evt) evt.stopPropagation();
+  var cb = wrap.querySelector('input[type="checkbox"]');
+  if (!cb) return;
+  var isOn = !cb.checked;
+  cb.checked = isOn;
+  wrap.className = 'toggle-wrap ' + (isOn ? 'on' : 'off');
 }
 function wisperSetSpeakers(n) {
   document.getElementById('num-speakers-val').value = n;

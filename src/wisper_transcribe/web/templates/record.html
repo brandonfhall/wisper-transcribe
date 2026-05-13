@@ -251,7 +251,7 @@
                style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:8px 10px;border-radius:5px;font-size:13px;font-family:var(--font-mono)"/>
       </div>
 
-      <div style="padding:16px 0">
+      <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
         <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center;font-size:14px;padding:10px">
           {{ icon("record", 10, "var(--color-ink-800)") }} Start recording
         </button>
@@ -259,12 +259,47 @@
     </div>
   </form>
 
-  <div style="border-top:1px solid var(--color-rule);padding:20px 0">
+  <!-- Save as preset -->
+  {% if request.query_params.get('preset_saved') %}
+  <div style="padding:10px 0;font-family:var(--font-mono);font-size:11px;color:var(--color-signal-green)">✓ Preset saved.</div>
+  {% elif request.query_params.get('preset_error') %}
+  <div style="padding:10px 0;font-family:var(--font-mono);font-size:11px;color:var(--color-signal-amber)">Invalid guild or channel ID.</div>
+  {% endif %}
+  <form method="post" action="/config/presets/add" style="margin-top:0">
+    <div style="border-top:1px solid var(--color-rule);padding:16px 0">
+      <div class="mono-kicker" style="margin-bottom:10px">Save as preset</div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input type="text" name="name" id="preset-name" placeholder="Preset name (e.g. table-1)"
+               style="flex:1;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:7px 10px;border-radius:5px;font-size:12px;font-family:var(--font-sans)"/>
+        <button type="submit" class="btn btn-secondary">Save preset</button>
+      </div>
+      <input type="hidden" name="guild_id" id="preset-guild"/>
+      <input type="hidden" name="channel_id" id="preset-channel"/>
+    </div>
+  </form>
+
+  <div style="padding:8px 0">
     <a href="/recordings" style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">View all recordings →</a>
   </div>
 </div>
 {% endif %}
 </div>
+
+<script>
+// Sync guild/channel from start form into the preset hidden fields
+(function(){
+  function sync() {
+    var g = document.querySelector('input[name="guild_id"]');
+    var c = document.querySelector('input[name="voice_channel_id"]');
+    var pg = document.getElementById('preset-guild');
+    var pc = document.getElementById('preset-channel');
+    if (g && pg) pg.value = g.value;
+    if (c && pc) pc.value = c.value;
+  }
+  document.addEventListener('input', sync);
+  sync();
+})();
+</script>
 
 {% if active_recording %}
 {% block extra_scripts %}

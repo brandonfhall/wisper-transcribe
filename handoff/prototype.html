@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>wisper — interactive prototype</title>
+  <link rel="icon" type="image/png" href="assets/logo.png"/>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=JetBrains+Mono:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet"/>
+  <style>
+    html, body { margin: 0; padding: 0; background: #0b0f17; min-height: 100vh; }
+    body { font-family: 'Geist', -apple-system, BlinkMacSystemFont, sans-serif; color: #f3ead8; }
+    #root { min-height: 100vh; }
+    .proto-shell { min-height: 100vh; height: 100vh; display: flex; }
+  </style>
+</head>
+<body>
+  <template id="__bundler_thumbnail" data-bg-color="#0b0f17">
+    <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+      <rect x="0" y="0" width="100" height="100" fill="#0b0f17"/>
+      <text x="50" y="56" font-family="Georgia, serif" font-size="36" font-style="italic" font-weight="300" fill="#f3ead8" text-anchor="middle">w</text>
+      <circle cx="78" cy="28" r="3" fill="#5fd4e7"/>
+    </svg>
+  </template>
+  <div id="root"></div>
+
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+  <script type="text/babel" src="screens/shared-data.jsx"></script>
+  <script type="text/babel" src="screens/codex.jsx"></script>
+  <script type="text/babel" src="screens/studio.jsx"></script>
+  <script type="text/babel" src="screens/studio2.jsx"></script>
+  <script type="text/babel" src="screens/studio-record.jsx"></script>
+  <script type="text/babel" src="screens/studio-recordings.jsx"></script>
+  <script type="text/babel" src="screens/studio-campaigns.jsx"></script>
+  <script type="text/babel" src="screens/studio-transcripts-list.jsx"></script>
+  <script type="text/babel" src="prototype.jsx"></script>
+</body>
+</html>

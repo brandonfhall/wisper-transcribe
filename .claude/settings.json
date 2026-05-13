@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -sL -H 'User-Agent: Mozilla/5.0 \\(Macintosh; Intel Mac OS X 10_15_7\\) AppleWebKit/537.36 \\(KHTML, like Gecko\\) Chrome/124.0.0.0 Safari/537.36' 'https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&family=JetBrains+Mono:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap' -o /tmp/gfonts.css)",
+      "Bash(.venv/bin/python -c \"import pytailwindcss; print\\(pytailwindcss.__version__\\)\")",
+      "Bash(.venv/bin/python -m pytailwindcss --version)",
+      "Bash(grep -E 'geist.*latin|newsreader.*latin|jetbrains.*latin|instrument.*latin' /tmp/font_faces.css | grep -v 'ext' | head -40)",
+      "Read(//private/tmp/**)",
+      "Bash(sed -n '293,320p' /Users/brandon/VSCode/wisper-transcribe/src/wisper_transcribe/web/routes/record.py)",
+      "Bash(sed -n '130,165p' /Users/brandon/VSCode/wisper-transcribe/src/wisper_transcribe/web/routes/transcripts.py)",
+      "Bash(sed -n '100,130p' /Users/brandon/VSCode/wisper-transcribe/src/wisper_transcribe/web/routes/config.py)",
+      "Bash(.venv/bin/pytest tests/test_web_routes.py::test_campaigns_index_empty tests/test_web_routes.py::test_config_llm_fields_visible tests/test_web_routes.py::test_transcribe_form_includes_campaign_select tests/test_web_routes.py::test_transcript_detail_shows_summary_link -v --tb=long)",
+      "Bash(.venv/bin/pytest tests/test_web_routes.py::test_campaigns_index_empty -v --tb=short)",
+      "Bash(.venv/bin/pytest tests/test_web_routes.py::test_config_llm_fields_visible tests/test_web_routes.py::test_transcribe_form_includes_campaign_select tests/test_web_routes.py::test_transcript_detail_shows_summary_link tests/test_web_routes.py::test_transcripts_list_groups_by_campaign -v --tb=line)",
+      "Bash(.venv/bin/pytest tests/test_web_routes.py::test_campaigns_index_empty tests/test_web_routes.py::test_config_llm_fields_visible tests/test_web_routes.py::test_transcribe_form_includes_campaign_select tests/test_web_routes.py::test_transcript_detail_shows_summary_link tests/test_web_routes.py::test_transcripts_list_groups_by_campaign tests/test_web_routes.py::test_transcript_detail_shows_campaign_dropdown -v --tb=short)",
+      "Bash(.venv/bin/pytest tests/ -x --tb=short)",
+      "Bash(git commit -m ' *)"
+    ]
+  }
+}
