@@ -117,6 +117,31 @@ def _get_safe_content_path(request: Request, name: str, suffix: str) -> Path | N
     return Path(target_path)
 
 
+@router.get("/partials/recent", response_class=HTMLResponse)
+async def recent_transcripts_partial(request: Request) -> HTMLResponse:
+    """HTMX partial: 6 most recent transcripts for the dashboard archive section."""
+    out_dir = get_output_dir()
+    files = sorted(
+        [f for f in out_dir.glob("*.md") if not f.name.endswith(".summary.md")],
+        key=lambda f: f.stat().st_mtime,
+        reverse=True,
+    )[:6]
+    items = []
+    for f in files:
+        meta, _ = _parse_frontmatter(f.read_text(encoding="utf-8"))
+        items.append({
+            "stem": f.stem,
+            "title": meta.get("title", f.stem),
+            "duration": meta.get("duration", ""),
+            "date_processed": meta.get("date_processed", ""),
+        })
+    return templates.TemplateResponse(
+        request,
+        "partials/recent_transcripts.html",
+        {"request": request, "transcripts": items},
+    )
+
+
 @router.get("", response_class=HTMLResponse)
 async def transcripts_list(request: Request) -> HTMLResponse:
     out_dir = get_output_dir()

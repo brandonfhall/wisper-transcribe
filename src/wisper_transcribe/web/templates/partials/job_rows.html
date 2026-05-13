@@ -3,7 +3,19 @@
 {% if jobs %}
 {% for job in jobs %}
 {%- set active = job.status == 'running' -%}
-<div style="display:grid;grid-template-columns:12px 1.7fr 110px 1fr 70px 56px;gap:14px;padding:14px 0;border-bottom:1px solid var(--color-rule);align-items:center">
+{%- if job.output_path and job.status == 'completed' -%}
+  {%- set row_href = '/transcripts/' ~ ((job.output_path | stem) | urlencode) -%}
+{%- else -%}
+  {%- set row_href = '/transcribe/jobs/' ~ job.id -%}
+{%- endif -%}
+<a href="{{ row_href }}"
+   style="display:grid;grid-template-columns:12px 1.7fr 110px 1fr 70px 56px;gap:14px;padding:14px 0;
+          border-bottom:1px solid var(--color-rule);align-items:center;
+          text-decoration:none;color:inherit;
+          transition:background 120ms"
+   onmouseover="this.style.background='var(--color-ink-700)'"
+   onmouseout="this.style.background=''">
+
   <!-- Status dot -->
   <div>
     {% if active %}
@@ -15,16 +27,9 @@
 
   <!-- Session name + ID -->
   <div>
-    {% if job.output_path and job.status == 'completed' %}
-    <a href="/transcripts/{{ (job.output_path | stem) | urlencode }}"
-       style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper);text-decoration:none">
-      {{ job.name or (job.input_path | basename) }}
-    </a>
-    {% else %}
     <div style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper)">
       {{ job.name or (job.input_path | basename) }}
     </div>
-    {% endif %}
     <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:3px">
       {{ job.id[:8] }} · {{ job.created_at.strftime('%H:%M:%S') }}
     </div>
@@ -65,7 +70,7 @@
     {% else %}—
     {% endif %}
   </div>
-</div>
+</a>
 {% endfor %}
 {% else %}
 <div style="padding:24px 0;color:var(--color-paper-faint);font-size:13px;font-style:italic">
