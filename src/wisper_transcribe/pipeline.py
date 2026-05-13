@@ -363,6 +363,7 @@ def process_file(
     initial_prompt: Optional[str] = None,
     hotwords: Optional[list[str]] = None,
     campaign: Optional[str] = None,
+    job_id: Optional[str] = None,
     _result_store: Optional[dict] = None,
 ) -> Path:
     """Run the full pipeline on a single audio file. Returns path to output .md."""
@@ -538,6 +539,8 @@ def process_file(
         "duration": format_duration(duration),
         "speakers": speaker_metadata,
     }
+    if job_id:
+        metadata["job_id"] = job_id
 
     content = to_markdown(
         aligned_segments,

@@ -105,6 +105,17 @@
 
     <!-- Sidebar -->
     <div>
+      <!-- Speaker enrollment link (only if job_id was stored in frontmatter) -->
+      {% if meta.get('job_id') %}
+      <div style="margin-bottom:16px;padding:14px 16px;background:var(--color-ink-700);border:1px solid var(--color-rule);border-radius:4px">
+        <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);letter-spacing:0.15em;text-transform:uppercase;margin-bottom:8px">Speaker Enrollment</div>
+        <a href="/transcribe/jobs/{{ meta.job_id }}/enroll" class="btn btn-secondary" style="display:flex;width:100%;justify-content:center">
+          {{ icon("users", 11) }} Name speakers
+        </a>
+        <div style="font-size:11px;color:var(--color-paper-faint);margin-top:6px;line-height:1.4">Assign names and enroll voice profiles from the audio detected in this session.</div>
+      </div>
+      {% endif %}
+
       <!-- Refine / summarize actions -->
       <div style="background:var(--color-ink-700);border:1px solid #5fd4e740;padding:20px 22px;margin-bottom:28px;box-shadow:0 0 28px #5fd4e712">
         <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:14px">

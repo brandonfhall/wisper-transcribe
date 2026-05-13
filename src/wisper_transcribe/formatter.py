@@ -54,6 +54,8 @@ def to_markdown(
     }
     if metadata.get("speakers"):
         frontmatter["speakers"] = metadata["speakers"]
+    if metadata.get("job_id"):
+        frontmatter["job_id"] = metadata["job_id"]
 
     lines.append("---")
     lines.append(yaml.dump(frontmatter, default_flow_style=False, allow_unicode=True).rstrip())
