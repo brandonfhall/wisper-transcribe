@@ -618,7 +618,7 @@ def test_ollama_cloud_catalog_network_error(client):
     data = resp.json()
     assert data["running"] is False
     assert data["models"] == []
-    assert "ollama.com" in data["error"]
+    assert data["error"] == "Could not reach ollama.com · check your network"
 
 
 def _make_fake_sdk_page(items):
