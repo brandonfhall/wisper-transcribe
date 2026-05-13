@@ -23,11 +23,13 @@ class OllamaClient(LLMClient):
     provider = "ollama"
 
     def __init__(self, model: str, endpoint: str = "http://localhost:11434",
-                 temperature: float = 0.2, timeout: float = 30.0):
+                 temperature: float = 0.2, timeout: float = 30.0,
+                 api_key: str | None = None):
         self.model = model
         self.endpoint = endpoint.rstrip("/")
         self.temperature = temperature
         self.timeout = timeout   # connect / write timeout in seconds
+        self.api_key = api_key   # set for ollama-cloud direct calls; None for local daemon
 
     def _post_chat(self, payload: dict) -> str:
         """POST to /api/chat with streaming and return the full content string.
@@ -52,13 +54,17 @@ class OllamaClient(LLMClient):
         timeout = httpx.Timeout(connect=self.timeout, read=None,
                                 write=self.timeout, pool=10.0)
 
+        headers = None
+        if self.api_key:
+            headers = {"Authorization": f"Bearer {self.api_key}"}
+
         parts: list[str] = []
         token_count = 0
         try:
             sys.stderr.write(f"  Connecting to Ollama ({self.endpoint})...\n")
             sys.stderr.flush()
             with httpx.stream("POST", url, json=stream_payload,
-                              timeout=timeout) as resp:
+                              headers=headers, timeout=timeout) as resp:
                 resp.raise_for_status()
                 sys.stderr.write(
                     f"  Waiting for {self.model} to start generating...\n"

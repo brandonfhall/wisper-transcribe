@@ -9,6 +9,24 @@ CLI runs these synchronously with `--dry-run` preview. Web runs them as async Jo
 
 ---
 
+## Job cancellation — best-effort GPU stop
+
+**Observed (2026-05-11):** clicking Stop on an in-flight transcribe job in the web UI marks the job `Failed` in the queue, but the GPU keeps running hard for the duration of the in-flight CTranslate2 batch. The Python worker exits on the next tqdm tick (cooperative cancel via `job._cancel_event` in `web/jobs.py`), but in-flight inference inside faster-whisper's internal thread pool continues until the batch finishes.
+
+**Why the current mechanism is cooperative-only:**
+- `cancel_event.is_set()` is checked inside `capturing_write()` and `ProgressCatcher.write()` — both only fire when tqdm emits output.
+- Between tqdm ticks the worker thread is blocked inside CTranslate2's C++ code, which has no Python yield points and no public cancel hook.
+- `pipeline.py` itself has no awareness of the job's cancel event.
+
+**Options for true interrupt:**
+1. **Run transcription in a subprocess and SIGTERM on cancel.** The `parallel_stages = true` config already does this for the transcribe+diarize concurrency path. Generalising it to single-stage mode would mean every job spawns a subprocess (small startup cost, ~1–2 s) but gives clean GPU release on cancel.
+2. **Plumb the cancel event into `pipeline.process_file()`** so it's checked between segments inside the generator loop. Faster than (1) for very short batches; doesn't help mid-batch on the GPU.
+3. **Document cancel as best-effort** and add a "Force-quit" button that issues the OS-level termination (Windows-aware, no JVM-style hard kill on POSIX).
+
+Recommendation: option (1) — reuse the parallel-stages subprocess plumbing for the single-stage path too. Tracked here until a user explicitly cancels often enough to justify the work.
+
+---
+
 ## Pycord / DAVE Sidecar Migration
 
 **Issue:** [#39](https://github.com/brandonfhall/wisper-transcribe/issues/39) — DAVE (Discord Audio/Video E2EE) blocking voice bot audio receive — **OPEN**

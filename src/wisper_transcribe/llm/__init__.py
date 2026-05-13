@@ -49,14 +49,16 @@ def get_client(provider: str, config: Optional[dict] = None) -> LLMClient:
     api_key = get_llm_api_key(provider, config=config)
     if not api_key:
         env_name = {
-            "anthropic": "ANTHROPIC_API_KEY",
-            "openai": "OPENAI_API_KEY",
-            "google": "GOOGLE_API_KEY",
+            "anthropic":    "ANTHROPIC_API_KEY",
+            "openai":       "OPENAI_API_KEY",
+            "google":       "GOOGLE_API_KEY",
+            "ollama-cloud": "OLLAMA_API_KEY",
         }[provider]
         config_key = {
-            "anthropic": "anthropic_api_key",
-            "openai": "openai_api_key",
-            "google": "google_api_key",
+            "anthropic":    "anthropic_api_key",
+            "openai":       "openai_api_key",
+            "google":       "google_api_key",
+            "ollama-cloud": "ollama_cloud_api_key",
         }[provider]
         raise LLMUnavailableError(
             f"No API key for provider {provider!r}. "
@@ -72,6 +74,12 @@ def get_client(provider: str, config: Optional[dict] = None) -> LLMClient:
     if provider == "google":
         from .google import GoogleClient
         return GoogleClient(model=model, api_key=api_key, temperature=temperature)
+    if provider == "ollama-cloud":
+        from .ollama_cloud import OllamaCloudClient
+        from ..config import _LLM_DEFAULT_ENDPOINTS
+        endpoint = _LLM_DEFAULT_ENDPOINTS["ollama-cloud"]
+        return OllamaCloudClient(model=model, api_key=api_key,
+                                 endpoint=endpoint, temperature=temperature)
 
     # Should never reach here given the LLM_PROVIDERS check above.
     raise ValueError(f"Unknown LLM provider: {provider!r}")

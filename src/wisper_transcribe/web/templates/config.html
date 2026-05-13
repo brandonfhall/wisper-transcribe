@@ -106,45 +106,34 @@
       <div>
         <label class="form-label" for="cfg_llm_provider">llm_provider <span class="text-gray-400 font-normal text-xs">— LLM provider</span></label>
         <select id="cfg_llm_provider" name="llm_provider" class="form-input" onchange="llmProviderChanged(this.value)">
-          {% for p in ["ollama", "lmstudio", "anthropic", "openai", "google"] %}
+          {% for p in ["ollama", "ollama-cloud", "lmstudio", "anthropic", "openai", "google"] %}
           <option value="{{ p }}" {% if config.get('llm_provider', 'ollama') == p %}selected{% endif %}>{{ p }}</option>
           {% endfor %}
         </select>
       </div>
 
-      <!-- Ollama status + model picker (shown only when ollama is selected) -->
-      <div id="ollama_picker_row" class="hidden space-y-1">
-        <div class="flex items-center gap-3">
-          <span id="ollama_status_line" class="text-xs text-gray-500">Checking Ollama…</span>
-          <button type="button" onclick="loadOllamaStatus()"
-                  class="text-xs text-indigo-600 hover:underline">↻ Refresh</button>
-        </div>
-        <select id="ollama_model_picker"
-                class="form-input font-mono text-sm hidden"
-                onchange="document.getElementById('cfg_llm_model').value = this.value">
-        </select>
-      </div>
-
-      <!-- LM Studio status + model picker (shown only when lmstudio is selected) -->
-      <div id="lmstudio_picker_row" class="hidden space-y-1">
-        <div class="flex items-center gap-3">
-          <span id="lmstudio_status_line" class="text-xs text-gray-500">Checking LM Studio…</span>
-          <button type="button" onclick="loadLMStudioStatus()"
-                  class="text-xs text-indigo-600 hover:underline">↻ Refresh</button>
-        </div>
-        <select id="lmstudio_model_picker"
-                class="form-input font-mono text-sm hidden"
-                onchange="document.getElementById('cfg_llm_model').value = this.value">
-        </select>
-      </div>
-
-      <!-- Model -->
+      <!-- Model (combobox: free text + discovered-models dropdown) -->
       <div>
         <label class="form-label" for="cfg_llm_model">llm_model <span class="text-gray-400 font-normal text-xs">— Model name (blank = default)</span></label>
-        <input type="text" id="cfg_llm_model" name="llm_model"
-               value="{{ config.get('llm_model', '') }}"
-               class="form-input font-mono text-sm"
-               placeholder="e.g. llama3.1:8b, claude-sonnet-4-6, gpt-4o-mini"/>
+        <div class="relative">
+          <input type="text" id="cfg_llm_model" name="llm_model"
+                 value="{{ config.get('llm_model', '') }}"
+                 autocomplete="off"
+                 class="form-input font-mono text-sm pr-10"
+                 placeholder="e.g. llama3.1:8b, claude-sonnet-4-6, gpt-4o-mini"/>
+          <button type="button" id="llm_model_toggle"
+                  class="hidden absolute inset-y-0 right-0 px-2 text-gray-400 hover:text-gray-600"
+                  aria-label="Show discovered models">▼</button>
+          <ul id="llm_model_menu"
+              role="listbox"
+              class="hidden absolute z-10 mt-1 w-full max-h-60 overflow-auto rounded-md bg-white shadow-lg ring-1 ring-black ring-opacity-5 text-sm font-mono">
+          </ul>
+        </div>
+        <div id="llm_local_status_row" class="hidden mt-1 flex items-center gap-3">
+          <span id="llm_local_status_line" class="text-xs text-gray-500"></span>
+          <button type="button" onclick="loadLocalProviderStatus()"
+                  class="text-xs text-indigo-600 hover:underline">↻ Refresh</button>
+        </div>
       </div>
 
       <!-- Endpoint (Ollama / LM Studio only) -->
@@ -186,6 +175,13 @@
                class="form-input font-mono text-sm"
                placeholder="AIza… (leave blank to keep existing)"/>
       </div>
+
+      <div id="llm_ollama_cloud_row" class="hidden">
+        <label class="form-label" for="cfg_ollama_cloud_api_key">ollama_cloud_api_key <span class="text-gray-400 font-normal text-xs">— Ollama Cloud API key (env <code>OLLAMA_API_KEY</code> takes precedence). Get one at <strong>ollama.com/settings/keys</strong>.</span></label>
+        <input type="password" id="cfg_ollama_cloud_api_key" name="ollama_cloud_api_key"
+               class="form-input font-mono text-sm"
+               placeholder="(leave blank to keep existing)"/>
+      </div>
     </div>
 
     <div class="flex gap-4">
@@ -198,124 +194,233 @@
 </div>
 
 <script>
-async function loadOllamaStatus() {
-  const endpoint = document.getElementById('cfg_llm_endpoint').value || 'http://localhost:11434';
-  const statusLine = document.getElementById('ollama_status_line');
-  const picker = document.getElementById('ollama_model_picker');
-  const modelInput = document.getElementById('cfg_llm_model');
+const _PROVIDERS = {
+  ollama: {
+    label: 'Ollama', kind: 'local', method: 'GET',
+    endpoint: '/config/ollama-status',
+    cloudOverlay: '/config/ollama-cloud-catalog',  // also list cloud models with -cloud suffix
+    cloudSuffix: '-cloud',
+    defaultEndpoint: 'http://localhost:11434',
+    emptyHint: 'No models installed. Run: ollama pull <model>',
+    unreachableHint: 'Start with: ollama serve',
+    notFoundSuffix: ' (not installed)',
+  },
+  'ollama-cloud': {
+    label: 'Ollama Cloud', kind: 'ollama-cloud', method: 'GET',
+    endpoint: '/config/ollama-cloud-catalog',
+    keyField: 'cfg_ollama_cloud_api_key',
+    notFoundSuffix: ' (not in catalog)',
+  },
+  lmstudio: {
+    label: 'LM Studio', kind: 'local', method: 'GET',
+    endpoint: '/config/lmstudio-status',
+    defaultEndpoint: 'http://localhost:1234',
+    emptyHint: 'No models loaded. Load a model in the LM Studio UI first.',
+    unreachableHint: 'Enable the local server in LM Studio → Developer → Local Server',
+    notFoundSuffix: ' (not loaded)',
+  },
+  anthropic: {
+    label: 'Anthropic', kind: 'cloud', method: 'POST',
+    endpoint: '/config/anthropic-models', keyField: 'cfg_anthropic_api_key',
+    notFoundSuffix: ' (not in current list)',
+  },
+  openai: {
+    label: 'OpenAI', kind: 'cloud', method: 'POST',
+    endpoint: '/config/openai-models', keyField: 'cfg_openai_api_key',
+    notFoundSuffix: ' (not in current list)',
+  },
+  google: {
+    label: 'Google Gemini', kind: 'cloud', method: 'POST',
+    endpoint: '/config/google-models', keyField: 'cfg_google_api_key',
+    notFoundSuffix: ' (not in current list)',
+  },
+};
 
-  statusLine.textContent = 'Checking Ollama…';
+// Discovered-model combobox state
+let _modelOptions = [];
+
+function _modelMenuEl()   { return document.getElementById('llm_model_menu'); }
+function _modelToggleEl() { return document.getElementById('llm_model_toggle'); }
+function _modelInputEl()  { return document.getElementById('cfg_llm_model'); }
+
+function _renderModelMenu(filter) {
+  const menu = _modelMenuEl();
+  menu.replaceChildren();
+  const needle = (filter || '').toLowerCase();
+  const matches = _modelOptions.filter(m => !needle || m.name.toLowerCase().includes(needle));
+  if (matches.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'px-3 py-2 text-gray-400 italic';
+    li.textContent = _modelOptions.length === 0 ? 'No discovered models yet' : 'No matches';
+    menu.appendChild(li);
+    return;
+  }
+  matches.forEach(m => {
+    const li = document.createElement('li');
+    li.className = 'px-3 py-2 cursor-pointer hover:bg-indigo-50';
+    li.setAttribute('role', 'option');
+    li.dataset.value = m.name;
+    // Use textContent to prevent XSS from provider-returned model names
+    li.textContent = m.size ? (m.name + ' (' + m.size + ')') : m.name;
+    li.addEventListener('mousedown', function(e) {
+      // mousedown (not click) so input blur doesn't close the menu before selection lands
+      e.preventDefault();
+      _modelInputEl().value = m.name;
+      _closeModelMenu();
+    });
+    menu.appendChild(li);
+  });
+}
+
+function _openModelMenu() {
+  if (_modelOptions.length === 0) return;
+  _renderModelMenu(_modelInputEl().value);
+  _modelMenuEl().classList.remove('hidden');
+}
+function _closeModelMenu() { _modelMenuEl().classList.add('hidden'); }
+function _toggleModelMenu() {
+  if (_modelMenuEl().classList.contains('hidden')) _openModelMenu(); else _closeModelMenu();
+}
+
+function _setDiscoveredModels(models) {
+  _modelOptions = models || [];
+  _modelToggleEl().classList.toggle('hidden', _modelOptions.length === 0);
+  // Keep menu in sync if it's currently open
+  if (!_modelMenuEl().classList.contains('hidden')) _renderModelMenu(_modelInputEl().value);
+}
+
+// Wire combobox interactions once
+(function _initModelCombobox() {
+  const input = _modelInputEl();
+  const toggle = _modelToggleEl();
+  input.addEventListener('focus', _openModelMenu);
+  input.addEventListener('input', function() { _openModelMenu(); });
+  input.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') _closeModelMenu();
+  });
+  toggle.addEventListener('click', function(e) {
+    e.preventDefault();
+    input.focus();
+    _toggleModelMenu();
+  });
+  document.addEventListener('click', function(e) {
+    if (!e.target.closest('#llm_model_menu') &&
+        e.target !== input &&
+        e.target !== toggle) {
+      _closeModelMenu();
+    }
+  });
+})();
+
+async function _fetchProvider(cfg) {
+  if (cfg.method === 'POST') {
+    const body = new FormData();
+    const keyInput = cfg.keyField ? document.getElementById(cfg.keyField) : null;
+    if (keyInput && keyInput.value) body.append('api_key', keyInput.value);
+    return await fetch(cfg.endpoint, { method: 'POST', body });
+  }
+  return await fetch(cfg.endpoint);
+}
+
+async function loadLocalProviderStatus() {
+  const provider = document.getElementById('cfg_llm_provider').value;
+  const cfg = _PROVIDERS[provider];
+  if (!cfg) return;
+
+  const statusLine = document.getElementById('llm_local_status_line');
+  const modelInput = _modelInputEl();
+
+  statusLine.textContent = 'Checking ' + cfg.label + '…';
   statusLine.className = 'text-xs text-gray-500';
-  picker.classList.add('hidden');
+  _setDiscoveredModels([]);
 
   try {
-    const r = await fetch('/config/ollama-status');
-    const data = await r.json();
+    // Primary fetch + optional cloud-overlay fetch in parallel (Ollama provider only).
+    const tasks = [_fetchProvider(cfg).then(r => r.json())];
+    if (cfg.cloudOverlay) {
+      tasks.push(fetch(cfg.cloudOverlay).then(r => r.json()).catch(() => ({running: false, models: []})));
+    }
+    const results = await Promise.all(tasks);
+    const data = results[0];
+    const cloud = results[1];
+
+    // Build the merged model list
+    let merged = [];
+    let localCount = 0, cloudCount = 0;
     if (data.running && data.models.length > 0) {
-      const current = modelInput.value;
-      picker.replaceChildren();
-      data.models.forEach(m => {
-        const opt = document.createElement('option');
-        opt.value = m.name;
-        opt.textContent = m.name + (m.size ? ' (' + m.size + ')' : '');
-        if (m.name === current) opt.selected = true;
-        picker.appendChild(opt);
+      merged = data.models.slice();
+      localCount = merged.length;
+    }
+    if (cloud && cloud.running && cloud.models.length > 0) {
+      const suffix = cfg.cloudSuffix || '';
+      const seen = new Set(merged.map(m => m.name));
+      cloud.models.forEach(m => {
+        const tagged = { name: m.name + suffix, size: '☁ ' + (m.size || 'cloud') };
+        if (!seen.has(tagged.name)) merged.push(tagged);
       });
-      if (current && !data.models.find(m => m.name === current)) {
-        const opt = document.createElement('option');
-        opt.value = current;
-        opt.textContent = current + ' (not installed)';
-        opt.selected = true;
-        picker.insertBefore(opt, picker.firstChild);
-      }
-      picker.classList.remove('hidden');
-      statusLine.textContent = '✓ Ollama running · ' + data.models.length +
-        ' model' + (data.models.length !== 1 ? 's' : '') + ' installed — pick one above or type below';
-      statusLine.className = 'text-xs text-green-600';
+      cloudCount = cloud.models.length;
+    }
+
+    if (merged.length > 0) {
+      _setDiscoveredModels(merged);
+      const current = modelInput.value;
+      const notFound = current && !merged.find(m => m.name === current);
+      const verb = cfg.kind === 'local' ? 'running' : (cfg.kind === 'ollama-cloud' ? 'catalog' : 'connected');
+      const counts = cloudCount > 0
+        ? (localCount + ' local + ' + cloudCount + ' cloud')
+        : (localCount + ' model' + (localCount !== 1 ? 's' : ''));
+      const hint = cloudCount > 0 ? ' · cloud models need `ollama signin`' : '';
+      statusLine.textContent = '✓ ' + cfg.label + ' ' + verb + ' · ' + counts + ' available' + hint +
+        (notFound ? ' · current "' + current + '"' + cfg.notFoundSuffix : '');
+      statusLine.className = 'text-xs ' + (notFound ? 'text-yellow-600' : 'text-green-600');
     } else if (data.running) {
-      statusLine.textContent = '✓ Ollama running · No models installed. Run: ollama pull <model>';
+      statusLine.textContent = '✓ ' + cfg.label + ' running · ' + (cfg.emptyHint || 'No models returned');
       statusLine.className = 'text-xs text-yellow-600';
     } else {
-      statusLine.textContent = '✗ Ollama not reachable · Start with: ollama serve';
+      const errHint = cfg.kind === 'local' ? cfg.unreachableHint : (data.error || 'Unavailable');
+      statusLine.textContent = '✗ ' + cfg.label + ' · ' + errHint;
       statusLine.className = 'text-xs text-red-500';
     }
   } catch (e) {
-    statusLine.textContent = 'Could not check Ollama status';
+    statusLine.textContent = 'Could not check ' + cfg.label + ' status';
     statusLine.className = 'text-xs text-gray-400';
   }
 }
-
-async function loadLMStudioStatus() {
-  const endpoint = document.getElementById('cfg_llm_endpoint').value || 'http://localhost:1234';
-  const statusLine = document.getElementById('lmstudio_status_line');
-  const picker = document.getElementById('lmstudio_model_picker');
-  const modelInput = document.getElementById('cfg_llm_model');
-
-  statusLine.textContent = 'Checking LM Studio…';
-  statusLine.className = 'text-xs text-gray-500';
-  picker.classList.add('hidden');
-
-  try {
-    const r = await fetch('/config/lmstudio-status');
-    const data = await r.json();
-    if (data.running && data.models.length > 0) {
-      const current = modelInput.value;
-      picker.replaceChildren();
-      data.models.forEach(m => {
-        const opt = document.createElement('option');
-        opt.value = m.name;
-        opt.textContent = m.name;
-        if (m.name === current) opt.selected = true;
-        picker.appendChild(opt);
-      });
-      if (current && !data.models.find(m => m.name === current)) {
-        const opt = document.createElement('option');
-        opt.value = current;
-        opt.textContent = current + ' (not loaded)';
-        opt.selected = true;
-        picker.insertBefore(opt, picker.firstChild);
-      }
-      picker.classList.remove('hidden');
-      statusLine.textContent = '✓ LM Studio running · ' + data.models.length +
-        ' model' + (data.models.length !== 1 ? 's' : '') + ' loaded — pick one above or type below';
-      statusLine.className = 'text-xs text-green-600';
-    } else if (data.running) {
-      statusLine.textContent = '✓ LM Studio running · No models loaded. Load a model in the LM Studio UI first.';
-      statusLine.className = 'text-xs text-yellow-600';
-    } else {
-      statusLine.textContent = '✗ LM Studio not reachable · Enable the local server in LM Studio → Developer → Local Server';
-      statusLine.className = 'text-xs text-red-500';
-    }
-  } catch (e) {
-    statusLine.textContent = 'Could not check LM Studio status';
-    statusLine.className = 'text-xs text-gray-400';
-  }
-}
-
-const _EP_DEFAULTS = { ollama: 'http://localhost:11434', lmstudio: 'http://localhost:1234' };
 
 function llmProviderChanged(provider) {
-  const isLocal = provider === 'ollama' || provider === 'lmstudio';
+  const cfg = _PROVIDERS[provider];
+  const isLocal = cfg && cfg.kind === 'local';
   document.getElementById('llm_endpoint_row').classList.toggle('hidden', !isLocal);
   document.getElementById('llm_anthropic_row').classList.toggle('hidden', provider !== 'anthropic');
   document.getElementById('llm_openai_row').classList.toggle('hidden', provider !== 'openai');
   document.getElementById('llm_google_row').classList.toggle('hidden', provider !== 'google');
-  document.getElementById('ollama_picker_row').classList.toggle('hidden', provider !== 'ollama');
-  document.getElementById('lmstudio_picker_row').classList.toggle('hidden', provider !== 'lmstudio');
+  document.getElementById('llm_ollama_cloud_row').classList.toggle('hidden', provider !== 'ollama-cloud');
+  document.getElementById('llm_local_status_row').classList.toggle('hidden', !cfg);
+  // Clear discovered models when switching providers so stale suggestions don't appear
+  _setDiscoveredModels([]);
+  _closeModelMenu();
   if (isLocal) {
-    const epInput = document.getElementById('cfg_llm_endpoint');
-    epInput.placeholder = _EP_DEFAULTS[provider] || 'http://localhost:11434';
+    document.getElementById('cfg_llm_endpoint').placeholder = cfg.defaultEndpoint;
   }
-  if (provider === 'ollama') loadOllamaStatus();
-  if (provider === 'lmstudio') loadLMStudioStatus();
+  if (cfg) loadLocalProviderStatus();
 }
+
 // Apply on page load
 llmProviderChanged(document.getElementById('cfg_llm_provider').value);
-// Re-check when endpoint URL changes
+// Re-check when endpoint URL changes (local providers only)
 document.getElementById('cfg_llm_endpoint').addEventListener('change', function() {
-  const p = document.getElementById('cfg_llm_provider').value;
-  if (p === 'ollama') loadOllamaStatus();
-  if (p === 'lmstudio') loadLMStudioStatus();
+  const p = _PROVIDERS[document.getElementById('cfg_llm_provider').value];
+  if (p && p.kind === 'local') loadLocalProviderStatus();
+});
+// Re-check when an API key field is committed (blur or Enter), so typing a new key
+// then tabbing out fetches the list without requiring a manual Refresh click.
+['cfg_anthropic_api_key', 'cfg_openai_api_key', 'cfg_google_api_key', 'cfg_ollama_cloud_api_key'].forEach(function(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener('change', function() {
+    const p = _PROVIDERS[document.getElementById('cfg_llm_provider').value];
+    if (p && p.keyField === id) loadLocalProviderStatus();
+  });
 });
 
 // Discord preset manager (vanilla JS)

@@ -42,6 +42,50 @@ def test_dashboard_returns_200(client, tmp_path):
     assert b"wisper" in resp.content
 
 
+def test_dashboard_shows_llm_provider_and_model(client, tmp_path, monkeypatch):
+    """System card surfaces the configured LLM provider and resolved model name."""
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    cfg = {
+        "llm_provider": "ollama",
+        "llm_model": "llama3.1:8b",
+        "llm_endpoint": "http://localhost:11434",
+    }
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
+         patch("wisper_transcribe.web.routes.dashboard.load_config", return_value=cfg), \
+         patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
+         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)):
+        resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.content.decode()
+    assert "LLM Provider" in body
+    assert "ollama" in body
+    assert "llama3.1:8b" in body
+    # Local providers are always "Ready" — no key needed
+    assert "Ready" in body
+
+
+def test_dashboard_flags_cloud_provider_missing_key(client, tmp_path, monkeypatch):
+    """A cloud provider with no env/config key shows the 'API key missing' hint."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    cfg = {
+        "llm_provider": "anthropic",
+        "llm_model": "",                 # blank → resolves to per-provider default
+        "anthropic_api_key": "",
+    }
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
+         patch("wisper_transcribe.web.routes.dashboard.load_config", return_value=cfg), \
+         patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
+         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)):
+        resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.content.decode()
+    assert "anthropic" in body
+    assert "API key missing" in body
+    # Resolved default model is shown when llm_model is blank
+    assert "claude-sonnet-4-6" in body
+
+
 def test_dashboard_jobs_partial_returns_200(client):
     resp = client.get("/jobs")
     assert resp.status_code == 200
@@ -541,6 +585,203 @@ def test_ollama_status_uses_saved_config_endpoint(client):
         client.get("/config/ollama-status")
 
     mock_get.assert_called_once_with("http://myhost:11435/api/tags", timeout=3.0)
+
+
+def test_ollama_cloud_catalog_running(client):
+    """Returns running=True with parsed cloud-catalog model list."""
+    fake_resp = MagicMock()
+    fake_resp.raise_for_status = MagicMock()
+    fake_resp.json.return_value = {
+        "models": [
+            {"name": "gpt-oss:120b", "size": 65_000_000_000},
+            {"name": "glm-4.7", "size": 696_000_000_000},
+        ]
+    }
+    with patch("httpx.get", return_value=fake_resp) as mock_get:
+        resp = client.get("/config/ollama-cloud-catalog")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["running"] is True
+    assert {m["name"] for m in data["models"]} == {"gpt-oss:120b", "glm-4.7"}
+    assert "GB" in data["models"][0]["size"]
+    mock_get.assert_called_once_with("https://ollama.com/api/tags", timeout=5.0)
+
+
+def test_ollama_cloud_catalog_network_error(client):
+    """Network failure returns running=False with a generic error message."""
+    import httpx as _httpx
+
+    with patch("httpx.get", side_effect=_httpx.ConnectError("refused")):
+        resp = client.get("/config/ollama-cloud-catalog")
+
+    data = resp.json()
+    assert data["running"] is False
+    assert data["models"] == []
+    assert data["error"] == "Could not reach ollama.com · check your network"
+
+
+def _make_fake_sdk_page(items):
+    """Build a SyncPage-like object with .data = items."""
+    page = MagicMock()
+    page.data = items
+    return page
+
+
+def test_anthropic_models_no_key_returns_error(client):
+    """No env, no config, no form key → running=False with hint."""
+    with patch("wisper_transcribe.web.routes.config.get_llm_api_key", return_value=None):
+        resp = client.post("/config/anthropic-models")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["running"] is False
+    assert "API key required" in data["error"]
+
+
+def test_anthropic_models_running_with_models(client):
+    """Returns chat models with display_name surfaced as `size`."""
+    fake_models = [
+        MagicMock(id="claude-sonnet-4-6", display_name="Claude Sonnet 4.6"),
+        MagicMock(id="claude-haiku-4-5", display_name="Claude Haiku 4.5"),
+    ]
+    fake_anthropic = MagicMock()
+    fake_anthropic.Anthropic.return_value.models.list.return_value = _make_fake_sdk_page(fake_models)
+
+    with patch("wisper_transcribe.web.routes.config.get_llm_api_key", return_value="sk-ant-test"), \
+         patch.dict("sys.modules", {"anthropic": fake_anthropic}):
+        resp = client.post("/config/anthropic-models")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["running"] is True
+    assert {m["name"] for m in data["models"]} == {"claude-sonnet-4-6", "claude-haiku-4-5"}
+    assert data["models"][0]["size"] in {"Claude Sonnet 4.6", "Claude Haiku 4.5"}
+
+
+def test_anthropic_models_form_key_takes_precedence(client):
+    """A non-empty api_key in the form body overrides env/config resolution."""
+    fake_anthropic = MagicMock()
+    fake_anthropic.Anthropic.return_value.models.list.return_value = _make_fake_sdk_page([])
+
+    with patch("wisper_transcribe.web.routes.config.get_llm_api_key",
+               return_value="should-not-be-used") as resolver, \
+         patch.dict("sys.modules", {"anthropic": fake_anthropic}):
+        resp = client.post("/config/anthropic-models", data={"api_key": "sk-ant-from-form"})
+
+    assert resp.status_code == 200
+    # SDK was called with the form-supplied key, not the resolver's value
+    fake_anthropic.Anthropic.assert_called_once_with(api_key="sk-ant-from-form")
+    # Resolver is never consulted when form supplies a key
+    resolver.assert_not_called()
+
+
+def test_anthropic_models_api_error_returns_running_false(client):
+    """An exception from the SDK is reported as running=False with a generic message."""
+    fake_anthropic = MagicMock()
+    fake_anthropic.Anthropic.return_value.models.list.side_effect = RuntimeError("401")
+
+    with patch("wisper_transcribe.web.routes.config.get_llm_api_key", return_value="bad-key"), \
+         patch.dict("sys.modules", {"anthropic": fake_anthropic}):
+        resp = client.post("/config/anthropic-models")
+
+    data = resp.json()
+    assert data["running"] is False
+    assert "Anthropic API call failed" in data["error"]
+    # Error message must not leak the underlying exception text (e.g. could include key fragments)
+    assert "401" not in data["error"]
+
+
+def test_openai_models_filters_to_chat_only(client):
+    """Whisper, dall-e, embedding, and instruct variants are filtered out."""
+    fake_models = [
+        MagicMock(id="gpt-4o-mini"),
+        MagicMock(id="gpt-4-turbo"),
+        MagicMock(id="o3-mini"),
+        MagicMock(id="o1"),
+        MagicMock(id="chatgpt-4o-latest"),
+        MagicMock(id="whisper-1"),               # excluded
+        MagicMock(id="dall-e-3"),                # excluded
+        MagicMock(id="text-embedding-3-large"),  # excluded
+        MagicMock(id="gpt-3.5-turbo-instruct"),  # excluded (instruct)
+        MagicMock(id="gpt-4o-audio-preview"),    # excluded (audio)
+        MagicMock(id="omni-moderation-latest"),  # excluded (moderation)
+        MagicMock(id="babbage-002"),             # excluded (babbage)
+    ]
+    fake_openai = MagicMock()
+    fake_openai.OpenAI.return_value.models.list.return_value = _make_fake_sdk_page(fake_models)
+
+    with patch("wisper_transcribe.web.routes.config.get_llm_api_key", return_value="sk-test"), \
+         patch.dict("sys.modules", {"openai": fake_openai}):
+        resp = client.post("/config/openai-models")
+
+    data = resp.json()
+    assert data["running"] is True
+    names = {m["name"] for m in data["models"]}
+    assert names == {"gpt-4o-mini", "gpt-4-turbo", "o3-mini", "o1", "chatgpt-4o-latest"}
+
+
+def test_google_models_filters_to_gemini_chat(client):
+    """Embedding, AQA, and Imagen variants are filtered out; 'models/' prefix is stripped."""
+    fake_models = [
+        MagicMock(name="m1"),
+        MagicMock(name="m2"),
+        MagicMock(name="m3"),
+        MagicMock(name="m4"),
+        MagicMock(name="m5"),
+    ]
+    # MagicMock interprets `name=` as the mock's display name, so set the attribute manually
+    fake_models[0].name = "models/gemini-2.0-flash"
+    fake_models[1].name = "models/gemini-1.5-pro"
+    fake_models[2].name = "models/text-embedding-004"    # excluded
+    fake_models[3].name = "models/aqa"                   # excluded
+    fake_models[4].name = "models/imagen-3.0-generate"   # excluded
+
+    fake_genai = MagicMock()
+    fake_genai.Client.return_value.models.list.return_value = iter(fake_models)
+
+    with patch("wisper_transcribe.web.routes.config.get_llm_api_key", return_value="AIza-test"), \
+         patch.dict("sys.modules", {"google.genai": fake_genai, "google": MagicMock(genai=fake_genai)}):
+        resp = client.post("/config/google-models")
+
+    data = resp.json()
+    assert data["running"] is True
+    names = {m["name"] for m in data["models"]}
+    assert names == {"gemini-2.0-flash", "gemini-1.5-pro"}
+
+
+def test_openai_models_sdk_missing(client):
+    """SDK not installed returns a helpful install hint."""
+    import sys
+    with patch("wisper_transcribe.web.routes.config.get_llm_api_key", return_value="sk-test"), \
+         patch.dict(sys.modules, {"openai": None}):
+        resp = client.post("/config/openai-models")
+    data = resp.json()
+    assert data["running"] is False
+    assert "wisper-transcribe[llm-openai]" in data["error"]
+
+
+def test_anthropic_models_api_key_not_in_url(client):
+    """The key must never appear in a URL — POST endpoints only."""
+    # Sanity: GET should 405
+    resp = client.get("/config/anthropic-models")
+    assert resp.status_code == 405
+
+
+def test_anthropic_models_oversized_key_rejected(client):
+    """A multi-kilobyte api_key in the form is ignored (falls back to env/config)."""
+    fake_anthropic = MagicMock()
+    fake_anthropic.Anthropic.return_value.models.list.return_value = _make_fake_sdk_page([])
+
+    with patch("wisper_transcribe.web.routes.config.get_llm_api_key",
+               return_value="sk-ant-config") as resolver, \
+         patch.dict("sys.modules", {"anthropic": fake_anthropic}):
+        resp = client.post("/config/anthropic-models",
+                           data={"api_key": "x" * 5000})
+
+    assert resp.status_code == 200
+    # Oversized form key was rejected → resolver was consulted, returning the config value
+    resolver.assert_called_once_with("anthropic")
+    fake_anthropic.Anthropic.assert_called_once_with(api_key="sk-ant-config")
 
 
 def test_preset_add_valid_saves_preset(client):
@@ -1191,6 +1432,135 @@ def test_enroll_submit_calls_enroll_speaker_when_segments_present(
     assert call_kwargs["display_name"] == "Alice"
     assert call_kwargs["name"] == "alice"
     assert call_kwargs["speaker_label"] == "SPEAKER_00"
+
+
+def test_enroll_submit_adds_speaker_to_job_campaign(client, tmp_path, monkeypatch):
+    """When the job was submitted with a campaign, enrolled speakers must be added to it."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from wisper_transcribe.campaign_manager import create_campaign, get_campaign_profile_keys
+    from datetime import datetime
+    import uuid
+
+    # Pre-create the campaign that the job references
+    create_campaign("D&D Mondays")
+
+    transcript = tmp_path / "session01.md"
+    transcript.write_text(
+        "---\nspeakers:\n  - name: SPEAKER_00\n---\n\n**SPEAKER_00** *(00:00)*: Hi."
+    )
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"fake")
+    fake_segment = MagicMock()
+    fake_segment.speaker = "SPEAKER_00"
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(audio),
+        kwargs={"device": "cpu", "campaign": "d-d-mondays"},
+        output_path=str(transcript),
+        diarization_segments=[fake_segment],
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    with patch("wisper_transcribe.speaker_manager.enroll_speaker"):
+        resp = client.post(
+            f"/transcribe/jobs/{job.id}/enroll",
+            data={"speaker_SPEAKER_00": "Alice"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    # The enrolled profile must now be a member of the campaign
+    assert "alice" in get_campaign_profile_keys("d-d-mondays")
+
+
+def test_enroll_submit_no_campaign_skips_add_member(client, tmp_path, monkeypatch):
+    """No campaign on the job → add_member is never called (normal enrollment path)."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from datetime import datetime
+    import uuid
+
+    transcript = tmp_path / "session01.md"
+    transcript.write_text(
+        "---\nspeakers:\n  - name: SPEAKER_00\n---\n\n**SPEAKER_00** *(00:00)*: Hi."
+    )
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"fake")
+    fake_segment = MagicMock()
+    fake_segment.speaker = "SPEAKER_00"
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(audio),
+        kwargs={"device": "cpu"},  # no campaign
+        output_path=str(transcript),
+        diarization_segments=[fake_segment],
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    with patch("wisper_transcribe.speaker_manager.enroll_speaker"), \
+         patch("wisper_transcribe.campaign_manager.add_member") as mock_add_member:
+        resp = client.post(
+            f"/transcribe/jobs/{job.id}/enroll",
+            data={"speaker_SPEAKER_00": "Bob"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    mock_add_member.assert_not_called()
+
+
+def test_enroll_submit_skips_add_member_if_already_in_campaign(client, tmp_path, monkeypatch):
+    """If the profile is already in the campaign, add_member must not be called (avoids clobbering role/character)."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from wisper_transcribe.campaign_manager import create_campaign, add_member
+    from datetime import datetime
+    import uuid
+
+    create_campaign("D&D Mondays")
+    add_member("d-d-mondays", "alice", role="player", character="Tika")
+
+    transcript = tmp_path / "session01.md"
+    transcript.write_text(
+        "---\nspeakers:\n  - name: SPEAKER_00\n---\n\n**SPEAKER_00** *(00:00)*: Hi."
+    )
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"fake")
+    fake_segment = MagicMock()
+    fake_segment.speaker = "SPEAKER_00"
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(audio),
+        kwargs={"device": "cpu", "campaign": "d-d-mondays"},
+        output_path=str(transcript),
+        diarization_segments=[fake_segment],
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    with patch("wisper_transcribe.speaker_manager.enroll_speaker"), \
+         patch("wisper_transcribe.campaign_manager.add_member") as mock_add_member:
+        resp = client.post(
+            f"/transcribe/jobs/{job.id}/enroll",
+            data={"speaker_SPEAKER_00": "Alice"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    # add_member must not be invoked a second time — Alice is already in the roster
+    mock_add_member.assert_not_called()
 
 
 def test_enroll_submit_skips_enroll_when_no_segments(client, tmp_path, monkeypatch):

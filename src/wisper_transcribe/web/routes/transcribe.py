@@ -330,11 +330,14 @@ async def enroll_submit(request: Request, job_id: str) -> Response:
         # the display name typed in the wizard.  Failures are logged but never
         # surfaced as HTTP errors — the transcript rename already happened.
         if job.diarization_segments:
+            import logging
             from wisper_transcribe.speaker_manager import enroll_speaker
             device = job.kwargs.get("device", "cpu")
             if device == "auto":
                 from wisper_transcribe.config import get_device
                 device = get_device()
+            campaign_slug = job.kwargs.get("campaign")
+            log = logging.getLogger(__name__)
             for old_label, display_name in renames.items():
                 profile_key = display_name.lower().replace(" ", "_")
                 try:
@@ -348,10 +351,26 @@ async def enroll_submit(request: Request, job_id: str) -> Response:
                         device=device,
                     )
                 except Exception as exc:
-                    import logging
-                    logging.getLogger(__name__).warning(
-                        "enroll_speaker failed for %s: %s", display_name, exc
-                    )
+                    log.warning("enroll_speaker failed for %s: %s", display_name, exc)
+                    continue
+                # Add the newly-enrolled profile to the job's campaign, if any.
+                # Mirrors record.py: only add when the slug exists and the profile
+                # isn't already a member, so existing role/character entries are
+                # never clobbered. Campaign failures never break enrollment.
+                if campaign_slug:
+                    try:
+                        from wisper_transcribe.campaign_manager import (
+                            add_member, load_campaigns,
+                        )
+                        campaigns = load_campaigns()
+                        if (campaign_slug in campaigns
+                                and profile_key not in campaigns[campaign_slug].members):
+                            add_member(campaign_slug, profile_key)
+                    except Exception as exc:
+                        log.warning(
+                            "add_member failed for %s in campaign %s: %s",
+                            profile_key, campaign_slug, exc,
+                        )
 
     transcript_name = Path(job.output_path).stem
     return RedirectResponse(url=f"/transcripts/{quote(transcript_name, safe='')}", status_code=303)

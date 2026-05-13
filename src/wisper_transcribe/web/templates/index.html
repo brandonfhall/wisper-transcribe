@@ -78,6 +78,26 @@
           {% endif %}
         </dd>
       </div>
+      <div>
+        <dt class="font-medium text-gray-500">LLM Provider</dt>
+        <dd class="mt-1 text-gray-900 font-mono">{{ llm_provider }}</dd>
+      </div>
+      <div>
+        <dt class="font-medium text-gray-500">LLM Model</dt>
+        <dd class="mt-1 text-gray-900 font-mono">{{ llm_model }}</dd>
+      </div>
+      <div>
+        <dt class="font-medium text-gray-500">LLM Status</dt>
+        <dd class="mt-1">
+          {% if llm_ready %}
+            <span class="text-green-600 font-medium">✓ Ready</span>
+            {% if llm_status_hint %}<span class="ml-1 text-gray-400 text-xs font-mono">{{ llm_status_hint }}</span>{% endif %}
+          {% else %}
+            <span class="text-red-600 font-medium">✗ {{ llm_status_hint }}</span>
+            <a href="/config" class="ml-2 text-indigo-600 text-xs hover:underline">Configure →</a>
+          {% endif %}
+        </dd>
+      </div>
     </dl>
   </div>
 
