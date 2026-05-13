@@ -1,0 +1,80 @@
+{#
+  Icon macro — mirrors the CodexIcon SVG paths from handoff/screens/codex.jsx.
+  Usage: {% from "partials/icons.html" import icon %}
+         {{ icon("scroll", 14, "currentColor") }}
+#}
+{% macro icon(name, size=16, color="currentColor", class="") %}
+<svg width="{{ size }}" height="{{ size }}" viewBox="0 0 24 24" fill="none"
+     stroke="{{ color }}" stroke-width="1.75" stroke-linecap="round"
+     stroke-linejoin="round" style="flex-shrink:0"{% if class %} class="{{ class }}"{% endif %}>
+  {%- if name == "quill" -%}
+  <path d="M3 21l5-5M14 4l-9 9-1 5 5-1 9-9-4-4z M11 7l4 4"/>
+  {%- elif name == "scroll" -%}
+  <path d="M5 4h11a3 3 0 013 3v10a3 3 0 01-3 3H8a3 3 0 01-3-3V4z M5 7H3 M16 4v13"/>
+  {%- elif name == "waveform" -%}
+  <line x1="3" y1="12" x2="3" y2="12"/>
+  <line x1="6" y1="9" x2="6" y2="15"/>
+  <line x1="9" y1="5" x2="9" y2="19"/>
+  <line x1="12" y1="8" x2="12" y2="16"/>
+  <line x1="15" y1="3" x2="15" y2="21"/>
+  <line x1="18" y1="7" x2="18" y2="17"/>
+  <line x1="21" y1="10" x2="21" y2="14"/>
+  {%- elif name == "upload" -%}
+  <path d="M12 16V4 M6 10l6-6 6 6 M4 20h16"/>
+  {%- elif name == "record" -%}
+  <circle cx="12" cy="12" r="6" fill="{{ color }}" stroke="none"/>
+  {%- elif name == "spark" -%}
+  <path d="M12 3v6 M12 15v6 M3 12h6 M15 12h6 M5.6 5.6l4.2 4.2 M14.2 14.2l4.2 4.2 M5.6 18.4l4.2-4.2 M14.2 9.8l4.2-4.2"/>
+  {%- elif name == "play" -%}
+  <path d="M6 4l14 8-14 8V4z" fill="{{ color }}" stroke="none"/>
+  {%- elif name == "pause" -%}
+  <rect x="6" y="4" width="4" height="16" fill="{{ color }}" stroke="none"/>
+  <rect x="14" y="4" width="4" height="16" fill="{{ color }}" stroke="none"/>
+  {%- elif name == "stop" -%}
+  <rect x="5" y="5" width="14" height="14" fill="{{ color }}" stroke="none"/>
+  {%- elif name == "chevron" -%}
+  <path d="M9 6l6 6-6 6"/>
+  {%- elif name == "chevronDown" -%}
+  <path d="M6 9l6 6 6-6"/>
+  {%- elif name == "dice" -%}
+  <path d="M12 2L3 7v10l9 5 9-5V7l-9-5z"/>
+  <path d="M3 7l9 5 9-5 M12 12v10"/>
+  {%- elif name == "user" -%}
+  <circle cx="12" cy="9" r="4"/>
+  <path d="M4 21c0-4 4-7 8-7s8 3 8 7"/>
+  {%- elif name == "users" -%}
+  <circle cx="9" cy="9" r="3.5"/>
+  <path d="M2 20c0-3.5 3-6 7-6s7 2.5 7 6"/>
+  <path d="M16 4a3.5 3.5 0 110 7 M22 18c0-2.5-1.5-4.5-4-5.5"/>
+  {%- elif name == "book" -%}
+  <path d="M4 5a2 2 0 012-2h12v18H6a2 2 0 01-2-2V5z M8 3v18 M12 8h4 M12 12h4"/>
+  {%- elif name == "eye" -%}
+  <path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/>
+  <circle cx="12" cy="12" r="3"/>
+  {%- elif name == "sliders" -%}
+  <line x1="4" y1="6" x2="20" y2="6"/>
+  <line x1="4" y1="12" x2="20" y2="12"/>
+  <line x1="4" y1="18" x2="20" y2="18"/>
+  <circle cx="8" cy="6" r="2"/>
+  <circle cx="14" cy="12" r="2"/>
+  <circle cx="9" cy="18" r="2"/>
+  {%- elif name == "search" -%}
+  <circle cx="11" cy="11" r="6"/>
+  <path d="M20 20l-4-4"/>
+  {%- elif name == "settings" -%}
+  <circle cx="12" cy="12" r="3"/>
+  <path d="M19 12a7 7 0 00-.2-1.6l2.1-1.6-2-3.4-2.5.9a7 7 0 00-2.8-1.6L13 2h-4l-.6 2.7A7 7 0 005.6 6.3L3.1 5.4l-2 3.4 2.1 1.6A7 7 0 003 12c0 .5.1 1 .2 1.6l-2.1 1.6 2 3.4 2.5-.9a7 7 0 002.8 1.6L9 22h4l.6-2.7a7 7 0 002.8-1.6l2.5.9 2-3.4-2.1-1.6c.1-.6.2-1.1.2-1.6z"/>
+  {%- elif name == "plus" -%}
+  <path d="M12 5v14 M5 12h14"/>
+  {%- elif name == "arrowRight" -%}
+  <path d="M5 12h14 M13 6l6 6-6 6"/>
+  {%- elif name == "x" -%}
+  <path d="M18 6L6 18 M6 6l12 12"/>
+  {%- elif name == "marker" -%}
+  <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/>
+  <circle cx="12" cy="9" r="2.5"/>
+  {%- else -%}
+  <circle cx="12" cy="12" r="4"/>
+  {%- endif -%}
+</svg>
+{% endmacro %}

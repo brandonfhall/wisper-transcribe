@@ -586,9 +586,14 @@ When a `.summary.md` sidecar exists, the transcript detail page shows a green "C
 - Transcripts are saved to `./output/` (or `data_dir/output`) and are immediately visible on the Transcripts page after the job completes.
 - Transcripts can be **deleted** from the Transcripts page (trash icon with confirmation). Deleting a transcript also removes its `.summary.md` sidecar if present.
 
-### Offline-first
+### Web UI assets
 
-All web assets (HTMX, Tailwind CSS) are served locally — no CDN or internet connection required after installation. Tailwind CSS is rebuilt automatically on server startup if `input.css` has changed.
+All web UI assets (HTMX, Tailwind CSS, fonts) are served from local files — the page itself loads without any external network requests.
+
+The UI uses three self-hosted fonts (all SIL OFL licensed, committed to the repository):
+- **Newsreader** — serif display font for titles and long-form reading
+- **Geist** — sans-serif body font
+- **JetBrains Mono** — monospace font for IDs, timestamps, and CLI flags
 
 > **Note for local (non-Docker) installs:** HTMX is vendored in `src/wisper_transcribe/static/htmx.min.js`. The file in the repo is a placeholder; download the real file once with:
 > ```bash

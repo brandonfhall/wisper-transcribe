@@ -392,15 +392,32 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 ## Web Interface (Phase 11)
 
 ### Stack
-FastAPI + Jinja2 + HTMX + Tailwind CSS. All assets served locally — no CDN or internet required at runtime.
+FastAPI + Jinja2 + HTMX + Tailwind CSS v4. All assets served locally — no CDN or internet required at runtime.
 
 | Layer | Choice | Notes |
 |-------|--------|-------|
 | Backend | FastAPI (uvicorn) | `wisper server` command; single-file app factory |
 | Templates | Jinja2 (server-side) | Rendered HTML; HTMX handles partial updates |
 | Reactive UI | HTMX 1.9 (vendored) | `static/htmx.min.js` committed; polled job updates |
-| Styling | Tailwind CSS (compiled) | `static/tailwind.min.css` pre-built; regenerate with `pytailwindcss` |
-| Icons | Heroicons (inline SVG) | Embedded in templates — no external load |
+| Styling | Tailwind CSS v4 (compiled) | `static/tailwind.min.css` pre-built; design tokens in `static/input.css` via `@theme` |
+| Fonts | Newsreader, Geist, JetBrains Mono | Self-hosted woff2 in `static/fonts/` (SIL OFL); downloaded once at setup |
+| Icons | Custom SVG macro set | `partials/icons.html` Jinja2 macros — no external load |
+
+### Studio Design System
+
+The UI uses the **Studio** design direction: persistent 204 px left sidebar, dark near-black background (`#0b0f17`), paper-cream text (`#f3ead8`), and cyan (`#5fd4e7`) as the sole saturated accent reserved for live/active states.
+
+Design tokens are defined in `static/input.css` under `@theme` (Tailwind v4 CSS-first approach):
+- **Backgrounds**: `--color-ink-900` (bgSunken) → `--color-ink-600` (bgRaised2)
+- **Text**: `--color-paper` / `--color-paper-dim` / `--color-paper-faint`
+- **Borders**: `--color-rule` (rgba hairline) / `--color-rule-strong`
+- **Accent**: `--color-accent` (cyan) / `--color-accent-deep`
+- **Signals**: `--color-signal-green` / `--color-signal-amber` / `--color-signal-rose`
+- **Fonts**: `--font-serif` (Newsreader) / `--font-sans` (Geist) / `--font-mono` (JetBrains Mono)
+
+Component classes (`sidebar`, `toolbar`, `section-head`, `hairline-*`, `pill-*`, `btn`, `filter-pill`, `tab-item`, etc.) are defined in `@layer components` in `input.css`.
+
+**Template structure**: all pages extend `base.html` which provides the sidebar and a `{% block toolbar %}` + `{% block page %}` slot. The sidebar (`partials/sidebar.html`) determines the active nav item from `request.url.path` and polls `/api/sidebar-status` every 5 seconds for live device/job counts.
 
 ### Job Queue
 `web/jobs.py` — `JobQueue` class with in-memory `dict[str, Job]` and an `asyncio.Queue` drain loop.
@@ -495,12 +512,13 @@ The job detail page shows a unified progress bar and step pills driven by SSE ev
 - **Campaign auto-association on enrollment**: when a transcribe job is submitted with `campaign=<slug>`, the slug rides on `job.kwargs["campaign"]`. The post-job enrollment wizard (`POST /transcribe/jobs/{id}/enroll`) reads it and, after each successful `enroll_speaker()`, calls `add_member(slug, profile_key)` so the new profile shows up in that campaign's roster. To match `record.py`'s defensive pattern, membership is checked first via `load_campaigns()` — `add_member` is only invoked when the profile is NOT already in the roster, so existing role/character entries are never clobbered. Campaign failures are logged and never break the enrollment HTTP response.
 - **Ollama Cloud — two routing paths**: a new `ollama-cloud` provider was added to `LLM_PROVIDERS` alongside an `OllamaCloudClient` (a thin `OllamaClient` subclass with `endpoint=https://ollama.com` and a required Bearer token in the `Authorization` header). `OllamaClient` itself grew an optional `api_key` constructor parameter so the cloud subclass reuses the streaming logic verbatim. (Path A) Users can keep `llm_provider = "ollama"` and pick a cloud model with `-cloud` suffix (e.g. `gpt-oss:120b-cloud`); the local daemon recognises the suffix and proxies to ollama.com using `ollama signin` credentials — wisper code is unchanged. (Path B) Users can switch to `llm_provider = "ollama-cloud"` and supply `OLLAMA_API_KEY` / `ollama_cloud_api_key`; `OllamaCloudClient` then calls `https://ollama.com/api/chat` directly with no local daemon. `GET /config/ollama-cloud-catalog` is a single public endpoint that fetches `https://ollama.com/api/tags` (5 s timeout, no auth header sent) and is used by both paths. The web combobox fetches local `/api/tags` and the cloud catalog in parallel when `ollama` is selected, dedupes by name, and tags cloud entries with `-cloud` suffix plus a `☁` label. For `ollama-cloud` provider the catalog is shown with bare names. Hardcoded endpoint in `_LLM_DEFAULT_ENDPOINTS["ollama-cloud"] = "https://ollama.com"` (no user override exposed in UI — there is one cloud endpoint).
 
-### Navigation Styling
-Nav link styles (`nav-link`, `nav-active`, `nav-divider`, `mobile-nav-link`) are defined in `static/input.css` as Tailwind component-layer classes, not in an inline `<style>` block in `base.html`. This ensures they are included in the compiled `tailwind.min.css` and benefit from purging. Links display as pill buttons: transparent border at rest, `border-green-500 bg-green-800` on hover, `border-green-400 bg-green-800` for the active page. The nav bar uses `sticky top-0 z-50` so it remains visible when the user scrolls down on long pages (e.g. the job detail page with a full log terminal).
-
 ### Offline Assets
 - `static/htmx.min.js`: placeholder committed to repo; real file downloaded during `docker build` via `curl`. For local use: `curl -sL https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js -o src/wisper_transcribe/static/htmx.min.js`
-- `static/tailwind.min.css`: rebuilt automatically on server startup by `app._build_tailwind()` (mtime-checked; skips if already current). `pytailwindcss` is a main dependency (no Node.js required). Docker builds also invoke the build step so images are self-contained. Manual rebuild: `python -m pytailwindcss -i ./src/wisper_transcribe/static/input.css -o ./src/wisper_transcribe/static/tailwind.min.css --minify`
+- `static/tailwind.min.css`: rebuilt automatically on server startup by `app._build_tailwind()` (mtime-checked; skips if already current). `pytailwindcss` is a main dependency (no Node.js required). Docker builds also invoke the build step so images are self-contained. Manual rebuild: `.venv/bin/python -m pytailwindcss -i src/wisper_transcribe/static/input.css -o src/wisper_transcribe/static/tailwind.min.css --minify`
+- `static/fonts/`: self-hosted woff2 files for Newsreader, Geist, JetBrains Mono, and Instrument Serif (latin + latin-ext subsets). All licensed under SIL OFL 1.1. Downloaded once via the Google Fonts API; committed to the repository so no internet access is required at runtime. `@font-face` declarations are in `static/input.css`.
+
+### Tailwind CSS Staleness Check (CI)
+CI runs `python -m pytailwindcss ... --minify` then `git diff --exit-code -- static/tailwind.min.css`. If the committed CSS differs from what a fresh build would produce (because a template or `input.css` changed without rebuilding), the diff step fails and blocks merge. The error message tells the developer exactly which command to run to fix it.
 
 ### Docker Web Services
 `docker-compose.yml` defines four services: `wisper` / `wisper-cpu` (CLI) and `wisper-web` / `wisper-cpu-web` (web UI, port 8080). All services share a common YAML anchor (`x-volumes`, `x-env`) so volume mounts and environment variables are declared once. Environment variables (`HF_TOKEN`, `HUGGINGFACE_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`) are read from a `.env` file (copy `.env.example → .env`). `Makefile` provides `make start` / `make start-gpu` / `make stop` / `make logs` / `make build` targets as a convenience layer over `docker compose`.

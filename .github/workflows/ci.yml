@@ -39,6 +39,15 @@ jobs:
       - name: Run tests with coverage
         run: pytest tests/ -v --cov --cov-report=term-missing
 
+      - name: Verify Tailwind CSS is current
+        run: |
+          python -m pytailwindcss \
+            -i src/wisper_transcribe/static/input.css \
+            -o src/wisper_transcribe/static/tailwind.min.css \
+            --minify
+          git diff --exit-code -- src/wisper_transcribe/static/tailwind.min.css \
+            || (echo "tailwind.min.css is stale — run '.venv/bin/python -m pytailwindcss -i src/wisper_transcribe/static/input.css -o src/wisper_transcribe/static/tailwind.min.css --minify' and commit the result" && exit 1)
+
   latest-deps:
     name: latest deps (3.12)
     runs-on: ubuntu-latest

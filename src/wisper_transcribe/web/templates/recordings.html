@@ -1,131 +1,173 @@
 {% extends "base.html" %}
+{% from "partials/icons.html" import icon %}
 {% block title %}Recordings{% endblock %}
 
-{% block content %}
-
-{% macro recording_card(r) %}
-<div class="card relative hover:shadow-md hover:ring-1 hover:ring-green-300 transition-all flex flex-col" data-filterable>
-  <a href="/recordings/{{ r.id }}" class="absolute inset-0 rounded-lg z-10" aria-label="View recording {{ r.id[:8] }}"></a>
-  <div class="flex items-start justify-between">
-    <div class="flex items-center gap-2 flex-1 min-w-0">
-      {% if r.status == 'recording' %}
-      <span class="h-2 w-2 rounded-full bg-red-500 animate-pulse flex-shrink-0" title="Recording"></span>
-      {% elif r.status == 'degraded' %}
-      <span class="h-2 w-2 rounded-full bg-orange-400 flex-shrink-0" title="Degraded"></span>
-      {% elif r.status == 'completed' %}
-      <span class="h-2 w-2 rounded-full bg-green-500 flex-shrink-0" title="Completed"></span>
-      {% elif r.status == 'failed' %}
-      <span class="h-2 w-2 rounded-full bg-red-400 flex-shrink-0" title="Failed"></span>
-      {% else %}
-      <span class="h-2 w-2 rounded-full bg-gray-300 flex-shrink-0"></span>
-      {% endif %}
-      <h3 class="text-sm font-semibold text-gray-900 font-mono truncate">{{ r.id[:8] }}…</h3>
-    </div>
-    <div class="flex items-center gap-2 flex-shrink-0 relative z-50">
-      <form method="post" action="/recordings/{{ r.id }}/delete"
-            onsubmit="return confirm('Remove from list? Audio files are kept on disk.')">
-        <button type="submit" class="text-gray-400 hover:text-red-500" title="Remove from list">
-          <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0"/>
-          </svg>
-        </button>
-      </form>
+{% block toolbar %}
+<div class="toolbar">
+  <div>
+    <div class="toolbar-kicker">Recordings</div>
+    <div style="display:flex;align-items:baseline;gap:12px">
+      <span class="toolbar-title">Captured sessions</span>
+      <span class="toolbar-sub">{{ recordings | length }} RECORDINGS</span>
     </div>
   </div>
-  <div class="mt-2 space-y-1 text-xs text-gray-500">
-    <p>Status: <span class="font-medium text-gray-700">{{ r.status }}</span></p>
-    {% if r.started_at %}<p>{{ r.started_at.strftime('%Y-%m-%d %H:%M') }} UTC</p>{% endif %}
-    <p>
-      {{ r.discord_speakers | length }} speaker{% if r.discord_speakers | length != 1 %}s{% endif %} ·
-      {{ r.segment_manifest | length }} segment{% if r.segment_manifest | length != 1 %}s{% endif %}
-    </p>
+  <div style="display:flex;align-items:center;gap:8px">
+    <a href="/record" class="btn btn-primary">{{ icon("record", 10, "var(--color-ink-800)") }} Start session</a>
   </div>
 </div>
-{% endmacro %}
+{% endblock %}
 
-<div class="space-y-6">
+{% block page %}
+<div class="studio-page">
 
-  <div class="flex items-center justify-between">
-    <div>
-      <h1 class="text-2xl font-bold text-gray-900">Recordings</h1>
-      <p class="mt-1 text-sm text-gray-500">{{ recordings | length }} recording{% if recordings | length != 1 %}s{% endif %}</p>
+  <!-- Filter row -->
+  <div style="display:flex;align-items:center;gap:4px;margin-bottom:16px;flex-wrap:wrap">
+    {%- set live_recs = recordings | selectattr('status', 'equalto', 'recording') | list -%}
+    {%- set done_recs = recordings | selectattr('status', 'equalto', 'completed') | list -%}
+    {%- set failed_recs = recordings | selectattr('status', 'equalto', 'failed') | list -%}
+    <button class="filter-pill active" onclick="wisperFilter(this,'all')">
+      All <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint)">{{ recordings | length }}</span>
+    </button>
+    <button class="filter-pill" onclick="wisperFilter(this,'recording')">
+      <span class="dot-rose" style="width:6px;height:6px"></span>
+      Live <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint)">{{ live_recs | length }}</span>
+    </button>
+    <button class="filter-pill" onclick="wisperFilter(this,'completed')">
+      Done <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint)">{{ done_recs | length }}</span>
+    </button>
+    <button class="filter-pill" onclick="wisperFilter(this,'failed')">
+      Failed <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint)">{{ failed_recs | length }}</span>
+    </button>
+    <div style="flex:1"></div>
+    <div class="search-bar" style="width:240px">
+      {{ icon("search", 11, "var(--color-paper-faint)") }}
+      <input type="text" placeholder="Filter recordings…" oninput="wisperSearchRecordings(this.value)"
+             style="background:none;border:none;outline:none;font-size:12px;color:var(--color-paper);flex:1;font-family:var(--font-sans)"/>
     </div>
-    <a href="/record" class="btn-primary">New Recording</a>
   </div>
 
-  {% if recordings %}
-  <input id="list-filter" type="search" placeholder="Filter recordings…"
-         class="form-input max-w-xs" autocomplete="off"/>
-  {% endif %}
-
-  {% if request.query_params.get('error') == 'not_found' %}
-  <div class="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-700">
-    Recording not found.
-  </div>
-  {% endif %}
-
-  {% if recordings %}
-
-  {# Campaign sections (Pattern 7) #}
-  {% for slug, c in campaigns.items() %}
-    {% set campaign_items = recordings | selectattr("campaign_slug", "equalto", slug) | list %}
-    {% if campaign_items %}
-    <details class="card" open data-filter-section>
-      <summary class="text-base font-semibold text-gray-900 cursor-pointer select-none flex items-center gap-2">
-        <svg class="h-4 w-4 text-green-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z"/>
-        </svg>
-        {{ c.display_name }}
-        <span class="text-xs font-normal text-gray-400 ml-1">{{ campaign_items | length }} session{% if campaign_items | length != 1 %}s{% endif %}</span>
-      </summary>
-      <div class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {% for r in campaign_items %}{{ recording_card(r) }}{% endfor %}
+  <!-- Live now group -->
+  {% if live_recs %}
+  <div style="margin-bottom:24px">
+    <div style="display:flex;align-items:baseline;gap:14px;margin-bottom:12px">
+      <div style="display:flex;align-items:center;gap:8px;font-family:var(--font-mono);font-size:10px;color:var(--color-signal-rose);letter-spacing:0.18em">
+        <span class="dot-rose" style="width:6px;height:6px"></span>
+        LIVE NOW
       </div>
-    </details>
-    {% endif %}
-  {% endfor %}
+      <div style="flex:1;height:1px;background:var(--color-rule)"></div>
+    </div>
+    {% for r in live_recs %}
+    {% set camp = campaigns.get(r.campaign_slug) %}
+    <a href="/record" data-status="recording"
+       style="display:grid;grid-template-columns:1fr auto auto auto auto;gap:24px;align-items:center;
+              padding:18px 20px;border-radius:8px;
+              background:linear-gradient(90deg,#e88b8b10,transparent 60%);
+              border:1px solid #e88b8b40;text-decoration:none;margin-bottom:8px">
+      <div>
+        <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-signal-rose);letter-spacing:0.18em;font-weight:600;margin-bottom:6px">RECORDING</div>
+        <div style="font-family:var(--font-serif);font-size:22px;color:var(--color-paper)">{{ r.id[:16] }}</div>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:6px;font-size:12px;color:var(--color-paper-dim)">
+          {% if camp %}<span>{{ camp.display_name }}</span>{% endif %}
+          <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint)">{{ r.voice_channel_id or '—' }}</span>
+        </div>
+      </div>
+      <div>
+        <div style="font-family:var(--font-serif);font-size:20px;color:var(--color-paper);line-height:1">{{ r.segment_manifest | length }}</div>
+        <div class="mono-kicker" style="margin-top:4px">SEGMENTS</div>
+      </div>
+      <div>
+        <div style="font-family:var(--font-serif);font-size:20px;color:var(--color-accent);line-height:1">{{ r.discord_speakers | length }}</div>
+        <div class="mono-kicker" style="margin-top:4px">VOICES</div>
+      </div>
+      <div style="display:flex;gap:2px;align-items:flex-end;height:28px;width:90px">
+        {% for i in range(30) %}<div style="flex:1;height:{{ (15 + (i * 7 + 3) % 80) }}%;background:var(--color-signal-rose);border-radius:1px;opacity:0.6"></div>{% endfor %}
+      </div>
+      <div class="btn btn-secondary">Open live view →</div>
+    </a>
+    {% endfor %}
+  </div>
+  {% endif %}
 
-  {# Uncampaigned recordings #}
-  {% set uncampaigned = recordings | rejectattr("campaign_slug") | list %}
-  {% if uncampaigned %}
-  <div data-filter-section>
-    {% if campaigns %}
-    <h2 class="text-sm font-medium text-gray-500 mb-3">No campaign</h2>
-    {% endif %}
-    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-      {% for r in uncampaigned %}{{ recording_card(r) }}{% endfor %}
+  <!-- Captured group -->
+  <div>
+    <div style="display:flex;align-items:baseline;gap:14px;margin-bottom:12px">
+      <div class="mono-kicker">Captured</div>
+      <div style="flex:1;height:1px;background:var(--color-rule)"></div>
+      <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);letter-spacing:0.12em">{{ (recordings | rejectattr('status', 'equalto', 'recording') | list) | length }} ITEMS</div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:12px 1.4fr 1fr 90px 70px 110px 130px;gap:16px;padding:8px 16px;border-top:1px solid var(--color-rule);border-bottom:1px solid var(--color-rule);font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);letter-spacing:0.12em">
+      <div></div><div>SESSION</div><div>CAMPAIGN · CHANNEL</div>
+      <div style="text-align:right">DURATION</div><div style="text-align:right">SEG</div>
+      <div>STATUS</div><div style="text-align:right">ACTION</div>
+    </div>
+
+    <div id="recordings-table">
+    {% for r in recordings if r.status != 'recording' %}
+    {% set camp = campaigns.get(r.campaign_slug) %}
+    {%- set started = r.started_at.strftime('%b %-d · %H:%M') if r.started_at else '—' -%}
+    {%- set ended = r.ended_at.strftime('%H:%M') if r.ended_at else '—' -%}
+    {%- set duration_s = ((r.ended_at - r.started_at).total_seconds() | int) if (r.ended_at and r.started_at) else 0 -%}
+    {%- set dur_str = "%d:%02d:%02d" | format(duration_s // 3600, (duration_s % 3600) // 60, duration_s % 60) if duration_s > 0 else '—' -%}
+    <div data-status="{{ r.status }}" data-name="{{ r.id | lower }}"
+         style="display:grid;grid-template-columns:12px 1.4fr 1fr 90px 70px 110px 130px;gap:16px;padding:14px 16px;border-bottom:1px solid var(--color-rule);align-items:center">
+      {{ icon("waveform", 11, "var(--color-paper-faint)") }}
+      <div>
+        <div style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper)">{{ r.id[:20] }}</div>
+        <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:3px">{{ r.id }} · {{ started }}</div>
+      </div>
+      <div>
+        {% if camp %}
+        <div style="display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--color-paper-dim)">
+          <span class="dot-color" style="width:5px;height:5px;background:#7bd88f"></span>
+          {{ camp.display_name }}
+        </div>
+        {% endif %}
+        <div style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint);margin-top:3px">{{ r.voice_channel_id or '—' }}</div>
+      </div>
+      <div style="font-family:var(--font-mono);font-size:12px;color:var(--color-paper-dim);text-align:right">{{ dur_str }}</div>
+      <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint);text-align:right">{{ r.segment_manifest | length }}</div>
+      <div>
+        {% if r.status == 'completed' %}
+          <span class="pill pill-green">TRANSCRIBED</span>
+        {% elif r.status == 'recording' %}
+          <span class="pill pill-rose">LIVE</span>
+        {% elif r.status == 'failed' %}
+          <span class="pill pill-amber">FAILED</span>
+        {% else %}
+          <span class="pill pill-dim">{{ r.status | upper }}</span>
+        {% endif %}
+      </div>
+      <div style="text-align:right">
+        {% if r.status == 'completed' %}
+          <a href="/recordings/{{ r.id }}" style="font-size:12px;color:var(--color-paper)">Open →</a>
+        {% elif r.status == 'failed' %}
+          <form method="post" action="/recordings/{{ r.id }}/transcribe" style="display:inline">
+            <button type="submit" class="btn btn-sm" style="background:transparent;border:1px solid #e4b57240;color:var(--color-signal-amber)">Retry</button>
+          </form>
+        {% endif %}
+      </div>
+    </div>
+    {% else %}
+    <div style="padding:24px 0;color:var(--color-paper-faint);font-size:13px;font-style:italic">No recordings yet. <a href="/record" style="color:var(--color-accent)">Start one →</a></div>
+    {% endfor %}
     </div>
   </div>
-  {% endif %}
-
-  {% else %}
-  <div class="card text-center py-12">
-    <svg class="h-12 w-12 text-gray-300 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke-width="1" stroke="currentColor">
-      <path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z"/>
-    </svg>
-    <p class="text-gray-500">No recordings yet.</p>
-    <p class="text-sm text-gray-400 mt-1">Start a new recording from the <a href="/record" class="text-green-600 hover:underline">Record</a> page.</p>
-  </div>
-  {% endif %}
-
 </div>
 
 <script>
-(function() {
-  var input = document.getElementById('list-filter');
-  if (!input) return;
-  input.addEventListener('input', function() {
-    var q = this.value.trim().toLowerCase();
-    document.querySelectorAll('[data-filterable]').forEach(function(el) {
-      el.style.display = (q && !el.textContent.toLowerCase().includes(q)) ? 'none' : '';
-    });
-    document.querySelectorAll('[data-filter-section]').forEach(function(sec) {
-      var any = Array.from(sec.querySelectorAll('[data-filterable]')).some(function(el) {
-        return el.style.display !== 'none';
-      });
-      sec.style.display = any ? '' : 'none';
-    });
+function wisperFilter(btn, status) {
+  document.querySelectorAll('.filter-pill').forEach(function(b) { b.classList.remove('active'); });
+  btn.classList.add('active');
+  document.querySelectorAll('[data-status]').forEach(function(row) {
+    row.style.display = (status === 'all' || row.dataset.status === status) ? '' : 'none';
   });
-})();
+}
+function wisperSearchRecordings(q) {
+  q = q.toLowerCase();
+  document.querySelectorAll('[data-name]').forEach(function(row) {
+    row.style.display = (!q || row.dataset.name.includes(q)) ? '' : 'none';
+  });
+}
 </script>
 {% endblock %}

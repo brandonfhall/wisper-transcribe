@@ -7,6 +7,11 @@ from fastapi.templating import Jinja2Templates
 
 from ..jobs import JobQueue
 
+try:
+    from wisper_transcribe import __version__ as _app_version
+except Exception:
+    _app_version = "dev"
+
 _TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
@@ -14,6 +19,9 @@ templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 templates.env.filters["basename"] = lambda p: Path(str(p)).name
 templates.env.filters["stem"] = lambda p: Path(str(p)).stem
 templates.env.filters["urlencode"] = lambda s: quote(str(s))
+
+# Globals available in every template
+templates.env.globals["app_version"] = _app_version
 
 
 def get_queue(request: Request) -> JobQueue:
