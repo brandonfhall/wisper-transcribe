@@ -60,6 +60,34 @@ def _build_tailwind() -> None:
         import warnings
         warnings.warn(f"Tailwind CSS build failed: {exc}. Using existing tailwind.min.css.")
 
+def _cleanup_orphaned_uploads() -> None:
+    """Delete wisper_upload_* temp files left by jobs that crashed mid-transcription.
+
+    The web upload route saves the file to a NamedTemporaryFile with the
+    wisper_upload_ prefix before enqueuing the job.  If the server crashes
+    while a job is running, the temp file is never cleaned up.  We sweep on
+    startup — the files are only needed while a job is running, so anything
+    still on disk at boot time is safe to remove.
+    """
+    import glob
+    import logging
+    import tempfile
+
+    tmp_dir = tempfile.gettempdir()
+    pattern = str(Path(tmp_dir) / "wisper_upload_*")
+    orphans = glob.glob(pattern)
+    if not orphans:
+        return
+    log = logging.getLogger(__name__)
+    for path in orphans:
+        try:
+            Path(path).unlink(missing_ok=True)
+            log.debug("Removed orphaned upload: %s", path)
+        except OSError as exc:
+            log.warning("Could not remove orphaned upload %s: %s", path, exc)
+    log.info("Cleaned up %d orphaned upload file(s) from previous session", len(orphans))
+
+
 try:
     from wisper_transcribe import __version__
 except Exception:
@@ -120,6 +148,8 @@ def create_app() -> FastAPI:
 
         from wisper_transcribe.recording_manager import reconcile_on_startup
         reconcile_on_startup(data_dir)
+
+        _cleanup_orphaned_uploads()
 
         from .discord_bot import BotManager
         bot_manager = BotManager(data_dir=data_dir)
