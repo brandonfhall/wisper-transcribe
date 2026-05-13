@@ -595,12 +595,7 @@ The UI uses three self-hosted fonts (all SIL OFL licensed, committed to the repo
 - **Geist** — sans-serif body font
 - **JetBrains Mono** — monospace font for IDs, timestamps, and CLI flags
 
-> **Note for local (non-Docker) installs:** HTMX is vendored in `src/wisper_transcribe/static/htmx.min.js`. The file in the repo is a placeholder; download the real file once with:
-> ```bash
-> curl -sL "https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js" \
->      -o src/wisper_transcribe/static/htmx.min.js
-> ```
-> The Docker build does this automatically.
+HTMX, the fonts, and Tailwind CSS are all committed directly — no download step needed for local dev or Docker builds.
 
 ---
 

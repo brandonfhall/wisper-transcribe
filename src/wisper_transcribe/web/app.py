@@ -31,34 +31,6 @@ _INPUT_CSS = _STATIC_DIR / "input.css"
 _OUTPUT_CSS = _STATIC_DIR / "tailwind.min.css"
 
 
-_HTMX_JS = _STATIC_DIR / "htmx.min.js"
-_HTMX_URL = "https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js"
-_HTMX_MIN_SIZE = 10_000  # real file is ~48 KB; placeholder is < 1 KB
-
-
-def _ensure_htmx() -> None:
-    """Download htmx.min.js if the committed placeholder is still in place.
-
-    The Docker build fetches it; for local dev the file is a stub until this
-    runs.  Failures are non-fatal — the app degrades gracefully without htmx
-    (forms still work; polling features won't update automatically).
-    """
-    if _HTMX_JS.exists() and _HTMX_JS.stat().st_size >= _HTMX_MIN_SIZE:
-        return  # already the real file
-
-    import urllib.request
-    import warnings
-
-    try:
-        urllib.request.urlretrieve(_HTMX_URL, str(_HTMX_JS))
-    except Exception as exc:
-        warnings.warn(
-            f"Could not download htmx.min.js ({exc}). "
-            "Run: curl -sL https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js "
-            f"-o {_HTMX_JS}"
-        )
-
-
 def _build_tailwind() -> None:
     """Rebuild tailwind.min.css from input.css if the source is newer.
 
@@ -159,7 +131,6 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[misc]
         _build_tailwind()
-        _ensure_htmx()
         job_queue.start()
 
         # Write server.json so CLI can discover the running server.

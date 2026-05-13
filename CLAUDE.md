@@ -152,7 +152,7 @@ Every security control must have a corresponding test in `tests/test_path_traver
 
 ## Non-Obvious Gotchas
 
-- **`static/htmx.min.js` is a placeholder.** The real file is downloaded by `docker build`. For local dev: `curl -sL "https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js" -o src/wisper_transcribe/static/htmx.min.js`
+- **`static/htmx.min.js` is committed** (48 KB, HTMX 1.9.12, ISC license). No download needed — works out of the box for local dev and Docker builds.
 - **Tailwind auto-rebuilds on startup** (mtime check in `app.py`), but you still need to rebuild manually and commit `tailwind.min.css` when changing template classes.
 - **`tqdm.monitor_interval = 0`** is set globally at app startup (`app.py`) and per-job (`jobs.py`) to prevent `TMonitor` from spawning a daemon thread that hangs `Ctrl+C` on Python 3.14.
 - **One job at a time.** `_model` and `_pipeline` are module-level globals — not thread-safe. `JobQueue` runs one job at a time intentionally.
