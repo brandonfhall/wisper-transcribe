@@ -24,7 +24,7 @@
       <button type="submit" class="btn btn-secondary btn-sm">Re-refine</button>
     </form>
     {% else %}
-    <form method="post" action="/transcripts/{{ name | urlencode }}/refine" style="display:inline">
+    <form method="post" action="/transcripts/{{ name | urlencode }}/summarize" style="display:inline">
       <button type="submit" class="btn btn-primary btn-sm">{{ icon("spark", 10, "var(--color-ink-800)") }} Summarize</button>
     </form>
     {% endif %}
@@ -112,9 +112,9 @@
           <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-accent);letter-spacing:0.18em;text-transform:uppercase">Post-processing</div>
         </div>
         {% if not has_summary %}
-        <form method="post" action="/transcripts/{{ name | urlencode }}/refine" style="margin-bottom:8px">
+        <form method="post" action="/transcripts/{{ name | urlencode }}/summarize" style="margin-bottom:8px">
           <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center">
-            {{ icon("spark", 10, "var(--color-ink-800)") }} Summarize (DM notes)
+            {{ icon("spark", 10, "var(--color-ink-800)") }} Generate Summary
           </button>
         </form>
         {% else %}
