@@ -44,3 +44,17 @@ Recommendation: option (1) — reuse the parallel-stages subprocess plumbing for
 4. Remove the Java builder stages from `Dockerfile` and the Java 25 requirement from launchers + README
 
 Nothing else changes — `SegmentedOggWriter`, the web UI, campaigns, CLI, and all tests remain unaffected.
+
+
+## UI Bugs ##
+
+* on the transcript resutls page the "Generate Summary" button is shown even after a summary has been generated. Aditionally the summary is not shown on the transcript results page after it has been generated. — **OPEN**
+
+* on the transcript results page Speakers is showing a raw JSON object instaed of the speaker table. — **OPEN**
+
+* Regression. There is not a way to name speakers in the UI on a transcript resutls page. The "Name Speakers" button is missing. — **OPEN**
+
+* on the config storage page add a link to open the storage directory in the OS file explorer. — **OPEN**
+
+* the Device and Jobs summary in the lower left corner of the page are blank and not bound to anything. — **OPEN**
+

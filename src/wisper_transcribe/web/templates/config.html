@@ -245,7 +245,13 @@
         <div style="font-family:var(--font-mono);font-size:12px;color:var(--color-paper-dim);margin-top:6px">{{ config_path }}</div>
       </div>
       <div style="padding:14px 0;border-bottom:1px solid var(--color-rule)">
-        <div style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper)">Data directory</div>
+        <div style="display:flex;align-items:baseline;justify-content:space-between">
+          <div style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper)">Data directory</div>
+          <button type="button" onclick="wisperOpenDataDir()"
+                  style="font-family:var(--font-mono);font-size:10px;color:var(--color-accent);background:none;border:none;cursor:pointer;padding:0;letter-spacing:0.05em">
+            Open in Finder →
+          </button>
+        </div>
         <div style="font-family:var(--font-mono);font-size:12px;color:var(--color-paper-dim);margin-top:6px">{{ config.get('data_dir', '—') }}</div>
       </div>
     </div>
@@ -506,5 +512,12 @@ function _refreshPresetEmpty() { _emptyMsg.textContent = _presetRows.children.le
 
 if (_presetData.length === 0) { _emptyMsg.textContent = 'No presets saved yet.'; }
 else { _presetData.forEach(function(p) { _presetRows.appendChild(_makePresetRow(p)); }); }
+
+function wisperOpenDataDir() {
+  fetch('/config/open-data-dir')
+    .then(function(r) { return r.json(); })
+    .then(function(d) { if (!d.ok) console.warn('Could not open data dir:', d.error); })
+    .catch(function() {});
+}
 </script>
 {% endblock %}

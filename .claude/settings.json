@@ -17,7 +17,17 @@
       "Bash(git commit -m ' *)",
       "Bash(.venv/bin/pytest tests/ -x -q --git-ref=remotes/origin/fix/web-ui-bugs)",
       "Bash(git rebase *)",
-      "Bash(.venv/bin/pytest tests/test_web_routes.py::test_dashboard_shows_llm_provider_and_model -v --tb=short)"
+      "Bash(.venv/bin/pytest tests/test_web_routes.py::test_dashboard_shows_llm_provider_and_model -v --tb=short)",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 -)",
+      "Bash(.venv/bin/pytest tests/ *)",
+      "Bash(.venv/bin/pytest tests/test_*)",
+      "Bash(.venv/bin/python -m pytailwindcss *)",
+      "Bash(.venv/bin/python -m *)",
+      "Bash(.venv/bin/python scripts/*)",
+      "Bash(gh pr checks *)",
+      "Bash(gh run view *)",
+      "Bash(.venv/bin/wisper *)"
     ]
   }
 }

@@ -105,16 +105,21 @@
 
     <!-- Sidebar -->
     <div>
-      <!-- Speaker enrollment link (only if job_id was stored in frontmatter) -->
-      {% if meta.get('job_id') %}
+      <!-- Speaker enrollment -->
       <div style="margin-bottom:16px;padding:14px 16px;background:var(--color-ink-700);border:1px solid var(--color-rule);border-radius:4px">
-        <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);letter-spacing:0.15em;text-transform:uppercase;margin-bottom:8px">Speaker Enrollment</div>
-        <a href="/transcribe/jobs/{{ meta.job_id }}/enroll" class="btn btn-secondary" style="display:flex;width:100%;justify-content:center">
+        <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);letter-spacing:0.15em;text-transform:uppercase;margin-bottom:8px">Speakers</div>
+        {% if meta.get('job_id') %}
+        <a href="/transcribe/jobs/{{ meta.job_id }}/enroll" class="btn btn-secondary" style="display:flex;width:100%;justify-content:center;margin-bottom:6px">
           {{ icon("users", 11) }} Name speakers
         </a>
-        <div style="font-size:11px;color:var(--color-paper-faint);margin-top:6px;line-height:1.4">Assign names and enroll voice profiles from the audio detected in this session.</div>
+        <div style="font-size:11px;color:var(--color-paper-faint);line-height:1.4">Assign names and enroll voice profiles detected in this session.</div>
+        {% else %}
+        <a href="/speakers" class="btn btn-secondary" style="display:flex;width:100%;justify-content:center;margin-bottom:6px">
+          {{ icon("users", 11) }} Manage speaker profiles
+        </a>
+        <div style="font-size:11px;color:var(--color-paper-faint);line-height:1.4">Enroll or re-enroll voices on the Speakers page. Re-transcribe this file to link enrollment directly.</div>
+        {% endif %}
       </div>
-      {% endif %}
 
       <!-- Refine / summarize actions -->
       <div style="background:var(--color-ink-700);border:1px solid #5fd4e740;padding:20px 22px;margin-bottom:28px;box-shadow:0 0 28px #5fd4e712">
@@ -145,14 +150,26 @@
           <div class="rule-fill"></div>
         </div>
         <div style="border-top:1px solid var(--color-rule)">
-          {% for k, v in meta.items() if v and k not in ['title'] %}
+          {%- set _skip = ['title', 'speakers', 'job_id'] -%}
+          {% for k, v in meta.items() if v and k not in _skip %}
           <div style="display:flex;justify-content:space-between;align-items:baseline;padding:10px 0;border-bottom:1px solid var(--color-rule)">
             <span style="font-family:var(--font-serif);font-size:13px;color:var(--color-paper);font-style:italic">{{ k | replace('_', ' ') | title }}</span>
-            <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim);max-width:180px;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-              {% if v is iterable and v is not string %}{{ v | join(', ') }}{% else %}{{ v }}{% endif %}
-            </span>
+            <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim);max-width:180px;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ v }}</span>
           </div>
           {% endfor %}
+          {# Speakers: render as names, not raw dicts #}
+          {% if meta.get('speakers') %}
+          <div style="padding:10px 0;border-bottom:1px solid var(--color-rule)">
+            <span style="font-family:var(--font-serif);font-size:13px;color:var(--color-paper);font-style:italic">Speakers</span>
+            <div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px">
+              {% for s in meta.speakers %}
+              <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-dim);padding:2px 6px;border:1px solid var(--color-rule);border-radius:3px">
+                {{ s.name if s is mapping else s }}{% if s is mapping and s.role %} <span style="color:var(--color-paper-faint)">({{ s.role }})</span>{% endif %}
+              </span>
+              {% endfor %}
+            </div>
+          </div>
+          {% endif %}
         </div>
       </div>
       {% endif %}

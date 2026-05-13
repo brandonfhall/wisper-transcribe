@@ -112,3 +112,28 @@ document.addEventListener('DOMContentLoaded', function() {
   var terminal = document.getElementById('log-terminal');
   if (terminal) terminal.scrollTop = terminal.scrollHeight;
 });
+
+// ── Sidebar status fallback ──
+// htmx handles this via hx-trigger="load, every 5s" when it's available.
+// If htmx.min.js is still the placeholder (local dev), this vanilla-JS
+// fallback fires instead so the Device / Jobs cells are never blank.
+(function() {
+  var wrap = document.getElementById('sidebar-status-wrap');
+  if (!wrap) return;
+
+  function pollSidebarStatus() {
+    fetch('/api/sidebar-status')
+      .then(function(r) { return r.text(); })
+      .then(function(html) { wrap.innerHTML = html; })
+      .catch(function() {});
+  }
+
+  // Only activate if htmx hasn't already claimed the element
+  // (htmx sets 'data-hx-processed' on elements it manages).
+  setTimeout(function() {
+    if (!wrap.hasAttribute('data-hx-processed')) {
+      pollSidebarStatus();
+      setInterval(pollSidebarStatus, 5000);
+    }
+  }, 200);
+})();
