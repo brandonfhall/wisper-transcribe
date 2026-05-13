@@ -15,7 +15,9 @@
       "Bash(.venv/bin/pytest tests/test_web_routes.py::test_campaigns_index_empty tests/test_web_routes.py::test_config_llm_fields_visible tests/test_web_routes.py::test_transcribe_form_includes_campaign_select tests/test_web_routes.py::test_transcript_detail_shows_summary_link tests/test_web_routes.py::test_transcripts_list_groups_by_campaign tests/test_web_routes.py::test_transcript_detail_shows_campaign_dropdown -v --tb=short)",
       "Bash(.venv/bin/pytest tests/ -x --tb=short)",
       "Bash(git commit -m ' *)",
-      "Bash(.venv/bin/pytest tests/ -x -q --git-ref=remotes/origin/fix/web-ui-bugs)"
+      "Bash(.venv/bin/pytest tests/ -x -q --git-ref=remotes/origin/fix/web-ui-bugs)",
+      "Bash(git rebase *)",
+      "Bash(.venv/bin/pytest tests/test_web_routes.py::test_dashboard_shows_llm_provider_and_model -v --tb=short)"
     ]
   }
 }
