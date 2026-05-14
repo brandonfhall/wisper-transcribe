@@ -45,24 +45,16 @@ Recommendation: option (1) — reuse the parallel-stages subprocess plumbing for
 
 Nothing else changes — `SegmentedOggWriter`, the web UI, campaigns, CLI, and all tests remain unaffected.
 
+---
 
-## Ideas ##
+## Ideas
 
-* Add per line rename speaker in the web UI — **OPEN** 
+* Add per-line speaker rename in the web UI — **OPEN**
 
-* Suppress webserver output on the termainl when running in web UI mode — **OPEN** (currently the server logs are mixed with the job progress logs, which is noisy and can be confusing)
+* Suppress webserver output on the terminal when running in web UI mode — **OPEN** (currently the server logs are mixed with the job progress logs, which is noisy and can be confusing)
 
+---
 
+## UI Bugs
 
-## UI Bugs ##
-
-* on the transcript results page the "Generate Summary" button is shown even after a summary has been generated. Additionally the summary is not shown on the transcript results page after it has been generated. — **OPEN** (template logic is correct; suspected CWD mismatch between server launch dir and where the summary was written — reproduce needed)
-
-* ~~Tailwind `git diff` check failing in CI~~ — **FIXED**: macOS/Linux tailwind binaries produce different CSS; `git diff --exit-code` removed from CI. CI now only verifies the build runs without errors (output to `/tmp`). Developer responsibility per CLAUDE.md.
-
-* on the summary generation page it should link to "view summary" not view transcript. — **OPEN** (simple template fix)
-
-
-## Security ##
-* ~~Information exposure via `str(exc)` in config.py `/open-data-dir` route~~ — **FIXED**: replaced with generic `"Failed to open data directory"` message.
-
+* On the transcript results page the "Generate Summary" button is shown even after a summary has been generated. Additionally the summary is not shown on the transcript results page after it has been generated. — **OPEN** (template logic is correct; suspected CWD mismatch between server launch dir and where the summary was written — reproduce needed)
