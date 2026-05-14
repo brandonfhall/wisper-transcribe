@@ -51,7 +51,6 @@ Nothing else changes — `SegmentedOggWriter`, the web UI, campaigns, CLI, and a
 
 * Add per-line speaker rename in the web UI — **OPEN**
 
-* ~~Suppress webserver output on the terminal~~ — **FIXED**: `access_log=False` added to `uvicorn.run()` in `cli.py`.
 
 ---
 
