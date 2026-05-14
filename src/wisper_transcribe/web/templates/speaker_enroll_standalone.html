@@ -29,6 +29,7 @@
     <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
       <div class="mono-kicker" style="margin-bottom:8px">Speaker name</div>
       <input type="text" id="name" name="name" required placeholder="e.g. Alice"
+             value="{{ request.query_params.get('name', '') }}"
              style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule-strong);color:var(--color-paper);padding:9px 12px;border-radius:5px;font-size:14px;font-family:var(--font-sans);outline:none"/>
     </div>
 
@@ -54,6 +55,7 @@
     <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
       <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
         <input type="checkbox" id="update" name="update" value="1"
+               {% if request.query_params.get('name') %}checked{% endif %}
                style="width:14px;height:14px;accent-color:var(--color-accent)"/>
         <div>
           <div style="font-family:var(--font-serif);font-size:14px;color:var(--color-paper)">Update existing profile</div>

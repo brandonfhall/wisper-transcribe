@@ -109,8 +109,14 @@ window.wisperTickerAppend = function(data) {
 // ── Inline audio excerpt player ──
 // Used on the Speakers page and the enrollment wizard.
 // Toggles play/pause on a hidden <audio> element; only one clip plays at a time.
+// Uses innerHTML (not textContent) so the SVG icon inside the button is preserved.
 (function() {
   var _playing = null;
+
+  function _setLabel(btn, label) {
+    // Replace the visible text while keeping the SVG icon intact.
+    btn.innerHTML = btn.innerHTML.replace(/\bSample\b|\bStop\b/, label);
+  }
 
   window.wisperPlayExcerpt = function(audioId, btn) {
     var audio = document.getElementById(audioId);
@@ -120,7 +126,7 @@ window.wisperTickerAppend = function(data) {
       _playing.pause();
       _playing.currentTime = 0;
       var prevBtn = document.querySelector('[data-audio-id="' + _playing.id + '"]');
-      if (prevBtn) prevBtn.textContent = prevBtn.textContent.replace('Stop', 'Sample');
+      if (prevBtn) { delete prevBtn.dataset.playing; _setLabel(prevBtn, 'Sample'); }
       _playing = null;
     }
 
@@ -128,15 +134,15 @@ window.wisperTickerAppend = function(data) {
       audio.pause();
       audio.currentTime = 0;
       delete btn.dataset.playing;
-      btn.textContent = btn.textContent.replace('Stop', 'Sample');
+      _setLabel(btn, 'Sample');
       _playing = null;
     } else {
       btn.dataset.playing = '1';
-      btn.textContent = btn.textContent.replace('Sample', 'Stop');
+      _setLabel(btn, 'Stop');
       audio.play();
       audio.onended = function() {
         delete btn.dataset.playing;
-        btn.textContent = btn.textContent.replace('Stop', 'Sample');
+        _setLabel(btn, 'Sample');
         _playing = null;
       };
       _playing = audio;
