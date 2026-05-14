@@ -1030,19 +1030,26 @@ def test_delete_transcript_also_removes_summary(client, tmp_path):
     assert not sm.exists()
 
 
-def test_transcribe_post_accepts_post_processing_flags(client, tmp_path):
-    """post_refine and post_summarize checkboxes must not cause a 422."""
+def test_transcribe_post_processing_flags_set_on_job(client, tmp_path):
+    """Toggle checkboxes send 'on'; the job must have post_refine/post_summarize=True."""
     audio_file = tmp_path / "test.mp3"
     audio_file.write_bytes(b"fake mp3")
     with open(audio_file, "rb") as f:
         resp = client.post(
             "/transcribe",
             files={"file": ("test.mp3", f, "audio/mpeg")},
-            data={"post_refine": "1", "post_summarize": "1"},
+            # Browsers send "on" for checked checkboxes, not "1"
+            data={"post_refine": "on", "post_summarize": "on"},
             follow_redirects=False,
         )
     assert resp.status_code == 303
-    assert resp.headers["location"].startswith("/transcribe/jobs/")
+    loc = resp.headers["location"]
+    assert loc.startswith("/transcribe/jobs/")
+    job_id = loc.split("/")[-1]
+    job = client.app.state.job_queue.get(job_id)
+    assert job is not None
+    assert job.post_refine is True
+    assert job.post_summarize is True
 
 
 def test_transcribe_post_with_vocab_file_sets_hotwords(client, tmp_path, monkeypatch):
@@ -1419,7 +1426,9 @@ def test_enroll_submit_calls_enroll_speaker_when_segments_present(
     )
     client.app.state.job_queue._jobs[job.id] = job
 
-    with patch("wisper_transcribe.speaker_manager.enroll_speaker") as mock_enroll:
+    wav_audio = tmp_path / "audio.wav"
+    with patch("wisper_transcribe.speaker_manager.enroll_speaker") as mock_enroll, \
+         patch("wisper_transcribe.audio_utils.convert_to_wav", return_value=wav_audio):
         resp = client.post(
             f"/transcribe/jobs/{job.id}/enroll",
             data={"speaker_SPEAKER_00": "Alice"},
@@ -1432,6 +1441,8 @@ def test_enroll_submit_calls_enroll_speaker_when_segments_present(
     assert call_kwargs["display_name"] == "Alice"
     assert call_kwargs["name"] == "alice"
     assert call_kwargs["speaker_label"] == "SPEAKER_00"
+    # Must use the WAV path, not the original MP3
+    assert call_kwargs["audio_path"] == wav_audio
 
 
 def test_enroll_submit_adds_speaker_to_job_campaign(client, tmp_path, monkeypatch):
@@ -1466,7 +1477,8 @@ def test_enroll_submit_adds_speaker_to_job_campaign(client, tmp_path, monkeypatc
     )
     client.app.state.job_queue._jobs[job.id] = job
 
-    with patch("wisper_transcribe.speaker_manager.enroll_speaker"):
+    with patch("wisper_transcribe.speaker_manager.enroll_speaker"), \
+         patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=lambda p: p):
         resp = client.post(
             f"/transcribe/jobs/{job.id}/enroll",
             data={"speaker_SPEAKER_00": "Alice"},
@@ -1507,6 +1519,7 @@ def test_enroll_submit_no_campaign_skips_add_member(client, tmp_path, monkeypatc
     client.app.state.job_queue._jobs[job.id] = job
 
     with patch("wisper_transcribe.speaker_manager.enroll_speaker"), \
+         patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=lambda p: p), \
          patch("wisper_transcribe.campaign_manager.add_member") as mock_add_member:
         resp = client.post(
             f"/transcribe/jobs/{job.id}/enroll",
@@ -1551,6 +1564,7 @@ def test_enroll_submit_skips_add_member_if_already_in_campaign(client, tmp_path,
     client.app.state.job_queue._jobs[job.id] = job
 
     with patch("wisper_transcribe.speaker_manager.enroll_speaker"), \
+         patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=lambda p: p), \
          patch("wisper_transcribe.campaign_manager.add_member") as mock_add_member:
         resp = client.post(
             f"/transcribe/jobs/{job.id}/enroll",
@@ -1596,6 +1610,52 @@ def test_enroll_submit_skips_enroll_when_no_segments(client, tmp_path, monkeypat
 
     assert resp.status_code == 303
     mock_enroll.assert_not_called()
+
+
+def test_enroll_form_uses_diarization_segments_not_frontmatter(client, tmp_path, monkeypatch):
+    """enroll_form uses raw SPEAKER_N labels from diarization_segments, even after
+    the transcript has already been renamed (stale frontmatter guard)."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from datetime import datetime
+    import uuid
+
+    # Transcript already renamed — frontmatter shows display names, not raw labels
+    transcript = tmp_path / "session01.md"
+    transcript.write_text(
+        "---\nspeakers:\n  - name: Alice\n  - name: Bob\n---\n\n"
+        "**Alice** *(00:00)*: Hello.\n**Bob** *(00:10)*: Hi."
+    )
+
+    seg_a = MagicMock()
+    seg_a.speaker = "SPEAKER_00"
+    seg_a.start = 0.0
+    seg_b = MagicMock()
+    seg_b.speaker = "SPEAKER_01"
+    seg_b.start = 10.0
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(tmp_path / "audio.mp3"),
+        kwargs={"device": "cpu"},
+        output_path=str(transcript),
+        diarization_segments=[seg_a, seg_b],
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        resp = client.get(f"/transcribe/jobs/{job.id}/enroll")
+
+    assert resp.status_code == 200
+    body = resp.content.decode()
+    # Must show raw diarization labels, not the already-renamed display names
+    assert "SPEAKER_00" in body
+    assert "SPEAKER_01" in body
+    assert 'name="speaker_SPEAKER_00"' in body
+    assert 'name="speaker_SPEAKER_01"' in body
 
 
 # ---------------------------------------------------------------------------

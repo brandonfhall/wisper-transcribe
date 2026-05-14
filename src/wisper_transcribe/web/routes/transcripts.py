@@ -251,6 +251,10 @@ async def transcript_detail(request: Request, name: str) -> HTMLResponse:
     summary_path = _get_safe_content_path(request, name, ".summary.md")
     has_summary = bool(summary_path and summary_path.exists())
 
+    # Check for enrollment sidecar (transcript-centric wizard)
+    diar_path = _get_safe_content_path(request, name, "_diar.json")
+    has_diar_sidecar = bool(diar_path and diar_path.exists())
+
     # Load current LLM config for display
     from wisper_transcribe.config import load_config
     cfg = load_config()
@@ -270,6 +274,7 @@ async def transcript_detail(request: Request, name: str) -> HTMLResponse:
             "html_body": html_body,
             "raw_path": str(md_path),
             "has_summary": has_summary,
+            "has_diar_sidecar": has_diar_sidecar,
             "llm_provider": llm_provider,
             "llm_model": llm_model,
             "campaigns": campaigns,
@@ -308,6 +313,71 @@ async def delete_transcript(request: Request, name: str) -> HTMLResponse:
         content="",
         status_code=303,
         headers={"Location": "/transcripts"},
+    )
+
+
+@router.get("/{name}/edit", response_class=HTMLResponse)
+async def transcript_edit(request: Request, name: str) -> HTMLResponse:
+    """Edit page — shows each speaker block with an editable speaker field."""
+    md_path = _get_safe_content_path(request, name, ".md")
+    if not md_path:
+        return invalid_input_response("Invalid name")
+    if not md_path.exists():
+        return HTMLResponse(content="Transcript not found", status_code=404)
+
+    content = md_path.read_text(encoding="utf-8")
+    meta, body = _parse_frontmatter(content)
+
+    from wisper_transcribe.formatter import parse_transcript_blocks
+    blocks = parse_transcript_blocks(body)
+
+    unique_speakers = list(dict.fromkeys(b["speaker"] for b in blocks if b["has_speaker"]))
+
+    return templates.TemplateResponse(
+        request,
+        "transcript_edit.html",
+        {
+            "request": request,
+            "name": name,
+            "meta": meta,
+            "blocks": blocks,
+            "unique_speakers": unique_speakers,
+        },
+    )
+
+
+@router.post("/{name}/edit", response_class=HTMLResponse)
+async def transcript_edit_save(request: Request, name: str) -> HTMLResponse:
+    """Save per-block speaker name changes."""
+    md_path = _get_safe_content_path(request, name, ".md")
+    if not md_path:
+        return invalid_input_response("Invalid name")
+    if not md_path.exists():
+        return HTMLResponse(content="Transcript not found", status_code=404)
+
+    form = await request.form()
+
+    updated_speakers: dict[int, str] = {}
+    for key, value in form.multi_items():
+        if key.startswith("speaker_"):
+            try:
+                idx = int(key[len("speaker_"):])
+            except ValueError:
+                continue
+            speaker_val = str(value).strip()
+            if speaker_val:
+                updated_speakers[idx] = speaker_val
+
+    if updated_speakers:
+        from wisper_transcribe.formatter import rewrite_transcript_blocks
+        content = md_path.read_text(encoding="utf-8")
+        content = rewrite_transcript_blocks(content, updated_speakers)
+        md_path.write_text(content, encoding="utf-8")
+
+    return HTMLResponse(
+        content="",
+        status_code=303,
+        headers={"Location": f"/transcripts/{quote(name)}"},
     )
 
 
@@ -466,3 +536,191 @@ async def assign_campaign(request: Request, name: str) -> HTMLResponse:
         status_code=303,
         headers={"Location": f"/transcripts/{quote(name)}"},
     )
+
+
+# ---------------------------------------------------------------------------
+# Transcript-centric enrollment wizard
+# ---------------------------------------------------------------------------
+
+def _load_diar_sidecar(md_path: "Path") -> dict | None:  # type: ignore[name-defined]
+    """Load the enrollment sidecar for a transcript, or None if absent/corrupt."""
+    import json as _json
+    sidecar_path = md_path.with_name(md_path.stem + "_diar.json")
+    if not sidecar_path.exists():
+        return None
+    try:
+        return _json.loads(sidecar_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+@router.get("/{name}/enroll", response_class=HTMLResponse)
+async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
+    """Speaker enrollment wizard — transcript-centric, restart-safe."""
+    md_path = _get_safe_content_path(request, name, ".md")
+    if not md_path:
+        return invalid_input_response("Invalid name")
+    if not md_path.exists():
+        return HTMLResponse(content="Transcript not found", status_code=404)
+
+    diar = _load_diar_sidecar(md_path)
+    if not diar:
+        return HTMLResponse(content="No enrollment data found for this transcript", status_code=404)
+
+    # Derive speaker labels ordered by first appearance
+    import re as _re
+    seen: dict[str, float] = {}
+    for seg in diar.get("diarization_segments", []):
+        if seg["speaker"] not in seen:
+            seen[seg["speaker"]] = seg["start"]
+    speakers = sorted(seen.keys(), key=lambda s: seen[s])
+
+    # Locate on-disk excerpt clips and text snippets
+    out_dir = md_path.parent
+    stem = md_path.stem
+    speaker_excerpts: dict[str, str] = {}
+    speaker_excerpt_texts: dict[str, str] = {}
+    for sp in speakers:
+        safe_label = _re.sub(r"[^\w\-]", "_", sp)
+        clips = list(out_dir.glob(f"{stem}_excerpt_{safe_label}.mp3"))
+        if clips:
+            speaker_excerpts[sp] = str(clips[0])
+        txt = out_dir / f"{stem}_excerpt_{safe_label}.txt"
+        if txt.exists():
+            try:
+                speaker_excerpt_texts[sp] = txt.read_text(encoding="utf-8").strip()
+            except Exception:
+                pass
+
+    from wisper_transcribe.speaker_manager import load_profiles
+    return templates.TemplateResponse(
+        request,
+        "speaker_enroll.html",
+        {
+            "request": request,
+            "form_action": f"/transcripts/{quote(name)}/enroll",
+            "back_url": f"/transcripts/{quote(name)}",
+            "excerpt_base_url": f"/transcripts/{quote(name)}/excerpt",
+            "display_name": name,
+            "detected_speakers": speakers,
+            "existing_profiles": load_profiles(),
+            "speaker_excerpts": speaker_excerpts,
+            "speaker_excerpt_texts": speaker_excerpt_texts,
+        },
+    )
+
+
+@router.post("/{name}/enroll", response_class=HTMLResponse)
+async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
+    """Apply speaker name assignments from the transcript enrollment wizard."""
+    md_path = _get_safe_content_path(request, name, ".md")
+    if not md_path:
+        return invalid_input_response("Invalid name")
+    if not md_path.exists():
+        return HTMLResponse(content="Transcript not found", status_code=404)
+
+    diar = _load_diar_sidecar(md_path)
+    if not diar:
+        return HTMLResponse(content="No enrollment data found for this transcript", status_code=404)
+
+    form_data = await request.form()
+    renames: dict[str, str] = {}
+    for key, value in form_data.multi_items():
+        if key.startswith("speaker_") and str(value).strip():
+            renames[key[len("speaker_"):]] = str(value).strip()
+
+    if not renames:
+        return HTMLResponse(
+            content="", status_code=303,
+            headers={"Location": f"/transcripts/{quote(name)}"},
+        )
+
+    # Rename in the transcript
+    from wisper_transcribe.formatter import update_speaker_names
+    content = md_path.read_text(encoding="utf-8")
+    for old_label, display_name in renames.items():
+        content = update_speaker_names(content, old_label, display_name)
+    md_path.write_text(content, encoding="utf-8")
+
+    # Enroll voice profiles
+    import logging
+    from wisper_transcribe.models import DiarizationSegment
+    from wisper_transcribe.speaker_manager import enroll_speaker
+    from wisper_transcribe.audio_utils import convert_to_wav
+    from wisper_transcribe.config import get_device
+
+    log = logging.getLogger(__name__)
+    raw_segments = [
+        DiarizationSegment(start=s["start"], end=s["end"], speaker=s["speaker"])
+        for s in diar.get("diarization_segments", [])
+    ]
+    input_path = Path(diar["input_path"])
+    campaign_slug = diar.get("campaign")
+
+    if raw_segments and input_path.exists():
+        from wisper_transcribe.config import load_config
+        device = load_config().get("device", "auto")
+        if device == "auto":
+            device = get_device()
+
+        wav_path = convert_to_wav(input_path)
+        try:
+            for old_label, display_name in renames.items():
+                profile_key = display_name.lower().replace(" ", "_")
+                try:
+                    enroll_speaker(
+                        name=profile_key,
+                        display_name=display_name,
+                        role="",
+                        audio_path=wav_path,
+                        segments=raw_segments,
+                        speaker_label=old_label,
+                        device=device,
+                    )
+                except Exception as exc:
+                    log.warning("enroll_speaker failed for %s: %s", display_name, exc)
+                    continue
+                if campaign_slug:
+                    try:
+                        from wisper_transcribe.campaign_manager import add_member, load_campaigns
+                        campaigns = load_campaigns()
+                        if (campaign_slug in campaigns
+                                and profile_key not in campaigns[campaign_slug].members):
+                            add_member(campaign_slug, profile_key)
+                    except Exception as exc:
+                        log.warning("add_member failed for %s in %s: %s",
+                                    profile_key, campaign_slug, exc)
+        finally:
+            if wav_path != input_path and wav_path.exists():
+                wav_path.unlink(missing_ok=True)
+    elif raw_segments:
+        log.warning("Enrollment skipped: source audio not found at %s", input_path)
+
+    return HTMLResponse(
+        content="", status_code=303,
+        headers={"Location": f"/transcripts/{quote(name)}"},
+    )
+
+
+@router.get("/{name}/excerpt/{speaker_name}")
+async def transcript_excerpt(request: Request, name: str, speaker_name: str):
+    """Serve a speaker excerpt clip for the transcript-centric enrollment wizard."""
+    import re as _re
+    if not speaker_name or "\x00" in speaker_name:
+        return invalid_input_response("Invalid speaker name")
+    safe_sp = os.path.basename(speaker_name)
+    if safe_sp != speaker_name or safe_sp in {".", ".."}:
+        return invalid_input_response("Invalid speaker name")
+
+    md_path = _get_safe_content_path(request, name, ".md")
+    if not md_path:
+        return invalid_input_response("Invalid name")
+
+    from fastapi.responses import FileResponse
+    safe_label = _re.sub(r"[^\w\-]", "_", safe_sp)
+    out_dir = md_path.parent
+    stem = md_path.stem
+    candidates = list(out_dir.glob(f"{stem}_excerpt_{safe_label}.mp3"))
+    if not candidates:
+        return HTMLResponse(content="Excerpt not available", status_code=404)
+    return FileResponse(path=str(candidates[0]), media_type="audio/mpeg")

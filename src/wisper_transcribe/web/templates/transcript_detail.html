@@ -108,7 +108,15 @@
       <!-- Speaker enrollment -->
       <div style="margin-bottom:16px;padding:14px 16px;background:var(--color-ink-700);border:1px solid var(--color-rule);border-radius:4px">
         <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);letter-spacing:0.15em;text-transform:uppercase;margin-bottom:8px">Speakers</div>
-        {% if meta.get('job_id') %}
+        <a href="/transcripts/{{ name | urlencode }}/edit" class="btn btn-secondary" style="display:flex;width:100%;justify-content:center;margin-bottom:6px">
+          {{ icon("sliders", 11) }} Edit per-line speakers
+        </a>
+        {% if has_diar_sidecar %}
+        <a href="/transcripts/{{ name | urlencode }}/enroll" class="btn btn-secondary" style="display:flex;width:100%;justify-content:center;margin-bottom:6px">
+          {{ icon("users", 11) }} Name speakers
+        </a>
+        <div style="font-size:11px;color:var(--color-paper-faint);line-height:1.4">Assign names and enroll voice profiles detected in this session.</div>
+        {% elif meta.get('job_id') %}
         <a href="/transcribe/jobs/{{ meta.job_id }}/enroll" class="btn btn-secondary" style="display:flex;width:100%;justify-content:center;margin-bottom:6px">
           {{ icon("users", 11) }} Name speakers
         </a>

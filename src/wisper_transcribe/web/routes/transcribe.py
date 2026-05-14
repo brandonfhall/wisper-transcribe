@@ -125,8 +125,8 @@ async def start_transcribe(
         initial_prompt=initial_prompt or None,
         output_dir=out_path,
         enroll_speakers=False,  # Web enrollment is post-job wizard
-        post_refine=(post_refine == "1"),
-        post_summarize=(post_summarize == "1"),
+        post_refine=bool(post_refine),
+        post_summarize=bool(post_summarize),
         campaign=safe_campaign,
         hotwords=hotwords,
     )
@@ -246,9 +246,19 @@ async def enroll_form(request: Request, job_id: str) -> Response:
 
     from wisper_transcribe.speaker_manager import load_profiles
 
-    # Parse YAML frontmatter from the output to get detected speakers
+    # Derive speaker labels for the wizard.
+    # Prefer the raw diarization segments stored on the job — those always carry
+    # the original "SPEAKER_N" labels even after the transcript has been renamed.
+    # Fall back to the frontmatter only when the job predates this fix or
+    # diarization was skipped.
     speakers_in_transcript: list[str] = []
-    if job.output_path:
+    if job.diarization_segments:
+        seen_order: dict[str, float] = {}
+        for seg in job.diarization_segments:
+            if seg.speaker not in seen_order:
+                seen_order[seg.speaker] = seg.start
+        speakers_in_transcript = sorted(seen_order.keys(), key=lambda s: seen_order[s])
+    elif job.output_path:
         try:
             import yaml
             content = Path(job.output_path).read_text(encoding="utf-8")
@@ -285,6 +295,10 @@ async def enroll_form(request: Request, job_id: str) -> Response:
         {
             "request": request,
             "job": job,
+            "form_action": f"/transcribe/jobs/{job.id}/enroll",
+            "back_url": f"/transcribe/jobs/{job.id}",
+            "excerpt_base_url": f"/transcribe/jobs/{job.id}/excerpt",
+            "display_name": job.name,
             "detected_speakers": speakers_in_transcript,
             "existing_profiles": profiles,
             "speaker_excerpts": job.speaker_excerpts,
@@ -364,45 +378,54 @@ async def enroll_submit(request: Request, job_id: str) -> Response:
         if job.diarization_segments:
             import logging
             from wisper_transcribe.speaker_manager import enroll_speaker
+            from wisper_transcribe.audio_utils import convert_to_wav
             device = job.kwargs.get("device", "cpu")
             if device == "auto":
                 from wisper_transcribe.config import get_device
                 device = get_device()
             campaign_slug = job.kwargs.get("campaign")
             log = logging.getLogger(__name__)
-            for old_label, display_name in renames.items():
-                profile_key = display_name.lower().replace(" ", "_")
-                try:
-                    enroll_speaker(
-                        name=profile_key,
-                        display_name=display_name,
-                        role="",
-                        audio_path=Path(job.input_path),
-                        segments=job.diarization_segments,
-                        speaker_label=old_label,
-                        device=device,
-                    )
-                except Exception as exc:
-                    log.warning("enroll_speaker failed for %s: %s", display_name, exc)
-                    continue
-                # Add the newly-enrolled profile to the job's campaign, if any.
-                # Mirrors record.py: only add when the slug exists and the profile
-                # isn't already a member, so existing role/character entries are
-                # never clobbered. Campaign failures never break enrollment.
-                if campaign_slug:
+
+            # pyannote embedding extraction requires a WAV file; the uploaded
+            # source may be an MP3 or other non-WAV format.  Convert once for
+            # all speakers, then clean up.
+            input_path = Path(job.input_path)
+            wav_path = convert_to_wav(input_path)
+            try:
+                for old_label, display_name in renames.items():
+                    profile_key = display_name.lower().replace(" ", "_")
                     try:
-                        from wisper_transcribe.campaign_manager import (
-                            add_member, load_campaigns,
+                        enroll_speaker(
+                            name=profile_key,
+                            display_name=display_name,
+                            role="",
+                            audio_path=wav_path,
+                            segments=job.diarization_segments,
+                            speaker_label=old_label,
+                            device=device,
                         )
-                        campaigns = load_campaigns()
-                        if (campaign_slug in campaigns
-                                and profile_key not in campaigns[campaign_slug].members):
-                            add_member(campaign_slug, profile_key)
                     except Exception as exc:
-                        log.warning(
-                            "add_member failed for %s in campaign %s: %s",
-                            profile_key, campaign_slug, exc,
-                        )
+                        log.warning("enroll_speaker failed for %s: %s", display_name, exc)
+                        continue
+                    # Add the newly-enrolled profile to the job's campaign, if any.
+                    # Only runs when enrollment succeeded (continue skips failed speakers).
+                    if campaign_slug:
+                        try:
+                            from wisper_transcribe.campaign_manager import (
+                                add_member, load_campaigns,
+                            )
+                            campaigns = load_campaigns()
+                            if (campaign_slug in campaigns
+                                    and profile_key not in campaigns[campaign_slug].members):
+                                add_member(campaign_slug, profile_key)
+                        except Exception as exc:
+                            log.warning(
+                                "add_member failed for %s in campaign %s: %s",
+                                profile_key, campaign_slug, exc,
+                            )
+            finally:
+                if wav_path != input_path and wav_path.exists():
+                    wav_path.unlink(missing_ok=True)
 
     transcript_name = Path(job.output_path).stem
     return RedirectResponse(url=f"/transcripts/{quote(transcript_name, safe='')}", status_code=303)

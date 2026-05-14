@@ -106,6 +106,50 @@ window.wisperTickerAppend = function(data) {
   }
 };
 
+// ── Inline audio excerpt player ──
+// Used on the Speakers page and the enrollment wizard.
+// Toggles play/pause on a hidden <audio> element; only one clip plays at a time.
+// Uses innerHTML (not textContent) so the SVG icon inside the button is preserved.
+(function() {
+  var _playing = null;
+
+  function _setLabel(btn, label) {
+    // Replace the visible text while keeping the SVG icon intact.
+    btn.innerHTML = btn.innerHTML.replace(/\bSample\b|\bStop\b/, label);
+  }
+
+  window.wisperPlayExcerpt = function(audioId, btn) {
+    var audio = document.getElementById(audioId);
+    if (!audio) return;
+
+    if (_playing && _playing !== audio) {
+      _playing.pause();
+      _playing.currentTime = 0;
+      var prevBtn = document.querySelector('[data-audio-id="' + _playing.id + '"]');
+      if (prevBtn) { delete prevBtn.dataset.playing; _setLabel(prevBtn, 'Sample'); }
+      _playing = null;
+    }
+
+    if (btn.dataset.playing) {
+      audio.pause();
+      audio.currentTime = 0;
+      delete btn.dataset.playing;
+      _setLabel(btn, 'Sample');
+      _playing = null;
+    } else {
+      btn.dataset.playing = '1';
+      _setLabel(btn, 'Stop');
+      audio.play();
+      audio.onended = function() {
+        delete btn.dataset.playing;
+        _setLabel(btn, 'Sample');
+        _playing = null;
+      };
+      _playing = audio;
+    }
+  };
+})();
+
 // ── File upload feedback ──
 document.addEventListener('DOMContentLoaded', function() {
   // Auto-scroll any log terminal

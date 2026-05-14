@@ -22,15 +22,36 @@ def _clip_path(key: str) -> "Path":
     return _get_embeddings_dir() / f"{os.path.basename(key)}.mp3"
 
 
+def _waveform_bars(key: str, count: int = 64) -> list[int]:
+    """Deterministic pseudo-random bar heights for a speaker's waveform decoration.
+
+    Uses the profile key as a seed so each speaker gets a unique but stable shape.
+    Heights are in percent (15–85) and follow a smooth envelope so adjacent bars
+    don't jump wildly.
+    """
+    import hashlib
+    seed = int(hashlib.md5(key.encode()).hexdigest()[:8], 16)
+    bars: list[int] = []
+    val = 50  # start mid-height
+    for _ in range(count):
+        seed = (seed * 1664525 + 1013904223) & 0xFFFFFFFF
+        # Small random step ±15 so the shape flows rather than scatters
+        step = ((seed >> 8) % 31) - 15
+        val = max(15, min(85, val + step))
+        bars.append(val)
+    return bars
+
+
 @router.get("", response_class=HTMLResponse)
 async def speakers_list(request: Request) -> HTMLResponse:
     profiles = load_profiles()
-    # Pass which profiles have a reference clip available
     has_clip = {key: _clip_path(key).exists() for key in profiles}
+    waveforms = {key: _waveform_bars(key) for key in profiles}
     return templates.TemplateResponse(
         request,
         "speakers.html",
-        {"request": request, "profiles": profiles, "has_clip": has_clip},
+        {"request": request, "profiles": profiles, "has_clip": has_clip,
+         "waveforms": waveforms},
     )
 
 

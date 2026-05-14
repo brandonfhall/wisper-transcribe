@@ -5,7 +5,13 @@
 {% block toolbar %}
 <div class="toolbar">
   <div>
-    <div class="toolbar-kicker">Transcribe / <a href="/transcribe/jobs/{{ job.id }}" style="color:var(--color-paper-dim)">{{ job.id[:8] }}</a></div>
+    <div class="toolbar-kicker">
+      {% if back_url %}
+      <a href="{{ back_url }}" style="color:var(--color-paper-dim)">{{ display_name or "transcript" }}</a>
+      {% else %}
+      Transcribe / <a href="/transcribe/jobs/{{ job.id }}" style="color:var(--color-paper-dim)">{{ job.id[:8] }}</a>
+      {% endif %}
+    </div>
     <span class="toolbar-title">Name detected speakers</span>
   </div>
   {% if detected_speakers %}
@@ -27,11 +33,15 @@
   {% if not detected_speakers %}
   <div style="padding:32px 0;color:var(--color-paper-faint);font-style:italic;font-size:14px">
     No detected speakers found in this transcript.
-    <a href="/transcribe/jobs/{{ job.id }}" style="color:var(--color-accent);margin-left:8px">Back to job →</a>
+    <a href="{{ back_url or '/transcripts' }}" style="color:var(--color-accent);margin-left:8px">Back →</a>
   </div>
   {% else %}
 
-  <form id="enroll-form" method="post" action="/transcribe/jobs/{{ job.id }}/enroll">
+  {%- set _form_action = form_action if form_action else "/transcribe/jobs/" ~ job.id ~ "/enroll" -%}
+  {%- set _excerpt_base = excerpt_base_url if excerpt_base_url else "/transcribe/jobs/" ~ job.id ~ "/excerpt" -%}
+  {%- set _back = back_url if back_url else "/transcribe/jobs/" ~ job.id -%}
+
+  <form id="enroll-form" method="post" action="{{ _form_action }}">
   <div style="border-top:1px solid var(--color-rule)">
     {% for speaker_name in detected_speakers %}
     {%- set field_id = "name_" ~ speaker_name | replace(" ", "_") | replace("/", "_") | replace(".", "_") -%}
@@ -41,13 +51,13 @@
         <div class="section-kicker">{{ speaker_name }}</div>
         {% if speaker_excerpts and speaker_name in speaker_excerpts %}
         <audio id="audio_{{ loop.index }}"
-               src="/transcribe/jobs/{{ job.id }}/excerpt/{{ speaker_name }}"
+               src="{{ _excerpt_base }}/{{ speaker_name }}"
                preload="none" style="display:none"></audio>
         <button type="button"
                 data-audio-id="audio_{{ loop.index }}"
                 onclick="wisperPlayExcerpt('audio_{{ loop.index }}', this)"
                 class="btn btn-secondary btn-sm">
-          {{ icon("play", 10) }} Play sample
+          {{ icon("play", 10) }} Sample
         </button>
         {% endif %}
       </div>
@@ -86,7 +96,7 @@
 
   <div style="padding-top:20px;display:flex;gap:8px">
     <button type="submit" class="btn btn-primary">Apply names</button>
-    <a href="/transcribe/jobs/{{ job.id }}" class="btn btn-secondary">Skip</a>
+    <a href="{{ _back }}" class="btn btn-secondary">Skip</a>
   </div>
   </form>
   {% endif %}
@@ -94,35 +104,4 @@
 </div>
 </div>
 
-<script>
-(function(){
-  var _playing = null;
-
-  window.wisperPlayExcerpt = function(audioId, btn) {
-    var audio = document.getElementById(audioId);
-    if (!audio) return;
-
-    // Stop currently playing
-    if (_playing && _playing !== audio) {
-      _playing.pause();
-      _playing.currentTime = 0;
-      var prevBtn = document.querySelector('[data-audio-id="' + _playing.id + '"]');
-      if (prevBtn) prevBtn.innerHTML = prevBtn.innerHTML.replace('Stop', 'Play sample');
-    }
-
-    if (btn.dataset.playing) {
-      audio.pause(); audio.currentTime = 0;
-      delete btn.dataset.playing;
-      btn.innerHTML = btn.innerHTML.replace('Stop', 'Play sample');
-      _playing = null;
-    } else {
-      btn.dataset.playing = '1';
-      btn.innerHTML = btn.innerHTML.replace('Play sample', 'Stop');
-      audio.play();
-      audio.onended = function() { delete btn.dataset.playing; btn.innerHTML = btn.innerHTML.replace('Stop', 'Play sample'); _playing = null; };
-      _playing = audio;
-    }
-  };
-})();
-</script>
 {% endblock %}

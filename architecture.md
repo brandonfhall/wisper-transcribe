@@ -32,7 +32,7 @@ src/wisper_transcribe/
 ├── debug_log.py        Centralized logging controller (Logger class); activated by --debug (file) and/or --verbose (console); tees tqdm.write() + Python logging to ./logs/wisper_<ts>.log
 ├── aligner.py          Merge transcription segments with diarization labels (max-overlap)
 ├── speaker_manager.py  Profile CRUD, embedding extraction, cosine-similarity matching, EMA updates; enroll_speaker_from_audio_dir() for per-user track enrollment (Phase 6)
-├── formatter.py        Markdown output, YAML frontmatter, dynamic version from __version__
+├── formatter.py        Markdown output, YAML frontmatter, dynamic version from __version__; parse_transcript_blocks() and rewrite_transcript_blocks() for per-line speaker editing
 ├── audio_utils.py      validate_audio(), convert_to_wav(), get_duration(), load_wav_as_tensor(); VIDEO_EXTENSIONS / AUDIO_EXTENSIONS sets
 ├── time_utils.py       Shared time formatting: format_timestamp(), format_duration()
 ├── path_utils.py       Shared path utilities: validate_path_component() — four-step CodeQL-safe guard; all per-module validators delegate here. get_output_dir() — single canonical output directory resolver (replaces duplicates in transcribe + transcripts routes)
@@ -52,18 +52,18 @@ src/wisper_transcribe/
 │   ├── anthropic.py    Anthropic SDK; JSON via forced tool_use
 │   ├── openai.py       OpenAI SDK; JSON via response_format json_schema strict mode
 │   └── google.py       google-genai SDK; JSON via response_schema
-├── static/             Vendored web assets: htmx.min.js, tailwind.min.css (pre-built), wisp.svg, app.js
+├── static/             Vendored web assets: htmx.min.js, tailwind.min.css (pre-built), wisp.svg, app.js (global JS: wisperUpdateMeters, wisperTickerAppend, wisperPlayExcerpt inline audio player shared across Speakers and enrollment wizard pages)
 └── web/                FastAPI web UI + Discord recording bot infrastructure
     ├── app.py          FastAPI application factory (create_app()), module-level app instance for uvicorn
-    ├── jobs.py         In-memory job queue, JobQueue class, asyncio background worker, SSE progress via tqdm.write patch; LLM job types (refine/summarize) with stderr capture
+    ├── jobs.py         In-memory job queue, JobQueue class, asyncio background worker, SSE progress via tqdm.write patch; LLM job types (refine/summarize) with stderr capture; _write_enrollment_sidecar() persists diarization segments + audio path to <stem>_diar.json alongside the transcript for restart-safe enrollment
     ├── audio_writer.py SegmentedOggWriter (rotating 60-s self-contained Ogg/Opus segments, packet-count rotation, crash-safe EOS pages), RealtimePCMMixer (48 kHz stereo → 16 kHz mono, clip-on-overflow)
     ├── _responses.py   Shared HTTP response helpers: invalid_input_response() (400 plain-text), error_redirect() (303 ?error= redirect); used by all route modules
     └── routes/
         ├── __init__.py     Jinja2 templates setup, shared get_queue() helper, urlencode filter
         ├── dashboard.py    GET /, GET /jobs (HTMX partial)
         ├── transcribe.py   GET/POST /transcribe (+ post_refine/post_summarize flags), GET /transcribe/jobs/{id}, SSE /jobs/{id}/stream, enrollment wizard
-        ├── transcripts.py  GET/POST /transcripts (grouped by campaign), transcript detail (with campaign assignment dropdown), download, delete, fix-speaker; POST /transcripts/{name}/refine, POST /transcripts/{name}/summarize; GET /transcripts/{name}/summary, GET /transcripts/{name}/summary/download; POST /transcripts/{name}/campaign (move/remove campaign association)
-        ├── speakers.py     GET/POST /speakers, enroll, rename, remove
+        ├── transcripts.py  GET/POST /transcripts (grouped by campaign), transcript detail (with campaign assignment dropdown), download, delete, fix-speaker; GET/POST /transcripts/{name}/edit (per-line speaker rename page); GET/POST /transcripts/{name}/enroll (transcript-centric enrollment wizard — restart-safe, reads _diar.json sidecar); GET /transcripts/{name}/excerpt/{speaker} (serves on-disk clip for enrollment wizard); POST /transcripts/{name}/refine, POST /transcripts/{name}/summarize; GET /transcripts/{name}/summary, GET /transcripts/{name}/summary/download; POST /transcripts/{name}/campaign (move/remove campaign association)
+        ├── speakers.py     GET/POST /speakers, enroll, rename, remove; _waveform_bars() generates per-speaker deterministic pseudo-random waveform bar heights (LCG seeded from md5(key))
         ├── campaigns.py    GET/POST /campaigns, campaign detail, roster add/remove, delete
         ├── config.py       GET/POST /config (+ Discord bot token, default guild/channel, presets management), POST /config/presets/add (inline preset save from Record page; validates guild/channel as snowflakes), GET /config/ollama-status, GET /config/lmstudio-status, GET /config/ollama-cloud-catalog, POST /config/{anthropic,openai,google}-models (cloud model discovery via SDK), GET /config/open-data-dir (opens data directory in OS file manager via `open`/`xdg-open`/`explorer`)
 ```
@@ -331,6 +331,17 @@ wisper-transcribe/       ← get_data_dir()
 
 **Campaign data model:** Campaigns hold rosters of `profile_key` references to the global `speakers.json`. Voice embeddings remain global — adding a speaker to a second campaign reuses their existing `.npy` automatically (voice transfer). Deleting a campaign never touches profiles or embeddings. `campaigns.json` absent on first run → `load_campaigns()` returns `{}`.
 
+**Transcript output directory** (`data_dir/output/` or `./output/`):
+```
+output/
+├── <stem>.md                       transcript with YAML frontmatter
+├── <stem>.summary.md               LLM campaign-notes sidecar (optional)
+├── <stem>_diar.json                enrollment sidecar: diarization_segments, input_path, campaign slug
+├── <stem>_excerpt_<speaker>.mp3    ~12 s audio clip per detected speaker (for enrollment wizard)
+└── <stem>_excerpt_<speaker>.txt    first dialogue line per speaker (shown in enrollment wizard)
+```
+The `_diar.json` sidecar is written by `_write_enrollment_sidecar()` in `jobs.py` when a transcription job completes with diarization results. It is the key artifact that makes `GET/POST /transcripts/{name}/enroll` restart-safe — the transcript-centric enrollment wizard reads it instead of relying on in-memory job state.
+
 Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`, `hotwords`, `use_mlx`, `parallel_stages`, `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`, `discord_bot_token`, `discord_default_guild`, `discord_default_channel`, `discord_presets`.
 
 > **`omegaconf` dependency note:** `omegaconf` is an undeclared transitive requirement of `pyannote-audio` — it is required at import time but not listed in pyannote's package metadata. `wisper-transcribe` declares it explicitly in `pyproject.toml` to ensure it is always installed.
@@ -430,15 +441,24 @@ Component classes (`sidebar`, `toolbar`, `section-head`, `hairline-*`, `pill-*`,
 - Cancel: `POST /transcribe/jobs/{id}/cancel` calls `JobQueue.cancel()`. Pending jobs are immediately marked failed. Running jobs set a `threading.Event` (`_cancel_event`) that is checked in the `tqdm.write` patch; when set, `InterruptedError` is raised to abort the pipeline thread cleanly.
 
 ### Speaker Enrollment Web Flow
-Interactive CLI enrollment (TTY prompts) is replaced by a post-job wizard:
+Interactive CLI enrollment (TTY prompts) is replaced by a post-job wizard. The wizard has two entry points — a **transcript-centric path** (preferred, restart-safe) and a **legacy job path** (still works while the server hasn't restarted).
+
+**On job completion (jobs.py):**
 1. Transcription completes with `enroll_speakers=False`; detected speakers appear in transcript as `SPEAKER_XX` labels.
-2. After `process_file()` returns, `_extract_speaker_excerpts()` parses the output markdown for each speaker's first timestamp and cuts a ~12s audio clip via ffmpeg, saved to `{stem}_excerpt_{speaker}.mp3` alongside the transcript. The first line of dialogue for each speaker is saved to `{stem}_excerpt_{speaker}.txt` (the transcript snippet shown in the wizard). Both files survive server restarts because they live on disk. The `job.speaker_excerpts` dict holds in-memory references while the job is alive.
-3. `pipeline.process_file()` now accepts a `job_id` kwarg and writes it to the transcript's YAML frontmatter as `job_id`. This lets the transcript detail page link directly back to the enrollment wizard even after navigating away.
-4. Dashboard "The desk" job rows and "The archive" transcript rows are fully clickable — running/queued/failed jobs link to `/transcribe/jobs/{id}`; completed jobs link directly to `/transcripts/{stem}`. The archive section polls `/transcripts/partials/recent` via htmx for the 6 most recent transcripts.
-5. `GET /transcribe/jobs/{id}/enroll` renders the wizard page with each detected label, a name input, existing-profiles click-to-fill options, a Play/Stop button, and an italic quote of the first detected dialogue line for that speaker.
-6. `GET /transcribe/jobs/{id}/excerpt/{speaker_name}` serves the audio clip as `audio/mpeg`. Falls back to scanning the output directory for `*_excerpt_{speaker}.mp3` when the in-memory job no longer exists (server restart recovery).
-7. The transcript detail sidebar always shows a speaker enrollment block — linking to `/transcribe/jobs/{meta.job_id}/enroll` when `job_id` is in the frontmatter, or falling back to `/speakers` for older transcripts.
-8. `POST /transcribe/jobs/{id}/enroll` applies speaker name renames via `formatter.update_speaker_names()` and calls `speaker_manager.enroll_speaker()` for each labelled speaker to persist voice embeddings. If `job.diarization_segments` is empty (e.g. no-diarization run), enrollment is skipped silently.
+2. `_extract_speaker_excerpts()` parses the output markdown for each speaker's first timestamp and cuts a ~12 s clip via ffmpeg, saved to `{stem}_excerpt_{speaker}.mp3` alongside the transcript. The first dialogue line per speaker is saved to `{stem}_excerpt_{speaker}.txt`. Both survive server restarts.
+3. `_write_enrollment_sidecar()` writes `{stem}_diar.json` alongside the transcript containing the raw `diarization_segments`, source `input_path`, and `campaign` slug. This is the key artifact that makes the transcript-centric wizard restart-safe.
+4. `pipeline.process_file()` writes `job_id` to the transcript's YAML frontmatter for legacy linking.
+
+**Transcript-centric enrollment wizard (transcripts.py) — preferred path:**
+5. The transcript detail sidebar shows "Name speakers" linking to `GET /transcripts/{name}/enroll` when `{stem}_diar.json` exists, or falls back to the job-based URL when only `job_id` is in the frontmatter, or falls back to `/speakers` for pre-sidecar transcripts.
+6. `GET /transcripts/{name}/enroll` reads speaker labels from the sidecar (always the original `SPEAKER_XX` labels regardless of whether the transcript has already been renamed), locates clip files on disk, and renders the wizard. This works after any server restart.
+7. `GET /transcripts/{name}/excerpt/{speaker_name}` serves the audio clip from disk.
+8. `POST /transcripts/{name}/enroll` renames speakers in the transcript via `formatter.update_speaker_names()`, then reconstructs `DiarizationSegment` objects from the sidecar, calls `convert_to_wav()` once on the source audio (the source may be an MP3 — scipy/pyannote require WAV; the temp WAV is cleaned up after all speakers are enrolled), and calls `enroll_speaker()` per speaker. Campaign membership is added after each successful enrollment. If the source audio no longer exists at `input_path`, renaming still completes but embedding extraction is skipped with a warning.
+
+**Legacy job-based wizard (transcribe.py) — available while server session is live:**
+- `GET /transcribe/jobs/{id}/enroll` renders the same wizard using in-memory `job.diarization_segments` (prefers these over frontmatter, so re-opening after a rename still shows original `SPEAKER_XX` labels). Falls back to frontmatter if segments are absent.
+- `GET /transcribe/jobs/{id}/excerpt/{speaker_name}` serves the clip, with disk fallback for `*_excerpt_{speaker}.mp3` when the in-memory job is gone.
+- `POST /transcribe/jobs/{id}/enroll` follows the same rename → WAV convert → embed → campaign pattern as the transcript-centric path.
 
 ### Startup Cleanup
 `app._cleanup_orphaned_uploads()` runs in the FastAPI lifespan on every startup. It deletes `wisper_upload_*` temp files left in `tempfile.gettempdir()` from transcription jobs that crashed mid-run. The files are only needed while a job is actively running, so anything on disk at boot time is safe to remove.
@@ -504,7 +524,7 @@ The job detail page shows a unified progress bar and step pills driven by SSE ev
 - Dashboard System card surfaces Whisper-side state (device, default model, HF token status) and LLM-side state (provider, resolved model via `resolve_llm_model()`, ready-vs-needs-config status). Ready is `True` for `ollama`/`lmstudio` (no key required) and reflects `get_llm_api_key()` for cloud providers — the actual key is never read into the template context, only the boolean and a generic "API key missing" hint, so the dashboard never leaks key material.
 
 ### LLM Post-processing (Web)
-- **Inline after transcription**: the `/transcribe` form has a "LLM Post-processing" checkbox group (`post_refine`, `post_summarize`). When checked, the options are stripped from kwargs before `process_file()` and stored as `Job.post_refine` / `Job.post_summarize`; after transcription completes, `_run_post_process()` chains into `_do_llm_work()` in the same job thread. LLM status messages (Ollama streaming output) are captured into `job.log_lines` via `_StderrCapture` (redirects `sys.stderr` for the job thread duration — safe because the queue runs one job at a time).
+- **Inline after transcription**: the `/transcribe` form has a "LLM Post-processing" toggle group (`post_refine`, `post_summarize`). HTML checkboxes submit `value="on"` when checked; the route handler uses `bool(post_refine)` (truthy for `"on"`, falsy for `None` when unchecked) before storing as `Job.post_refine` / `Job.post_summarize`. After transcription completes, `_run_post_process()` chains into `_do_llm_work()` in the same job thread. LLM status messages (Ollama streaming output) are captured into `job.log_lines` via `_StderrCapture` (redirects `sys.stderr` for the job thread duration — safe because the queue runs one job at a time).
 - **Standalone from transcript detail**: `POST /transcripts/{name}/refine` and `POST /transcripts/{name}/summarize` call `queue.submit_llm()`, which enqueues a `Job` with `job_type="refine"` or `"summarize"`. The browser is redirected to `/transcribe/jobs/{id}` — the same job detail / SSE streaming page used for transcription jobs. The job detail page suppresses the T/D/F step indicators for LLM jobs and shows a single step dot (R or S).
 - **Campaign Notes page**: `GET /transcripts/{name}/summary` renders `.summary.md` as HTML with a metadata card (LLM provider/model, generated date, NPC chips) and a "Regenerate" button. `GET /transcripts/{name}/summary/download` serves the raw `.summary.md` file.
 - **Job completion actions**: the SSE `done` event now includes `summary_path` and `job_type`; the JS in `job_detail.html` conditionally shows "View Campaign Notes" when `summary_path` is set and hides "Name Speakers" for non-transcription jobs.
