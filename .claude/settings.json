@@ -31,7 +31,17 @@
       "Bash(curl -sL https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js -o src/wisper_transcribe/static/htmx.min.js)",
       "Bash(python scripts/vendor.py *)",
       "Skill(update-config)",
-      "Skill(update-config:*)"
+      "Skill(update-config:*)",
+      "Bash(git commit *)",
+      "Bash(git -C /Users/brandon/VSCode/wisper-transcribe ls-files --error-unmatch example-file/)",
+      "Bash(git -C /Users/brandon/VSCode/wisper-transcribe ls-files --error-unmatch .DS_Store)",
+      "Bash(git -C /Users/brandon/VSCode/wisper-transcribe ls-files discord-bot/build/)",
+      "Bash(git -C /Users/brandon/VSCode/wisper-transcribe ls-files scripts/jda-spike/)",
+      "Bash(git -C /Users/brandon/VSCode/wisper-transcribe rm -r scripts/jda-spike/)",
+      "Bash(git -C /Users/brandon/VSCode/wisper-transcribe commit -m ' *)",
+      "Bash(git -C /Users/brandon/VSCode/wisper-transcribe status)",
+      "Bash(git -C /Users/brandon/VSCode/wisper-transcribe diff)",
+      "Bash(git -C /Users/brandon/VSCode/wisper-transcribe add .claude/settings.json plan.md)"
     ]
   }
 }

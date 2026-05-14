@@ -46,7 +46,27 @@ Recommendation: option (1) — reuse the parallel-stages subprocess plumbing for
 Nothing else changes — `SegmentedOggWriter`, the web UI, campaigns, CLI, and all tests remain unaffected.
 
 
+## Ideas ##
+
+* Add per line rename speaker in the web UI — **OPEN** 
+
+* Suppress webserver output on the termainl when running in web UI mode — **OPEN** (currently the server logs are mixed with the job progress logs, which is noisy and can be confusing)
+
+
+
 ## UI Bugs ##
 
 * on the transcript results page the "Generate Summary" button is shown even after a summary has been generated. Additionally the summary is not shown on the transcript results page after it has been generated. — **OPEN** (template logic is correct; suspected CWD mismatch between server launch dir and where the summary was written — reproduce needed)
+
+* Summary generation is not properly working for at least ollama-cloud it could affect other providers as well. It appears that it is coming back but it's not being properly detected.
+    - "LLM: ollama-cloud / glm-5.1
+    Generating campaign summary for Impossible Landscapes S1 E1 — Remove Your Mask.md ...
+    Connecting to Ollama (https://ollama.com)...
+    LLM: ollama-cloud / glm-5.1
+    Generating campaign summary for Impossible Landscapes S1 E1 — Remove Your Mask.md ...
+    Connecting to Ollama (https://ollama.com)...
+    Waiting for glm-5.1 to start generating...
+    Generating (glm-5.1): ···········
+    Summarize failed: Ollama JSON response did not parse: Expecting value: line 1 column 1 (char 0). Raw: '```json\n{\n "summary": "The season four premiere of Get in the Trunk opens with a cinematic cold read performed by Troy, featuring his returning character Roger Cummestone aboard a flight into Baltimo'"
+
 
