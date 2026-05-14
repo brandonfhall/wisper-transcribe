@@ -51,6 +51,14 @@ def test_transcripts_path_traversal_blocked(client: TestClient, payload: str):
     resp = client.post(f"/transcripts/{safe_url}/fix-speaker", data={"old_name": "a", "new_name": "b"})
     assert resp.status_code == 400
 
+    # 5. Edit page (GET)
+    resp = client.get(f"/transcripts/{safe_url}/edit")
+    assert resp.status_code == 400
+
+    # 6. Edit save (POST)
+    resp = client.post(f"/transcripts/{safe_url}/edit", data={"speaker_0": "Alice"})
+    assert resp.status_code == 400
+
 
 @pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS)
 def test_speakers_clip_path_traversal_blocked(client: TestClient, payload: str):

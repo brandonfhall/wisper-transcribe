@@ -1,6 +1,6 @@
 import pytest
 
-from wisper_transcribe.formatter import to_markdown, update_speaker_names
+from wisper_transcribe.formatter import to_markdown, update_speaker_names, parse_transcript_blocks, rewrite_transcript_blocks
 from wisper_transcribe.time_utils import format_timestamp as _format_timestamp
 from wisper_transcribe.models import AlignedSegment, TranscriptionSegment
 
@@ -109,3 +109,107 @@ def test_update_speaker_names_in_frontmatter():
     result = update_speaker_names(content, "Alice", "Diana")
     assert "- name: Diana" in result
     assert "- name: Alice" not in result
+
+
+# ---------------------------------------------------------------------------
+# parse_transcript_blocks
+# ---------------------------------------------------------------------------
+
+_SAMPLE_BODY = """\
+# Session 01
+
+**Alice** *(00:00)*: Welcome everyone
+**Bob** *(00:12)*: Thanks for having me
+**Alice** *(00:18)*: Let's get started
+
+---
+*Transcribed by wisper-transcribe v1.0*
+"""
+
+
+def test_parse_blocks_returns_correct_count():
+    blocks = parse_transcript_blocks(_SAMPLE_BODY)
+    assert len(blocks) == 3
+
+
+def test_parse_blocks_speaker_and_timestamp():
+    blocks = parse_transcript_blocks(_SAMPLE_BODY)
+    assert blocks[0]["speaker"] == "Alice"
+    assert blocks[0]["timestamp"] == "00:00"
+    assert blocks[0]["text"] == "Welcome everyone"
+    assert blocks[0]["has_speaker"] is True
+
+
+def test_parse_blocks_indices_sequential():
+    blocks = parse_transcript_blocks(_SAMPLE_BODY)
+    assert [b["index"] for b in blocks] == [0, 1, 2]
+
+
+def test_parse_blocks_no_speaker_lines():
+    body = "*(00:05)* Narrator text\n**Alice** *(00:10)*: Hello"
+    blocks = parse_transcript_blocks(body)
+    assert len(blocks) == 2
+    assert blocks[0]["has_speaker"] is False
+    assert blocks[0]["speaker"] == ""
+    assert blocks[0]["timestamp"] == "00:05"
+    assert blocks[1]["has_speaker"] is True
+
+
+def test_parse_blocks_skips_heading_and_rule():
+    body = "# Title\n---\n**Alice** *(00:01)*: Hi"
+    blocks = parse_transcript_blocks(body)
+    assert len(blocks) == 1
+    assert blocks[0]["speaker"] == "Alice"
+
+
+# ---------------------------------------------------------------------------
+# rewrite_transcript_blocks
+# ---------------------------------------------------------------------------
+
+_SAMPLE_MD = """\
+---
+title: Session 01
+---
+
+# Session 01
+
+**Alice** *(00:00)*: Welcome everyone
+**Bob** *(00:12)*: Thanks for having me
+**Alice** *(00:18)*: Let's get started
+
+---
+*Transcribed by wisper-transcribe v1.0*
+"""
+
+
+def test_rewrite_blocks_changes_target_speaker():
+    result = rewrite_transcript_blocks(_SAMPLE_MD, {1: "Charlie"})
+    assert "**Charlie**" in result
+    assert "**Bob**" not in result
+    # Alice blocks untouched
+    assert result.count("**Alice**") == 2
+
+
+def test_rewrite_blocks_leaves_others_unchanged():
+    result = rewrite_transcript_blocks(_SAMPLE_MD, {0: "Diana"})
+    assert "**Diana**" in result
+    assert "**Bob**" in result
+    assert result.count("**Alice**") == 1  # only the second Alice block remains
+
+
+def test_rewrite_blocks_no_changes_when_empty():
+    result = rewrite_transcript_blocks(_SAMPLE_MD, {})
+    assert "**Alice**" in result
+    assert "**Bob**" in result
+
+
+def test_rewrite_blocks_strips_newlines_from_speaker():
+    result = rewrite_transcript_blocks(_SAMPLE_MD, {0: "Di\nana"})
+    assert "**Diana**" in result
+    assert "\n" not in result.split("**Diana**")[0].split("\n")[-1]
+
+
+def test_rewrite_blocks_preserves_frontmatter():
+    result = rewrite_transcript_blocks(_SAMPLE_MD, {0: "NewName"})
+    assert result.startswith("---")
+    assert "title: Session 01" in result

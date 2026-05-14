@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% from "partials/icons.html" import icon %}
+{% block title %}Edit speakers — {{ meta.title or name }}{% endblock %}
+
+{% block toolbar %}
+<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 24px;border-bottom:1px solid var(--color-rule);min-height:60px;flex-shrink:0;background:var(--color-ink-800)">
+  <div style="display:flex;align-items:center;gap:10px;font-size:12px;color:var(--color-paper-dim);font-family:var(--font-mono);letter-spacing:0.04em">
+    <a href="/transcripts" style="color:var(--color-paper-dim)">transcripts</a>
+    <span style="color:var(--color-paper-faint)">/</span>
+    <a href="/transcripts/{{ name | urlencode }}" style="color:var(--color-paper-dim)">{{ name }}</a>
+    <span style="color:var(--color-paper-faint)">/</span>
+    <span style="color:var(--color-paper)">edit speakers</span>
+  </div>
+  <div style="display:flex;gap:8px;align-items:center">
+    <a href="/transcripts/{{ name | urlencode }}" class="btn btn-secondary btn-sm">Cancel</a>
+    <button type="submit" form="edit-form" class="btn btn-primary btn-sm">Save changes</button>
+  </div>
+</div>
+{% endblock %}
+
+{% block page %}
+<div style="flex:1;overflow-y:auto">
+
+  <!-- Hero -->
+  <div style="padding:28px 36px 20px;border-bottom:1px solid var(--color-rule)">
+    <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);letter-spacing:0.18em;text-transform:uppercase;margin-bottom:10px">Edit per-line speakers</div>
+    <h1 style="font-family:var(--font-serif);font-weight:300;font-size:40px;color:var(--color-paper);margin:0;line-height:1;letter-spacing:-0.03em">
+      {{ meta.title or name }}
+    </h1>
+    <div style="margin-top:12px;font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint)">
+      Rename the speaker on individual lines without changing the rest of the transcript.
+      Editing a speaker here only affects that specific block.
+    </div>
+  </div>
+
+  <!-- Datalist for speaker autocomplete -->
+  <datalist id="speaker-list">
+    {% for s in unique_speakers %}
+    <option value="{{ s | e }}">
+    {% endfor %}
+  </datalist>
+
+  <form id="edit-form" method="post" action="/transcripts/{{ name | urlencode }}/edit">
+    <div style="padding:24px 36px">
+      {% if blocks %}
+      <div style="border:1px solid var(--color-rule);border-radius:4px;overflow:hidden">
+
+        <!-- Column header -->
+        <div style="display:grid;grid-template-columns:200px 80px 1fr;gap:0;background:var(--color-ink-700);padding:8px 16px;border-bottom:1px solid var(--color-rule)">
+          <span style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);letter-spacing:0.14em;text-transform:uppercase">Speaker</span>
+          <span style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);letter-spacing:0.14em;text-transform:uppercase">Time</span>
+          <span style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);letter-spacing:0.14em;text-transform:uppercase">Text</span>
+        </div>
+
+        {% for block in blocks %}
+        <div style="display:grid;grid-template-columns:200px 80px 1fr;gap:0;padding:10px 16px;border-bottom:1px solid var(--color-rule);align-items:start{% if loop.last %};border-bottom:none{% endif %}">
+
+          <!-- Speaker input -->
+          <div style="padding-right:16px">
+            {% if block.has_speaker %}
+            <input
+              type="text"
+              name="speaker_{{ block.index }}"
+              value="{{ block.speaker | e }}"
+              list="speaker-list"
+              autocomplete="off"
+              style="width:100%;background:var(--color-ink-900);border:1px solid var(--color-rule);color:var(--color-paper);padding:5px 8px;border-radius:3px;font-size:12px;font-family:var(--font-sans);box-sizing:border-box"
+            />
+            {% else %}
+            <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint);font-style:italic">no speaker</span>
+            {% endif %}
+          </div>
+
+          <!-- Timestamp -->
+          <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint);padding-top:6px;white-space:nowrap">
+            {{ block.timestamp }}
+          </div>
+
+          <!-- Text -->
+          <div style="font-family:var(--font-serif);font-size:14px;color:var(--color-paper);line-height:1.5;padding-top:4px">
+            {{ block.text | e }}
+          </div>
+
+        </div>
+        {% endfor %}
+
+      </div>
+
+      <!-- Bottom save -->
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:20px">
+        <a href="/transcripts/{{ name | urlencode }}" class="btn btn-secondary">Cancel</a>
+        <button type="submit" class="btn btn-primary">Save changes</button>
+      </div>
+
+      {% else %}
+      <div style="color:var(--color-paper-faint);font-style:italic;font-size:14px;padding:32px 0">
+        No speaker blocks found in this transcript.
+      </div>
+      {% endif %}
+    </div>
+  </form>
+
+</div>
+{% endblock %}

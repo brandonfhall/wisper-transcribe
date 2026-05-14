@@ -47,11 +47,6 @@ Nothing else changes — `SegmentedOggWriter`, the web UI, campaigns, CLI, and a
 
 ---
 
-## Ideas
-
-* Add per-line speaker rename in the web UI — **OPEN**
-
-
 ---
 
 ## UI Bugs

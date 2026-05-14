@@ -311,6 +311,71 @@ async def delete_transcript(request: Request, name: str) -> HTMLResponse:
     )
 
 
+@router.get("/{name}/edit", response_class=HTMLResponse)
+async def transcript_edit(request: Request, name: str) -> HTMLResponse:
+    """Edit page — shows each speaker block with an editable speaker field."""
+    md_path = _get_safe_content_path(request, name, ".md")
+    if not md_path:
+        return invalid_input_response("Invalid name")
+    if not md_path.exists():
+        return HTMLResponse(content="Transcript not found", status_code=404)
+
+    content = md_path.read_text(encoding="utf-8")
+    meta, body = _parse_frontmatter(content)
+
+    from wisper_transcribe.formatter import parse_transcript_blocks
+    blocks = parse_transcript_blocks(body)
+
+    unique_speakers = list(dict.fromkeys(b["speaker"] for b in blocks if b["has_speaker"]))
+
+    return templates.TemplateResponse(
+        request,
+        "transcript_edit.html",
+        {
+            "request": request,
+            "name": name,
+            "meta": meta,
+            "blocks": blocks,
+            "unique_speakers": unique_speakers,
+        },
+    )
+
+
+@router.post("/{name}/edit", response_class=HTMLResponse)
+async def transcript_edit_save(request: Request, name: str) -> HTMLResponse:
+    """Save per-block speaker name changes."""
+    md_path = _get_safe_content_path(request, name, ".md")
+    if not md_path:
+        return invalid_input_response("Invalid name")
+    if not md_path.exists():
+        return HTMLResponse(content="Transcript not found", status_code=404)
+
+    form = await request.form()
+
+    updated_speakers: dict[int, str] = {}
+    for key, value in form.multi_items():
+        if key.startswith("speaker_"):
+            try:
+                idx = int(key[len("speaker_"):])
+            except ValueError:
+                continue
+            speaker_val = str(value).strip()
+            if speaker_val:
+                updated_speakers[idx] = speaker_val
+
+    if updated_speakers:
+        from wisper_transcribe.formatter import rewrite_transcript_blocks
+        content = md_path.read_text(encoding="utf-8")
+        content = rewrite_transcript_blocks(content, updated_speakers)
+        md_path.write_text(content, encoding="utf-8")
+
+    return HTMLResponse(
+        content="",
+        status_code=303,
+        headers={"Location": f"/transcripts/{quote(name)}"},
+    )
+
+
 @router.post("/{name}/fix-speaker", response_class=HTMLResponse)
 async def fix_speaker(request: Request, name: str) -> HTMLResponse:
     """Rename a speaker in an existing transcript."""

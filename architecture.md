@@ -32,7 +32,7 @@ src/wisper_transcribe/
 ├── debug_log.py        Centralized logging controller (Logger class); activated by --debug (file) and/or --verbose (console); tees tqdm.write() + Python logging to ./logs/wisper_<ts>.log
 ├── aligner.py          Merge transcription segments with diarization labels (max-overlap)
 ├── speaker_manager.py  Profile CRUD, embedding extraction, cosine-similarity matching, EMA updates; enroll_speaker_from_audio_dir() for per-user track enrollment (Phase 6)
-├── formatter.py        Markdown output, YAML frontmatter, dynamic version from __version__
+├── formatter.py        Markdown output, YAML frontmatter, dynamic version from __version__; parse_transcript_blocks() and rewrite_transcript_blocks() for per-line speaker editing
 ├── audio_utils.py      validate_audio(), convert_to_wav(), get_duration(), load_wav_as_tensor(); VIDEO_EXTENSIONS / AUDIO_EXTENSIONS sets
 ├── time_utils.py       Shared time formatting: format_timestamp(), format_duration()
 ├── path_utils.py       Shared path utilities: validate_path_component() — four-step CodeQL-safe guard; all per-module validators delegate here. get_output_dir() — single canonical output directory resolver (replaces duplicates in transcribe + transcripts routes)
@@ -62,7 +62,7 @@ src/wisper_transcribe/
         ├── __init__.py     Jinja2 templates setup, shared get_queue() helper, urlencode filter
         ├── dashboard.py    GET /, GET /jobs (HTMX partial)
         ├── transcribe.py   GET/POST /transcribe (+ post_refine/post_summarize flags), GET /transcribe/jobs/{id}, SSE /jobs/{id}/stream, enrollment wizard
-        ├── transcripts.py  GET/POST /transcripts (grouped by campaign), transcript detail (with campaign assignment dropdown), download, delete, fix-speaker; POST /transcripts/{name}/refine, POST /transcripts/{name}/summarize; GET /transcripts/{name}/summary, GET /transcripts/{name}/summary/download; POST /transcripts/{name}/campaign (move/remove campaign association)
+        ├── transcripts.py  GET/POST /transcripts (grouped by campaign), transcript detail (with campaign assignment dropdown), download, delete, fix-speaker; GET/POST /transcripts/{name}/edit (per-line speaker rename page); POST /transcripts/{name}/refine, POST /transcripts/{name}/summarize; GET /transcripts/{name}/summary, GET /transcripts/{name}/summary/download; POST /transcripts/{name}/campaign (move/remove campaign association)
         ├── speakers.py     GET/POST /speakers, enroll, rename, remove
         ├── campaigns.py    GET/POST /campaigns, campaign detail, roster add/remove, delete
         ├── config.py       GET/POST /config (+ Discord bot token, default guild/channel, presets management), POST /config/presets/add (inline preset save from Record page; validates guild/channel as snowflakes), GET /config/ollama-status, GET /config/lmstudio-status, GET /config/ollama-cloud-catalog, POST /config/{anthropic,openai,google}-models (cloud model discovery via SDK), GET /config/open-data-dir (opens data directory in OS file manager via `open`/`xdg-open`/`explorer`)
