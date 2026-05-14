@@ -69,8 +69,7 @@
 
           <!-- Waveform sample -->
           <div style="display:flex;gap:1px;align-items:center;height:30px;margin:14px 0;padding:4px 0">
-            {% for i in range(64) %}
-            {%- set h_pct = (20 + ((i * 13 + hue) % 60)) -%}
+            {% for h_pct in waveforms[key] %}
             <div style="flex:1;height:{{ h_pct }}%;background:oklch(0.5 0.12 {{ hue }}deg);border-radius:1px;opacity:0.55"></div>
             {% endfor %}
           </div>
