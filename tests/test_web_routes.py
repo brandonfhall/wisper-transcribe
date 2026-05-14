@@ -1030,19 +1030,26 @@ def test_delete_transcript_also_removes_summary(client, tmp_path):
     assert not sm.exists()
 
 
-def test_transcribe_post_accepts_post_processing_flags(client, tmp_path):
-    """post_refine and post_summarize checkboxes must not cause a 422."""
+def test_transcribe_post_processing_flags_set_on_job(client, tmp_path):
+    """Toggle checkboxes send 'on'; the job must have post_refine/post_summarize=True."""
     audio_file = tmp_path / "test.mp3"
     audio_file.write_bytes(b"fake mp3")
     with open(audio_file, "rb") as f:
         resp = client.post(
             "/transcribe",
             files={"file": ("test.mp3", f, "audio/mpeg")},
-            data={"post_refine": "1", "post_summarize": "1"},
+            # Browsers send "on" for checked checkboxes, not "1"
+            data={"post_refine": "on", "post_summarize": "on"},
             follow_redirects=False,
         )
     assert resp.status_code == 303
-    assert resp.headers["location"].startswith("/transcribe/jobs/")
+    loc = resp.headers["location"]
+    assert loc.startswith("/transcribe/jobs/")
+    job_id = loc.split("/")[-1]
+    job = client.app.state.job_queue.get(job_id)
+    assert job is not None
+    assert job.post_refine is True
+    assert job.post_summarize is True
 
 
 def test_transcribe_post_with_vocab_file_sets_hotwords(client, tmp_path, monkeypatch):

@@ -125,8 +125,8 @@ async def start_transcribe(
         initial_prompt=initial_prompt or None,
         output_dir=out_path,
         enroll_speakers=False,  # Web enrollment is post-job wizard
-        post_refine=(post_refine == "1"),
-        post_summarize=(post_summarize == "1"),
+        post_refine=bool(post_refine),
+        post_summarize=bool(post_summarize),
         campaign=safe_campaign,
         hotwords=hotwords,
     )
