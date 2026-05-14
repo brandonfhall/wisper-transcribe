@@ -415,5 +415,5 @@ async def open_data_dir() -> JSONResponse:
         else:
             subprocess.Popen(["xdg-open", path])
         return JSONResponse({"ok": True})
-    except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)})
+    except Exception:
+        return JSONResponse({"ok": False, "error": "Failed to open data directory"})

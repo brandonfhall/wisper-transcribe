@@ -58,10 +58,11 @@ Nothing else changes — `SegmentedOggWriter`, the web UI, campaigns, CLI, and a
 
 * on the transcript results page the "Generate Summary" button is shown even after a summary has been generated. Additionally the summary is not shown on the transcript results page after it has been generated. — **OPEN** (template logic is correct; suspected CWD mismatch between server launch dir and where the summary was written — reproduce needed)
 
-* ~~Summary generation failing with ollama-cloud — model wrapping JSON in markdown code fence, causing parse failure~~ — **FIXED** (`_strip_json_fence` applied to all clients)
+* ~~Tailwind `git diff` check failing in CI~~ — **FIXED**: macOS/Linux tailwind binaries produce different CSS; `git diff --exit-code` removed from CI. CI now only verifies the build runs without errors (output to `/tmp`). Developer responsibility per CLAUDE.md.
+
+* on the summary generation page it should link to "view summary" not view transcript. — **OPEN** (simple template fix)
 
 
 ## Security ##
-* https://github.com/brandonfhall/wisper-transcribe/pull/43#discussion_r3238115060 
-    - information exposure though an exception config.py LN 419
+* ~~Information exposure via `str(exc)` in config.py `/open-data-dir` route~~ — **FIXED**: replaced with generic `"Failed to open data directory"` message.
 
