@@ -295,6 +295,10 @@ async def enroll_form(request: Request, job_id: str) -> Response:
         {
             "request": request,
             "job": job,
+            "form_action": f"/transcribe/jobs/{job.id}/enroll",
+            "back_url": f"/transcribe/jobs/{job.id}",
+            "excerpt_base_url": f"/transcribe/jobs/{job.id}/excerpt",
+            "display_name": job.name,
             "detected_speakers": speakers_in_transcript,
             "existing_profiles": profiles,
             "speaker_excerpts": job.speaker_excerpts,

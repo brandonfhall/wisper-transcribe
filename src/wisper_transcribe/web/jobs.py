@@ -77,6 +77,36 @@ class _StderrCapture:
         return False
 
 
+def _write_enrollment_sidecar(job: "Job", output_path: "Path") -> None:  # type: ignore[name-defined]
+    """Persist enrollment data alongside the transcript as <stem>_diar.json.
+
+    Stores the diarization segments and source audio path so the enrollment
+    wizard can function after a server restart without requiring the in-memory
+    job to still exist.  Failures are silently swallowed — the transcript is
+    already written and enrollment can still fall back to the in-memory job.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    if not job.diarization_segments:
+        return
+
+    try:
+        out = _Path(output_path)
+        sidecar = {
+            "input_path": str(_Path(job.input_path)),
+            "campaign": job.kwargs.get("campaign"),
+            "diarization_segments": [
+                {"start": s.start, "end": s.end, "speaker": s.speaker}
+                for s in job.diarization_segments
+            ],
+        }
+        sidecar_path = out.with_name(out.stem + "_diar.json")
+        sidecar_path.write_text(_json.dumps(sidecar, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _extract_speaker_excerpts(job: "Job", output_path: "Path") -> None:  # type: ignore[name-defined]
     """Extract a short audio clip per speaker from the transcribed file.
 
@@ -418,6 +448,7 @@ class JobQueue:
             job.diarization_segments = _result_store.get("diarization_segments", [])
             job.output_path = str(output_path)
             _extract_speaker_excerpts(job, output_path)
+            _write_enrollment_sidecar(job, output_path)
 
             # Chain LLM post-processing if requested; defer COMPLETED until done
             if job.post_refine or job.post_summarize:
