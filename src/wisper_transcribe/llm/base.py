@@ -13,7 +13,22 @@ Every concrete client must:
 """
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
+
+
+def _strip_json_fence(text: str) -> str:
+    """Strip a markdown code fence if the model wrapped its JSON output in one.
+
+    Some models ignore ``format: json`` / ``response_format`` and emit:
+        ```json
+        { ... }
+        ```
+    This strips the fence so json.loads() can parse the content cleanly.
+    """
+    text = text.strip()
+    m = re.match(r"^```(?:json)?\s*\n?(.*?)\n?```\s*$", text, re.DOTALL)
+    return m.group(1).strip() if m else text
 
 
 class LLMClient(ABC):

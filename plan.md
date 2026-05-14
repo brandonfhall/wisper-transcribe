@@ -58,15 +58,10 @@ Nothing else changes — `SegmentedOggWriter`, the web UI, campaigns, CLI, and a
 
 * on the transcript results page the "Generate Summary" button is shown even after a summary has been generated. Additionally the summary is not shown on the transcript results page after it has been generated. — **OPEN** (template logic is correct; suspected CWD mismatch between server launch dir and where the summary was written — reproduce needed)
 
-* Summary generation is not properly working for at least ollama-cloud it could affect other providers as well. It appears that it is coming back but it's not being properly detected.
-    - "LLM: ollama-cloud / glm-5.1
-    Generating campaign summary for Impossible Landscapes S1 E1 — Remove Your Mask.md ...
-    Connecting to Ollama (https://ollama.com)...
-    LLM: ollama-cloud / glm-5.1
-    Generating campaign summary for Impossible Landscapes S1 E1 — Remove Your Mask.md ...
-    Connecting to Ollama (https://ollama.com)...
-    Waiting for glm-5.1 to start generating...
-    Generating (glm-5.1): ···········
-    Summarize failed: Ollama JSON response did not parse: Expecting value: line 1 column 1 (char 0). Raw: '```json\n{\n "summary": "The season four premiere of Get in the Trunk opens with a cinematic cold read performed by Troy, featuring his returning character Roger Cummestone aboard a flight into Baltimo'"
+* ~~Summary generation failing with ollama-cloud — model wrapping JSON in markdown code fence, causing parse failure~~ — **FIXED** (`_strip_json_fence` applied to all clients)
 
+
+## Security ##
+* https://github.com/brandonfhall/wisper-transcribe/pull/43#discussion_r3238115060 
+    - information exposure though an exception config.py LN 419
 

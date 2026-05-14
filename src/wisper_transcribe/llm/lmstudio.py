@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import sys
 
-from .base import LLMClient
+from .base import LLMClient, _strip_json_fence
 from .errors import LLMResponseError, LLMUnavailableError
 
 _DOT_INTERVAL = 50   # print a progress dot every N content tokens
@@ -138,7 +138,7 @@ class LMStudioClient(LLMClient):
                 {"role": "user", "content": user},
             ],
         }
-        text = self._post_chat(payload)
+        text = _strip_json_fence(self._post_chat(payload))
         try:
             return json.loads(text)
         except json.JSONDecodeError as exc:

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 
-from .base import LLMClient
+from .base import LLMClient, _strip_json_fence
 from .errors import LLMResponseError, LLMUnavailableError
 
 
@@ -79,7 +79,7 @@ class OpenAIClient(LLMClient):
             )
         except self._errors as exc:
             raise LLMUnavailableError(f"OpenAI API error: {exc}") from exc
-        text = self._extract_text(completion)
+        text = _strip_json_fence(self._extract_text(completion))
         try:
             return json.loads(text)
         except json.JSONDecodeError as exc:
