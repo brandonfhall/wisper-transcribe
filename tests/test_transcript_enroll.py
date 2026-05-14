@@ -178,11 +178,10 @@ def test_enroll_form_orders_speakers_by_first_appearance(client: TestClient, tmp
 # ---------------------------------------------------------------------------
 
 def test_enroll_submit_renames_transcript(client: TestClient, tmp_path: Path):
+    # The sidecar points to /tmp/session01.mp3 which won't exist in CI —
+    # enrollment is silently skipped, but the rename always happens first.
     md = _write_transcript(tmp_path)
-    with _patch_output(tmp_path), \
-         patch("wisper_transcribe.speaker_manager.enroll_speaker"), \
-         patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=lambda p: p), \
-         patch("pathlib.Path.exists", return_value=True):
+    with _patch_output(tmp_path):
         resp = client.post(
             "/transcripts/session01/enroll",
             data={"speaker_SPEAKER_00": "Alice", "speaker_SPEAKER_01": "Bob"},
