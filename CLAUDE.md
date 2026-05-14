@@ -1,6 +1,6 @@
 # wisper-transcribe — Claude Instructions
 
-> **Full references:** [README.md](README.md) (user docs) · [architecture.md](architecture.md) (technical deep-dive)
+> **Full references:** [README.md](README.md) (overview + quickstart) · [docs/](docs/) (full user docs) · [architecture.md](architecture.md) (technical deep-dive)
 
 ---
 
@@ -11,7 +11,13 @@ Keeping docs in sync with code is **non-optional** — treat it as part of the d
 | Doc | Update when |
 |-----|-------------|
 | `architecture.md` | Any new module, pipeline change, design decision, or config key change. Update: module map entry, relevant design-decision section, config key list, Known Constraints table. |
-| `README.md` | Only when it affects **how a user runs or configures the app** at a high level: new CLI flag, new command, changed env variable, Docker change, or major feature additions. **README.md is not a changelog** — do not mention implementation details, library names, or internal architecture. It explains what the app does and how to use it, written for someone who has never seen the code. |
+| `README.md` | Only when the **one-paragraph description** or **Option A quickstart** changes, or the docs table of contents needs a new entry. README is a ~60-line landing page: what it does, Option A quick start, and links to `docs/`. Do not add detail here — put it in the right `docs/` file instead. |
+| `docs/setup.md` | New install path, changed requirements, HF token flow, model size guide, or anything about first-time setup. |
+| `docs/cli-reference.md` | New or changed CLI command, flag, or output format. |
+| `docs/web-ui.md` | New web UI page, changed UI behaviour, or new job management feature. |
+| `docs/docker.md` | Docker, Makefile targets, volume layout, or Discord bot setup changes. |
+| `docs/configuration.md` | New or changed env var, data storage location, or debugging flag. |
+| `docs/scenarios.md` | New common scenario, known limitation added or resolved. |
 | `plan.md` | All active plans, research findings, and open design decisions live here. When work is completed, remove it from `plan.md` — unless the context directly informs a remaining action item, in which case keep only the relevant excerpt. |
 
 Both files must be updated **in the same commit** as the code change, not as a follow-up.
