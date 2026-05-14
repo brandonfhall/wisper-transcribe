@@ -1,4 +1,4 @@
-# wisper-transcribe — Open Items
+`# wisper-transcribe — Open Items
 
 ---
 
@@ -51,10 +51,9 @@ Nothing else changes — `SegmentedOggWriter`, the web UI, campaigns, CLI, and a
 
 * Add per-line speaker rename in the web UI — **OPEN**
 
-* Suppress webserver output on the terminal when running in web UI mode — **OPEN** (currently the server logs are mixed with the job progress logs, which is noisy and can be confusing)
+* ~~Suppress webserver output on the terminal~~ — **FIXED**: `access_log=False` added to `uvicorn.run()` in `cli.py`.
 
 ---
 
 ## UI Bugs
-
-* On the transcript results page the "Generate Summary" button is shown even after a summary has been generated. Additionally the summary is not shown on the transcript results page after it has been generated. — **OPEN** (template logic is correct; suspected CWD mismatch between server launch dir and where the summary was written — reproduce needed)
+`
