@@ -101,9 +101,13 @@
           <!-- Actions -->
           <div style="display:flex;gap:6px;margin-top:14px;align-items:center">
             {% if has_clip.get(key) %}
-            <a href="/speakers/{{ key }}/clip" class="btn btn-secondary btn-sm">
+            <audio id="clip_{{ key }}" src="/speakers/{{ key }}/clip" preload="none" style="display:none"></audio>
+            <button type="button"
+                    data-audio-id="clip_{{ key }}"
+                    onclick="wisperPlayExcerpt('clip_{{ key }}', this)"
+                    class="btn btn-secondary btn-sm">
               {{ icon("play", 10) }} Sample
-            </a>
+            </button>
             {% endif %}
             <a href="/speakers/{{ key }}/enroll" class="btn btn-secondary btn-sm">Re-enroll</a>
             {% if profile.notes %}

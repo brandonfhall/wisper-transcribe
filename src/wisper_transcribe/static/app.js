@@ -106,6 +106,44 @@ window.wisperTickerAppend = function(data) {
   }
 };
 
+// ── Inline audio excerpt player ──
+// Used on the Speakers page and the enrollment wizard.
+// Toggles play/pause on a hidden <audio> element; only one clip plays at a time.
+(function() {
+  var _playing = null;
+
+  window.wisperPlayExcerpt = function(audioId, btn) {
+    var audio = document.getElementById(audioId);
+    if (!audio) return;
+
+    if (_playing && _playing !== audio) {
+      _playing.pause();
+      _playing.currentTime = 0;
+      var prevBtn = document.querySelector('[data-audio-id="' + _playing.id + '"]');
+      if (prevBtn) prevBtn.textContent = prevBtn.textContent.replace('Stop', 'Sample');
+      _playing = null;
+    }
+
+    if (btn.dataset.playing) {
+      audio.pause();
+      audio.currentTime = 0;
+      delete btn.dataset.playing;
+      btn.textContent = btn.textContent.replace('Stop', 'Sample');
+      _playing = null;
+    } else {
+      btn.dataset.playing = '1';
+      btn.textContent = btn.textContent.replace('Sample', 'Stop');
+      audio.play();
+      audio.onended = function() {
+        delete btn.dataset.playing;
+        btn.textContent = btn.textContent.replace('Stop', 'Sample');
+        _playing = null;
+      };
+      _playing = audio;
+    }
+  };
+})();
+
 // ── File upload feedback ──
 document.addEventListener('DOMContentLoaded', function() {
   // Auto-scroll any log terminal

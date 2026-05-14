@@ -104,35 +104,4 @@
 </div>
 </div>
 
-<script>
-(function(){
-  var _playing = null;
-
-  window.wisperPlayExcerpt = function(audioId, btn) {
-    var audio = document.getElementById(audioId);
-    if (!audio) return;
-
-    // Stop currently playing
-    if (_playing && _playing !== audio) {
-      _playing.pause();
-      _playing.currentTime = 0;
-      var prevBtn = document.querySelector('[data-audio-id="' + _playing.id + '"]');
-      if (prevBtn) prevBtn.innerHTML = prevBtn.innerHTML.replace('Stop', 'Play sample');
-    }
-
-    if (btn.dataset.playing) {
-      audio.pause(); audio.currentTime = 0;
-      delete btn.dataset.playing;
-      btn.innerHTML = btn.innerHTML.replace('Stop', 'Play sample');
-      _playing = null;
-    } else {
-      btn.dataset.playing = '1';
-      btn.innerHTML = btn.innerHTML.replace('Play sample', 'Stop');
-      audio.play();
-      audio.onended = function() { delete btn.dataset.playing; btn.innerHTML = btn.innerHTML.replace('Stop', 'Play sample'); _playing = null; };
-      _playing = audio;
-    }
-  };
-})();
-</script>
 {% endblock %}
