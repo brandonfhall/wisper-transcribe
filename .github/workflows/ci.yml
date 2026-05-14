@@ -39,6 +39,13 @@ jobs:
       - name: Run tests with coverage
         run: pytest tests/ -v --cov --cov-report=term-missing
 
+      - name: Verify Tailwind CSS builds without errors
+        run: |
+          python -m pytailwindcss \
+            -i src/wisper_transcribe/static/input.css \
+            -o /tmp/tailwind-ci.min.css \
+            --minify
+
   latest-deps:
     name: latest deps (3.12)
     runs-on: ubuntu-latest

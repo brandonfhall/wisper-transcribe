@@ -1,37 +1,54 @@
 {% extends "base.html" %}
+{% from "partials/icons.html" import icon %}
 {% block title %}Job {{ job.id[:8] }}{% endblock %}
 
-{% block content %}
-<div class="max-w-3xl space-y-6">
-
-  <div class="flex items-center gap-4">
-    <a href="/" class="text-indigo-600 hover:underline text-sm">← Dashboard</a>
-    <h1 class="text-2xl font-bold text-gray-900">{{ job.name or "Transcription Job" }}</h1>
-    <span id="status-badge">
-      {% if job.status == "pending" %}<span class="badge-pending">Pending</span>
-      {% elif job.status == "running" %}<span class="badge-running">Running</span>
-      {% elif job.status == "completed" %}<span class="badge-completed">Completed</span>
-      {% else %}<span class="badge-failed">Failed</span>{% endif %}
-    </span>
+{% block toolbar %}
+<div class="toolbar">
+  <div>
+    <div class="toolbar-kicker">Transcribe</div>
+    <div style="display:flex;align-items:baseline;gap:14px">
+      <span class="toolbar-title">{{ job.name or "Transcription job" }}</span>
+      <span id="status-badge">
+        {% if job.status == "pending" %}<span class="pill pill-dim">PENDING</span>
+        {% elif job.status == "running" %}<span class="pill pill-cyan">RUNNING</span>
+        {% elif job.status == "completed" %}<span class="pill pill-green">COMPLETED</span>
+        {% else %}<span class="pill pill-amber">FAILED</span>{% endif %}
+      </span>
+    </div>
   </div>
+  <a href="/" class="btn btn-secondary">← Dashboard</a>
+</div>
+{% endblock %}
+
+{% block page %}
+<div class="studio-page">
+<div style="max-width:800px">
 
   <!-- Job metadata -->
-  <div class="card">
-    <dl class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-      <div><dt class="font-medium text-gray-500">Job ID</dt><dd class="font-mono text-xs text-gray-700">{{ job.id }}</dd></div>
-      <div><dt class="font-medium text-gray-500">File</dt><dd class="font-mono text-xs text-gray-700 truncate">{{ job.name or (job.input_path | basename) }}</dd></div>
-      <div><dt class="font-medium text-gray-500">Created</dt><dd class="text-gray-700">{{ job.created_at.strftime("%Y-%m-%d %H:%M:%S") }}</dd></div>
-      {% if job.finished_at %}
-      <div><dt class="font-medium text-gray-500">Finished</dt><dd class="text-gray-700">{{ job.finished_at.strftime("%Y-%m-%d %H:%M:%S") }}</dd></div>
-      {% endif %}
-    </dl>
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid var(--color-rule);border-bottom:1px solid var(--color-rule);margin-bottom:28px">
+    <div style="padding:14px 16px">
+      <div class="mono-kicker" style="margin-bottom:6px">Job ID</div>
+      <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">{{ job.id }}</div>
+    </div>
+    <div style="padding:14px 16px;border-left:1px solid var(--color-rule)">
+      <div class="mono-kicker" style="margin-bottom:6px">File</div>
+      <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ job.name or (job.input_path | basename) }}</div>
+    </div>
+    <div style="padding:14px 16px;border-left:1px solid var(--color-rule)">
+      <div class="mono-kicker" style="margin-bottom:6px">Created</div>
+      <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">{{ job.created_at.strftime("%Y-%m-%d %H:%M:%S") }}</div>
+    </div>
+    <div style="padding:14px 16px;border-left:1px solid var(--color-rule)">
+      <div class="mono-kicker" style="margin-bottom:6px">Finished</div>
+      <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">{% if job.finished_at %}{{ job.finished_at.strftime("%H:%M:%S") }}{% else %}—{% endif %}</div>
+    </div>
   </div>
 
   <!-- Progress -->
   {% if job.status in ("pending", "running") or job.progress or job.status == "completed" %}
-  <div class="card" id="progress-card">
+  <div id="progress-card" style="margin-bottom:28px">
 
-    {# Build step list for this job type #}
+    {# Build step list #}
     {% if job.job_type == "transcription" %}
       {% set steps = [("transcribe","T","Transcribe"), ("diarize","D","Diarize"), ("format","F","Format")] %}
       {% if job.post_refine %}{% set steps = steps + [("refine","R","Refine")] %}{% endif %}
@@ -43,93 +60,89 @@
       {% set steps = [("summarize","S","Summarize")] %}
     {% endif %}
 
-    <!-- Step pills -->
-    <div class="flex items-center gap-1 mb-4 flex-wrap">
+    <!-- Pipeline strip -->
+    <div style="display:flex;border-top:1px solid var(--color-rule);border-bottom:1px solid var(--color-rule);margin-bottom:14px">
       {% for step_id, step_abbr, step_label in steps %}
       <div id="step_{{ step_id }}"
-           class="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border transition-all
-           {% if job.status == 'completed' %}bg-green-100 border-green-300 text-green-800
-           {% else %}bg-gray-100 border-gray-200 text-gray-400{% endif %}">
-        <span id="step_icon_{{ step_id }}" class="w-4 h-4 rounded-full flex items-center justify-center text-white text-xs font-bold shrink-0
-              {% if job.status == 'completed' %}bg-green-500{% else %}bg-gray-300{% endif %}">
-          {{ step_abbr }}
-        </span>
-        {{ step_label }}
+           style="flex:1;padding:10px 14px;{% if not loop.first %}border-left:1px solid var(--color-rule);{% endif %}">
+        <div style="display:flex;align-items:center;gap:7px;margin-bottom:4px">
+          {% if job.status == 'completed' %}
+          <span style="width:5px;height:5px;border-radius:50%;background:var(--color-signal-green);flex-shrink:0"></span>
+          {% else %}
+          <span id="step_dot_{{ step_id }}" style="width:5px;height:5px;border-radius:50%;border:1px solid var(--color-paper-faint);flex-shrink:0"></span>
+          {% endif %}
+          <span id="step_lbl_{{ step_id }}" style="font-family:var(--font-mono);font-size:10px;
+                color:{% if job.status == 'completed' %}var(--color-signal-green){% else %}var(--color-paper-faint){% endif %};
+                letter-spacing:0.12em;text-transform:uppercase">{{ step_label }}</span>
+        </div>
       </div>
-      {% if not loop.last %}
-      <div id="connector_{{ loop.index }}" class="w-4 h-px {% if job.status == 'completed' %}bg-green-400{% else %}bg-gray-200{% endif %} shrink-0"></div>
-      {% endif %}
       {% endfor %}
     </div>
 
-    <!-- Single unified bar -->
-    <div class="w-full bg-gray-100 rounded-full h-3 overflow-hidden relative">
+    <!-- Progress bar -->
+    <div style="height:3px;background:var(--color-ink-900);border-radius:2px;overflow:hidden;margin-bottom:8px">
       <div id="progress-bar"
-           class="h-3 rounded-full transition-all duration-700
-           {% if job.status in ('pending','running') and not job.progress %}animate-pulse{% endif %}
-           {% if job.status == 'failed' %}bg-red-400{% else %}bg-green-500{% endif %}"
-           style="width: {% if job.status == 'completed' %}100{% else %}0{% endif %}%">
+           style="height:100%;background:var(--color-accent);box-shadow:0 0 6px #5fd4e780;
+                  transition:width 700ms ease;
+                  width:{% if job.status == 'completed' %}100{% else %}0{% endif %}%">
       </div>
     </div>
 
-    <!-- Stats row: step label + pct left, ETA + rate right -->
-    <div class="flex justify-between items-baseline mt-1.5">
-      <span id="step-label" class="text-xs font-medium text-gray-600">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">
+      <span id="step-label">
         {% if job.status == 'completed' %}Complete
         {% elif job.status == 'pending' %}Waiting in queue…
         {% else %}Starting…{% endif %}
       </span>
-      <span class="flex items-center gap-3">
-        <span id="progress-eta"  class="text-xs text-gray-400"></span>
-        <span id="progress-rate" class="text-xs font-mono text-gray-400"></span>
-        <span id="progress-pct"  class="text-xs font-semibold text-green-700">
-          {% if job.status == 'completed' %}100%{% endif %}
-        </span>
+      <span style="display:flex;align-items:baseline;gap:14px">
+        <span id="progress-eta" style="color:var(--color-paper-faint)"></span>
+        <span id="progress-rate" style="color:var(--color-paper-faint)"></span>
+        <span id="progress-pct" style="color:var(--color-accent);font-weight:500">{% if job.status == 'completed' %}100%{% endif %}</span>
       </span>
     </div>
   </div>
   {% endif %}
 
-  <!-- Log terminal -->
-  <div class="card">
-    <h2 class="text-base font-semibold text-gray-900 mb-3">Progress Log</h2>
-    <div id="log-terminal" class="log-terminal">
+  <!-- Log feed -->
+  <div style="margin-bottom:28px">
+    <div class="section-head"><div class="section-head-left"><span class="section-kicker">Progress log</span></div></div>
+    <div id="log-terminal" class="log-feed" style="max-height:300px;overflow-y:auto;border:1px solid var(--color-rule)">
       {% for line in job.log_lines %}<div>{{ line }}</div>{% endfor %}
-      <div id="log-cursor" class="{% if job.status in ('pending','running') %}animate-pulse{% endif %}">{% if job.status in ('pending','running') %}█{% endif %}</div>
+      <div id="log-cursor" style="{% if job.status in ('pending','running') %}opacity:0.6{% else %}display:none{% endif %}">{% if job.status in ('pending','running') %}█{% endif %}</div>
     </div>
   </div>
 
   <!-- Actions -->
-  <div id="job-actions" class="flex gap-4 flex-wrap">
+  <div id="job-actions" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
     {% if job.status == "completed" %}
       {% if job.output_path %}
-        <a href="/transcripts/{{ job.output_path | stem | urlencode }}" class="btn-primary">View Transcript</a>
+        <a href="/transcripts/{{ job.output_path | stem | urlencode }}" class="btn btn-primary">View transcript</a>
         {% if job.job_type == "transcription" %}
-          <a href="/transcribe/jobs/{{ job.id }}/enroll" class="btn-secondary">Name Speakers</a>
+          <a href="/transcribe/jobs/{{ job.id }}/enroll" class="btn btn-secondary">Name speakers</a>
         {% endif %}
         {% if job.summary_path %}
-          <a href="/transcripts/{{ job.output_path | stem | urlencode }}/summary" class="btn-secondary">View Campaign Notes</a>
+          <a href="/transcripts/{{ job.output_path | stem | urlencode }}/summary" class="btn btn-secondary">View Summary</a>
         {% endif %}
       {% endif %}
     {% elif job.status in ("pending", "running") %}
       <form method="post" action="/transcribe/jobs/{{ job.id }}/cancel"
             onsubmit="return confirm('Cancel this job?')">
-        <button type="submit" class="btn-danger">Stop Job</button>
+        <button type="submit" class="btn btn-rose">Stop job</button>
       </form>
     {% elif job.status == "failed" %}
-      <div class="rounded-md bg-red-50 border border-red-200 p-4 w-full">
-        <p class="text-sm text-red-800"><strong>Error:</strong> {{ job.error }}</p>
+      <div style="padding:12px 14px;background:#e88b8b15;border:1px solid #e88b8b40;border-radius:4px;font-size:12.5px;color:var(--color-signal-rose);width:100%">
+        <strong>Error:</strong> {{ job.error }}
       </div>
     {% endif %}
-    <a href="/" class="btn-secondary">Back to Dashboard</a>
+    <a href="/" class="btn btn-secondary">← Dashboard</a>
   </div>
 
+</div>
 </div>
 
 {% if job.status in ("pending", "running") %}
 <script>
 (function() {
-  // ── DOM refs ──────────────────────────────────────────────────────────────
   const terminal     = document.getElementById('log-terminal');
   const cursor       = document.getElementById('log-cursor');
   const badge        = document.getElementById('status-badge');
@@ -140,9 +153,6 @@
   const progressEta  = document.getElementById('progress-eta');
   const progressRate = document.getElementById('progress-rate');
 
-  // ── Step definitions ──────────────────────────────────────────────────────
-  // Built from the same server-side data the Jinja template used, so JS and
-  // template always agree.  Order matters: bar slices are equal widths.
   const STEPS = [
     {% if job.job_type == "transcription" %}
       {% if job.is_video %}'extract',{% endif %}
@@ -156,115 +166,76 @@
     {% endif %}
   ];
 
-  // Slice boundaries: step i occupies [i/N … (i+1)/N] of the bar (0–100 pct)
-  const N          = STEPS.length;
-  const sliceWidth = 100 / N;   // % per step
-
-  // Which step index is currently active (-1 = not started yet)
+  const N = STEPS.length;
+  const sliceWidth = 100 / N;
   let activeIdx = -1;
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
-  function parsePercent(msg) {
-    const m = msg.match(/(\d+)%\s*[|│]/);
-    return m ? parseInt(m[1], 10) : null;
-  }
-  function parseETA(msg) {
-    const m = msg.match(/<(\d+:\d{2}(?::\d{2})?)/);
-    return m ? m[1] : null;
-  }
-  function parseRate(msg) {
-    const m = msg.match(/,\s*([\d.]+\s*[kMG]?\w+\/\w+)\s*\]/);
-    return m ? m[1].trim() : null;
-  }
+  function parsePercent(msg) { const m = msg.match(/(\d+)%\s*[|│]/); return m ? parseInt(m[1], 10) : null; }
+  function parseETA(msg)     { const m = msg.match(/<(\d+:\d{2}(?::\d{2})?)/); return m ? m[1] : null; }
+  function parseRate(msg)    { const m = msg.match(/,\s*([\d.]+\s*[kMG]?\w+\/\w+)\s*\]/); return m ? m[1].trim() : null; }
 
-  // ── Step state ────────────────────────────────────────────────────────────
-  function setStepPending(id) {
-    const pill = document.getElementById('step_' + id);
-    const icon = document.getElementById('step_icon_' + id);
-    if (!pill) return;
-    pill.className = 'flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border transition-all bg-gray-100 border-gray-200 text-gray-400';
-    if (icon) icon.className = 'w-4 h-4 rounded-full flex items-center justify-center text-white text-xs font-bold shrink-0 bg-gray-300';
-  }
-  function setStepActive(id) {
-    const pill = document.getElementById('step_' + id);
-    const icon = document.getElementById('step_icon_' + id);
-    if (!pill) return;
-    pill.className = 'flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border transition-all bg-indigo-50 border-indigo-300 text-indigo-700';
-    if (icon) icon.className = 'w-4 h-4 rounded-full flex items-center justify-center text-white text-xs font-bold shrink-0 bg-indigo-500 animate-pulse';
-  }
-  function setStepDone(id, idx) {
-    const pill = document.getElementById('step_' + id);
-    const icon = document.getElementById('step_icon_' + id);
-    const conn = document.getElementById('connector_' + (idx + 1));
-    if (!pill) return;
-    pill.className = 'flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border transition-all bg-green-100 border-green-300 text-green-800';
-    if (icon) icon.className = 'w-4 h-4 rounded-full flex items-center justify-center text-white text-xs font-bold shrink-0 bg-green-500';
-    if (conn) conn.className = 'w-4 h-px bg-green-400 shrink-0';
+  // colors
+  const C_PENDING = 'var(--color-paper-faint)';
+  const C_ACTIVE  = 'var(--color-accent)';
+  const C_DONE    = 'var(--color-signal-green)';
+
+  function setStepState(id, state) {
+    const dot = document.getElementById('step_dot_' + id);
+    const lbl = document.getElementById('step_lbl_' + id);
+    if (!dot || !lbl) return;
+    if (state === 'active') {
+      dot.style.cssText = 'width:6px;height:6px;border-radius:50%;background:var(--color-accent);box-shadow:0 0 6px var(--color-accent);flex-shrink:0';
+      lbl.style.color = C_ACTIVE;
+    } else if (state === 'done') {
+      dot.style.cssText = 'width:5px;height:5px;border-radius:50%;background:var(--color-signal-green);flex-shrink:0';
+      lbl.style.color = C_DONE;
+    } else {
+      dot.style.cssText = 'width:5px;height:5px;border-radius:50%;border:1px solid var(--color-paper-faint);flex-shrink:0';
+      lbl.style.color = C_PENDING;
+    }
   }
 
   function activateStep(idx) {
     if (idx <= activeIdx) return;
-    // Mark prior steps done
-    for (let i = activeIdx + 1; i < idx; i++) setStepDone(STEPS[i], i);
+    for (let i = activeIdx + 1; i < idx; i++) setStepState(STEPS[i], 'done');
     activeIdx = idx;
-    setStepActive(STEPS[idx]);
+    setStepState(STEPS[idx], 'active');
     if (stepLabel) stepLabel.textContent = {
-      extract:    'Extracting audio…',
-      transcribe: 'Transcribing…',
-      diarize:    'Diarizing…',
-      format:     'Formatting…',
-      refine:     'Refining…',
-      summarize:  'Summarizing…',
+      extract: 'Extracting audio…', transcribe: 'Transcribing…',
+      diarize: 'Diarizing…', format: 'Formatting…',
+      refine: 'Refining…', summarize: 'Summarizing…',
     }[STEPS[idx]] || STEPS[idx] + '…';
-    // Snap bar to the start of this step's slice
-    const base = idx * sliceWidth;
-    setBar(base);
+    setBar(idx * sliceWidth);
   }
 
   function setBar(pct) {
     if (!progressBar) return;
     progressBar.style.width = pct + '%';
-    progressBar.classList.remove('animate-pulse');
     if (progressPct) progressPct.textContent = Math.round(pct) + '%';
   }
 
-  // Map within-step tqdm% to overall bar%
-  // step idx occupies [idx*sliceWidth … (idx+1)*sliceWidth]
-  function stepPctToBar(idx, withinPct) {
-    return idx * sliceWidth + withinPct * sliceWidth / 100;
-  }
+  function stepPctToBar(idx, within) { return idx * sliceWidth + within * sliceWidth / 100; }
 
   function allDone() {
-    STEPS.forEach((id, i) => setStepDone(id, i));
+    STEPS.forEach(id => setStepState(id, 'done'));
     setBar(100);
-    if (stepLabel) stepLabel.textContent = 'Complete';
+    if (stepLabel)    stepLabel.textContent    = 'Complete';
     if (progressEta)  progressEta.textContent  = '';
     if (progressRate) progressRate.textContent = '';
     if (progressPct)  progressPct.textContent  = '100%';
+    if (progressBar)  progressBar.style.boxShadow = 'none';
   }
 
-  // ── Phase detection from log lines ────────────────────────────────────────
   function detectPhase(msg) {
-    const lower = msg.toLowerCase();
-    if (lower.includes('extracting audio') || lower.includes('audio extraction')) {
-      const ei = STEPS.indexOf('extract');
-      if (ei >= 0) activateStep(ei);
-    } else if (lower.includes('transcrib') || lower.includes('whisper') || lower.includes('loading model')) {
-      activateStep(STEPS.indexOf('transcribe'));
-    } else if (lower.includes('diariz') || lower.includes('pyannote') || lower.includes('align')) {
-      activateStep(STEPS.indexOf('diarize'));
-    } else if (lower.includes('wrote') || lower.includes('format') || lower.includes('speaker match')) {
-      activateStep(STEPS.indexOf('format'));
-    } else if (lower.includes('connecting to ollama') || lower.includes('refining') || lower.includes('fix_vocabulary') || lower.includes('refine')) {
-      const ri = STEPS.indexOf('refine');
-      if (ri >= 0) activateStep(ri);
-    } else if (lower.includes('summariz') || lower.includes('generating')) {
-      const si = STEPS.indexOf('summarize');
-      if (si >= 0) activateStep(si);
-    }
+    const lo = msg.toLowerCase();
+    if (lo.includes('extracting audio') || lo.includes('audio extraction')) { const i = STEPS.indexOf('extract'); if (i>=0) activateStep(i); }
+    else if (lo.includes('transcrib') || lo.includes('whisper') || lo.includes('loading model')) activateStep(STEPS.indexOf('transcribe'));
+    else if (lo.includes('diariz') || lo.includes('pyannote') || lo.includes('align')) activateStep(STEPS.indexOf('diarize'));
+    else if (lo.includes('wrote') || lo.includes('format') || lo.includes('speaker match')) activateStep(STEPS.indexOf('format'));
+    else if (lo.includes('refin') || lo.includes('fix_vocabulary')) { const i = STEPS.indexOf('refine'); if (i>=0) activateStep(i); }
+    else if (lo.includes('summariz') || lo.includes('generating')) { const i = STEPS.indexOf('summarize'); if (i>=0) activateStep(i); }
   }
 
-  // ── SSE ───────────────────────────────────────────────────────────────────
   const es = new EventSource('/transcribe/jobs/{{ job.id }}/stream');
 
   es.onmessage = function(e) {
@@ -280,153 +251,74 @@
     }
 
     if (evt.type === 'progress') {
-      const pct  = parsePercent(evt.message);
-      const eta  = parseETA(evt.message);
-      const rate = parseRate(evt.message);
-      const lower = evt.message.toLowerCase();
-
+      const pct = parsePercent(evt.message), eta = parseETA(evt.message), rate = parseRate(evt.message);
+      const lo = evt.message.toLowerCase();
       if (pct !== null) {
-        // Map to the correct step slice
         let idx = activeIdx;
-        if (lower.includes('extracting audio')) {
-          idx = STEPS.indexOf('extract');
-          if (idx >= 0) activateStep(idx);
-        } else if (lower.includes('transcrib')) {
-          idx = STEPS.indexOf('transcribe');
-          if (idx >= 0) activateStep(idx);
-        } else if (lower.includes('segmentation') || lower.includes('embedding') || lower.includes('clustering')) {
-          idx = STEPS.indexOf('diarize');
-          if (idx >= 0) activateStep(idx);
-        }
+        if (lo.includes('extracting audio')) { idx = STEPS.indexOf('extract'); if (idx>=0) activateStep(idx); }
+        else if (lo.includes('transcrib')) { idx = STEPS.indexOf('transcribe'); if (idx>=0) activateStep(idx); }
+        else if (lo.includes('segmentation') || lo.includes('embedding') || lo.includes('clustering')) { idx = STEPS.indexOf('diarize'); if (idx>=0) activateStep(idx); }
         if (idx >= 0) setBar(stepPctToBar(idx, pct));
       }
-      if (progressEta  && eta)  { progressEta.textContent  = 'ETA ' + eta; }
-      if (progressRate && rate) { progressRate.textContent = rate; }
+      if (progressEta  && eta)  progressEta.textContent  = 'ETA ' + eta;
+      if (progressRate && rate) progressRate.textContent = rate;
     }
 
     if (evt.type === 'channel_progress') {
-      // Parallel mode: use the channel to determine the step
-      const ch  = evt.channel;
-      const pct = parsePercent(evt.message);
-      const lower = evt.message.toLowerCase();
-
-      if (ch === 'transcribe' && pct !== null) {
-        const idx = STEPS.indexOf('transcribe');
-        if (idx >= 0) setBar(stepPctToBar(idx, pct));
+      const pct = parsePercent(evt.message), lo = evt.message.toLowerCase();
+      if (evt.channel === 'transcribe' && pct !== null) { const i = STEPS.indexOf('transcribe'); if (i>=0) setBar(stepPctToBar(i, pct)); }
+      if (evt.channel === 'diarize' && pct !== null) {
+        let dp = lo.includes('segmentation') ? pct*0.4 : lo.includes('embedding') ? 40+pct*0.4 : lo.includes('clustering') ? 80+pct*0.2 : pct*0.4;
+        const i = STEPS.indexOf('diarize');
+        if (i >= 0) { const cur = parseFloat(progressBar?.style.width)||0; const cand = stepPctToBar(i, Math.round(dp)); if (cand>cur) setBar(cand); }
       }
-      if (ch === 'diarize' && pct !== null) {
-        // Map pyannote sub-steps: segmentation 0-40%, embedding 40-80%, clustering 80-100%
-        let dpct;
-        if (lower.includes('segmentation'))   dpct = pct * 0.4;
-        else if (lower.includes('embedding')) dpct = 40 + pct * 0.4;
-        else if (lower.includes('clustering'))dpct = 80 + pct * 0.2;
-        else                                  dpct = pct * 0.4;
-        const idx = STEPS.indexOf('diarize');
-        // In parallel mode the bar shows max of T and D slices
-        if (idx >= 0) {
-          const tidx = STEPS.indexOf('transcribe');
-          // Current transcribe bar value
-          const current = parseFloat(progressBar ? progressBar.style.width : '0') || 0;
-          const candidate = stepPctToBar(idx, Math.round(dpct));
-          if (candidate > current) setBar(candidate);
-        }
-      }
-      const eta  = parseETA(evt.message);
-      const rate = parseRate(evt.message);
+      const eta = parseETA(evt.message), rate = parseRate(evt.message);
       if (progressEta  && eta)  progressEta.textContent  = 'ETA ' + eta;
       if (progressRate && rate) progressRate.textContent = rate;
     }
 
     if (evt.type === 'status') {
-      const statusMap = {
-        pending:   '<span class="badge-pending">Pending</span>',
-        running:   '<span class="badge-running">Running</span>',
-        completed: '<span class="badge-completed">Completed</span>',
-        failed:    '<span class="badge-failed">Failed</span>',
+      const map = {
+        pending:   '<span class="pill pill-dim">PENDING</span>',
+        running:   '<span class="pill pill-cyan">RUNNING</span>',
+        completed: '<span class="pill pill-green">COMPLETED</span>',
+        failed:    '<span class="pill pill-amber">FAILED</span>',
       };
-      if (statusMap[evt.status]) badge.innerHTML = statusMap[evt.status];
+      if (map[evt.status] && badge) badge.innerHTML = map[evt.status];
     }
 
     if (evt.type === 'done') {
-      cursor.textContent = '';
+      cursor.style.display = 'none';
       es.close();
-      // Terminal state — stop the estimating ticker so it can never overwrite
-      // the final "Complete"/"Failed" label or creep the bar forward.
-      stopEstimatingTicker();
       if (evt.status === 'completed') {
         allDone();
         if (evt.output_path) {
           const stem = evt.output_path.replace(/\\/g, '/').split('/').pop().replace('.md', '');
-          const enrollBtn = evt.job_type === 'transcription'
-            ? `<a href="/transcribe/jobs/{{ job.id }}/enroll" class="btn-secondary">Name Speakers</a>`
-            : '';
-          const summaryBtn = evt.summary_path
-            ? `<a href="/transcripts/${encodeURIComponent(stem)}/summary" class="btn-secondary">View Campaign Notes</a>`
-            : '';
-          actions.innerHTML = `
-            <a href="/transcripts/${encodeURIComponent(stem)}" class="btn-primary">View Transcript</a>
-            ${enrollBtn}
-            ${summaryBtn}
-            <a href="/" class="btn-secondary">Back to Dashboard</a>`;
+          const enc  = encodeURIComponent(stem);
+          const enrollBtn  = evt.job_type === 'transcription' ? `<a href="/transcribe/jobs/{{ job.id }}/enroll" class="btn btn-secondary">Name speakers</a>` : '';
+          const summaryBtn = evt.summary_path ? `<a href="/transcripts/${enc}/summary" class="btn btn-secondary">View Summary</a>` : '';
+          actions.innerHTML = `<a href="/transcripts/${enc}" class="btn btn-primary">View transcript</a>${enrollBtn}${summaryBtn}<a href="/" class="btn btn-secondary">← Dashboard</a>`;
         }
       } else if (evt.status === 'failed') {
-        if (progressBar) progressBar.classList.replace('bg-green-500', 'bg-red-400');
+        if (progressBar) { progressBar.style.background = 'var(--color-signal-rose)'; progressBar.style.boxShadow = 'none'; }
         if (stepLabel) stepLabel.textContent = 'Failed';
-        if (progressEta)  progressEta.textContent  = '';
-        if (progressRate) progressRate.textContent = '';
         const msg = evt.error === 'Cancelled' ? 'Job was cancelled.' : `<strong>Error:</strong> ${evt.error || 'Unknown error'}`;
-        actions.innerHTML = `
-          <div class="rounded-md bg-red-50 border border-red-200 p-4 w-full">
-            <p class="text-sm text-red-800">${msg}</p>
-          </div>
-          <a href="/" class="btn-secondary">Back to Dashboard</a>`;
+        actions.innerHTML = `<div style="padding:12px 14px;background:#e88b8b15;border:1px solid #e88b8b40;border-radius:4px;font-size:12.5px;color:var(--color-signal-rose);width:100%">${msg}</div><a href="/" class="btn btn-secondary">← Dashboard</a>`;
       }
     }
   };
 
-  es.onerror = function() { es.close(); stopEstimatingTicker(); };
+  es.onerror = function() { es.close(); };
 
-  // ── Estimated progress ticker ─────────────────────────────────────────────
-  // When no tqdm data arrives for a step, animate the bar slowly within its
-  // slice to give visual feedback. Updates every 5 s; never exceeds 90% of
-  // the current step's slice (leaves room for real data to take over).
-  // Stopped on any terminal state (done event or SSE error) so it can't
-  // overwrite the final label or creep the bar forward.
+  // Estimated progress tick
   let lastRealUpdate = Date.now();
-  let estimating = false;
-  const ESTIMATING_TAG = ' (estimating…)';
-
-  es.addEventListener('message', function() { lastRealUpdate = Date.now(); estimating = false; });
-
-  let estimatingTicker = setInterval(function() {
-    if (activeIdx < 0) return;
-    const now = Date.now();
-    if (now - lastRealUpdate < 5000) return;  // real data is fresh
-    const current = parseFloat(progressBar ? progressBar.style.width : '0') || 0;
-    const sliceEnd = (activeIdx + 1) * sliceWidth * 0.90;  // 90% cap within slice
-    if (current < sliceEnd) {
-      // Creep forward by ~1% every 5 s
-      const next = Math.min(current + 1, sliceEnd);
-      setBar(next);
-      // Only add the tag once — earlier this used a wrong sentinel ('~') and
-      // appended " (estimating…)" on every tick, producing "Failed (estimating)
-      // (estimating) (estimating)…" after a job ended.
-      if (stepLabel && !estimating) {
-        stepLabel.textContent = stepLabel.textContent.replace(ESTIMATING_TAG, '') + ESTIMATING_TAG;
-        estimating = true;
-      }
-    }
+  es.addEventListener('message', function() { lastRealUpdate = Date.now(); });
+  setInterval(function() {
+    if (activeIdx < 0 || Date.now() - lastRealUpdate < 5000) return;
+    const cur = parseFloat(progressBar?.style.width || '0') || 0;
+    const cap = (activeIdx + 1) * sliceWidth * 0.9;
+    if (cur < cap) setBar(Math.min(cur + 1, cap));
   }, 5000);
-
-  function stopEstimatingTicker() {
-    if (estimatingTicker) {
-      clearInterval(estimatingTicker);
-      estimatingTicker = null;
-    }
-    activeIdx = -1;
-    // Strip any leftover " (estimating…)" tag from the final label
-    if (stepLabel) stepLabel.textContent = stepLabel.textContent.replace(ESTIMATING_TAG, '');
-  }
 
 })();
 </script>

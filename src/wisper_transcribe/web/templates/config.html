@@ -1,196 +1,291 @@
 {% extends "base.html" %}
+{% from "partials/icons.html" import icon %}
 {% block title %}Config{% endblock %}
 
-{% block content %}
-<div class="max-w-2xl space-y-6">
-
+{% block toolbar %}
+<div class="toolbar">
   <div>
-    <h1 class="text-2xl font-bold text-gray-900">Configuration</h1>
-    <p class="mt-1 text-sm text-gray-500">
-      Settings are saved to <code class="text-xs bg-gray-100 px-1 py-0.5 rounded">{{ config_path }}</code>
-    </p>
+    <div class="toolbar-kicker">Config</div>
+    <div style="display:flex;align-items:baseline;gap:12px">
+      <span class="toolbar-title">System</span>
+      <span class="toolbar-sub">{{ config_path }}</span>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block page %}
+{%- set section_tab = request.query_params.get('section', 'transcription') -%}
+<div style="flex:1;display:grid;grid-template-columns:220px 1fr;overflow:hidden;height:100%">
+
+  <!-- Section nav -->
+  <div style="padding:20px 14px;border-right:1px solid var(--color-rule);background:var(--color-ink-900);overflow-y:auto">
+    <div class="mono-kicker" style="padding:0 4px 12px">Sections</div>
+    {% for sec, label in [('transcription','Transcription'),('llm','LLM'),('discord','Discord'),('storage','Storage'),('about','About')] %}
+    <a href="/config?section={{ sec }}"
+       style="display:block;padding:8px 12px;border-radius:6px;margin-bottom:2px;font-family:var(--font-serif);
+              font-style:{% if sec == section_tab %}italic{% else %}normal{% endif %};font-size:15px;
+              color:{% if sec == section_tab %}var(--color-paper){% else %}var(--color-paper-dim){% endif %};
+              background:{% if sec == section_tab %}var(--color-ink-700){% else %}transparent{% endif %};
+              border-left:2px solid {% if sec == section_tab %}var(--color-accent){% else %}transparent{% endif %};
+              padding-left:{% if sec == section_tab %}10px{% else %}12px{% endif %};
+              text-decoration:none">{{ label }}</a>
+    {% endfor %}
   </div>
 
-  {% if saved %}
-  <div class="rounded-md bg-green-50 border border-green-200 p-4">
-    <p class="text-sm text-green-800">✓ Configuration saved.</p>
-  </div>
-  {% endif %}
+  <!-- Content -->
+  <div style="overflow-y:auto;padding:32px 36px">
 
-  <form method="post" action="/config" class="space-y-6">
+    {% if saved %}
+    <div style="padding:12px 14px;background:#7bd88f12;border:1px solid #7bd88f30;border-radius:4px;font-size:12.5px;color:var(--color-signal-green);margin-bottom:24px">✓ Configuration saved.</div>
+    {% endif %}
 
-    <div class="card space-y-4">
-      <h2 class="text-base font-semibold text-gray-900">Model & Processing</h2>
-      {% for key, type_, desc, choices in fields %}
-      {% if key not in ("hf_token",) %}
-      <div>
-        <label class="form-label" for="cfg_{{ key }}">{{ key }} <span class="text-gray-400 font-normal text-xs">— {{ desc }}</span></label>
-        {% if type_ == "bool" %}
-          <input type="checkbox" id="cfg_{{ key }}" name="{{ key }}" value="1"
-                 {% if config.get(key) %}checked{% endif %}
-                 class="rounded text-indigo-600"/>
-        {% elif choices %}
-          <select id="cfg_{{ key }}" name="{{ key }}" class="form-input">
-            {% for c in choices %}
-            <option value="{{ c }}" {% if config.get(key) == c %}selected{% endif %}>{{ c }}</option>
-            {% endfor %}
-          </select>
-        {% else %}
-          <input type="text" id="cfg_{{ key }}" name="{{ key }}"
-                 value="{{ config.get(key, '') }}"
-                 class="form-input"/>
-        {% endif %}
+    <form method="post" action="/config?section={{ section_tab }}">
+
+    <!-- ── Transcription ── -->
+    <div id="section-transcription" style="display:{% if section_tab == 'transcription' %}block{% else %}none{% endif %}">
+    <div class="section-head"><div class="section-head-left"><span class="section-kicker">Transcription</span><h2 class="section-title">Whisper &amp; pyannote</h2></div></div>
+    <div style="border-top:1px solid var(--color-rule)">
+      {% for key, type, desc, options in fields %}
+      <div style="display:grid;grid-template-columns:1fr auto;gap:24px;padding:18px 0;border-bottom:1px solid var(--color-rule);align-items:center">
+        <div>
+          <div style="font-family:var(--font-serif);font-size:16px;color:var(--color-paper)">{{ desc }}</div>
+          <div style="font-size:12px;color:var(--color-paper-faint);margin-top:4px;font-family:var(--font-mono)">{{ key }}</div>
+        </div>
+        <div>
+          {% if type == 'secret' %}
+            {% if config.get(key) %}
+            <span style="font-family:var(--font-mono);font-size:12px;color:var(--color-signal-green)">✓ set</span>
+            {% else %}
+            <input type="text" name="{{ key }}" placeholder="paste token here"
+                   style="background:var(--color-ink-700);border:1px solid var(--color-rule-strong);color:var(--color-paper);padding:6px 10px;border-radius:4px;font-size:12px;font-family:var(--font-mono);width:240px"/>
+            {% endif %}
+          {% elif type == 'bool' %}
+            <select name="{{ key }}" style="background:var(--color-ink-700);border:1px solid var(--color-rule-strong);color:var(--color-paper);padding:6px 10px;border-radius:4px;font-size:12px;font-family:var(--font-mono)">
+              <option value="true"  {% if config.get(key) %}selected{% endif %}>On</option>
+              <option value="false" {% if not config.get(key) %}selected{% endif %}>Off</option>
+            </select>
+          {% elif options %}
+            <select name="{{ key }}" style="background:var(--color-ink-700);border:1px solid var(--color-rule-strong);color:var(--color-paper);padding:6px 10px;border-radius:4px;font-size:12px;font-family:var(--font-mono)">
+              {% for opt in options %}
+              <option value="{{ opt }}" {% if config.get(key) == opt %}selected{% endif %}>{{ opt }}</option>
+              {% endfor %}
+            </select>
+          {% else %}
+            <input type="text" name="{{ key }}" value="{{ config.get(key, '') }}"
+                   style="background:var(--color-ink-700);border:1px solid var(--color-rule-strong);color:var(--color-paper);padding:6px 10px;border-radius:4px;font-size:12px;font-family:var(--font-mono);width:200px"/>
+          {% endif %}
+        </div>
       </div>
-      {% endif %}
       {% endfor %}
     </div>
-
-    <div class="card space-y-4">
-      <h2 class="text-base font-semibold text-gray-900">HuggingFace Token</h2>
-      <p class="text-xs text-gray-500">Required for speaker diarization. Get a free token at <strong>huggingface.co</strong>.</p>
-      <div>
-        <label class="form-label" for="cfg_hf_token">hf_token</label>
-        <input type="password" id="cfg_hf_token" name="hf_token"
-               value="{{ config.get('hf_token', '') }}"
-               class="form-input font-mono text-sm"
-               placeholder="hf_…"/>
-      </div>
     </div>
 
-    <!-- Discord Recording Bot -->
-    <div class="card space-y-4">
-      <h2 class="text-base font-semibold text-gray-900">Discord Recording Bot</h2>
-      <p class="text-xs text-gray-500">Get your bot token from <strong>discord.com/developers/applications</strong>. Env var <code>DISCORD_BOT_TOKEN</code> takes precedence.</p>
-      <div>
-        <label class="form-label" for="cfg_discord_bot_token">discord_bot_token</label>
-        <input type="password" id="cfg_discord_bot_token" name="discord_bot_token"
-               class="form-input font-mono text-sm"
-               placeholder="{% if config.get('discord_bot_token', '') %}***set*** (leave blank to keep){% else %}Bot token…{% endif %}"/>
-      </div>
-      <div>
-        <label class="form-label" for="cfg_discord_default_guild">discord_default_guild <span class="text-gray-400 font-normal text-xs">— Default guild (server) ID</span></label>
-        <input type="text" id="cfg_discord_default_guild" name="discord_default_guild"
-               value="{{ config.get('discord_default_guild', '') }}"
-               class="form-input font-mono text-sm"
-               placeholder="e.g. 123456789012345678"/>
-      </div>
-      <div>
-        <label class="form-label" for="cfg_discord_default_channel">discord_default_channel <span class="text-gray-400 font-normal text-xs">— Default voice channel ID</span></label>
-        <input type="text" id="cfg_discord_default_channel" name="discord_default_channel"
-               value="{{ config.get('discord_default_channel', '') }}"
-               class="form-input font-mono text-sm"
-               placeholder="e.g. 987654321098765432"/>
-      </div>
-
-      <!-- Presets -->
-      <div id="preset-manager" class="space-y-3">
-        <div class="flex items-center justify-between">
-          <h3 class="text-sm font-semibold text-gray-700">Saved Channel Presets</h3>
-          <button type="button" onclick="addPresetRow()" class="text-xs text-indigo-600 hover:underline">+ Add Preset</button>
-        </div>
-        <p class="text-xs text-gray-400">Quick-select options for the record page and CLI.</p>
-        <div id="preset-rows" class="space-y-2">
-        </div>
-        <p id="preset-empty-msg" class="text-xs text-gray-400 italic hidden">No presets saved yet.</p>
-      </div>
-    </div>
-
-    <!-- LLM Post-processing -->
-    <div class="card space-y-4">
-      <div>
-        <h2 class="text-base font-semibold text-gray-900">LLM Post-processing</h2>
-        <p class="text-xs text-gray-500 mt-1">Used by <em>Refine</em> and <em>Summarize</em>. Ollama and LM Studio run locally; cloud providers require an API key.</p>
-      </div>
+    <!-- ── LLM ── -->
+    <div id="section-llm" style="display:{% if section_tab == 'llm' %}block{% else %}none{% endif %}">
+    <div class="section-head"><div class="section-head-left"><span class="section-kicker">LLM</span><h2 class="section-title">Refine &amp; summarize</h2></div></div>
+    <p style="font-family:var(--font-serif);font-style:italic;color:var(--color-paper-dim);font-size:14.5px;max-width:620px;margin-top:0;line-height:1.55">
+      Used for vocabulary correction, speaker ID, session recap and DM notes. Ollama and LM Studio run locally; cloud providers require an API key.
+    </p>
+    <div style="border-top:1px solid var(--color-rule)">
 
       <!-- Provider -->
-      <div>
-        <label class="form-label" for="cfg_llm_provider">llm_provider <span class="text-gray-400 font-normal text-xs">— LLM provider</span></label>
-        <select id="cfg_llm_provider" name="llm_provider" class="form-input" onchange="llmProviderChanged(this.value)">
+      <div style="display:grid;grid-template-columns:1fr auto;gap:24px;padding:14px 0;border-bottom:1px solid var(--color-rule);align-items:center">
+        <div style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper)">LLM provider</div>
+        <select id="cfg_llm_provider" name="llm_provider" onchange="llmProviderChanged(this.value)"
+                style="background:var(--color-ink-700);border:1px solid var(--color-rule-strong);color:var(--color-paper);padding:6px 10px;border-radius:4px;font-size:12px;font-family:var(--font-mono)">
           {% for p in ["ollama", "ollama-cloud", "lmstudio", "anthropic", "openai", "google"] %}
           <option value="{{ p }}" {% if config.get('llm_provider', 'ollama') == p %}selected{% endif %}>{{ p }}</option>
           {% endfor %}
         </select>
       </div>
 
-      <!-- Model (combobox: free text + discovered-models dropdown) -->
-      <div>
-        <label class="form-label" for="cfg_llm_model">llm_model <span class="text-gray-400 font-normal text-xs">— Model name (blank = default)</span></label>
-        <div class="relative">
+      <!-- Model combobox -->
+      <div style="padding:14px 0;border-bottom:1px solid var(--color-rule)">
+        <div style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper);margin-bottom:8px">
+          Model <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint)">(blank = provider default)</span>
+        </div>
+        <div style="position:relative;display:inline-block;width:100%;max-width:360px">
           <input type="text" id="cfg_llm_model" name="llm_model"
                  value="{{ config.get('llm_model', '') }}"
                  autocomplete="off"
-                 class="form-input font-mono text-sm pr-10"
-                 placeholder="e.g. llama3.1:8b, claude-sonnet-4-6, gpt-4o-mini"/>
-          <button type="button" id="llm_model_toggle"
-                  class="hidden absolute inset-y-0 right-0 px-2 text-gray-400 hover:text-gray-600"
-                  aria-label="Show discovered models">▼</button>
-          <ul id="llm_model_menu"
-              role="listbox"
-              class="hidden absolute z-10 mt-1 w-full max-h-60 overflow-auto rounded-md bg-white shadow-lg ring-1 ring-black ring-opacity-5 text-sm font-mono">
+                 placeholder="e.g. llama3.1:8b, gpt-4o-mini"
+                 style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule-strong);color:var(--color-paper);padding:6px 32px 6px 10px;border-radius:4px;font-size:12px;font-family:var(--font-mono);box-sizing:border-box"/>
+          <button type="button" id="llm_model_toggle" aria-label="Show discovered models"
+                  style="display:none;position:absolute;inset-y:0;right:0;padding:0 8px;background:none;border:none;color:var(--color-paper-faint);cursor:pointer;font-size:10px">▼</button>
+          <ul id="llm_model_menu" role="listbox"
+              style="display:none;position:absolute;z-index:20;top:100%;left:0;width:100%;max-height:240px;overflow-y:auto;
+                     background:var(--color-ink-700);border:1px solid var(--color-rule-strong);border-radius:4px;
+                     margin-top:2px;padding:0;list-style:none;font-family:var(--font-mono);font-size:12px;box-shadow:0 8px 24px #00000060">
           </ul>
         </div>
-        <div id="llm_local_status_row" class="hidden mt-1 flex items-center gap-3">
-          <span id="llm_local_status_line" class="text-xs text-gray-500"></span>
+        <div id="llm_local_status_row" style="display:none;margin-top:6px;align-items:center;gap:10px">
+          <span id="llm_local_status_line" style="font-size:11px;color:var(--color-paper-faint)"></span>
           <button type="button" onclick="loadLocalProviderStatus()"
-                  class="text-xs text-indigo-600 hover:underline">↻ Refresh</button>
+                  style="font-size:11px;color:var(--color-accent);background:none;border:none;cursor:pointer;padding:0;font-family:var(--font-mono)">↻ Refresh</button>
         </div>
       </div>
 
-      <!-- Endpoint (Ollama / LM Studio only) -->
-      <div id="llm_endpoint_row">
-        <label class="form-label" for="cfg_llm_endpoint">llm_endpoint <span class="text-gray-400 font-normal text-xs">— Local server URL</span></label>
+      <!-- Endpoint (local providers only) -->
+      <div id="llm_endpoint_row" style="display:grid;grid-template-columns:1fr auto;gap:24px;padding:14px 0;border-bottom:1px solid var(--color-rule);align-items:center">
+        <div>
+          <div style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper)">Endpoint URL</div>
+          <div style="font-size:11px;color:var(--color-paper-faint);margin-top:3px;font-family:var(--font-mono)">llm_endpoint</div>
+        </div>
         <input type="text" id="cfg_llm_endpoint" name="llm_endpoint"
                value="{{ config.get('llm_endpoint', 'http://localhost:11434') }}"
-               class="form-input font-mono text-sm"
-               placeholder="http://localhost:11434"/>
+               placeholder="http://localhost:11434"
+               style="background:var(--color-ink-700);border:1px solid var(--color-rule-strong);color:var(--color-paper);padding:6px 10px;border-radius:4px;font-size:12px;font-family:var(--font-mono);width:240px"/>
       </div>
 
       <!-- Temperature -->
-      <div>
-        <label class="form-label" for="cfg_llm_temperature">llm_temperature <span class="text-gray-400 font-normal text-xs">— Sampling temperature (0–1)</span></label>
+      <div style="display:grid;grid-template-columns:1fr auto;gap:24px;padding:14px 0;border-bottom:1px solid var(--color-rule);align-items:center">
+        <div style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper)">Temperature
+          <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint);margin-left:8px">llm_temperature</span>
+        </div>
         <input type="number" id="cfg_llm_temperature" name="llm_temperature"
                value="{{ config.get('llm_temperature', 0.2) }}"
                step="0.05" min="0" max="1"
-               class="form-input w-32"/>
+               style="background:var(--color-ink-700);border:1px solid var(--color-rule-strong);color:var(--color-paper);padding:6px 10px;border-radius:4px;font-size:12px;font-family:var(--font-mono);width:100px"/>
       </div>
 
-      <!-- Cloud API keys -->
-      <div id="llm_anthropic_row" class="hidden">
-        <label class="form-label" for="cfg_anthropic_api_key">anthropic_api_key <span class="text-gray-400 font-normal text-xs">— Anthropic API key (env <code>ANTHROPIC_API_KEY</code> takes precedence)</span></label>
+      <!-- Anthropic API key -->
+      <div id="llm_anthropic_row" style="display:none;padding:14px 0;border-bottom:1px solid var(--color-rule)">
+        <div style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper);margin-bottom:6px">
+          Anthropic API key
+          <span style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-left:8px">env ANTHROPIC_API_KEY takes precedence</span>
+        </div>
+        {% if config.get('anthropic_api_key') %}<div style="font-family:var(--font-mono);font-size:12px;color:var(--color-signal-green);margin-bottom:6px">✓ key saved</div>{% endif %}
         <input type="password" id="cfg_anthropic_api_key" name="anthropic_api_key"
-               class="form-input font-mono text-sm"
-               placeholder="sk-ant-… (leave blank to keep existing)"/>
+               placeholder="sk-ant-… (leave blank to keep existing)"
+               style="width:100%;max-width:360px;background:var(--color-ink-700);border:1px solid var(--color-rule-strong);color:var(--color-paper);padding:6px 10px;border-radius:4px;font-size:12px;font-family:var(--font-mono);box-sizing:border-box"/>
       </div>
 
-      <div id="llm_openai_row" class="hidden">
-        <label class="form-label" for="cfg_openai_api_key">openai_api_key <span class="text-gray-400 font-normal text-xs">— OpenAI API key (env <code>OPENAI_API_KEY</code> takes precedence)</span></label>
+      <!-- OpenAI API key -->
+      <div id="llm_openai_row" style="display:none;padding:14px 0;border-bottom:1px solid var(--color-rule)">
+        <div style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper);margin-bottom:6px">
+          OpenAI API key
+          <span style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-left:8px">env OPENAI_API_KEY takes precedence</span>
+        </div>
+        {% if config.get('openai_api_key') %}<div style="font-family:var(--font-mono);font-size:12px;color:var(--color-signal-green);margin-bottom:6px">✓ key saved</div>{% endif %}
         <input type="password" id="cfg_openai_api_key" name="openai_api_key"
-               class="form-input font-mono text-sm"
-               placeholder="sk-… (leave blank to keep existing)"/>
+               placeholder="sk-… (leave blank to keep existing)"
+               style="width:100%;max-width:360px;background:var(--color-ink-700);border:1px solid var(--color-rule-strong);color:var(--color-paper);padding:6px 10px;border-radius:4px;font-size:12px;font-family:var(--font-mono);box-sizing:border-box"/>
       </div>
 
-      <div id="llm_google_row" class="hidden">
-        <label class="form-label" for="cfg_google_api_key">google_api_key <span class="text-gray-400 font-normal text-xs">— Google API key (env <code>GOOGLE_API_KEY</code> takes precedence)</span></label>
+      <!-- Google API key -->
+      <div id="llm_google_row" style="display:none;padding:14px 0;border-bottom:1px solid var(--color-rule)">
+        <div style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper);margin-bottom:6px">
+          Google API key
+          <span style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-left:8px">env GOOGLE_API_KEY takes precedence</span>
+        </div>
+        {% if config.get('google_api_key') %}<div style="font-family:var(--font-mono);font-size:12px;color:var(--color-signal-green);margin-bottom:6px">✓ key saved</div>{% endif %}
         <input type="password" id="cfg_google_api_key" name="google_api_key"
-               class="form-input font-mono text-sm"
-               placeholder="AIza… (leave blank to keep existing)"/>
+               placeholder="AIza… (leave blank to keep existing)"
+               style="width:100%;max-width:360px;background:var(--color-ink-700);border:1px solid var(--color-rule-strong);color:var(--color-paper);padding:6px 10px;border-radius:4px;font-size:12px;font-family:var(--font-mono);box-sizing:border-box"/>
       </div>
 
-      <div id="llm_ollama_cloud_row" class="hidden">
-        <label class="form-label" for="cfg_ollama_cloud_api_key">ollama_cloud_api_key <span class="text-gray-400 font-normal text-xs">— Ollama Cloud API key (env <code>OLLAMA_API_KEY</code> takes precedence). Get one at <strong>ollama.com/settings/keys</strong>.</span></label>
+      <!-- Ollama Cloud API key -->
+      <div id="llm_ollama_cloud_row" style="display:none;padding:14px 0;border-bottom:1px solid var(--color-rule)">
+        <div style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper);margin-bottom:4px">
+          Ollama Cloud API key
+          <span style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-left:8px">env OLLAMA_API_KEY takes precedence</span>
+        </div>
+        <div style="font-size:11px;color:var(--color-paper-faint);margin-bottom:6px">Get one at <strong>ollama.com/settings/keys</strong>. Note: model discovery uses the public catalog and works without a key — you still need to save a key for actual refine/summarize calls.</div>
+        {% if config.get('ollama_cloud_api_key') %}<div style="font-family:var(--font-mono);font-size:12px;color:var(--color-signal-green);margin-bottom:6px">✓ key saved</div>{% endif %}
         <input type="password" id="cfg_ollama_cloud_api_key" name="ollama_cloud_api_key"
-               class="form-input font-mono text-sm"
-               placeholder="(leave blank to keep existing)"/>
+               placeholder="(leave blank to keep existing)"
+               style="width:100%;max-width:360px;background:var(--color-ink-700);border:1px solid var(--color-rule-strong);color:var(--color-paper);padding:6px 10px;border-radius:4px;font-size:12px;font-family:var(--font-mono);box-sizing:border-box"/>
+      </div>
+
+    </div>
+    </div>
+
+    <!-- ── Discord ── -->
+    <div id="section-discord" style="display:{% if section_tab == 'discord' %}block{% else %}none{% endif %}">
+    <div class="section-head"><div class="section-head-left"><span class="section-kicker">Discord</span><h2 class="section-title">Recording bot</h2></div></div>
+    <div style="border-top:1px solid var(--color-rule)">
+      {% for key, type, desc, _ in discord_fields %}
+      <div style="display:grid;grid-template-columns:1fr auto;gap:24px;padding:14px 0;border-bottom:1px solid var(--color-rule);align-items:center">
+        <div style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper)">{{ desc }}</div>
+        <div>
+          {% if type == 'secret' %}
+            {% if config.get(key) %}
+            <span style="font-family:var(--font-mono);font-size:12px;color:var(--color-signal-green)">✓ set</span>
+            {% else %}
+            <input type="text" name="{{ key }}" placeholder="paste token"
+                   style="background:var(--color-ink-700);border:1px solid var(--color-rule-strong);color:var(--color-paper);padding:6px 10px;border-radius:4px;font-size:12px;font-family:var(--font-mono);width:220px"/>
+            {% endif %}
+          {% else %}
+            <input type="text" name="{{ key }}" value="{{ config.get(key, '') }}"
+                   style="background:var(--color-ink-700);border:1px solid var(--color-rule-strong);color:var(--color-paper);padding:6px 10px;border-radius:4px;font-size:12px;font-family:var(--font-mono);width:220px"/>
+          {% endif %}
+        </div>
+      </div>
+      {% endfor %}
+
+      <!-- Preset manager -->
+      <div style="margin-top:24px">
+        <div class="section-head">
+          <div class="section-head-left"><span class="section-kicker">Quick-connect</span><h2 class="section-title">Presets</h2></div>
+          <button type="button" onclick="addPresetRow()" class="btn btn-secondary btn-sm">+ Add preset</button>
+        </div>
+        <div id="preset-rows" style="display:flex;flex-direction:column;gap:8px"></div>
+        <p id="preset-empty-msg" style="font-size:12px;color:var(--color-paper-faint);font-style:italic;margin:8px 0 0"></p>
       </div>
     </div>
-
-    <div class="flex gap-4">
-      <button type="submit" class="btn-primary">Save Configuration</button>
-      <a href="/" class="btn-secondary">Cancel</a>
     </div>
 
-  </form>
+    <!-- ── Storage ── -->
+    <div id="section-storage" style="display:{% if section_tab == 'storage' %}block{% else %}none{% endif %}">
+    <div class="section-head"><div class="section-head-left"><span class="section-kicker">Storage</span><h2 class="section-title">Files &amp; paths</h2></div></div>
+    <div style="border-top:1px solid var(--color-rule)">
+      <div style="padding:14px 0;border-bottom:1px solid var(--color-rule)">
+        <div style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper)">Config file</div>
+        <div style="font-family:var(--font-mono);font-size:12px;color:var(--color-paper-dim);margin-top:6px">{{ config_path }}</div>
+      </div>
+      <div style="padding:14px 0;border-bottom:1px solid var(--color-rule)">
+        <div style="display:flex;align-items:baseline;justify-content:space-between">
+          <div style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper)">Data directory</div>
+          <button type="button" onclick="wisperOpenDataDir()"
+                  style="font-family:var(--font-mono);font-size:10px;color:var(--color-accent);background:none;border:none;cursor:pointer;padding:0;letter-spacing:0.05em">
+            Open in Finder →
+          </button>
+        </div>
+        <div style="font-family:var(--font-mono);font-size:12px;color:var(--color-paper-dim);margin-top:6px">{{ config.get('data_dir', '—') }}</div>
+      </div>
+    </div>
+    </div>
 
+    <!-- ── About ── -->
+    <div id="section-about" style="display:{% if section_tab == 'about' %}block{% else %}none{% endif %}">
+    <div class="section-head"><div class="section-head-left"><span class="section-kicker">About</span><h2 class="section-title">wisper-transcribe</h2></div></div>
+    <div style="display:flex;align-items:center;gap:18px;padding:20px 0;border-top:1px solid var(--color-rule);border-bottom:1px solid var(--color-rule);margin-bottom:24px">
+      <img src="/static/logo.png" width="72" height="72" style="border-radius:12px;flex-shrink:0" alt="wisper"/>
+      <div>
+        <div style="font-family:var(--font-serif);font-style:italic;font-size:28px;color:var(--color-paper)">wisper</div>
+        <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint);letter-spacing:0.1em;margin-top:6px">v{{ app_version }} · LOCAL-FIRST TTRPG TRANSCRIPTION</div>
+        <div style="font-family:var(--font-serif);font-style:italic;font-size:14px;color:var(--color-paper-dim);margin-top:8px;max-width:480px">Local podcast transcription with automatic speaker identification.</div>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:28px">
+      <div>
+        <div class="mono-kicker" style="margin-bottom:10px">Links</div>
+        <a href="/transcripts" style="display:block;padding:7px 0;font-size:13px;color:var(--color-accent);font-family:var(--font-serif);font-style:italic">Transcripts archive →</a>
+        <a href="/speakers" style="display:block;padding:7px 0;font-size:13px;color:var(--color-accent);font-family:var(--font-serif);font-style:italic">Speaker profiles →</a>
+        <a href="/campaigns" style="display:block;padding:7px 0;font-size:13px;color:var(--color-accent);font-family:var(--font-serif);font-style:italic">Campaigns →</a>
+      </div>
+    </div>
+    </div>
+
+    {% if section_tab not in ('storage', 'about') %}
+    <div style="margin-top:28px">
+      <button type="submit" class="btn btn-primary">Save settings</button>
+    </div>
+    {% endif %}
+
+    </form>
+  </div>
 </div>
 
 <script>
@@ -198,7 +293,7 @@ const _PROVIDERS = {
   ollama: {
     label: 'Ollama', kind: 'local', method: 'GET',
     endpoint: '/config/ollama-status',
-    cloudOverlay: '/config/ollama-cloud-catalog',  // also list cloud models with -cloud suffix
+    cloudOverlay: '/config/ollama-cloud-catalog',
     cloudSuffix: '-cloud',
     defaultEndpoint: 'http://localhost:11434',
     emptyHint: 'No models installed. Run: ollama pull <model>',
@@ -236,7 +331,6 @@ const _PROVIDERS = {
   },
 };
 
-// Discovered-model combobox state
 let _modelOptions = [];
 
 function _modelMenuEl()   { return document.getElementById('llm_model_menu'); }
@@ -244,26 +338,26 @@ function _modelToggleEl() { return document.getElementById('llm_model_toggle'); 
 function _modelInputEl()  { return document.getElementById('cfg_llm_model'); }
 
 function _renderModelMenu(filter) {
-  const menu = _modelMenuEl();
-  menu.replaceChildren();
-  const needle = (filter || '').toLowerCase();
-  const matches = _modelOptions.filter(m => !needle || m.name.toLowerCase().includes(needle));
+  var menu = _modelMenuEl();
+  menu.innerHTML = '';
+  var needle = (filter || '').toLowerCase();
+  var matches = _modelOptions.filter(function(m) { return !needle || m.name.toLowerCase().indexOf(needle) !== -1; });
   if (matches.length === 0) {
-    const li = document.createElement('li');
-    li.className = 'px-3 py-2 text-gray-400 italic';
+    var li = document.createElement('li');
+    li.style.cssText = 'padding:8px 12px;color:var(--color-paper-faint);font-style:italic';
     li.textContent = _modelOptions.length === 0 ? 'No discovered models yet' : 'No matches';
     menu.appendChild(li);
     return;
   }
-  matches.forEach(m => {
-    const li = document.createElement('li');
-    li.className = 'px-3 py-2 cursor-pointer hover:bg-indigo-50';
+  matches.forEach(function(m) {
+    var li = document.createElement('li');
+    li.style.cssText = 'padding:8px 12px;cursor:pointer;color:var(--color-paper)';
     li.setAttribute('role', 'option');
     li.dataset.value = m.name;
-    // Use textContent to prevent XSS from provider-returned model names
     li.textContent = m.size ? (m.name + ' (' + m.size + ')') : m.name;
+    li.addEventListener('mouseover', function() { li.style.background = 'var(--color-ink-600)'; });
+    li.addEventListener('mouseout',  function() { li.style.background = ''; });
     li.addEventListener('mousedown', function(e) {
-      // mousedown (not click) so input blur doesn't close the menu before selection lands
       e.preventDefault();
       _modelInputEl().value = m.name;
       _closeModelMenu();
@@ -275,189 +369,155 @@ function _renderModelMenu(filter) {
 function _openModelMenu() {
   if (_modelOptions.length === 0) return;
   _renderModelMenu(_modelInputEl().value);
-  _modelMenuEl().classList.remove('hidden');
+  _modelMenuEl().style.display = 'block';
 }
-function _closeModelMenu() { _modelMenuEl().classList.add('hidden'); }
+function _closeModelMenu() { _modelMenuEl().style.display = 'none'; }
 function _toggleModelMenu() {
-  if (_modelMenuEl().classList.contains('hidden')) _openModelMenu(); else _closeModelMenu();
+  if (_modelMenuEl().style.display !== 'block') _openModelMenu(); else _closeModelMenu();
 }
 
 function _setDiscoveredModels(models) {
   _modelOptions = models || [];
-  _modelToggleEl().classList.toggle('hidden', _modelOptions.length === 0);
-  // Keep menu in sync if it's currently open
-  if (!_modelMenuEl().classList.contains('hidden')) _renderModelMenu(_modelInputEl().value);
+  _modelToggleEl().style.display = _modelOptions.length === 0 ? 'none' : 'block';
+  if (_modelMenuEl().style.display === 'block') _renderModelMenu(_modelInputEl().value);
 }
 
-// Wire combobox interactions once
 (function _initModelCombobox() {
-  const input = _modelInputEl();
-  const toggle = _modelToggleEl();
+  var input = _modelInputEl();
+  if (!input) return;
+  var toggle = _modelToggleEl();
   input.addEventListener('focus', _openModelMenu);
-  input.addEventListener('input', function() { _openModelMenu(); });
-  input.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape') _closeModelMenu();
-  });
-  toggle.addEventListener('click', function(e) {
-    e.preventDefault();
-    input.focus();
-    _toggleModelMenu();
-  });
+  input.addEventListener('input', _openModelMenu);
+  input.addEventListener('keydown', function(e) { if (e.key === 'Escape') _closeModelMenu(); });
+  toggle.addEventListener('click', function(e) { e.preventDefault(); input.focus(); _toggleModelMenu(); });
   document.addEventListener('click', function(e) {
-    if (!e.target.closest('#llm_model_menu') &&
-        e.target !== input &&
-        e.target !== toggle) {
-      _closeModelMenu();
-    }
+    if (!e.target.closest('#llm_model_menu') && e.target !== input && e.target !== toggle) _closeModelMenu();
   });
 })();
 
 async function _fetchProvider(cfg) {
   if (cfg.method === 'POST') {
-    const body = new FormData();
-    const keyInput = cfg.keyField ? document.getElementById(cfg.keyField) : null;
+    var body = new FormData();
+    var keyInput = cfg.keyField ? document.getElementById(cfg.keyField) : null;
     if (keyInput && keyInput.value) body.append('api_key', keyInput.value);
-    return await fetch(cfg.endpoint, { method: 'POST', body });
+    return await fetch(cfg.endpoint, { method: 'POST', body: body });
   }
   return await fetch(cfg.endpoint);
 }
 
 async function loadLocalProviderStatus() {
-  const provider = document.getElementById('cfg_llm_provider').value;
-  const cfg = _PROVIDERS[provider];
+  var provider = document.getElementById('cfg_llm_provider').value;
+  var cfg = _PROVIDERS[provider];
   if (!cfg) return;
 
-  const statusLine = document.getElementById('llm_local_status_line');
-  const modelInput = _modelInputEl();
-
+  var statusLine = document.getElementById('llm_local_status_line');
+  var statusRow  = document.getElementById('llm_local_status_row');
+  statusRow.style.display = 'flex';
   statusLine.textContent = 'Checking ' + cfg.label + '…';
-  statusLine.className = 'text-xs text-gray-500';
+  statusLine.style.color = 'var(--color-paper-faint)';
   _setDiscoveredModels([]);
 
   try {
-    // Primary fetch + optional cloud-overlay fetch in parallel (Ollama provider only).
-    const tasks = [_fetchProvider(cfg).then(r => r.json())];
+    var tasks = [_fetchProvider(cfg).then(function(r) { return r.json(); })];
     if (cfg.cloudOverlay) {
-      tasks.push(fetch(cfg.cloudOverlay).then(r => r.json()).catch(() => ({running: false, models: []})));
+      tasks.push(fetch(cfg.cloudOverlay).then(function(r) { return r.json(); }).catch(function() { return {running:false,models:[]}; }));
     }
-    const results = await Promise.all(tasks);
-    const data = results[0];
-    const cloud = results[1];
-
-    // Build the merged model list
-    let merged = [];
-    let localCount = 0, cloudCount = 0;
-    if (data.running && data.models.length > 0) {
-      merged = data.models.slice();
-      localCount = merged.length;
-    }
-    if (cloud && cloud.running && cloud.models.length > 0) {
-      const suffix = cfg.cloudSuffix || '';
-      const seen = new Set(merged.map(m => m.name));
-      cloud.models.forEach(m => {
-        const tagged = { name: m.name + suffix, size: '☁ ' + (m.size || 'cloud') };
-        if (!seen.has(tagged.name)) merged.push(tagged);
+    var results = await Promise.all(tasks);
+    var data = results[0], cloud = results[1];
+    var merged = [], localCount = 0, cloudCount = 0;
+    if (data.running && data.models && data.models.length > 0) { merged = data.models.slice(); localCount = merged.length; }
+    if (cloud && cloud.running && cloud.models && cloud.models.length > 0) {
+      var suffix = cfg.cloudSuffix || '';
+      var seen = new Set(merged.map(function(m) { return m.name; }));
+      cloud.models.forEach(function(m) {
+        var t = {name: m.name + suffix, size: '☁ ' + (m.size || 'cloud')};
+        if (!seen.has(t.name)) merged.push(t);
       });
       cloudCount = cloud.models.length;
     }
-
     if (merged.length > 0) {
       _setDiscoveredModels(merged);
-      const current = modelInput.value;
-      const notFound = current && !merged.find(m => m.name === current);
-      const verb = cfg.kind === 'local' ? 'running' : (cfg.kind === 'ollama-cloud' ? 'catalog' : 'connected');
-      const counts = cloudCount > 0
-        ? (localCount + ' local + ' + cloudCount + ' cloud')
-        : (localCount + ' model' + (localCount !== 1 ? 's' : ''));
-      const hint = cloudCount > 0 ? ' · cloud models need `ollama signin`' : '';
-      statusLine.textContent = '✓ ' + cfg.label + ' ' + verb + ' · ' + counts + ' available' + hint +
+      var current = _modelInputEl().value;
+      var notFound = current && !merged.find(function(m) { return m.name === current; });
+      var verb = cfg.kind === 'local' ? 'running' : (cfg.kind === 'ollama-cloud' ? 'catalog' : 'connected');
+      var counts = cloudCount > 0 ? (localCount + ' local + ' + cloudCount + ' cloud') : (localCount + ' model' + (localCount !== 1 ? 's' : ''));
+      statusLine.textContent = '✓ ' + cfg.label + ' ' + verb + ' · ' + counts + ' available' +
+        (cloudCount > 0 ? ' · cloud models need `ollama signin`' : '') +
         (notFound ? ' · current "' + current + '"' + cfg.notFoundSuffix : '');
-      statusLine.className = 'text-xs ' + (notFound ? 'text-yellow-600' : 'text-green-600');
+      statusLine.style.color = notFound ? 'var(--color-signal-amber)' : 'var(--color-signal-green)';
     } else if (data.running) {
       statusLine.textContent = '✓ ' + cfg.label + ' running · ' + (cfg.emptyHint || 'No models returned');
-      statusLine.className = 'text-xs text-yellow-600';
+      statusLine.style.color = 'var(--color-signal-amber)';
     } else {
-      const errHint = cfg.kind === 'local' ? cfg.unreachableHint : (data.error || 'Unavailable');
-      statusLine.textContent = '✗ ' + cfg.label + ' · ' + errHint;
-      statusLine.className = 'text-xs text-red-500';
+      statusLine.textContent = '✗ ' + cfg.label + ' · ' + (cfg.kind === 'local' ? cfg.unreachableHint : (data.error || 'Unavailable'));
+      statusLine.style.color = 'var(--color-signal-rose)';
     }
-  } catch (e) {
+  } catch(e) {
     statusLine.textContent = 'Could not check ' + cfg.label + ' status';
-    statusLine.className = 'text-xs text-gray-400';
+    statusLine.style.color = 'var(--color-paper-faint)';
   }
 }
 
 function llmProviderChanged(provider) {
-  const cfg = _PROVIDERS[provider];
-  const isLocal = cfg && cfg.kind === 'local';
-  document.getElementById('llm_endpoint_row').classList.toggle('hidden', !isLocal);
-  document.getElementById('llm_anthropic_row').classList.toggle('hidden', provider !== 'anthropic');
-  document.getElementById('llm_openai_row').classList.toggle('hidden', provider !== 'openai');
-  document.getElementById('llm_google_row').classList.toggle('hidden', provider !== 'google');
-  document.getElementById('llm_ollama_cloud_row').classList.toggle('hidden', provider !== 'ollama-cloud');
-  document.getElementById('llm_local_status_row').classList.toggle('hidden', !cfg);
-  // Clear discovered models when switching providers so stale suggestions don't appear
+  var cfg = _PROVIDERS[provider];
+  var isLocal = cfg && cfg.kind === 'local';
+  function show(id, visible) { var el = document.getElementById(id); if (el) el.style.display = visible ? '' : 'none'; }
+  show('llm_endpoint_row',     isLocal);
+  show('llm_anthropic_row',    provider === 'anthropic');
+  show('llm_openai_row',       provider === 'openai');
+  show('llm_google_row',       provider === 'google');
+  show('llm_ollama_cloud_row', provider === 'ollama-cloud');
   _setDiscoveredModels([]);
   _closeModelMenu();
-  if (isLocal) {
-    document.getElementById('cfg_llm_endpoint').placeholder = cfg.defaultEndpoint;
-  }
+  if (isLocal && cfg) document.getElementById('cfg_llm_endpoint').placeholder = cfg.defaultEndpoint;
   if (cfg) loadLocalProviderStatus();
 }
 
-// Apply on page load
-llmProviderChanged(document.getElementById('cfg_llm_provider').value);
-// Re-check when endpoint URL changes (local providers only)
+(function() { var el = document.getElementById('cfg_llm_provider'); if (el) llmProviderChanged(el.value); })();
+
 document.getElementById('cfg_llm_endpoint').addEventListener('change', function() {
-  const p = _PROVIDERS[document.getElementById('cfg_llm_provider').value];
+  var p = _PROVIDERS[document.getElementById('cfg_llm_provider').value];
   if (p && p.kind === 'local') loadLocalProviderStatus();
 });
-// Re-check when an API key field is committed (blur or Enter), so typing a new key
-// then tabbing out fetches the list without requiring a manual Refresh click.
-['cfg_anthropic_api_key', 'cfg_openai_api_key', 'cfg_google_api_key', 'cfg_ollama_cloud_api_key'].forEach(function(id) {
-  const el = document.getElementById(id);
+
+['cfg_anthropic_api_key','cfg_openai_api_key','cfg_google_api_key','cfg_ollama_cloud_api_key'].forEach(function(id) {
+  var el = document.getElementById(id);
   if (!el) return;
   el.addEventListener('change', function() {
-    const p = _PROVIDERS[document.getElementById('cfg_llm_provider').value];
+    var p = _PROVIDERS[document.getElementById('cfg_llm_provider').value];
     if (p && p.keyField === id) loadLocalProviderStatus();
   });
 });
 
-// Discord preset manager (vanilla JS)
-const _presetData = {{ discord_presets | tojson }};
-const _presetRows = document.getElementById('preset-rows');
-const _emptyMsg = document.getElementById('preset-empty-msg');
+// Discord preset manager
+var _presetData = {{ discord_presets | tojson }};
+var _presetRows = document.getElementById('preset-rows');
+var _emptyMsg   = document.getElementById('preset-empty-msg');
+var _inputStyle = 'background:var(--color-ink-700);border:1px solid var(--color-rule-strong);color:var(--color-paper);padding:6px 10px;border-radius:4px;font-size:12px;font-family:var(--font-mono)';
 
-function _makePresetRow(p, idx) {
-  const row = document.createElement('div');
-  row.className = 'flex items-center gap-2';
+function _escAttr(s) { return (s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function _makePresetRow(p) {
+  var row = document.createElement('div');
+  row.style.cssText = 'display:flex;align-items:center;gap:8px';
   row.innerHTML =
-    '<input type="text" name="preset_name" value="' + _escAttr(p.name) + '" placeholder="Label (e.g. Weekly D&D)" class="form-input flex-1 text-sm"/>' +
-    '<input type="text" name="preset_guild_id" value="' + _escAttr(p.guild_id) + '" placeholder="Guild ID" class="form-input w-44 font-mono text-sm"/>' +
-    '<input type="text" name="preset_channel_id" value="' + _escAttr(p.channel_id) + '" placeholder="Channel ID" class="form-input w-44 font-mono text-sm"/>' +
-    '<button type="button" onclick="this.parentElement.remove();_refreshPresetEmpty()" class="text-red-400 hover:text-red-600 text-xs shrink-0">✕</button>';
+    '<input type="text" name="preset_name"       value="'+_escAttr(p.name)+'"       placeholder="Label (e.g. Weekly D&amp;D)" style="'+_inputStyle+';flex:1"/>' +
+    '<input type="text" name="preset_guild_id"   value="'+_escAttr(p.guild_id)+'"   placeholder="Guild ID"   style="'+_inputStyle+';width:160px"/>' +
+    '<input type="text" name="preset_channel_id" value="'+_escAttr(p.channel_id)+'" placeholder="Channel ID" style="'+_inputStyle+';width:160px"/>' +
+    '<button type="button" onclick="this.parentElement.remove();_refreshPresetEmpty()" style="background:none;border:none;color:var(--color-signal-rose);cursor:pointer;font-size:13px;padding:0 4px;line-height:1">✕</button>';
   return row;
 }
+function addPresetRow() { _presetRows.appendChild(_makePresetRow({name:'',guild_id:'',channel_id:''})); _emptyMsg.textContent=''; }
+function _refreshPresetEmpty() { _emptyMsg.textContent = _presetRows.children.length === 0 ? 'No presets saved yet.' : ''; }
 
-function _escAttr(s) { return (s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+if (_presetData.length === 0) { _emptyMsg.textContent = 'No presets saved yet.'; }
+else { _presetData.forEach(function(p) { _presetRows.appendChild(_makePresetRow(p)); }); }
 
-function addPresetRow() {
-  const row = _makePresetRow({name: '', guild_id: '', channel_id: ''});
-  _presetRows.appendChild(row);
-  _emptyMsg.classList.add('hidden');
-}
-
-function _refreshPresetEmpty() {
-  if (_presetRows.children.length === 0) {
-    _emptyMsg.classList.remove('hidden');
-  }
-}
-
-// Initial render
-if (_presetData.length === 0) {
-  _emptyMsg.classList.remove('hidden');
-} else {
-  _presetData.forEach(function(p) { _presetRows.appendChild(_makePresetRow(p)); });
+function wisperOpenDataDir() {
+  fetch('/config/open-data-dir')
+    .then(function(r) { return r.json(); })
+    .then(function(d) { if (!d.ok) console.warn('Could not open data dir:', d.error); })
+    .catch(function() {});
 }
 </script>
 {% endblock %}

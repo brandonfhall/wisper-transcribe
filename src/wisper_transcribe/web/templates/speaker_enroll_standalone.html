@@ -1,55 +1,75 @@
 {% extends "base.html" %}
+{% from "partials/icons.html" import icon %}
 {% block title %}Enroll Speaker{% endblock %}
 
-{% block content %}
-<div class="max-w-xl space-y-6">
-
+{% block toolbar %}
+<div class="toolbar">
   <div>
-    <a href="/speakers" class="text-indigo-600 hover:underline text-sm">← Speakers</a>
-    <h1 class="text-2xl font-bold text-gray-900 mt-2">Enroll New Speaker</h1>
-    <p class="mt-1 text-sm text-gray-500">Upload an audio clip to create a voice profile.</p>
+    <div class="toolbar-kicker">Speakers / <a href="/speakers" style="color:var(--color-paper-dim)">profiles</a></div>
+    <span class="toolbar-title">Enroll a voice</span>
   </div>
+</div>
+{% endblock %}
+
+{% block page %}
+<div class="studio-page">
+<div style="max-width:560px">
 
   {% if request.query_params.get("error") %}
-  <div class="rounded-md bg-red-50 border border-red-200 p-4">
-    <p class="text-sm text-red-800">Error: {{ request.query_params.get("error") }}</p>
+  <div style="padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber);margin-bottom:20px">
+    Error: {{ request.query_params.get("error") }}
   </div>
   {% endif %}
 
-  <form method="post" action="/speakers/enroll" enctype="multipart/form-data" class="card space-y-4">
+  <div class="section-head"><div class="section-head-left"><span class="section-kicker">New profile</span><h2 class="section-title">Voice details</h2></div></div>
 
-    <div>
-      <label class="form-label" for="name">Speaker Name</label>
-      <input type="text" id="name" name="name" required placeholder="Alice" class="form-input"/>
+  <form method="post" action="/speakers/enroll" enctype="multipart/form-data">
+  <div style="border-top:1px solid var(--color-rule)">
+
+    <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
+      <div class="mono-kicker" style="margin-bottom:8px">Speaker name</div>
+      <input type="text" id="name" name="name" required placeholder="e.g. Alice"
+             style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule-strong);color:var(--color-paper);padding:9px 12px;border-radius:5px;font-size:14px;font-family:var(--font-sans);outline:none"/>
     </div>
 
-    <div>
-      <label class="form-label" for="role">Role <span class="text-gray-400 font-normal">(optional)</span></label>
-      <input type="text" id="role" name="role" placeholder="DM, Player, Guest…" class="form-input"/>
+    <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
+      <div class="mono-kicker" style="margin-bottom:8px">Role <span style="color:var(--color-paper-faint);font-size:9px;letter-spacing:0.1em">(optional)</span></div>
+      <input type="text" id="role" name="role" placeholder="DM, Player, Guest…"
+             style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule-strong);color:var(--color-paper);padding:9px 12px;border-radius:5px;font-size:14px;font-family:var(--font-sans);outline:none"/>
     </div>
 
-    <div>
-      <label class="form-label" for="notes">Notes <span class="text-gray-400 font-normal">(optional)</span></label>
-      <input type="text" id="notes" name="notes" placeholder="Main character: Kyra the Ranger" class="form-input"/>
+    <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
+      <div class="mono-kicker" style="margin-bottom:8px">Notes <span style="color:var(--color-paper-faint);font-size:9px;letter-spacing:0.1em">(optional)</span></div>
+      <input type="text" id="notes" name="notes" placeholder="e.g. Main character: Kyra the Ranger"
+             style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule-strong);color:var(--color-paper);padding:9px 12px;border-radius:5px;font-size:14px;font-family:var(--font-sans);outline:none"/>
     </div>
 
-    <div>
-      <label class="form-label" for="audio">Audio File</label>
+    <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
+      <div class="mono-kicker" style="margin-bottom:8px">Audio file</div>
       <input type="file" id="audio" name="audio" accept=".mp3,.wav,.m4a,.flac,.ogg,.mp4" required
-             class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-medium file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"/>
-      <p class="mt-1 text-xs text-gray-500">A clip with clear speech from this speaker (30s – 5min ideal).</p>
+             style="font-family:var(--font-mono);font-size:12px;color:var(--color-paper-dim);width:100%"/>
+      <div style="font-size:11.5px;color:var(--color-paper-faint);margin-top:6px">A clip with clear speech from this speaker — 30 seconds to 5 minutes is ideal.</div>
     </div>
 
-    <div class="flex items-center gap-2">
-      <input type="checkbox" id="update" name="update" value="1" class="rounded text-indigo-600"/>
-      <label for="update" class="text-sm text-gray-700">Update existing profile (blend with EMA)</label>
+    <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+        <input type="checkbox" id="update" name="update" value="1"
+               style="width:14px;height:14px;accent-color:var(--color-accent)"/>
+        <div>
+          <div style="font-family:var(--font-serif);font-size:14px;color:var(--color-paper)">Update existing profile</div>
+          <div style="font-size:11.5px;color:var(--color-paper-faint);margin-top:2px">Blend with existing embedding via EMA (exponential moving average)</div>
+        </div>
+      </label>
     </div>
 
-    <div class="flex gap-4 pt-2">
-      <button type="submit" class="btn-primary">Enroll Speaker</button>
-      <a href="/speakers" class="btn-secondary">Cancel</a>
+    <div style="padding:16px 0;display:flex;gap:8px">
+      <button type="submit" class="btn btn-primary">{{ icon("plus", 11, "var(--color-ink-800)") }} Enroll Speaker</button>
+      <a href="/speakers" class="btn btn-secondary">Cancel</a>
     </div>
+
+  </div>
   </form>
 
+</div>
 </div>
 {% endblock %}

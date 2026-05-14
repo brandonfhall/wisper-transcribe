@@ -1,4 +1,4 @@
-# wisper-transcribe — Open Items
+`# wisper-transcribe — Open Items
 
 ---
 
@@ -44,3 +44,15 @@ Recommendation: option (1) — reuse the parallel-stages subprocess plumbing for
 4. Remove the Java builder stages from `Dockerfile` and the Java 25 requirement from launchers + README
 
 Nothing else changes — `SegmentedOggWriter`, the web UI, campaigns, CLI, and all tests remain unaffected.
+
+---
+
+## Ideas
+
+* Add per-line speaker rename in the web UI — **OPEN**
+
+
+---
+
+## UI Bugs
+`

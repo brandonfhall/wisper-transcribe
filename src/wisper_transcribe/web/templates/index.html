@@ -1,135 +1,192 @@
 {% extends "base.html" %}
+{% from "partials/icons.html" import icon %}
 {% block title %}Dashboard{% endblock %}
 
-{% block content %}
-<div class="space-y-8">
-
-  <!-- Page header -->
+{% block toolbar %}
+<div class="toolbar">
   <div>
-    <h1 class="text-2xl font-bold text-gray-900">Dashboard</h1>
-    <p class="mt-1 text-sm text-gray-500">Transcription queue and system overview</p>
+    <div class="toolbar-kicker">Dashboard</div>
+    <span class="toolbar-title" id="dashboard-greeting">Good evening</span>
   </div>
-
-  <!-- Stats row -->
-  <div class="grid grid-cols-1 gap-5 sm:grid-cols-3">
-    <a href="/transcribe" class="card hover:shadow-md hover:ring-1 hover:ring-indigo-300 transition-all">
-      <div class="flex items-center">
-        <div class="flex-shrink-0 bg-indigo-500 rounded-md p-3">
-          <svg class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 9.776c.112-.017.227-.026.344-.026h15.812c.117 0 .232.009.344.026m-16.5 0a2.25 2.25 0 00-1.883 2.542l.857 6a2.25 2.25 0 002.227 1.932H19.05a2.25 2.25 0 002.227-1.932l.857-6a2.25 2.25 0 00-1.883-2.542m-16.5 0V6A2.25 2.25 0 016 3.75h3.879a1.5 1.5 0 011.06.44l2.122 2.12a1.5 1.5 0 001.06.44H18A2.25 2.25 0 0120.25 9v.776"/>
-          </svg>
-        </div>
-        <div class="ml-5">
-          <p class="text-sm font-medium text-gray-500 truncate">Active Jobs</p>
-          <p class="mt-1 text-3xl font-semibold text-gray-900">{{ active_count }}</p>
-        </div>
-      </div>
-    </a>
-
-    <a href="/transcripts" class="card hover:shadow-md hover:ring-1 hover:ring-green-300 transition-all">
-      <div class="flex items-center">
-        <div class="flex-shrink-0 bg-green-500 rounded-md p-3">
-          <svg class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"/>
-          </svg>
-        </div>
-        <div class="ml-5">
-          <p class="text-sm font-medium text-gray-500 truncate">Transcripts</p>
-          <p class="mt-1 text-3xl font-semibold text-gray-900">{{ transcript_count }}</p>
-        </div>
-      </div>
-    </a>
-
-    <a href="/speakers" class="card hover:shadow-md hover:ring-1 hover:ring-purple-300 transition-all">
-      <div class="flex items-center">
-        <div class="flex-shrink-0 bg-purple-500 rounded-md p-3">
-          <svg class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z"/>
-          </svg>
-        </div>
-        <div class="ml-5">
-          <p class="text-sm font-medium text-gray-500 truncate">Enrolled Speakers</p>
-          <p class="mt-1 text-3xl font-semibold text-gray-900">{{ speaker_count }}</p>
-        </div>
-      </div>
-    </a>
-  </div>
-
-  <!-- System info -->
-  <div class="card">
-    <h2 class="text-base font-semibold text-gray-900 mb-4">System</h2>
-    <dl class="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-3 text-sm">
-      <div>
-        <dt class="font-medium text-gray-500">Device</dt>
-        <dd class="mt-1 text-gray-900 font-mono">{{ device }}</dd>
-      </div>
-      <div>
-        <dt class="font-medium text-gray-500">Default Model</dt>
-        <dd class="mt-1 text-gray-900 font-mono">{{ model }}</dd>
-      </div>
-      <div>
-        <dt class="font-medium text-gray-500">HuggingFace Token</dt>
-        <dd class="mt-1">
-          {% if hf_token_set %}
-            <span class="text-green-600 font-medium">✓ Set</span>
-          {% else %}
-            <span class="text-red-600 font-medium">✗ Not set</span>
-            <a href="/config" class="ml-2 text-indigo-600 text-xs hover:underline">Configure →</a>
-          {% endif %}
-        </dd>
-      </div>
-      <div>
-        <dt class="font-medium text-gray-500">LLM Provider</dt>
-        <dd class="mt-1 text-gray-900 font-mono">{{ llm_provider }}</dd>
-      </div>
-      <div>
-        <dt class="font-medium text-gray-500">LLM Model</dt>
-        <dd class="mt-1 text-gray-900 font-mono">{{ llm_model }}</dd>
-      </div>
-      <div>
-        <dt class="font-medium text-gray-500">LLM Status</dt>
-        <dd class="mt-1">
-          {% if llm_ready %}
-            <span class="text-green-600 font-medium">✓ Ready</span>
-            {% if llm_status_hint %}<span class="ml-1 text-gray-400 text-xs font-mono">{{ llm_status_hint }}</span>{% endif %}
-          {% else %}
-            <span class="text-red-600 font-medium">✗ {{ llm_status_hint }}</span>
-            <a href="/config" class="ml-2 text-indigo-600 text-xs hover:underline">Configure →</a>
-          {% endif %}
-        </dd>
-      </div>
-    </dl>
-  </div>
-
-  <!-- Quick start -->
-  <div class="flex gap-4">
-    <a href="/transcribe" class="btn-primary">
-      <svg class="h-5 w-5 mr-2 -ml-1" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
-      </svg>
-      New Transcription
-    </a>
-    <a href="/transcripts" class="btn-secondary">View Transcripts</a>
-  </div>
-
-  <!-- Job queue -->
-  <div class="card">
-    <div class="flex items-center justify-between mb-4">
-      <h2 class="text-base font-semibold text-gray-900">Recent Jobs</h2>
-      {% if active_count > 0 %}
-        <span class="text-xs text-indigo-600 animate-pulse">● Live</span>
-      {% endif %}
+  <div style="display:flex;align-items:center;gap:8px">
+    <div class="search-bar">
+      {{ icon("search", 12, "var(--color-paper-faint)") }}
+      <span>Search transcripts, speakers …</span>
+      <span style="margin-left:auto;font-family:var(--font-mono);font-size:10px;padding:1px 6px;border:1px solid var(--color-rule);border-radius:3px">⌘K</span>
     </div>
-
-    <div id="job-table"
-         {% if active_count > 0 %}
-         hx-get="/jobs"
-         hx-trigger="every 2s"
-         hx-swap="innerHTML"
-         {% endif %}>
-      {% include "partials/job_rows.html" %}
-    </div>
+    <a href="/transcribe" class="btn btn-secondary">{{ icon("upload", 12) }} Transcribe</a>
+    <a href="/record" class="btn btn-primary">{{ icon("record", 10, "var(--color-ink-800)") }} Start session</a>
   </div>
-
 </div>
+{% endblock %}
+
+{% block page %}
+<div class="studio-page">
+
+  <!-- Editorial headline -->
+  <div style="padding-bottom:24px;border-bottom:1px solid var(--color-rule);margin-bottom:24px">
+    <h1 style="font-family:var(--font-serif);font-weight:300;font-size:38px;color:var(--color-paper);margin:0;line-height:1.05;letter-spacing:-0.025em;max-width:720px">
+      {% if active_count > 0 %}
+        {{ active_count }} session{{ 's' if active_count != 1 else '' }} processing.
+        <span style="color:var(--color-paper-dim);font-style:italic"> Ready when you are.</span>
+      {% else %}
+        Archive ready.
+        <span style="color:var(--color-paper-dim);font-style:italic"> No active jobs.</span>
+      {% endif %}
+    </h1>
+  </div>
+
+  <!-- Stat strip (6-col) -->
+  <div style="display:grid;grid-template-columns:repeat(6,1fr);border-top:1px solid var(--color-rule);border-bottom:1px solid var(--color-rule);margin-bottom:24px">
+    {%- for kicker, val, sub, live in [
+      ("In progress", active_count|string,     "active",       active_count > 0),
+      ("Archive",     transcript_count|string, "transcripts",  false),
+      ("Voices",      speaker_count|string,    "enrolled",     false),
+      ("Model",       model,                   "",             false),
+      ("Device",      device,                  "",             false),
+      ("HF token",    "✓ set" if hf_token_set else "missing",  "", false),
+    ] %}
+    <div style="padding:18px;{% if not loop.first %}border-left:1px solid var(--color-rule);{% endif %}">
+      <div style="display:flex;align-items:center;gap:7px;margin-bottom:10px">
+        {% if live %}<span class="dot-live"></span>{% endif %}
+        <div class="mono-kicker">{{ kicker }}</div>
+      </div>
+      <div style="font-family:var(--font-serif);font-size:32px;font-weight:300;
+                  color:{% if live %}var(--color-accent){% elif kicker=='HF token' and not hf_token_set %}var(--color-signal-rose){% else %}var(--color-paper){% endif %};
+                  line-height:1;letter-spacing:-0.02em">{{ val }}</div>
+      {% if sub %}<div style="font-size:11.5px;color:var(--color-paper-faint);margin-top:6px">{{ sub }}</div>{% endif %}
+    </div>
+    {%- endfor %}
+  </div>
+
+  <!-- Two-column body -->
+  <div style="display:grid;grid-template-columns:1.6fr 1fr;gap:36px">
+
+    <!-- Left: jobs + archive -->
+    <div>
+      <div class="section-head">
+        <div class="section-head-left">
+          <span class="section-kicker">Now processing</span>
+          <h2 class="section-title">The desk</h2>
+        </div>
+        <a href="/transcribe" style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">view queue →</a>
+      </div>
+
+      <div style="display:grid;grid-template-columns:12px 1.7fr 110px 1fr 70px 56px;gap:14px;padding:8px 0;border-top:1px solid var(--color-rule);border-bottom:1px solid var(--color-rule);font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);letter-spacing:0.12em">
+        <div></div><div>SESSION</div><div>CAMPAIGN</div><div>STAGE</div>
+        <div style="text-align:right">ETA</div><div style="text-align:right">%</div>
+      </div>
+
+      <div id="job-desk"
+           hx-get="/jobs"
+           hx-trigger="load, every 3s"
+           hx-swap="innerHTML">
+        {% include "partials/job_rows.html" %}
+      </div>
+
+      <div class="log-feed" style="border-top:none;margin-bottom:36px;font-size:11px;line-height:1.75">
+        <span style="color:var(--color-paper-faint);font-style:italic">No recent log output.</span>
+      </div>
+
+      <div class="section-head">
+        <div class="section-head-left">
+          <span class="section-kicker">Recent</span>
+          <h2 class="section-title">The archive</h2>
+        </div>
+        <a href="/transcripts" style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">archive →</a>
+      </div>
+      <div style="border-top:1px solid var(--color-rule)"
+           id="recent-transcripts"
+           hx-get="/transcripts/partials/recent"
+           hx-trigger="load"
+           hx-swap="innerHTML">
+        {% if transcript_count > 0 %}
+          <p style="font-size:13px;color:var(--color-paper-dim);margin:0;padding:14px 0">
+            {{ transcript_count }} transcript{{ 's' if transcript_count != 1 else '' }} in the archive.
+            <a href="/transcripts" style="color:var(--color-accent)">Browse →</a>
+          </p>
+        {% else %}
+          <p style="font-size:13px;color:var(--color-paper-faint);margin:0;padding:14px 0">
+            No transcripts yet. <a href="/transcribe" style="color:var(--color-accent)">Start one →</a>
+          </p>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Right: campaigns + speakers + LLM status -->
+    <div>
+      <div class="section-head">
+        <div class="section-head-left">
+          <span class="section-kicker">Campaigns</span>
+          <h2 class="section-title">The tables</h2>
+        </div>
+        <a href="/campaigns" style="font-family:var(--font-mono);font-size:11px;color:var(--color-accent)">+ NEW</a>
+      </div>
+      <div style="border-top:1px solid var(--color-rule);margin-bottom:36px;padding:14px 0">
+        <a href="/campaigns" style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">View all campaigns →</a>
+      </div>
+
+      <div class="section-head">
+        <div class="section-head-left">
+          <span class="section-kicker">Speakers</span>
+          <h2 class="section-title">The voices</h2>
+        </div>
+        <a href="/speakers" style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">manage →</a>
+      </div>
+      <div style="border-top:1px solid var(--color-rule);padding:14px 0;margin-bottom:36px">
+        {% if speaker_count > 0 %}
+          <p style="font-size:13px;color:var(--color-paper-dim);margin:0">
+            {{ speaker_count }} voice profile{{ 's' if speaker_count != 1 else '' }} enrolled.
+            <a href="/speakers" style="color:var(--color-accent)">View all →</a>
+          </p>
+        {% else %}
+          <p style="font-size:13px;color:var(--color-paper-faint);margin:0">
+            No voices enrolled yet.
+            <a href="/speakers/enroll" style="color:var(--color-accent)">Enroll the first →</a>
+          </p>
+        {% endif %}
+      </div>
+
+      <!-- LLM status -->
+      <div class="section-head">
+        <div class="section-head-left">
+          <span class="section-kicker">LLM</span>
+          <h2 class="section-title">Post-processing</h2>
+        </div>
+        <a href="/config?section=llm" style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">configure →</a>
+      </div>
+      <div style="border-top:1px solid var(--color-rule)">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;padding:10px 0;border-bottom:1px solid var(--color-rule)">
+          <span style="font-family:var(--font-serif);font-size:13px;color:var(--color-paper);font-style:italic">LLM Provider</span>
+          <span style="font-family:var(--font-mono);font-size:12px;color:var(--color-paper-dim)">{{ llm_provider }}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:baseline;padding:10px 0;border-bottom:1px solid var(--color-rule)">
+          <span style="font-family:var(--font-serif);font-size:13px;color:var(--color-paper);font-style:italic">LLM Model</span>
+          <span style="font-family:var(--font-mono);font-size:12px;color:var(--color-paper-dim)">{{ llm_model or '—' }}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0">
+          <span style="font-family:var(--font-serif);font-size:13px;color:var(--color-paper);font-style:italic">LLM Status</span>
+          {% if llm_ready %}
+            <span style="font-family:var(--font-mono);font-size:12px;color:var(--color-signal-green)">● Ready</span>
+          {% else %}
+            <span style="display:flex;align-items:center;gap:8px">
+              <span style="font-family:var(--font-mono);font-size:12px;color:var(--color-signal-rose)">✗ {{ llm_status_hint }}</span>
+              <a href="/config?section=llm" style="font-family:var(--font-mono);font-size:10px;color:var(--color-accent)">Configure →</a>
+            </span>
+          {% endif %}
+        </div>
+      </div>
+
+    </div>
+
+  </div>
+</div>
+
+<script>
+  (function(){
+    var h = new Date().getHours();
+    document.getElementById('dashboard-greeting').textContent =
+      h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
+  })();
+</script>
 {% endblock %}

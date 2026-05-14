@@ -1,0 +1,67 @@
+{#
+  Studio sidebar — 204px fixed left panel.
+  Reads request.url.path to set active nav item.
+  app_version is a Jinja2 global set in routes/__init__.py.
+#}
+{% from "partials/icons.html" import icon %}
+{%- set path = request.url.path -%}
+{%- set nav_items = [
+  ("Dashboard",   "/",            "sliders"),
+  ("Transcribe",  "/transcribe",  "upload"),
+  ("Record",      "/record",      "record"),
+  ("Transcripts", "/transcripts", "scroll"),
+  ("Speakers",    "/speakers",    "users"),
+  ("Campaigns",   "/campaigns",   "dice"),
+  ("Config",      "/config",      "settings"),
+] -%}
+{%- macro is_active(name, href) -%}
+  {%- if href == "/" -%}{{ path == "/" }}
+  {%- elif name == "Record" -%}{{ path.startswith("/record") or path.startswith("/recordings") }}
+  {%- else -%}{{ path.startswith(href) }}
+  {%- endif -%}
+{%- endmacro -%}
+
+<nav class="sidebar">
+  <!-- Wordmark -->
+  <a href="/" class="sidebar-wordmark" style="text-decoration:none">
+    <img src="/static/logo.png" width="30" height="30" style="border-radius:7px;flex-shrink:0" alt="wisper"/>
+    <div>
+      <div style="font-family:var(--font-serif);font-style:italic;font-size:18px;font-weight:400;color:var(--color-paper);letter-spacing:-0.01em;line-height:1">wisper</div>
+      <div style="font-family:var(--font-mono);font-size:9px;color:var(--color-paper-faint);letter-spacing:0.12em;margin-top:3px">v{{ app_version }}</div>
+    </div>
+  </a>
+
+  <!-- Nav items -->
+  <div style="flex:1;display:flex;flex-direction:column;gap:1px">
+    {%- for name, href, ico in nav_items -%}
+    {%- set active = (href == "/" and path == "/") or (name == "Record" and (path.startswith("/record") or path.startswith("/recordings"))) or (href != "/" and name != "Record" and path.startswith(href)) -%}
+    <a href="{{ href }}" class="nav-item{% if active %} active{% endif %}">
+      {{ icon(ico, 14, "var(--color-accent)" if active else "var(--color-paper-dim)") }}
+      {{ name }}
+    </a>
+    {%- endfor -%}
+  </div>
+
+  <!-- System status (polled via htmx) -->
+  <div id="sidebar-status-wrap"
+       hx-get="/api/sidebar-status"
+       hx-trigger="load, every 5s"
+       hx-swap="innerHTML">
+    {# initial placeholder — replaced immediately by htmx #}
+    <div style="padding:12px 10px;border-top:1px solid var(--color-rule);font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);line-height:1.8">
+      <div style="display:flex;justify-content:space-between"><span>DEVICE</span><span>—</span></div>
+      <div style="display:flex;justify-content:space-between"><span>JOBS</span><span>—</span></div>
+    </div>
+  </div>
+
+  <!-- User row -->
+  <div style="display:flex;align-items:center;gap:10px;padding:10px 8px 0;border-top:1px solid var(--color-rule);margin-top:4px">
+    <div style="width:28px;height:28px;border-radius:7px;background:var(--color-ink-700);border:1px solid var(--color-rule);display:flex;align-items:center;justify-content:center;font-family:var(--font-serif);font-style:italic;font-size:11px;font-weight:500;color:var(--color-paper);flex-shrink:0">
+      {% block sidebar_user_initials %}B{% endblock %}
+    </div>
+    <div style="min-width:0">
+      <div style="font-size:12px;color:var(--color-paper);line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{% block sidebar_username %}admin{% endblock %}</div>
+      <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:2px">localhost:8080</div>
+    </div>
+  </div>
+</nav>

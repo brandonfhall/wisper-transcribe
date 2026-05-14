@@ -173,6 +173,7 @@ def server(host: str, port: int, reload: bool, debug: bool) -> None:
         host=host,
         port=port,
         reload=reload,
+        access_log=False,
     )
 
 

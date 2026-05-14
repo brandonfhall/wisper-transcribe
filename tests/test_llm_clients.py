@@ -17,6 +17,37 @@ from wisper_transcribe.llm.errors import LLMResponseError, LLMUnavailableError
 
 
 # ---------------------------------------------------------------------------
+# _strip_json_fence helper
+# ---------------------------------------------------------------------------
+
+def test_strip_json_fence_clean_json():
+    from wisper_transcribe.llm.base import _strip_json_fence
+    assert _strip_json_fence('{"a": 1}') == '{"a": 1}'
+
+
+def test_strip_json_fence_with_json_tag():
+    from wisper_transcribe.llm.base import _strip_json_fence
+    assert _strip_json_fence('```json\n{"a": 1}\n```') == '{"a": 1}'
+
+
+def test_strip_json_fence_without_tag():
+    from wisper_transcribe.llm.base import _strip_json_fence
+    assert _strip_json_fence('```\n{"a": 1}\n```') == '{"a": 1}'
+
+
+def test_strip_json_fence_multiline():
+    from wisper_transcribe.llm.base import _strip_json_fence
+    raw = '```json\n{\n  "summary": "hello",\n  "loot": []\n}\n```'
+    result = _strip_json_fence(raw)
+    assert result.startswith("{") and result.endswith("}")
+
+
+def test_strip_json_fence_not_a_fence():
+    from wisper_transcribe.llm.base import _strip_json_fence
+    assert _strip_json_fence("not json at all") == "not json at all"
+
+
+# ---------------------------------------------------------------------------
 # get_client factory
 # ---------------------------------------------------------------------------
 
@@ -237,6 +268,17 @@ def test_ollama_local_client_omits_authorization_header():
     assert kwargs["headers"] is None
 
 
+def test_ollama_complete_json_strips_code_fence():
+    from wisper_transcribe.llm.ollama import OllamaClient
+
+    client = OllamaClient(model="llama3.1:8b")
+    fenced = '```json\n{"changes": []}\n```'
+    fake_cm = _fake_stream_context(_ollama_chunks(fenced))
+    with patch("httpx.stream", return_value=fake_cm):
+        data = client.complete_json("sys", "user", {"type": "object"})
+    assert data == {"changes": []}
+
+
 def test_ollama_bad_json_raises_response_error():
     from wisper_transcribe.llm.ollama import OllamaClient
 
@@ -387,6 +429,17 @@ def test_openai_complete_json_parses(monkeypatch):
     assert client.complete_json("sys", "user", {"type": "object"}) == {"changes": []}
 
 
+def test_openai_complete_json_strips_code_fence(monkeypatch):
+    _install_fake_openai(monkeypatch)
+    from wisper_transcribe.llm.openai import OpenAIClient
+
+    client = OpenAIClient(model="gpt-4o-mini", api_key="sk-test")
+    client._client.chat.completions.create.return_value = _fake_chat_completion(
+        '```json\n{"changes": []}\n```'
+    )
+    assert client.complete_json("sys", "user", {"type": "object"}) == {"changes": []}
+
+
 def test_openai_bad_json_raises(monkeypatch):
     _install_fake_openai(monkeypatch)
     from wisper_transcribe.llm.openai import OpenAIClient
@@ -449,6 +502,17 @@ def test_google_complete_json_parses(monkeypatch):
     client._client.models.generate_content.return_value = resp
     out = client.complete_json("sys", "user", {"type": "object"})
     assert out == {"summary": "ok"}
+
+
+def test_google_complete_json_strips_code_fence(monkeypatch):
+    _install_fake_google(monkeypatch)
+    from wisper_transcribe.llm.google import GoogleClient
+
+    client = GoogleClient(model="gemini-1.5-flash", api_key="k")
+    resp = MagicMock()
+    resp.text = '```json\n{"summary": "ok"}\n```'
+    client._client.models.generate_content.return_value = resp
+    assert client.complete_json("sys", "user", {"type": "object"}) == {"summary": "ok"}
 
 
 def test_google_generate_error_raises_unavailable(monkeypatch):

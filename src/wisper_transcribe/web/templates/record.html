@@ -1,281 +1,341 @@
 {% extends "base.html" %}
+{% from "partials/icons.html" import icon %}
 {% block title %}Record{% endblock %}
 
-{% block content %}
-<div class="space-y-6">
-
-  <div class="flex items-center justify-between">
+{% block toolbar %}
+{% if active_recording %}
+{# Recording-state toolbar — rose-tinted background #}
+<div class="toolbar" style="background:linear-gradient(180deg,#e88b8b10 0%,transparent 100%)">
+  <div style="display:flex;align-items:center;gap:18px">
+    <div style="display:flex;align-items:center;gap:10px">
+      <span class="dot-rose" style="width:12px;height:12px"></span>
+      <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-signal-rose);letter-spacing:0.18em;font-weight:600">RECORDING</div>
+    </div>
+    <div style="display:flex;align-items:baseline;gap:6px">
+      <div id="elapsed-timer" style="font-family:var(--font-mono);font-size:26px;color:var(--color-paper);font-weight:500;letter-spacing:-0.01em">00:00:00</div>
+      <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint)">elapsed</div>
+    </div>
+    <div style="width:1px;height:28px;background:var(--color-rule)"></div>
     <div>
-      <h1 class="text-2xl font-bold text-gray-900">Record</h1>
-      <p class="mt-1 text-sm text-gray-500">Discord voice channel recording</p>
+      <div class="mono-kicker">Channel</div>
+      {% if active_recording.voice_channel_id %}
+      <div style="font-family:var(--font-serif);font-style:italic;font-size:16px;color:var(--color-paper);margin-top:2px">#{{ active_recording.voice_channel_id }}</div>
+      {% else %}
+      <div style="font-family:var(--font-serif);font-style:italic;font-size:16px;color:var(--color-paper);margin-top:2px">—</div>
+      {% endif %}
     </div>
-    <a href="/recordings" class="btn-secondary">All Recordings</a>
   </div>
+  <div style="display:flex;align-items:center;gap:8px">
+    <form method="post" action="/record/marker" style="display:inline">
+      <button type="submit" class="btn btn-secondary">{{ icon("spark", 12) }} Add marker</button>
+    </form>
+    <form method="post" action="/record/stop">
+      <button type="submit" class="btn btn-rose">
+        <span style="width:9px;height:9px;background:#1a0a0a;display:inline-block;flex-shrink:0"></span>
+        Stop recording
+      </button>
+    </form>
+  </div>
+</div>
+{% else %}
+{# Idle toolbar #}
+<div class="toolbar">
+  <div>
+    <div class="toolbar-kicker">Record</div>
+    <span class="toolbar-title">Start a session</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px">
+    <a href="/recordings" class="btn btn-secondary">All recordings</a>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
 
-  {% if request.query_params.get('error') == 'already_active' %}
-  <div class="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-700">
-    A recording session is already active.
-  </div>
-  {% elif request.query_params.get('error') == 'no_session' %}
-  <div class="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-700">
-    No active recording session.
-  </div>
-  {% elif request.query_params.get('error') == 'missing_channel' %}
-  <div class="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-700">
-    Voice channel ID is required.
-  </div>
-  {% elif request.query_params.get('error') == 'unavailable' %}
-  <div class="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-700">
-    Bot manager unavailable — is the server running?
-  </div>
-  {% endif %}
+{% block page %}
+<div class="studio-page">
+{% if request.query_params.get('error') == 'already_active' %}
+<div style="padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber);margin-bottom:20px">
+  A recording session is already active.
+</div>
+{% elif request.query_params.get('error') == 'no_session' %}
+<div style="padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber);margin-bottom:20px">
+  No active recording session found.
+</div>
+{% endif %}
 
-  {% if request.query_params.get('preset_saved') == '1' %}
-  <div class="rounded-md bg-green-50 border border-green-200 p-3 text-sm text-green-700">
-    Preset saved.
-  </div>
-  {% elif request.query_params.get('preset_error') == 'invalid' %}
-  <div class="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-700">
-    Could not save preset — Guild ID and Channel ID must be valid Discord snowflakes (17–20 digits).
-  </div>
-  {% endif %}
+{% if active_recording %}
+{# ── Live recording view ── #}
+<div style="display:grid;grid-template-columns:1fr 320px;gap:28px;align-items:start">
 
-  {% if active_recording and active_recording.status in ('recording', 'degraded') %}
-  <!-- Active session panel -->
-  <div class="card space-y-4">
-    <div class="flex items-center justify-between flex-wrap gap-3">
-      <div class="flex items-center gap-3">
-        <span class="h-3 w-3 rounded-full bg-red-500 animate-pulse"></span>
-        <span class="font-semibold text-gray-900">Recording in progress</span>
-        {% if active_recording.status == 'degraded' %}
-        <span class="text-xs font-medium text-orange-600 border border-orange-300 rounded px-1.5 py-0.5">DEGRADED</span>
-        {% endif %}
+  <!-- Main column -->
+  <div>
+    <!-- Status strip -->
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);border-top:1px solid var(--color-rule);border-bottom:1px solid var(--color-rule);margin-bottom:28px">
+      <div style="padding:14px 16px">
+        <div class="mono-kicker" style="margin-bottom:6px">Speakers</div>
+        <div style="font-family:var(--font-serif);font-size:22px;color:var(--color-accent);font-weight:300;line-height:1" id="live-speaker-count">{{ active_recording.discord_speakers | length }}</div>
+        <div style="font-size:11px;color:var(--color-paper-faint);margin-top:5px">mapped</div>
       </div>
-      <form method="post" action="/record/stop">
-        <button type="submit" class="btn-danger">Stop Recording</button>
-      </form>
+      <div style="padding:14px 16px;border-left:1px solid var(--color-rule)">
+        <div class="mono-kicker" style="margin-bottom:6px">Segments</div>
+        <div style="font-family:var(--font-serif);font-size:22px;color:var(--color-paper);font-weight:300;line-height:1" id="live-seg-count">{{ active_recording.segment_manifest | length }}</div>
+        <div style="font-size:11px;color:var(--color-paper-faint);margin-top:5px">60s rotation</div>
+      </div>
+      <div style="padding:14px 16px;border-left:1px solid var(--color-rule)">
+        <div class="mono-kicker" style="margin-bottom:6px">Status</div>
+        <div style="font-family:var(--font-serif);font-size:22px;color:var(--color-signal-green);font-weight:300;line-height:1">●</div>
+        <div style="font-size:11px;color:var(--color-paper-faint);margin-top:5px">capturing</div>
+      </div>
+      <div style="padding:14px 16px;border-left:1px solid var(--color-rule)">
+        <div class="mono-kicker" style="margin-bottom:6px">Storage</div>
+        <div style="font-family:var(--font-serif);font-size:22px;color:var(--color-paper);font-weight:300;line-height:1">Ogg</div>
+        <div style="font-size:11px;color:var(--color-paper-faint);margin-top:5px">./recordings/</div>
+      </div>
+      <div style="padding:14px 16px;border-left:1px solid var(--color-rule)">
+        <div class="mono-kicker" style="margin-bottom:6px">ID</div>
+        <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-accent);line-height:1.4;margin-top:4px">{{ active_recording.id[:12] }}…</div>
+      </div>
     </div>
 
-    <div class="grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
-      <div>
-        <p class="text-xs text-gray-400 uppercase tracking-wider mb-0.5">Recording ID</p>
-        <p class="font-mono text-xs text-gray-700">{{ active_recording.id[:8] }}…</p>
+    <!-- Speaker meters -->
+    <div class="section-head">
+      <div class="section-head-left">
+        <span class="section-kicker">Voices · live</span>
+        <h2 class="section-title">At the table</h2>
       </div>
-      <div>
-        <p class="text-xs text-gray-400 uppercase tracking-wider mb-0.5">Campaign</p>
-        <p class="text-gray-700">{{ active_recording.campaign_slug or "—" }}</p>
-      </div>
-      <div>
-        <p class="text-xs text-gray-400 uppercase tracking-wider mb-0.5">Speakers</p>
-        <p id="speaker-count" class="text-gray-700">{{ active_recording.discord_speakers | length }}</p>
-      </div>
-      <div>
-        <p class="text-xs text-gray-400 uppercase tracking-wider mb-0.5">Segments</p>
-        <p id="segment-count" class="text-gray-700">{{ active_recording.segment_manifest | length }}</p>
+      <div style="display:flex;align-items:center;gap:8px;font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint);letter-spacing:0.1em">
+        <span class="dot-green" style="width:6px;height:6px"></span>
+        CAPTURING
       </div>
     </div>
 
-    <div id="speaker-dots" class="flex flex-wrap gap-2 min-h-6">
-      {% for discord_id, profile in active_recording.discord_speakers.items() %}
-      <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-100 text-green-800 text-xs">
-        <span class="h-1.5 w-1.5 rounded-full bg-green-500"></span>
-        {{ profile or discord_id[:8] }}
-      </span>
+    <div id="speaker-meters" style="border-top:1px solid var(--color-rule)">
+      {% for uid, name in active_recording.discord_speakers.items() %}
+      <div class="speaker-row" data-uid="{{ uid }}"
+           style="display:grid;grid-template-columns:38px 1fr 1fr auto 110px;gap:18px;align-items:center;padding:18px 0;border-bottom:1px solid var(--color-rule)">
+        <div class="speaker-avatar" style="width:36px;height:36px;border-radius:50%;background:var(--color-ink-600);color:var(--color-paper);display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-size:13px;font-weight:600">
+          {{ (name or uid)[:1] | upper }}
+        </div>
+        <div>
+          <div style="font-family:var(--font-serif);font-size:18px;color:var(--color-paper)">{{ name or uid }}</div>
+          <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);letter-spacing:0.1em;margin-top:3px">{{ uid[:8] }}…</div>
+        </div>
+        <div class="meter-bars" id="meter-{{ uid }}">
+          {% for i in range(28) %}<div class="meter-bar" style="height:18%;background:var(--color-rule-strong)"></div>{% endfor %}
+        </div>
+        <div style="min-width:60px;text-align:right">
+          <div class="talk-time" style="font-family:var(--font-mono);font-size:13px;color:var(--color-paper-dim);font-weight:500">0m</div>
+          <div style="font-family:var(--font-mono);font-size:9.5px;color:var(--color-paper-faint);letter-spacing:0.1em;margin-top:3px">SPEAKING</div>
+        </div>
+        <div style="display:flex;justify-content:flex-end">
+          <div class="live-pill pill" style="border:1px solid var(--color-rule);color:var(--color-paper-faint);border-radius:999px">QUIET</div>
+        </div>
+      </div>
+      {% else %}
+      <div style="padding:24px 0;color:var(--color-paper-faint);font-size:13px;font-style:italic">
+        No speakers mapped yet. Participants will appear as they join.
+      </div>
       {% endfor %}
     </div>
+
+    <!-- Live ticker -->
+    <div style="margin-top:28px">
+      <div class="section-head">
+        <div class="section-head-left">
+          <span class="section-kicker">Heard so far</span>
+          <h2 class="section-title">The thread</h2>
+        </div>
+      </div>
+      <div id="live-ticker" style="background:var(--color-ink-700);border:1px solid var(--color-rule);padding:14px 18px;border-radius:4px;min-height:80px">
+        <div style="color:var(--color-paper-faint);font-size:12px;font-style:italic">Waiting for transcription stream…</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;padding:10px 0 4px;font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint);letter-spacing:0.1em;margin-top:4px">
+        <span class="dot-live" style="width:6px;height:6px"></span>
+        PARTIAL TRANSCRIPT · WHISPER-STREAMING
+      </div>
+    </div>
   </div>
 
-  <script>
-  (function() {
-    const es = new EventSource('/record/sse');
-    es.onmessage = function(e) {
-      try {
-        const evt = JSON.parse(e.data);
-        if (evt.type === 'status' && evt.status === 'idle') {
-          es.close();
-          window.location.reload();
-          return;
-        }
-        if (evt.segment_count !== undefined) {
-          const el = document.getElementById('segment-count');
-          if (el) el.textContent = evt.segment_count;
-        }
-        if (evt.speakers !== undefined) {
-          const el = document.getElementById('speaker-count');
-          if (el) el.textContent = evt.speakers.length;
-        }
-      } catch (_) {}
-    };
-    es.onerror = function() { es.close(); };
-  })();
-  </script>
+  <!-- Sidebar -->
+  <div style="display:flex;flex-direction:column;gap:20px">
+    <div>
+      <div class="mono-kicker" style="margin-bottom:8px">This session</div>
+      {% if active_recording.campaign_slug %}
+      <div style="font-family:var(--font-serif);font-style:italic;font-size:18px;color:var(--color-paper);margin-bottom:6px">
+        {{ campaigns[active_recording.campaign_slug].name if active_recording.campaign_slug in campaigns else active_recording.campaign_slug }}
+      </div>
+      {% endif %}
+      <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim);line-height:1.7">
+        <div>started {% if active_recording.started_at %}{{ active_recording.started_at.strftime('%b %-d · %H:%M') }}{% else %}—{% endif %}</div>
+        <div>id <span style="color:var(--color-accent)">{{ active_recording.id[:12] }}…</span></div>
+      </div>
+    </div>
 
-  {% else %}
-  <!-- Start session form -->
-  <div class="card space-y-4">
-    <h2 class="text-lg font-semibold text-gray-800">Start Recording Session</h2>
-    <p class="text-sm text-gray-500">Requires a running Discord bot with <code class="text-xs bg-gray-100 px-1 rounded">DISCORD_BOT_TOKEN</code> configured.</p>
-    <form method="post" action="/record/start" class="space-y-4">
-      {% if discord_presets %}
-      <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Quick Select Preset</label>
-        <select id="preset-select" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-1 focus:ring-green-500 focus:border-green-500"
-                onchange="applyPreset(this.value)">
-          <option value="">— Select a preset —</option>
-          {% for p in discord_presets %}
-          <option value="{{ loop.index0 }}">{{ p.name }}</option>
+    <div>
+      <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:10px">
+        <div class="mono-kicker">Segment manifest</div>
+        <div style="flex:1;height:1px;background:var(--color-rule)"></div>
+        <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-signal-green)">● HEALTHY</div>
+      </div>
+      <div id="segment-manifest" style="border-top:1px solid var(--color-rule)">
+        {% for seg in active_recording.segment_manifest[-5:] | reverse %}
+        <div style="display:grid;grid-template-columns:auto 1fr auto;gap:12px;padding:8px 0;border-bottom:1px solid var(--color-rule);align-items:center;font-family:var(--font-mono);font-size:11px">
+          <span style="color:var(--color-paper-faint)">#{{ "%03d" % loop.revindex0 }}</span>
+          <span style="color:var(--color-paper-dim);font-size:10.5px;letter-spacing:0.06em">{{ seg.get('status', 'sealed') }}</span>
+          <span style="color:var(--color-paper-faint);font-size:10.5px">{{ seg.get('size_bytes', 0) | filesizeformat if seg.get('size_bytes') else '—' }}</span>
+        </div>
+        {% else %}
+        <div style="padding:8px 0;color:var(--color-paper-faint);font-size:12px">No segments yet.</div>
+        {% endfor %}
+      </div>
+      <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:8px;line-height:1.7">
+        <div>codec: Ogg/Opus · 60s rotation</div>
+      </div>
+    </div>
+
+    <div style="padding:14px 16px;background:var(--color-ink-700);border:1px solid var(--color-rule);border-radius:4px">
+      <div class="mono-kicker" style="margin-bottom:8px">When you stop</div>
+      <ol style="margin:0;padding:0 0 0 18px;font-size:12px;color:var(--color-paper-dim);line-height:1.6">
+        <li>Final segment sealed</li>
+        <li>Recording saved</li>
+        <li>Transcription queued automatically</li>
+      </ol>
+    </div>
+  </div>
+</div>
+
+{% else %}
+{# ── Idle / start new session ── #}
+<div style="max-width:640px">
+  <form method="post" action="/record/start-form" style="margin-bottom:32px">
+    <div class="section-head"><div class="section-head-left"><span class="section-kicker">Discord voice</span><h2 class="section-title">Connect and record</h2></div></div>
+    <div style="border-top:1px solid var(--color-rule)">
+
+      <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px">
+          <div class="mono-kicker">Campaign (optional)</div>
+        </div>
+        <select name="campaign_slug" style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:8px 10px;border-radius:5px;font-size:13px;font-family:var(--font-sans)">
+          <option value="">— None —</option>
+          {% for slug, c in campaigns.items() %}
+          <option value="{{ slug }}">{{ c.display_name }}</option>
           {% endfor %}
         </select>
       </div>
+
+      {% if discord_presets %}
+      <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
+        <div class="mono-kicker" style="margin-bottom:10px">Quick-connect preset</div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          {% for preset in discord_presets %}
+          <label style="display:flex;align-items:center;gap:12px;padding:10px 12px;background:var(--color-ink-700);border:1px solid var(--color-rule);border-radius:5px;cursor:pointer">
+            <input type="radio" name="preset_index" value="{{ loop.index0 }}" style="accent-color:var(--color-accent)"/>
+            <div>
+              <div style="font-family:var(--font-serif);font-size:14px;color:var(--color-paper)">{{ preset.get('name', 'Preset ' ~ loop.index) }}</div>
+              <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:2px">guild {{ preset.get('guild_id', '—')[:8] }}… · ch {{ preset.get('channel_id', '—')[:8] }}…</div>
+            </div>
+          </label>
+          {% endfor %}
+        </div>
+      </div>
       {% endif %}
-      <div class="grid gap-4 sm:grid-cols-2">
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Campaign <span class="text-gray-400 font-normal">(optional)</span></label>
-          <select name="campaign_slug" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-1 focus:ring-green-500 focus:border-green-500">
-            <option value="">— No campaign —</option>
-            {% for slug, c in campaigns.items() %}
-            <option value="{{ slug }}">{{ c.display_name }}</option>
-            {% endfor %}
-          </select>
-        </div>
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Voice Channel ID</label>
-          <input type="text" name="voice_channel_id" id="voice_channel_id" required placeholder="e.g. 123456789012345678"
-                 value="{{ default_channel }}"
-                 class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-1 focus:ring-green-500 focus:border-green-500"/>
-        </div>
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Guild (Server) ID</label>
-          <input type="text" name="guild_id" id="guild_id" required placeholder="e.g. 987654321098765432"
-                 value="{{ default_guild }}"
-                 class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-1 focus:ring-green-500 focus:border-green-500"/>
-        </div>
-      </div>
-      <button type="submit" class="btn-primary">Start Recording</button>
-    </form>
-    <div class="border-t border-gray-100 pt-3 mt-1">
-      <button type="button" onclick="toggleSavePreset()"
-              class="text-sm text-green-600 hover:text-green-800">+ Save current IDs as preset</button>
-      <div id="save-preset-panel" class="hidden mt-3">
-        <form method="post" action="/config/presets/add" onsubmit="populatePresetHidden()"
-              class="flex flex-wrap gap-2 items-end">
-          <div class="flex-1 min-w-40">
-            <label class="block text-xs font-medium text-gray-600 mb-1">Preset name</label>
-            <input type="text" name="name" required placeholder="e.g. My Server — General"
-                   class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-1 focus:ring-green-500 focus:border-green-500"/>
-          </div>
-          <input type="hidden" name="guild_id" id="preset-guild-hidden"/>
-          <input type="hidden" name="channel_id" id="preset-channel-hidden"/>
-          <button type="submit" class="btn-secondary whitespace-nowrap self-end">Save preset</button>
-        </form>
-      </div>
-    </div>
-  </div>
 
-  <!-- Channel browser -->
-  <details class="card" id="channel-browser">
-    <summary class="text-sm font-semibold text-gray-700 cursor-pointer select-none flex items-center gap-2">
-      <svg class="h-4 w-4 text-gray-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z"/>
-      </svg>
-      Browse bot's channels
-      <button type="button" onclick="event.stopPropagation();loadChannels(this)"
-              class="ml-auto text-xs text-indigo-600 hover:underline">↻ Refresh</button>
-    </summary>
-    <div id="channel-list" class="mt-3">
-      <p class="text-xs text-gray-400">Open to browse voice channels.</p>
+      <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
+        <div class="mono-kicker" style="margin-bottom:10px">Guild ID</div>
+        <input type="text" name="guild_id" value="{{ default_guild }}" placeholder="e.g. 987654321098765432"
+               style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:8px 10px;border-radius:5px;font-size:13px;font-family:var(--font-mono)"/>
+      </div>
+      <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
+        <div class="mono-kicker" style="margin-bottom:10px">Voice channel ID</div>
+        <input type="text" name="voice_channel_id" value="{{ default_channel }}" placeholder="e.g. 123456789012345678"
+               style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:8px 10px;border-radius:5px;font-size:13px;font-family:var(--font-mono)"/>
+      </div>
+
+      <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
+        <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center;font-size:14px;padding:10px">
+          {{ icon("record", 10, "var(--color-ink-800)") }} Start recording
+        </button>
+      </div>
     </div>
-  </details>
+  </form>
+
+  <!-- Save as preset -->
+  {% if request.query_params.get('preset_saved') %}
+  <div style="padding:10px 0;font-family:var(--font-mono);font-size:11px;color:var(--color-signal-green)">✓ Preset saved.</div>
+  {% elif request.query_params.get('preset_error') %}
+  <div style="padding:10px 0;font-family:var(--font-mono);font-size:11px;color:var(--color-signal-amber)">Invalid guild or channel ID.</div>
   {% endif %}
+  <form method="post" action="/config/presets/add" style="margin-top:0">
+    <div style="border-top:1px solid var(--color-rule);padding:16px 0">
+      <div class="mono-kicker" style="margin-bottom:10px">Save as preset</div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input type="text" name="name" id="preset-name" placeholder="Preset name (e.g. table-1)"
+               style="flex:1;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:7px 10px;border-radius:5px;font-size:12px;font-family:var(--font-sans)"/>
+        <button type="submit" class="btn btn-secondary">Save preset</button>
+      </div>
+      <input type="hidden" name="guild_id" id="preset-guild"/>
+      <input type="hidden" name="channel_id" id="preset-channel"/>
+    </div>
+  </form>
 
+  <div style="padding:8px 0">
+    <a href="/recordings" style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">View all recordings →</a>
+  </div>
+</div>
+{% endif %}
 </div>
 
 <script>
-const _presets = {{ discord_presets | tojson }};
-function applyPreset(idx) {
-  if (idx === '') return;
-  const p = _presets[parseInt(idx)];
-  if (p) {
-    document.getElementById('guild_id').value = p.guild_id;
-    document.getElementById('voice_channel_id').value = p.channel_id;
+// Sync guild/channel from start form into the preset hidden fields
+(function(){
+  function sync() {
+    var g = document.querySelector('input[name="guild_id"]');
+    var c = document.querySelector('input[name="voice_channel_id"]');
+    var pg = document.getElementById('preset-guild');
+    var pc = document.getElementById('preset-channel');
+    if (g && pg) pg.value = g.value;
+    if (c && pc) pc.value = c.value;
   }
-}
-function toggleSavePreset() {
-  document.getElementById('save-preset-panel').classList.toggle('hidden');
-}
-function populatePresetHidden() {
-  document.getElementById('preset-guild-hidden').value = document.getElementById('guild_id').value;
-  document.getElementById('preset-channel-hidden').value = document.getElementById('voice_channel_id').value;
-}
-
-// --- Channel browser ---
-var _channelsLoaded = false;
-(function() {
-  var browser = document.getElementById('channel-browser');
-  if (browser) {
-    browser.addEventListener('toggle', function() {
-      if (this.open && !_channelsLoaded) loadChannels();
-    });
-  }
+  document.addEventListener('input', sync);
+  sync();
 })();
-
-function _escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
-async function loadChannels(btn) {
-  var container = document.getElementById('channel-list');
-  if (!container) return;
-  container.innerHTML = '<p class="text-xs text-gray-400">Loading…</p>';
-  if (btn) btn.disabled = true;
-  try {
-    var r = await fetch('/api/record/channels');
-    var data = await r.json();
-    if (data.error === 'no_token') {
-      container.innerHTML = '<p class="text-xs text-red-500">No bot token configured — add one in <a href="/config" class="underline">Config</a>.</p>';
-      return;
-    }
-    if (data.error === 'invalid_token') {
-      container.innerHTML = '<p class="text-xs text-red-500">Bot token rejected by Discord — check your token in <a href="/config" class="underline">Config</a>.</p>';
-      return;
-    }
-    if (!data.guilds || !data.guilds.length) {
-      container.innerHTML = '<p class="text-xs text-gray-400">Bot is not in any servers, or fetch failed.</p>';
-      return;
-    }
-    var html = '';
-    data.guilds.forEach(function(guild) {
-      if (!guild.voice_channels.length) return;
-      html += '<div class="mb-3">';
-      html += '<p class="text-xs font-semibold text-gray-600 mb-1">' + _escHtml(guild.name) +
-              ' <span class="font-mono font-normal text-gray-400">' + _escHtml(guild.id) + '</span></p>';
-      guild.voice_channels.forEach(function(ch) {
-        html += '<button type="button" onclick="selectChannel(' + JSON.stringify(guild.id) + ',' + JSON.stringify(ch.id) + ')" ' +
-                'class="flex items-center gap-2 w-full text-left text-xs px-2 py-1 rounded hover:bg-green-50 hover:text-green-700 text-gray-700">' +
-                '<svg class="h-3 w-3 text-gray-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">' +
-                '<path stroke-linecap="round" stroke-linejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z"/></svg>' +
-                _escHtml(ch.name) +
-                '<span class="font-mono text-gray-400 ml-auto">' + _escHtml(ch.id) + '</span>' +
-                '</button>';
-      });
-      html += '</div>';
-    });
-    container.innerHTML = html || '<p class="text-xs text-gray-400">No voice channels found in any server.</p>';
-    _channelsLoaded = true;
-  } catch(e) {
-    container.innerHTML = '<p class="text-xs text-red-500">Could not reach server.</p>';
-  } finally {
-    if (btn) btn.disabled = false;
-  }
-}
-
-function selectChannel(guildId, channelId) {
-  var gEl = document.getElementById('guild_id');
-  var cEl = document.getElementById('voice_channel_id');
-  if (gEl) gEl.value = guildId;
-  if (cEl) cEl.value = channelId;
-  var browser = document.getElementById('channel-browser');
-  if (browser) browser.removeAttribute('open');
-}
 </script>
+
+{% if active_recording %}
+{% block extra_scripts %}
+<script>
+// ── Record live UI ──
+// SSE stream binds speaker meters + ticker.
+// See app.js for full record-meters.js / record-ticker.js implementations.
+(function(){
+  var startTs = {{ (active_recording.started_at.timestamp() if active_recording.started_at else 0) }};
+  function pad(n) { return String(n).padStart(2, '0'); }
+  function tick() {
+    if (!startTs) return;
+    var s = Math.floor(Date.now() / 1000 - startTs);
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+    var el = document.getElementById('elapsed-timer');
+    if (el) el.textContent = pad(h) + ':' + pad(m) + ':' + pad(ss);
+  }
+  tick(); setInterval(tick, 1000);
+
+  // SSE
+  try {
+    var src = new EventSource('/record/sse');
+    src.addEventListener('voice_activity', function(e) {
+      try { window.wisperUpdateMeters && window.wisperUpdateMeters(JSON.parse(e.data)); } catch(ex) {}
+    });
+    src.addEventListener('partial_transcript', function(e) {
+      try { window.wisperTickerAppend && window.wisperTickerAppend(JSON.parse(e.data)); } catch(ex) {}
+    });
+    src.addEventListener('segment_sealed', function(e) {
+      var c = document.getElementById('live-seg-count');
+      if (c) c.textContent = parseInt(c.textContent||'0') + 1;
+    });
+    src.onerror = function() { src.close(); };
+  } catch(ex) {}
+})();
+</script>
+{% endblock %}
+{% endif %}
 {% endblock %}

@@ -161,6 +161,16 @@ def test_lmstudio_non404_http_status_raises_generic():
             client.complete("sys", "user")
 
 
+def test_lmstudio_complete_json_strips_code_fence():
+    from wisper_transcribe.llm.lmstudio import LMStudioClient
+
+    client = LMStudioClient(model="phi-3")
+    fake_cm = _fake_stream_ctx(_sse_lines('```json\n{"changes": []}\n```'))
+    with patch("httpx.stream", return_value=fake_cm):
+        data = client.complete_json("sys", "user", {"type": "object"})
+    assert data == {"changes": []}
+
+
 def test_lmstudio_bad_json_raises_response_error():
     from wisper_transcribe.llm.lmstudio import LMStudioClient
 

@@ -1,135 +1,188 @@
 {% extends "base.html" %}
+{% from "partials/icons.html" import icon %}
 {% block title %}{{ meta.title or name }}{% endblock %}
 
-{% block content %}
-<div class="space-y-6">
-
-  <div class="flex items-center gap-4">
-    <a href="/transcripts" class="text-indigo-600 hover:underline text-sm">← Transcripts</a>
-    <h1 class="text-2xl font-bold text-gray-900 flex-1">{{ meta.title or name }}</h1>
-    <a href="/transcripts/{{ name }}/download" class="btn-secondary text-sm">Download .md</a>
+{% block toolbar %}
+{# Breadcrumb toolbar instead of standard toolbar #}
+<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 24px;border-bottom:1px solid var(--color-rule);min-height:60px;flex-shrink:0;background:var(--color-ink-800)">
+  <div style="display:flex;align-items:center;gap:10px;font-size:12px;color:var(--color-paper-dim);font-family:var(--font-mono);letter-spacing:0.04em">
+    <a href="/transcripts" style="color:var(--color-paper-dim)">transcripts</a>
+    <span style="color:var(--color-paper-faint)">/</span>
+    {% if current_campaign_slug %}
+    <a href="/campaigns/{{ current_campaign_slug }}" style="color:var(--color-paper-dim)">{{ current_campaign_slug }}</a>
+    <span style="color:var(--color-paper-faint)">/</span>
+    {% endif %}
+    <span style="color:var(--color-paper)">{{ name }}.md</span>
   </div>
-
-  <!-- Metadata -->
-  {% if meta %}
-  <div class="card">
-    <dl class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
-      {% if meta.date_processed %}<div><dt class="font-medium text-gray-500">Processed</dt><dd>{{ meta.date_processed }}</dd></div>{% endif %}
-      {% if meta.duration %}<div><dt class="font-medium text-gray-500">Duration</dt><dd>{{ meta.duration }}</dd></div>{% endif %}
-      {% if meta.source_file %}<div class="sm:col-span-2"><dt class="font-medium text-gray-500">Source</dt><dd class="font-mono text-xs truncate">{{ meta.source_file }}</dd></div>{% endif %}
-    </dl>
-    {% if meta.speakers %}
-    <div class="mt-4">
-      <p class="text-sm font-medium text-gray-500 mb-2">Speakers</p>
-      <div class="flex flex-wrap gap-2">
-        {% for s in meta.speakers %}
-        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
-          {{ s.name }}{% if s.role %} <span class="ml-1 text-indigo-500">({{ s.role }})</span>{% endif %}
-        </span>
-        {% endfor %}
-      </div>
-    </div>
+  <div style="display:flex;gap:8px;align-items:center">
+    <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-signal-green);letter-spacing:0.12em;margin-right:6px">
+      {% if meta.date_processed %}● PROCESSED {{ meta.date_processed }}{% endif %}
+    </span>
+    <a href="/transcripts/{{ name | urlencode }}/download" class="btn btn-secondary btn-sm">Export .md</a>
+    {% if has_summary %}
+    <form method="post" action="/transcripts/{{ name | urlencode }}/refine" style="display:inline">
+      <button type="submit" class="btn btn-secondary btn-sm">Re-refine</button>
+    </form>
+    {% else %}
+    <form method="post" action="/transcripts/{{ name | urlencode }}/summarize" style="display:inline">
+      <button type="submit" class="btn btn-primary btn-sm">{{ icon("spark", 10, "var(--color-ink-800)") }} Summarize</button>
+    </form>
     {% endif %}
   </div>
-  {% endif %}
+</div>
+{% endblock %}
 
-  <!-- Campaign assignment -->
-  {% if campaigns %}
-  <div class="card">
-    <h2 class="text-sm font-medium text-gray-700 mb-2">Campaign</h2>
-    <form method="post" action="/transcripts/{{ name }}/campaign" class="flex items-center gap-3">
-      <select name="campaign" class="form-input flex-1 text-sm">
-        <option value=""{% if not current_campaign_slug %} selected{% endif %}>— No campaign —</option>
-        {% for slug, c in campaigns.items() %}
-        <option value="{{ slug }}"{% if slug == current_campaign_slug %} selected{% endif %}>{{ c.display_name }}</option>
-        {% endfor %}
-      </select>
-      <button type="submit" class="btn-secondary text-sm">Save</button>
-    </form>
-  </div>
-  {% endif %}
+{% block page %}
+<div style="flex:1;overflow-y:auto">
 
-  <!-- Campaign Notes link (shown when summary sidecar exists) -->
-  {% if has_summary %}
-  <div class="card bg-green-50 border-green-200">
-    <div class="flex items-center justify-between">
-      <div class="flex items-center gap-3">
-        <svg class="h-5 w-5 text-green-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"/>
-        </svg>
-        <div>
-          <p class="text-sm font-semibold text-green-900">Campaign Notes available</p>
-          <p class="text-xs text-green-700">AI-generated session summary with loot, NPCs, and follow-ups.</p>
-        </div>
-      </div>
-      <div class="flex items-center gap-2 flex-shrink-0">
-        <a href="/transcripts/{{ name }}/summary" class="btn-primary text-sm">View Notes</a>
-        <a href="/transcripts/{{ name }}/summary/download" class="btn-secondary text-sm">Download</a>
-      </div>
+  <!-- Hero -->
+  <div style="padding:32px 36px 24px;border-bottom:1px solid var(--color-rule)">
+    {% if current_campaign_slug %}
+    <div style="display:flex;align-items:center;gap:12px;font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);letter-spacing:0.18em;text-transform:uppercase;margin-bottom:14px">
+      <span class="dot-color" style="width:6px;height:6px;background:#7bd88f"></span>
+      <span style="color:var(--color-paper-dim)">{{ current_campaign_slug | replace('-', ' ') | title }}</span>
+    </div>
+    {% endif %}
+    <h1 style="font-family:var(--font-serif);font-weight:300;font-size:56px;color:var(--color-paper);margin:0;line-height:1;letter-spacing:-0.03em">
+      {{ meta.title or name }}
+    </h1>
+    <div style="display:flex;gap:28px;margin-top:18px;font-family:var(--font-mono);font-size:11px">
+      {% if meta.date_processed %}<div><div style="color:var(--color-paper-faint);letter-spacing:0.14em">DATE</div><div style="color:var(--color-paper);margin-top:3px">{{ meta.date_processed }}</div></div>{% endif %}
+      {% if meta.duration %}<div><div style="color:var(--color-paper-faint);letter-spacing:0.14em">DURATION</div><div style="color:var(--color-paper);margin-top:3px">{{ meta.duration }}</div></div>{% endif %}
+      {% if meta.speakers %}<div><div style="color:var(--color-paper-faint);letter-spacing:0.14em">VOICES</div><div style="color:var(--color-paper);margin-top:3px">{{ meta.speakers | length }}</div></div>{% endif %}
+      {% if meta.source_file %}<div><div style="color:var(--color-paper-faint);letter-spacing:0.14em">SOURCE</div><div style="color:var(--color-paper);margin-top:3px;font-size:10px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ meta.source_file | basename }}</div></div>{% endif %}
     </div>
   </div>
-  {% endif %}
 
-  <!-- LLM Post-processing -->
-  <details class="card">
-    <summary class="text-sm font-medium text-gray-700 cursor-pointer">LLM Post-processing
-      <span class="ml-2 text-xs text-gray-400 font-normal">{{ llm_provider }}/{{ llm_model }}</span>
-    </summary>
-    <div class="mt-4 flex flex-wrap gap-3">
-      <form method="post" action="/transcripts/{{ name }}/refine">
-        <button type="submit" class="btn-secondary text-sm"
-                onclick="return confirm('Refine vocabulary in this transcript? A backup (.md.bak) will be saved.')">
-          <svg class="h-4 w-4 mr-1.5 -ml-0.5 inline-block" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125"/>
-          </svg>
-          Refine Vocabulary
-        </button>
-      </form>
-      <form method="post" action="/transcripts/{{ name }}/summarize">
-        <button type="submit" class="btn-secondary text-sm"
-                {% if has_summary %}onclick="return confirm('A summary already exists. Regenerate it?')"{% endif %}>
-          <svg class="h-4 w-4 mr-1.5 -ml-0.5 inline-block" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m0 0H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V9.375c0-.621-.504-1.125-1.125-1.125H8.25zM6.75 12h.008v.008H6.75V12zm0 3h.008v.008H6.75V15zm0 3h.008v.008H6.75V18z"/>
-          </svg>
-          Generate Campaign Summary
-        </button>
-      </form>
+  <!-- Tabs -->
+  <div style="display:flex;border-bottom:1px solid var(--color-rule);padding:0 36px">
+    {% if has_summary %}
+    <a href="/transcripts/{{ name | urlencode }}/summary" class="tab-item {% if request.url.path.endswith('/summary') %}active{% endif %}" aria-label="Campaign Notes">
+      {{ icon("book", 11, "var(--color-accent)" if request.url.path.endswith('/summary') else "var(--color-paper-dim)") }}
+      Summary
+      <span style="font-size:9px;color:var(--color-accent);padding:2px 6px;border:1px solid #5fd4e740;margin-left:4px;letter-spacing:0.08em">Campaign Notes</span>
+    </a>
+    {% endif %}
+    <a href="/transcripts/{{ name | urlencode }}" class="tab-item {% if not request.url.path.endswith('/summary') %}active{% endif %}">
+      {{ icon("scroll", 11, "var(--color-accent)" if not request.url.path.endswith('/summary') else "var(--color-paper-dim)") }}
+      Transcript
+    </a>
+    <a href="/transcripts/{{ name | urlencode }}/download" class="tab-item">
+      {{ icon("sliders", 11, "var(--color-paper-dim)") }} Raw .md
+    </a>
+  </div>
+
+  <!-- Body: two-column -->
+  <div style="padding:36px;display:grid;grid-template-columns:1.55fr 1fr;gap:48px;align-items:start">
+
+    <!-- Main content -->
+    <div>
+      <!-- Assign to campaign -->
+      <div style="margin-bottom:28px;padding:14px 16px;background:var(--color-ink-700);border:1px solid var(--color-rule);border-radius:4px">
+        <div class="mono-kicker" style="margin-bottom:8px">Campaign</div>
+        <form method="post" action="/transcripts/{{ name | urlencode }}/campaign" style="display:flex;gap:8px;align-items:center">
+          <select name="campaign" style="flex:1;background:var(--color-ink-900);border:1px solid var(--color-rule);color:var(--color-paper);padding:6px 10px;border-radius:4px;font-size:12px;font-family:var(--font-sans)">
+            <option value="">— Uncategorized —</option>
+            {% for slug, c in campaigns.items() %}
+            <option value="{{ slug }}" {% if slug == current_campaign_slug %}selected{% endif %}>{{ c.display_name }}</option>
+            {% endfor %}
+          </select>
+          <button type="submit" class="btn btn-secondary btn-sm">Save</button>
+        </form>
+      </div>
+
+      {% if html_body %}
+      <!-- Rendered transcript body -->
+      <div class="drop-cap" style="font-family:var(--font-serif);font-size:17px;line-height:1.65;color:var(--color-paper)">
+        {{ html_body | safe }}
+      </div>
+      {% else %}
+      <div style="color:var(--color-paper-faint);font-style:italic;font-size:14px">
+        No transcript content found.
+      </div>
+      {% endif %}
     </div>
-    <p class="mt-3 text-xs text-gray-400">
-      Jobs run in the background — you'll be taken to a progress page.
-      Change provider/model in <a href="/config" class="underline">Config</a>.
-    </p>
-  </details>
 
-  <!-- Fix speaker names form -->
-  <details class="card">
-    <summary class="text-sm font-medium text-gray-700 cursor-pointer">Rename a Speaker</summary>
-    <form method="post" action="/transcripts/{{ name }}/fix-speaker" class="mt-4 flex items-end gap-3 flex-wrap">
-      <div>
-        <label class="form-label text-xs">Current name</label>
-        {% if meta.speakers %}
-        <select name="old_name" class="form-input" required>
-          <option value="" disabled selected>Select speaker…</option>
-          {% for s in meta.speakers %}
-          <option value="{{ s.name }}">{{ s.name }}{% if s.role %} ({{ s.role }}){% endif %}</option>
-          {% endfor %}
-        </select>
+    <!-- Sidebar -->
+    <div>
+      <!-- Speaker enrollment -->
+      <div style="margin-bottom:16px;padding:14px 16px;background:var(--color-ink-700);border:1px solid var(--color-rule);border-radius:4px">
+        <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);letter-spacing:0.15em;text-transform:uppercase;margin-bottom:8px">Speakers</div>
+        {% if meta.get('job_id') %}
+        <a href="/transcribe/jobs/{{ meta.job_id }}/enroll" class="btn btn-secondary" style="display:flex;width:100%;justify-content:center;margin-bottom:6px">
+          {{ icon("users", 11) }} Name speakers
+        </a>
+        <div style="font-size:11px;color:var(--color-paper-faint);line-height:1.4">Assign names and enroll voice profiles detected in this session.</div>
         {% else %}
-        <input type="text" name="old_name" class="form-input" placeholder="Alice" required/>
+        <a href="/speakers" class="btn btn-secondary" style="display:flex;width:100%;justify-content:center;margin-bottom:6px">
+          {{ icon("users", 11) }} Manage speaker profiles
+        </a>
+        <div style="font-size:11px;color:var(--color-paper-faint);line-height:1.4">Enroll or re-enroll voices on the Speakers page. Re-transcribe this file to link enrollment directly.</div>
         {% endif %}
       </div>
-      <div>
-        <label class="form-label text-xs">New name</label>
-        <input type="text" name="new_name" class="form-input" placeholder="Alice (DM)" required/>
+
+      <!-- Refine / summarize actions -->
+      <div style="background:var(--color-ink-700);border:1px solid #5fd4e740;padding:20px 22px;margin-bottom:28px;box-shadow:0 0 28px #5fd4e712">
+        <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:14px">
+          {{ icon("spark", 13, "var(--color-accent)") }}
+          <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-accent);letter-spacing:0.18em;text-transform:uppercase">Post-processing</div>
+        </div>
+        {% if not has_summary %}
+        <form method="post" action="/transcripts/{{ name | urlencode }}/summarize" style="margin-bottom:8px">
+          <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center">
+            {{ icon("spark", 10, "var(--color-ink-800)") }} Generate Summary
+          </button>
+        </form>
+        {% else %}
+        <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-signal-green);letter-spacing:0.12em;margin-bottom:12px">✓ SUMMARY AVAILABLE</div>
+        <a href="/transcripts/{{ name | urlencode }}/summary" class="btn btn-secondary" style="display:flex;width:100%;justify-content:center;margin-bottom:8px">View Summary</a>
+        {% endif %}
+        <div style="font-size:11.5px;color:var(--color-paper-faint);margin-top:8px;line-height:1.5">
+          LLM: {{ llm_provider }}{% if llm_model %} · {{ llm_model }}{% endif %}
+        </div>
       </div>
-      <button type="submit" class="btn-secondary text-sm">Rename</button>
-    </form>
-  </details>
 
-  <!-- Transcript body -->
-  <div class="card prose prose-indigo max-w-none">
-    {{ html_body | safe }}
+      <!-- Metadata card -->
+      {% if meta %}
+      <div style="margin-bottom:24px">
+        <div style="display:flex;align-items:baseline;gap:14px;margin-bottom:14px">
+          <div class="mono-kicker">Metadata</div>
+          <div class="rule-fill"></div>
+        </div>
+        <div style="border-top:1px solid var(--color-rule)">
+          {%- set _skip = ['title', 'speakers', 'job_id'] -%}
+          {% for k, v in meta.items() if v and k not in _skip %}
+          <div style="display:flex;justify-content:space-between;align-items:baseline;padding:10px 0;border-bottom:1px solid var(--color-rule)">
+            <span style="font-family:var(--font-serif);font-size:13px;color:var(--color-paper);font-style:italic">{{ k | replace('_', ' ') | title }}</span>
+            <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim);max-width:180px;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ v }}</span>
+          </div>
+          {% endfor %}
+          {# Speakers: render as names, not raw dicts #}
+          {% if meta.get('speakers') %}
+          <div style="padding:10px 0;border-bottom:1px solid var(--color-rule)">
+            <span style="font-family:var(--font-serif);font-size:13px;color:var(--color-paper);font-style:italic">Speakers</span>
+            <div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px">
+              {% for s in meta.speakers %}
+              <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-dim);padding:2px 6px;border:1px solid var(--color-rule);border-radius:3px">
+                {{ s.name if s is mapping else s }}{% if s is mapping and s.role %} <span style="color:var(--color-paper-faint)">({{ s.role }})</span>{% endif %}
+              </span>
+              {% endfor %}
+            </div>
+          </div>
+          {% endif %}
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- Delete -->
+      <div style="margin-top:16px">
+        <form method="post" action="/transcripts/{{ name | urlencode }}/delete"
+              onsubmit="return confirm('Delete this transcript permanently?')">
+          <button type="submit" style="background:none;border:none;color:var(--color-signal-rose);font-size:12px;font-family:var(--font-sans);cursor:pointer;padding:6px 0">Delete transcript</button>
+        </form>
+      </div>
+    </div>
+
   </div>
-
 </div>
 {% endblock %}

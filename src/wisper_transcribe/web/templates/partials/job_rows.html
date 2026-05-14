@@ -1,41 +1,87 @@
+{# Studio job rows — rendered inside the desk table on the dashboard.
+   Grid columns must match the header: 12px 1.7fr 110px 1fr 70px 56px #}
 {% if jobs %}
-<div class="overflow-x-auto">
-<table class="min-w-full divide-y divide-gray-200 text-sm">
-  <thead class="bg-gray-50">
-    <tr>
-      <th class="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">File</th>
-      <th class="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Status</th>
-      <th class="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Created</th>
-      <th class="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Actions</th>
-    </tr>
-  </thead>
-  <tbody class="bg-white divide-y divide-gray-200">
-    {% for job in jobs %}
-    <tr>
-      <td class="px-4 py-3 font-mono text-xs text-gray-700 max-w-xs truncate">{{ job.name or (job.input_path | basename) }}</td>
-      <td class="px-4 py-3">
-        {% if job.status == "pending" %}
-          <span class="badge-pending">Pending</span>
-        {% elif job.status == "running" %}
-          <span class="badge-running">Running</span>
-        {% elif job.status == "completed" %}
-          <span class="badge-completed">Completed</span>
-        {% else %}
-          <span class="badge-failed">Failed</span>
-        {% endif %}
-      </td>
-      <td class="px-4 py-3 text-gray-500 text-xs">{{ job.created_at.strftime("%H:%M:%S") }}</td>
-      <td class="px-4 py-3 flex gap-2">
-        <a href="/transcribe/jobs/{{ job.id }}" class="text-indigo-600 hover:underline text-xs">View</a>
-        {% if job.status == "completed" and job.output_path %}
-          <a href="/transcripts/{{ job.output_path | stem | urlencode }}" class="text-green-600 hover:underline text-xs">Transcript</a>
-        {% endif %}
-      </td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-</div>
+{% for job in jobs %}
+{%- set active = job.status == 'running' -%}
+{%- if job.output_path and job.status == 'completed' -%}
+  {%- set row_href = '/transcripts/' ~ ((job.output_path | stem) | urlencode) -%}
+{%- else -%}
+  {%- set row_href = '/transcribe/jobs/' ~ job.id -%}
+{%- endif -%}
+<a href="{{ row_href }}"
+   style="display:grid;grid-template-columns:12px 1.7fr 110px 1fr 70px 56px;gap:14px;padding:14px 0;
+          border-bottom:1px solid var(--color-rule);align-items:center;
+          text-decoration:none;color:inherit;
+          transition:background 120ms"
+   onmouseover="this.style.background='var(--color-ink-700)'"
+   onmouseout="this.style.background=''">
+
+  <!-- Status dot -->
+  <div>
+    {% if active %}
+    <span class="dot-live" style="width:8px;height:8px"></span>
+    {% else %}
+    <span style="display:block;width:8px;height:8px;border-radius:50%;border:1px solid var(--color-paper-faint)"></span>
+    {% endif %}
+  </div>
+
+  <!-- Session name + ID -->
+  <div>
+    <div style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper)">
+      {{ job.name or (job.input_path | basename) }}
+    </div>
+    <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:3px">
+      {{ job.id[:8] }} · {{ job.created_at.strftime('%H:%M:%S') }}
+    </div>
+  </div>
+
+  <!-- Campaign (not yet in job model) -->
+  <div style="font-size:11px;color:var(--color-paper-dim)">—</div>
+
+  <!-- Stage + progress bar -->
+  <div style="display:flex;align-items:center;gap:10px">
+    <div style="flex:1;height:2px;background:var(--color-ink-900);border-radius:1px;overflow:hidden">
+      {% if active %}
+      <div style="height:100%;background:var(--color-accent);box-shadow:0 0 6px #5fd4e780;animation:wisper-indeterminate 1.8s ease-in-out infinite"></div>
+      {% elif job.status == 'completed' %}
+      <div style="width:100%;height:100%;background:var(--color-signal-green)"></div>
+      {% elif job.status == 'failed' %}
+      <div style="width:100%;height:100%;background:var(--color-signal-rose)"></div>
+      {% endif %}
+    </div>
+    <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-dim);min-width:64px">
+      {% if active %}Processing
+      {% elif job.status == 'completed' %}Done
+      {% elif job.status == 'failed' %}Failed
+      {% else %}Queued
+      {% endif %}
+    </span>
+  </div>
+
+  <!-- ETA -->
+  <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim);text-align:right">—</div>
+
+  <!-- Status indicator -->
+  <div style="font-family:var(--font-mono);font-size:12px;text-align:right;font-weight:500;
+              color:{% if active %}var(--color-accent){% elif job.status == 'completed' %}var(--color-signal-green){% elif job.status == 'failed' %}var(--color-signal-rose){% else %}var(--color-paper-faint){% endif %}">
+    {% if job.status == 'completed' %}✓
+    {% elif job.status == 'failed' %}✗
+    {% elif active %}…
+    {% else %}—
+    {% endif %}
+  </div>
+</a>
+{% endfor %}
 {% else %}
-<p class="text-sm text-gray-500 text-center py-8">No jobs yet. <a href="/transcribe" class="text-indigo-600 hover:underline">Start a transcription →</a></p>
+<div style="padding:24px 0;color:var(--color-paper-faint);font-size:13px;font-style:italic">
+  No jobs running. <a href="/transcribe" style="color:var(--color-accent)">Start one →</a>
+</div>
 {% endif %}
+
+<style>
+@keyframes wisper-indeterminate {
+  0%   { width: 0%;  margin-left: 0%; }
+  50%  { width: 50%; margin-left: 25%; }
+  100% { width: 0%;  margin-left: 100%; }
+}
+</style>

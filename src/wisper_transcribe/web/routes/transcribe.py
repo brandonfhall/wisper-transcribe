@@ -263,6 +263,22 @@ async def enroll_form(request: Request, job_id: str) -> Response:
 
     profiles = load_profiles()
 
+    # Load persisted transcript text snippets for each speaker (written as
+    # <stem>_excerpt_<speaker>.txt alongside the clip files).
+    import re as _re
+    speaker_excerpt_texts: dict[str, str] = {}
+    if job.output_path:
+        out_dir = Path(job.output_path).parent
+        stem = Path(job.output_path).stem
+        for speaker_name in speakers_in_transcript:
+            safe_label = _re.sub(r"[^\w\-]", "_", speaker_name)
+            txt_path = out_dir / f"{stem}_excerpt_{safe_label}.txt"
+            if txt_path.exists():
+                try:
+                    speaker_excerpt_texts[speaker_name] = txt_path.read_text(encoding="utf-8").strip()
+                except Exception:
+                    pass
+
     return templates.TemplateResponse(
         request,
         "speaker_enroll.html",
@@ -272,6 +288,7 @@ async def enroll_form(request: Request, job_id: str) -> Response:
             "detected_speakers": speakers_in_transcript,
             "existing_profiles": profiles,
             "speaker_excerpts": job.speaker_excerpts,
+            "speaker_excerpt_texts": speaker_excerpt_texts,
         },
     )
 
@@ -287,9 +304,24 @@ async def speaker_excerpt(request: Request, job_id: str, speaker_name: str) -> R
         return invalid_input_response("Invalid speaker name")
     queue = _get_queue(request)
     job = queue.get(job_id)
-    if job is None:
-        return HTMLResponse(content="Job not found", status_code=404)
-    clip_path = job.speaker_excerpts.get(speaker_name)
+
+    clip_path: Optional[str] = None
+    if job is not None:
+        clip_path = job.speaker_excerpts.get(speaker_name)
+
+    # Fallback: scan the output directory for an on-disk excerpt clip so the
+    # wizard still works after a server restart (the in-memory job is gone but
+    # the files remain alongside the transcript).
+    if not clip_path or not Path(clip_path).exists():
+        from wisper_transcribe.path_utils import get_output_dir
+        import re as _re
+        safe_label = _re.sub(r"[^\w\-]", "_", speaker_name)
+        out_dir = get_output_dir()
+        # Excerpts are named <transcript_stem>_excerpt_<speaker_label>.mp3
+        candidates = list(out_dir.glob(f"*_excerpt_{safe_label}.mp3"))
+        if candidates:
+            clip_path = str(candidates[0])
+
     if not clip_path or not Path(clip_path).exists():
         return HTMLResponse(content="Excerpt not available", status_code=404)
     return FileResponse(path=clip_path, media_type="audio/mpeg")

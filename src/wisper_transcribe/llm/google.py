@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 
-from .base import LLMClient
+from .base import LLMClient, _strip_json_fence
 from .errors import LLMResponseError, LLMUnavailableError
 
 
@@ -66,7 +66,7 @@ class GoogleClient(LLMClient):
         return self._safe_generate(system=system, user=user)
 
     def complete_json(self, system: str, user: str, schema: dict) -> dict:
-        text = self._safe_generate(system=system, user=user, schema=schema)
+        text = _strip_json_fence(self._safe_generate(system=system, user=user, schema=schema))
         try:
             return json.loads(text)
         except json.JSONDecodeError as exc:

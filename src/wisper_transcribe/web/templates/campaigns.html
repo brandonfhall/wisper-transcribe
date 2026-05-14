@@ -1,153 +1,198 @@
 {% extends "base.html" %}
+{% from "partials/icons.html" import icon %}
 {% block title %}Campaigns{% endblock %}
 
-{% block content %}
-<div class="space-y-6">
+{%- set slug = request.path_params.get('slug') or '' -%}
+{%- set active_campaign = campaigns.get(slug) -%}
 
-  <div class="flex items-center justify-between">
-    <div>
-      <h1 class="text-2xl font-bold text-gray-900">Campaigns</h1>
-      <p class="mt-1 text-sm text-gray-500">{{ campaigns | length }} campaign{% if campaigns | length != 1 %}s{% endif %}</p>
+{% block toolbar %}
+<div class="toolbar">
+  <div>
+    <div class="toolbar-kicker">Campaigns</div>
+    <div style="display:flex;align-items:baseline;gap:12px">
+      <span class="toolbar-title">{% if active_campaign %}{{ active_campaign.name }}{% else %}All campaigns{% endif %}</span>
     </div>
   </div>
+  <div style="display:flex;align-items:center;gap:8px">
+    <button onclick="document.getElementById('new-campaign-dialog').style.display='flex'" class="btn btn-primary">
+      {{ icon("plus", 11, "var(--color-ink-800)") }} New campaign
+    </button>
+  </div>
+</div>
+{% endblock %}
 
-  {% if request.query_params.get('error') == 'create_failed' %}
-  <div class="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-700">
-    Could not create campaign. A campaign with that name may already exist.
-  </div>
-  {% elif request.query_params.get('error') == 'invalid_name' %}
-  <div class="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-700">
-    Invalid campaign name.
-  </div>
-  {% elif request.query_params.get('error') == 'unknown_profile' %}
-  <div class="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-700">
-    That speaker is not enrolled. Enroll them first under <a href="/speakers" class="underline">Speakers</a>.
-  </div>
-  {% elif request.query_params.get('error') == 'invalid_discord_id' %}
-  <div class="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-700">
-    Invalid Discord user ID. Paste the numeric user ID from Discord (e.g. 123456789012345678).
-  </div>
-  {% endif %}
+{% block page %}
 
-  <!-- Create form -->
-  <div class="card">
-    <h2 class="text-lg font-semibold text-gray-800 mb-3">New Campaign</h2>
-    <form method="post" action="/campaigns" class="flex gap-2 items-end">
-      <div class="flex-1">
-        <label class="block text-sm font-medium text-gray-700 mb-1">Campaign name</label>
-        <input type="text" name="display_name" required placeholder="e.g. D&amp;D Mondays"
-               class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-1 focus:ring-green-500 focus:border-green-500"/>
+<!-- New campaign modal -->
+<div id="new-campaign-dialog" style="display:none;position:fixed;inset:0;background:#00000080;z-index:100;align-items:center;justify-content:center">
+  <div style="background:var(--color-ink-700);border:1px solid var(--color-rule-strong);border-radius:8px;padding:28px;width:380px">
+    <div style="font-family:var(--font-serif);font-style:italic;font-size:20px;color:var(--color-paper);margin-bottom:16px">New campaign</div>
+    <form method="post" action="/campaigns">
+      <div style="margin-bottom:16px">
+        <div class="mono-kicker" style="margin-bottom:8px">Campaign name</div>
+        <input type="text" name="display_name" placeholder="e.g. Curse of Strahd" autofocus required
+               style="width:100%;background:var(--color-ink-900);border:1px solid var(--color-rule-strong);color:var(--color-paper);padding:10px 12px;border-radius:5px;font-size:14px;font-family:var(--font-sans);outline:none"/>
       </div>
-      <button type="submit" class="btn-primary">Create</button>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button type="button" onclick="document.getElementById('new-campaign-dialog').style.display='none'" class="btn btn-secondary">Cancel</button>
+        <button type="submit" class="btn btn-primary">Create</button>
+      </div>
     </form>
   </div>
+</div>
 
-  {% if active_campaign %}
-  <!-- Campaign detail -->
-  <div class="card space-y-4">
-    <div class="flex items-center justify-between">
-      <div>
-        <h2 class="text-xl font-bold text-gray-900">{{ active_campaign.display_name }}</h2>
-        <p class="text-xs text-gray-400">slug: {{ active_campaign.slug }} · created {{ active_campaign.created }}</p>
-      </div>
-      <form method="post" action="/campaigns/{{ active_campaign.slug }}/delete"
-            onsubmit="return confirm('Delete campaign \'{{ active_campaign.display_name }}\'? This does not remove enrolled speakers.')">
-        <button type="submit" class="text-xs text-red-600 border border-red-300 rounded px-2 py-1 hover:bg-red-50">Delete campaign</button>
-      </form>
-    </div>
+{% if request.query_params.get('error') == 'create_failed' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">A campaign with that name may already exist.</div>
+{% elif request.query_params.get('error') == 'invalid_name' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Invalid campaign name.</div>
+{% elif request.query_params.get('error') == 'not_found' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Campaign not found.</div>
+{% endif %}
 
-    <!-- Add member -->
-    {% if unenrolled %}
-    <form method="post" action="/campaigns/{{ active_campaign.slug }}/members" class="flex gap-2 items-end flex-wrap">
-      <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Add speaker</label>
-        <select name="profile_key" class="border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-1 focus:ring-green-500">
-          {% for key, p in unenrolled.items() %}
-          <option value="{{ key }}">{{ p.display_name }}</option>
-          {% endfor %}
-        </select>
-      </div>
-      <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Role</label>
-        <input type="text" name="role" placeholder="DM / Player"
-               class="border border-gray-300 rounded-md px-3 py-2 text-sm w-28 focus:ring-1 focus:ring-green-500"/>
-      </div>
-      <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Character</label>
-        <input type="text" name="character" placeholder="optional"
-               class="border border-gray-300 rounded-md px-3 py-2 text-sm w-32 focus:ring-1 focus:ring-green-500"/>
-      </div>
-      <button type="submit" class="btn-primary">Add</button>
-    </form>
-    {% else %}
-    <p class="text-sm text-gray-500">All enrolled speakers are already in this campaign.</p>
-    {% endif %}
+<div style="flex:1;display:grid;grid-template-columns:260px 1fr;overflow:hidden;height:100%">
 
-    <!-- Roster -->
-    {% if active_campaign.members %}
-    <div class="overflow-x-auto">
-    <table class="min-w-full divide-y divide-gray-200 text-sm">
-      <thead class="bg-gray-50">
-        <tr>
-          <th class="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Speaker</th>
-          <th class="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Role</th>
-          <th class="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Character</th>
-          <th class="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Discord ID</th>
-          <th class="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Actions</th>
-        </tr>
-      </thead>
-      <tbody class="bg-white divide-y divide-gray-200">
-        {% for key, member in active_campaign.members.items() %}
-        <tr>
-          <td class="px-4 py-3 font-medium text-gray-900">
-            {% if key in profiles %}{{ profiles[key].display_name }}{% else %}<span class="text-gray-400 italic">removed: {{ key }}</span>{% endif %}
-          </td>
-          <td class="px-4 py-3 text-gray-500">{{ member.role or "—" }}</td>
-          <td class="px-4 py-3 text-gray-500">{{ member.character or "—" }}</td>
-          <td class="px-4 py-3">
-            <form method="post" action="/campaigns/{{ active_campaign.slug }}/members/{{ key }}/discord-id" class="flex gap-1 items-center">
-              <input type="text" name="discord_user_id" value="{{ member.discord_user_id or '' }}"
-                     placeholder="Discord user ID" pattern="\d*"
-                     class="border border-gray-300 rounded px-2 py-1 text-xs w-40 focus:ring-1 focus:ring-green-500"/>
-              <button type="submit" class="text-xs text-blue-600 hover:underline">Link</button>
-            </form>
-          </td>
-          <td class="px-4 py-3">
-            <form method="post" action="/campaigns/{{ active_campaign.slug }}/members/{{ key }}/remove">
-              <button type="submit" class="text-xs text-red-600 hover:underline">Remove</button>
-            </form>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-    </div>
-    {% else %}
-    <p class="text-sm text-gray-500">No members yet. Add speakers above.</p>
-    {% endif %}
-  </div>
-
-  {% elif campaigns %}
-  <!-- Campaign list -->
-  <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-    {% for slug, c in campaigns.items() %}
-    <a href="/campaigns/{{ slug }}" class="card block hover:shadow-md transition-shadow">
-      <h3 class="font-semibold text-gray-900">{{ c.display_name }}</h3>
-      <p class="text-xs text-gray-400 mt-1">slug: {{ slug }}</p>
-      <p class="text-sm text-gray-600 mt-2">{{ c.members | length }} member{% if c.members | length != 1 %}s{% endif %}</p>
-      <p class="text-xs text-gray-400">Created {{ c.created }}</p>
+  <!-- Campaign rail -->
+  <div style="border-right:1px solid var(--color-rule);background:var(--color-ink-900);padding:18px 14px;overflow-y:auto">
+    <div class="mono-kicker" style="padding:0 4px 12px">All campaigns · {{ campaigns | length }}</div>
+    {% for cslug, c in campaigns.items() %}
+    <a href="/campaigns/{{ cslug }}" style="display:flex;align-items:flex-start;gap:11px;padding:12px 14px;border-radius:8px;margin-bottom:4px;text-decoration:none;
+                  background:{% if cslug == slug %}var(--color-ink-700){% else %}transparent{% endif %};
+                  border:1px solid {% if cslug == slug %}var(--color-rule-strong){% else %}transparent{% endif %}">
+      <div style="width:3px;height:38px;background:#7bd88f;border-radius:1.5px;flex-shrink:0;margin-top:2px"></div>
+      <div style="flex:1;min-width:0">
+        <div style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper)">{{ c.display_name }}</div>
+        <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim);margin-top:6px">{{ c.transcripts | length }} sessions</div>
+      </div>
     </a>
+    {% else %}
+    <div style="color:var(--color-paper-faint);font-size:13px;font-style:italic;padding:8px 4px">No campaigns yet.</div>
     {% endfor %}
+    <button onclick="document.getElementById('new-campaign-dialog').style.display='flex'"
+            style="width:100%;padding:10px 12px;margin-top:10px;border-radius:8px;background:transparent;border:1px dashed var(--color-rule);color:var(--color-paper-dim);font-size:12px;font-family:var(--font-sans);cursor:pointer">
+      + New campaign
+    </button>
   </div>
-  {% else %}
-  <div class="card text-center py-12">
-    <svg class="h-12 w-12 text-gray-300 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke-width="1" stroke="currentColor">
-      <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 010 3.75H5.625a1.875 1.875 0 010-3.75z"/>
-    </svg>
-    <p class="text-gray-500">No campaigns yet.</p>
-    <p class="text-sm text-gray-400 mt-1">Use the form above to create your first campaign.</p>
-  </div>
-  {% endif %}
 
+  <!-- Detail pane -->
+  <div style="overflow-y:auto;padding:28px 32px 32px">
+    {% if active_campaign %}
+    <!-- Campaign hero -->
+    <div style="padding-bottom:24px;border-bottom:1px solid var(--color-rule);margin-bottom:28px">
+      <div style="display:flex;align-items:center;gap:10px;font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);letter-spacing:0.18em;text-transform:uppercase;margin-bottom:12px">
+        <span class="dot-color" style="width:8px;height:8px;background:#7bd88f"></span>
+        slug · <span style="color:var(--color-paper)">{{ slug }}</span>
+      </div>
+      <h1 style="font-family:var(--font-serif);font-weight:300;font-size:44px;color:var(--color-paper);margin:0;line-height:1.05;letter-spacing:-0.025em">
+        {{ active_campaign.name }}
+      </h1>
+      <div style="display:flex;gap:32px;margin-top:20px">
+        {%- for k, v in [("Sessions", active_campaign.transcripts | length), ("Members", active_campaign.members | length)] %}
+        <div>
+          <div class="mono-kicker" style="margin-bottom:4px">{{ k }}</div>
+          <div style="font-family:var(--font-serif);font-size:20px;color:var(--color-paper);font-weight:300">{{ v }}</div>
+        </div>
+        {%- endfor %}
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1.4fr 1fr;gap:36px">
+      <!-- Sessions / transcripts -->
+      <div>
+        <div class="section-head">
+          <div class="section-head-left">
+            <span class="section-kicker">Episodes</span>
+            <h2 class="section-title">The thread</h2>
+          </div>
+        </div>
+        <div style="border-top:1px solid var(--color-rule)">
+          {% for stem in active_campaign.transcripts %}
+          <a href="/transcripts/{{ stem | urlencode }}"
+             style="display:grid;grid-template-columns:60px 1fr 90px;gap:16px;padding:14px 0;border-bottom:1px solid var(--color-rule);align-items:center;text-decoration:none">
+            <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint);letter-spacing:0.06em">{{ "%02d"|format(loop.index) }}</div>
+            <div style="font-family:var(--font-serif);font-size:16px;color:var(--color-paper)">{{ stem | replace('-', ' ') | title }}</div>
+            <div style="text-align:right">
+              <span class="pill pill-green">TRANSCRIBED</span>
+            </div>
+          </a>
+          {% else %}
+          <div style="padding:14px 0;color:var(--color-paper-faint);font-size:13px;font-style:italic">
+            No transcripts assigned yet.
+            <a href="/transcripts" style="color:var(--color-accent)">Assign from archive →</a>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+
+      <!-- Roster + settings -->
+      <div>
+        <div class="section-head">
+          <div class="section-head-left">
+            <span class="section-kicker">Roster</span>
+            <h2 class="section-title">At this table</h2>
+          </div>
+          <a href="#add-member" style="font-family:var(--font-mono);font-size:11px;color:var(--color-accent)">+ ADD MEMBER</a>
+        </div>
+        <div style="border-top:1px solid var(--color-rule);margin-bottom:32px">
+          {% for member_key in active_campaign.members %}
+          {%- set p = profiles.get(member_key) -%}
+          {% if p %}
+          <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--color-rule)">
+            <div style="width:30px;height:30px;border-radius:50%;background:var(--color-ink-600);color:var(--color-paper);display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-size:11px;font-weight:600">
+              {{ (p.name or member_key)[:1] | upper }}
+            </div>
+            <div style="flex:1">
+              <div style="font-family:var(--font-serif);font-size:14px;color:var(--color-paper)">{{ p.name or member_key }}</div>
+              <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);letter-spacing:0.1em;margin-top:2px">{{ (p.role or '') | upper }}</div>
+            </div>
+            <form method="post" action="/campaigns/{{ slug }}/remove-member" style="display:inline">
+              <input type="hidden" name="member_key" value="{{ member_key }}"/>
+              <button type="submit" style="background:none;border:none;color:var(--color-signal-rose);font-size:11.5px;cursor:pointer;padding:0">remove</button>
+            </form>
+          </div>
+          {% endif %}
+          {% else %}
+          <div style="padding:14px 0;color:var(--color-paper-faint);font-size:13px;font-style:italic">No members yet.</div>
+          {% endfor %}
+        </div>
+
+        <!-- Add member -->
+        <div id="add-member" style="margin-bottom:24px">
+          <div class="mono-kicker" style="margin-bottom:10px">Add member</div>
+          <form method="post" action="/campaigns/{{ slug }}/add-member" style="display:flex;gap:8px">
+            <select name="profile_key" style="flex:1;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:7px 10px;border-radius:5px;font-size:12px;font-family:var(--font-sans)">
+              <option value="">— Select speaker —</option>
+              {% for key, p in profiles.items() if key not in active_campaign.members %}
+              <option value="{{ key }}">{{ p.name or key }}</option>
+              {% endfor %}
+            </select>
+            <button type="submit" class="btn btn-secondary btn-sm">Add</button>
+          </form>
+        </div>
+
+        <!-- Delete campaign -->
+        <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--color-rule)">
+          <form method="post" action="/campaigns/{{ slug }}/delete"
+                onsubmit="return confirm('Delete campaign {{ active_campaign.name }}? Transcripts will not be deleted.')">
+            <button type="submit" style="background:none;border:none;color:var(--color-signal-rose);font-size:12px;font-family:var(--font-sans);cursor:pointer;padding:0">Delete campaign</button>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    {% elif campaigns %}
+    <!-- No campaign selected — landing state -->
+    <div style="padding:40px 0;color:var(--color-paper-faint)">
+      <div style="font-family:var(--font-serif);font-style:italic;font-size:24px;margin-bottom:8px">Select a campaign to view its details.</div>
+    </div>
+    {% else %}
+    <!-- No campaigns at all -->
+    <div style="padding:40px 0;color:var(--color-paper-faint)">
+      <div style="font-family:var(--font-serif);font-style:italic;font-size:24px;margin-bottom:12px">No campaigns yet.</div>
+      <button onclick="document.getElementById('new-campaign-dialog').style.display='flex'" class="btn btn-primary">
+        {{ icon("plus", 11, "var(--color-ink-800)") }} Create your first
+      </button>
+    </div>
+    {% endif %}
+  </div>
 </div>
 {% endblock %}

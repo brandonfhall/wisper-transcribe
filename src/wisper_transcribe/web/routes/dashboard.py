@@ -85,3 +85,16 @@ async def jobs_partial(request: Request) -> HTMLResponse:
         "partials/job_rows.html",
         {"request": request, "jobs": queue.list_recent()},
     )
+
+
+@router.get("/api/sidebar-status", response_class=HTMLResponse)
+async def sidebar_status(request: Request) -> HTMLResponse:
+    """HTMX partial: sidebar system status (device, jobs count). Polled every 5s."""
+    queue = get_queue(request)
+    device = get_device()
+    active = queue.active_count()
+    return templates.TemplateResponse(
+        request,
+        "partials/sidebar_status.html",
+        {"request": request, "device": device, "active_jobs": active},
+    )

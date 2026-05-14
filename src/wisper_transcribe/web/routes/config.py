@@ -394,3 +394,26 @@ async def config_save(request: Request) -> RedirectResponse:
 
     save_config(config)
     return RedirectResponse(url="/config?saved=1", status_code=303)
+
+
+@router.get("/open-data-dir", response_class=JSONResponse)
+async def open_data_dir() -> JSONResponse:
+    """Open the data directory in the OS file manager (macOS Finder, Linux Files, Windows Explorer).
+
+    Only meaningful when running locally — silently fails on headless servers.
+    Returns {ok: true} on success, {ok: false, error: "..."} on failure.
+    """
+    import subprocess
+    import sys
+    from wisper_transcribe.config import get_data_dir
+    path = str(get_data_dir())
+    try:
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        elif sys.platform == "win32":
+            subprocess.Popen(["explorer", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+        return JSONResponse({"ok": True})
+    except Exception:
+        return JSONResponse({"ok": False, "error": "Failed to open data directory"})

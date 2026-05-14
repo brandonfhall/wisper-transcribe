@@ -97,11 +97,15 @@ def _extract_speaker_excerpts(job: "Job", output_path: "Path") -> None:  # type:
         return
 
     # Match lines like: **Alice** *(00:01:23)*: …  or  **Bob** *(1:23)*: …
-    pattern = re.compile(r"\*\*(.+?)\*\*\s+\*\((\d+:\d{2}(?::\d{2})?)\)\*")
+    # Also capture the text on each speaker line so we can show it in the
+    # enrollment wizard alongside the audio clip.
+    line_pattern = re.compile(
+        r"\*\*(.+?)\*\*\s+\*\((\d+:\d{2}(?::\d{2})?)\)\*[:\s]*(.*)"
+    )
     first_ts: dict[str, float] = {}
-    for m in pattern.finditer(content):
-        speaker = m.group(1)
-        ts_str = m.group(2)
+    first_text: dict[str, str] = {}
+    for m in line_pattern.finditer(content):
+        speaker, ts_str, text = m.group(1), m.group(2), m.group(3).strip()
         if speaker in first_ts:
             continue
         parts = ts_str.split(":")
@@ -110,6 +114,7 @@ def _extract_speaker_excerpts(job: "Job", output_path: "Path") -> None:  # type:
         else:
             secs = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
         first_ts[speaker] = float(secs)
+        first_text[speaker] = text
 
     if not first_ts:
         return
@@ -137,6 +142,13 @@ def _extract_speaker_excerpts(job: "Job", output_path: "Path") -> None:  # type:
                 capture_output=True,
             )
             job.speaker_excerpts[speaker] = str(clip_path)
+        except Exception:
+            pass
+
+        # Persist the transcript snippet to disk so it survives server restarts.
+        text_path = out_dir / f"{stem}_excerpt_{safe_name}.txt"
+        try:
+            text_path.write_text(first_text.get(speaker, ""), encoding="utf-8")
         except Exception:
             pass
 
@@ -402,7 +414,7 @@ class JobQueue:
         _tqdm_module.tqdm.__init__ = capturing_init  # type: ignore[method-assign]
         try:
             _result_store: dict = {}
-            output_path = process_file(Path(job.input_path), _result_store=_result_store, **job.kwargs)
+            output_path = process_file(Path(job.input_path), _result_store=_result_store, job_id=job.id, **job.kwargs)
             job.diarization_segments = _result_store.get("diarization_segments", [])
             job.output_path = str(output_path)
             _extract_speaker_excerpts(job, output_path)

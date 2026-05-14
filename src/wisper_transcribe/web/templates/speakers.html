@@ -1,113 +1,133 @@
 {% extends "base.html" %}
+{% from "partials/icons.html" import icon %}
 {% block title %}Speakers{% endblock %}
 
-{% block content %}
-<div class="space-y-6">
-
-  <div class="flex items-center justify-between">
-    <div>
-      <h1 class="text-2xl font-bold text-gray-900">Speaker Profiles</h1>
-      <p class="mt-1 text-sm text-gray-500">{{ profiles | length }} enrolled speaker{% if profiles | length != 1 %}s{% endif %}</p>
+{% block toolbar %}
+<div class="toolbar">
+  <div>
+    <div class="toolbar-kicker">Speakers</div>
+    <div style="display:flex;align-items:baseline;gap:12px">
+      <span class="toolbar-title">Voice profiles</span>
+      <span class="toolbar-sub">{{ profiles | length }} ENROLLED</span>
     </div>
-    <a href="/speakers/enroll" class="btn-primary">Enroll New Speaker</a>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px">
+    <a href="/speakers/enroll" class="btn btn-primary">{{ icon("plus", 11, "var(--color-ink-800)") }} Enroll a voice</a>
+  </div>
+</div>
+{% endblock %}
+
+{% block page %}
+<div class="studio-page">
+
+  {% if request.query_params.get('error') == 'enroll_failed' %}
+  <div style="padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber);margin-bottom:20px">
+    Enrollment failed. Please check the audio file and try again.
+  </div>
+  {% elif request.query_params.get('enrolled') %}
+  <div style="padding:12px 14px;background:#7bd88f12;border:1px solid #7bd88f30;border-radius:4px;font-size:12.5px;color:var(--color-signal-green);margin-bottom:20px">
+    ✓ Speaker enrolled successfully.
+  </div>
+  {% endif %}
+
+  <!-- Intro -->
+  <div style="padding-bottom:20px;border-bottom:1px solid var(--color-rule);margin-bottom:24px">
+    <p style="font-family:var(--font-serif);font-size:16px;font-style:italic;color:var(--color-paper-dim);margin:0;max-width:720px;line-height:1.55">
+      Voice embeddings are extracted with pyannote and matched by cosine similarity.
+      The more sessions a profile blends in, the sharper it gets.
+    </p>
   </div>
 
   {% if profiles %}
-  <input id="list-filter" type="search" placeholder="Filter speakers…"
-         class="form-input max-w-xs" autocomplete="off"/>
-  {% endif %}
-
-  {% if profiles %}
-  <div class="card overflow-hidden p-0">
-    <div class="overflow-x-auto">
-    <table class="min-w-full divide-y divide-gray-200 text-sm">
-      <thead class="bg-gray-50">
-        <tr>
-          <th class="px-6 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Name</th>
-          <th class="px-6 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Role</th>
-          <th class="px-6 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Enrolled</th>
-          <th class="px-6 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Notes</th>
-          <th class="px-6 py-3 text-left font-medium text-gray-500 uppercase tracking-wider">Actions</th>
-        </tr>
-      </thead>
-      <tbody class="bg-white divide-y divide-gray-200">
-        {% for key, profile in profiles.items() %}
-        <tr data-filterable>
-          <td class="px-6 py-4 font-medium text-gray-900">
-            {{ profile.display_name }}
-            {% if has_clip and has_clip[key] %}
-            <audio id="clip_{{ key }}" src="/speakers/{{ key }}/clip" preload="none" class="hidden"></audio>
-            {% endif %}
-          </td>
-          <td class="px-6 py-4 text-gray-500">{{ profile.role or "—" }}</td>
-          <td class="px-6 py-4 text-gray-500 text-xs">{{ profile.enrolled_date }}</td>
-          <td class="px-6 py-4 text-gray-500 text-xs max-w-xs truncate">{{ profile.notes or "—" }}</td>
-          <td class="px-6 py-4">
-            <div class="flex gap-3 items-center flex-wrap">
-              {% if has_clip and has_clip[key] %}
-              <button type="button" onclick="playClip('clip_{{ key }}', this)"
-                      class="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-full border border-green-500 text-green-700 hover:bg-green-50 transition-colors">
-                <svg class="h-3 w-3" fill="currentColor" viewBox="0 0 20 20">
-                  <path d="M6.3 2.841A1.5 1.5 0 004 4.11v11.78a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/>
-                </svg>
-                Play
-              </button>
-              {% endif %}
-              <!-- Rename -->
-              <form method="post" action="/speakers/{{ key }}/rename" class="flex gap-1 items-center">
-                <input type="text" name="new_name" placeholder="New name" class="text-xs border border-gray-300 rounded px-2 py-1 w-24 focus:ring-1 focus:ring-green-500 focus:border-green-500"/>
-                <button type="submit" class="text-xs text-green-700 hover:underline">Rename</button>
-              </form>
-              <!-- Remove -->
-              <form method="post" action="/speakers/{{ key }}/remove"
-                    onsubmit="return confirm('Remove {{ profile.display_name }}?')">
-                <button type="submit" class="text-xs text-red-600 hover:underline">Remove</button>
-              </form>
+  <!-- Speaker grid -->
+  <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:1px;background:var(--color-rule);border:1px solid var(--color-rule);margin-bottom:24px">
+    {% for key, profile in profiles.items() %}
+    {%- set initials = (profile.name or key)[:1] | upper -%}
+    {%- set hue = (loop.index0 * 67 + 200) % 360 -%}
+    <div style="padding:22px 24px;background:var(--color-ink-800)">
+      <div style="display:flex;align-items:flex-start;gap:16px">
+        <!-- Avatar -->
+        <div style="width:56px;height:56px;border-radius:50%;
+                    background:oklch(0.5 0.12 {{ hue }}deg);
+                    color:#fff;display:flex;align-items:center;justify-content:center;
+                    font-family:var(--font-serif);font-style:italic;font-size:24px;font-weight:500;flex-shrink:0">
+          {{ initials }}
+        </div>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px">
+            <div>
+              <div style="font-family:var(--font-serif);font-size:22px;color:var(--color-paper)">{{ profile.name or key }}</div>
+              <div style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint);letter-spacing:0.1em;margin-top:3px">
+                {{ (profile.role or 'UNKNOWN') | upper }}
+              </div>
             </div>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+            <form method="post" action="/speakers/{{ key }}/delete"
+                  onsubmit="return confirm('Remove {{ profile.name or key }} permanently?')" style="display:inline">
+              <button type="submit" style="background:none;border:none;color:var(--color-signal-rose);font-size:11.5px;font-family:var(--font-sans);cursor:pointer;padding:0">Remove</button>
+            </form>
+          </div>
+
+          <!-- Waveform sample -->
+          <div style="display:flex;gap:1px;align-items:center;height:30px;margin:14px 0;padding:4px 0">
+            {% for i in range(64) %}
+            {%- set h_pct = (20 + ((i * 13 + hue) % 60)) -%}
+            <div style="flex:1;height:{{ h_pct }}%;background:oklch(0.5 0.12 {{ hue }}deg);border-radius:1px;opacity:0.55"></div>
+            {% endfor %}
+          </div>
+
+          <!-- Stats row -->
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:0;border-top:1px solid var(--color-rule);border-bottom:1px solid var(--color-rule)">
+            {%- set sessions = profile.sessions | default(0) -%}
+            <div style="padding:10px 4px;{% if not loop.first %}border-left:1px solid var(--color-rule);{% endif %}">
+              <div style="font-family:var(--font-mono);font-size:9.5px;color:var(--color-paper-faint);letter-spacing:0.12em;text-transform:uppercase;margin-bottom:4px">SESSIONS</div>
+              <div style="font-family:var(--font-mono);font-size:12.5px;color:var(--color-paper)">{{ sessions }}</div>
+            </div>
+            <div style="padding:10px 4px;border-left:1px solid var(--color-rule)">
+              <div style="font-family:var(--font-mono);font-size:9.5px;color:var(--color-paper-faint);letter-spacing:0.12em;text-transform:uppercase;margin-bottom:4px">SIM</div>
+              <div style="font-family:var(--font-mono);font-size:12.5px;color:var(--color-signal-green)">—</div>
+            </div>
+            <div style="padding:10px 4px;border-left:1px solid var(--color-rule)">
+              <div style="font-family:var(--font-mono);font-size:9.5px;color:var(--color-paper-faint);letter-spacing:0.12em;text-transform:uppercase;margin-bottom:4px">HEARD</div>
+              <div style="font-family:var(--font-mono);font-size:12.5px;color:var(--color-paper)">—</div>
+            </div>
+            <div style="padding:10px 4px;border-left:1px solid var(--color-rule)">
+              <div style="font-family:var(--font-mono);font-size:9.5px;color:var(--color-paper-faint);letter-spacing:0.12em;text-transform:uppercase;margin-bottom:4px">SOURCE</div>
+              <div style="font-family:var(--font-mono);font-size:12.5px;color:var(--color-paper)">
+                {% if sessions > 0 %}EMA{% else %}single{% endif %}
+              </div>
+            </div>
+          </div>
+
+          <!-- Actions -->
+          <div style="display:flex;gap:6px;margin-top:14px;align-items:center">
+            {% if has_clip.get(key) %}
+            <a href="/speakers/{{ key }}/clip" class="btn btn-secondary btn-sm">
+              {{ icon("play", 10) }} Sample
+            </a>
+            {% endif %}
+            <a href="/speakers/{{ key }}/enroll" class="btn btn-secondary btn-sm">Re-enroll</a>
+            {% if profile.notes %}
+            <span style="font-size:11.5px;color:var(--color-paper-faint);font-style:italic;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ profile.notes }}</span>
+            {% endif %}
+          </div>
+        </div>
+      </div>
     </div>
-  </div>
-  {% else %}
-  <div class="card text-center py-12">
-    <svg class="h-12 w-12 text-gray-300 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke-width="1" stroke="currentColor">
-      <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z"/>
-    </svg>
-    <p class="text-gray-500">No speakers enrolled yet.</p>
-    <a href="/speakers/enroll" class="mt-4 inline-block btn-primary">Enroll a Speaker</a>
+    {% endfor %}
   </div>
   {% endif %}
+
+  <!-- Enroll another -->
+  <div style="padding:20px 24px;border:1px dashed var(--color-rule-strong);display:flex;align-items:center;gap:18px">
+    <div style="width:48px;height:48px;border-radius:50%;border:1px dashed var(--color-rule-strong);display:flex;align-items:center;justify-content:center;color:var(--color-paper-dim);flex-shrink:0">
+      {{ icon("plus", 20, "var(--color-paper-dim)") }}
+    </div>
+    <div style="flex:1">
+      <div style="font-family:var(--font-serif);font-style:italic;font-size:18px;color:var(--color-paper)">Enroll another voice</div>
+      <div style="font-size:12.5px;color:var(--color-paper-dim);margin-top:4px">Drag in a clean clip (10–60 seconds, single speaker) or enroll from the enrollment page.</div>
+    </div>
+    <a href="/speakers/enroll" class="btn btn-secondary">Browse audio</a>
+  </div>
 
 </div>
-
-<script>
-(function() {
-  var input = document.getElementById('list-filter');
-  if (!input) return;
-  input.addEventListener('input', function() {
-    var q = this.value.trim().toLowerCase();
-    document.querySelectorAll('[data-filterable]').forEach(function(el) {
-      el.style.display = (q && !el.textContent.toLowerCase().includes(q)) ? 'none' : '';
-    });
-  });
-})();
-
-function playClip(audioId, btn) {
-  document.querySelectorAll('audio').forEach(a => {
-    if (a.id !== audioId) { a.pause(); a.currentTime = 0; }
-  });
-  const audio = document.getElementById(audioId);
-  if (audio.paused) {
-    audio.play();
-    btn.innerHTML = '<svg class="h-3 w-3" fill="currentColor" viewBox="0 0 20 20"><path d="M5.75 3a.75.75 0 00-.75.75v12.5c0 .414.336.75.75.75h1.5a.75.75 0 00.75-.75V3.75A.75.75 0 007.25 3h-1.5zM12.75 3a.75.75 0 00-.75.75v12.5c0 .414.336.75.75.75h1.5a.75.75 0 00.75-.75V3.75A.75.75 0 0014.25 3h-1.5z"/></svg> Stop';
-    audio.onended = () => { btn.innerHTML = '<svg class="h-3 w-3" fill="currentColor" viewBox="0 0 20 20"><path d="M6.3 2.841A1.5 1.5 0 004 4.11v11.78a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/></svg> Play'; };
-  } else {
-    audio.pause(); audio.currentTime = 0;
-    btn.innerHTML = '<svg class="h-3 w-3" fill="currentColor" viewBox="0 0 20 20"><path d="M6.3 2.841A1.5 1.5 0 004 4.11v11.78a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/></svg> Play';
-  }
-}
-</script>
 {% endblock %}
