@@ -112,7 +112,7 @@ Checks ffmpeg, detects your GPU (CUDA/MPS/CPU), prompts for your HuggingFace tok
 wisper transcribe <path>
 
   path                     Audio or video file, or folder of files
-                           Audio: mp3 wav m4a flac ogg
+                           Audio: mp3 wav m4a m4b flac ogg
                            Video: mp4 mkv mov avi webm m4v flv ts mts m2ts
                            (video: first audio track extracted automatically)
 
@@ -368,7 +368,7 @@ wisper server --reload         # dev mode — auto-reloads on code changes
 
 ## Supported Formats
 
-**Audio:** `.mp3` `.wav` `.m4a` `.flac` `.ogg`
+**Audio:** `.mp3` `.wav` `.m4a` `.m4b` `.flac` `.ogg`
 
 **Video:** `.mp4` `.m4v` `.mkv` `.mov` `.avi` `.webm` `.flv` `.ts` `.mts` `.m2ts`
 

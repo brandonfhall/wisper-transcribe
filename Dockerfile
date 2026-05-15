@@ -61,6 +61,12 @@ COPY src/ ./src/
 # speaker profiles (overrides the platformdirs default of ~/.local/share/...).
 ENV WISPER_DATA_DIR=/data
 
+# Pin the tailwindcss binary tag so the download URL is
+# /releases/download/v4.2.4/... (cached on the GitHub CDN) instead of
+# /releases/latest/download/... which is redirect-prone and has hit
+# transient HTTP 503/504 in CI builds.
+ENV TAILWINDCSS_VERSION=v4.2.4
+
 # ── cpu target ────────────────────────────────────────────────────────────────
 FROM base AS cpu
 

@@ -2,12 +2,13 @@ import re as _re
 import subprocess
 import tempfile
 import threading
+import wave
 from pathlib import Path
 
 from pydub import AudioSegment
 
 # Audio-only formats handled by pydub.
-AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac", ".ogg"}
+AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".m4b", ".flac", ".ogg"}
 
 # Video container formats — audio is extracted via ffmpeg with explicit
 # stream mapping so only the first audio track is used.
@@ -53,13 +54,19 @@ def _probe_duration(video_path: Path) -> float | None:
     return None
 
 
-def _extract_first_audio_track(video_path: Path) -> Path:
-    """Extract the first audio stream from a video file as a 16kHz mono WAV.
+def _extract_first_audio_track(source_path: Path) -> Path:
+    """Convert any audio or video file to a 16kHz mono WAV via streaming ffmpeg.
 
     Streams ffmpeg's ``-progress pipe:1`` output to drive a tqdm progress bar
-    so both the CLI terminal and the web job log show extraction progress and
-    ETA.  Uses ``-map 0:a:0`` so only the primary audio track is extracted
-    regardless of how many tracks the container holds.
+    so both the CLI terminal and the web job log show conversion progress and
+    ETA. Uses ``-map 0:a:0`` so only the primary audio track is extracted,
+    which works for video containers with multiple audio tracks and is a
+    no-op for audio-only files.
+
+    This is preferred over pydub for large files: pydub loads the full
+    decoded PCM into memory and raises ``Unable to process >4GB files`` for
+    long-form audio (e.g. multi-hour audiobooks decoded at native rate).
+    Streaming through ffmpeg has no such limit.
     """
     from tqdm import tqdm as _tqdm
 
@@ -67,15 +74,15 @@ def _extract_first_audio_track(video_path: Path) -> Path:
     tmp.close()
     out_path = Path(tmp.name)
 
-    total_seconds = _probe_duration(video_path)
+    total_seconds = _probe_duration(source_path)
 
-    _tqdm.write(f"  Extracting audio from {video_path.name!r}…")
+    _tqdm.write(f"  Extracting audio from {source_path.name!r}…")
 
     try:
         proc = subprocess.Popen(
             [
                 "ffmpeg", "-y",
-                "-i", str(video_path),
+                "-i", str(source_path),
                 "-map", "0:a:0",
                 "-ac", "1",
                 "-ar", "16000",
@@ -89,7 +96,7 @@ def _extract_first_audio_track(video_path: Path) -> Path:
         )
     except FileNotFoundError as exc:
         raise RuntimeError(
-            "ffmpeg not found. Install it to process video files: "
+            "ffmpeg not found. Install it to process audio and video files: "
             "https://ffmpeg.org/download.html"
         ) from exc
 
@@ -138,7 +145,7 @@ def _extract_first_audio_track(video_path: Path) -> Path:
     if proc.returncode != 0:
         stderr_tail = "\n".join(stderr_lines[-10:])
         raise ValueError(
-            f"ffmpeg could not extract audio from {video_path.name!r}. "
+            f"ffmpeg could not extract audio from {source_path.name!r}. "
             f"Does the file have an audio track?\nffmpeg: {stderr_tail}"
         )
 
@@ -149,31 +156,26 @@ def _extract_first_audio_track(video_path: Path) -> Path:
 def convert_to_wav(path: Path) -> Path:
     """Convert an audio or video file to a 16kHz mono WAV.
 
-    Video files: ffmpeg extracts only the first audio track (``-map 0:a:0``).
-    Audio files: pydub handles conversion; already-correct WAVs are returned
-    unchanged.
+    Already-correct WAVs (16 kHz mono) are returned unchanged. Everything
+    else is streamed through ffmpeg via ``_extract_first_audio_track``.
+    Pydub is intentionally not used for the conversion because it loads the
+    full decoded PCM into memory and raises ``Unable to process >4GB files``
+    for long-form audio (e.g. multi-hour audiobooks).
     """
     path = Path(path)
 
-    if path.suffix.lower() in VIDEO_EXTENSIONS:
-        return _extract_first_audio_track(path)
+    if path.suffix.lower() == ".wav":
+        # Header-only check via stdlib wave — never loads PCM data, so this
+        # works even on a >4GB pre-converted WAV. Falls through to ffmpeg
+        # for non-PCM WAVs (e.g. ADPCM) which `wave` can't open.
+        try:
+            with wave.open(str(path), "rb") as w:
+                if w.getframerate() == 16000 and w.getnchannels() == 1:
+                    return path
+        except wave.Error:
+            pass
 
-    audio = AudioSegment.from_file(str(path))
-
-    if (
-        path.suffix.lower() == ".wav"
-        and audio.frame_rate == 16000
-        and audio.channels == 1
-    ):
-        return path
-
-    audio = audio.set_frame_rate(16000).set_channels(1)
-
-    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    tmp.close()
-    out_path = Path(tmp.name)
-    audio.export(str(out_path), format="wav")
-    return out_path
+    return _extract_first_audio_track(path)
 
 
 def get_duration(path: Path) -> float:

@@ -81,12 +81,16 @@ def test_sidecar_written_after_job_completes(tmp_path: Path):
     out_md = tmp_path / "session01.md"
     out_md.write_text("# Session 01", encoding="utf-8")
 
+    # Use the platform-native string form of the path so the assertion
+    # matches the sidecar value on both POSIX and Windows.
+    input_path_str = str(Path("/tmp/session01.mp3"))
+
     seg = DiarizationSegment(start=1.0, end=5.0, speaker="SPEAKER_00")
     job = Job(
         id=str(uuid.uuid4()),
         status=COMPLETED,
         created_at=datetime.now(),
-        input_path="/tmp/session01.mp3",
+        input_path=input_path_str,
         kwargs={"campaign": "my-campaign"},
         output_path=str(out_md),
         diarization_segments=[seg],
@@ -97,7 +101,7 @@ def test_sidecar_written_after_job_completes(tmp_path: Path):
     sidecar = tmp_path / "session01_diar.json"
     assert sidecar.exists()
     data = json.loads(sidecar.read_text())
-    assert data["input_path"] == "/tmp/session01.mp3"
+    assert data["input_path"] == input_path_str
     assert data["campaign"] == "my-campaign"
     assert len(data["diarization_segments"]) == 1
     assert data["diarization_segments"][0] == {"start": 1.0, "end": 5.0, "speaker": "SPEAKER_00"}
@@ -298,6 +302,136 @@ def test_excerpt_serves_clip(client: TestClient, tmp_path: Path):
         resp = client.get("/transcripts/session01/excerpt/SPEAKER_00")
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "audio/mpeg"
+
+
+def test_excerpt_falls_back_to_legacy_display_name(client: TestClient, tmp_path: Path):
+    """Pre-fix transcripts saved excerpt files keyed by display name (e.g.
+    'Unknown_Speaker_1') instead of the raw pyannote label. The wizard +
+    excerpt route must locate them via timestamp-matched markdown parsing
+    so users don't have to re-transcribe."""
+    md = tmp_path / "session01.md"
+    md.write_text(
+        "---\ntitle: Session 01\n---\n\n"
+        "**Unknown Speaker 1** *(00:00)*: Hello everyone\n"
+        "**Unknown Speaker 2** *(00:12)*: Thanks for having me\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "session01_diar.json").write_text(
+        json.dumps(_SAMPLE_DIAR), encoding="utf-8",
+    )
+    # Legacy file name: keyed by display name, not raw label
+    legacy_clip = tmp_path / "session01_excerpt_Unknown_Speaker_1.mp3"
+    legacy_clip.write_bytes(b"fake-mp3-data")
+
+    with _patch_output(tmp_path):
+        resp = client.get("/transcripts/session01/excerpt/SPEAKER_00")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "audio/mpeg"
+
+
+def test_enroll_form_finds_legacy_display_name_excerpts(client: TestClient, tmp_path: Path):
+    """The wizard page must surface excerpts even when files are keyed by
+    the old display-name convention."""
+    md = tmp_path / "session01.md"
+    md.write_text(
+        "---\ntitle: Session 01\n---\n\n"
+        "**Unknown Speaker 1** *(00:00)*: Hello everyone\n"
+        "**Unknown Speaker 2** *(00:12)*: Thanks for having me\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "session01_diar.json").write_text(
+        json.dumps(_SAMPLE_DIAR), encoding="utf-8",
+    )
+    (tmp_path / "session01_excerpt_Unknown_Speaker_1.mp3").write_bytes(b"audio")
+    (tmp_path / "session01_excerpt_Unknown_Speaker_1.txt").write_text(
+        "Hello everyone", encoding="utf-8",
+    )
+
+    with _patch_output(tmp_path):
+        resp = client.get("/transcripts/session01/enroll")
+    assert resp.status_code == 200
+    # Sample button is rendered when speaker_excerpts contains the raw label
+    assert b"Sample" in resp.content
+    # Italic snippet is rendered when speaker_excerpt_texts contains the raw label
+    assert b"Hello everyone" in resp.content
+
+
+def test_legacy_backfill_uses_interval_match_not_exact_timestamp(client: TestClient, tmp_path: Path):
+    """The legacy backfill must match by *interval containment*, not exact
+    start-time string match. In real transcripts the markdown's first-block
+    timestamp is the first whisper segment's start, which usually differs
+    from pyannote's first-segment-of-SPEAKER_XX start (whisper skips silence,
+    aligner may assign nearby segments to UNKNOWN, etc.)."""
+    md = tmp_path / "session01.md"
+    # Pyannote says SPEAKER_00 spans 0.0-30.0, but the first whisper line
+    # assigned to SPEAKER_00 starts at 02:15 (135s) — well inside the turn
+    # but NOT equal to the pyannote start of 0.0.
+    md.write_text(
+        "---\ntitle: Session 01\n---\n\n"
+        "**Unknown Speaker 1** *(02:15)*: Mid-turn whisper segment\n",
+        encoding="utf-8",
+    )
+    diar = {
+        "input_path": "/tmp/session01.mp3",
+        "campaign": None,
+        "diarization_segments": [
+            # Single long pyannote turn covering the markdown timestamp
+            {"start": 0.0, "end": 300.0, "speaker": "SPEAKER_00"},
+        ],
+    }
+    (tmp_path / "session01_diar.json").write_text(json.dumps(diar), encoding="utf-8")
+    (tmp_path / "session01_excerpt_Unknown_Speaker_1.mp3").write_bytes(b"audio")
+
+    with _patch_output(tmp_path):
+        resp = client.get("/transcripts/session01/excerpt/SPEAKER_00")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "audio/mpeg"
+
+
+def test_extract_speaker_excerpts_uses_raw_labels(tmp_path: Path):
+    """`_extract_speaker_excerpts` must key files by raw pyannote label
+    (`SPEAKER_00`), not the rendered display name from the markdown."""
+    from wisper_transcribe.web.jobs import _extract_speaker_excerpts, Job, COMPLETED
+    from wisper_transcribe.models import AlignedSegment
+    from datetime import datetime
+    import uuid
+
+    out_md = tmp_path / "session01.md"
+    out_md.write_text(
+        "**Unknown Speaker 1** *(00:00)*: Hello\n", encoding="utf-8",
+    )
+    fake_audio = tmp_path / "audio.mp3"
+    fake_audio.write_bytes(b"fake")
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(fake_audio),
+        kwargs={},
+        output_path=str(out_md),
+    )
+    aligned = [
+        AlignedSegment(start=0.0, end=5.0, text="Hello", speaker="SPEAKER_00"),
+        AlignedSegment(start=10.0, end=15.0, text="Hi", speaker="SPEAKER_00"),
+        AlignedSegment(start=20.0, end=25.0, text="Goodbye", speaker="UNKNOWN"),
+    ]
+
+    with patch("wisper_transcribe.web.jobs.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0)
+        _extract_speaker_excerpts(job, out_md, aligned_segments=aligned)
+
+    # The text file is written even if ffmpeg is mocked
+    txt_path = tmp_path / "session01_excerpt_SPEAKER_00.txt"
+    assert txt_path.exists()
+    assert txt_path.read_text(encoding="utf-8") == "Hello"
+
+    # UNKNOWN segments are skipped
+    assert not (tmp_path / "session01_excerpt_UNKNOWN.txt").exists()
+
+    # ffmpeg was invoked with the raw-label output path
+    cmd = mock_run.call_args[0][0]
+    assert any("SPEAKER_00" in str(p) for p in cmd)
 
 
 def test_excerpt_404_when_no_clip(client: TestClient, tmp_path: Path):

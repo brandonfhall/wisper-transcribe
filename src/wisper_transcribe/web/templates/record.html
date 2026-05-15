@@ -166,7 +166,7 @@
       </div>
       {% endif %}
       <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim);line-height:1.7">
-        <div>started {% if active_recording.started_at %}{{ active_recording.started_at.strftime('%b %-d · %H:%M') }}{% else %}—{% endif %}</div>
+        <div>started {% if active_recording.started_at %}{{ active_recording.started_at.strftime('%b ') }}{{ active_recording.started_at.day }}{{ active_recording.started_at.strftime(' · %H:%M') }}{% else %}—{% endif %}</div>
         <div>id <span style="color:var(--color-accent)">{{ active_recording.id[:12] }}…</span></div>
       </div>
     </div>

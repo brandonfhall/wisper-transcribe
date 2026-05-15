@@ -11,6 +11,13 @@ on:
   schedule:
     - cron: "0 6 * * 1"   # weekly latest-deps check — Monday 06:00 UTC
 
+env:
+  # Pin the tailwindcss binary to a specific tag so the download URL is
+  # /releases/download/v4.2.4/... (cached on the GitHub CDN) instead of
+  # /releases/latest/download/... which is redirect-prone and has hit
+  # transient HTTP 503/504 in CI.
+  TAILWINDCSS_VERSION: v4.2.4
+
 jobs:
   test:
     runs-on: ubuntu-latest

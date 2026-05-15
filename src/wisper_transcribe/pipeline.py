@@ -484,6 +484,8 @@ def process_file(
             if _result_store is not None:
                 _result_store["diarization_segments"] = list(diarization)
             aligned_segments = align(segments, diarization)
+            if _result_store is not None:
+                _result_store["aligned_segments"] = list(aligned_segments)
 
             unique_speakers = sorted(
                 {seg.speaker for seg in aligned_segments if seg.speaker != "UNKNOWN"},

@@ -20,6 +20,7 @@ Design:
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import sys as _sys
 import threading
 import uuid
@@ -107,44 +108,36 @@ def _write_enrollment_sidecar(job: "Job", output_path: "Path") -> None:  # type:
         pass
 
 
-def _extract_speaker_excerpts(job: "Job", output_path: "Path") -> None:  # type: ignore[name-defined]
+def _extract_speaker_excerpts(job: "Job", output_path: "Path",  # type: ignore[name-defined]
+                              aligned_segments: list | None = None) -> None:
     """Extract a short audio clip per speaker from the transcribed file.
 
-    Parses the output markdown for the first timestamp of each speaker, then
-    uses ffmpeg to cut a ~12s clip from the original input audio.  Clips are
-    saved alongside the transcript as <stem>_excerpt_<speaker>.mp3 so they
-    can be served to the browser during the enrollment wizard.
+    Walks the aligned segments to find the first occurrence of each *raw*
+    speaker label (e.g. ``SPEAKER_00``), then uses ffmpeg to cut a ~12 s clip
+    from the original input audio. Clips are saved alongside the transcript
+    as ``<stem>_excerpt_<raw_label>.mp3`` so the enrollment wizard — which
+    keys off the raw labels stored in ``_diar.json`` — can find them.
+
+    Earlier versions parsed the rendered markdown and so keyed files by the
+    *display* name ("Unknown Speaker 1", etc.), which never matched the
+    wizard lookup. The wizard route has a backfill for those legacy files.
 
     Failures are silently swallowed — playback is a nice-to-have, not critical.
     """
     import re
-    import subprocess
     from pathlib import Path as _Path
 
-    try:
-        content = _Path(output_path).read_text(encoding="utf-8")
-    except Exception:
+    if not aligned_segments:
         return
 
-    # Match lines like: **Alice** *(00:01:23)*: …  or  **Bob** *(1:23)*: …
-    # Also capture the text on each speaker line so we can show it in the
-    # enrollment wizard alongside the audio clip.
-    line_pattern = re.compile(
-        r"\*\*(.+?)\*\*\s+\*\((\d+:\d{2}(?::\d{2})?)\)\*[:\s]*(.*)"
-    )
     first_ts: dict[str, float] = {}
     first_text: dict[str, str] = {}
-    for m in line_pattern.finditer(content):
-        speaker, ts_str, text = m.group(1), m.group(2), m.group(3).strip()
-        if speaker in first_ts:
+    for seg in aligned_segments:
+        label = getattr(seg, "speaker", None)
+        if not label or label == "UNKNOWN" or label in first_ts:
             continue
-        parts = ts_str.split(":")
-        if len(parts) == 2:
-            secs = int(parts[0]) * 60 + int(parts[1])
-        else:
-            secs = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-        first_ts[speaker] = float(secs)
-        first_text[speaker] = text
+        first_ts[label] = float(seg.start)
+        first_text[label] = (getattr(seg, "text", "") or "").strip()
 
     if not first_ts:
         return
@@ -220,11 +213,16 @@ class Job:
     summary_path: Optional[str] = None
 
     @property
-    def is_video(self) -> bool:
-        """True when the input file is a video container (not a pure audio file)."""
+    def needs_extraction(self) -> bool:
+        """True when the input must be streamed through ffmpeg before transcription.
+
+        Anything that isn't a `.wav` (mp3, m4a, m4b, flac, ogg, mp4, mkv, …)
+        is converted to 16 kHz mono WAV via `_extract_first_audio_track`.
+        WAVs are passthrough-checked and may also re-encode silently if their
+        rate/channels are wrong — but the common case is no extraction.
+        """
         from pathlib import Path as _Path
-        from wisper_transcribe.audio_utils import VIDEO_EXTENSIONS
-        return _Path(self.input_path or "").suffix.lower() in VIDEO_EXTENSIONS
+        return _Path(self.input_path or "").suffix.lower() != ".wav"
 
 
 class JobQueue:
@@ -447,7 +445,8 @@ class JobQueue:
             output_path = process_file(Path(job.input_path), _result_store=_result_store, job_id=job.id, **job.kwargs)
             job.diarization_segments = _result_store.get("diarization_segments", [])
             job.output_path = str(output_path)
-            _extract_speaker_excerpts(job, output_path)
+            _extract_speaker_excerpts(job, output_path,
+                                      aligned_segments=_result_store.get("aligned_segments", []))
             _write_enrollment_sidecar(job, output_path)
 
             # Chain LLM post-processing if requested; defer COMPLETED until done

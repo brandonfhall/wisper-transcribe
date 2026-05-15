@@ -350,6 +350,21 @@ def test_config_get_returns_200(client):
     assert b"model" in resp.content
 
 
+@pytest.mark.parametrize("platform,expected_label", [
+    ("darwin", "Open in Finder"),
+    ("win32", "Open in Explorer"),
+    ("linux", "Show in Files"),
+])
+def test_config_get_uses_os_specific_open_label(client, platform, expected_label):
+    """The data-dir button verb must match the host OS file manager."""
+    with patch("wisper_transcribe.web.routes.config.load_config", return_value={}), \
+         patch("wisper_transcribe.web.routes.config.get_config_path", return_value=Path("/tmp/config.toml")), \
+         patch("wisper_transcribe.web.routes.config.sys.platform", platform):
+        resp = client.get("/config")
+    assert resp.status_code == 200
+    assert expected_label.encode() in resp.content
+
+
 def test_config_post_saves_and_redirects(client):
     with patch("wisper_transcribe.web.routes.config.load_config", return_value={}), \
          patch("wisper_transcribe.web.routes.config.save_config") as mock_save:
@@ -1050,6 +1065,52 @@ def test_transcribe_post_processing_flags_set_on_job(client, tmp_path):
     assert job is not None
     assert job.post_refine is True
     assert job.post_summarize is True
+
+
+def test_transcribe_post_no_diarize_round_trips_to_queue(client, tmp_path, monkeypatch):
+    """The Speakers `Off` cell submits no_diarize=on; the job kwarg must be True."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.web.jobs import Job
+    import uuid
+
+    fake_job = MagicMock(spec=Job)
+    fake_job.id = str(uuid.uuid4())
+
+    with patch("wisper_transcribe.web.routes.transcribe.get_output_dir", return_value=tmp_path), \
+         patch.object(client.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
+        resp = client.post(
+            "/transcribe",
+            files={"file": ("audiobook.m4b", b"fake audio", "audio/mp4")},
+            data={"no_diarize": "on", "num_speakers": ""},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    call_kwargs = mock_submit.call_args.kwargs
+    assert call_kwargs.get("no_diarize") is True
+    assert call_kwargs.get("num_speakers") is None
+
+
+def test_transcribe_post_default_no_diarize_is_false(client, tmp_path, monkeypatch):
+    """Without the `Off` cell selected, no_diarize defaults to False."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.web.jobs import Job
+    import uuid
+
+    fake_job = MagicMock(spec=Job)
+    fake_job.id = str(uuid.uuid4())
+
+    with patch("wisper_transcribe.web.routes.transcribe.get_output_dir", return_value=tmp_path), \
+         patch.object(client.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
+        resp = client.post(
+            "/transcribe",
+            files={"file": ("session.mp3", b"fake audio", "audio/mpeg")},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    call_kwargs = mock_submit.call_args.kwargs
+    assert call_kwargs.get("no_diarize") is False
 
 
 def test_transcribe_post_with_vocab_file_sets_hotwords(client, tmp_path, monkeypatch):

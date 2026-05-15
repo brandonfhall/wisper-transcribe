@@ -48,39 +48,59 @@ def test_validate_audio_case_insensitive(tmp_path):
     validate_audio(f)  # .MP3 should be accepted
 
 
-@patch("wisper_transcribe.audio_utils.AudioSegment")
-def test_convert_to_wav_already_wav(mock_audio_segment, tmp_path):
-    wav_file = tmp_path / "audio.wav"
-    wav_file.write_bytes(b"fake wav data")
-
-    mock_audio = MagicMock()
-    mock_audio.frame_rate = 16000
-    mock_audio.channels = 1
-    mock_audio_segment.from_file.return_value = mock_audio
+def test_convert_to_wav_already_wav(tmp_path):
+    """A real 16 kHz mono WAV is returned unchanged (no re-encode)."""
+    import numpy as np
+    import scipy.io.wavfile as wavfile
 
     from wisper_transcribe.audio_utils import convert_to_wav
 
+    wav_file = tmp_path / "audio.wav"
+    wavfile.write(str(wav_file), 16000, np.zeros(16, dtype=np.int16))
+
     result = convert_to_wav(wav_file)
-    assert result == wav_file  # returned unchanged
+    assert result == wav_file  # returned unchanged, no temp file
 
 
-@patch("wisper_transcribe.audio_utils.AudioSegment")
-def test_convert_to_wav_converts_mp3(mock_audio_segment, tmp_path):
+def test_convert_to_wav_wrong_rate_wav_routed_through_ffmpeg(tmp_path):
+    """A WAV at 44.1 kHz / stereo is re-encoded via the ffmpeg path."""
+    import numpy as np
+    import scipy.io.wavfile as wavfile
+
+    from wisper_transcribe.audio_utils import convert_to_wav
+
+    wav_file = tmp_path / "highrate.wav"
+    wavfile.write(str(wav_file), 44100, np.zeros((16, 2), dtype=np.int16))
+
+    with patch("wisper_transcribe.audio_utils.subprocess.run",
+               return_value=_mock_ffprobe(None)), \
+         patch("wisper_transcribe.audio_utils.subprocess.Popen",
+               side_effect=_make_mock_popen()) as mock_popen:
+        result = convert_to_wav(wav_file)
+
+    assert result.suffix == ".wav"
+    cmd = mock_popen.call_args[0][0]
+    assert "-ar" in cmd and "16000" in cmd
+    assert "-ac" in cmd and "1" in cmd
+
+
+def test_convert_to_wav_converts_mp3(tmp_path):
+    """MP3 (and any other non-WAV audio) is converted via streaming ffmpeg."""
     mp3_file = tmp_path / "audio.mp3"
     mp3_file.write_bytes(b"fake mp3 data")
 
-    mock_audio = MagicMock()
-    mock_audio.frame_rate = 44100
-    mock_audio.channels = 2
-    converted = MagicMock()
-    mock_audio.set_frame_rate.return_value.set_channels.return_value = converted
-    mock_audio_segment.from_file.return_value = mock_audio
-
     from wisper_transcribe.audio_utils import convert_to_wav
 
-    result = convert_to_wav(mp3_file)
+    with patch("wisper_transcribe.audio_utils.subprocess.run",
+               return_value=_mock_ffprobe(None)), \
+         patch("wisper_transcribe.audio_utils.subprocess.Popen",
+               side_effect=_make_mock_popen()) as mock_popen:
+        result = convert_to_wav(mp3_file)
+
     assert result.suffix == ".wav"
-    converted.export.assert_called_once()
+    cmd = mock_popen.call_args[0][0]
+    assert "-ar" in cmd and "16000" in cmd
+    assert "-ac" in cmd and "1" in cmd
 
 
 @patch("wisper_transcribe.audio_utils.AudioSegment")

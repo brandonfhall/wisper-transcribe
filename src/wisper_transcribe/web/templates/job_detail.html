@@ -53,7 +53,7 @@
       {% set steps = [("transcribe","T","Transcribe"), ("diarize","D","Diarize"), ("format","F","Format")] %}
       {% if job.post_refine %}{% set steps = steps + [("refine","R","Refine")] %}{% endif %}
       {% if job.post_summarize %}{% set steps = steps + [("summarize","S","Summarize")] %}{% endif %}
-      {% if job.is_video %}{% set steps = [("extract","E","Extract")] + steps %}{% endif %}
+      {% if job.needs_extraction %}{% set steps = [("extract","E","Extract")] + steps %}{% endif %}
     {% elif job.job_type == "refine" %}
       {% set steps = [("refine","R","Refine")] %}
     {% else %}
@@ -155,7 +155,7 @@
 
   const STEPS = [
     {% if job.job_type == "transcription" %}
-      {% if job.is_video %}'extract',{% endif %}
+      {% if job.needs_extraction %}'extract',{% endif %}
       'transcribe', 'diarize', 'format',
       {% if job.post_refine %}'refine',{% endif %}
       {% if job.post_summarize %}'summarize',{% endif %}
