@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -303,6 +304,19 @@ async def google_models(request: Request) -> JSONResponse:
         })
 
 
+def _file_manager_label() -> str:
+    """OS-specific verb for the 'open data dir' button.
+
+    Mirrors the platform switch in `open_data_dir` so the UI matches the
+    shell command actually run (Finder/Explorer/Files).
+    """
+    if sys.platform == "darwin":
+        return "Open in Finder"
+    if sys.platform == "win32":
+        return "Open in Explorer"
+    return "Show in Files"
+
+
 @router.get("", response_class=HTMLResponse)
 async def config_show(request: Request) -> HTMLResponse:
     config = load_config()
@@ -318,6 +332,7 @@ async def config_show(request: Request) -> HTMLResponse:
             "llm_fields": _LLM_FIELDS,
             "discord_fields": _DISCORD_FIELDS,
             "discord_presets": config.get("discord_presets", []),
+            "file_manager_label": _file_manager_label(),
             "saved": request.query_params.get("saved") == "1",
         },
     )
@@ -404,7 +419,6 @@ async def open_data_dir() -> JSONResponse:
     Returns {ok: true} on success, {ok: false, error: "..."} on failure.
     """
     import subprocess
-    import sys
     from wisper_transcribe.config import get_data_dir
     path = str(get_data_dir())
     try:

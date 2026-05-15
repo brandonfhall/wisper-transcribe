@@ -350,6 +350,21 @@ def test_config_get_returns_200(client):
     assert b"model" in resp.content
 
 
+@pytest.mark.parametrize("platform,expected_label", [
+    ("darwin", "Open in Finder"),
+    ("win32", "Open in Explorer"),
+    ("linux", "Show in Files"),
+])
+def test_config_get_uses_os_specific_open_label(client, platform, expected_label):
+    """The data-dir button verb must match the host OS file manager."""
+    with patch("wisper_transcribe.web.routes.config.load_config", return_value={}), \
+         patch("wisper_transcribe.web.routes.config.get_config_path", return_value=Path("/tmp/config.toml")), \
+         patch("wisper_transcribe.web.routes.config.sys.platform", platform):
+        resp = client.get("/config")
+    assert resp.status_code == 200
+    assert expected_label.encode() in resp.content
+
+
 def test_config_post_saves_and_redirects(client):
     with patch("wisper_transcribe.web.routes.config.load_config", return_value={}), \
          patch("wisper_transcribe.web.routes.config.save_config") as mock_save:
