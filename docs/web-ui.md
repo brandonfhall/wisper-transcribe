@@ -16,7 +16,7 @@ wisper server
 | Page | URL | Description |
 |------|-----|-------------|
 | Dashboard | `/` | Job queue, system status (device, model, HF token), quick upload |
-| Transcribe | `/transcribe` | Drag-and-drop upload, all transcription options, live progress stream; speaker count defaults to **Auto** (let the diarizer detect — leave the `?` cell selected) but can be pinned to 1–10; optional "Refine vocabulary" and "Generate campaign summary" post-processing checkboxes |
+| Transcribe | `/transcribe` | Drag-and-drop upload, all transcription options, live progress stream; **Detect speakers** toggle (on by default — turn off for audiobooks/lectures to skip diarization entirely) reveals a count selector with **?** (auto-detect, default) or pinned **1–10**; optional "Refine vocabulary" and "Generate campaign summary" post-processing checkboxes |
 | Transcripts | `/transcripts` | Browse output files, view rendered markdown, download, delete; green notes icon on cards that have a campaign summary |
 | Speakers | `/speakers` | Enroll, rename, remove speaker profiles |
 | Campaigns | `/campaigns` | Create and manage campaigns; add/remove roster members; scope transcription to a campaign |

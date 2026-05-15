@@ -99,31 +99,49 @@
         </div>
       </div>
 
-      <!-- Speakers count -->
+      <!-- Speakers — collapses behind the Detect speakers toggle -->
       <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
-        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px">
-          <div class="mono-kicker">Speakers</div>
-          <div style="display:flex;align-items:baseline;gap:10px">
-            <span id="speaker-count-display" style="font-family:var(--font-serif);font-size:22px;color:var(--color-accent);line-height:1">Auto</span>
-            <span style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint)">--num-speakers</span>
+        <input type="hidden" name="no_diarize" id="no-diarize-val" value=""/>
+
+        <label style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;cursor:pointer">
+          <div>
+            <div style="display:flex;align-items:baseline;gap:8px">
+              <span style="font-family:var(--font-serif);font-size:14px;color:var(--color-paper)">Detect speakers</span>
+              <span style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint)">--no-diarize</span>
+            </div>
+            <div style="font-size:11.5px;color:var(--color-paper-faint);margin-top:2px">Off skips diarization — fastest, best for single-narrator content (audiobooks, lectures).</div>
           </div>
-        </div>
-        <input type="hidden" name="num_speakers" id="num-speakers-val" value=""/>
-        <div style="display:flex;gap:3px">
-          <div onclick="wisperSetSpeakers(0)" data-n="0"
-               style="flex:1;height:24px;background:var(--color-ink-700);
-                      border-top:1px solid var(--color-accent);
-                      font-family:var(--font-mono);font-size:10px;color:var(--color-accent);
-                      display:flex;align-items:center;justify-content:center;cursor:pointer;user-select:none"
-               class="speaker-bar" title="Let the diarizer detect the speaker count">?</div>
-          {% for n in range(1, 11) %}
-          <div onclick="wisperSetSpeakers({{ n }})" data-n="{{ n }}"
-               style="flex:1;height:24px;background:var(--color-ink-900);
-                      border-top:none;
-                      font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);
-                      display:flex;align-items:center;justify-content:center;cursor:pointer;user-select:none"
-               class="speaker-bar">{{ n }}</div>
-          {% endfor %}
+          <div id="diarize-toggle" class="toggle-wrap on" style="margin-top:2px" onclick="wisperToggleDiarize(this, event)">
+            <input type="checkbox" id="diarize-checkbox" checked style="display:none"/>
+            <div class="toggle-knob"></div>
+          </div>
+        </label>
+
+        <div id="speaker-count-panel" style="margin-top:14px">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px">
+            <div class="mono-kicker">Count</div>
+            <div style="display:flex;align-items:baseline;gap:10px">
+              <span id="speaker-count-display" style="font-family:var(--font-serif);font-size:22px;color:var(--color-accent);line-height:1">Auto</span>
+              <span style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint)">--num-speakers</span>
+            </div>
+          </div>
+          <input type="hidden" name="num_speakers" id="num-speakers-val" value=""/>
+          <div style="display:flex;gap:3px">
+            <div onclick="wisperSetSpeakers(0)" data-n="0"
+                 style="flex:1;height:24px;background:var(--color-ink-700);
+                        border-top:1px solid var(--color-accent);
+                        font-family:var(--font-mono);font-size:10px;color:var(--color-accent);
+                        display:flex;align-items:center;justify-content:center;cursor:pointer;user-select:none"
+                 class="speaker-bar" title="Let the diarizer detect the speaker count">?</div>
+            {% for n in range(1, 11) %}
+            <div onclick="wisperSetSpeakers({{ n }})" data-n="{{ n }}"
+                 style="flex:1;height:24px;background:var(--color-ink-900);
+                        border-top:none;
+                        font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);
+                        display:flex;align-items:center;justify-content:center;cursor:pointer;user-select:none"
+                 class="speaker-bar">{{ n }}</div>
+            {% endfor %}
+          </div>
         </div>
       </div>
 
@@ -205,8 +223,9 @@ function wisperToggle(wrap, evt) {
   wrap.className = 'toggle-wrap ' + (isOn ? 'on' : 'off');
 }
 function wisperSetSpeakers(n) {
-  // n === 0 means "Auto" (let the diarizer detect speaker count); empty form
-  // value round-trips to None on the backend.
+  // n === 0 → Auto (let the diarizer detect speaker count); n > 0 → pinned
+  // speaker count. Empty num_speakers round-trips to None on the backend.
+  // Off (skip diarization entirely) is handled by wisperToggleDiarize.
   var isAuto = (n === 0);
   document.getElementById('num-speakers-val').value = isAuto ? '' : n;
   document.getElementById('speaker-count-display').textContent = isAuto ? 'Auto' : n;
@@ -218,6 +237,20 @@ function wisperSetSpeakers(n) {
     el.style.borderTop = selected ? '1px solid var(--color-accent)' : 'none';
     el.style.color = selected ? 'var(--color-accent)' : 'var(--color-paper-faint)';
   });
+}
+
+function wisperToggleDiarize(wrap, evt) {
+  // Master toggle for speaker detection. When OFF the count panel is hidden
+  // and no_diarize=on is sent — the backend skips pyannote entirely.
+  if (evt) evt.stopPropagation();
+  var cb = wrap.querySelector('input[type="checkbox"]');
+  if (!cb) return;
+  var isOn = !cb.checked;
+  cb.checked = isOn;
+  wrap.className = 'toggle-wrap ' + (isOn ? 'on' : 'off');
+  document.getElementById('no-diarize-val').value = isOn ? '' : 'on';
+  var panel = document.getElementById('speaker-count-panel');
+  if (panel) panel.style.display = isOn ? '' : 'none';
 }
 // Drag-and-drop on the dropzone label
 (function(){
