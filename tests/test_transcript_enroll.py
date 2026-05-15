@@ -159,6 +159,30 @@ def test_enroll_form_404_when_no_transcript(client: TestClient, tmp_path: Path):
     assert resp.status_code == 404
 
 
+def test_enroll_form_prefills_previously_applied_names(client: TestClient, tmp_path: Path):
+    """After a first rename pass, the wizard must show the applied display
+    names in the input fields so the user can come back and fix a typo
+    without losing what they typed."""
+    md = tmp_path / "session01.md"
+    md.write_text(
+        "---\ntitle: Session 01\nspeakers:\n- name: Brandon\n- name: Sam\n---\n\n"
+        "**Brandon** *(00:00)*: Hello everyone\n"
+        "**Sam** *(00:12)*: Thanks for having me\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "session01_diar.json").write_text(
+        json.dumps(_SAMPLE_DIAR), encoding="utf-8",
+    )
+    with _patch_output(tmp_path), \
+         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        resp = client.get("/transcripts/session01/enroll")
+    body = resp.content.decode()
+    assert 'name="speaker_SPEAKER_00"' in body
+    assert 'value="Brandon"' in body
+    assert 'name="speaker_SPEAKER_01"' in body
+    assert 'value="Sam"' in body
+
+
 def test_enroll_form_orders_speakers_by_first_appearance(client: TestClient, tmp_path: Path):
     """Speaker list must be ordered by first segment start time, not dict order."""
     diar = {
@@ -196,6 +220,34 @@ def test_enroll_submit_renames_transcript(client: TestClient, tmp_path: Path):
     assert "**Alice**" in content
     assert "**Bob**" in content
     assert "**SPEAKER_00**" not in content
+
+
+def test_enroll_submit_second_pass_corrects_typo(client: TestClient, tmp_path: Path):
+    """A second pass through the wizard must actually update the transcript.
+    The form key is still the raw label, but the markdown body now contains
+    the previously-applied display name — the submit handler has to translate
+    raw_label -> current_display before calling update_speaker_names."""
+    md = tmp_path / "session01.md"
+    md.write_text(
+        "---\ntitle: Session 01\nspeakers:\n- name: Bradnon\n- name: Sam\n---\n\n"
+        "**Bradnon** *(00:00)*: Hello everyone\n"
+        "**Sam** *(00:12)*: Thanks for having me\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "session01_diar.json").write_text(
+        json.dumps(_SAMPLE_DIAR), encoding="utf-8",
+    )
+    with _patch_output(tmp_path):
+        resp = client.post(
+            "/transcripts/session01/enroll",
+            data={"speaker_SPEAKER_00": "Brandon", "speaker_SPEAKER_01": "Sam"},
+            follow_redirects=False,
+        )
+    assert resp.status_code == 303
+    content = md.read_text(encoding="utf-8")
+    assert "**Brandon**" in content
+    assert "**Bradnon**" not in content
+    assert "**Sam**" in content
 
 
 def test_enroll_submit_calls_enroll_speaker_when_audio_exists(
