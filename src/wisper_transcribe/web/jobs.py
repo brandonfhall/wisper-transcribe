@@ -220,11 +220,16 @@ class Job:
     summary_path: Optional[str] = None
 
     @property
-    def is_video(self) -> bool:
-        """True when the input file is a video container (not a pure audio file)."""
+    def needs_extraction(self) -> bool:
+        """True when the input must be streamed through ffmpeg before transcription.
+
+        Anything that isn't a `.wav` (mp3, m4a, m4b, flac, ogg, mp4, mkv, …)
+        is converted to 16 kHz mono WAV via `_extract_first_audio_track`.
+        WAVs are passthrough-checked and may also re-encode silently if their
+        rate/channels are wrong — but the common case is no extraction.
+        """
         from pathlib import Path as _Path
-        from wisper_transcribe.audio_utils import VIDEO_EXTENSIONS
-        return _Path(self.input_path or "").suffix.lower() in VIDEO_EXTENSIONS
+        return _Path(self.input_path or "").suffix.lower() != ".wav"
 
 
 class JobQueue:
