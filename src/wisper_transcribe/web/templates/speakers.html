@@ -55,13 +55,27 @@
         </div>
         <div style="flex:1;min-width:0">
           <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px">
-            <div>
-              <div style="font-family:var(--font-serif);font-size:22px;color:var(--color-paper)">{{ profile.display_name or key }}</div>
+            <div style="flex:1;min-width:0">
+              <div id="name-display-{{ key }}" style="font-family:var(--font-serif);font-size:22px;color:var(--color-paper)">
+                <span>{{ profile.display_name or key }}</span>
+                <button type="button" onclick="wisperRenameSpeaker('{{ key }}')"
+                        style="background:none;border:none;color:var(--color-paper-faint);font-size:11.5px;font-family:var(--font-sans);cursor:pointer;padding:0 0 0 8px;vertical-align:middle">
+                  Rename
+                </button>
+              </div>
+              <form id="name-edit-{{ key }}" method="post" action="/speakers/{{ key }}/rename"
+                    style="display:none;align-items:center;gap:6px">
+                <input type="text" name="new_name" value="{{ profile.display_name or key }}"
+                       maxlength="120"
+                       style="flex:1;background:var(--color-ink-700);border:1px solid var(--color-rule-strong);color:var(--color-paper);padding:6px 10px;border-radius:4px;font-size:15px;font-family:var(--font-serif);outline:none"/>
+                <button type="submit" class="btn btn-secondary btn-sm">Save</button>
+                <button type="button" onclick="wisperRenameCancel('{{ key }}')" class="btn btn-secondary btn-sm">Cancel</button>
+              </form>
               <div style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint);letter-spacing:0.1em;margin-top:3px">
                 {{ (profile.role or 'UNKNOWN') | upper }}
               </div>
             </div>
-            <form method="post" action="/speakers/{{ key }}/delete"
+            <form method="post" action="/speakers/{{ key }}/remove"
                   onsubmit="return confirm('Remove {{ profile.name or key }} permanently?')" style="display:inline">
               <button type="submit" style="background:none;border:none;color:var(--color-signal-rose);font-size:11.5px;font-family:var(--font-sans);cursor:pointer;padding:0">Remove</button>
             </form>
@@ -119,6 +133,25 @@
     {% endfor %}
   </div>
   {% endif %}
+
+  <script>
+  function wisperRenameSpeaker(key) {
+    var disp = document.getElementById('name-display-' + key);
+    var form = document.getElementById('name-edit-' + key);
+    if (!disp || !form) return;
+    disp.style.display = 'none';
+    form.style.display = 'flex';
+    var input = form.querySelector('input[name="new_name"]');
+    if (input) { input.focus(); input.select(); }
+  }
+  function wisperRenameCancel(key) {
+    var disp = document.getElementById('name-display-' + key);
+    var form = document.getElementById('name-edit-' + key);
+    if (!disp || !form) return;
+    form.style.display = 'none';
+    disp.style.display = '';
+  }
+  </script>
 
   <!-- Enroll another -->
   <div style="padding:20px 24px;border:1px dashed var(--color-rule-strong);display:flex;align-items:center;gap:18px">
