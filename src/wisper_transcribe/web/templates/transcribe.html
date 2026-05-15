@@ -104,17 +104,23 @@
         <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px">
           <div class="mono-kicker">Speakers</div>
           <div style="display:flex;align-items:baseline;gap:10px">
-            <span id="speaker-count-display" style="font-family:var(--font-serif);font-size:22px;color:var(--color-accent);line-height:1">5</span>
+            <span id="speaker-count-display" style="font-family:var(--font-serif);font-size:22px;color:var(--color-accent);line-height:1">Auto</span>
             <span style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint)">--num-speakers</span>
           </div>
         </div>
-        <input type="hidden" name="num_speakers" id="num-speakers-val" value="5"/>
+        <input type="hidden" name="num_speakers" id="num-speakers-val" value=""/>
         <div style="display:flex;gap:3px">
+          <div onclick="wisperSetSpeakers(0)" data-n="0"
+               style="flex:1;height:24px;background:var(--color-ink-700);
+                      border-top:1px solid var(--color-accent);
+                      font-family:var(--font-mono);font-size:10px;color:var(--color-accent);
+                      display:flex;align-items:center;justify-content:center;cursor:pointer;user-select:none"
+               class="speaker-bar" title="Let the diarizer detect the speaker count">?</div>
           {% for n in range(1, 11) %}
           <div onclick="wisperSetSpeakers({{ n }})" data-n="{{ n }}"
-               style="flex:1;height:24px;background:{% if n <= 5 %}var(--color-ink-700){% else %}var(--color-ink-900){% endif %};
-                      border-top:{% if n == 5 %}1px solid var(--color-accent){% else %}none{% endif %};
-                      font-family:var(--font-mono);font-size:10px;color:{% if n == 5 %}var(--color-accent){% else %}var(--color-paper-faint){% endif %};
+               style="flex:1;height:24px;background:var(--color-ink-900);
+                      border-top:none;
+                      font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);
                       display:flex;align-items:center;justify-content:center;cursor:pointer;user-select:none"
                class="speaker-bar">{{ n }}</div>
           {% endfor %}
@@ -199,13 +205,18 @@ function wisperToggle(wrap, evt) {
   wrap.className = 'toggle-wrap ' + (isOn ? 'on' : 'off');
 }
 function wisperSetSpeakers(n) {
-  document.getElementById('num-speakers-val').value = n;
-  document.getElementById('speaker-count-display').textContent = n;
+  // n === 0 means "Auto" (let the diarizer detect speaker count); empty form
+  // value round-trips to None on the backend.
+  var isAuto = (n === 0);
+  document.getElementById('num-speakers-val').value = isAuto ? '' : n;
+  document.getElementById('speaker-count-display').textContent = isAuto ? 'Auto' : n;
   document.querySelectorAll('.speaker-bar').forEach(function(el) {
     var bn = parseInt(el.dataset.n);
-    el.style.background = bn <= n ? 'var(--color-ink-700)' : 'var(--color-ink-900)';
-    el.style.borderTop = bn === n ? '1px solid var(--color-accent)' : 'none';
-    el.style.color = bn === n ? 'var(--color-accent)' : 'var(--color-paper-faint)';
+    var filled = isAuto ? (bn === 0) : (bn > 0 && bn <= n);
+    var selected = (bn === n);
+    el.style.background = filled ? 'var(--color-ink-700)' : 'var(--color-ink-900)';
+    el.style.borderTop = selected ? '1px solid var(--color-accent)' : 'none';
+    el.style.color = selected ? 'var(--color-accent)' : 'var(--color-paper-faint)';
   });
 }
 // Drag-and-drop on the dropzone label
