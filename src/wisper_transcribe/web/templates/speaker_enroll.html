@@ -85,9 +85,10 @@
       </div>
       {% endif %}
 
+      {%- set _current = (current_names | default({})).get(speaker_name, speaker_name) -%}
       <input type="text" id="{{ field_id }}"
              name="speaker_{{ speaker_name }}"
-             value="{{ speaker_name }}"
+             value="{{ _current }}"
              style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule-strong);color:var(--color-paper);padding:9px 12px;border-radius:5px;font-size:14px;font-family:var(--font-sans);outline:none"
              placeholder="Type a name or click an existing profile above"/>
     </div>

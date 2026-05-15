@@ -692,6 +692,11 @@ async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
             "existing_profiles": load_profiles(),
             "speaker_excerpts": speaker_excerpts,
             "speaker_excerpt_texts": speaker_excerpt_texts,
+            # raw_label -> current display name in the transcript, derived by
+            # interval-matching markdown timestamps against pyannote segments.
+            # Lets the wizard pre-fill names the user previously applied so
+            # they can edit corrections instead of re-typing from scratch.
+            "current_names": legacy_label_map,
         },
     )
 
@@ -721,11 +726,20 @@ async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
             headers={"Location": f"/transcripts/{quote(name)}"},
         )
 
-    # Rename in the transcript
+    # Rename in the transcript.
+    # The form keys are raw pyannote labels (e.g. "SPEAKER_00"), but after a
+    # previous wizard pass the markdown body no longer contains those raw
+    # labels — it has whatever display name the user applied. Look up the
+    # *current* display name for each raw label so the rename targets the
+    # right string. Without this, a second pass through the wizard is a no-op.
     from wisper_transcribe.formatter import update_speaker_names
     content = md_path.read_text(encoding="utf-8")
-    for old_label, display_name in renames.items():
-        content = update_speaker_names(content, old_label, display_name)
+    current_names = _build_legacy_label_map(md_path, diar.get("diarization_segments", []))
+    for raw_label, new_name in renames.items():
+        old_name = current_names.get(raw_label, raw_label)
+        if old_name == new_name:
+            continue
+        content = update_speaker_names(content, old_name, new_name)
     md_path.write_text(content, encoding="utf-8")
 
     # Enroll voice profiles
