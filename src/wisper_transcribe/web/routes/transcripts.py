@@ -554,6 +554,43 @@ def _load_diar_sidecar(md_path: "Path") -> dict | None:  # type: ignore[name-def
         return None
 
 
+def _build_legacy_label_map(md_path: "Path", segments: list) -> dict[str, str]:  # type: ignore[name-defined]
+    """Map raw pyannote labels → display names by matching first-appearance timestamps.
+
+    Pre-fix transcripts saved excerpt files keyed by the *display* name, while
+    the wizard looks them up by the raw label from the sidecar. Parsing the
+    markdown's first ``**name** *(HH:MM:SS)*`` per timestamp lets us recover
+    the mapping without re-transcribing.
+    """
+    import re as _re
+    from wisper_transcribe.time_utils import format_timestamp
+
+    label_map: dict[str, str] = {}
+    try:
+        ts_to_display: dict[str, str] = {}
+        md_pattern = _re.compile(
+            r"\*\*(.+?)\*\*\s+\*\((\d+:\d{2}(?::\d{2})?)\)\*"
+        )
+        md_text = md_path.read_text(encoding="utf-8")
+        for m in md_pattern.finditer(md_text):
+            ts_to_display.setdefault(m.group(2), m.group(1))
+
+        seen: dict[str, float] = {}
+        for seg in segments:
+            sp = seg.get("speaker") if isinstance(seg, dict) else getattr(seg, "speaker", None)
+            start = seg.get("start") if isinstance(seg, dict) else getattr(seg, "start", None)
+            if sp is None or start is None or sp in seen:
+                continue
+            seen[sp] = float(start)
+        for sp, start in seen.items():
+            display = ts_to_display.get(format_timestamp(start))
+            if display and display != sp:
+                label_map[sp] = display
+    except Exception:
+        pass
+    return label_map
+
+
 @router.get("/{name}/enroll", response_class=HTMLResponse)
 async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
     """Speaker enrollment wizard — transcript-centric, restart-safe."""
@@ -575,22 +612,40 @@ async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
             seen[seg["speaker"]] = seg["start"]
     speakers = sorted(seen.keys(), key=lambda s: seen[s])
 
-    # Locate on-disk excerpt clips and text snippets
+    # Locate on-disk excerpt clips and text snippets. New transcripts have
+    # files keyed by the raw pyannote label (matches what's in the sidecar).
+    # Legacy transcripts (pre-fix) keyed files by the *display* name from
+    # the rendered markdown — backfill that mapping by parsing the markdown
+    # and matching first-appearance timestamps so the wizard still works
+    # without re-transcribing.
     out_dir = md_path.parent
     stem = md_path.stem
+
+    legacy_label_map = _build_legacy_label_map(md_path, diar.get("diarization_segments", []))
+
+    def _excerpt_candidates(raw_label: str) -> list[str]:
+        cands = [_re.sub(r"[^\w\-]", "_", raw_label)]
+        legacy = legacy_label_map.get(raw_label)
+        if legacy:
+            cands.append(_re.sub(r"[^\w\-]", "_", legacy))
+        return cands
+
     speaker_excerpts: dict[str, str] = {}
     speaker_excerpt_texts: dict[str, str] = {}
     for sp in speakers:
-        safe_label = _re.sub(r"[^\w\-]", "_", sp)
-        clips = list(out_dir.glob(f"{stem}_excerpt_{safe_label}.mp3"))
-        if clips:
-            speaker_excerpts[sp] = str(clips[0])
-        txt = out_dir / f"{stem}_excerpt_{safe_label}.txt"
-        if txt.exists():
-            try:
-                speaker_excerpt_texts[sp] = txt.read_text(encoding="utf-8").strip()
-            except Exception:
-                pass
+        for safe_label in _excerpt_candidates(sp):
+            clip = out_dir / f"{stem}_excerpt_{safe_label}.mp3"
+            if clip.exists():
+                speaker_excerpts[sp] = str(clip)
+                break
+        for safe_label in _excerpt_candidates(sp):
+            txt = out_dir / f"{stem}_excerpt_{safe_label}.txt"
+            if txt.exists():
+                try:
+                    speaker_excerpt_texts[sp] = txt.read_text(encoding="utf-8").strip()
+                except Exception:
+                    pass
+                break
 
     from wisper_transcribe.speaker_manager import load_profiles
     return templates.TemplateResponse(
@@ -717,10 +772,21 @@ async def transcript_excerpt(request: Request, name: str, speaker_name: str):
         return invalid_input_response("Invalid name")
 
     from fastapi.responses import FileResponse
-    safe_label = _re.sub(r"[^\w\-]", "_", safe_sp)
     out_dir = md_path.parent
     stem = md_path.stem
-    candidates = list(out_dir.glob(f"{stem}_excerpt_{safe_label}.mp3"))
-    if not candidates:
-        return HTMLResponse(content="Excerpt not available", status_code=404)
-    return FileResponse(path=str(candidates[0]), media_type="audio/mpeg")
+
+    # Try the raw label first; fall back to the legacy display-name file
+    # (pre-fix transcripts keyed excerpts by display name).
+    candidates: list[str] = [_re.sub(r"[^\w\-]", "_", safe_sp)]
+    diar = _load_diar_sidecar(md_path)
+    if diar:
+        legacy_label_map = _build_legacy_label_map(md_path, diar.get("diarization_segments", []))
+        legacy = legacy_label_map.get(safe_sp)
+        if legacy:
+            candidates.append(_re.sub(r"[^\w\-]", "_", legacy))
+
+    for safe_label in candidates:
+        clip = out_dir / f"{stem}_excerpt_{safe_label}.mp3"
+        if clip.exists():
+            return FileResponse(path=str(clip), media_type="audio/mpeg")
+    return HTMLResponse(content="Excerpt not available", status_code=404)

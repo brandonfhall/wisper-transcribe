@@ -304,6 +304,104 @@ def test_excerpt_serves_clip(client: TestClient, tmp_path: Path):
     assert resp.headers["content-type"] == "audio/mpeg"
 
 
+def test_excerpt_falls_back_to_legacy_display_name(client: TestClient, tmp_path: Path):
+    """Pre-fix transcripts saved excerpt files keyed by display name (e.g.
+    'Unknown_Speaker_1') instead of the raw pyannote label. The wizard +
+    excerpt route must locate them via timestamp-matched markdown parsing
+    so users don't have to re-transcribe."""
+    md = tmp_path / "session01.md"
+    md.write_text(
+        "---\ntitle: Session 01\n---\n\n"
+        "**Unknown Speaker 1** *(00:00)*: Hello everyone\n"
+        "**Unknown Speaker 2** *(00:12)*: Thanks for having me\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "session01_diar.json").write_text(
+        json.dumps(_SAMPLE_DIAR), encoding="utf-8",
+    )
+    # Legacy file name: keyed by display name, not raw label
+    legacy_clip = tmp_path / "session01_excerpt_Unknown_Speaker_1.mp3"
+    legacy_clip.write_bytes(b"fake-mp3-data")
+
+    with _patch_output(tmp_path):
+        resp = client.get("/transcripts/session01/excerpt/SPEAKER_00")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "audio/mpeg"
+
+
+def test_enroll_form_finds_legacy_display_name_excerpts(client: TestClient, tmp_path: Path):
+    """The wizard page must surface excerpts even when files are keyed by
+    the old display-name convention."""
+    md = tmp_path / "session01.md"
+    md.write_text(
+        "---\ntitle: Session 01\n---\n\n"
+        "**Unknown Speaker 1** *(00:00)*: Hello everyone\n"
+        "**Unknown Speaker 2** *(00:12)*: Thanks for having me\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "session01_diar.json").write_text(
+        json.dumps(_SAMPLE_DIAR), encoding="utf-8",
+    )
+    (tmp_path / "session01_excerpt_Unknown_Speaker_1.mp3").write_bytes(b"audio")
+    (tmp_path / "session01_excerpt_Unknown_Speaker_1.txt").write_text(
+        "Hello everyone", encoding="utf-8",
+    )
+
+    with _patch_output(tmp_path):
+        resp = client.get("/transcripts/session01/enroll")
+    assert resp.status_code == 200
+    # Sample button is rendered when speaker_excerpts contains the raw label
+    assert b"Sample" in resp.content
+    # Italic snippet is rendered when speaker_excerpt_texts contains the raw label
+    assert b"Hello everyone" in resp.content
+
+
+def test_extract_speaker_excerpts_uses_raw_labels(tmp_path: Path):
+    """`_extract_speaker_excerpts` must key files by raw pyannote label
+    (`SPEAKER_00`), not the rendered display name from the markdown."""
+    from wisper_transcribe.web.jobs import _extract_speaker_excerpts, Job, COMPLETED
+    from wisper_transcribe.models import AlignedSegment
+    from datetime import datetime
+    import uuid
+
+    out_md = tmp_path / "session01.md"
+    out_md.write_text(
+        "**Unknown Speaker 1** *(00:00)*: Hello\n", encoding="utf-8",
+    )
+    fake_audio = tmp_path / "audio.mp3"
+    fake_audio.write_bytes(b"fake")
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(fake_audio),
+        kwargs={},
+        output_path=str(out_md),
+    )
+    aligned = [
+        AlignedSegment(start=0.0, end=5.0, text="Hello", speaker="SPEAKER_00"),
+        AlignedSegment(start=10.0, end=15.0, text="Hi", speaker="SPEAKER_00"),
+        AlignedSegment(start=20.0, end=25.0, text="Goodbye", speaker="UNKNOWN"),
+    ]
+
+    with patch("wisper_transcribe.web.jobs.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0)
+        _extract_speaker_excerpts(job, out_md, aligned_segments=aligned)
+
+    # The text file is written even if ffmpeg is mocked
+    txt_path = tmp_path / "session01_excerpt_SPEAKER_00.txt"
+    assert txt_path.exists()
+    assert txt_path.read_text(encoding="utf-8") == "Hello"
+
+    # UNKNOWN segments are skipped
+    assert not (tmp_path / "session01_excerpt_UNKNOWN.txt").exists()
+
+    # ffmpeg was invoked with the raw-label output path
+    cmd = mock_run.call_args[0][0]
+    assert any("SPEAKER_00" in str(p) for p in cmd)
+
+
 def test_excerpt_404_when_no_clip(client: TestClient, tmp_path: Path):
     _write_transcript(tmp_path)
     with _patch_output(tmp_path):
