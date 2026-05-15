@@ -81,12 +81,16 @@ def test_sidecar_written_after_job_completes(tmp_path: Path):
     out_md = tmp_path / "session01.md"
     out_md.write_text("# Session 01", encoding="utf-8")
 
+    # Use the platform-native string form of the path so the assertion
+    # matches the sidecar value on both POSIX and Windows.
+    input_path_str = str(Path("/tmp/session01.mp3"))
+
     seg = DiarizationSegment(start=1.0, end=5.0, speaker="SPEAKER_00")
     job = Job(
         id=str(uuid.uuid4()),
         status=COMPLETED,
         created_at=datetime.now(),
-        input_path="/tmp/session01.mp3",
+        input_path=input_path_str,
         kwargs={"campaign": "my-campaign"},
         output_path=str(out_md),
         diarization_segments=[seg],
@@ -97,7 +101,7 @@ def test_sidecar_written_after_job_completes(tmp_path: Path):
     sidecar = tmp_path / "session01_diar.json"
     assert sidecar.exists()
     data = json.loads(sidecar.read_text())
-    assert data["input_path"] == "/tmp/session01.mp3"
+    assert data["input_path"] == input_path_str
     assert data["campaign"] == "my-campaign"
     assert len(data["diarization_segments"]) == 1
     assert data["diarization_segments"][0] == {"start": 1.0, "end": 5.0, "speaker": "SPEAKER_00"}

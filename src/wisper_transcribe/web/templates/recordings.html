@@ -105,7 +105,7 @@
     <div id="recordings-table">
     {% for r in recordings if r.status != 'recording' %}
     {% set camp = campaigns.get(r.campaign_slug) %}
-    {%- set started = r.started_at.strftime('%b %-d · %H:%M') if r.started_at else '—' -%}
+    {%- set started = (r.started_at.strftime('%b ') ~ r.started_at.day ~ r.started_at.strftime(' · %H:%M')) if r.started_at else '—' -%}
     {%- set ended = r.ended_at.strftime('%H:%M') if r.ended_at else '—' -%}
     {%- set duration_s = ((r.ended_at - r.started_at).total_seconds() | int) if (r.ended_at and r.started_at) else 0 -%}
     {%- set dur_str = "%d:%02d:%02d" | format(duration_s // 3600, (duration_s % 3600) // 60, duration_s % 60) if duration_s > 0 else '—' -%}
