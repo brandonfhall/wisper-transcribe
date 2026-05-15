@@ -555,37 +555,68 @@ def _load_diar_sidecar(md_path: "Path") -> dict | None:  # type: ignore[name-def
 
 
 def _build_legacy_label_map(md_path: "Path", segments: list) -> dict[str, str]:  # type: ignore[name-defined]
-    """Map raw pyannote labels → display names by matching first-appearance timestamps.
+    """Map raw pyannote labels → display names by interval-matching markdown timestamps.
 
     Pre-fix transcripts saved excerpt files keyed by the *display* name, while
-    the wizard looks them up by the raw label from the sidecar. Parsing the
-    markdown's first ``**name** *(HH:MM:SS)*`` per timestamp lets us recover
-    the mapping without re-transcribing.
+    the wizard looks them up by the raw label from the sidecar. To rebuild
+    the mapping, for each `**display_name** *(HH:MM:SS)*` line in the
+    markdown, find the pyannote segment whose [start, end] interval contains
+    that timestamp — the segment's raw label is the one the aligner assigned
+    to that whisper line. Exact start-time matching does NOT work here:
+    pyannote's first-occurrence-of-SPEAKER_00 timestamp rarely equals the
+    first whisper segment assigned to SPEAKER_00 (whisper may skip silence,
+    aligner may assign nearby segments to UNKNOWN, etc.).
     """
     import re as _re
-    from wisper_transcribe.time_utils import format_timestamp
 
     label_map: dict[str, str] = {}
     try:
-        ts_to_display: dict[str, str] = {}
+        # Normalise sidecar segments to (start, end, speaker) tuples.
+        intervals: list[tuple[float, float, str]] = []
+        for seg in segments:
+            if isinstance(seg, dict):
+                sp, start, end = seg.get("speaker"), seg.get("start"), seg.get("end")
+            else:
+                sp = getattr(seg, "speaker", None)
+                start = getattr(seg, "start", None)
+                end = getattr(seg, "end", None)
+            if sp is None or start is None or end is None:
+                continue
+            intervals.append((float(start), float(end), sp))
+
+        if not intervals:
+            return {}
+
         md_pattern = _re.compile(
             r"\*\*(.+?)\*\*\s+\*\((\d+:\d{2}(?::\d{2})?)\)\*"
         )
         md_text = md_path.read_text(encoding="utf-8")
-        for m in md_pattern.finditer(md_text):
-            ts_to_display.setdefault(m.group(2), m.group(1))
 
-        seen: dict[str, float] = {}
-        for seg in segments:
-            sp = seg.get("speaker") if isinstance(seg, dict) else getattr(seg, "speaker", None)
-            start = seg.get("start") if isinstance(seg, dict) else getattr(seg, "start", None)
-            if sp is None or start is None or sp in seen:
+        for m in md_pattern.finditer(md_text):
+            display = m.group(1)
+            if display == "UNKNOWN":
                 continue
-            seen[sp] = float(start)
-        for sp, start in seen.items():
-            display = ts_to_display.get(format_timestamp(start))
-            if display and display != sp:
-                label_map[sp] = display
+            parts = m.group(2).split(":")
+            if len(parts) == 2:
+                t_sec = int(parts[0]) * 60 + int(parts[1])
+            else:
+                t_sec = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+            t = float(t_sec)
+            # Prefer an interval containing t exactly; fall back to the nearest
+            # by start time so a whisper segment that starts slightly outside
+            # the pyannote turn still maps somewhere reasonable.
+            containing = next(
+                ((s, e, sp) for s, e, sp in intervals if s <= t <= e),
+                None,
+            )
+            if containing is None:
+                containing = min(intervals, key=lambda iv: abs(iv[0] - t))
+            raw_label = containing[2]
+            # First-write wins: a display name only maps to its first interval-
+            # matched raw label (multiple markdown blocks may share a display
+            # name when match_speakers matched several raw labels to the same
+            # enrolled profile — we only need one for excerpt lookup).
+            label_map.setdefault(raw_label, display)
     except Exception:
         pass
     return label_map
@@ -785,8 +816,19 @@ async def transcript_excerpt(request: Request, name: str, speaker_name: str):
         if legacy:
             candidates.append(_re.sub(r"[^\w\-]", "_", legacy))
 
+    # Path-traversal guard: re.sub(r"[^\w\-]", "_", …) is already a tight
+    # whitelist, but CodeQL's taint tracker only recognises the
+    # os.path.abspath + startswith pattern (CLAUDE.md security note).
+    base_dir = os.path.abspath(str(out_dir))
+    if not base_dir.endswith(os.sep):
+        base_dir += os.sep
     for safe_label in candidates:
-        clip = out_dir / f"{stem}_excerpt_{safe_label}.mp3"
+        candidate_abs = os.path.abspath(
+            os.path.join(base_dir, f"{stem}_excerpt_{safe_label}.mp3")
+        )
+        if not candidate_abs.startswith(base_dir):
+            continue
+        clip = Path(candidate_abs)
         if clip.exists():
             return FileResponse(path=str(clip), media_type="audio/mpeg")
     return HTMLResponse(content="Excerpt not available", status_code=404)

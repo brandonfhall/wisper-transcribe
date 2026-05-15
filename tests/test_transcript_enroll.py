@@ -356,6 +356,38 @@ def test_enroll_form_finds_legacy_display_name_excerpts(client: TestClient, tmp_
     assert b"Hello everyone" in resp.content
 
 
+def test_legacy_backfill_uses_interval_match_not_exact_timestamp(client: TestClient, tmp_path: Path):
+    """The legacy backfill must match by *interval containment*, not exact
+    start-time string match. In real transcripts the markdown's first-block
+    timestamp is the first whisper segment's start, which usually differs
+    from pyannote's first-segment-of-SPEAKER_XX start (whisper skips silence,
+    aligner may assign nearby segments to UNKNOWN, etc.)."""
+    md = tmp_path / "session01.md"
+    # Pyannote says SPEAKER_00 spans 0.0-30.0, but the first whisper line
+    # assigned to SPEAKER_00 starts at 02:15 (135s) — well inside the turn
+    # but NOT equal to the pyannote start of 0.0.
+    md.write_text(
+        "---\ntitle: Session 01\n---\n\n"
+        "**Unknown Speaker 1** *(02:15)*: Mid-turn whisper segment\n",
+        encoding="utf-8",
+    )
+    diar = {
+        "input_path": "/tmp/session01.mp3",
+        "campaign": None,
+        "diarization_segments": [
+            # Single long pyannote turn covering the markdown timestamp
+            {"start": 0.0, "end": 300.0, "speaker": "SPEAKER_00"},
+        ],
+    }
+    (tmp_path / "session01_diar.json").write_text(json.dumps(diar), encoding="utf-8")
+    (tmp_path / "session01_excerpt_Unknown_Speaker_1.mp3").write_bytes(b"audio")
+
+    with _patch_output(tmp_path):
+        resp = client.get("/transcripts/session01/excerpt/SPEAKER_00")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "audio/mpeg"
+
+
 def test_extract_speaker_excerpts_uses_raw_labels(tmp_path: Path):
     """`_extract_speaker_excerpts` must key files by raw pyannote label
     (`SPEAKER_00`), not the rendered display name from the markdown."""
