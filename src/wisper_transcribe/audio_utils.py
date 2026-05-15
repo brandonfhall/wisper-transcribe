@@ -7,7 +7,7 @@ from pathlib import Path
 from pydub import AudioSegment
 
 # Audio-only formats handled by pydub.
-AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac", ".ogg"}
+AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".m4b", ".flac", ".ogg"}
 
 # Video container formats — audio is extracted via ffmpeg with explicit
 # stream mapping so only the first audio track is used.
