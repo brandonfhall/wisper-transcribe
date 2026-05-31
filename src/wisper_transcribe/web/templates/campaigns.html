@@ -106,14 +106,17 @@
         </div>
         <div style="border-top:1px solid var(--color-rule)">
           {% for stem in active_campaign.transcripts %}
-          <a href="/transcripts/{{ stem | urlencode }}"
-             style="display:grid;grid-template-columns:60px 1fr 90px;gap:16px;padding:14px 0;border-bottom:1px solid var(--color-rule);align-items:center;text-decoration:none">
+          <div style="display:grid;grid-template-columns:60px 1fr 90px 32px;gap:16px;padding:14px 0;border-bottom:1px solid var(--color-rule);align-items:center">
             <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint);letter-spacing:0.06em">{{ "%02d"|format(loop.index) }}</div>
-            <div style="font-family:var(--font-serif);font-size:16px;color:var(--color-paper)">{{ stem | replace('-', ' ') | title }}</div>
+            <a href="/transcripts/{{ stem | urlencode }}" style="font-family:var(--font-serif);font-size:16px;color:var(--color-paper);text-decoration:none">{{ stem | replace('-', ' ') | title }}</a>
             <div style="text-align:right">
               <span class="pill pill-green">TRANSCRIBED</span>
             </div>
-          </a>
+            <form method="post" action="/campaigns/{{ slug }}/transcripts/remove" style="display:flex;align-items:center;justify-content:flex-end">
+              <input type="hidden" name="stem" value="{{ stem }}"/>
+              <button type="submit" title="Remove from campaign" style="background:none;border:none;color:var(--color-paper-faint);font-size:14px;cursor:pointer;padding:0;line-height:1" onmouseover="this.style.color='var(--color-signal-rose)'" onmouseout="this.style.color='var(--color-paper-faint)'">✕</button>
+            </form>
+          </div>
           {% else %}
           <div style="padding:14px 0;color:var(--color-paper-faint);font-size:13px;font-style:italic">
             No transcripts assigned yet.

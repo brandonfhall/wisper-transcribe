@@ -1,6 +1,7 @@
 """Campaigns route — manage per-campaign speaker rosters."""
 from __future__ import annotations
 
+import os
 import re
 from typing import Annotated, Optional
 
@@ -17,6 +18,7 @@ from wisper_transcribe.campaign_manager import (
     delete_campaign,
     load_campaigns,
     remove_member,
+    remove_transcript_from_campaign,
 )
 from wisper_transcribe.speaker_manager import load_profiles
 from wisper_transcribe.web._responses import error_redirect, invalid_input_response
@@ -196,5 +198,40 @@ async def campaign_bind_discord_id(
         return RedirectResponse(
             url=f"/campaigns/{campaign.slug}?error=not_found", status_code=303
         )
+
+    return RedirectResponse(url=f"/campaigns/{campaign.slug}", status_code=303)
+
+
+@router.post("/{slug}/transcripts/remove", response_class=HTMLResponse)
+async def campaign_remove_transcript(
+    request: Request,
+    slug: str,
+    stem: Annotated[str, Form()],
+) -> RedirectResponse:
+    safe_slug = _validate_campaign_slug(slug)
+    if safe_slug is None:
+        return invalid_input_response("Invalid campaign slug")
+
+    # Stem validation: no null bytes, no path separators, not empty, not a dot path.
+    # The stem is used only for list membership removal in campaigns.json — no file
+    # paths are constructed from it — but we still reject traversal-style payloads.
+    if (
+        not stem
+        or "\x00" in stem
+        or os.sep in stem
+        or "/" in stem
+        or "\\" in stem
+        or stem.strip(".") == ""
+        or len(stem) > 512
+    ):
+        return invalid_input_response("Invalid transcript stem")
+
+    campaigns = load_campaigns()
+    campaign = campaigns.get(safe_slug)
+    if campaign is None:
+        return error_redirect("/campaigns", "not_found")
+
+    if stem in campaign.transcripts:
+        remove_transcript_from_campaign(stem)
 
     return RedirectResponse(url=f"/campaigns/{campaign.slug}", status_code=303)

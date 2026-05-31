@@ -1323,6 +1323,56 @@ def test_campaign_remove_member_does_not_delete_profile(client, tmp_path, monkey
     assert "alice" not in get_campaign_profile_keys("test-game", data_dir=tmp_path)
 
 
+def test_campaign_remove_transcript_unlinks_stem(client, tmp_path, monkeypatch):
+    """POST /campaigns/{slug}/transcripts/remove removes the stem from the campaign."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign, load_campaigns
+
+    create_campaign("Test Game", data_dir=tmp_path)
+    move_transcript_to_campaign("session-01", "test-game", data_dir=tmp_path)
+
+    resp = client.post(
+        "/campaigns/test-game/transcripts/remove",
+        data={"stem": "session-01"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "/campaigns/test-game" in resp.headers.get("location", "")
+    assert "session-01" not in load_campaigns(tmp_path)["test-game"].transcripts
+
+
+def test_campaign_remove_transcript_noop_for_absent_stem(client, tmp_path, monkeypatch):
+    """Removing a stem not in the campaign is a no-op (still redirects cleanly)."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    create_campaign("Test Game", data_dir=tmp_path)
+
+    resp = client.post(
+        "/campaigns/test-game/transcripts/remove",
+        data={"stem": "not-in-campaign"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "/campaigns/test-game" in resp.headers.get("location", "")
+
+
+def test_campaign_remove_transcript_rejects_traversal(client, tmp_path, monkeypatch):
+    """Path-traversal and null-byte payloads in stem are rejected with 400."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    create_campaign("Test Game", data_dir=tmp_path)
+
+    for bad_stem in ["../etc/passwd", "foo/bar", "stem\x00bad"]:
+        resp = client.post(
+            "/campaigns/test-game/transcripts/remove",
+            data={"stem": bad_stem},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 400, f"expected 400 for stem={bad_stem!r}, got {resp.status_code}"
+
+
 def test_transcribe_form_includes_campaign_select(client, tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     from wisper_transcribe.models import Campaign
