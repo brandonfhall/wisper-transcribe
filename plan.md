@@ -88,25 +88,17 @@ Nothing else changes — `SegmentedOggWriter`, the web UI, campaigns, CLI, and a
 
 **Context (2026-05-14):** Per-session `wisper summarize` already produces `.summary.md` sidecars with recap, loot, NPCs, and follow-ups. These are session-scoped. The next level is campaign-scoped documents — aggregations across sessions that are most useful to the DM managing an ongoing story.
 
-Four distinct features share the same infrastructure (reading multiple `.summary.md` files, writing a campaign-level output, running through the LLM pipeline):
+The **rolling campaign journal** — the first of these — has shipped (`journal.py`, `wisper campaigns journal`, the web Campaign-page journal panel). It established the shared infrastructure the remaining features reuse: slug-scoped storage under `campaigns/<slug>/`, `.summary.md` discovery (`unjournalled_sessions()`), and `JobQueue` `JOB_CAMPAIGN_*` types with the standard SSE progress page. See `architecture.md` / `docs/web-ui.md` for its as-built shape; mirror it when building the three below.
+
+The three remaining features all read the same `.summary.md` sidecars written by `wisper summarize`:
 
 ---
 
-### 1. Rolling campaign journal (incremental, bounded context) — ✅ SHIPPED (`feat/campaign-journal`)
-
-Implemented in `journal.py` + `wisper campaigns journal` CLI (Phase 1) and the web UI (Phase 2: `JOB_CAMPAIGN_JOURNAL`, "Update journal"/"Fold all"/"View journal" on the Campaign page, `campaign_journal.html`). On each fold the LLM receives `[current journal body] + [one new .summary.md]` via the free-text `complete()` method and rewrites the journal — context stays bounded regardless of campaign length. Storage is `data_dir/campaigns/<slug>/journal.md`; session `.summary.md` sidecars are never modified.
-
-**Deviation from the original design:** folded sessions are tracked as a **list** in the `journaled_sessions:` frontmatter key (not a single `journal_through:` high-water mark), so out-of-order summarization diffs correctly. `unjournalled_sessions()` returns campaign transcripts that have a `.summary.md` but are not yet in that list.
-
-See `architecture.md` (module map + the LLM post-processing design-decision section) and `docs/web-ui.md` / `docs/cli-reference.md` for the as-built surface. This feature is the reference infrastructure the three below reuse.
-
----
-
-### 2. Combined summary (batch, full campaign)
+### 1. Combined summary (batch, full campaign)
 
 Takes all session summaries for a campaign in one LLM call and produces a single consolidated document. Useful for retrospectives, onboarding a returning/new player, or a campaign wiki entry.
 
-**Context ceiling:** A 20-session campaign with typical summaries (~1 k tokens each) is ~20 k tokens of input. Most providers handle this fine. At 50+ sessions it starts to strain context limits — the rolling journal (above) is the better choice at that scale.
+**Context ceiling:** A 20-session campaign with typical summaries (~1 k tokens each) is ~20 k tokens of input. Most providers handle this fine. At 50+ sessions it starts to strain context limits — the rolling journal is the better choice at that scale.
 
 **Output:** `data_dir/campaigns/<slug>/combined_summary.md`
 
@@ -114,7 +106,7 @@ Takes all session summaries for a campaign in one LLM call and produces a single
 
 ---
 
-### 3. "Previously on..." recap (player-facing, one-pager)
+### 2. "Previously on..." recap (player-facing, one-pager)
 
 A short (200–400 word) player-facing doc generated before each session. Different tone from the DM journal — no spoilers, no DM-only info, focused on what the players experienced and remember.
 
@@ -126,7 +118,7 @@ A short (200–400 word) player-facing doc generated before each session. Differ
 
 ---
 
-### 4. Hierarchical summaries (arc → campaign, scales to any length)
+### 3. Hierarchical summaries (arc → campaign, scales to any length)
 
 For very long campaigns (30+ sessions), group sessions into arcs, summarize each arc, then combine arc summaries into a campaign overview. Two-level LLM pipeline.
 
@@ -136,11 +128,10 @@ For very long campaigns (30+ sessions), group sessions into arcs, summarize each
 
 ### Shared implementation notes
 
-- All four read from the same `.summary.md` sidecar files written by `wisper summarize`
+- All three read from the same `.summary.md` sidecar files written by `wisper summarize`
 - Campaigns without any summarized sessions silently show nothing (the buttons are disabled or hidden)
 - The `summarize.py` `SummaryNote` dataclass already captures loot, NPCs, follow-ups — the campaign-level LLM just needs to receive multiple of these and synthesize
-- The rolling journal (#1, shipped) is the reference implementation: `journal.py` patterns (slug-scoped storage under `campaigns/<slug>/`, `.summary.md` discovery via `unjournalled_sessions`, `JobQueue.submit_journal` + `_run_journal_job`) carry directly to #2 and #3
-- The remaining non-hierarchical features (#2, #3) fit the existing `JobQueue` as new `JOB_CAMPAIGN_*` types, giving them the same SSE progress page as transcription/summarize/journal jobs
+- Reuse the shipped journal's patterns: slug-scoped storage under `campaigns/<slug>/`, `.summary.md` discovery via `unjournalled_sessions`, and `JobQueue.submit_journal` + `_run_journal_job` as the template for new `JOB_CAMPAIGN_*` types (same SSE progress page as transcription/summarize/journal jobs). The combined summary and recap (#1, #2) fit this directly
 
 ---
 
