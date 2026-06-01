@@ -289,6 +289,7 @@
 </div>
 
 <script>
+const _ollamaCloudKeySaved = {{ 'true' if config.get('ollama_cloud_api_key') else 'false' }};
 const _PROVIDERS = {
   ollama: {
     label: 'Ollama', kind: 'local', method: 'GET',
@@ -439,12 +440,16 @@ async function loadLocalProviderStatus() {
       _setDiscoveredModels(merged);
       var current = _modelInputEl().value;
       var notFound = current && !merged.find(function(m) { return m.name === current; });
-      var verb = cfg.kind === 'local' ? 'running' : (cfg.kind === 'ollama-cloud' ? 'catalog' : 'connected');
+      var verb = cfg.kind === 'local' ? 'running' : (cfg.kind === 'ollama-cloud' ? 'catalog (public)' : 'connected');
       var counts = cloudCount > 0 ? (localCount + ' local + ' + cloudCount + ' cloud') : (localCount + ' model' + (localCount !== 1 ? 's' : ''));
+      // For ollama-cloud: warn if no key is saved and none has been typed into the field this session.
+      var cloudKeyInput = document.getElementById('cfg_ollama_cloud_api_key');
+      var cloudKeyMissing = cfg.kind === 'ollama-cloud' && !_ollamaCloudKeySaved && !(cloudKeyInput && cloudKeyInput.value.trim());
       statusLine.textContent = '✓ ' + cfg.label + ' ' + verb + ' · ' + counts + ' available' +
         (cloudCount > 0 ? ' · cloud models need `ollama signin`' : '') +
-        (notFound ? ' · current "' + current + '"' + cfg.notFoundSuffix : '');
-      statusLine.style.color = notFound ? 'var(--color-signal-amber)' : 'var(--color-signal-green)';
+        (notFound ? ' · current "' + current + '"' + cfg.notFoundSuffix : '') +
+        (cloudKeyMissing ? ' · no API key saved — summarize & refine will fail until you save one' : '');
+      statusLine.style.color = (notFound || cloudKeyMissing) ? 'var(--color-signal-amber)' : 'var(--color-signal-green)';
     } else if (data.running) {
       statusLine.textContent = '✓ ' + cfg.label + ' running · ' + (cfg.emptyHint || 'No models returned');
       statusLine.style.color = 'var(--color-signal-amber)';
