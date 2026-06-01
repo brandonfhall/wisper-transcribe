@@ -1488,6 +1488,30 @@ def test_job_detail_journal_shows_view_journal_not_transcript(client, tmp_path, 
     assert "View transcript" not in resp.text
 
 
+def test_job_detail_journal_pending_bakes_slug_into_js(client, tmp_path, monkeypatch):
+    """A pending journal job bakes the slug into the page JS so the live
+    'View journal' link does not depend on the SSE payload."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.web.jobs import Job, JOB_CAMPAIGN_JOURNAL, PENDING
+    import uuid
+    from datetime import datetime
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=PENDING,
+        created_at=datetime.now(),
+        input_path="",
+        kwargs={"slug": "my-game"},
+        name="Journal: My Game",
+        job_type=JOB_CAMPAIGN_JOURNAL,
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    resp = client.get(f"/transcribe/jobs/{job.id}")
+    assert resp.status_code == 200
+    assert 'JOURNAL_SLUG = "my-game"' in resp.text
+
+
 def test_transcribe_form_includes_campaign_select(client, tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     from wisper_transcribe.models import Campaign

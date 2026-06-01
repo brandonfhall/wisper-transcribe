@@ -159,6 +159,11 @@
   const progressEta  = document.getElementById('progress-eta');
   const progressRate = document.getElementById('progress-rate');
 
+  // Slug baked in at render time so the "View journal" link does not depend on
+  // the SSE payload (the stream endpoint is Python; the template reloads from
+  // disk per request, so this stays correct even if the server hasn't reloaded).
+  const JOURNAL_SLUG = {% if job.job_type == "campaign_journal" and job.kwargs.slug %}{{ job.kwargs.slug | tojson }}{% else %}null{% endif %};
+
   const STEPS = [
     {% if job.job_type == "transcription" %}
       {% if job.needs_extraction %}'extract',{% endif %}
@@ -300,11 +305,8 @@
       es.close();
       if (evt.status === 'completed') {
         allDone();
-        if (evt.job_type === 'campaign_journal') {
-          const journalBtn = evt.journal_slug
-            ? `<a href="/campaigns/${encodeURIComponent(evt.journal_slug)}/journal" class="btn btn-primary">View journal</a>`
-            : '';
-          actions.innerHTML = `${journalBtn}<a href="/" class="btn btn-secondary">← Dashboard</a>`;
+        if (JOURNAL_SLUG) {
+          actions.innerHTML = `<a href="/campaigns/${encodeURIComponent(JOURNAL_SLUG)}/journal" class="btn btn-primary">View journal</a><a href="/" class="btn btn-secondary">← Dashboard</a>`;
         } else if (evt.output_path) {
           const stem = evt.output_path.replace(/\\/g, '/').split('/').pop().replace('.md', '');
           const enc  = encodeURIComponent(stem);
