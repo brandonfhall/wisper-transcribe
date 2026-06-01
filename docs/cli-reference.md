@@ -193,6 +193,19 @@ wisper campaigns remove-member d-d-mondays charlie      # remove from roster onl
 wisper campaigns delete d-d-mondays                     # delete campaign (with confirmation)
 ```
 
+#### `wisper campaigns journal`
+
+Maintains a **rolling campaign journal** — a single living document the LLM rewrites as each new session is folded in. It reads the per-session `.summary.md` sidecars (from `wisper summarize`) and accumulates them into `campaigns/<slug>/journal.md`, tracking story arcs, open plot threads, NPCs, party decisions, and a running loot ledger. Context stays bounded: each fold sends only the current journal plus one new session summary.
+
+```bash
+wisper campaigns journal d-d-mondays                  # fold the next unjournalled session
+wisper campaigns journal d-d-mondays --all            # fold every pending session (oldest first)
+wisper campaigns journal d-d-mondays --session s05    # fold a specific session stem
+wisper campaigns journal d-d-mondays --provider openai --model gpt-4o-mini
+```
+
+A session is "pending" once it has a `.summary.md`. With no flags the command folds the single oldest unjournalled session; re-run (or use `--all`) to catch up the rest. Sessions already folded are tracked in the journal's `journaled_sessions:` frontmatter and skipped.
+
 **Scoping transcription to a campaign:**
 
 ```bash

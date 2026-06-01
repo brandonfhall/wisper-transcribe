@@ -755,6 +755,12 @@ def speakers_reset(yes: bool):
 # wisper campaigns
 # ---------------------------------------------------------------------------
 
+# Provider choice for LLM-backed commands (summarize, refine, campaigns journal).
+# Defined here (above its first use in a command decorator) so module import
+# does not hit a NameError — decorators evaluate top-to-bottom at import time.
+_LLM_PROVIDER_CHOICE = click.Choice(["ollama", "anthropic", "openai", "google"])
+
+
 @main.group()
 def campaigns():
     """Manage campaigns (per-show speaker rosters)."""
@@ -893,6 +899,72 @@ def campaigns_remove_member(slug: str, profile_key: str):
     click.echo(f"Removed {profile_key!r} from campaign {safe!r}.")
 
 
+@campaigns.command("journal")
+@click.argument("slug")
+@click.option("--session", default=None,
+              help="Specific session stem to fold (default: next unjournalled)")
+@click.option("--all", "fold_all", is_flag=True, default=False,
+              help="Fold every pending session in one run (oldest first)")
+@click.option("--provider", default=None, type=_LLM_PROVIDER_CHOICE,
+              help="LLM provider (default: llm_provider from config)")
+@click.option("--model", default=None, help="Model override (default: llm_model from config)")
+@click.option("--endpoint", default=None, help="Ollama endpoint override")
+def campaigns_journal(slug: str, session: Optional[str], fold_all: bool,
+                      provider: Optional[str], model: Optional[str],
+                      endpoint: Optional[str]):
+    """Fold session summaries into a rolling campaign journal.
+
+    The journal is a single living document at
+    ``campaigns/<slug>/journal.md`` that the LLM rewrites as each new session
+    is folded in. With no flags it folds the next unjournalled session (one
+    that has a ``.summary.md`` from `wisper summarize`). Pass ``--all`` to fold
+    every pending session, or ``--session <stem>`` to fold a specific one.
+    """
+    from .campaign_manager import _validate_campaign_slug, load_campaigns
+    from .journal import unjournalled_sessions, update_journal
+    from .llm.errors import LLMResponseError, LLMUnavailableError
+    from .speaker_manager import load_profiles
+
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        raise click.ClickException(f"Invalid campaign slug: {slug!r}")
+    if safe not in load_campaigns():
+        raise click.ClickException(f"Campaign {safe!r} not found.")
+
+    if session and fold_all:
+        raise click.ClickException("--session and --all are mutually exclusive.")
+
+    # Decide the work list up front so we can report 'nothing to do' cleanly.
+    if session:
+        targets = [session]
+    else:
+        targets = unjournalled_sessions(safe)
+        if not targets:
+            click.echo("Journal is already up to date — no sessions to fold.")
+            click.echo("  (Sessions need a .summary.md first: run `wisper summarize`.)")
+            return
+        if not fold_all:
+            targets = targets[:1]
+
+    client = _get_llm_client(provider, model, endpoint)
+    click.echo(f"Folding {len(targets)} session(s) with "
+               f"{client.provider} / {client.model} ...", err=True)
+
+    result = None
+    for stem in targets:
+        click.echo(f"  Folding in: {stem}", err=True)
+        try:
+            result = update_journal(safe, client, load_profiles(), session_stem=stem)
+        except FileNotFoundError as exc:
+            raise click.ClickException(str(exc))
+        except (LLMUnavailableError, LLMResponseError) as exc:
+            raise click.ClickException(str(exc))
+
+    if result is not None:
+        click.echo(f"Wrote {result.path}")
+        click.echo(f"  journaled sessions: {len(result.journaled_sessions)}")
+
+
 # ---------------------------------------------------------------------------
 # wisper transcripts
 # ---------------------------------------------------------------------------
@@ -1018,9 +1090,6 @@ def fix(transcript: Path, speaker: str, new_name: str, re_enroll: bool):
 # ---------------------------------------------------------------------------
 # wisper refine  /  wisper summarize
 # ---------------------------------------------------------------------------
-
-_LLM_PROVIDER_CHOICE = click.Choice(["ollama", "anthropic", "openai", "google"])
-
 
 def _get_llm_client(provider: Optional[str], model: Optional[str],
                     endpoint: Optional[str]):

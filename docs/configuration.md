@@ -35,7 +35,9 @@ wisper-transcribe/
 │       ├── alice.npy    voice fingerprint
 │       └── bob.npy
 └── campaigns/
-    └── campaigns.json   campaign rosters (additive layer over global profiles)
+    ├── campaigns.json   campaign rosters (additive layer over global profiles)
+    └── <slug>/
+        └── journal.md  rolling campaign journal (one per campaign; written by `wisper campaigns journal`)
 ```
 
 Override the storage path with `WISPER_DATA_DIR` (set automatically in Docker).
