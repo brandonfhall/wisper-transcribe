@@ -56,6 +56,8 @@
       {% if job.needs_extraction %}{% set steps = [("extract","E","Extract")] + steps %}{% endif %}
     {% elif job.job_type == "refine" %}
       {% set steps = [("refine","R","Refine")] %}
+    {% elif job.job_type == "campaign_journal" %}
+      {% set steps = [("journal","J","Journal")] %}
     {% else %}
       {% set steps = [("summarize","S","Summarize")] %}
     {% endif %}
@@ -115,7 +117,11 @@
   <!-- Actions -->
   <div id="job-actions" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
     {% if job.status == "completed" %}
-      {% if job.output_path %}
+      {% if job.job_type == "campaign_journal" %}
+        {% if job.kwargs.slug %}
+          <a href="/campaigns/{{ job.kwargs.slug }}/journal" class="btn btn-primary">View journal</a>
+        {% endif %}
+      {% elif job.output_path %}
         <a href="/transcripts/{{ job.output_path | stem | urlencode }}" class="btn btn-primary">View transcript</a>
         {% if job.job_type == "transcription" %}
           <a href="/transcribe/jobs/{{ job.id }}/enroll" class="btn btn-secondary">Name speakers</a>
@@ -161,6 +167,8 @@
       {% if job.post_summarize %}'summarize',{% endif %}
     {% elif job.job_type == "refine" %}
       'refine',
+    {% elif job.job_type == "campaign_journal" %}
+      'journal',
     {% else %}
       'summarize',
     {% endif %}
@@ -292,7 +300,12 @@
       es.close();
       if (evt.status === 'completed') {
         allDone();
-        if (evt.output_path) {
+        if (evt.job_type === 'campaign_journal') {
+          const journalBtn = evt.journal_slug
+            ? `<a href="/campaigns/${encodeURIComponent(evt.journal_slug)}/journal" class="btn btn-primary">View journal</a>`
+            : '';
+          actions.innerHTML = `${journalBtn}<a href="/" class="btn btn-secondary">← Dashboard</a>`;
+        } else if (evt.output_path) {
           const stem = evt.output_path.replace(/\\/g, '/').split('/').pop().replace('.md', '');
           const enc  = encodeURIComponent(stem);
           const enrollBtn  = evt.job_type === 'transcription' ? `<a href="/transcribe/jobs/{{ job.id }}/enroll" class="btn btn-secondary">Name speakers</a>` : '';

@@ -213,6 +213,9 @@ async def job_stream(request: Request, job_id: str) -> StreamingResponse:
                     "output_path": job.output_path,
                     "summary_path": job.summary_path,
                     "job_type": job.job_type,
+                    # For campaign-journal jobs there is no transcript — the
+                    # completion action links to the campaign journal instead.
+                    "journal_slug": job.kwargs.get("slug"),
                     "error": job.error,
                 })
                 yield f"data: {final}\n\n"
