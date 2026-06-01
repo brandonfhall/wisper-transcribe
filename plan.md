@@ -92,24 +92,13 @@ Four distinct features share the same infrastructure (reading multiple `.summary
 
 ---
 
-### 1. Rolling campaign journal (incremental, bounded context)
+### 1. Rolling campaign journal (incremental, bounded context) — ✅ SHIPPED (`feat/campaign-journal`)
 
-A living document that grows with each new session. On each run the LLM receives `[current journal.md] + [new session.summary.md]` and rewrites the journal to incorporate the new session.
+Implemented in `journal.py` + `wisper campaigns journal` CLI (Phase 1) and the web UI (Phase 2: `JOB_CAMPAIGN_JOURNAL`, "Update journal"/"Fold all"/"View journal" on the Campaign page, `campaign_journal.html`). On each fold the LLM receives `[current journal body] + [one new .summary.md]` via the free-text `complete()` method and rewrites the journal — context stays bounded regardless of campaign length. Storage is `data_dir/campaigns/<slug>/journal.md`; session `.summary.md` sidecars are never modified.
 
-**Why this is the right default:** Context stays bounded — even session 50 only sends one session's worth of new material plus the current journal (~2–5 k tokens each). The journal acts as a compressed campaign memory.
+**Deviation from the original design:** folded sessions are tracked as a **list** in the `journaled_sessions:` frontmatter key (not a single `journal_through:` high-water mark), so out-of-order summarization diffs correctly. `unjournalled_sessions()` returns campaign transcripts that have a `.summary.md` but are not yet in that list.
 
-**What it tracks across sessions:**
-- Story arc progression and where each thread stands
-- Active plot hooks (opened vs resolved)
-- NPC roster: who appeared, what role they played, how the relationship evolved
-- PC decisions that had lasting consequences
-- Running loot/resource ledger (net gains/losses per session)
-
-**Storage:** `data_dir/campaigns/<slug>/journal.md` — a single file that gets overwritten each time a new session is folded in. The individual session `.summary.md` files are never touched; they remain the source of truth.
-
-**Entry point:** "Update journal" button on the Campaign page, enabled when new sessions exist that have not yet been folded in. Track this via a `journal_through: <session_stem>` frontmatter key in `journal.md` — compare against the campaign transcript list to know what's new.
-
-**CLI:** `wisper campaign journal <slug> [--session <stem>]` — folds one session (default: latest un-journalled) into the journal.
+See `architecture.md` (module map + the LLM post-processing design-decision section) and `docs/web-ui.md` / `docs/cli-reference.md` for the as-built surface. This feature is the reference infrastructure the three below reuse.
 
 ---
 
@@ -150,8 +139,8 @@ For very long campaigns (30+ sessions), group sessions into arcs, summarize each
 - All four read from the same `.summary.md` sidecar files written by `wisper summarize`
 - Campaigns without any summarized sessions silently show nothing (the buttons are disabled or hidden)
 - The `summarize.py` `SummaryNote` dataclass already captures loot, NPCs, follow-ups — the campaign-level LLM just needs to receive multiple of these and synthesize
-- The rolling journal is the highest-value, most technically tractable feature — build it first; the others follow naturally from the same infrastructure
-- All three non-hierarchical features fit into the existing `JobQueue` as new `JOB_CAMPAIGN_*` types, giving them the same SSE progress page as transcription and summarize jobs
+- The rolling journal (#1, shipped) is the reference implementation: `journal.py` patterns (slug-scoped storage under `campaigns/<slug>/`, `.summary.md` discovery via `unjournalled_sessions`, `JobQueue.submit_journal` + `_run_journal_job`) carry directly to #2 and #3
+- The remaining non-hierarchical features (#2, #3) fit the existing `JobQueue` as new `JOB_CAMPAIGN_*` types, giving them the same SSE progress page as transcription/summarize/journal jobs
 
 ---
 
