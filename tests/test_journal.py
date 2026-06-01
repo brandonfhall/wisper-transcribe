@@ -251,3 +251,38 @@ def test_cli_campaigns_journal_unknown_campaign(tmp_path, monkeypatch):
     result = CliRunner().invoke(cli.main, ["campaigns", "journal", "ghost"])
     assert result.exit_code != 0
     assert "not found" in result.output
+
+
+# ---------------------------------------------------------------------------
+# JobQueue worker: _run_journal_job
+# ---------------------------------------------------------------------------
+
+def test_run_journal_job_folds_and_completes(tmp_path, out_dir, monkeypatch):
+    """_run_journal_job builds a client, folds the next session, completes."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.web import jobs as jobs_mod
+
+    create_campaign("My Game", data_dir=tmp_path)
+    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
+    _write_summary(out_dir, "s1")
+
+    # The worker resolves get_client from config — hand it our FakeClient.
+    monkeypatch.setattr(jobs_mod, "_StderrCapture", lambda job: _Devnull())
+    import wisper_transcribe.llm as llm_mod
+    monkeypatch.setattr(llm_mod, "get_client", lambda *a, **k: FakeClient())
+
+    q = jobs_mod.JobQueue()
+    job = q.submit_journal("my-game")
+    q._run_journal_job(job)
+
+    assert job.status == jobs_mod.COMPLETED
+    assert journal.journal_path("my-game", data_dir=tmp_path).exists()
+    assert job.output_path and job.output_path.endswith("journal.md")
+
+
+class _Devnull:
+    def write(self, *a, **k):
+        pass
+
+    def flush(self):
+        pass

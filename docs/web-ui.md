@@ -19,7 +19,7 @@ wisper server
 | Transcribe | `/transcribe` | Drag-and-drop upload, all transcription options, live progress stream; **Detect speakers** toggle (on by default — turn off for audiobooks/lectures to skip diarization entirely) reveals a count selector with **?** (auto-detect, default) or pinned **1–10**; optional "Refine vocabulary" and "Generate campaign summary" post-processing checkboxes |
 | Transcripts | `/transcripts` | Browse output files, view rendered markdown, download, delete; green notes icon on cards that have a campaign summary |
 | Speakers | `/speakers` | Enroll, rename, remove speaker profiles |
-| Campaigns | `/campaigns` | Create and manage campaigns; add/remove roster members; scope transcription to a campaign |
+| Campaigns | `/campaigns` | Create and manage campaigns; add/remove roster members; scope transcription to a campaign; maintain a rolling **campaign journal** |
 | Record | `/record` | Start and stop live Discord voice channel recording sessions; shows active session with live speaker and segment counts via SSE; **Browse bot's channels** panel lists available guilds and voice channels so you can click-to-fill IDs without leaving the page |
 | Recordings | `/recordings` | Browse all recordings, grouped by campaign; view per-recording detail (status, speakers, segments); delete entries |
 | Config | `/config` | View and edit all settings |
@@ -50,6 +50,9 @@ Open any transcript and expand "LLM Post-processing". Click **Refine Vocabulary*
 
 **Campaign Notes:**
 When a `.summary.md` sidecar exists, the transcript detail page shows a green "Campaign Notes available" panel with **View Notes** and **Download** buttons. Campaign notes are also accessible via the transcript list card (green notes icon). The notes page shows the session recap, loot, NPCs, and follow-up items rendered as HTML.
+
+**Campaign Journal (DM tool):**
+The Campaign page shows a **Rolling journal** panel that aggregates session summaries into one living document per campaign. Once a session has a `.summary.md`, it becomes "ready to fold in". Click **Update journal** to fold the next session, or **Fold all** to catch up every pending session. Each fold queues a job (redirecting to the live progress page) where the LLM rewrites the journal to incorporate the new session — tracking story arcs, open plot threads, NPCs, party decisions, and a running loot ledger. Context stays bounded (current journal + one new summary per fold), so it scales to long campaigns. Click **View journal** to read the rendered result; already-folded sessions are skipped on subsequent runs.
 
 ---
 

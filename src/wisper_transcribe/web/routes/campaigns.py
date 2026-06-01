@@ -8,7 +8,7 @@ from typing import Annotated, Optional
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from . import templates
+from . import get_queue, templates
 from wisper_transcribe.campaign_manager import (
     _validate_campaign_slug,
     _validate_profile_key,
@@ -73,6 +73,11 @@ async def campaign_detail(request: Request, slug: str) -> HTMLResponse:
     # Profiles not yet in this campaign (for the add-member dropdown)
     unenrolled = {k: v for k, v in profiles.items() if k not in campaign.members}
 
+    from wisper_transcribe.journal import journal_path, unjournalled_sessions
+    jpath = journal_path(safe)
+    journal_exists = bool(jpath and jpath.exists())
+    journal_pending = len(unjournalled_sessions(safe))
+
     return templates.TemplateResponse(
         request,
         "campaigns.html",
@@ -82,6 +87,8 @@ async def campaign_detail(request: Request, slug: str) -> HTMLResponse:
             "profiles": profiles,
             "active_campaign": campaign,
             "unenrolled": unenrolled,
+            "journal_exists": journal_exists,
+            "journal_pending": journal_pending,
         },
     )
 
@@ -235,3 +242,70 @@ async def campaign_remove_transcript(
         remove_transcript_from_campaign(stem)
 
     return RedirectResponse(url=f"/campaigns/{campaign.slug}", status_code=303)
+
+
+@router.post("/{slug}/journal", response_class=HTMLResponse)
+async def campaign_journal_update(
+    request: Request,
+    slug: str,
+    mode: Annotated[str, Form()] = "next",
+) -> RedirectResponse:
+    """Submit a rolling-journal job and redirect to its progress page.
+
+    `mode="all"` folds every pending session; anything else folds the next one.
+    """
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        return invalid_input_response("Invalid campaign slug")
+
+    campaign = load_campaigns().get(safe)
+    if campaign is None:
+        return error_redirect("/campaigns", "not_found")
+
+    queue = get_queue(request)
+    job = queue.submit_journal(
+        safe, name=f"Journal: {campaign.display_name}", fold_all=(mode == "all")
+    )
+    # job.id is a server-generated uuid4 — never user input (CodeQL-safe redirect).
+    return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
+
+
+@router.get("/{slug}/journal", response_class=HTMLResponse)
+async def campaign_journal_view(request: Request, slug: str) -> HTMLResponse:
+    """Render the campaign's rolling journal, or an empty-state page."""
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        return invalid_input_response("Invalid campaign slug")
+
+    campaign = load_campaigns().get(safe)
+    if campaign is None:
+        return error_redirect("/campaigns", "not_found")
+
+    from wisper_transcribe.journal import journal_path, unjournalled_sessions, parse_journal
+    from .transcripts import _sanitize_html
+
+    jpath = journal_path(safe)
+    meta: dict = {}
+    html_body = ""
+    has_journal = bool(jpath and jpath.exists())
+    if has_journal:
+        meta, body = parse_journal(jpath.read_text(encoding="utf-8"))
+        import markdown as _md
+        html_body = _sanitize_html(_md.markdown(body, extensions=["nl2br"]))
+
+    pending = unjournalled_sessions(safe)
+
+    return templates.TemplateResponse(
+        request,
+        "campaign_journal.html",
+        {
+            "request": request,
+            "campaign": campaign,
+            "slug": safe,
+            "meta": meta,
+            "html_body": html_body,
+            "has_journal": has_journal,
+            "pending": pending,
+            "journaled_count": len(meta.get("journaled_sessions") or []),
+        },
+    )

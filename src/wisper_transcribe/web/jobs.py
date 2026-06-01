@@ -42,6 +42,7 @@ FAILED = "failed"
 JOB_TRANSCRIPTION = "transcription"
 JOB_REFINE = "refine"
 JOB_SUMMARIZE = "summarize"
+JOB_CAMPAIGN_JOURNAL = "campaign_journal"
 
 _EXCERPT_SECONDS = 12  # length of each speaker audio clip
 
@@ -335,6 +336,27 @@ class JobQueue:
         self._queue.put_nowait(job.id)
         return job
 
+    def submit_journal(
+        self,
+        slug: str,
+        name: str = "",
+        session_stem: Optional[str] = None,
+        fold_all: bool = False,
+    ) -> Job:
+        """Enqueue a rolling-campaign-journal job for a campaign slug."""
+        job = Job(
+            id=str(uuid.uuid4()),
+            status=PENDING,
+            created_at=datetime.now(),
+            input_path="",
+            kwargs={"slug": slug, "session_stem": session_stem, "fold_all": fold_all},
+            name=name or f"Journal: {slug}",
+            job_type=JOB_CAMPAIGN_JOURNAL,
+        )
+        self._jobs[job.id] = job
+        self._queue.put_nowait(job.id)
+        return job
+
     def get(self, job_id: str) -> Optional[Job]:
         return self._jobs.get(job_id)
 
@@ -385,10 +407,65 @@ class JobQueue:
 
     def _run_job(self, job: Job) -> None:
         """Dispatch to the appropriate worker based on job_type."""
-        if job.job_type in (JOB_REFINE, JOB_SUMMARIZE):
+        if job.job_type == JOB_CAMPAIGN_JOURNAL:
+            self._run_journal_job(job)
+        elif job.job_type in (JOB_REFINE, JOB_SUMMARIZE):
             self._run_llm_job(job)
         else:
             self._run_transcription_job(job)
+
+    def _run_journal_job(self, job: Job) -> None:
+        """Fold session summaries into a campaign's rolling journal.
+
+        Runs in a thread; sys.stderr is redirected to capture the LLM client's
+        streaming status messages into job.log_lines (same pattern as the
+        refine/summarize LLM jobs — safe because the queue is single-worker).
+        """
+        from wisper_transcribe.config import load_config
+        from wisper_transcribe.journal import unjournalled_sessions, update_journal
+        from wisper_transcribe.llm import get_client
+        from wisper_transcribe.speaker_manager import load_profiles
+
+        slug = job.kwargs["slug"]
+        session_stem = job.kwargs.get("session_stem")
+        fold_all = bool(job.kwargs.get("fold_all", False))
+
+        old_stderr = _sys.stderr
+        _sys.stderr = _StderrCapture(job)
+        try:
+            cfg = load_config()
+            client = get_client(cfg.get("llm_provider", "ollama"), config=cfg)
+            job.log_lines.append(f"LLM: {client.provider} / {client.model}")
+            profiles = load_profiles()
+
+            if session_stem:
+                targets = [session_stem]
+            else:
+                targets = unjournalled_sessions(slug)
+                if not targets:
+                    job.log_lines.append("Journal already up to date — nothing to fold.")
+                elif not fold_all:
+                    targets = targets[:1]
+
+            result = None
+            for stem in targets:
+                job.log_lines.append(f"Folding in: {stem} ...")
+                result = update_journal(slug, client, profiles, session_stem=stem)
+
+            if result is not None:
+                job.output_path = str(result.path)
+                job.log_lines.append(
+                    f"Journal written: {result.path.name} "
+                    f"({len(result.journaled_sessions)} session(s) folded)"
+                )
+            job.status = COMPLETED
+        except Exception as exc:
+            job.status = FAILED
+            job.error = str(exc)
+            raise
+        finally:
+            _sys.stderr = old_stderr
+            job.finished_at = datetime.now()
 
     def _run_transcription_job(self, job: Job) -> None:
         """Runs in a thread.  Patches tqdm.write to capture progress logs."""

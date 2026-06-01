@@ -1373,6 +1373,94 @@ def test_campaign_remove_transcript_rejects_traversal(client, tmp_path, monkeypa
         assert resp.status_code == 400, f"expected 400 for stem={bad_stem!r}, got {resp.status_code}"
 
 
+def test_campaign_journal_post_submits_job_and_redirects(client, tmp_path, monkeypatch):
+    """POST /campaigns/{slug}/journal queues a journal job and redirects to it."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.web.jobs import Job
+    from wisper_transcribe.campaign_manager import create_campaign
+    import uuid
+
+    create_campaign("My Game", data_dir=tmp_path)
+    fake_job = MagicMock(spec=Job)
+    fake_job.id = str(uuid.uuid4())
+
+    with patch.object(client.app.state.job_queue, "submit_journal",
+                      return_value=fake_job) as mock_submit:
+        resp = client.post("/campaigns/my-game/journal",
+                           data={"mode": "next"}, follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/transcribe/jobs/{fake_job.id}"
+    assert mock_submit.call_args.args[0] == "my-game"
+    assert mock_submit.call_args.kwargs.get("fold_all") is False
+
+
+def test_campaign_journal_post_fold_all(client, tmp_path, monkeypatch):
+    """mode=all sets fold_all=True on the submitted job."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.web.jobs import Job
+    from wisper_transcribe.campaign_manager import create_campaign
+    import uuid
+
+    create_campaign("My Game", data_dir=tmp_path)
+    fake_job = MagicMock(spec=Job)
+    fake_job.id = str(uuid.uuid4())
+
+    with patch.object(client.app.state.job_queue, "submit_journal",
+                      return_value=fake_job) as mock_submit:
+        resp = client.post("/campaigns/my-game/journal",
+                           data={"mode": "all"}, follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert mock_submit.call_args.kwargs.get("fold_all") is True
+
+
+def test_campaign_journal_post_unknown_campaign(client, tmp_path, monkeypatch):
+    """POST to a nonexistent campaign redirects to /campaigns with not_found."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    resp = client.post("/campaigns/ghost/journal",
+                       data={"mode": "next"}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert "error=not_found" in resp.headers.get("location", "")
+
+
+def test_campaign_journal_view_empty_state(client, tmp_path, monkeypatch):
+    """GET the journal page before any journal exists shows the empty state."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+    from wisper_transcribe import journal as journal_mod
+
+    create_campaign("My Game", data_dir=tmp_path)
+    monkeypatch.setattr(journal_mod, "get_output_dir", lambda: tmp_path / "out")
+
+    resp = client.get("/campaigns/my-game/journal")
+    assert resp.status_code == 200
+    assert "No journal yet" in resp.text
+
+
+def test_campaign_journal_view_renders_body(client, tmp_path, monkeypatch):
+    """GET renders an existing journal.md as HTML."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+    from wisper_transcribe import journal as journal_mod
+
+    create_campaign("My Game", data_dir=tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setattr(journal_mod, "get_output_dir", lambda: out)
+
+    jpath = journal_mod.journal_path("my-game", data_dir=tmp_path)
+    jpath.parent.mkdir(parents=True, exist_ok=True)
+    jpath.write_text(journal_mod.render_journal(
+        "my-game", "## Story So Far\n\nThe heroes gathered.", ["s1"], "ollama", "llama3.1:8b"
+    ), encoding="utf-8")
+
+    resp = client.get("/campaigns/my-game/journal")
+    assert resp.status_code == 200
+    assert "Story So Far" in resp.text
+    assert "The heroes gathered." in resp.text
+
+
 def test_transcribe_form_includes_campaign_select(client, tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     from wisper_transcribe.models import Campaign

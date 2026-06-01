@@ -95,6 +95,40 @@
       </div>
     </div>
 
+    <!-- Campaign journal -->
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 18px;margin-bottom:28px;border:1px solid var(--color-rule);border-radius:8px;background:var(--color-ink-900)">
+      <div>
+        <div class="mono-kicker" style="margin-bottom:5px">Rolling journal</div>
+        <div style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper)">
+          {% if journal_pending %}
+            {{ journal_pending }} session{{ 's' if journal_pending != 1 else '' }} ready to fold in
+          {% elif journal_exists %}
+            Up to date — all summarized sessions folded in
+          {% else %}
+            No journal yet — summarize a session, then fold it in
+          {% endif %}
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;flex-shrink:0">
+        {% if journal_exists %}
+        <a href="/campaigns/{{ slug }}/journal" class="btn btn-secondary btn-sm">View journal</a>
+        {% endif %}
+        {% if journal_pending %}
+        <form method="post" action="/campaigns/{{ slug }}/journal" style="display:inline">
+          <input type="hidden" name="mode" value="next"/>
+          <button type="submit" class="btn btn-primary btn-sm">Update journal</button>
+        </form>
+        {% if journal_pending > 1 %}
+        <form method="post" action="/campaigns/{{ slug }}/journal" style="display:inline">
+          <input type="hidden" name="mode" value="all"/>
+          <button type="submit" class="btn btn-secondary btn-sm"
+                  onclick="return confirm('Fold all {{ journal_pending }} pending sessions? This makes {{ journal_pending }} LLM calls.')">Fold all</button>
+        </form>
+        {% endif %}
+        {% endif %}
+      </div>
+    </div>
+
     <div style="display:grid;grid-template-columns:1.4fr 1fr;gap:36px">
       <!-- Sessions / transcripts -->
       <div>
