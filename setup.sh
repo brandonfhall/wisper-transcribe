@@ -56,8 +56,8 @@ if command -v python3 &>/dev/null; then
     VER=$(python3 -c "import sys; v=sys.version_info; print(f'{v.major}.{v.minor}.{v.micro}')")
     MAJOR=$(python3 -c "import sys; print(sys.version_info.major)")
     MINOR=$(python3 -c "import sys; print(sys.version_info.minor)")
-    if [ "$MAJOR" -lt 3 ] || ([ "$MAJOR" -eq 3 ] && [ "$MINOR" -lt 10 ]); then
-        fail "Python $VER found but 3.10+ is required. Install from https://python.org"
+    if [ "$MAJOR" -lt 3 ] || ([ "$MAJOR" -eq 3 ] && [ "$MINOR" -lt 13 ]); then
+        fail "Python $VER found but 3.13+ is required. Install from https://python.org"
     fi
     ok "Python $VER"
 else

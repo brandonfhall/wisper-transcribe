@@ -60,12 +60,12 @@ Write-Step "Checking Python..."
 try {
     $ver = & python -c "import sys; v=sys.version_info; print(f'{v.major}.{v.minor}.{v.micro}')" 2>&1
     $parts = $ver.Trim().Split('.')
-    if ([int]$parts[0] -lt 3 -or ([int]$parts[0] -eq 3 -and [int]$parts[1] -lt 10)) {
-        Write-Fail "Python $ver found but 3.10+ is required. Install from https://python.org"
+    if ([int]$parts[0] -lt 3 -or ([int]$parts[0] -eq 3 -and [int]$parts[1] -lt 13)) {
+        Write-Fail "Python $ver found but 3.13+ is required. Install from https://python.org"
     }
     Write-OK "Python $ver"
 } catch {
-    Write-Fail "Python not found. Install Python 3.10+ from https://python.org"
+    Write-Fail "Python not found. Install Python 3.13+ from https://python.org"
 }
 
 # ── Virtual environment ───────────────────────────────────────────────────────

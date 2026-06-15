@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "wisper-transcribe"
 version = "0.1.0"
 description = "Podcast transcription with speaker diarization for tabletop RPG actual-play recordings"
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 dependencies = [
     "faster-whisper>=1.1.0",
     "pyannote-audio>=4.0",

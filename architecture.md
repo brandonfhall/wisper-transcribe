@@ -383,8 +383,8 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 - `tests/test_discord_bot.py` covers BotManager start/stop lifecycle, start_session recording persisted, per-user .opus files written from PCM frames, transient 4015 rejoin logged, exhausted retries → degraded, permanent 4014 → failed (no retry), stop_session → completed, known Discord ID auto-tagged to profile key on first frame, unknown Discord ID gets empty string, unknown Discord ID added to unbound_speakers, known Discord ID NOT added to unbound_speakers, 3-user simultaneous interleaved frames → all per-user dirs populated, 3 unknown speakers all in unbound list (no duplicates), simultaneous known+unknown speakers (tagged vs unbound split); all via injected fake audio sources (no real JDA/Discord) (14 tests)
 - `tests/_discord_fakes.py`: scripted_source, multi_attempt_source, infinite_disconnect_source, blocking_source factories + make_pcm_frame / make_disconnect_frame helpers
 **CI matrix** (`.github/workflows/ci.yml`):
-- Runs on every push/PR: Python 3.10, 3.11, 3.12, 3.13 (blocking) + 3.14 (non-blocking, `continue-on-error: true`)
-- Weekly cron (Monday): same matrix + `latest-deps` job (`pip install --upgrade`) to detect forward-compatibility breakage before it hits PRs
+- Runs on every push/PR: Python 3.13 and 3.14, both blocking — the only versions the project ships on (Docker `python:3.14-slim`; local-`.venv` install floor 3.13 per `requires-python`). We deliberately do not fan out across versions we don't ship.
+- Weekly cron (Monday): same matrix + `latest-deps` job (`pip install --upgrade`, 3.14) to detect forward-compatibility breakage before it hits PRs
 - `allow-prereleases: true` on `setup-python` so 3.14 resolves even if still in pre-release
 - Dependabot monitors `pip`, `docker`, and `github-actions` ecosystems weekly
 
