@@ -75,7 +75,7 @@ python scripts/vendor.py            # re-download + rebuild all assets
 - **Push frequently when running in the Claude Code app** — after each commit, push the branch so work is available to pick up from another device. Use `git push -u origin <branch>`.
 - **After committing a phase, pause for user review before starting the next.**
 - **Branch naming:** `feat/...` or `fix/...`
-- **CI matrix:** Python 3.10–3.13 are blocking; 3.14 is `continue-on-error: true` (non-blocking).
+- **CI matrix:** Python 3.13 and 3.14 — the versions the project ships on (Docker `python:3.14-slim`; local-`.venv` floor 3.13). Both are blocking. We deliberately do not test versions we don't ship; `requires-python = ">=3.13"` and the `setup.sh`/`setup.ps1` floor checks must stay in sync with the lowest matrix entry.
 - **CI Tailwind staleness check:** CI rebuilds `tailwind.min.css` and runs `git diff --exit-code` on it. If the committed CSS is stale (templates changed without rebuilding), the check fails and blocks merge. Run the rebuild command above and commit before pushing.
 
 ---

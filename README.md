@@ -8,7 +8,7 @@ Runs entirely offline. No cloud APIs. Outputs clean markdown files ready for Not
 
 ## Requirements
 
-- Python 3.10+ and [ffmpeg](https://ffmpeg.org/download.html) on your PATH
+- Python 3.13+ and [ffmpeg](https://ffmpeg.org/download.html) on your PATH
 - A free [HuggingFace token](https://huggingface.co/settings/tokens) (for speaker identification)
 - GPU recommended but not required (CPU works, just slower)
 

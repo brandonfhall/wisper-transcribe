@@ -6,7 +6,7 @@ Pick the path that fits you. All three end up at the same web UI on `http://loca
 
 ### Option A — Double-click launcher *(recommended for most users)*
 
-**Requirements:** Python 3.10+ and [ffmpeg](https://ffmpeg.org/download.html) installed.
+**Requirements:** Python 3.13+ and [ffmpeg](https://ffmpeg.org/download.html) installed.
 
 | Platform | Steps |
 |----------|-------|
@@ -100,7 +100,7 @@ Walks you through provider (Ollama / LM Studio / Anthropic / OpenAI / Google), m
 
 ## Requirements
 
-- Python 3.10+ (for Option A/C)
+- Python 3.13+ (for Option A/C)
 - [ffmpeg](https://ffmpeg.org/download.html) on your PATH
 - A free [HuggingFace token](https://huggingface.co/settings/tokens)
 - GPU recommended but not required (CPU works, just slower)
@@ -170,4 +170,4 @@ pip install -e '.[llm-all]'         # all three
 
 Tests mock all ML models — no GPU, network, or real audio files required.
 
-CI runs the test suite across Python 3.10–3.14 on every push and PR. Python 3.14 is treated as experimental (non-blocking).
+CI runs the test suite on Python 3.13 and 3.14 — the versions the project actually ships on (Docker uses `python:3.14-slim`; the local-`.venv` install floor is 3.13). Both are blocking.

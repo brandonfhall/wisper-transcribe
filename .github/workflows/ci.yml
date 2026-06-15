@@ -24,12 +24,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
-        experimental: [false]
-        include:
-          - python-version: "3.14"
-            experimental: true
-    continue-on-error: ${{ matrix.experimental }}
+        # Only test what we ship: Docker runs 3.14 (python:3.14-slim) and the
+        # local-.venv install floor is 3.13. Both are blocking — the version we
+        # ship must never be the one allowed to fail.
+        python-version: ["3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@v6
@@ -54,7 +52,7 @@ jobs:
             --minify
 
   latest-deps:
-    name: latest deps (3.12)
+    name: latest deps (3.14)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule'
 
@@ -63,7 +61,8 @@ jobs:
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: "3.14"
+          allow-prereleases: true
 
       - name: Install package with latest dependencies
         run: pip install --upgrade -e ".[dev]"
