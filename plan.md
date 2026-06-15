@@ -27,23 +27,28 @@ Recommendation: option (1) — reuse the parallel-stages subprocess plumbing for
 
 ---
 
-## Pycord / DAVE Sidecar Migration
+## DAVE Sidecar → Python migration (parked; not yet viable)
 
-**Issue:** [#39](https://github.com/brandonfhall/wisper-transcribe/issues/39) — DAVE (Discord Audio/Video E2EE) blocking voice bot audio receive — **OPEN**
+**Issue #39 (DAVE blocking audio receive) is CLOSED** — the original "bot is broken" premise is resolved. The Java JDA 6.3.0 + JDAVE 0.1.8 sidecar receives and decrypts DAVE-encrypted audio today and works end-to-end. DAVE itself is mandatory and unavoidable (Discord enforced E2EE for non-stage voice on March 2, 2026; there is no per-channel opt-out), so the only open question is *where* DAVE is implemented, not *whether*.
 
-**Background:** Discord enforced DAVE E2EE for non-stage voice calls on March 2, 2026. The Java JDA sidecar continues to work (JDA 6.x has DAVE support). The Python side of the codebase has no DAVE implementation yet.
+**Key fact:** DAVE is MLS over OpenMLS — there is no pure-Python implementation and never will be. Every path depends on a native (Rust/JNI) MLS binding. The choice is which language wraps that binding, not Java-native vs. Python-pure.
 
-**Blockers being watched:**
-- **Pycord PR #3159** — DAVE receive for pycord. Still open as of late April 2026.
-- **discord.py PR #10300** — DAVE via the `davey` (OpenMLS) dependency. Actively in progress; issue #9948 tracks it.
+**Python DAVE-receive readiness (as of 2026-06-15):**
+- **pycord PR #3159** — DAVE *receive* for pycord. Approved by 2 reviewers but still a **draft**, milestoned for **2.9.0rc1** (last activity 2026-06-08). pycord has native voice receive, so this is the right target — but it is **unreleased**.
+- **discord.py PR #10300** — **merged 2026-01-07**, shipped in discord.py **2.7.0 / 2.7.1** (2026-03-03), but flagged *"tentative"*. discord.py has **no first-class voice receive**, so it is not a fit for a recording bot regardless.
+- **`davey`** (Snazzah's OpenMLS binding, the Rust native lib both discord.py and pycord use) — **v0.1.5, beta, 2026-03-29**, with "proper usage documentation does not exist yet."
 
-**Migration path** (when a Python library ships stable DAVE receive):
+**Verdict:** Migrating now would trade a working Java sidecar for an unreleased Python one on a beta native lib. **Keep the sidecar.** Revisit when **pycord 2.9 ships #3159 as a stable release**.
+
+**Migration path** (execute once pycord 2.9 stable lands):
 1. Delete `discord-bot/` (the Gradle/Java project)
 2. Write ~100-line Python replacement emitting the same length-prefixed PCM wire format over the existing Unix socket
 3. Update `BotManager` to launch the Python script instead of the JAR
 4. Remove the Java builder stages from `Dockerfile` and the Java 25 requirement from launchers + README
 
 Nothing else changes — `SegmentedOggWriter`, the web UI, campaigns, CLI, and all tests remain unaffected.
+
+**Structural fallback (Strategy B), if the native-binding ecosystem stalls:** both JDAVE and `davey` are small-maintainer libraries tracking a protocol Discord controls and can change. The only DAVE-churn-immune approach is to *not* implement DAVE at all — run a real Discord client joined to the channel and capture its client-side-decrypted audio via a virtual audio (loopback) device. Heavier operationally and loses per-speaker SSRC separation, so not worth building now — documented as the escape hatch if jdave/davey break on a future protocol bump.
 
 ---
 
