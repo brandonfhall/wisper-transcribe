@@ -89,6 +89,110 @@ Nothing else changes — `SegmentedOggWriter`, the web UI, campaigns, CLI, and a
 
 ---
 
+## AUDIT (2026-07-12) — Enrollment & speaker identification pipeline
+
+**Reported symptoms:** after the name-enrollment wizard, (a) not all speaker values in the transcript get updated; (b) voices are not always properly separated/identified in subsequent transcriptions.
+
+Full trace of the web transcription→enrollment flow. Findings ordered by severity; each maps to at least one reported symptom.
+
+### F1 — HIGH — Legacy job-path wizard renames silently no-op once any profile exists
+
+`enroll_submit` (`web/routes/transcribe.py:370`) renames with the **raw pyannote label** as `old_name`:
+```python
+for old_name, new_name in renames.items():
+    content = update_speaker_names(content, old_name, new_name)
+```
+But as soon as *any* profile is enrolled, `match_speakers` runs during transcription and the markdown body/frontmatter contain **display names** ("Unknown Speaker 1", or a matched profile name) — the string `**SPEAKER_00**` no longer exists anywhere in the file, so every replace is a silent no-op. The transcript-centric path (`transcripts.py:737`) fixed exactly this with the `current_names` lookup; the job path — which is what the **"Name speakers" button on the job detail page links to** (`job_detail.html:121`) — was never given the same fix. This is the most direct cause of "not all values in the transcripts are updated": first session works (no profiles yet → raw labels in body), every later session breaks.
+
+**Fix direction:** make the job path resolve current display names the same way the transcript path does (or better: make the job-path route delegate to the transcript-centric handler; the job has `output_path` and the sidecar exists).
+
+### F2 — HIGH — Untouched prefilled fields enroll junk "SPEAKER_XX" voice profiles
+
+`speaker_enroll.html:88-91` prefills each input with the raw label whenever no current name is known — which in the job path is *always* (`current_names` isn't passed). Both submit handlers treat any non-empty field as a rename+enroll. A user who names 3 of 6 speakers and submits therefore:
+- creates real voice profiles keyed `speaker_03` with display name "SPEAKER_03" (embedding extracted from that label's segments),
+- adds them to the campaign roster,
+- and those junk profiles then **compete in `match_speakers` for every future session** — a real person can be matched to "SPEAKER_03", and exclusivity (F4) means a junk match can also steal a slot from the right profile.
+
+Direct cause of "does not always properly identify voices."
+
+**Fix direction:** never enroll a name matching `^SPEAKER_\d+$`; leave unknown-speaker fields *empty* in the template (placeholder text instead of value); skip enroll when submitted name == prefilled current name.
+
+### F3 — HIGH — Every wizard submit overwrites existing profile embeddings
+
+`enroll_speaker` (`speaker_manager.py:168`) unconditionally `np.save`s over the existing embedding and replaces the profile entry. Both submit paths call it for **every non-empty field — including unchanged prefilled names** (the transcript path skips the *rename* when old==new, `transcripts.py:740`, but not the *enroll*). Consequences:
+- Re-entering the wizard to fix one typo re-extracts and replaces **all** speakers' embeddings from this session's segments (possibly worse audio).
+- Assigning the same display name to two raw labels (legitimately — pyannote often splits one person) makes the second `enroll_speaker` overwrite the first's embedding instead of merging.
+- `update_embedding()` (EMA, `speaker_manager.py:395`) exists precisely for this and is never called from any web path.
+
+**Fix direction:** in the web submit paths, when a profile key already exists, extract the embedding and call `update_embedding()` instead of `enroll_speaker()`; when two labels map to one name in a single submit, average before saving. Only enroll unchanged names if no profile exists.
+
+### F4 — HIGH — `match_speakers` greedy exclusivity has no second-choice fallback
+
+`speaker_manager.py:358-388`: each label records only its single best profile. Labels are sorted by best similarity and claim profiles greedily; a label whose best profile was already claimed falls to "Unknown Speaker N" **even when its second-best profile is above threshold**. Concretely: pyannote splits Alice into SPEAKER_00/SPEAKER_02 → one claims "Alice", the other goes Unknown; or Bob's best-scoring profile is Alice (similar voices) but Alice's own label claimed it — Bob lands Unknown despite scoring 0.78 against his own profile. Combined with F2's junk profiles, misidentification compounds.
+
+**Fix direction:** score all (label × profile) pairs, assign greedily over the full pair list (or Hungarian), allowing a label to fall back to its next-best unused profile above threshold. Consider allowing many-to-one matching (two labels → same profile) since over-segmentation of one speaker is common — exclusivity is the wrong invariant when `num_speakers` wasn't pinned.
+
+### F5 — MEDIUM-HIGH — Sidecar `input_path` points at a temp upload the startup sweep deletes
+
+`_write_enrollment_sidecar` (`web/jobs.py:98`) persists `job.input_path` — a `wisper_upload_*` file in the OS tempdir. That file is (a) never deleted when the job completes (disk leak until restart), and (b) **deleted for *all* jobs by `_cleanup_orphaned_uploads()` on every server restart** (`app.py:63`). So after any restart, the "restart-safe" wizard can still rename but `transcript_enroll_submit` hits `input_path.exists() == False` (`transcripts.py:760`) and **silently skips voice enrollment** — `log.warning` only; the browser gets a normal redirect and the user believes enrollment succeeded. Future sessions then can't identify those speakers.
+
+**Fix direction:** copy (or move) the source audio next to the transcript (or into `data_dir`) when writing the sidecar, and point `input_path` at the durable copy; surface "enrollment skipped — source audio missing" in the UI instead of silently succeeding. The completed-job temp file should then be deleted eagerly at job end (fixes the leak too).
+
+### F6 — MEDIUM — Sequential global renames cross-contaminate
+
+Both submit paths apply `update_speaker_names` (global find/replace) once per rename, mutating the same content string in a loop. Failure modes:
+- Swap on re-entry (Alice→Bob then Bob→Alice) merges every block into "Alice".
+- Two raw labels sharing one display name (common after F3's many-to-one naming): renaming only one of them renames **both** speakers' blocks.
+- New name colliding with another speaker's current name chains the same way.
+
+**Fix direction:** resolve all renames against the *original* content in one pass — block-level rewrite keyed by raw label using timestamps (the `_diar.json` segments + `rewrite_transcript_blocks()` already provide everything needed), not name-based global substitution.
+
+### F7 — MEDIUM — `_build_legacy_label_map` interval matching is fragile
+
+`transcripts.py:557-622`. The raw-label→display-name map that both the prefill and the rename targeting depend on is reconstructed by matching markdown block timestamps against pyannote intervals:
+- Markdown timestamps are truncated to whole seconds and block starts are *whisper* segment starts, which regularly fall outside every pyannote interval → nearest-start fallback can bind the block to the **wrong speaker's** interval.
+- `setdefault` (first-write-wins) means one early misattributed block poisons the mapping for that label.
+- A wrong `current_names` entry makes the transcript-path rename target a wrong/absent `old_name` → blocks not updated (same symptom as F1, intermittent).
+
+**Fix direction:** stop reconstructing this mapping from rendered output. Persist the authoritative `raw_label → display_name` map (the `speaker_map` the formatter actually used) into `_diar.json` at write time, and update it on every wizard rename. The interval heuristic should be a legacy fallback only.
+
+### F8 — MEDIUM — Aligner granularity: whole-Whisper-segment, winner-take-all
+
+`aligner.py` assigns each whisper segment to the single diarization turn with max overlap. Whisper segments in conversational audio routinely span 2+ speaker turns, so the minority speaker's words are attributed to the majority speaker. `word_timestamps` is **not enabled** on the faster-whisper path (`transcriber.py:192-199`; only the MLX path requests it, and even there the aligner ignores words). This is the structural ceiling on "properly separate voices" — no enrollment fix can recover text that was merged at alignment time.
+
+**Fix direction:** enable `word_timestamps=True` in faster-whisper and split whisper segments at diarization turn boundaries (assign words to turns, re-group). CPU cost is modest; accuracy gain on multi-speaker audio is large.
+
+### F9 — LOW-MEDIUM — Excerpt fallback can serve another session's audio
+
+`speaker_excerpt` (`web/routes/transcribe.py:329-337`): when the in-memory job is gone, the fallback globs `*_excerpt_SPEAKER_00.mp3` across the **entire output dir** and serves the first hit — potentially a clip from a different transcript. The user hears the wrong voice and assigns the wrong name.
+
+**Fix direction:** scope the glob to the job's transcript stem (available via `job.output_path`; if the job is gone, this route can't know the stem — redirect to the transcript-centric wizard instead, which scopes correctly).
+
+### F10 — LOW — Excerpt & embedding source quality
+
+The 12 s excerpt is cut at the label's *first* aligned occurrence (`jobs.py:133-140`), which for a misattributed short interjection plays mostly someone else's voice. Embeddings average the 5 *longest* diarization segments (`speaker_manager.py:148`), which in tabletop audio often include cross-talk/music. Both quietly degrade identification accuracy.
+
+**Fix direction:** pick the excerpt from the longest (not first) segment; for embeddings, prefer several medium-length solo segments over the absolute longest.
+
+### F11 — LOW — Frontmatter rename regex misses quoted YAML and has a prefix collision
+
+`update_speaker_names` (`formatter.py:173-177`) rewrites `- name: OldName` with no end anchor: renaming "Dan" also corrupts "- name: Dan Smith" → "- name: Daniel Smith". And `yaml.dump` quotes names containing special characters (`- name: 'O''Brien'`), which the unquoted pattern never matches → frontmatter silently left stale.
+
+**Fix direction:** parse/re-dump the frontmatter YAML instead of regex-editing it (already parsed in `transcript_detail` via `_parse_frontmatter`).
+
+### Suggested fix order
+
+1. **F1 + F2 + F3** — one PR: unify both wizard submit paths on a single handler that (a) resolves current names from a persisted map (F7's fix), (b) refuses `SPEAKER_\d+` enrollments and empty-prefills the template, (c) uses EMA update for existing profiles. Highest symptom relief per line changed.
+2. **F5** — durable audio copy + eager temp cleanup + UI feedback on skipped enrollment. Unblocks post-restart enrollment.
+3. **F6 + F7** — block-level single-pass rename keyed by persisted label map.
+4. **F4** — assignment algorithm rework (pair-scored greedy, optional many-to-one).
+5. **F8** — word-timestamp alignment (biggest quality win, most testing needed).
+6. **F9/F10/F11** — small hardening batch.
+
+Related existing plan item: "Enrollment wizard — synchronous embedding extraction blocks the browser" (JOB_ENROLL) — the fix-order item 1 handler unification is the natural place to also move enrollment into the JobQueue.
+
+---
+
 ## Campaign-level LLM summaries (DM tools)
 
 **Context (2026-05-14):** Per-session `wisper summarize` already produces `.summary.md` sidecars with recap, loot, NPCs, and follow-ups. These are session-scoped. The next level is campaign-scoped documents — aggregations across sessions that are most useful to the DM managing an ongoing story.
