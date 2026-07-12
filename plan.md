@@ -177,3 +177,22 @@ For very long campaigns (30+ sessions), group sessions into arcs, summarize each
 4. On completion the job detail page links to the transcript — same pattern as post-refine/summarize.
 
 **Prerequisite:** The `_diar.json` sidecar (already implemented) means the worker has everything it needs without the in-memory job.
+
+
+### Upload Progress Indicator (Phase 12)
+
+**Problem:** Large file uploads (e.g., a multi-GB video or audio file) take several minutes, during which the browser provides no visual feedback. The user might think the application has frozen or the upload failed.
+
+**Proposed Fix:** Implement an asynchronous, AJAX-based upload mechanism in the `/transcribe` view to provide real-time progress feedback via a progress bar.
+
+**Implementation Details:**
+1.  **Intercept Form Submission:** Instead of a standard HTML form POST (which causes a full page reload and offers no progress data), catch the `submit` event using JavaScript on the `#transcribe-form`.
+2.  **Use XHR for Progress Tracking:** Utilize `XMLHttpRequest` to send the `FormData`. This allows access to the `upload.onprogress` event, which provides periodic updates on how many bytes have been sent to the server.
+3.  **Update UI Components:**
+    *   **Progress Bar:** Add a visual progress bar element within the `#selected-file` area of the `transcribe.html` template.
+    *   **Button State:** Disable the "Run job" button and change its text to "Uploading..." while the transfer is in flight to prevent duplicate submissions.
+4.  **Completion Workflow:** Once the upload reaches 100%, programmatically trigger the final step (either completing a simulation of the form submission or handling the successful response) to transition into the transcription job phase.
+
+**Benefits:** provides immediate, satisfying visual feedback for long-running uploads, improving the perceived reliability and UX of the tool.
+
+---
