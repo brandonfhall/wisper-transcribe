@@ -443,6 +443,14 @@ Component classes (`sidebar`, `toolbar`, `section-head`, `hairline-*`, `pill-*`,
 - Output is always written to the configured output directory (`./output` or `data_dir/output`) so the Transcripts page can find it.
 - Cancel: `POST /transcribe/jobs/{id}/cancel` calls `JobQueue.cancel()`. Pending jobs are immediately marked failed. Running jobs set a `threading.Event` (`_cancel_event`) that is checked in the `tqdm.write` patch; when set, `InterruptedError` is raised to abort the pipeline thread cleanly.
 
+### Upload Progress (Web)
+`transcribe.html` submits via `XMLHttpRequest` instead of a native form POST so it can show byte-level progress for large source files (multi-GB video/audio) — the server-side route (`start_transcribe` in `transcribe.py`) is unchanged; only the client-side transport differs.
+- `xhr.upload.addEventListener('progress', ...)` drives a `#upload-progress-bar` fill and `N%` label while bytes are in flight (this tracks the HTTP request body, not job/transcription progress — that's the separate SSE-driven bar described below, which only starts once the job exists).
+- `xhr.upload`'s `load` event (all bytes sent, response not yet received) switches the label to "Processing…" so the UI doesn't look stalled while the server spools the temp file and creates the job — this window can be several seconds for very large uploads.
+- On the request's own `load` event, the client navigates via `window.location.href = xhr.responseURL`. Because `start_transcribe` always responds with a 303 (success → `/transcribe/jobs/{id}`, validation failure → `/transcribe?error=...`) and XHR follows redirects itself, this one line reproduces what a plain form submission would have done for both outcomes — no separate error branch needed.
+- `xhr.addEventListener('error', ...)` (network-level failure, no response at all) is the one case with no page to navigate to: it re-enables the submit buttons and shows an inline error, rather than leaving the user stuck on "Uploading…".
+- Both submit buttons (`#run-job-btn-toolbar` in the page toolbar, `#run-job-btn-inline` in the settings panel — the toolbar one references the form via the `form=` attribute rather than being nested inside it) are disabled for the duration of the request to prevent duplicate submissions.
+
 ### Speaker Enrollment Web Flow
 Interactive CLI enrollment (TTY prompts) is replaced by a post-job wizard. The wizard has two entry points — a **transcript-centric path** (preferred, restart-safe) and a **legacy job path** (still works while the server hasn't restarted).
 

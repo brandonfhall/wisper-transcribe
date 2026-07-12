@@ -12,7 +12,7 @@
     </div>
   </div>
   <div style="display:flex;align-items:center;gap:8px">
-    <button type="submit" form="transcribe-form" class="btn btn-primary">Run job ↵</button>
+    <button type="submit" form="transcribe-form" id="run-job-btn-toolbar" class="btn btn-primary">Run job ↵</button>
   </div>
 </div>
 {% endblock %}
@@ -55,6 +55,17 @@
       <span id="sel-mb" style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">—</span>
       <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">—</span>
       <button type="button" onclick="wisperClearFile()" style="background:none;border:none;color:var(--color-paper-faint);font-size:14px;padding:0 4px;line-height:1">✕</button>
+    </div>
+
+    <!-- Upload progress (shown once the form is submitted; tracks bytes sent, not job progress) -->
+    <div id="upload-progress" style="display:none;margin-top:12px">
+      <div style="height:3px;background:var(--color-ink-900);border-radius:2px;overflow:hidden;margin-bottom:6px">
+        <div id="upload-progress-bar" style="height:100%;background:var(--color-accent);box-shadow:0 0 6px #5fd4e780;transition:width 150ms linear;width:0%"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:baseline;font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">
+        <span id="upload-progress-label">Uploading…</span>
+        <span id="upload-progress-pct">0%</span>
+      </div>
     </div>
 
     {% if request.query_params.get('error') %}
@@ -178,7 +189,7 @@
 
       <!-- Submit -->
       <div style="padding:16px 0">
-        <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center;font-size:14px;padding:10px">
+        <button type="submit" id="run-job-btn-inline" class="btn btn-primary" style="width:100%;justify-content:center;font-size:14px;padding:10px">
           Run job ↵
         </button>
       </div>
@@ -269,6 +280,72 @@ function wisperToggleDiarize(wrap, evt) {
     var input = document.getElementById('file-input');
     var dt = new DataTransfer(); dt.items.add(f); input.files = dt.files;
     wisperFileSelected(input);
+  });
+})();
+
+// Upload via XHR so we can show byte-level progress for large files. The
+// server still responds with its normal 303 redirect (success -> job detail,
+// validation error -> /transcribe?error=...); XHR follows redirects itself,
+// so navigating to xhr.responseURL on load reproduces a plain form submit
+// for both outcomes without a separate error branch.
+(function() {
+  var form = document.getElementById('transcribe-form');
+  if (!form) return;
+  var progressWrap  = document.getElementById('upload-progress');
+  var progressBar   = document.getElementById('upload-progress-bar');
+  var progressLabel = document.getElementById('upload-progress-label');
+  var progressPct   = document.getElementById('upload-progress-pct');
+  var submitBtns    = [document.getElementById('run-job-btn-toolbar'), document.getElementById('run-job-btn-inline')];
+
+  function setButtonsState(disabled, text) {
+    submitBtns.forEach(function(btn) {
+      if (!btn) return;
+      btn.disabled = disabled;
+      btn.textContent = text;
+    });
+  }
+
+  form.addEventListener('submit', function(evt) {
+    evt.preventDefault();
+
+    if (progressWrap)  progressWrap.style.display = 'block';
+    if (progressBar)   { progressBar.style.width = '0%'; progressBar.style.background = 'var(--color-accent)'; }
+    if (progressPct)   progressPct.textContent = '0%';
+    if (progressLabel) { progressLabel.textContent = 'Uploading…'; progressLabel.style.color = 'var(--color-paper-dim)'; }
+    setButtonsState(true, 'Uploading…');
+
+    var xhr = new XMLHttpRequest();
+    xhr.open(form.method || 'POST', form.action, true);
+
+    xhr.upload.addEventListener('progress', function(e) {
+      if (!e.lengthComputable) return;
+      var pct = Math.round((e.loaded / e.total) * 100);
+      if (progressBar) progressBar.style.width = pct + '%';
+      if (progressPct) progressPct.textContent = pct + '%';
+    });
+
+    xhr.upload.addEventListener('load', function() {
+      // All bytes are on the wire; the server still has to spool the temp
+      // file and create the job before it responds, so keep the user
+      // informed instead of looking stalled at 100%.
+      if (progressLabel) progressLabel.textContent = 'Processing…';
+      setButtonsState(true, 'Processing…');
+    });
+
+    xhr.addEventListener('load', function() {
+      window.location.href = xhr.responseURL || form.action;
+    });
+
+    xhr.addEventListener('error', function() {
+      if (progressLabel) {
+        progressLabel.textContent = 'Upload failed — check your connection and try again.';
+        progressLabel.style.color = 'var(--color-signal-rose)';
+      }
+      if (progressBar) progressBar.style.background = 'var(--color-signal-rose)';
+      setButtonsState(false, 'Run job ↵');
+    });
+
+    xhr.send(new FormData(form));
   });
 })();
 </script>
