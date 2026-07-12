@@ -1770,6 +1770,322 @@ def test_enroll_form_uses_diarization_segments_not_frontmatter(client, tmp_path,
 
 
 # ---------------------------------------------------------------------------
+# Phase 1 audit fixes — F1 (legacy job-path rename no-op), F2 (junk
+# "SPEAKER_XX" profiles from untouched fields), F3 (EMA merge instead of
+# overwrite on resubmission / two labels -> one profile averaging)
+# ---------------------------------------------------------------------------
+
+
+def test_job_path_rename_works_when_transcript_has_display_names(
+    client, tmp_path, monkeypatch
+):
+    """F1: once match_speakers has already written a display name into the
+    body (e.g. from a prior session's enrollment), the job-path submit
+    handler must still resolve the raw label -> current display name and
+    rename correctly, instead of silently no-op'ing against a body that no
+    longer contains "**SPEAKER_00**"."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from wisper_transcribe.models import DiarizationSegment
+    from datetime import datetime
+    import uuid
+
+    transcript = tmp_path / "session01.md"
+    transcript.write_text(
+        "---\nspeakers:\n  - name: Unknown Speaker 1\n---\n\n"
+        "**Unknown Speaker 1** *(00:00)*: Hello everyone.",
+        encoding="utf-8",
+    )
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"fake")
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(audio),
+        kwargs={"device": "cpu"},
+        output_path=str(transcript),
+        diarization_segments=[
+            DiarizationSegment(start=0.0, end=5.0, speaker="SPEAKER_00"),
+        ],
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
+         patch("wisper_transcribe.speaker_manager.enroll_speaker"), \
+         patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=lambda p: p):
+        resp = client.post(
+            f"/transcribe/jobs/{job.id}/enroll",
+            data={"speaker_SPEAKER_00": "Alice"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    content = transcript.read_text(encoding="utf-8")
+    assert "**Alice**" in content
+    assert "Unknown Speaker 1" not in content
+
+
+def test_job_path_get_form_prefills_current_display_name(client, tmp_path, monkeypatch):
+    """F1: the GET wizard form must also resolve current_names on the job
+    path (previously only the transcript-centric path did this)."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from wisper_transcribe.models import DiarizationSegment
+    from datetime import datetime
+    import uuid
+
+    transcript = tmp_path / "session01.md"
+    transcript.write_text(
+        "---\nspeakers:\n  - name: Brandon\n---\n\n"
+        "**Brandon** *(00:00)*: Hello everyone.",
+        encoding="utf-8",
+    )
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(tmp_path / "audio.mp3"),
+        kwargs={"device": "cpu"},
+        output_path=str(transcript),
+        diarization_segments=[
+            DiarizationSegment(start=0.0, end=5.0, speaker="SPEAKER_00"),
+        ],
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        resp = client.get(f"/transcribe/jobs/{job.id}/enroll")
+
+    assert resp.status_code == 200
+    assert 'value="Brandon"' in resp.content.decode()
+
+
+def test_raw_label_shaped_submission_refused(client, tmp_path, monkeypatch):
+    """F2: submitting an untouched field (value still "SPEAKER_05", pyannote's
+    raw format) must not rename the transcript or enroll a junk profile."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from wisper_transcribe.models import DiarizationSegment
+    from datetime import datetime
+    import uuid
+
+    transcript = tmp_path / "session01.md"
+    original = (
+        "---\nspeakers:\n  - name: SPEAKER_05\n---\n\n"
+        "**SPEAKER_05** *(00:00)*: Hello."
+    )
+    transcript.write_text(original, encoding="utf-8")
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"fake")
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(audio),
+        kwargs={"device": "cpu"},
+        output_path=str(transcript),
+        diarization_segments=[
+            DiarizationSegment(start=0.0, end=5.0, speaker="SPEAKER_05"),
+        ],
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
+         patch("wisper_transcribe.speaker_manager.enroll_speaker") as mock_enroll, \
+         patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=lambda p: p):
+        resp = client.post(
+            f"/transcribe/jobs/{job.id}/enroll",
+            data={"speaker_SPEAKER_05": "SPEAKER_05"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    mock_enroll.assert_not_called()
+    assert transcript.read_text(encoding="utf-8") == original
+
+
+def test_existing_profile_gets_ema_update_not_overwrite(client, tmp_path, monkeypatch):
+    """F3: resubmitting a name that already has a voice profile must merge
+    via update_embedding (EMA), never call enroll_speaker (which would
+    overwrite the embedding and clobber display_name/enrolled_date/etc)."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from wisper_transcribe.models import DiarizationSegment, SpeakerProfile
+    from datetime import datetime
+    import uuid
+    import numpy as np
+
+    transcript = tmp_path / "session01.md"
+    transcript.write_text(
+        "---\nspeakers:\n  - name: SPEAKER_00\n---\n\n"
+        "**SPEAKER_00** *(00:00)*: Hello.",
+        encoding="utf-8",
+    )
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"fake")
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(audio),
+        kwargs={"device": "cpu"},
+        output_path=str(transcript),
+        diarization_segments=[
+            DiarizationSegment(start=0.0, end=5.0, speaker="SPEAKER_00"),
+        ],
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    existing_alice = SpeakerProfile(
+        name="alice", display_name="Alice", role="", embedding_path=tmp_path / "alice.npy",
+        enrolled_date="2026-01-01", enrollment_source="old.mp3",
+    )
+    new_emb = np.ones(4)
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={"alice": existing_alice}), \
+         patch("wisper_transcribe.speaker_manager.extract_embedding", return_value=new_emb) as mock_extract, \
+         patch("wisper_transcribe.speaker_manager.update_embedding") as mock_update, \
+         patch("wisper_transcribe.speaker_manager.enroll_speaker") as mock_enroll, \
+         patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=lambda p: p):
+        resp = client.post(
+            f"/transcribe/jobs/{job.id}/enroll",
+            data={"speaker_SPEAKER_00": "Alice"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    mock_enroll.assert_not_called()
+    mock_update.assert_called_once()
+    assert mock_update.call_args.args[0] == "alice"
+    np.testing.assert_array_equal(mock_update.call_args.args[1], new_emb)
+    mock_extract.assert_called_once()
+
+
+def test_two_labels_same_name_average_embeddings(client, tmp_path, monkeypatch):
+    """F3: when two raw pyannote labels are assigned the same display name in
+    one submit (pyannote over-segmented one real speaker), embeddings must be
+    extracted for both and averaged before saving -- not silently overwritten
+    by whichever label happens to process last."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from wisper_transcribe.models import DiarizationSegment
+    from datetime import datetime
+    import uuid
+    import numpy as np
+
+    transcript = tmp_path / "session01.md"
+    transcript.write_text(
+        "---\nspeakers:\n  - name: SPEAKER_00\n  - name: SPEAKER_01\n---\n\n"
+        "**SPEAKER_00** *(00:00)*: Hello.\n**SPEAKER_01** *(00:10)*: Hi again.",
+        encoding="utf-8",
+    )
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"fake")
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(audio),
+        kwargs={"device": "cpu"},
+        output_path=str(transcript),
+        diarization_segments=[
+            DiarizationSegment(start=0.0, end=5.0, speaker="SPEAKER_00"),
+            DiarizationSegment(start=10.0, end=15.0, speaker="SPEAKER_01"),
+        ],
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    emb_a = np.array([1.0, 0.0, 0.0])
+    emb_b = np.array([0.0, 1.0, 0.0])
+
+    def fake_extract(audio_path, segments, label, device="cpu"):
+        return emb_a if label == "SPEAKER_00" else emb_b
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
+         patch("wisper_transcribe.speaker_manager.extract_embedding", side_effect=fake_extract), \
+         patch("wisper_transcribe.speaker_manager.enroll_speaker") as mock_enroll, \
+         patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=lambda p: p):
+        resp = client.post(
+            f"/transcribe/jobs/{job.id}/enroll",
+            data={"speaker_SPEAKER_00": "Alice", "speaker_SPEAKER_01": "Alice"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    mock_enroll.assert_called_once()
+    call_kwargs = mock_enroll.call_args.kwargs
+    assert call_kwargs["display_name"] == "Alice"
+    assert call_kwargs["name"] == "alice"
+    np.testing.assert_array_almost_equal(call_kwargs["embedding"], (emb_a + emb_b) / 2)
+
+
+def test_unchanged_name_with_existing_profile_skips_enroll(client, tmp_path, monkeypatch):
+    """F3: resubmitting the same (already-current) display name for a
+    speaker that already has a profile must not call enroll_speaker OR
+    update_embedding -- nothing changed, so nothing should be re-extracted."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from wisper_transcribe.models import DiarizationSegment, SpeakerProfile
+    from datetime import datetime
+    import uuid
+
+    transcript = tmp_path / "session01.md"
+    transcript.write_text(
+        "---\nspeakers:\n  - name: Alice\n---\n\n"
+        "**Alice** *(00:00)*: Hello.",
+        encoding="utf-8",
+    )
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"fake")
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(audio),
+        kwargs={"device": "cpu"},
+        output_path=str(transcript),
+        diarization_segments=[
+            DiarizationSegment(start=0.0, end=5.0, speaker="SPEAKER_00"),
+        ],
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    existing_alice = SpeakerProfile(
+        name="alice", display_name="Alice", role="", embedding_path=tmp_path / "alice.npy",
+        enrolled_date="2026-01-01", enrollment_source="old.mp3",
+    )
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={"alice": existing_alice}), \
+         patch("wisper_transcribe.speaker_manager.extract_embedding") as mock_extract, \
+         patch("wisper_transcribe.speaker_manager.update_embedding") as mock_update, \
+         patch("wisper_transcribe.speaker_manager.enroll_speaker") as mock_enroll, \
+         patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=lambda p: p):
+        resp = client.post(
+            f"/transcribe/jobs/{job.id}/enroll",
+            data={"speaker_SPEAKER_00": "Alice"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    mock_enroll.assert_not_called()
+    mock_update.assert_not_called()
+    mock_extract.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Bulk transcript operations (E3)
 # ---------------------------------------------------------------------------
 

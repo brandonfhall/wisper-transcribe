@@ -258,6 +258,36 @@ def test_enroll_speaker(tmp_path):
     assert emb_path.exists()
 
 
+def test_enroll_speaker_uses_precomputed_embedding_when_given(tmp_path):
+    """When `embedding` is passed, enroll_speaker must save it as-is and must
+    NOT call extract_embedding -- this is what lets web callers average
+    embeddings from two raw labels assigned the same display name before
+    saving (F3)."""
+    from wisper_transcribe.speaker_manager import enroll_speaker, load_profiles
+
+    segs = _fake_diarization(["SPEAKER_00"])
+    precomputed = np.array([0.5, 0.25, 0.25])
+
+    with patch("wisper_transcribe.speaker_manager.extract_embedding") as mock_extract:
+        profile = enroll_speaker(
+            name="alice",
+            display_name="Alice",
+            role="",
+            audio_path=Path("fake.wav"),
+            segments=segs,
+            speaker_label="SPEAKER_00",
+            device="cpu",
+            data_dir=tmp_path,
+            embedding=precomputed,
+        )
+
+    mock_extract.assert_not_called()
+    assert profile.display_name == "Alice"
+    saved = np.load(str(tmp_path / "profiles" / "embeddings" / "alice.npy"))
+    np.testing.assert_array_equal(saved, precomputed)
+    assert "alice" in load_profiles(data_dir=tmp_path)
+
+
 # ---------------------------------------------------------------------------
 # reset_profiles
 # ---------------------------------------------------------------------------

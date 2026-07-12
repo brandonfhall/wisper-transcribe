@@ -95,36 +95,14 @@ Nothing else changes — `SegmentedOggWriter`, the web UI, campaigns, CLI, and a
 
 Full trace of the web transcription→enrollment flow. Findings ordered by severity; each maps to at least one reported symptom.
 
-### F1 — HIGH — Legacy job-path wizard renames silently no-op once any profile exists
+### F1/F2/F3 — Fixed in phase 1 (2026-07-12, branch `fix/enrollment-audit`)
 
-`enroll_submit` (`web/routes/transcribe.py:370`) renames with the **raw pyannote label** as `old_name`:
-```python
-for old_name, new_name in renames.items():
-    content = update_speaker_names(content, old_name, new_name)
-```
-But as soon as *any* profile is enrolled, `match_speakers` runs during transcription and the markdown body/frontmatter contain **display names** ("Unknown Speaker 1", or a matched profile name) — the string `**SPEAKER_00**` no longer exists anywhere in the file, so every replace is a silent no-op. The transcript-centric path (`transcripts.py:737`) fixed exactly this with the `current_names` lookup; the job path — which is what the **"Name speakers" button on the job detail page links to** (`job_detail.html:121`) — was never given the same fix. This is the most direct cause of "not all values in the transcripts are updated": first session works (no profiles yet → raw labels in body), every later session breaks.
+Unified both wizard submit paths (job-centric `transcribe.py` + transcript-centric `transcripts.py`) onto a single shared handler in `web/enroll_shared.py`:
+- **F1** (job-path renames silently no-op once any profile exists): both GET and POST job-path routes now resolve `current_names` via `build_legacy_label_map()` the same way the transcript path always did, so a rename targets the transcript's *current* display name instead of a raw `SPEAKER_XX` string that no longer exists in the body.
+- **F2** (untouched prefilled fields enroll junk "SPEAKER_XX" profiles): the template only prefills a field when a real (non-raw-label) current name is known — otherwise it's left empty with the raw label shown as a placeholder — and the server refuses any submission whose *new* name matches `^SPEAKER_\d+$`, regardless of what the template did.
+- **F3** (every submit overwrites existing profile embeddings): the shared handler now skips the enroll step entirely when a submitted name is unchanged and a profile already exists; when a profile exists and something *did* change, it extracts and merges via `update_embedding()` (EMA) instead of calling `enroll_speaker()`; two raw labels assigned the same display name in one submit have their embeddings averaged (via a new optional `embedding=` param on `enroll_speaker()`) before being saved/merged.
 
-**Fix direction:** make the job path resolve current display names the same way the transcript path does (or better: make the job-path route delegate to the transcript-centric handler; the job has `output_path` and the sidecar exists).
-
-### F2 — HIGH — Untouched prefilled fields enroll junk "SPEAKER_XX" voice profiles
-
-`speaker_enroll.html:88-91` prefills each input with the raw label whenever no current name is known — which in the job path is *always* (`current_names` isn't passed). Both submit handlers treat any non-empty field as a rename+enroll. A user who names 3 of 6 speakers and submits therefore:
-- creates real voice profiles keyed `speaker_03` with display name "SPEAKER_03" (embedding extracted from that label's segments),
-- adds them to the campaign roster,
-- and those junk profiles then **compete in `match_speakers` for every future session** — a real person can be matched to "SPEAKER_03", and exclusivity (F4) means a junk match can also steal a slot from the right profile.
-
-Direct cause of "does not always properly identify voices."
-
-**Fix direction:** never enroll a name matching `^SPEAKER_\d+$`; leave unknown-speaker fields *empty* in the template (placeholder text instead of value); skip enroll when submitted name == prefilled current name.
-
-### F3 — HIGH — Every wizard submit overwrites existing profile embeddings
-
-`enroll_speaker` (`speaker_manager.py:168`) unconditionally `np.save`s over the existing embedding and replaces the profile entry. Both submit paths call it for **every non-empty field — including unchanged prefilled names** (the transcript path skips the *rename* when old==new, `transcripts.py:740`, but not the *enroll*). Consequences:
-- Re-entering the wizard to fix one typo re-extracts and replaces **all** speakers' embeddings from this session's segments (possibly worse audio).
-- Assigning the same display name to two raw labels (legitimately — pyannote often splits one person) makes the second `enroll_speaker` overwrite the first's embedding instead of merging.
-- `update_embedding()` (EMA, `speaker_manager.py:395`) exists precisely for this and is never called from any web path.
-
-**Fix direction:** in the web submit paths, when a profile key already exists, extract the embedding and call `update_embedding()` instead of `enroll_speaker()`; when two labels map to one name in a single submit, average before saving. Only enroll unchanged names if no profile exists.
+See `architecture.md` → "Speaker Enrollment Web Flow" for the full current design. F4–F11 below are unaffected and still open.
 
 ### F4 — HIGH — `match_speakers` greedy exclusivity has no second-choice fallback
 
@@ -182,14 +160,14 @@ The 12 s excerpt is cut at the label's *first* aligned occurrence (`jobs.py:133-
 
 ### Suggested fix order
 
-1. **F1 + F2 + F3** — one PR: unify both wizard submit paths on a single handler that (a) resolves current names from a persisted map (F7's fix), (b) refuses `SPEAKER_\d+` enrollments and empty-prefills the template, (c) uses EMA update for existing profiles. Highest symptom relief per line changed.
+1. ~~**F1 + F2 + F3**~~ — done, see "F1/F2/F3 — Fixed in phase 1" above.
 2. **F5** — durable audio copy + eager temp cleanup + UI feedback on skipped enrollment. Unblocks post-restart enrollment.
-3. **F6 + F7** — block-level single-pass rename keyed by persisted label map.
+3. **F6 + F7** — block-level single-pass rename keyed by persisted label map. Note: `_build_legacy_label_map` (now `build_legacy_label_map` in `web/enroll_shared.py`) still has the interval-matching fragility described in F7 — phase 1 unified *where* it's called from, not the matching heuristic itself.
 4. **F4** — assignment algorithm rework (pair-scored greedy, optional many-to-one).
 5. **F8** — word-timestamp alignment (biggest quality win, most testing needed).
 6. **F9/F10/F11** — small hardening batch.
 
-Related existing plan item: "Enrollment wizard — synchronous embedding extraction blocks the browser" (JOB_ENROLL) — the fix-order item 1 handler unification is the natural place to also move enrollment into the JobQueue.
+Related existing plan item: "Enrollment wizard — synchronous embedding extraction blocks the browser" (JOB_ENROLL) — `web/enroll_shared.py` (phase 1) is the natural place to also move enrollment into the JobQueue when that's tackled.
 
 ---
 

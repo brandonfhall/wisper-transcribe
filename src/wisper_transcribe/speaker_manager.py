@@ -175,11 +175,20 @@ def enroll_speaker(
     device: str = "cpu",
     data_dir: Optional[Path] = None,
     notes: str = "",
+    embedding: Optional[np.ndarray] = None,
 ) -> SpeakerProfile:
-    """Extract embedding and save a new speaker profile."""
+    """Extract embedding and save a new speaker profile.
+
+    ``embedding``, when provided, is used as-is instead of calling
+    ``extract_embedding()`` internally. This lets callers average embeddings
+    extracted from multiple raw diarization labels before saving -- e.g. when
+    two pyannote labels are assigned the same display name in one enrollment
+    wizard submit (over-segmentation of a single real speaker).
+    """
     import datetime
 
-    embedding = extract_embedding(audio_path, segments, speaker_label, device)
+    if embedding is None:
+        embedding = extract_embedding(audio_path, segments, speaker_label, device)
 
     emb_dir = _get_embeddings_dir(data_dir)
     emb_dir.mkdir(parents=True, exist_ok=True)

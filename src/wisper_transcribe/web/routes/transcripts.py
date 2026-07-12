@@ -542,84 +542,15 @@ async def assign_campaign(request: Request, name: str) -> HTMLResponse:
 # Transcript-centric enrollment wizard
 # ---------------------------------------------------------------------------
 
-def _load_diar_sidecar(md_path: "Path") -> dict | None:  # type: ignore[name-defined]
-    """Load the enrollment sidecar for a transcript, or None if absent/corrupt."""
-    import json as _json
-    sidecar_path = md_path.with_name(md_path.stem + "_diar.json")
-    if not sidecar_path.exists():
-        return None
-    try:
-        return _json.loads(sidecar_path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-
-
-def _build_legacy_label_map(md_path: "Path", segments: list) -> dict[str, str]:  # type: ignore[name-defined]
-    """Map raw pyannote labels → display names by interval-matching markdown timestamps.
-
-    Pre-fix transcripts saved excerpt files keyed by the *display* name, while
-    the wizard looks them up by the raw label from the sidecar. To rebuild
-    the mapping, for each `**display_name** *(HH:MM:SS)*` line in the
-    markdown, find the pyannote segment whose [start, end] interval contains
-    that timestamp — the segment's raw label is the one the aligner assigned
-    to that whisper line. Exact start-time matching does NOT work here:
-    pyannote's first-occurrence-of-SPEAKER_00 timestamp rarely equals the
-    first whisper segment assigned to SPEAKER_00 (whisper may skip silence,
-    aligner may assign nearby segments to UNKNOWN, etc.).
-    """
-    import re as _re
-
-    label_map: dict[str, str] = {}
-    try:
-        # Normalise sidecar segments to (start, end, speaker) tuples.
-        intervals: list[tuple[float, float, str]] = []
-        for seg in segments:
-            if isinstance(seg, dict):
-                sp, start, end = seg.get("speaker"), seg.get("start"), seg.get("end")
-            else:
-                sp = getattr(seg, "speaker", None)
-                start = getattr(seg, "start", None)
-                end = getattr(seg, "end", None)
-            if sp is None or start is None or end is None:
-                continue
-            intervals.append((float(start), float(end), sp))
-
-        if not intervals:
-            return {}
-
-        md_pattern = _re.compile(
-            r"\*\*(.+?)\*\*\s+\*\((\d+:\d{2}(?::\d{2})?)\)\*"
-        )
-        md_text = md_path.read_text(encoding="utf-8")
-
-        for m in md_pattern.finditer(md_text):
-            display = m.group(1)
-            if display == "UNKNOWN":
-                continue
-            parts = m.group(2).split(":")
-            if len(parts) == 2:
-                t_sec = int(parts[0]) * 60 + int(parts[1])
-            else:
-                t_sec = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-            t = float(t_sec)
-            # Prefer an interval containing t exactly; fall back to the nearest
-            # by start time so a whisper segment that starts slightly outside
-            # the pyannote turn still maps somewhere reasonable.
-            containing = next(
-                ((s, e, sp) for s, e, sp in intervals if s <= t <= e),
-                None,
-            )
-            if containing is None:
-                containing = min(intervals, key=lambda iv: abs(iv[0] - t))
-            raw_label = containing[2]
-            # First-write wins: a display name only maps to its first interval-
-            # matched raw label (multiple markdown blocks may share a display
-            # name when match_speakers matched several raw labels to the same
-            # enrolled profile — we only need one for excerpt lookup).
-            label_map.setdefault(raw_label, display)
-    except Exception:
-        pass
-    return label_map
+# Shared with web/routes/transcribe.py (the legacy job-centric wizard) via
+# wisper_transcribe.web.enroll_shared -- see that module for the rationale
+# behind the interval-matching approach and the F1/F2/F3 fixes.
+from wisper_transcribe.web.enroll_shared import (
+    _load_diar_sidecar,
+    apply_enrollment_submit,
+    build_legacy_label_map as _build_legacy_label_map,
+    template_current_names,
+)
 
 
 @router.get("/{name}/enroll", response_class=HTMLResponse)
@@ -696,7 +627,10 @@ async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
             # interval-matching markdown timestamps against pyannote segments.
             # Lets the wizard pre-fill names the user previously applied so
             # they can edit corrections instead of re-typing from scratch.
-            "current_names": legacy_label_map,
+            # Raw-label-valued entries (first pass, no renames applied yet)
+            # are filtered out so the input starts empty rather than
+            # prefilled with "SPEAKER_00" (F2) -- see template_current_names.
+            "current_names": template_current_names(legacy_label_map),
         },
     )
 
@@ -726,30 +660,13 @@ async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
             headers={"Location": f"/transcripts/{quote(name)}"},
         )
 
-    # Rename in the transcript.
-    # The form keys are raw pyannote labels (e.g. "SPEAKER_00"), but after a
-    # previous wizard pass the markdown body no longer contains those raw
-    # labels — it has whatever display name the user applied. Look up the
-    # *current* display name for each raw label so the rename targets the
-    # right string. Without this, a second pass through the wizard is a no-op.
-    from wisper_transcribe.formatter import update_speaker_names
-    content = md_path.read_text(encoding="utf-8")
-    current_names = _build_legacy_label_map(md_path, diar.get("diarization_segments", []))
-    for raw_label, new_name in renames.items():
-        old_name = current_names.get(raw_label, raw_label)
-        if old_name == new_name:
-            continue
-        content = update_speaker_names(content, old_name, new_name)
-    md_path.write_text(content, encoding="utf-8")
-
-    # Enroll voice profiles
-    import logging
+    # Rename + enroll/update voice profiles via the shared handler (unifies
+    # this path with the legacy job-centric wizard in transcribe.py). See
+    # enroll_shared.apply_enrollment_submit for the current-name resolution
+    # (F1), raw-label refusal (F2), and EMA-merge (F3) logic.
     from wisper_transcribe.models import DiarizationSegment
-    from wisper_transcribe.speaker_manager import enroll_speaker
-    from wisper_transcribe.audio_utils import convert_to_wav
-    from wisper_transcribe.config import get_device
+    from wisper_transcribe.config import get_device, load_config
 
-    log = logging.getLogger(__name__)
     raw_segments = [
         DiarizationSegment(start=s["start"], end=s["end"], speaker=s["speaker"])
         for s in diar.get("diarization_segments", [])
@@ -757,44 +674,18 @@ async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
     input_path = Path(diar["input_path"])
     campaign_slug = diar.get("campaign")
 
-    if raw_segments and input_path.exists():
-        from wisper_transcribe.config import load_config
-        device = load_config().get("device", "auto")
-        if device == "auto":
-            device = get_device()
+    device = load_config().get("device", "auto")
+    if device == "auto":
+        device = get_device()
 
-        wav_path = convert_to_wav(input_path)
-        try:
-            for old_label, display_name in renames.items():
-                profile_key = display_name.lower().replace(" ", "_")
-                try:
-                    enroll_speaker(
-                        name=profile_key,
-                        display_name=display_name,
-                        role="",
-                        audio_path=wav_path,
-                        segments=raw_segments,
-                        speaker_label=old_label,
-                        device=device,
-                    )
-                except Exception as exc:
-                    log.warning("enroll_speaker failed for %s: %s", display_name, exc)
-                    continue
-                if campaign_slug:
-                    try:
-                        from wisper_transcribe.campaign_manager import add_member, load_campaigns
-                        campaigns = load_campaigns()
-                        if (campaign_slug in campaigns
-                                and profile_key not in campaigns[campaign_slug].members):
-                            add_member(campaign_slug, profile_key)
-                    except Exception as exc:
-                        log.warning("add_member failed for %s in %s: %s",
-                                    profile_key, campaign_slug, exc)
-        finally:
-            if wav_path != input_path and wav_path.exists():
-                wav_path.unlink(missing_ok=True)
-    elif raw_segments:
-        log.warning("Enrollment skipped: source audio not found at %s", input_path)
+    apply_enrollment_submit(
+        md_path=md_path,
+        segments=raw_segments,
+        input_path=input_path,
+        campaign_slug=campaign_slug,
+        device=device,
+        renames=renames,
+    )
 
     return HTMLResponse(
         content="", status_code=303,

@@ -498,3 +498,98 @@ def test_excerpt_rejects_null_byte(client: TestClient, tmp_path: Path):
     with _patch_output(tmp_path):
         resp = client.get("/transcripts/session01/excerpt/SPEAKER%00_00")
     assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 audit fixes — F2 (template must not prefill raw labels)
+# ---------------------------------------------------------------------------
+
+def test_enroll_form_first_pass_leaves_input_empty(client: TestClient, tmp_path: Path):
+    """F2 layer 1: on a first pass (body still has raw '**SPEAKER_00**'
+    labels, no renames applied yet), the input must render empty rather than
+    prefilled with the raw label -- prefilling it means submitting untouched
+    fields creates junk 'SPEAKER_00' voice profiles."""
+    _write_transcript(tmp_path)
+    with _patch_output(tmp_path), \
+         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        resp = client.get("/transcripts/session01/enroll")
+    body = resp.content.decode()
+    assert 'name="speaker_SPEAKER_00"' in body
+    assert 'value="SPEAKER_00"' not in body
+    assert 'value="SPEAKER_01"' not in body
+    # The raw label is still shown as a placeholder/heading, not lost entirely
+    assert "SPEAKER_00" in body
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 audit fixes — F2 (refuse raw-label-shaped submissions)
+# ---------------------------------------------------------------------------
+
+def test_enroll_submit_refuses_raw_label_shaped_name(client: TestClient, tmp_path: Path):
+    """Submitting a field whose value is still 'SPEAKER_05' (i.e. untouched)
+    must not rename the transcript or enroll a profile."""
+    md = tmp_path / "session01.md"
+    original = (
+        "---\ntitle: Session 01\nspeakers:\n- name: SPEAKER_00\n---\n\n"
+        "**SPEAKER_00** *(00:00)*: Hello everyone\n"
+    )
+    md.write_text(original, encoding="utf-8")
+    diar = {
+        "input_path": "/tmp/session01.mp3",
+        "campaign": None,
+        "diarization_segments": [
+            {"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"},
+        ],
+    }
+    (tmp_path / "session01_diar.json").write_text(json.dumps(diar), encoding="utf-8")
+
+    with _patch_output(tmp_path), \
+         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
+         patch("wisper_transcribe.speaker_manager.enroll_speaker") as mock_enroll:
+        resp = client.post(
+            "/transcripts/session01/enroll",
+            data={"speaker_SPEAKER_00": "SPEAKER_00"},
+            follow_redirects=False,
+        )
+    assert resp.status_code == 303
+    mock_enroll.assert_not_called()
+    assert md.read_text(encoding="utf-8") == original
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 audit fixes — F3 (EMA merge instead of overwrite)
+# ---------------------------------------------------------------------------
+
+def test_enroll_submit_existing_profile_uses_ema_update(client: TestClient, tmp_path: Path):
+    """Resubmitting a name that already has a voice profile must merge via
+    update_embedding (EMA), never enroll_speaker (which overwrites)."""
+    import numpy as np
+    from wisper_transcribe.models import SpeakerProfile
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake-mp3")
+    diar = {**_SAMPLE_DIAR, "input_path": str(audio)}
+    _write_transcript(tmp_path, diar=diar)
+
+    existing_alice = SpeakerProfile(
+        name="alice", display_name="Alice", role="", embedding_path=tmp_path / "alice.npy",
+        enrolled_date="2026-01-01", enrollment_source="old.mp3",
+    )
+    new_emb = np.ones(4)
+
+    with _patch_output(tmp_path), \
+         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={"alice": existing_alice}), \
+         patch("wisper_transcribe.speaker_manager.extract_embedding", return_value=new_emb), \
+         patch("wisper_transcribe.speaker_manager.update_embedding") as mock_update, \
+         patch("wisper_transcribe.speaker_manager.enroll_speaker") as mock_enroll, \
+         patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=lambda p: p):
+        resp = client.post(
+            "/transcripts/session01/enroll",
+            data={"speaker_SPEAKER_00": "Alice"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    mock_enroll.assert_not_called()
+    mock_update.assert_called_once()
+    assert mock_update.call_args.args[0] == "alice"

@@ -245,6 +245,7 @@ async def enroll_form(request: Request, job_id: str) -> Response:
         return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
 
     from wisper_transcribe.speaker_manager import load_profiles
+    from wisper_transcribe.web.enroll_shared import build_legacy_label_map, template_current_names
 
     # Derive speaker labels for the wizard.
     # Prefer the raw diarization segments stored on the job — those always carry
@@ -252,12 +253,22 @@ async def enroll_form(request: Request, job_id: str) -> Response:
     # Fall back to the frontmatter only when the job predates this fix or
     # diarization was skipped.
     speakers_in_transcript: list[str] = []
+    current_names: dict[str, str] = {}
     if job.diarization_segments:
         seen_order: dict[str, float] = {}
         for seg in job.diarization_segments:
             if seg.speaker not in seen_order:
                 seen_order[seg.speaker] = seg.start
         speakers_in_transcript = sorted(seen_order.keys(), key=lambda s: seen_order[s])
+        # F1: resolve raw label -> current display name in the transcript so
+        # the wizard (and its submit handler) can rename on a second pass,
+        # after match_speakers has already written display names into the
+        # body. Filtered for template prefill so an untouched field shows
+        # empty rather than the raw label (F2).
+        if job.output_path:
+            current_names = template_current_names(
+                build_legacy_label_map(Path(job.output_path), job.diarization_segments)
+            )
     elif job.output_path:
         try:
             import yaml
@@ -303,6 +314,7 @@ async def enroll_form(request: Request, job_id: str) -> Response:
             "existing_profiles": profiles,
             "speaker_excerpts": job.speaker_excerpts,
             "speaker_excerpt_texts": speaker_excerpt_texts,
+            "current_names": current_names,
         },
     )
 
@@ -364,68 +376,27 @@ async def enroll_submit(request: Request, job_id: str) -> Response:
             renames[old_name] = str(value).strip()
 
     if renames:
-        from wisper_transcribe.formatter import update_speaker_names
-        out_path = Path(job.output_path)
-        content = out_path.read_text(encoding="utf-8")
-        for old_name, new_name in renames.items():
-            content = update_speaker_names(content, old_name, new_name)
-        out_path.write_text(content, encoding="utf-8")
+        # Rename + enroll/update voice profiles via the shared handler
+        # (unifies this legacy job-centric path with the transcript-centric
+        # wizard in transcripts.py). See enroll_shared.apply_enrollment_submit
+        # for the current-name resolution (F1), raw-label refusal (F2), and
+        # EMA-merge (F3) logic.
+        from wisper_transcribe.web.enroll_shared import apply_enrollment_submit
 
-        # Enroll each labelled speaker so voice profiles are persisted.
-        # old_name is the raw diarization label (e.g. "SPEAKER_00"); new_name is
-        # the display name typed in the wizard.  Failures are logged but never
-        # surfaced as HTTP errors — the transcript rename already happened.
-        if job.diarization_segments:
-            import logging
-            from wisper_transcribe.speaker_manager import enroll_speaker
-            from wisper_transcribe.audio_utils import convert_to_wav
-            device = job.kwargs.get("device", "cpu")
-            if device == "auto":
-                from wisper_transcribe.config import get_device
-                device = get_device()
-            campaign_slug = job.kwargs.get("campaign")
-            log = logging.getLogger(__name__)
+        device = job.kwargs.get("device", "cpu")
+        if device == "auto":
+            from wisper_transcribe.config import get_device
+            device = get_device()
+        campaign_slug = job.kwargs.get("campaign")
 
-            # pyannote embedding extraction requires a WAV file; the uploaded
-            # source may be an MP3 or other non-WAV format.  Convert once for
-            # all speakers, then clean up.
-            input_path = Path(job.input_path)
-            wav_path = convert_to_wav(input_path)
-            try:
-                for old_label, display_name in renames.items():
-                    profile_key = display_name.lower().replace(" ", "_")
-                    try:
-                        enroll_speaker(
-                            name=profile_key,
-                            display_name=display_name,
-                            role="",
-                            audio_path=wav_path,
-                            segments=job.diarization_segments,
-                            speaker_label=old_label,
-                            device=device,
-                        )
-                    except Exception as exc:
-                        log.warning("enroll_speaker failed for %s: %s", display_name, exc)
-                        continue
-                    # Add the newly-enrolled profile to the job's campaign, if any.
-                    # Only runs when enrollment succeeded (continue skips failed speakers).
-                    if campaign_slug:
-                        try:
-                            from wisper_transcribe.campaign_manager import (
-                                add_member, load_campaigns,
-                            )
-                            campaigns = load_campaigns()
-                            if (campaign_slug in campaigns
-                                    and profile_key not in campaigns[campaign_slug].members):
-                                add_member(campaign_slug, profile_key)
-                        except Exception as exc:
-                            log.warning(
-                                "add_member failed for %s in campaign %s: %s",
-                                profile_key, campaign_slug, exc,
-                            )
-            finally:
-                if wav_path != input_path and wav_path.exists():
-                    wav_path.unlink(missing_ok=True)
+        apply_enrollment_submit(
+            md_path=Path(job.output_path),
+            segments=job.diarization_segments,
+            input_path=Path(job.input_path),
+            campaign_slug=campaign_slug,
+            device=device,
+            renames=renames,
+        )
 
     transcript_name = Path(job.output_path).stem
     return RedirectResponse(url=f"/transcripts/{quote(transcript_name, safe='')}", status_code=303)
