@@ -187,21 +187,61 @@ def _delete_temp_upload(job: "Job") -> None:  # type: ignore[name-defined]
         pass
 
 
+def _longest_aligned_segment(aligned_segments: list, label: str) -> Optional[tuple]:
+    """Return (start, duration, text) of the LONGEST aligned segment for a raw
+    label (by ``end - start``), or None if the label has no segments.
+
+    Used as the fallback excerpt window when no diarization turn is available
+    for a label -- the pre-F12 behavior. A short interjection ("mm-hmm", a
+    cross-talk aside) is often misattributed and plays mostly someone else's
+    voice, while the longest block for a label is far more likely to actually
+    be that speaker talking.
+    """
+    best = None
+    best_duration = -1.0
+    for seg in aligned_segments:
+        if getattr(seg, "speaker", None) != label:
+            continue
+        duration = float(seg.end) - float(seg.start)
+        if duration > best_duration:
+            best_duration = duration
+            best = seg
+    if best is None:
+        return None
+    return float(best.start), best_duration, (getattr(best, "text", "") or "").strip()
+
+
 def _extract_speaker_excerpts(job: "Job", output_path: "Path",  # type: ignore[name-defined]
-                              aligned_segments: list | None = None) -> None:
+                              aligned_segments: list | None = None,
+                              diarization_segments: list | None = None) -> None:
     """Extract a short audio clip per speaker from the transcribed file.
 
-    Walks the aligned segments to find, for each *raw* speaker label (e.g.
-    ``SPEAKER_00``), the LONGEST aligned segment (by ``end - start``) rather
-    than the first occurrence -- a short interjection ("mm-hmm", a cross-talk
-    aside) is often misattributed and plays mostly someone else's voice,
-    while the longest block for a label is far more likely to actually be
-    that speaker talking. Then uses ffmpeg to cut a ~12 s clip starting at
-    that segment from the original input audio. Clips are saved alongside
-    the transcript as ``<stem>_excerpt_<raw_label>.mp3`` so the enrollment
-    wizard — which keys off the raw labels stored in ``_diar.json`` — can
-    find them. The persisted ``.txt`` snippet is the text of that same
-    longest segment.
+    F12: for each *raw* speaker label (e.g. ``SPEAKER_00``), the clip window
+    is chosen from the speaker's longest **solo diarization turn** --
+    ``speaker_manager._select_embedding_segments(diarization_segments, label,
+    max_count=1)``, the same solo-preferred / 2-20s-band / graceful-fallback
+    policy F10b uses to pick embedding source audio, so the clip is (as much
+    as diarization allows) audio of ONLY that speaker. The clip duration is
+    strictly clamped to ``min(_EXCERPT_SECONDS, turn length)`` -- no padding
+    floor when the turn is shorter than 12s: a short clip of only the target
+    speaker beats 12s that runs into someone else's turn (decision
+    2026-07-13). The persisted ``.txt`` snippet is built from ALL of that
+    label's aligned word-runs (post-F8, a whisper segment can split into
+    several word-run AlignedSegments) that overlap the clip window, joined in
+    time order -- so the displayed text matches exactly what the listener
+    hears, instead of one word-run that can be a mid-sentence fragment.
+
+    A label with no diarization segments (or a `diarization_segments` list
+    without any turn for that label -- `_select_embedding_segments` raises
+    `ValueError`) falls back to the pre-F12 behavior: the clip is cut at the
+    label's longest ALIGNED segment, with the full fixed `_EXCERPT_SECONDS`
+    window and that single segment's text. This keeps the function robust for
+    legacy callers/tests that only pass `aligned_segments`, and means one
+    label's lookup failure never affects any other label.
+
+    Clips are saved alongside the transcript as
+    ``<stem>_excerpt_<raw_label>.mp3`` so the enrollment wizard -- which keys
+    off the raw labels stored in ``_diar.json`` -- can find them.
 
     Earlier versions parsed the rendered markdown and so keyed files by the
     *display* name ("Unknown Speaker 1", etc.), which never matched the
@@ -212,38 +252,64 @@ def _extract_speaker_excerpts(job: "Job", output_path: "Path",  # type: ignore[n
     import re
     from pathlib import Path as _Path
 
+    from wisper_transcribe.speaker_manager import _select_embedding_segments
+
     if not aligned_segments:
         return
 
-    best_start: dict[str, float] = {}
-    best_text: dict[str, str] = {}
-    best_duration: dict[str, float] = {}
-    for seg in aligned_segments:
-        label = getattr(seg, "speaker", None)
-        if not label or label == "UNKNOWN":
-            continue
-        duration = float(seg.end) - float(seg.start)
-        if label not in best_duration or duration > best_duration[label]:
-            best_duration[label] = duration
-            best_start[label] = float(seg.start)
-            best_text[label] = (getattr(seg, "text", "") or "").strip()
-
-    if not best_start:
+    labels = sorted({
+        getattr(seg, "speaker", None)
+        for seg in aligned_segments
+        if getattr(seg, "speaker", None) and getattr(seg, "speaker", None) != "UNKNOWN"
+    })
+    if not labels:
         return
 
     out_dir = _Path(output_path).parent
     stem = _Path(output_path).stem
     input_path = _Path(job.input_path)
 
-    for speaker, start in best_start.items():
-        safe_name = re.sub(r"[^\w\-]", "_", speaker)
+    for label in labels:
+        turn = None
+        if diarization_segments:
+            try:
+                turn = _select_embedding_segments(diarization_segments, label, max_count=1)[0]
+            except ValueError:
+                turn = None
+
+        if turn is not None:
+            start = float(turn.start)
+            duration = min(_EXCERPT_SECONDS, float(turn.end) - float(turn.start))
+            window_end = start + duration
+            overlapping = sorted(
+                (
+                    seg for seg in aligned_segments
+                    if getattr(seg, "speaker", None) == label
+                    and float(seg.start) < window_end
+                    and float(seg.end) > start
+                ),
+                key=lambda seg: seg.start,
+            )
+            text = " ".join(
+                stripped for stripped in (
+                    (getattr(seg, "text", "") or "").strip() for seg in overlapping
+                ) if stripped
+            )
+        else:
+            fallback = _longest_aligned_segment(aligned_segments, label)
+            if fallback is None:
+                continue
+            start, _longest_duration, text = fallback
+            duration = _EXCERPT_SECONDS
+
+        safe_name = re.sub(r"[^\w\-]", "_", label)
         clip_path = out_dir / f"{stem}_excerpt_{safe_name}.mp3"
         try:
             subprocess.run(
                 [
                     "ffmpeg", "-y",
                     "-ss", str(start),
-                    "-t", str(_EXCERPT_SECONDS),
+                    "-t", str(duration),
                     "-i", str(input_path),
                     "-ac", "1",
                     "-ar", "22050",
@@ -253,14 +319,14 @@ def _extract_speaker_excerpts(job: "Job", output_path: "Path",  # type: ignore[n
                 check=True,
                 capture_output=True,
             )
-            job.speaker_excerpts[speaker] = str(clip_path)
+            job.speaker_excerpts[label] = str(clip_path)
         except Exception:
             pass
 
         # Persist the transcript snippet to disk so it survives server restarts.
         text_path = out_dir / f"{stem}_excerpt_{safe_name}.txt"
         try:
-            text_path.write_text(best_text.get(speaker, ""), encoding="utf-8")
+            text_path.write_text(text, encoding="utf-8")
         except Exception:
             pass
 
@@ -629,7 +695,8 @@ class JobQueue:
                 job.is_web_upload = False
 
             _extract_speaker_excerpts(job, output_path,
-                                      aligned_segments=_result_store.get("aligned_segments", []))
+                                      aligned_segments=_result_store.get("aligned_segments", []),
+                                      diarization_segments=job.diarization_segments)
             _write_enrollment_sidecar(job, output_path)
 
             # Chain LLM post-processing if requested; defer COMPLETED until done

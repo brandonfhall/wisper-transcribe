@@ -151,25 +151,14 @@ Final hardening batch — three small, independent fixes shipped together:
 
 See `architecture.md` → "Speaker Enrollment Web Flow" (excerpt fallback, embedding segment selection) and module map (`formatter.py`, `speaker_manager.py`) for the current design.
 
-### Manual-testing feedback (2026-07-13) — F12/F13, open
+### F12/F13 — Fixed in phase 7 (2026-07-13, branch `fix/enrollment-audit`)
 
-Brandon's hands-on verification of phases 1–6 surfaced two follow-ups, both artifacts of how the fixed pipeline now behaves:
+Both were artifacts of how the phases 1–6 pipeline behaves, surfaced by Brandon's hands-on verification:
 
-#### F12 — MEDIUM — Wizard excerpt audio doesn't match the displayed text (and can contain multiple speakers)
+- **F12** (wizard excerpt audio doesn't match the displayed text, and can contain multiple speakers): `_extract_speaker_excerpts()` (`web/jobs.py`) now takes an additional `diarization_segments` parameter and, for each raw label, cuts the clip from that speaker's longest **solo diarization turn** — `speaker_manager._select_embedding_segments(diarization_segments, label, max_count=1)`, reusing F10b's solo/2–20s-band policy — with the ffmpeg `-t` strictly clamped to `min(_EXCERPT_SECONDS, turn length)` (no padding floor; a short clip of only the target speaker beats 12s that bleeds into a crowd). The persisted `.txt` snippet is built from ALL of that label's aligned word-runs overlapping the clip window, joined in time order, so the displayed text matches exactly what's audible instead of one word-run that can be a mid-sentence fragment. A label with no diarization segments (or `_select_embedding_segments` raising `ValueError` for that label) falls back per-label to the pre-F12 fixed-12s/longest-aligned-segment behavior, without affecting other labels' extraction.
+- **F13** (sentences split abruptly across speaker blocks): `aligner.align()` now runs a micro-run smoothing pass (`_smooth_word_speakers()`) on the per-word speaker list after `_assign_word_speakers()` and before grouping into `AlignedSegment`s. A run sandwiched between two same-speaker (different from its own) neighbors is absorbed into them when short — ≤2 words (`_MICRO_RUN_MAX_WORDS`) OR <1.0s span (`_MICRO_RUN_MAX_SECONDS`), either condition sufficient. Runs at a segment's start/end are never absorbed (no sandwich possible), and a run between two *different* speakers always survives (genuine interjection). The pass repeats to a fixpoint since absorbing one run can expose another (`A B A B A` with tiny B runs collapses to one A run).
 
-Reported: the enrollment page's text snippet is sometimes only a subset of the audio clip (audio: "The quick brown fox jumps over the lazy dog", text: "fox Jumps"), and clips often contain several people — making it unclear who is being enrolled.
-
-Root cause: `_extract_speaker_excerpts()` (`web/jobs.py`) cuts a **fixed ~12s window** starting at the speaker's longest aligned segment. If that segment is shorter than 12s, the clip runs past their turn into other speakers' audio. Meanwhile the displayed text is only that one aligned segment — which, post-F8, is a word-run that can be a mid-sentence fragment. The text truthfully describes the speaker's words; the fixed window does not truthfully describe the audio.
-
-**Fix direction:** cut the clip from the speaker's longest **solo diarization turn** (reuse `_select_embedding_segments()`'s solo/2–20s policy from F10b, `max_count=1`) and clamp the clip duration to that turn (`min(12s, turn length)`) — strict clamp, no padding floor: a short clip of only the target speaker beats 12s of a crowd (decision 2026-07-13). Build the displayed `.txt` text from **all** of that speaker's aligned word-runs overlapping the clip window, so what you read is exactly what you hear.
-
-#### F13 — MEDIUM — Sentences split abruptly across speaker blocks (aligner boundary jitter)
-
-Reported: transcripts sometimes end a sentence abruptly and continue it on the next line under another speaker.
-
-Root cause: F8's word-level alignment has no smoothing. Diarization turn boundaries jitter by a word or two, so a word near a turn edge lands on the wrong side, producing `A("The quick brown") B("fox") A("jumps over…")` — three rendered blocks where the middle one is a misattributed fragment. The old whole-segment aligner hid this behind its own (worse) merging defect.
-
-**Fix direction:** add a smoothing pass to `aligner.align()` after word-run grouping: a **sandwiched micro-run** (≤2 words or <~1.0s) whose neighbors on both sides belong to the same *other* speaker is absorbed into that speaker's run. Genuine short interjections survive (different speakers on each side, or longer than the threshold). Keep the pass inside the aligner so both backends and the fallback path stay consistent.
+See `architecture.md` → the Processing Pipeline's ALIGN step, module map (`aligner.py`), and "Speaker Enrollment Web Flow" (excerpt extraction) for the current design.
 
 ### Suggested fix order
 
@@ -179,7 +168,7 @@ Root cause: F8's word-level alignment has no smoothing. Diarization turn boundar
 4. ~~**F4**~~ — done, see "F4 — Fixed in phase 4" above.
 5. ~~**F8**~~ — done, see "F8 — Fixed in phase 5" above.
 6. ~~**F9/F10/F11**~~ — done, see "F9/F10/F11 — Fixed in phase 6" above.
-7. **F12 + F13** — manual-testing feedback batch (excerpt clip/text fidelity + aligner smoothing).
+7. ~~**F12 + F13**~~ — done, see "F12/F13 — Fixed in phase 7" above.
 
 Related plan item ("Enrollment wizard — synchronous embedding extraction blocks the browser", JOB_ENROLL) is implemented — see "Phase 2.5 split" in `architecture.md` → "Speaker Enrollment Web Flow" and the "Job Queue" section's `JOB_ENROLL` entry.
 

@@ -30,7 +30,7 @@ src/wisper_transcribe/
 ├── diarizer.py         pyannote pipeline wrapper, lazy cache (_pipeline), uses load_wav_as_tensor() from audio_utils
 ├── _noise_suppress.py  Centralised third-party warning/logging suppression (Lightning, pyannote, speechbrain); safe to call from subprocesses
 ├── debug_log.py        Centralized logging controller (Logger class); activated by --debug (file) and/or --verbose (console); tees tqdm.write() + Python logging to ./logs/wisper_<ts>.log
-├── aligner.py          Merge transcription segments with diarization labels; word-level splitting at turn boundaries when word timestamps are available, whole-segment max-overlap fallback otherwise (F8)
+├── aligner.py          Merge transcription segments with diarization labels; word-level splitting at turn boundaries when word timestamps are available, whole-segment max-overlap fallback otherwise (F8); micro-run smoothing pass (F13, `_smooth_word_speakers()`) absorbs a sandwiched run of ≤2 words or <1.0s between two same-speaker neighbors before grouping, so a jittered diarization boundary can't split one sentence across speaker blocks
 ├── speaker_manager.py  Profile CRUD, embedding extraction, cosine-similarity matching, EMA updates; enroll_speaker_from_audio_dir() for per-user track enrollment (Phase 6); enroll_speaker() accepts an optional precomputed embedding= (skips its internal extract_embedding() call) so callers can average embeddings from multiple raw diarization labels before saving; _select_embedding_segments() (F10b) picks up to 5 segments preferring non-overlapping ("solo") 2-20s spans over the raw-longest segments, falling back when nothing fits that profile
 ├── formatter.py        Markdown output, YAML frontmatter, dynamic version from __version__; parse_transcript_blocks() and rewrite_transcript_blocks() for per-line speaker editing (both match the timestamped `**Speaker** *(ts)*: text` and timestamp-free `**Speaker**: text` forms — the latter is what `include_timestamps=False` renders); rewrite_frontmatter_speakers() (F11) parses/re-dumps the YAML `speakers:` list for renames instead of regex, avoiding prefix collisions and quoted-name mismatches
 ├── audio_utils.py      validate_audio(), convert_to_wav(), get_duration(), load_wav_as_tensor(); VIDEO_EXTENSIONS / AUDIO_EXTENSIONS sets
@@ -107,13 +107,29 @@ Audio file
                5. ALIGN          aligner.align()
                   • Word-level strategy (F8): each word is assigned to the
                     diarization turn with max time overlap (nearest turn by
-                    word-midpoint distance if none overlaps); consecutive
-                    same-speaker words are grouped into one AlignedSegment
-                    per run, so a segment spanning multiple speaker turns
-                    splits at the turn boundary instead of being attributed
-                    wholesale to the majority speaker
+                    word-midpoint distance if none overlaps)
+                  • Micro-run smoothing (F13, `_smooth_word_speakers()`):
+                    diarization boundaries jitter by a word or two, so before
+                    grouping, a run sandwiched between two SAME-speaker runs
+                    (different from the run's own speaker) is absorbed into
+                    them when it's short — ≤2 words OR <1.0s span (either
+                    condition alone is enough; `_MICRO_RUN_MAX_WORDS` /
+                    `_MICRO_RUN_MAX_SECONDS`). Runs at a segment's start/end
+                    are never absorbed (no sandwich possible), and a run
+                    between two DIFFERENT speakers always survives (genuine
+                    interjection). Repeats to a fixpoint since absorbing one
+                    run can expose another (e.g. `A B A B A` with tiny B runs
+                    collapses to one A run)
+                  • Consecutive same-speaker words (post-smoothing) are
+                    grouped into one AlignedSegment per run, so a segment
+                    spanning multiple speaker turns splits at the turn
+                    boundary instead of being attributed wholesale to the
+                    majority speaker, without fragmenting mid-sentence on
+                    one- or two-word jitter
                   • Whole-segment max-overlap fallback for segments without
-                    word data (None/empty `words` — legacy callers, mocks)
+                    word data (None/empty `words` — legacy callers, mocks);
+                    the smoothing pass only touches per-word speaker lists,
+                    so this fallback is unaffected
                   • Unmatched words/segments labeled "UNKNOWN"
                   • Returns List[AlignedSegment]
                        │
@@ -358,8 +374,8 @@ output/
 ├── <stem><suffix>                  durable copy of a web-uploaded source file (F5; mp3/wav/m4a/… — only present when the job had diarization data), moved here from the tempdir at job completion
 ├── <stem>.summary.md               LLM campaign-notes sidecar (optional)
 ├── <stem>_diar.json                enrollment sidecar: diarization_segments, speaker_map, input_path (now the durable <stem><suffix> path above), campaign slug
-├── <stem>_excerpt_<speaker>.mp3    ~12 s audio clip per detected speaker (for enrollment wizard)
-└── <stem>_excerpt_<speaker>.txt    first dialogue line per speaker (shown in enrollment wizard)
+├── <stem>_excerpt_<speaker>.mp3    up to ~12 s audio clip per detected speaker, clamped to their longest solo diarization turn (F12; for enrollment wizard)
+└── <stem>_excerpt_<speaker>.txt    that speaker's aligned word-runs overlapping the clip window, joined in time order (F12; shown in enrollment wizard)
 ```
 The `_diar.json` sidecar is written by `_write_enrollment_sidecar()` in `jobs.py` when a transcription job completes with diarization results. It is the key artifact that makes `GET/POST /transcripts/{name}/enroll` restart-safe — the transcript-centric enrollment wizard reads it instead of relying on in-memory job state. Since F5, `input_path` in the sidecar always points at the durable `<stem><suffix>` copy (when the job came from a web upload) rather than a tempdir path that a later server restart could sweep away. Since F7 (phase 3), the sidecar also carries `speaker_map` — the exact raw `SPEAKER_XX` → display-name mapping `pipeline.process_file()` handed the formatter when it wrote the transcript (round-tripped through `Job.speaker_map`, populated from `_result_store["speaker_map"]`). This is the *authoritative* source for "what does this raw label currently display as" — see `enroll_shared.resolve_current_names()`. Sidecars written before this key existed simply lack it; callers fall back to the older interval-matching heuristic in that case. `apply_renames()` updates `speaker_map` in place after every successful rename, so it stays authoritative across repeated wizard visits. Deleting a transcript (`POST /transcripts/{name}/delete`, and the bulk-delete route) also deletes `<stem>_diar.json` and the `<stem><suffix>` audio file it references — that audio exists only to back the now-deleted transcript's enrollment wizard, so leaving it in the output dir would be a permanent leak. The deletion only ever targets a path that resolves inside the output dir (an `os.path.abspath` + `startswith` guard), so a legacy pre-F5 sidecar still pointing at a tempdir path is left alone.
 
@@ -477,7 +493,7 @@ Interactive CLI enrollment (TTY prompts) is replaced by a post-job wizard. The w
 **On job completion (jobs.py):**
 1. Transcription completes with `enroll_speakers=False`; detected speakers appear in transcript as `SPEAKER_XX` labels.
 2. **F5:** if the job's input came from a web upload (`Job.is_web_upload`) and diarization data exists, the temp file is moved from the tempdir into the output directory as `{stem}{suffix}` and `job.input_path` is updated to that durable path — see "Job Queue" above for the full move/cleanup decision tree.
-3. `_extract_speaker_excerpts()` walks the aligned segments for each raw speaker label and cuts a ~12 s clip via ffmpeg starting at that label's LONGEST segment (F10a) — not the first occurrence, which is often a short misattributed interjection that plays mostly someone else's voice — saved to `{stem}_excerpt_{speaker}.mp3` alongside the transcript. The dialogue text of that same longest segment is saved to `{stem}_excerpt_{speaker}.txt`. Both survive server restarts.
+3. `_extract_speaker_excerpts()` (F12, phase 7; supersedes F10a) chooses each raw speaker label's clip window from their longest **solo diarization turn** — `speaker_manager._select_embedding_segments(diarization_segments, label, max_count=1)`, reusing F10b's solo-preferred / 2-20s-band / graceful-fallback policy so the clip is, as much as diarization allows, audio of only that speaker. The ffmpeg clip's `-t` is strictly clamped to `min(_EXCERPT_SECONDS, turn length)` — no padding floor when the turn is shorter than 12s, since a short clip of only the target speaker beats 12s that bleeds into someone else's turn. Saved to `{stem}_excerpt_{speaker}.mp3` alongside the transcript. The `.txt` sidecar is built from ALL of that label's aligned word-runs (post-F8, one whisper segment can yield several) that overlap the clip window, joined in time order, so the displayed text matches exactly what's audible — not just one word-run that can be a mid-sentence fragment. A label with no diarization segments (or none for that label — `_select_embedding_segments` raises `ValueError`) falls back per-label to the pre-F12 behavior: cut at that label's longest ALIGNED segment with the fixed 12s window and that single segment's text; one label's fallback never affects another's extraction. Both files survive server restarts.
 4. `_write_enrollment_sidecar()` writes `{stem}_diar.json` alongside the transcript containing the raw `diarization_segments`, `speaker_map` (F7 — the authoritative raw label → display name map, carried on `Job.speaker_map` from `_result_store["speaker_map"]`), the (now durable, per step 2) `input_path`, and `campaign` slug. This is the key artifact that makes the transcript-centric wizard restart-safe.
 5. `pipeline.process_file()` writes `job_id` to the transcript's YAML frontmatter for legacy linking, and (F7) exports the same `speaker_map` local it hands to `to_markdown()` into `_result_store["speaker_map"]` (defaulting to `{}` when diarization was skipped) for step 4 above to persist.
 

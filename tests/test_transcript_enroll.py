@@ -936,6 +936,176 @@ def test_extract_speaker_excerpts_cuts_at_longest_segment(tmp_path: Path):
     assert txt_path.read_text(encoding="utf-8") == "This is the real content."
 
 
+def test_extract_speaker_excerpts_clamps_to_short_solo_turn(tmp_path: Path):
+    """F12: when a diarization solo turn is SHORTER than `_EXCERPT_SECONDS`,
+    the clip is cut at that turn's start with `-t` strictly clamped to the
+    turn's own duration -- no padding floor that would run into another
+    speaker's audio."""
+    from wisper_transcribe.web.jobs import _extract_speaker_excerpts, Job, COMPLETED
+    from wisper_transcribe.models import AlignedSegment, DiarizationSegment
+    from datetime import datetime
+    import uuid
+
+    out_md = tmp_path / "session01.md"
+    out_md.write_text("# Session 01\n", encoding="utf-8")
+    fake_audio = tmp_path / "audio.mp3"
+    fake_audio.write_bytes(b"fake")
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(fake_audio),
+        kwargs={},
+        output_path=str(out_md),
+    )
+    # Solo turn for SPEAKER_00 is only 5s long -- shorter than the 12s window.
+    diarization = [DiarizationSegment(start=10.0, end=15.0, speaker="SPEAKER_00")]
+    aligned = [
+        AlignedSegment(start=10.0, end=15.0, text="Hello there", speaker="SPEAKER_00"),
+    ]
+
+    with patch("wisper_transcribe.web.jobs.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0)
+        _extract_speaker_excerpts(
+            job, out_md, aligned_segments=aligned, diarization_segments=diarization,
+        )
+
+    cmd = mock_run.call_args[0][0]
+    assert cmd[cmd.index("-ss") + 1] == "10.0"
+    assert cmd[cmd.index("-t") + 1] == "5.0"
+
+
+def test_extract_speaker_excerpts_keeps_full_12s_for_long_solo_turn(tmp_path: Path):
+    """F12: when the solo diarization turn is LONGER than `_EXCERPT_SECONDS`,
+    `-t` stays at the full 12s (only the start point comes from the turn)."""
+    from wisper_transcribe.web.jobs import _extract_speaker_excerpts, Job, COMPLETED
+    from wisper_transcribe.models import AlignedSegment, DiarizationSegment
+    from datetime import datetime
+    import uuid
+
+    out_md = tmp_path / "session01.md"
+    out_md.write_text("# Session 01\n", encoding="utf-8")
+    fake_audio = tmp_path / "audio.mp3"
+    fake_audio.write_bytes(b"fake")
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(fake_audio),
+        kwargs={},
+        output_path=str(out_md),
+    )
+    # Solo turn is 20s long -- well over the 12s excerpt window.
+    diarization = [DiarizationSegment(start=5.0, end=25.0, speaker="SPEAKER_00")]
+    aligned = [
+        AlignedSegment(start=5.0, end=25.0, text="A long monologue happens here.", speaker="SPEAKER_00"),
+    ]
+
+    with patch("wisper_transcribe.web.jobs.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0)
+        _extract_speaker_excerpts(
+            job, out_md, aligned_segments=aligned, diarization_segments=diarization,
+        )
+
+    cmd = mock_run.call_args[0][0]
+    assert cmd[cmd.index("-ss") + 1] == "5.0"
+    assert cmd[cmd.index("-t") + 1] == "12"
+
+
+def test_extract_speaker_excerpts_text_covers_all_word_runs_in_window(tmp_path: Path):
+    """F12: the persisted `.txt` snippet is built from ALL of the label's
+    aligned word-runs that overlap the clip window, joined in time order --
+    not just one segment's text -- so it matches everything audible in the
+    clip. A word-run outside the window is excluded."""
+    from wisper_transcribe.web.jobs import _extract_speaker_excerpts, Job, COMPLETED
+    from wisper_transcribe.models import AlignedSegment, DiarizationSegment
+    from datetime import datetime
+    import uuid
+
+    out_md = tmp_path / "session01.md"
+    out_md.write_text("# Session 01\n", encoding="utf-8")
+    fake_audio = tmp_path / "audio.mp3"
+    fake_audio.write_bytes(b"fake")
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(fake_audio),
+        kwargs={},
+        output_path=str(out_md),
+    )
+    diarization = [DiarizationSegment(start=10.0, end=15.0, speaker="SPEAKER_00")]
+    # Deliberately out of time order, and one segment outside [10.0, 15.0].
+    aligned = [
+        AlignedSegment(start=20.0, end=21.0, text="outside", speaker="SPEAKER_00"),
+        AlignedSegment(start=13.0, end=14.0, text="world", speaker="SPEAKER_00"),
+        AlignedSegment(start=10.0, end=11.0, text="Hello", speaker="SPEAKER_00"),
+    ]
+
+    with patch("wisper_transcribe.web.jobs.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0)
+        _extract_speaker_excerpts(
+            job, out_md, aligned_segments=aligned, diarization_segments=diarization,
+        )
+
+    txt_path = tmp_path / "session01_excerpt_SPEAKER_00.txt"
+    assert txt_path.read_text(encoding="utf-8") == "Hello world"
+
+
+def test_extract_speaker_excerpts_falls_back_per_label_without_diarization(tmp_path: Path):
+    """F12: a label with no diarization segments falls back to the longest-
+    aligned-segment behavior (fixed 12s window) without breaking extraction
+    for a sibling label that DOES have diarization data."""
+    from wisper_transcribe.web.jobs import _extract_speaker_excerpts, Job, COMPLETED
+    from wisper_transcribe.models import AlignedSegment, DiarizationSegment
+    from datetime import datetime
+    import uuid
+
+    out_md = tmp_path / "session01.md"
+    out_md.write_text("# Session 01\n", encoding="utf-8")
+    fake_audio = tmp_path / "audio.mp3"
+    fake_audio.write_bytes(b"fake")
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(fake_audio),
+        kwargs={},
+        output_path=str(out_md),
+    )
+    # Diarization data exists only for SPEAKER_01 -- SPEAKER_00 has none.
+    diarization = [DiarizationSegment(start=30.0, end=35.0, speaker="SPEAKER_01")]
+    aligned = [
+        AlignedSegment(start=1.0, end=1.5, text="Yeah", speaker="SPEAKER_00"),
+        AlignedSegment(start=50.0, end=60.0, text="Longest segment for 00.", speaker="SPEAKER_00"),
+        AlignedSegment(start=30.0, end=32.0, text="Speaker one talking.", speaker="SPEAKER_01"),
+    ]
+
+    with patch("wisper_transcribe.web.jobs.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0)
+        _extract_speaker_excerpts(
+            job, out_md, aligned_segments=aligned, diarization_segments=diarization,
+        )
+
+    calls_by_output = {call.args[0][-1]: call.args[0] for call in mock_run.call_args_list}
+    cmd_00 = calls_by_output[str(tmp_path / "session01_excerpt_SPEAKER_00.mp3")]
+    assert cmd_00[cmd_00.index("-ss") + 1] == "50.0"
+    assert cmd_00[cmd_00.index("-t") + 1] == "12"
+
+    cmd_01 = calls_by_output[str(tmp_path / "session01_excerpt_SPEAKER_01.mp3")]
+    assert cmd_01[cmd_01.index("-ss") + 1] == "30.0"
+
+    txt_00 = tmp_path / "session01_excerpt_SPEAKER_00.txt"
+    assert txt_00.read_text(encoding="utf-8") == "Longest segment for 00."
+
+    txt_01 = tmp_path / "session01_excerpt_SPEAKER_01.txt"
+    assert txt_01.read_text(encoding="utf-8") == "Speaker one talking."
+
+
 def test_excerpt_404_when_no_clip(client: TestClient, tmp_path: Path):
     _write_transcript(tmp_path)
     with _patch_output(tmp_path):
