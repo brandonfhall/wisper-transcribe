@@ -604,6 +604,7 @@ from wisper_transcribe.web.enroll_shared import (
     _load_diar_sidecar,
     apply_renames,
     build_legacy_label_map as _build_legacy_label_map,
+    resolve_current_names,
     template_current_names,
 )
 
@@ -685,14 +686,19 @@ async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
             "existing_profiles": load_profiles(),
             "speaker_excerpts": speaker_excerpts,
             "speaker_excerpt_texts": speaker_excerpt_texts,
-            # raw_label -> current display name in the transcript, derived by
-            # interval-matching markdown timestamps against pyannote segments.
-            # Lets the wizard pre-fill names the user previously applied so
-            # they can edit corrections instead of re-typing from scratch.
-            # Raw-label-valued entries (first pass, no renames applied yet)
-            # are filtered out so the input starts empty rather than
-            # prefilled with "SPEAKER_00" (F2) -- see template_current_names.
-            "current_names": template_current_names(legacy_label_map),
+            # raw_label -> current display name in the transcript. F7:
+            # resolved from the sidecar's authoritative speaker_map when
+            # present, falling back to the (fragile) interval-matching
+            # heuristic only for legacy sidecars that predate that key --
+            # see resolve_current_names. Lets the wizard pre-fill names the
+            # user previously applied so they can edit corrections instead
+            # of re-typing from scratch. Raw-label-valued entries (first
+            # pass, no renames applied yet) are filtered out so the input
+            # starts empty rather than prefilled with "SPEAKER_00" (F2) --
+            # see template_current_names.
+            "current_names": template_current_names(
+                resolve_current_names(md_path, diar, diar.get("diarization_segments", []))
+            ),
             "audio_missing": audio_missing,
         },
     )

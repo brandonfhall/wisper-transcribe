@@ -98,10 +98,18 @@ def parse_transcript_blocks(body: str) -> list[dict]:
 
     Returns a list of dicts with keys: index, speaker, timestamp, text, has_speaker.
     Lines that are headings, horizontal rules, or the footer are skipped.
+
+    The inline ``*(HH:MM:SS)*`` timestamp is optional -- ``to_markdown()``
+    omits it entirely when called with ``include_timestamps=False`` (the web
+    upload form's "Include timestamps" checkbox), producing ``**Speaker**:
+    text`` instead of ``**Speaker** *(ts)*: text``. ``timestamp`` is ``''``
+    for those blocks; callers that need per-block timing (e.g.
+    ``enroll_shared.apply_renames``'s raw-label attribution) must handle an
+    empty timestamp themselves -- there is no timing signal to fall back on.
     """
     import re
 
-    speaker_re = re.compile(r'^\*\*(.+?)\*\*\s*\*\((.+?)\)\*:\s*(.*)')
+    speaker_re = re.compile(r'^\*\*(.+?)\*\*\s*(?:\*\((.+?)\)\*)?:\s*(.*)')
     no_speaker_re = re.compile(r'^\*\((.+?)\)\*\s*(.*)')
 
     blocks = []
@@ -114,7 +122,7 @@ def parse_transcript_blocks(body: str) -> list[dict]:
             blocks.append({
                 'index': len(blocks),
                 'speaker': m.group(1),
-                'timestamp': m.group(2),
+                'timestamp': m.group(2) or '',
                 'text': m.group(3),
                 'has_speaker': True,
             })
@@ -137,10 +145,14 @@ def rewrite_transcript_blocks(content: str, updated_speakers: dict) -> str:
     updated_speakers maps block_index (int) to the new speaker name (str).
     Only lines matching the speaker-block pattern are counted; all other lines
     are passed through unchanged. Returns the full updated markdown string.
+
+    Matches both the timestamped (``**Speaker** *(ts)*: text``) and
+    timestamp-free (``**Speaker**: text``, ``include_timestamps=False``)
+    formats -- see ``parse_transcript_blocks``.
     """
     import re
 
-    speaker_line_re = re.compile(r'^\*\*(.+?)\*\*(\s*\*\(.+?\)\*:.*)')
+    speaker_line_re = re.compile(r'^\*\*(.+?)\*\*(\s*(?:\*\(.+?\)\*)?:.*)')
 
     block_idx = 0
     new_lines = []

@@ -1190,3 +1190,71 @@ def test_process_file_no_campaign_passes_none_filter(
     mock_match.assert_called_once()
     call_kwargs = mock_match.call_args.kwargs
     assert call_kwargs.get("profile_filter") is None
+
+
+# ---------------------------------------------------------------------------
+# F7 — process_file exports the formatter's speaker_map into _result_store
+# ---------------------------------------------------------------------------
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=60.0)
+@patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
+@patch("wisper_transcribe.pipeline.get_hf_token", return_value="fake-token")
+@patch("wisper_transcribe.diarizer.diarize")
+@patch("wisper_transcribe.aligner.align")
+@patch("wisper_transcribe.speaker_manager.match_speakers", return_value={"SPEAKER_00": "Alice"})
+def test_process_file_exports_speaker_map_to_result_store(
+    mock_match, mock_align, mock_diarize, mock_hf_token,
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg,
+    tmp_path,
+):
+    """The web enrollment wizard (F7) needs the exact raw_label -> display_name
+    map the formatter used, persisted into the _diar.json sidecar at write
+    time instead of being reconstructed later from rendered markdown. That
+    starts here: process_file must hand the resolved speaker_map back to the
+    caller via _result_store, the same way it already does for
+    diarization_segments and aligned_segments."""
+    from wisper_transcribe.models import DiarizationSegment, AlignedSegment
+    from wisper_transcribe.pipeline import process_file
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    mock_convert.return_value = audio
+
+    diar_seg = DiarizationSegment(0.0, 5.0, "SPEAKER_00")
+    mock_diarize.return_value = [diar_seg]
+    mock_align.return_value = [AlignedSegment(0.0, 5.0, "SPEAKER_00", "Hello")]
+
+    result_store: dict = {}
+    process_file(audio, output_dir=tmp_path, device="cpu", _result_store=result_store)
+
+    assert result_store["speaker_map"] == {"SPEAKER_00": "Alice"}
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=60.0)
+@patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
+def test_process_file_no_diarize_exports_empty_speaker_map(
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg,
+    tmp_path,
+):
+    """When diarization is skipped there's no speaker_map to speak of --
+    _result_store still gets the key (as an empty dict) rather than it
+    being silently absent."""
+    from wisper_transcribe.pipeline import process_file
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    mock_convert.return_value = audio
+
+    result_store: dict = {}
+    process_file(
+        audio, output_dir=tmp_path, device="cpu", no_diarize=True,
+        _result_store=result_store,
+    )
+
+    assert result_store["speaker_map"] == {}

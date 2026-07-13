@@ -245,7 +245,11 @@ async def enroll_form(request: Request, job_id: str) -> Response:
         return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
 
     from wisper_transcribe.speaker_manager import load_profiles
-    from wisper_transcribe.web.enroll_shared import build_legacy_label_map, template_current_names
+    from wisper_transcribe.web.enroll_shared import (
+        _load_diar_sidecar,
+        resolve_current_names,
+        template_current_names,
+    )
 
     # Derive speaker labels for the wizard.
     # Prefer the raw diarization segments stored on the job — those always carry
@@ -264,10 +268,15 @@ async def enroll_form(request: Request, job_id: str) -> Response:
         # the wizard (and its submit handler) can rename on a second pass,
         # after match_speakers has already written display names into the
         # body. Filtered for template prefill so an untouched field shows
-        # empty rather than the raw label (F2).
+        # empty rather than the raw label (F2). F7: resolve via the sidecar's
+        # authoritative speaker_map when present (same resolution function
+        # the transcript-centric wizard uses), falling back to the interval
+        # heuristic only for legacy sidecars/jobs that predate that key.
         if job.output_path:
+            out_path = Path(job.output_path)
+            diar = _load_diar_sidecar(out_path)
             current_names = template_current_names(
-                build_legacy_label_map(Path(job.output_path), job.diarization_segments)
+                resolve_current_names(out_path, diar, job.diarization_segments)
             )
     elif job.output_path:
         try:

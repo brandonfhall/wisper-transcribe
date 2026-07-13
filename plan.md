@@ -120,23 +120,13 @@ Moved the temp web-upload audio next to its transcript at job completion instead
 
 See `architecture.md` → "Job Queue" and "Speaker Enrollment Web Flow" for the full current design. F4, F6–F11 below are unaffected and still open.
 
-### F6 — MEDIUM — Sequential global renames cross-contaminate
+### F6/F7 — Fixed in phase 3 (2026-07-12, branch `fix/enrollment-audit`)
 
-Both submit paths apply `update_speaker_names` (global find/replace) once per rename, mutating the same content string in a loop. Failure modes:
-- Swap on re-entry (Alice→Bob then Bob→Alice) merges every block into "Alice".
-- Two raw labels sharing one display name (common after F3's many-to-one naming): renaming only one of them renames **both** speakers' blocks.
-- New name colliding with another speaker's current name chains the same way.
+Replaced the reconstructed, fragile raw-label→display-name map with a persisted, authoritative one, and made renames single-pass instead of a sequential mutating loop:
+- **F7** (`_build_legacy_label_map` interval matching is fragile): `pipeline.process_file()` now exports the exact `speaker_map` local it hands to the formatter into `_result_store["speaker_map"]`; `jobs.py` carries it on `Job.speaker_map` and `_write_enrollment_sidecar()` persists it into `_diar.json`'s `speaker_map` key. A new `enroll_shared.resolve_current_names(md_path, diar, segments)` is the single resolution path every caller (both wizard GET routes' prefill, and `apply_renames`'s old-name resolution) now goes through: it prefers the sidecar's `speaker_map` and only falls back to `build_legacy_label_map()`'s interval-matching heuristic for sidecars written before this key existed. `apply_renames()` updates the sidecar's `speaker_map` after every successful rename, keeping it authoritative across repeated wizard visits.
+- **F6** (sequential global renames cross-contaminate): `apply_renames()` no longer loops `update_speaker_names()` over a mutating content string. It now attributes every markdown block to a raw pyannote label exactly once from the *original* content (`_attribute_block_to_label()` — interval containment, with an unambiguous-name-match fallback for low-confidence blocks), then rewrites only the blocks whose raw label was actually renamed via `formatter.rewrite_transcript_blocks()`. This handles a same-submit swap (Alice↔Bob) and a shared-display-name rename (two raw labels both currently "Dan", only one renamed) correctly — neither is representable as a single global find/replace. The YAML frontmatter `speakers:` list is still rewritten by name (`_rewrite_frontmatter_names()`), but as one simultaneous-pass substitution rather than a sequential loop, and skipping any old name shared by more than one raw label (ambiguous — left alone rather than guessed at). F11's underlying regex limitations (quoted YAML, prefix collisions) are unchanged and still out of scope.
 
-**Fix direction:** resolve all renames against the *original* content in one pass — block-level rewrite keyed by raw label using timestamps (the `_diar.json` segments + `rewrite_transcript_blocks()` already provide everything needed), not name-based global substitution.
-
-### F7 — MEDIUM — `_build_legacy_label_map` interval matching is fragile
-
-`transcripts.py:557-622`. The raw-label→display-name map that both the prefill and the rename targeting depend on is reconstructed by matching markdown block timestamps against pyannote intervals:
-- Markdown timestamps are truncated to whole seconds and block starts are *whisper* segment starts, which regularly fall outside every pyannote interval → nearest-start fallback can bind the block to the **wrong speaker's** interval.
-- `setdefault` (first-write-wins) means one early misattributed block poisons the mapping for that label.
-- A wrong `current_names` entry makes the transcript-path rename target a wrong/absent `old_name` → blocks not updated (same symptom as F1, intermittent).
-
-**Fix direction:** stop reconstructing this mapping from rendered output. Persist the authoritative `raw_label → display_name` map (the `speaker_map` the formatter actually used) into `_diar.json` at write time, and update it on every wizard rename. The interval heuristic should be a legacy fallback only.
+See `architecture.md` → "Speaker Enrollment Web Flow" for the full current design.
 
 ### F8 — MEDIUM — Aligner granularity: whole-Whisper-segment, winner-take-all
 
@@ -166,7 +156,7 @@ The 12 s excerpt is cut at the label's *first* aligned occurrence (`jobs.py:133-
 
 1. ~~**F1 + F2 + F3**~~ — done, see "F1/F2/F3 — Fixed in phase 1" above.
 2. ~~**F5**~~ — done, see "F5 — Fixed in phase 2" above.
-3. **F6 + F7** — block-level single-pass rename keyed by persisted label map. Note: `_build_legacy_label_map` (now `build_legacy_label_map` in `web/enroll_shared.py`) still has the interval-matching fragility described in F7 — phase 1 unified *where* it's called from, not the matching heuristic itself.
+3. ~~**F6 + F7**~~ — done, see "F6/F7 — Fixed in phase 3" above.
 4. **F4** — assignment algorithm rework (pair-scored greedy, optional many-to-one).
 5. **F8** — word-timestamp alignment (biggest quality win, most testing needed).
 6. **F9/F10/F11** — small hardening batch.

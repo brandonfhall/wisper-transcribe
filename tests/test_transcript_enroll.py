@@ -107,6 +107,36 @@ def test_sidecar_written_after_job_completes(tmp_path: Path):
     assert data["diarization_segments"][0] == {"start": 1.0, "end": 5.0, "speaker": "SPEAKER_00"}
 
 
+def test_sidecar_includes_speaker_map_when_job_provides_it(tmp_path: Path):
+    """(d) F7: when the job carries the authoritative speaker_map (populated
+    from pipeline.process_file()'s _result_store), it is persisted into the
+    sidecar alongside the diarization segments."""
+    from wisper_transcribe.web.jobs import _write_enrollment_sidecar, Job, COMPLETED
+    from wisper_transcribe.models import DiarizationSegment
+    from datetime import datetime
+    import uuid
+
+    out_md = tmp_path / "session01.md"
+    out_md.write_text("# Session 01", encoding="utf-8")
+
+    seg = DiarizationSegment(start=0.0, end=5.0, speaker="SPEAKER_00")
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(tmp_path / "session01.mp3"),
+        kwargs={},
+        output_path=str(out_md),
+        diarization_segments=[seg],
+        speaker_map={"SPEAKER_00": "Alice"},
+    )
+
+    _write_enrollment_sidecar(job, out_md)
+
+    sidecar = json.loads((tmp_path / "session01_diar.json").read_text())
+    assert sidecar["speaker_map"] == {"SPEAKER_00": "Alice"}
+
+
 def test_sidecar_not_written_when_no_segments(tmp_path: Path):
     """_write_enrollment_sidecar is a no-op when diarization_segments is empty."""
     from wisper_transcribe.web.jobs import _write_enrollment_sidecar, Job, COMPLETED
@@ -248,6 +278,298 @@ def test_enroll_submit_second_pass_corrects_typo(client: TestClient, tmp_path: P
     assert "**Brandon**" in content
     assert "**Bradnon**" not in content
     assert "**Sam**" in content
+
+
+# ---------------------------------------------------------------------------
+# F6/F7 -- resolve_current_names() and apply_renames()'s single-pass,
+# block-level rename (see enroll_shared.py for the full design rationale).
+# ---------------------------------------------------------------------------
+
+def _diar_segments(*pairs: tuple[str, float, float]):
+    from wisper_transcribe.models import DiarizationSegment
+    return [DiarizationSegment(start=start, end=end, speaker=sp) for sp, start, end in pairs]
+
+
+def test_resolve_current_names_prefers_sidecar_speaker_map(tmp_path: Path):
+    """(f) When the sidecar carries an authoritative speaker_map, it is used
+    as-is -- no interval reconstruction happens at all."""
+    from wisper_transcribe.web.enroll_shared import resolve_current_names
+
+    md = tmp_path / "session01.md"
+    md.write_text(
+        "---\ntitle: Session 01\n---\n\n**Wrong Name** *(00:00)*: hi\n",
+        encoding="utf-8",
+    )
+    diar = {
+        "speaker_map": {"SPEAKER_00": "Alice"},
+        "diarization_segments": [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"}],
+    }
+    # If the interval heuristic ran, it would read "Wrong Name" out of the
+    # markdown -- proving the persisted map (not the markdown) won.
+    result = resolve_current_names(md, diar, diar["diarization_segments"])
+    assert result == {"SPEAKER_00": "Alice"}
+
+
+def test_resolve_current_names_falls_back_to_interval_heuristic_for_legacy_sidecar(
+    tmp_path: Path,
+):
+    """(f) A sidecar written before the speaker_map key existed (or with no
+    sidecar at all) falls back to build_legacy_label_map's interval match."""
+    from wisper_transcribe.web.enroll_shared import resolve_current_names
+
+    md = tmp_path / "session01.md"
+    md.write_text(
+        "---\ntitle: Session 01\n---\n\n**Alice** *(00:00)*: hi\n",
+        encoding="utf-8",
+    )
+    segments = _diar_segments(("SPEAKER_00", 0.0, 5.0))
+    legacy_diar = {"diarization_segments": [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"}]}
+
+    # No speaker_map key at all (legacy sidecar).
+    assert resolve_current_names(md, legacy_diar, segments) == {"SPEAKER_00": "Alice"}
+    # No sidecar dict whatsoever.
+    assert resolve_current_names(md, None, segments) == {"SPEAKER_00": "Alice"}
+    # speaker_map present but empty also falls back (defensive).
+    assert resolve_current_names(md, {"speaker_map": {}, **legacy_diar}, segments) == {
+        "SPEAKER_00": "Alice"
+    }
+
+
+def test_apply_renames_swap_on_reentry(tmp_path: Path):
+    """(a) Renaming Alice->Bob and Bob->Alice in the SAME submit must swap
+    both speakers' blocks correctly, not merge everyone into one name (the
+    old sequential update_speaker_names loop would merge here)."""
+    from wisper_transcribe.web.enroll_shared import apply_renames
+
+    md = tmp_path / "session01.md"
+    md.write_text(
+        "---\ntitle: Session 01\nspeakers:\n- name: Alice\n- name: Bob\n---\n\n"
+        "**Alice** *(00:00)*: Hello everyone\n"
+        "**Bob** *(00:12)*: Thanks for having me\n",
+        encoding="utf-8",
+    )
+    segments = _diar_segments(("SPEAKER_00", 0.0, 5.0), ("SPEAKER_01", 12.0, 18.0))
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        result = apply_renames(
+            md, segments, {"SPEAKER_00": "Bob", "SPEAKER_01": "Alice"},
+        )
+
+    content = md.read_text(encoding="utf-8")
+    assert "**Bob** *(00:00)*: Hello everyone" in content
+    assert "**Alice** *(00:12)*: Thanks for having me" in content
+    # Frontmatter swaps too (both old names were unambiguous, one raw label each).
+    assert "- name: Bob" in content
+    assert "- name: Alice" in content
+    assert result.groups == {"Bob": ["SPEAKER_00"], "Alice": ["SPEAKER_01"]}
+
+
+def test_apply_renames_shared_display_name_only_renames_targeted_label(tmp_path: Path):
+    """(b) Two raw labels currently both display "Dan" (many-to-one naming,
+    F3). Renaming only SPEAKER_01 to "Sara" must leave SPEAKER_00's block
+    saying "Dan" -- a name-keyed global rename would have renamed both."""
+    from wisper_transcribe.web.enroll_shared import apply_renames
+
+    md = tmp_path / "session01.md"
+    md.write_text(
+        "---\ntitle: Session 01\nspeakers:\n- name: Dan\n---\n\n"
+        "**Dan** *(00:00)*: line from the first Dan\n"
+        "**Dan** *(00:12)*: line from the second Dan\n",
+        encoding="utf-8",
+    )
+    segments = _diar_segments(("SPEAKER_00", 0.0, 5.0), ("SPEAKER_01", 12.0, 18.0))
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        result = apply_renames(md, segments, {"SPEAKER_01": "Sara"})
+
+    content = md.read_text(encoding="utf-8")
+    assert "**Dan** *(00:00)*: line from the first Dan" in content
+    assert "**Sara** *(00:12)*: line from the second Dan" in content
+    assert "**Dan** *(00:12)*" not in content
+    # Frontmatter left alone -- "Dan" is ambiguous (shared by two raw labels),
+    # so there is no safe way to know which entry to rewrite.
+    assert "- name: Dan" in content
+    assert result.groups == {"Sara": ["SPEAKER_01"]}
+
+
+def test_apply_renames_new_name_collides_with_untouched_speaker(tmp_path: Path):
+    """(c) Renaming SPEAKER_00 (Alice) to "Carol" -- the same name an
+    untouched SPEAKER_01 already has -- must not fold SPEAKER_01 into the
+    rename/enrollment: only SPEAKER_00 was submitted."""
+    from wisper_transcribe.web.enroll_shared import apply_renames
+
+    md = tmp_path / "session01.md"
+    md.write_text(
+        "---\ntitle: Session 01\nspeakers:\n- name: Alice\n- name: Carol\n---\n\n"
+        "**Alice** *(00:00)*: hi\n"
+        "**Carol** *(00:12)*: hello\n",
+        encoding="utf-8",
+    )
+    segments = _diar_segments(("SPEAKER_00", 0.0, 5.0), ("SPEAKER_01", 12.0, 18.0))
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        result = apply_renames(md, segments, {"SPEAKER_00": "Carol"})
+
+    content = md.read_text(encoding="utf-8")
+    assert "**Carol** *(00:00)*: hi" in content
+    assert "**Carol** *(00:12)*: hello" in content
+    # Only the explicitly-submitted raw label is grouped for enrollment --
+    # SPEAKER_01 never entered `renames` and must not be swept in just
+    # because the display names now collide.
+    assert result.groups == {"Carol": ["SPEAKER_00"]}
+
+
+def test_apply_renames_body_rename_without_timestamps(tmp_path: Path):
+    """`include_timestamps=False` transcripts render "**Speaker**: text"
+    with no inline timestamp at all -- there is no timing signal to
+    attribute a block from. As long as the sidecar carries the authoritative
+    speaker_map (guaranteed for any transcript produced after this fix), the
+    per-block rename still works via the unambiguous-name fallback."""
+    from wisper_transcribe.web.enroll_shared import apply_renames
+
+    md = tmp_path / "session01.md"
+    md.write_text(
+        "---\ntitle: Session 01\nspeakers:\n- name: Alice\n- name: Bob\n---\n\n"
+        "**Alice**: Hello everyone\n"
+        "**Bob**: Thanks for having me\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "session01_diar.json").write_text(
+        json.dumps({
+            "input_path": str(tmp_path / "session01.mp3"),
+            "campaign": None,
+            "speaker_map": {"SPEAKER_00": "Alice", "SPEAKER_01": "Bob"},
+            "diarization_segments": [
+                {"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"},
+                {"start": 12.0, "end": 18.0, "speaker": "SPEAKER_01"},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    segments = _diar_segments(("SPEAKER_00", 0.0, 5.0), ("SPEAKER_01", 12.0, 18.0))
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        result = apply_renames(md, segments, {"SPEAKER_00": "Alicia"})
+
+    content = md.read_text(encoding="utf-8")
+    assert "**Alicia**: Hello everyone" in content
+    assert "**Bob**: Thanks for having me" in content
+    assert "**Alice**:" not in content
+    assert result.groups == {"Alicia": ["SPEAKER_00"]}
+
+
+def test_apply_renames_legacy_sidecar_low_confidence_block_uses_name_fallback(
+    tmp_path: Path,
+):
+    """F7's known-fragile regime: a legacy sidecar (no persisted speaker_map)
+    where one block's rendered timestamp falls *outside every interval* and
+    is numerically closer to the WRONG speaker's interval -- the nearest-
+    start fallback alone would misattribute it. Because that block's text
+    unambiguously says "Alice" and only one raw label currently displays
+    that name, the per-block name-based fallback overrides the bad guess
+    and the rename still lands on the correct (Alice/SPEAKER_00) block."""
+    from wisper_transcribe.web.enroll_shared import apply_renames
+
+    md = tmp_path / "session01.md"
+    md.write_text(
+        "---\ntitle: Session 01\nspeakers:\n- name: Alice\n- name: Bob\n---\n\n"
+        # Anchor blocks: both timestamps land squarely inside their own
+        # interval, so build_legacy_label_map confidently resolves
+        # SPEAKER_00 -> Alice and SPEAKER_01 -> Bob from these two lines.
+        "**Alice** *(00:05)*: an early Alice line\n"
+        "**Bob** *(16:40)*: a Bob line\n"
+        # Whisper-segment start (00:17) falls between the two pyannote
+        # turns ([0,10] and [20,30]) but is numerically closer to
+        # SPEAKER_01's start (20) than SPEAKER_00's (0) -- nearest-start
+        # alone would (wrongly) attribute this Alice line to SPEAKER_01.
+        "**Alice** *(00:17)*: a later Alice line, timestamp between turns\n",
+        encoding="utf-8",
+    )
+    # No speaker_map key at all -- legacy sidecar, forces the interval
+    # heuristic (build_legacy_label_map) rather than the persisted map.
+    (tmp_path / "session01_diar.json").write_text(
+        json.dumps({
+            "input_path": str(tmp_path / "session01.mp3"),
+            "campaign": None,
+            "diarization_segments": [
+                {"start": 0.0, "end": 10.0, "speaker": "SPEAKER_00"},
+                {"start": 20.0, "end": 30.0, "speaker": "SPEAKER_01"},
+                {"start": 1000.0, "end": 1010.0, "speaker": "SPEAKER_01"},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    segments = _diar_segments(
+        ("SPEAKER_00", 0.0, 10.0),
+        ("SPEAKER_01", 20.0, 30.0),
+        ("SPEAKER_01", 1000.0, 1010.0),
+    )
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        result = apply_renames(md, segments, {"SPEAKER_00": "Alicia"})
+
+    content = md.read_text(encoding="utf-8")
+    assert "**Alicia** *(00:05)*: an early Alice line" in content
+    assert "**Alicia** *(00:17)*: a later Alice line, timestamp between turns" in content
+    assert "**Bob** *(16:40)*: a Bob line" in content
+    assert result.groups == {"Alicia": ["SPEAKER_00"]}
+
+
+def test_apply_renames_updates_sidecar_speaker_map(tmp_path: Path):
+    """(e) After a successful rename, the sidecar's speaker_map is updated
+    so the next wizard visit (or apply_renames call) resolves from it
+    directly instead of re-deriving from rendered markdown."""
+    from wisper_transcribe.web.enroll_shared import apply_renames
+
+    md = tmp_path / "session01.md"
+    md.write_text(
+        "---\ntitle: Session 01\nspeakers:\n- name: SPEAKER_00\n---\n\n"
+        "**SPEAKER_00** *(00:00)*: hi\n",
+        encoding="utf-8",
+    )
+    sidecar_path = tmp_path / "session01_diar.json"
+    sidecar_path.write_text(
+        json.dumps({
+            "input_path": str(tmp_path / "session01.mp3"),
+            "campaign": None,
+            "diarization_segments": [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"}],
+        }),
+        encoding="utf-8",
+    )
+    segments = _diar_segments(("SPEAKER_00", 0.0, 5.0))
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        apply_renames(md, segments, {"SPEAKER_00": "Alice"})
+
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    assert sidecar["speaker_map"] == {"SPEAKER_00": "Alice"}
+
+    # A second call (re-entry) must now resolve "Alice" as the old name via
+    # the persisted map, not by re-deriving from markdown timestamps.
+    from wisper_transcribe.web.enroll_shared import _load_diar_sidecar, resolve_current_names
+    diar = _load_diar_sidecar(md)
+    assert resolve_current_names(md, diar, segments) == {"SPEAKER_00": "Alice"}
+
+
+def test_apply_renames_frontmatter_speakers_list_updated(tmp_path: Path):
+    """(g) No regression: a plain rename still updates the frontmatter
+    `speakers:` list (F11's YAML-parsing rework is explicitly out of scope)."""
+    from wisper_transcribe.web.enroll_shared import apply_renames
+
+    md = tmp_path / "session01.md"
+    md.write_text(
+        "---\ntitle: Session 01\nspeakers:\n- name: SPEAKER_00\n---\n\n"
+        "**SPEAKER_00** *(00:00)*: hi\n",
+        encoding="utf-8",
+    )
+    segments = _diar_segments(("SPEAKER_00", 0.0, 5.0))
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        apply_renames(md, segments, {"SPEAKER_00": "Alice"})
+
+    content = md.read_text(encoding="utf-8")
+    assert "- name: Alice" in content
+    assert "- name: SPEAKER_00" not in content
 
 
 def test_enroll_submit_enqueues_job_and_renames_synchronously(

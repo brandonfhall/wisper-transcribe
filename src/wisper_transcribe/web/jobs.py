@@ -110,6 +110,11 @@ def _write_enrollment_sidecar(job: "Job", output_path: "Path") -> None:  # type:
                 {"start": s.start, "end": s.end, "speaker": s.speaker}
                 for s in job.diarization_segments
             ],
+            # F7: authoritative raw_label -> display_name map. Present on
+            # every new transcript; absent on sidecars written before this
+            # key existed, which is exactly the legacy fallback
+            # resolve_current_names() handles.
+            "speaker_map": dict(job.speaker_map) if job.speaker_map else {},
         }
         sidecar_path = out.with_name(out.stem + "_diar.json")
         sidecar_path.write_text(_json.dumps(sidecar, indent=2), encoding="utf-8")
@@ -272,6 +277,12 @@ class Job:
     diarization_labels: list[str] = field(default_factory=list)
     # Full diarization segments retained for post-job enrollment (enroll_submit uses these)
     diarization_segments: list = field(default_factory=list)
+    # F7: authoritative raw_label -> display_name map the formatter used when
+    # writing the transcript (pipeline.process_file()'s speaker_map local).
+    # Persisted into the _diar.json sidecar so the enrollment wizard can
+    # resolve current names without reconstructing them from rendered
+    # markdown timestamps -- see enroll_shared.resolve_current_names.
+    speaker_map: dict[str, str] = field(default_factory=dict)
     # speaker_label -> path to a short audio excerpt (for enrollment wizard)
     speaker_excerpts: dict[str, str] = field(default_factory=dict)
     # Threading event set by cancel() to signal the worker to abort
@@ -582,6 +593,7 @@ class JobQueue:
             _result_store: dict = {}
             output_path = process_file(Path(job.input_path), _result_store=_result_store, job_id=job.id, **job.kwargs)
             job.diarization_segments = _result_store.get("diarization_segments", [])
+            job.speaker_map = _result_store.get("speaker_map", {})
             job.output_path = str(output_path)
 
             # F5: move the temp web upload next to the transcript so the

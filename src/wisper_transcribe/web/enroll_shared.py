@@ -58,8 +58,69 @@ def _load_diar_sidecar(md_path: Path) -> Optional[dict]:
         return None
 
 
+def _segment_intervals(segments: list) -> list[tuple[float, float, str]]:
+    """Normalise ``DiarizationSegment``-like or plain-dict segments into
+    ``(start, end, raw_label)`` tuples for interval matching."""
+    intervals: list[tuple[float, float, str]] = []
+    for seg in segments:
+        if isinstance(seg, dict):
+            sp, start, end = seg.get("speaker"), seg.get("start"), seg.get("end")
+        else:
+            sp = getattr(seg, "speaker", None)
+            start = getattr(seg, "start", None)
+            end = getattr(seg, "end", None)
+        if sp is None or start is None or end is None:
+            continue
+        intervals.append((float(start), float(end), sp))
+    return intervals
+
+
+def _parse_md_timestamp(ts: str) -> float:
+    """Parse a rendered ``MM:SS`` or ``H:MM:SS`` markdown timestamp to seconds.
+
+    Truncated to whole seconds by ``time_utils.format_timestamp`` at render
+    time -- this is the source of the imprecision both ``build_legacy_label_map``
+    and ``_attribute_block_to_label`` document (F7).
+    """
+    parts = ts.split(":")
+    try:
+        if len(parts) == 2:
+            return float(int(parts[0]) * 60 + int(parts[1]))
+        if len(parts) == 3:
+            return float(int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2]))
+    except ValueError:
+        pass
+    return 0.0
+
+
+def _attribute_block_to_label(
+    t: float, intervals: list[tuple[float, float, str]]
+) -> tuple[Optional[str], bool]:
+    """Attribute one markdown block's timestamp to a raw pyannote label.
+
+    Returns ``(raw_label, confident)``. ``confident`` is True only when *t*
+    falls inside a diarization segment's ``[start, end]`` interval exactly;
+    False when just the nearest-by-start fallback matched -- whisper segment
+    starts routinely fall outside pyannote turns, and rendered timestamps are
+    truncated to whole seconds, so the fallback is a real but weaker signal.
+    Used per-block (F6) rather than per-label (F7's fragile first-write-wins
+    ``setdefault``), so one imprecise block no longer poisons a whole label.
+    """
+    if not intervals:
+        return None, False
+    containing = next(((s, e, sp) for s, e, sp in intervals if s <= t <= e), None)
+    if containing is not None:
+        return containing[2], True
+    nearest = min(intervals, key=lambda iv: abs(iv[0] - t))
+    return nearest[2], False
+
+
 def build_legacy_label_map(md_path: Path, segments: list) -> dict[str, str]:
     """Map raw pyannote labels -> current display name in the transcript body.
+
+    LEGACY FALLBACK ONLY (F7) -- used only when a transcript's ``_diar.json``
+    sidecar predates the persisted ``speaker_map`` key (see
+    ``resolve_current_names``, which is what every caller should go through).
 
     Reconstructed by matching markdown block timestamps against pyannote
     segment intervals: for each ``**display_name** *(HH:MM:SS)*`` line, find
@@ -67,33 +128,25 @@ def build_legacy_label_map(md_path: Path, segments: list) -> dict[str, str]:
     timestamp -- the segment's raw label is the one the aligner assigned to
     that whisper line. Falls back to the nearest segment by start time when
     no interval contains the timestamp exactly (whisper segment starts
-    routinely fall outside pyannote turns).
+    routinely fall outside pyannote turns). First-write-wins (``setdefault``)
+    across the whole transcript -- fragile if an early block is misattributed
+    (see ``_attribute_block_to_label``, which demotes this to a per-block
+    decision for the rename path itself).
 
     Returns raw_label -> display_name for every label that could be matched.
     On a *first* pass (no profiles enrolled yet, body still has raw labels)
     this naturally maps ``SPEAKER_00 -> "SPEAKER_00"`` since the markdown
     itself contains the raw label as the "display name". Callers that use
     this map to prefill a form must filter out those raw-label-valued
-    entries themselves (see ``resolve_current_names_for_template``) --
-    the POST/rename path wants the unfiltered map (raw-to-raw is a correct,
-    useful no-op target on a first pass).
+    entries themselves (see ``template_current_names``) -- the POST/rename
+    path wants the unfiltered map (raw-to-raw is a correct, useful no-op
+    target on a first pass).
     """
     import re as _re
 
     label_map: dict[str, str] = {}
     try:
-        intervals: list[tuple[float, float, str]] = []
-        for seg in segments:
-            if isinstance(seg, dict):
-                sp, start, end = seg.get("speaker"), seg.get("start"), seg.get("end")
-            else:
-                sp = getattr(seg, "speaker", None)
-                start = getattr(seg, "start", None)
-                end = getattr(seg, "end", None)
-            if sp is None or start is None or end is None:
-                continue
-            intervals.append((float(start), float(end), sp))
-
+        intervals = _segment_intervals(segments)
         if not intervals:
             return {}
 
@@ -106,23 +159,43 @@ def build_legacy_label_map(md_path: Path, segments: list) -> dict[str, str]:
             display = m.group(1)
             if display == "UNKNOWN":
                 continue
-            parts = m.group(2).split(":")
-            if len(parts) == 2:
-                t_sec = int(parts[0]) * 60 + int(parts[1])
-            else:
-                t_sec = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-            t = float(t_sec)
-            containing = next(
-                ((s, e, sp) for s, e, sp in intervals if s <= t <= e),
-                None,
-            )
-            if containing is None:
-                containing = min(intervals, key=lambda iv: abs(iv[0] - t))
-            raw_label = containing[2]
-            label_map.setdefault(raw_label, display)
+            t = _parse_md_timestamp(m.group(2))
+            raw_label, _confident = _attribute_block_to_label(t, intervals)
+            if raw_label is not None:
+                label_map.setdefault(raw_label, display)
     except Exception:
         pass
     return label_map
+
+
+def resolve_current_names(
+    md_path: Path, diar: Optional[dict], segments: list
+) -> dict[str, str]:
+    """Resolve raw_label -> current display name in the transcript body.
+
+    Single entry point (F7) for "what does this raw pyannote label currently
+    display as". Resolution order:
+
+    1. The authoritative ``speaker_map`` persisted in the enrollment sidecar
+       at transcript-write time (``diar["speaker_map"]``) -- exactly the map
+       the formatter used, no reconstruction needed.
+    2. ``build_legacy_label_map()``'s interval-matching heuristic, for
+       sidecars written before the ``speaker_map`` key existed (or when no
+       sidecar dict is available at all).
+
+    ``diar`` is the loaded ``_diar.json`` sidecar dict (or ``None``);
+    ``segments`` is the diarization segments to fall back on (accepts either
+    ``DiarizationSegment``-like objects or the sidecar's plain-dict form --
+    same normalisation as ``build_legacy_label_map``). Every caller that
+    needs this resolution -- both wizard GET routes (prefill) and
+    ``apply_renames`` (old-name resolution for the rename itself) -- goes
+    through this one function.
+    """
+    if diar:
+        speaker_map = diar.get("speaker_map")
+        if isinstance(speaker_map, dict) and speaker_map:
+            return dict(speaker_map)
+    return build_legacy_label_map(md_path, segments)
 
 
 def template_current_names(current_names: dict[str, str]) -> dict[str, str]:
@@ -159,6 +232,34 @@ class RenameResult:
     groups: dict[str, list[str]] = field(default_factory=dict)
 
 
+def _rewrite_frontmatter_names(content: str, old_to_new: dict[str, str]) -> str:
+    """Rewrite ``- name: OldName`` frontmatter lines in one simultaneous pass.
+
+    F6: a sequential loop of per-name regex substitutions over a mutating
+    string can't correctly handle a swap (Alice<->Bob renamed in the same
+    submit) or a new name colliding with another entry -- the second
+    substitution would match text the first one just wrote. Building one
+    alternation pattern and substituting via a lookup dict keyed off what
+    matched (not re-scanning the already-substituted result) applies every
+    pair against the ORIGINAL text in one pass, the same idea as
+    ``rewrite_transcript_blocks`` for the body.
+
+    This still edits the frontmatter with a regex rather than parsing and
+    re-dumping the YAML -- F11 (quoted names, the "Dan"/"Dan Smith" prefix
+    collision) is a separate, explicitly out-of-scope bug in the regex
+    itself. This function only fixes *which pass* sees the text; it
+    inherits F11's remaining blind spots unchanged.
+    """
+    import re as _re
+
+    if not old_to_new:
+        return content
+    pattern = _re.compile(
+        r"(- name: )(" + "|".join(_re.escape(n) for n in old_to_new) + r")"
+    )
+    return pattern.sub(lambda m: m.group(1) + old_to_new[m.group(2)], content)
+
+
 def apply_renames(
     md_path: Path,
     segments: list,
@@ -172,15 +273,32 @@ def apply_renames(
     request. ``segments`` must be ``DiarizationSegment``-like objects
     (attribute access) -- both callers normalise to that before calling in.
 
+    F6/F7 fix: renames are resolved against the sidecar's authoritative
+    ``speaker_map`` when available (``resolve_current_names``), and applied
+    to the transcript body in a single pass over the ORIGINAL content rather
+    than a sequential loop of global find/replace calls. Each markdown block
+    is attributed to a raw pyannote label *once* (by timestamp, falling back
+    to an unambiguous name match -- see ``_attribute_block_to_label``), and
+    only blocks whose raw label was actually renamed are rewritten
+    (``rewrite_transcript_blocks``). This is what makes a same-submit swap
+    (Alice<->Bob) and a shared-display-name rename (two raw labels both
+    currently "Dan", only one renamed) both come out correct -- neither is
+    representable as "replace this string with that string" the way the old
+    ``update_speaker_names`` loop required.
+
     Returns a ``RenameResult`` whose ``groups`` the caller hands to
     ``enroll_profiles()`` -- directly, or (the web routes' choice) via a
     ``JOB_ENROLL`` job so the slow embedding-extraction step doesn't block
     the response.
     """
-    from wisper_transcribe.formatter import update_speaker_names
+    import json as _json
+    from collections import Counter
+
+    from wisper_transcribe.formatter import parse_transcript_blocks, rewrite_transcript_blocks
     from wisper_transcribe.speaker_manager import load_profiles
 
-    current_names = build_legacy_label_map(md_path, segments)
+    diar = _load_diar_sidecar(md_path)
+    current_names = resolve_current_names(md_path, diar, segments)
 
     # F2: never rename/enroll a submission whose *new* name is itself
     # raw-label-shaped -- that means the field was left untouched.
@@ -204,14 +322,87 @@ def apply_renames(
         # changed and a profile already exists under that name.
         eligible_for_enroll[raw] = not (unchanged and profile_exists)
 
-    # --- Rename: single pass against the content read once, like before ---
+    # How many raw labels currently display each name -- >1 means a shared
+    # display name (legitimate after F3's many-to-one naming). Used both to
+    # gate the per-block name-based fallback and to keep the frontmatter
+    # rewrite from guessing at an ambiguous shared entry.
+    label_counts = Counter(current_names.values())
+
     content = md_path.read_text(encoding="utf-8")
-    for raw, new in valid.items():
-        old = old_names[raw]
-        if old == new:
-            continue
-        content = update_speaker_names(content, old, new)
+
+    if segments:
+        intervals = _segment_intervals(segments)
+        blocks = parse_transcript_blocks(content)
+        updated_speakers: dict[int, str] = {}
+        for block in blocks:
+            if not block["has_speaker"]:
+                continue
+            # `include_timestamps=False` (the web upload's "Include
+            # timestamps" option) renders blocks as "**Speaker**: text" with
+            # no "*(ts)*" at all -- there is no timing signal to attribute
+            # from, so go straight to the name-based fallback below rather
+            # than attributing against t=0.0 (which would look "confident"
+            # purely by accident whenever some segment happens to start at 0).
+            raw_label: Optional[str] = None
+            confident = False
+            if block["timestamp"]:
+                t = _parse_md_timestamp(block["timestamp"])
+                raw_label, confident = _attribute_block_to_label(t, intervals)
+            if not confident:
+                # The coarse nearest-timestamp guess is unreliable here --
+                # prefer an unambiguous name match instead (exactly one raw
+                # label currently displays this block's speaker name). If
+                # the name is itself shared (ambiguous), keep whatever the
+                # interval match already found (possibly None, if there was
+                # no timestamp at all) rather than guessing further -- it's
+                # imprecise but the best available signal, and per-block
+                # (not per-label) so a bad guess here can't poison anything
+                # beyond this one block.
+                candidates = [
+                    r for r in current_names if current_names[r] == block["speaker"]
+                ]
+                if len(candidates) == 1:
+                    raw_label = candidates[0]
+            if raw_label is None or raw_label not in valid:
+                continue
+            new_name = valid[raw_label]
+            if new_name == old_names[raw_label]:
+                continue
+            updated_speakers[block["index"]] = new_name
+
+        if updated_speakers:
+            content = rewrite_transcript_blocks(content, updated_speakers)
+
+    # Frontmatter `speakers:` list -- still name-keyed (F11's YAML-parsing
+    # rework is out of scope), but resolved in one simultaneous pass instead
+    # of a sequential loop so a swap/collision doesn't cross-contaminate
+    # here either. Skip any old name shared by more than one raw label --
+    # the frontmatter list has no way to represent "two people, one name",
+    # so an ambiguous entry is left alone rather than guessed at.
+    frontmatter_renames = {
+        old_names[raw]: new
+        for raw, new in valid.items()
+        if old_names[raw] != new and label_counts.get(old_names[raw], 0) <= 1
+    }
+    if frontmatter_renames:
+        content = _rewrite_frontmatter_names(content, frontmatter_renames)
+
     md_path.write_text(content, encoding="utf-8")
+
+    # F7: keep the sidecar's speaker_map authoritative across wizard
+    # re-entries -- every raw label submitted (renamed or resubmitted
+    # unchanged) gets its current resolved name recorded, so the next GET
+    # prefill and the next apply_renames() call both resolve from here
+    # instead of re-deriving from rendered markdown.
+    if diar is not None:
+        updated_map = dict(current_names)
+        updated_map.update(valid)
+        diar["speaker_map"] = updated_map
+        try:
+            sidecar_path = md_path.with_name(md_path.stem + "_diar.json")
+            sidecar_path.write_text(_json.dumps(diar, indent=2), encoding="utf-8")
+        except Exception:
+            pass
 
     if not segments:
         return RenameResult(current_names, groups={})
