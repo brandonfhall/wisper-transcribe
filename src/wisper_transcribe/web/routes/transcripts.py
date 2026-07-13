@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html as _html_module
+import json
 import os
 from html.parser import HTMLParser
 from pathlib import Path
@@ -117,6 +118,53 @@ def _get_safe_content_path(request: Request, name: str, suffix: str) -> Path | N
     return Path(target_path)
 
 
+def _delete_diar_sidecar_and_audio(request: Request, name: str) -> None:
+    """Remove the ``_diar.json`` enrollment sidecar and the durable audio copy
+    it points to, if any.
+
+    F5 decision: the audio file living next to a transcript exists solely to
+    back the enrollment wizard (it was moved there from the tempdir by
+    ``_move_upload_to_output`` in ``web/jobs.py``). Once the transcript is
+    deleted there's nothing left to enroll against, so leaving that audio
+    file (and the now-dangling sidecar referencing it) behind would be a
+    permanent leak -- the exact kind of leak F5 was fixing in the first
+    place, just relocated from the tempdir to the output dir. Deleting both
+    here keeps that promise. Excerpt clips (``*_excerpt_*.mp3``/``.txt``) are
+    a separate, pre-existing concern (F9/F10) and are intentionally left
+    untouched.
+    """
+    diar_path = _get_safe_content_path(request, name, "_diar.json")
+    if not diar_path or not diar_path.exists():
+        return
+
+    try:
+        diar = json.loads(diar_path.read_text(encoding="utf-8"))
+        stored_input_path = diar.get("input_path")
+    except Exception:
+        stored_input_path = None
+
+    if stored_input_path:
+        # Only delete the referenced audio if it actually resolves inside the
+        # output dir -- i.e. it's the durable moved copy, not some external
+        # user file (legacy sidecars from before the F5 fix may still point
+        # at a tempdir path, which must never be touched here).
+        out_dir = get_output_dir().resolve()
+        base_dir = os.path.abspath(str(out_dir))
+        if not base_dir.endswith(os.sep):
+            base_dir += os.sep
+        candidate_abs = os.path.abspath(stored_input_path)
+        if candidate_abs.startswith(base_dir):
+            try:
+                Path(candidate_abs).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    try:
+        diar_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 @router.get("/partials/recent", response_class=HTMLResponse)
 async def recent_transcripts_partial(request: Request) -> HTMLResponse:
     """HTMX partial: 6 most recent transcripts for the dashboard archive section."""
@@ -199,6 +247,7 @@ async def bulk_delete_transcripts(request: Request) -> HTMLResponse:
         summary = _get_safe_content_path(request, stem, ".summary.md")
         if summary and summary.exists():
             summary.unlink()
+        _delete_diar_sidecar_and_audio(request, stem)
     return HTMLResponse(content="", status_code=303, headers={"Location": "/transcripts"})
 
 
@@ -309,6 +358,9 @@ async def delete_transcript(request: Request, name: str) -> HTMLResponse:
     summary_path = _get_safe_content_path(request, name, ".summary.md")
     if summary_path and summary_path.exists():
         summary_path.unlink()
+    # F5: also remove the enrollment sidecar and the durable audio copy it
+    # references -- see _delete_diar_sidecar_and_audio for the reasoning.
+    _delete_diar_sidecar_and_audio(request, name)
     return HTMLResponse(
         content="",
         status_code=303,
@@ -610,6 +662,13 @@ async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
                 break
 
     from wisper_transcribe.speaker_manager import load_profiles
+
+    # F5: warn before submission when the sidecar's recorded input_path is
+    # gone (e.g. transcript predates the move-to-output fix, or the move
+    # failed) rather than letting the wizard silently rename-only on submit.
+    diar_input_path = diar.get("input_path", "")
+    audio_missing = not (diar_input_path and Path(diar_input_path).exists())
+
     return templates.TemplateResponse(
         request,
         "speaker_enroll.html",
@@ -631,6 +690,7 @@ async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
             # are filtered out so the input starts empty rather than
             # prefilled with "SPEAKER_00" (F2) -- see template_current_names.
             "current_names": template_current_names(legacy_label_map),
+            "audio_missing": audio_missing,
         },
     )
 
@@ -678,7 +738,7 @@ async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
     if device == "auto":
         device = get_device()
 
-    apply_enrollment_submit(
+    result = apply_enrollment_submit(
         md_path=md_path,
         segments=raw_segments,
         input_path=input_path,
@@ -687,9 +747,12 @@ async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
         renames=renames,
     )
 
+    location = f"/transcripts/{quote(name)}"
+    if result.audio_missing:
+        location += "?notice=enroll_audio_missing"
     return HTMLResponse(
         content="", status_code=303,
-        headers={"Location": f"/transcripts/{quote(name)}"},
+        headers={"Location": location},
     )
 
 

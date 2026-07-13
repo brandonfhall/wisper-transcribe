@@ -110,11 +110,15 @@ See `architecture.md` → "Speaker Enrollment Web Flow" for the full current des
 
 **Fix direction:** score all (label × profile) pairs, assign greedily over the full pair list (or Hungarian), allowing a label to fall back to its next-best unused profile above threshold. Consider allowing many-to-one matching (two labels → same profile) since over-segmentation of one speaker is common — exclusivity is the wrong invariant when `num_speakers` wasn't pinned.
 
-### F5 — MEDIUM-HIGH — Sidecar `input_path` points at a temp upload the startup sweep deletes
+### F5 — Fixed in phase 2 (2026-07-12, branch `fix/enrollment-audit`)
 
-`_write_enrollment_sidecar` (`web/jobs.py:98`) persists `job.input_path` — a `wisper_upload_*` file in the OS tempdir. That file is (a) never deleted when the job completes (disk leak until restart), and (b) **deleted for *all* jobs by `_cleanup_orphaned_uploads()` on every server restart** (`app.py:63`). So after any restart, the "restart-safe" wizard can still rename but `transcript_enroll_submit` hits `input_path.exists() == False` (`transcripts.py:760`) and **silently skips voice enrollment** — `log.warning` only; the browser gets a normal redirect and the user believes enrollment succeeded. Future sessions then can't identify those speakers.
+Moved the temp web-upload audio next to its transcript at job completion instead of leaving it in the OS tempdir:
+- `JobQueue.submit()` now captures `Job.is_web_upload` from the *original* `wisper_upload_*` basename before the friendly-name rename strips that prefix. On completion with diarization data, `_move_upload_to_output()` (`web/jobs.py`) moves the file into the output dir as `<stem><suffix>` (collision-safe counter suffix) and `job.input_path` is updated to that durable path before the `_diar.json` sidecar is written — so the sidecar's `input_path` survives restarts instead of pointing at a file `_cleanup_orphaned_uploads()` (or a lucky crash) already deleted.
+- When a job completes with no diarization data (no sidecar will ever be written to record a moved file's path) or fails/is cancelled, the temp file is deleted instead of moved — closing the original disk leak.
+- `apply_enrollment_submit()` now returns an `EnrollmentResult(current_names, audio_missing)` instead of a bare dict; both POST routes redirect with a generic `?notice=enroll_audio_missing` flag (no paths/exception text) when enrollment was skipped, and `transcript_detail.html` shows a banner explaining that names were updated but enrollment didn't run. Both GET wizard routes also show a pre-submit warning banner when the recorded audio path is missing.
+- `POST /transcripts/{name}/delete` (and the bulk-delete route) now also delete `<stem>_diar.json` and the durable audio file it references — that audio exists only to back the wizard for the (now-deleted) transcript, so leaving it behind would be a permanent leak in the same spot F5 just fixed. The delete only targets paths that resolve inside the output dir, so legacy sidecars still pointing at a tempdir path are left untouched.
 
-**Fix direction:** copy (or move) the source audio next to the transcript (or into `data_dir`) when writing the sidecar, and point `input_path` at the durable copy; surface "enrollment skipped — source audio missing" in the UI instead of silently succeeding. The completed-job temp file should then be deleted eagerly at job end (fixes the leak too).
+See `architecture.md` → "Job Queue" and "Speaker Enrollment Web Flow" for the full current design. F4, F6–F11 below are unaffected and still open.
 
 ### F6 — MEDIUM — Sequential global renames cross-contaminate
 
@@ -161,7 +165,7 @@ The 12 s excerpt is cut at the label's *first* aligned occurrence (`jobs.py:133-
 ### Suggested fix order
 
 1. ~~**F1 + F2 + F3**~~ — done, see "F1/F2/F3 — Fixed in phase 1" above.
-2. **F5** — durable audio copy + eager temp cleanup + UI feedback on skipped enrollment. Unblocks post-restart enrollment.
+2. ~~**F5**~~ — done, see "F5 — Fixed in phase 2" above.
 3. **F6 + F7** — block-level single-pass rename keyed by persisted label map. Note: `_build_legacy_label_map` (now `build_legacy_label_map` in `web/enroll_shared.py`) still has the interval-matching fragility described in F7 — phase 1 unified *where* it's called from, not the matching heuristic itself.
 4. **F4** — assignment algorithm rework (pair-scored greedy, optional many-to-one).
 5. **F8** — word-timestamp alignment (biggest quality win, most testing needed).

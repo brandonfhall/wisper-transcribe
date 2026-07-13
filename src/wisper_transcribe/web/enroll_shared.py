@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -126,6 +127,26 @@ def template_current_names(current_names: dict[str, str]) -> dict[str, str]:
     return {k: v for k, v in current_names.items() if not RAW_LABEL_RE.match(v)}
 
 
+@dataclass
+class EnrollmentResult:
+    """Outcome of ``apply_enrollment_submit``, for callers/tests that need to
+    tell "renamed + enrolled" apart from "renamed only, audio missing" (F5).
+
+    ``current_names`` is the (unfiltered) current_names map used to resolve
+    renames -- kept for callers/tests that want to inspect it, same as the
+    plain dict this function used to return.
+
+    ``audio_missing`` is True only when there was at least one rename that
+    *would* have triggered an enroll/update step (i.e. renaming actually
+    happened and something was eligible for enrollment) but the source audio
+    file could not be found on disk. Routes use this to surface a notice
+    instead of a silent success redirect.
+    """
+
+    current_names: dict[str, str] = field(default_factory=dict)
+    audio_missing: bool = False
+
+
 def apply_enrollment_submit(
     *,
     md_path: Path,
@@ -135,14 +156,14 @@ def apply_enrollment_submit(
     device: str,
     renames: dict[str, str],
     data_dir=None,
-) -> dict[str, str]:
+) -> EnrollmentResult:
     """Apply a wizard submission: rename in the transcript, enroll/update profiles.
 
     ``segments`` must be ``DiarizationSegment``-like objects (attribute
     access) -- both callers normalise to that before calling in.
 
-    Returns the (unfiltered) current_names map used to resolve renames, for
-    callers/tests that want to inspect it.
+    Returns an ``EnrollmentResult`` -- see its docstring for what
+    ``audio_missing`` means and why callers care.
     """
     from wisper_transcribe.formatter import update_speaker_names
     from wisper_transcribe.speaker_manager import load_profiles
@@ -155,7 +176,7 @@ def apply_enrollment_submit(
         raw: new for raw, new in renames.items() if not RAW_LABEL_RE.match(new)
     }
     if not valid:
-        return current_names
+        return EnrollmentResult(current_names, audio_missing=False)
 
     existing_profiles = load_profiles(data_dir)
 
@@ -181,10 +202,7 @@ def apply_enrollment_submit(
     md_path.write_text(content, encoding="utf-8")
 
     if not segments:
-        return current_names
-    if not input_path.exists():
-        log.warning("Enrollment skipped: source audio not found at %s", input_path)
-        return current_names
+        return EnrollmentResult(current_names, audio_missing=False)
 
     # Group eligible raw labels by target display name -- handles two raw
     # labels being assigned the same display name in one submit (F3).
@@ -195,7 +213,15 @@ def apply_enrollment_submit(
         groups.setdefault(new, []).append(raw)
 
     if not groups:
-        return current_names
+        return EnrollmentResult(current_names, audio_missing=False)
+
+    # F5: only *now* -- once we know there's actually something eligible to
+    # enroll -- do we check for audio. Checking earlier would flag
+    # audio_missing even when every rename was a no-op that wouldn't have
+    # touched the audio anyway.
+    if not input_path.exists():
+        log.warning("Enrollment skipped: source audio not found at %s", input_path)
+        return EnrollmentResult(current_names, audio_missing=True)
 
     import numpy as np
 
@@ -263,4 +289,4 @@ def apply_enrollment_submit(
         if wav_path != input_path and wav_path.exists():
             wav_path.unlink(missing_ok=True)
 
-    return current_names
+    return EnrollmentResult(current_names, audio_missing=False)

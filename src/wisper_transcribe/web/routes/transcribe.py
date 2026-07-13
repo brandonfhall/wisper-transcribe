@@ -284,6 +284,11 @@ async def enroll_form(request: Request, job_id: str) -> Response:
 
     profiles = load_profiles()
 
+    # F5: warn before submission when the source audio is gone (e.g. after a
+    # restart, if the move-to-output ever failed) rather than letting the
+    # wizard silently rename-only on submit.
+    audio_missing = not (job.input_path and Path(job.input_path).exists())
+
     # Load persisted transcript text snippets for each speaker (written as
     # <stem>_excerpt_<speaker>.txt alongside the clip files).
     import re as _re
@@ -315,6 +320,7 @@ async def enroll_form(request: Request, job_id: str) -> Response:
             "speaker_excerpts": job.speaker_excerpts,
             "speaker_excerpt_texts": speaker_excerpt_texts,
             "current_names": current_names,
+            "audio_missing": audio_missing,
         },
     )
 
@@ -375,6 +381,7 @@ async def enroll_submit(request: Request, job_id: str) -> Response:
             old_name = key[len("speaker_"):]
             renames[old_name] = str(value).strip()
 
+    audio_missing = False
     if renames:
         # Rename + enroll/update voice profiles via the shared handler
         # (unifies this legacy job-centric path with the transcript-centric
@@ -389,7 +396,7 @@ async def enroll_submit(request: Request, job_id: str) -> Response:
             device = get_device()
         campaign_slug = job.kwargs.get("campaign")
 
-        apply_enrollment_submit(
+        result = apply_enrollment_submit(
             md_path=Path(job.output_path),
             segments=job.diarization_segments,
             input_path=Path(job.input_path),
@@ -397,6 +404,10 @@ async def enroll_submit(request: Request, job_id: str) -> Response:
             device=device,
             renames=renames,
         )
+        audio_missing = result.audio_missing
 
     transcript_name = Path(job.output_path).stem
-    return RedirectResponse(url=f"/transcripts/{quote(transcript_name, safe='')}", status_code=303)
+    url = f"/transcripts/{quote(transcript_name, safe='')}"
+    if audio_missing:
+        url += "?notice=enroll_audio_missing"
+    return RedirectResponse(url=url, status_code=303)

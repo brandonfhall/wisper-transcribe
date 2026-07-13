@@ -108,6 +108,71 @@ def _write_enrollment_sidecar(job: "Job", output_path: "Path") -> None:  # type:
         pass
 
 
+def _move_upload_to_output(input_path: str, output_path: "Path") -> str:  # type: ignore[name-defined]
+    """Move a temp web-upload file next to its finished transcript.
+
+    F5 fix: web uploads land in a ``wisper_upload_*`` NamedTemporaryFile in the
+    OS tempdir (renamed to a friendly ``<original_stem><suffix>`` name by
+    ``JobQueue.submit`` before the job even starts — see ``Job.is_web_upload``
+    for why the *original* prefix is captured at submit time rather than
+    re-derived from the current basename here).  That file is never cleaned
+    up when a job completes, and the startup orphan sweep only recognises the
+    unrenamed ``wisper_upload_*`` prefix, so it leaks until a lucky restart
+    happens to catch it mid-flight.  Moving it next to the transcript makes it
+    durable (the enrollment sidecar's ``input_path`` then survives restarts)
+    and removes it from the tempdir, closing the leak.
+
+    Returns the new durable path as a string, or the original ``input_path``
+    unchanged if the source is missing or the move fails for any reason —
+    callers should treat that as "enrollment audio may be unavailable" rather
+    than a hard failure, since the transcript itself is already written.
+    """
+    import shutil
+    from pathlib import Path as _Path
+
+    src = _Path(input_path)
+    if not src.exists():
+        return input_path
+
+    out = _Path(output_path)
+    out_dir = out.parent
+    stem = out.stem
+    suffix = src.suffix
+
+    dest = out_dir / f"{stem}{suffix}"
+    counter = 1
+    while dest.exists():
+        dest = out_dir / f"{stem}_{counter}{suffix}"
+        counter += 1
+
+    try:
+        shutil.move(str(src), str(dest))
+    except OSError:
+        return input_path
+    return str(dest)
+
+
+def _delete_temp_upload(job: "Job") -> None:  # type: ignore[name-defined]
+    """Delete the job's temp web-upload file on failure/cancel.
+
+    Only ever acts on files ``Job.is_web_upload`` marks as originating from a
+    ``wisper_upload_*`` temp file — recording-sourced or other durable inputs
+    are never touched.  A failed/cancelled job never reaches
+    ``_move_upload_to_output``, so the temp file would otherwise sit in the
+    tempdir leaking disk until the next server restart.
+    """
+    if not job.is_web_upload:
+        return
+    from pathlib import Path as _Path
+
+    try:
+        p = _Path(job.input_path)
+        if p.exists():
+            p.unlink()
+    except OSError:
+        pass
+
+
 def _extract_speaker_excerpts(job: "Job", output_path: "Path",  # type: ignore[name-defined]
                               aligned_segments: list | None = None) -> None:
     """Extract a short audio clip per speaker from the transcribed file.
@@ -211,6 +276,12 @@ class Job:
     llm_transcript_path: Optional[str] = None
     # For summarize jobs: path to the generated .summary.md file
     summary_path: Optional[str] = None
+    # True when input_path originated from a wisper_upload_* temp file (set by
+    # JobQueue.submit from the *original* basename before the friendly-name
+    # rename below strips that prefix).  Drives the F5 move-to-output and
+    # failure-path cleanup — recording-sourced or other durable inputs must
+    # never be moved or deleted.
+    is_web_upload: bool = False
 
     @property
     def needs_extraction(self) -> bool:
@@ -286,6 +357,12 @@ class JobQueue:
         if not original_stem:
             original_stem = Path(input_path).stem
 
+        # Capture the web-upload marker from the *original* basename before
+        # the friendly-name rename below strips the "wisper_upload_" prefix
+        # (F5: the renamed file still lives in the tempdir and must still be
+        # recognised as a temp upload at job-completion/failure time).
+        is_web_upload = Path(input_path).name.startswith("wisper_upload_")
+
         # Rename temp file so process_file writes <stem>.md instead of a UUID
         tmp_path = Path(input_path)
         if tmp_path.exists() and tmp_path.stem != original_stem:
@@ -303,6 +380,7 @@ class JobQueue:
             job_type=JOB_TRANSCRIPTION,
             post_refine=post_refine,
             post_summarize=post_summarize,
+            is_web_upload=is_web_upload,
         )
         self._jobs[job.id] = job
         if on_complete is not None:
@@ -445,6 +523,29 @@ class JobQueue:
             output_path = process_file(Path(job.input_path), _result_store=_result_store, job_id=job.id, **job.kwargs)
             job.diarization_segments = _result_store.get("diarization_segments", [])
             job.output_path = str(output_path)
+
+            # F5: move the temp web upload next to the transcript so the
+            # enrollment sidecar's input_path is durable across restarts and
+            # the tempdir copy doesn't leak. Must happen before excerpt
+            # extraction and the sidecar write so both use the durable path.
+            #
+            # Only move it when there's diarization data: no segments means
+            # _write_enrollment_sidecar (below) never writes a _diar.json, so
+            # a moved copy would sit in the output dir with nothing recording
+            # its path -- an unreclaimable leak in exactly the spot F5 is
+            # fixing. With no enrollment wizard possible, just delete the temp
+            # file, same as the failure path.
+            if job.is_web_upload:
+                if job.diarization_segments:
+                    job.input_path = _move_upload_to_output(job.input_path, output_path)
+                else:
+                    _delete_temp_upload(job)
+                # Either way the temp-upload obligation is discharged: never
+                # let a later failure (e.g. in post-processing) fall into the
+                # except-block cleanup and delete what is now either the
+                # user's durable transcript-adjacent audio or already gone.
+                job.is_web_upload = False
+
             _extract_speaker_excerpts(job, output_path,
                                       aligned_segments=_result_store.get("aligned_segments", []))
             _write_enrollment_sidecar(job, output_path)
@@ -464,9 +565,11 @@ class JobQueue:
         except InterruptedError:
             job.status = FAILED
             job.error = "Cancelled"
+            _delete_temp_upload(job)
         except Exception as exc:
             job.status = FAILED
             job.error = str(exc)
+            _delete_temp_upload(job)
             raise
         finally:
             _tqdm_module.tqdm.write = original_write  # type: ignore[method-assign]

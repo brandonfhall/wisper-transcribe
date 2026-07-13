@@ -1045,6 +1045,63 @@ def test_delete_transcript_also_removes_summary(client, tmp_path):
     assert not sm.exists()
 
 
+def test_delete_transcript_also_removes_diar_sidecar_and_audio(client, tmp_path):
+    """(g) F5: deleting a transcript must also remove the _diar.json sidecar
+    and the durable audio copy it references -- that audio exists only to
+    back the (now-deleted) transcript's enrollment wizard, so leaving it
+    behind would be a permanent leak."""
+    import json
+
+    md = tmp_path / "session01.md"
+    md.write_text(_TRANSCRIPT_MD)
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake-audio")
+    diar = tmp_path / "session01_diar.json"
+    diar.write_text(json.dumps({
+        "input_path": str(audio),
+        "campaign": None,
+        "diarization_segments": [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}],
+    }), encoding="utf-8")
+
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
+        resp = client.post("/transcripts/session01/delete", follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert not md.exists()
+    assert not audio.exists()
+    assert not diar.exists()
+
+
+def test_delete_transcript_never_deletes_audio_outside_output_dir(client, tmp_path):
+    """A legacy sidecar pointing at a path outside the output dir (e.g. a
+    pre-F5 tempdir path) must never be deleted by the transcript-delete
+    route -- only durable copies that actually live in the output dir."""
+    import json
+
+    md = tmp_path / "session01.md"
+    md.write_text(_TRANSCRIPT_MD)
+    outside_dir = tmp_path.parent / "outside_audio_dir"
+    outside_dir.mkdir(exist_ok=True)
+    outside_audio = outside_dir / "session01.mp3"
+    outside_audio.write_bytes(b"fake-audio")
+    diar = tmp_path / "session01_diar.json"
+    diar.write_text(json.dumps({
+        "input_path": str(outside_audio),
+        "campaign": None,
+        "diarization_segments": [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}],
+    }), encoding="utf-8")
+
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
+        resp = client.post("/transcripts/session01/delete", follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert not md.exists()
+    assert not diar.exists()
+    assert outside_audio.exists()
+    outside_audio.unlink()
+    outside_dir.rmdir()
+
+
 def test_transcribe_post_processing_flags_set_on_job(client, tmp_path):
     """Toggle checkboxes send 'on'; the job must have post_refine/post_summarize=True."""
     audio_file = tmp_path / "test.mp3"

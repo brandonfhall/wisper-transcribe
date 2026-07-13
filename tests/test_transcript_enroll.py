@@ -292,6 +292,97 @@ def test_enroll_submit_skips_enroll_when_audio_missing(
     mock_enroll.assert_not_called()
 
 
+def test_enroll_submit_redirects_with_notice_when_audio_missing(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """(e) When enrollment is skipped due to missing audio, the redirect must
+    carry a generic notice flag (no paths/exception text) so the detail page
+    can tell the user."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    diar = {**_SAMPLE_DIAR, "input_path": "/nonexistent/audio.mp3"}
+    _write_transcript(tmp_path, diar=diar)
+
+    with _patch_output(tmp_path), \
+         patch("wisper_transcribe.speaker_manager.enroll_speaker"):
+        resp = client.post(
+            "/transcripts/session01/enroll",
+            data={"speaker_SPEAKER_00": "Alice"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    location = resp.headers["location"]
+    assert location == "/transcripts/session01?notice=enroll_audio_missing"
+
+
+def test_enroll_submit_no_notice_when_audio_present(
+    client: TestClient, tmp_path: Path
+):
+    """No renamed-but-skipped notice when enrollment actually succeeds."""
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake-mp3")
+    diar = {**_SAMPLE_DIAR, "input_path": str(audio)}
+    _write_transcript(tmp_path, diar=diar)
+
+    with _patch_output(tmp_path), \
+         patch("wisper_transcribe.speaker_manager.enroll_speaker"), \
+         patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=lambda p: p):
+        resp = client.post(
+            "/transcripts/session01/enroll",
+            data={"speaker_SPEAKER_00": "Alice"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/transcripts/session01"
+
+
+def test_transcript_detail_shows_notice_banner(client: TestClient, tmp_path: Path):
+    """(e) The transcript detail page renders the skipped-enrollment notice
+    when the redirect included the generic ?notice=enroll_audio_missing flag."""
+    _write_transcript(tmp_path)
+    with _patch_output(tmp_path):
+        resp = client.get("/transcripts/session01?notice=enroll_audio_missing")
+    assert resp.status_code == 200
+    body = resp.content.decode()
+    assert "voice enrollment was skipped" in body.lower()
+
+
+def test_transcript_detail_no_banner_without_notice(client: TestClient, tmp_path: Path):
+    _write_transcript(tmp_path)
+    with _patch_output(tmp_path):
+        resp = client.get("/transcripts/session01")
+    assert resp.status_code == 200
+    body = resp.content.decode()
+    assert "voice enrollment was skipped" not in body.lower()
+
+
+def test_enroll_form_shows_audio_missing_banner(client: TestClient, tmp_path: Path):
+    """(f) GET wizard renders a warning banner when the sidecar's input_path
+    doesn't exist, so users know before they submit."""
+    diar = {**_SAMPLE_DIAR, "input_path": "/nonexistent/audio.mp3"}
+    _write_transcript(tmp_path, diar=diar)
+    with _patch_output(tmp_path), \
+         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        resp = client.get("/transcripts/session01/enroll")
+    assert resp.status_code == 200
+    body = resp.content.decode()
+    assert "voice enrollment unavailable" in body.lower()
+
+
+def test_enroll_form_no_banner_when_audio_present(client: TestClient, tmp_path: Path):
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake-mp3")
+    diar = {**_SAMPLE_DIAR, "input_path": str(audio)}
+    _write_transcript(tmp_path, diar=diar)
+    with _patch_output(tmp_path), \
+         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        resp = client.get("/transcripts/session01/enroll")
+    assert resp.status_code == 200
+    body = resp.content.decode()
+    assert "voice enrollment unavailable" not in body.lower()
+
+
 def test_enroll_submit_adds_to_campaign(
     client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
