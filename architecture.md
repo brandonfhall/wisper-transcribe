@@ -30,7 +30,7 @@ src/wisper_transcribe/
 ├── diarizer.py         pyannote pipeline wrapper, lazy cache (_pipeline), uses load_wav_as_tensor() from audio_utils
 ├── _noise_suppress.py  Centralised third-party warning/logging suppression (Lightning, pyannote, speechbrain); safe to call from subprocesses
 ├── debug_log.py        Centralized logging controller (Logger class); activated by --debug (file) and/or --verbose (console); tees tqdm.write() + Python logging to ./logs/wisper_<ts>.log
-├── aligner.py          Merge transcription segments with diarization labels (max-overlap)
+├── aligner.py          Merge transcription segments with diarization labels; word-level splitting at turn boundaries when word timestamps are available, whole-segment max-overlap fallback otherwise (F8)
 ├── speaker_manager.py  Profile CRUD, embedding extraction, cosine-similarity matching, EMA updates; enroll_speaker_from_audio_dir() for per-user track enrollment (Phase 6); enroll_speaker() accepts an optional precomputed embedding= (skips its internal extract_embedding() call) so callers can average embeddings from multiple raw diarization labels before saving
 ├── formatter.py        Markdown output, YAML frontmatter, dynamic version from __version__; parse_transcript_blocks() and rewrite_transcript_blocks() for per-line speaker editing (both match the timestamped `**Speaker** *(ts)*: text` and timestamp-free `**Speaker**: text` forms — the latter is what `include_timestamps=False` renders)
 ├── audio_utils.py      validate_audio(), convert_to_wav(), get_duration(), load_wav_as_tensor(); VIDEO_EXTENSIONS / AUDIO_EXTENSIONS sets
@@ -41,7 +41,7 @@ src/wisper_transcribe/
 ├── recording_manager.py Recording CRUD: load/save/create/delete recordings, append_segment() with per-recording mutex, reconcile_on_startup() crash recovery, _validate_recording_id() delegates to path_utils
 ├── web/discord_bot.py  BotManager: start()/stop() lifecycle, start_session()/stop_session(), _session_loop with auto-rejoin (backoff [2,5,15,30,60]s), _route_frame → SegmentedOggWriter + RealtimePCMMixer + auto-tag via lookup_profile_by_discord_id() + unbound_speakers tracking, _handle_disconnect (transient/permanent close code split), _finalise; injectable audio_source_factory for testing; _unix_socket_source launches JDA sidecar subprocess (Java 25, JDAVE 0.1.8), _find_sidecar_jar() for JAR discovery, _read_frame() parses length-prefixed wire protocol over Unix socket
 ├── web/routes/record.py Full recording UI: JSON API /api/record/{start,stop,status} + /api/record/channels (Discord REST proxy — lists guilds + voice channels via bot token), /api/recordings (list), /api/recordings/{id} (detail/transcribe/delete stubs) + HTML routes GET /record (includes channel-browser panel), POST /record/{start,stop}, GET /record/sse (SSE stream), GET /recordings (campaign-grouped list), GET /recordings/{id}, POST /recordings/{id}/enroll, POST /recordings/{id}/transcribe, POST /recordings/{id}/delete, GET /recordings/{id}/live (501 placeholder); _validate_recording_id() + _uid_guard path-traversal guards; Discord preset quick-select dropdown; pre-fills default guild/channel from config
-├── models.py           Dataclasses: TranscriptionSegment, DiarizationSegment, AlignedSegment, SpeakerProfile, CampaignMember (+ discord_user_id), Campaign, Recording (+ unbound_speakers), SegmentRecord, RejoinAttempt, Edit, SpeakerSuggestion, LootChange, NPCMention, SummaryNote
+├── models.py           Dataclasses: Word, TranscriptionSegment (+ words: Optional[list[Word]]), DiarizationSegment, AlignedSegment, SpeakerProfile, CampaignMember (+ discord_user_id), Campaign, Recording (+ unbound_speakers), SegmentRecord, RejoinAttempt, Edit, SpeakerSuggestion, LootChange, NPCMention, SummaryNote
 ├── refine.py           LLM-driven transcript refinement: vocabulary correction + unknown-speaker ID (edit-distance guarded, frontmatter-preserving)
 ├── summarize.py        Campaign-notes generation (session recap, loot, NPCs, follow-ups) → Obsidian-ready sidecar markdown
 ├── llm/                Provider-agnostic LLM client package (Ollama, LM Studio, Anthropic, OpenAI, Google)
@@ -97,16 +97,24 @@ Audio file
    • faster-whisper (CTranslate2) by default          • pyannote Pipeline (lazy-loaded, cached)
    • MLX Whisper on Apple Silicon if available        • Audio loaded via scipy.io.wavfile
      (use_mlx=auto + macOS + MPS + mlx-whisper)       • Passed as tensor dict to pipeline
-   • Returns List[TranscriptionSegment]               • Returns List[DiarizationSegment]
-   • Each segment: start, end, text                   • Each segment: start, end, speaker label
+   • word_timestamps=True on both backends            • Returns List[DiarizationSegment]
+   • Returns List[TranscriptionSegment]                • Each segment: start, end, speaker label
+   • Each segment: start, end, text, words (list[Word])
    Steps 3+4 run concurrently when parallel_stages=True (ProcessPoolExecutor; each subprocess isolates model globals)
     │                                                      │
     └──────────────────┬───────────────────────────────────┘
                        ▼
                5. ALIGN          aligner.align()
-                  • Max-overlap strategy: each transcription segment
-                    gets the speaker label with most time overlap
-                  • Unmatched segments labeled "UNKNOWN"
+                  • Word-level strategy (F8): each word is assigned to the
+                    diarization turn with max time overlap (nearest turn by
+                    word-midpoint distance if none overlaps); consecutive
+                    same-speaker words are grouped into one AlignedSegment
+                    per run, so a segment spanning multiple speaker turns
+                    splits at the turn boundary instead of being attributed
+                    wholesale to the majority speaker
+                  • Whole-segment max-overlap fallback for segments without
+                    word data (None/empty `words` — legacy callers, mocks)
+                  • Unmatched words/segments labeled "UNKNOWN"
                   • Returns List[AlignedSegment]
                        │
                        ▼

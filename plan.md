@@ -128,11 +128,17 @@ Replaced the reconstructed, fragile raw-label→display-name map with a persiste
 
 See `architecture.md` → "Speaker Enrollment Web Flow" for the full current design.
 
-### F8 — MEDIUM — Aligner granularity: whole-Whisper-segment, winner-take-all
+### F8 — Fixed in phase 5 (2026-07-13, branch `fix/enrollment-audit`)
 
-`aligner.py` assigns each whisper segment to the single diarization turn with max overlap. Whisper segments in conversational audio routinely span 2+ speaker turns, so the minority speaker's words are attributed to the majority speaker. `word_timestamps` is **not enabled** on the faster-whisper path (`transcriber.py:192-199`; only the MLX path requests it, and even there the aligner ignores words). This is the structural ceiling on "properly separate voices" — no enrollment fix can recover text that was merged at alignment time.
+`aligner.py` used to assign each whisper segment to the single diarization turn with max overlap, so a segment spanning 2+ speaker turns had the minority speaker's words attributed to the majority speaker — the structural ceiling on "properly separate voices," since no enrollment fix could recover text merged at alignment time.
 
-**Fix direction:** enable `word_timestamps=True` in faster-whisper and split whisper segments at diarization turn boundaries (assign words to turns, re-group). CPU cost is modest; accuracy gain on multi-speaker audio is large.
+Fixed by requesting word timestamps on both transcription backends and rewriting `align()` to split at word boundaries:
+- `transcriber.py` now passes `word_timestamps=True` to the faster-whisper `_model.transcribe()` call (the MLX path already requested it but discarded the words) and both paths build a `words: list[Word]` on each `TranscriptionSegment` (`Word(start, end, text)`, leading-space stripped from faster-whisper's `.word`).
+- `aligner.align()`: when a segment has words, each word is assigned to the diarization turn with max time overlap; a word overlapping no turn inherits the nearest turn's speaker by word-midpoint distance; with no diarization at all, a word inherits the previous word's speaker (UNKNOWN for the first). Consecutive same-speaker words are grouped into one `AlignedSegment` per run, so a segment inside one turn still yields exactly one segment, and an A/B/A sandwich yields three. Segments without word data (`None`/`[]` — legacy callers, mocked tests) take the original whole-segment max-overlap fallback, unchanged.
+- `formatter._merge_consecutive()` already collapses consecutive same-speaker blocks, so the extra splitting can't fragment the rendered transcript — no formatter changes needed.
+- `pipeline.py`'s `parallel_stages` path moves segments across a `ProcessPoolExecutor` boundary via pickle (not JSON), so the new `words` field survives automatically — no serialization code needed there. The `_diar.json` sidecar (`web/jobs.py`) only ever serialized `DiarizationSegment` (start/end/speaker), never `TranscriptionSegment`/`AlignedSegment`, so `words` never crosses a JSON boundary either.
+
+See `architecture.md` → module map (`aligner.py`, `models.py`) and the Processing Pipeline diagram's ALIGN step for the current design.
 
 ### F9 — LOW-MEDIUM — Excerpt fallback can serve another session's audio
 
@@ -158,7 +164,7 @@ The 12 s excerpt is cut at the label's *first* aligned occurrence (`jobs.py:133-
 2. ~~**F5**~~ — done, see "F5 — Fixed in phase 2" above.
 3. ~~**F6 + F7**~~ — done, see "F6/F7 — Fixed in phase 3" above.
 4. ~~**F4**~~ — done, see "F4 — Fixed in phase 4" above.
-5. **F8** — word-timestamp alignment (biggest quality win, most testing needed).
+5. ~~**F8**~~ — done, see "F8 — Fixed in phase 5" above.
 6. **F9/F10/F11** — small hardening batch.
 
 Related plan item ("Enrollment wizard — synchronous embedding extraction blocks the browser", JOB_ENROLL) is implemented — see "Phase 2.5 split" in `architecture.md` → "Speaker Enrollment Web Flow" and the "Job Queue" section's `JOB_ENROLL` entry.
