@@ -536,8 +536,9 @@ The job detail page shows a unified progress bar and step pills driven by SSE ev
 - Transcription with post-processing: T → D → F → R (if `post_refine`) → S (if `post_summarize`)
 - Standalone refine: R only
 - Standalone summarize: S only
+- Enrollment (`JOB_ENROLL`): E only — progress comes from `enroll_profiles()`'s `progress` callback lines in the log stream (no tqdm), so the ≥5 s estimator below carries the bar between per-speaker updates
 
-**Single bar:** The bar is divided into equal slices, one per step. As each step's tqdm percentage arrives, it fills within that step's slice. Phase is detected from log keywords (`transcrib`, `diariz`, `format`, `refine`, `summariz`) to activate the correct step. For parallel mode (`channel_progress` events), each channel maps to its step slice.
+**Single bar:** The bar is divided into equal slices, one per step. As each step's tqdm percentage arrives, it fills within that step's slice. Phase is detected from log keywords (`transcrib`, `diariz`, `format`, `refine`, `summariz`; for enroll jobs, the `progress` callback's own phrases `converting audio` / `extracting embedding`) to activate the correct step. For parallel mode (`channel_progress` events), each channel maps to its step slice.
 
 **ETA and rate:** Parsed from tqdm progress strings and shown live below the bar. When no tqdm data arrives for ≥5 s (e.g. during LLM steps which have no tqdm), an estimator ticks the bar forward ~1% every 5 s up to 90% of the current step's slice, providing visual feedback until the `done` event fires.
 
