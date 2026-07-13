@@ -232,34 +232,6 @@ class RenameResult:
     groups: dict[str, list[str]] = field(default_factory=dict)
 
 
-def _rewrite_frontmatter_names(content: str, old_to_new: dict[str, str]) -> str:
-    """Rewrite ``- name: OldName`` frontmatter lines in one simultaneous pass.
-
-    F6: a sequential loop of per-name regex substitutions over a mutating
-    string can't correctly handle a swap (Alice<->Bob renamed in the same
-    submit) or a new name colliding with another entry -- the second
-    substitution would match text the first one just wrote. Building one
-    alternation pattern and substituting via a lookup dict keyed off what
-    matched (not re-scanning the already-substituted result) applies every
-    pair against the ORIGINAL text in one pass, the same idea as
-    ``rewrite_transcript_blocks`` for the body.
-
-    This still edits the frontmatter with a regex rather than parsing and
-    re-dumping the YAML -- F11 (quoted names, the "Dan"/"Dan Smith" prefix
-    collision) is a separate, explicitly out-of-scope bug in the regex
-    itself. This function only fixes *which pass* sees the text; it
-    inherits F11's remaining blind spots unchanged.
-    """
-    import re as _re
-
-    if not old_to_new:
-        return content
-    pattern = _re.compile(
-        r"(- name: )(" + "|".join(_re.escape(n) for n in old_to_new) + r")"
-    )
-    return pattern.sub(lambda m: m.group(1) + old_to_new[m.group(2)], content)
-
-
 def apply_renames(
     md_path: Path,
     segments: list,
@@ -373,19 +345,24 @@ def apply_renames(
         if updated_speakers:
             content = rewrite_transcript_blocks(content, updated_speakers)
 
-    # Frontmatter `speakers:` list -- still name-keyed (F11's YAML-parsing
-    # rework is out of scope), but resolved in one simultaneous pass instead
-    # of a sequential loop so a swap/collision doesn't cross-contaminate
-    # here either. Skip any old name shared by more than one raw label --
-    # the frontmatter list has no way to represent "two people, one name",
-    # so an ambiguous entry is left alone rather than guessed at.
+    # Frontmatter `speakers:` list -- F11: rewritten via
+    # formatter.rewrite_frontmatter_speakers, which parses/re-dumps the YAML
+    # (exact-value name matching, so no prefix collision, and quoting is
+    # handled by yaml.dump instead of a regex that never matches it). Every
+    # pair is applied in one simultaneous pass against the parsed values
+    # (F6), so a same-submit swap (Alice<->Bob) or a new name colliding with
+    # another entry can't cross-contaminate. Skip any old name shared by
+    # more than one raw label -- the frontmatter list has no way to
+    # represent "two people, one name", so an ambiguous entry is left alone
+    # rather than guessed at.
     frontmatter_renames = {
         old_names[raw]: new
         for raw, new in valid.items()
         if old_names[raw] != new and label_counts.get(old_names[raw], 0) <= 1
     }
     if frontmatter_renames:
-        content = _rewrite_frontmatter_names(content, frontmatter_renames)
+        from wisper_transcribe.formatter import rewrite_frontmatter_speakers
+        content = rewrite_frontmatter_speakers(content, frontmatter_renames)
 
     md_path.write_text(content, encoding="utf-8")
 

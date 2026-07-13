@@ -553,7 +553,7 @@ def test_apply_renames_updates_sidecar_speaker_map(tmp_path: Path):
 
 def test_apply_renames_frontmatter_speakers_list_updated(tmp_path: Path):
     """(g) No regression: a plain rename still updates the frontmatter
-    `speakers:` list (F11's YAML-parsing rework is explicitly out of scope)."""
+    `speakers:` list (now via formatter.rewrite_frontmatter_speakers, F11)."""
     from wisper_transcribe.web.enroll_shared import apply_renames
 
     md = tmp_path / "session01.md"
@@ -889,6 +889,51 @@ def test_extract_speaker_excerpts_uses_raw_labels(tmp_path: Path):
     # ffmpeg was invoked with the raw-label output path
     cmd = mock_run.call_args[0][0]
     assert any("SPEAKER_00" in str(p) for p in cmd)
+
+
+def test_extract_speaker_excerpts_cuts_at_longest_segment(tmp_path: Path):
+    """F10a: `_extract_speaker_excerpts` must cut the clip at the LONGEST
+    aligned segment for a label, not the first occurrence -- a short
+    misattributed interjection ("Yeah") would otherwise dominate the clip
+    and play mostly someone else's voice. The persisted `.txt` snippet must
+    come from that same longest segment."""
+    from wisper_transcribe.web.jobs import _extract_speaker_excerpts, Job, COMPLETED
+    from wisper_transcribe.models import AlignedSegment
+    from datetime import datetime
+    import uuid
+
+    out_md = tmp_path / "session01.md"
+    out_md.write_text("# Session 01\n", encoding="utf-8")
+    fake_audio = tmp_path / "audio.mp3"
+    fake_audio.write_bytes(b"fake")
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(fake_audio),
+        kwargs={},
+        output_path=str(out_md),
+    )
+    aligned = [
+        # Short first occurrence -- likely a misattributed interjection.
+        AlignedSegment(start=1.0, end=1.5, text="Yeah", speaker="SPEAKER_00"),
+        # This is the LONGEST SPEAKER_00 segment -- the clip should start here.
+        AlignedSegment(start=50.0, end=80.0, text="This is the real content.", speaker="SPEAKER_00"),
+        # A mid-length segment that is neither first nor longest.
+        AlignedSegment(start=20.0, end=25.0, text="Something in between.", speaker="SPEAKER_00"),
+    ]
+
+    with patch("wisper_transcribe.web.jobs.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0)
+        _extract_speaker_excerpts(job, out_md, aligned_segments=aligned)
+
+    cmd = mock_run.call_args[0][0]
+    ss_index = cmd.index("-ss")
+    assert cmd[ss_index + 1] == "50.0"
+
+    txt_path = tmp_path / "session01_excerpt_SPEAKER_00.txt"
+    assert txt_path.read_text(encoding="utf-8") == "This is the real content."
 
 
 def test_excerpt_404_when_no_clip(client: TestClient, tmp_path: Path):

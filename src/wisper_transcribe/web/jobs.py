@@ -191,11 +191,17 @@ def _extract_speaker_excerpts(job: "Job", output_path: "Path",  # type: ignore[n
                               aligned_segments: list | None = None) -> None:
     """Extract a short audio clip per speaker from the transcribed file.
 
-    Walks the aligned segments to find the first occurrence of each *raw*
-    speaker label (e.g. ``SPEAKER_00``), then uses ffmpeg to cut a ~12 s clip
-    from the original input audio. Clips are saved alongside the transcript
-    as ``<stem>_excerpt_<raw_label>.mp3`` so the enrollment wizard — which
-    keys off the raw labels stored in ``_diar.json`` — can find them.
+    Walks the aligned segments to find, for each *raw* speaker label (e.g.
+    ``SPEAKER_00``), the LONGEST aligned segment (by ``end - start``) rather
+    than the first occurrence -- a short interjection ("mm-hmm", a cross-talk
+    aside) is often misattributed and plays mostly someone else's voice,
+    while the longest block for a label is far more likely to actually be
+    that speaker talking. Then uses ffmpeg to cut a ~12 s clip starting at
+    that segment from the original input audio. Clips are saved alongside
+    the transcript as ``<stem>_excerpt_<raw_label>.mp3`` so the enrollment
+    wizard — which keys off the raw labels stored in ``_diar.json`` — can
+    find them. The persisted ``.txt`` snippet is the text of that same
+    longest segment.
 
     Earlier versions parsed the rendered markdown and so keyed files by the
     *display* name ("Unknown Speaker 1", etc.), which never matched the
@@ -209,23 +215,27 @@ def _extract_speaker_excerpts(job: "Job", output_path: "Path",  # type: ignore[n
     if not aligned_segments:
         return
 
-    first_ts: dict[str, float] = {}
-    first_text: dict[str, str] = {}
+    best_start: dict[str, float] = {}
+    best_text: dict[str, str] = {}
+    best_duration: dict[str, float] = {}
     for seg in aligned_segments:
         label = getattr(seg, "speaker", None)
-        if not label or label == "UNKNOWN" or label in first_ts:
+        if not label or label == "UNKNOWN":
             continue
-        first_ts[label] = float(seg.start)
-        first_text[label] = (getattr(seg, "text", "") or "").strip()
+        duration = float(seg.end) - float(seg.start)
+        if label not in best_duration or duration > best_duration[label]:
+            best_duration[label] = duration
+            best_start[label] = float(seg.start)
+            best_text[label] = (getattr(seg, "text", "") or "").strip()
 
-    if not first_ts:
+    if not best_start:
         return
 
     out_dir = _Path(output_path).parent
     stem = _Path(output_path).stem
     input_path = _Path(job.input_path)
 
-    for speaker, start in first_ts.items():
+    for speaker, start in best_start.items():
         safe_name = re.sub(r"[^\w\-]", "_", speaker)
         clip_path = out_dir / f"{stem}_excerpt_{safe_name}.mp3"
         try:
@@ -250,7 +260,7 @@ def _extract_speaker_excerpts(job: "Job", output_path: "Path",  # type: ignore[n
         # Persist the transcript snippet to disk so it survives server restarts.
         text_path = out_dir / f"{stem}_excerpt_{safe_name}.txt"
         try:
-            text_path.write_text(first_text.get(speaker, ""), encoding="utf-8")
+            text_path.write_text(best_text.get(speaker, ""), encoding="utf-8")
         except Exception:
             pass
 

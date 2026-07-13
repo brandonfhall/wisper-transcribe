@@ -489,6 +489,93 @@ def test_extract_embedding_no_matching_segments_raises(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# F10b — _select_embedding_segments (pure function, no mocks needed)
+# ---------------------------------------------------------------------------
+
+def test_select_embedding_segments_no_segments_for_label_raises():
+    from wisper_transcribe.speaker_manager import _select_embedding_segments
+
+    segments = [DiarizationSegment(start=0.0, end=5.0, speaker="SPEAKER_01")]
+    with pytest.raises(ValueError, match="No segments found for speaker"):
+        _select_embedding_segments(segments, "SPEAKER_00")
+
+
+def test_select_embedding_segments_prefers_solo_medium_over_longer_overlapped():
+    """A long SPEAKER_00 segment that overlaps another speaker's turn
+    (cross-talk) must lose out to a shorter solo segment in the 2-20s band."""
+    from wisper_transcribe.speaker_manager import _select_embedding_segments
+
+    segments = [
+        # Long but overlaps SPEAKER_01 for its whole span -- cross-talk risk.
+        DiarizationSegment(start=0.0, end=30.0, speaker="SPEAKER_00"),
+        DiarizationSegment(start=5.0, end=10.0, speaker="SPEAKER_01"),
+        # Solo, in the 2-20s sweet spot -- should be preferred.
+        DiarizationSegment(start=40.0, end=48.0, speaker="SPEAKER_00"),
+    ]
+
+    selected = _select_embedding_segments(segments, "SPEAKER_00")
+
+    assert selected == [DiarizationSegment(start=40.0, end=48.0, speaker="SPEAKER_00")]
+
+
+def test_select_embedding_segments_band_fallback_to_all_solo():
+    """When no solo segment falls in the 2-20s band, fall back to all solo
+    segments sorted longest-first."""
+    from wisper_transcribe.speaker_manager import _select_embedding_segments
+
+    segments = [
+        # Solo but too short (under 2.0s).
+        DiarizationSegment(start=0.0, end=1.0, speaker="SPEAKER_00"),
+        # Solo but too long (over 20.0s).
+        DiarizationSegment(start=10.0, end=35.0, speaker="SPEAKER_00"),
+    ]
+
+    selected = _select_embedding_segments(segments, "SPEAKER_00")
+
+    # Both are solo (no other speaker present at all) -- longest-first.
+    assert selected == [
+        DiarizationSegment(start=10.0, end=35.0, speaker="SPEAKER_00"),
+        DiarizationSegment(start=0.0, end=1.0, speaker="SPEAKER_00"),
+    ]
+
+
+def test_select_embedding_segments_no_solo_falls_back_to_longest_overall():
+    """When every SPEAKER_00 segment overlaps another speaker, fall back to
+    the longest speaker_segs regardless of overlap (today's old behavior)."""
+    from wisper_transcribe.speaker_manager import _select_embedding_segments
+
+    segments = [
+        DiarizationSegment(start=0.0, end=5.0, speaker="SPEAKER_00"),
+        DiarizationSegment(start=0.0, end=5.0, speaker="SPEAKER_01"),
+        DiarizationSegment(start=10.0, end=20.0, speaker="SPEAKER_00"),
+        DiarizationSegment(start=10.0, end=20.0, speaker="SPEAKER_01"),
+    ]
+
+    selected = _select_embedding_segments(segments, "SPEAKER_00")
+
+    assert selected == [
+        DiarizationSegment(start=10.0, end=20.0, speaker="SPEAKER_00"),
+        DiarizationSegment(start=0.0, end=5.0, speaker="SPEAKER_00"),
+    ]
+
+
+def test_select_embedding_segments_respects_max_count():
+    from wisper_transcribe.speaker_manager import _select_embedding_segments
+
+    segments = [
+        DiarizationSegment(start=float(i * 30), end=float(i * 30 + 5 + i), speaker="SPEAKER_00")
+        for i in range(8)
+    ]
+
+    selected = _select_embedding_segments(segments, "SPEAKER_00", max_count=3)
+
+    assert len(selected) == 3
+    # Longest-first within the 2-20s band.
+    durations = [s.end - s.start for s in selected]
+    assert durations == sorted(durations, reverse=True)
+
+
+# ---------------------------------------------------------------------------
 # match_speakers — profile_filter
 # ---------------------------------------------------------------------------
 

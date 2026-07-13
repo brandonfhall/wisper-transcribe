@@ -140,23 +140,16 @@ Fixed by requesting word timestamps on both transcription backends and rewriting
 
 See `architecture.md` → module map (`aligner.py`, `models.py`) and the Processing Pipeline diagram's ALIGN step for the current design.
 
-### F9 — LOW-MEDIUM — Excerpt fallback can serve another session's audio
+### F9/F10/F11 — Fixed in phase 6 (2026-07-13, branch `fix/enrollment-audit`)
 
-`speaker_excerpt` (`web/routes/transcribe.py:329-337`): when the in-memory job is gone, the fallback globs `*_excerpt_SPEAKER_00.mp3` across the **entire output dir** and serves the first hit — potentially a clip from a different transcript. The user hears the wrong voice and assigns the wrong name.
+Final hardening batch — three small, independent fixes shipped together:
 
-**Fix direction:** scope the glob to the job's transcript stem (available via `job.output_path`; if the job is gone, this route can't know the stem — redirect to the transcript-centric wizard instead, which scopes correctly).
+- **F9** (excerpt fallback could serve another transcript's audio): `speaker_excerpt` (`web/routes/transcribe.py`) globbed `*_excerpt_{label}.mp3` across the **entire output dir** when the in-memory job's `clip_path` was missing/stale, potentially serving a different transcript's same-labelled clip. Now scoped: if the job is present and has `output_path`, the fallback only looks for `{Path(job.output_path).stem}_excerpt_{label}.mp3`. If the job is gone entirely (server restarted), the route 404s rather than globbing blindly — confirmed the transcript-centric wizard (`transcripts.py`'s `GET /transcripts/{name}/enroll`) passes its own `excerpt_base_url` (`/transcripts/{name}/excerpt`), a separately-implemented, already-transcript-stem-scoped route, so this route 404ing on a gone job doesn't break that path.
+- **F10a** (excerpt cut at wrong segment): `_extract_speaker_excerpts()` (`jobs.py`) now cuts each speaker's clip at their LONGEST aligned segment (by `end - start`) instead of the first occurrence, and persists that same segment's text to the `.txt` sidecar — avoids a short misattributed interjection dominating the sample clip.
+- **F10b** (embedding source quality): `extract_embedding()` (`speaker_manager.py`) delegates segment selection to a new pure helper, `_select_embedding_segments()`: prefers up to 5 "solo" segments (no strict time-overlap with any other speaker's segment) in the 2.0-20.0s range, longest-first; falls back to all solo segments longest-first if none fit that band; falls back to the old longest-5-regardless-of-overlap behavior if there are no solo segments at all. Avoids averaging in segments where cross-talk/music bleeds into a turn.
+- **F11** (frontmatter rename regex defects): added `formatter.rewrite_frontmatter_speakers()` — parses the frontmatter as YAML (`yaml.safe_load`/`yaml.dump`) and matches/replaces `speakers[].name` values exactly, instead of a regex that both corrupted prefix matches ("Dan" renaming into "Dan Smith") and silently missed `yaml.dump`-quoted names (`- name: 'O''Brien'`). `formatter.update_speaker_names()` and `enroll_shared.apply_renames()` (which deleted its own `_rewrite_frontmatter_names()`) both now call this one shared helper. The document body is preserved byte-for-byte; all renames apply in one simultaneous pass so a same-submit swap still works correctly (F6 property preserved).
 
-### F10 — LOW — Excerpt & embedding source quality
-
-The 12 s excerpt is cut at the label's *first* aligned occurrence (`jobs.py:133-140`), which for a misattributed short interjection plays mostly someone else's voice. Embeddings average the 5 *longest* diarization segments (`speaker_manager.py:148`), which in tabletop audio often include cross-talk/music. Both quietly degrade identification accuracy.
-
-**Fix direction:** pick the excerpt from the longest (not first) segment; for embeddings, prefer several medium-length solo segments over the absolute longest.
-
-### F11 — LOW — Frontmatter rename regex misses quoted YAML and has a prefix collision
-
-`update_speaker_names` (`formatter.py:173-177`) rewrites `- name: OldName` with no end anchor: renaming "Dan" also corrupts "- name: Dan Smith" → "- name: Daniel Smith". And `yaml.dump` quotes names containing special characters (`- name: 'O''Brien'`), which the unquoted pattern never matches → frontmatter silently left stale.
-
-**Fix direction:** parse/re-dump the frontmatter YAML instead of regex-editing it (already parsed in `transcript_detail` via `_parse_frontmatter`).
+See `architecture.md` → "Speaker Enrollment Web Flow" (excerpt fallback, embedding segment selection) and module map (`formatter.py`, `speaker_manager.py`) for the current design.
 
 ### Suggested fix order
 
@@ -165,7 +158,7 @@ The 12 s excerpt is cut at the label's *first* aligned occurrence (`jobs.py:133-
 3. ~~**F6 + F7**~~ — done, see "F6/F7 — Fixed in phase 3" above.
 4. ~~**F4**~~ — done, see "F4 — Fixed in phase 4" above.
 5. ~~**F8**~~ — done, see "F8 — Fixed in phase 5" above.
-6. **F9/F10/F11** — small hardening batch.
+6. ~~**F9/F10/F11**~~ — done, see "F9/F10/F11 — Fixed in phase 6" above.
 
 Related plan item ("Enrollment wizard — synchronous embedding extraction blocks the browser", JOB_ENROLL) is implemented — see "Phase 2.5 split" in `architecture.md` → "Speaker Enrollment Web Flow" and the "Job Queue" section's `JOB_ENROLL` entry.
 

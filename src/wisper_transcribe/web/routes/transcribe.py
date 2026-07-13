@@ -350,18 +350,36 @@ async def speaker_excerpt(request: Request, job_id: str, speaker_name: str) -> R
     if job is not None:
         clip_path = job.speaker_excerpts.get(speaker_name)
 
-    # Fallback: scan the output directory for an on-disk excerpt clip so the
-    # wizard still works after a server restart (the in-memory job is gone but
-    # the files remain alongside the transcript).
-    if not clip_path or not Path(clip_path).exists():
-        from wisper_transcribe.path_utils import get_output_dir
+    # Fallback: the in-memory clip_path can be missing/stale (e.g. never
+    # recorded, or pointing at a since-cleaned-up temp path) even though the
+    # job itself is still known. Re-derive it from disk, but ONLY within this
+    # job's own transcript stem -- a glob across the whole output dir (F9)
+    # would happily serve a *different transcript's* same-labelled excerpt
+    # (e.g. every transcript has a SPEAKER_00), so the user could hear the
+    # wrong voice and enroll the wrong name. If the job is gone entirely
+    # (server restarted), there is no stem to scope to, so we can't safely
+    # fall back at all -- the transcript-centric wizard's own
+    # /transcripts/{name}/excerpt/{speaker_name} route (transcripts.py) is
+    # what serves excerpts after a restart; this route intentionally 404s
+    # instead of guessing.
+    if job is not None and job.output_path and (not clip_path or not Path(clip_path).exists()):
         import re as _re
         safe_label = _re.sub(r"[^\w\-]", "_", speaker_name)
-        out_dir = get_output_dir()
-        # Excerpts are named <transcript_stem>_excerpt_<speaker_label>.mp3
-        candidates = list(out_dir.glob(f"*_excerpt_{safe_label}.mp3"))
-        if candidates:
-            clip_path = str(candidates[0])
+        out_dir = Path(job.output_path).parent
+        stem = Path(job.output_path).stem
+
+        # Path-traversal guard: re.sub(r"[^\w\-]", "_", …) is already a
+        # tight whitelist, but CodeQL's taint tracker only recognises the
+        # os.path.abspath + startswith pattern (CLAUDE.md security note) --
+        # same guard as the mirrored fallback in transcripts.py.
+        base_dir = os.path.abspath(str(out_dir))
+        if not base_dir.endswith(os.sep):
+            base_dir += os.sep
+        candidate_abs = os.path.abspath(
+            os.path.join(base_dir, f"{stem}_excerpt_{safe_label}.mp3")
+        )
+        if candidate_abs.startswith(base_dir) and os.path.exists(candidate_abs):
+            clip_path = candidate_abs
 
     if not clip_path or not Path(clip_path).exists():
         return HTMLResponse(content="Excerpt not available", status_code=404)

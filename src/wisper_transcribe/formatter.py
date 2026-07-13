@@ -171,6 +171,74 @@ def rewrite_transcript_blocks(content: str, updated_speakers: dict) -> str:
     return '\n'.join(new_lines)
 
 
+def rewrite_frontmatter_speakers(content: str, old_to_new: dict[str, str]) -> str:
+    """Rewrite ``speakers:`` frontmatter entries by parsing and re-dumping YAML.
+
+    F11: two previous regex-based approaches (this function replaces both)
+    shared the same defects -- an un-anchored ``- name: Dan`` pattern
+    corrupts ``- name: Dan Smith`` (prefix collision), and ``yaml.dump``
+    quotes names with special characters (e.g. ``- name: 'O''Brien'``) which
+    an unquoted regex never matches, silently leaving the frontmatter stale.
+
+    This function instead parses the frontmatter as YAML and matches names
+    as whole values: for every entry in ``speakers`` that is a dict with a
+    ``name`` key, if that name is an EXACT key in ``old_to_new`` it is
+    replaced. Exact-value matching means no prefix collision is possible,
+    and going through ``yaml.safe_load``/``yaml.dump`` means quoting is
+    handled correctly regardless of what characters the name contains.
+
+    All renames in ``old_to_new`` are applied in one pass against the
+    parsed (not re-serialized) values, so a same-submit swap (Alice<->Bob)
+    or any other set of simultaneous renames comes out correct -- same
+    property the F6 fix established for the per-block body rewrite.
+
+    Returns ``content`` unchanged if it doesn't start with a ``---``
+    frontmatter block, if the closing ``---`` is missing, if the
+    frontmatter fails to parse as YAML, or if there is no ``speakers`` list
+    in it. The document body (everything after the closing ``---``) is
+    preserved byte-for-byte.
+
+    Note: re-dumping via ``yaml.dump`` may normalize unrelated frontmatter
+    formatting (key order, quoting style) even for keys that weren't
+    renamed -- that's an accepted side effect of round-tripping through the
+    YAML parser instead of doing surgical text edits.
+    """
+    if not content.startswith("---"):
+        return content
+
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        return content
+
+    _prefix, raw_frontmatter, body = parts
+
+    try:
+        frontmatter = yaml.safe_load(raw_frontmatter)
+    except yaml.YAMLError:
+        return content
+
+    if not isinstance(frontmatter, dict):
+        return content
+
+    speakers = frontmatter.get("speakers")
+    if not isinstance(speakers, list):
+        return content
+
+    changed = False
+    for entry in speakers:
+        if isinstance(entry, dict) and "name" in entry:
+            old = entry["name"]
+            if old in old_to_new:
+                entry["name"] = old_to_new[old]
+                changed = True
+
+    if not changed:
+        return content
+
+    dumped = yaml.dump(frontmatter, default_flow_style=False, allow_unicode=True)
+    return f"---\n{dumped}---{body}"
+
+
 def update_speaker_names(content: str, old_name: str, new_name: str) -> str:
     """Replace all occurrences of a speaker name in an existing markdown transcript."""
     import re
@@ -181,10 +249,8 @@ def update_speaker_names(content: str, old_name: str, new_name: str) -> str:
         f"**{new_name}**",
         content,
     )
-    # Replace in YAML frontmatter speaker list
-    content = re.sub(
-        rf"(- name: ){re.escape(old_name)}",
-        rf"\g<1>{new_name}",
-        content,
-    )
+    # Replace in YAML frontmatter speaker list (F11: parse/re-dump YAML
+    # instead of a regex, so a rename target name isn't corrupted by a
+    # prefix collision and quoted names are matched correctly).
+    content = rewrite_frontmatter_speakers(content, {old_name: new_name})
     return content

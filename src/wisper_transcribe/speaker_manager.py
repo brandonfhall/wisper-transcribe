@@ -129,23 +129,74 @@ def _get_hf_token() -> str:
         return ""
 
 
+def _segments_overlap(a: DiarizationSegment, b: DiarizationSegment) -> bool:
+    """Strict time overlap between two segments: ``max(starts) < min(ends)``."""
+    return max(a.start, b.start) < min(a.end, b.end)
+
+
+def _select_embedding_segments(
+    segments: list[DiarizationSegment],
+    speaker_label: str,
+    max_count: int = 5,
+) -> list[DiarizationSegment]:
+    """Pick up to ``max_count`` segments to source a speaker's voice embedding.
+
+    Selection policy (in order):
+
+    1. ``speaker_segs`` = all segments carrying ``speaker_label``. Raises
+       ``ValueError`` if there are none (same as before this was split out).
+    2. ``solo`` = the subset of ``speaker_segs`` that do NOT strictly
+       time-overlap any segment belonging to a *different* speaker --
+       overlapping segments are exactly where tabletop audio has cross-talk
+       (or music) bleeding into a diarization turn, which pollutes the
+       embedding.
+    3. Prefer solo segments 2.0-20.0s long (a "sweet spot": long enough to
+       carry real voice characteristics, short enough to stay single-topic
+       and avoid drifting into silence/noise), sorted longest-first, up to
+       ``max_count``.
+    4. If none fall in that band, fall back to all solo segments sorted
+       longest-first, up to ``max_count``.
+    5. If there are no solo segments at all (e.g. constant cross-talk),
+       fall back to the original behavior: the ``max_count`` longest
+       ``speaker_segs`` regardless of overlap.
+    """
+    speaker_segs = [s for s in segments if s.speaker == speaker_label]
+    if not speaker_segs:
+        raise ValueError(f"No segments found for speaker {speaker_label!r}")
+
+    other_segs = [s for s in segments if s.speaker != speaker_label]
+    solo = [
+        s for s in speaker_segs
+        if not any(_segments_overlap(s, o) for o in other_segs)
+    ]
+
+    if solo:
+        banded = [s for s in solo if 2.0 <= (s.end - s.start) <= 20.0]
+        pool = banded if banded else solo
+        return sorted(pool, key=lambda s: s.end - s.start, reverse=True)[:max_count]
+
+    return sorted(speaker_segs, key=lambda s: s.end - s.start, reverse=True)[:max_count]
+
+
 def extract_embedding(
     audio_path: Path,
     segments: list[DiarizationSegment],
     speaker_label: str,
     device: str = "cpu",
 ) -> np.ndarray:
-    """Extract a voice embedding for a speaker by averaging their longest segments."""
+    """Extract a voice embedding for a speaker by averaging select segments.
+
+    Segment choice is delegated to ``_select_embedding_segments()``: it
+    prefers segments that don't overlap another speaker's turn (avoiding
+    cross-talk/music bleed) and are a moderate 2-20s long, falling back to
+    the longest available segments when nothing fits that profile. See that
+    function's docstring for the full policy.
+    """
     from pyannote.core import Segment as PyannoteSegment
 
     inference = _load_embedding_model(device)
 
-    speaker_segs = [s for s in segments if s.speaker == speaker_label]
-    if not speaker_segs:
-        raise ValueError(f"No segments found for speaker {speaker_label!r}")
-
-    # Use up to 5 longest segments
-    longest = sorted(speaker_segs, key=lambda s: s.end - s.start, reverse=True)[:5]
+    selected = _select_embedding_segments(segments, speaker_label)
 
     # Pre-load audio via scipy so pyannote never calls torchaudio (removed in 2.x).
     from .audio_utils import load_wav_as_tensor
@@ -153,7 +204,7 @@ def extract_embedding(
     audio_dict = load_wav_as_tensor(audio_path)
 
     embeddings = []
-    for seg in longest:
+    for seg in selected:
         excerpt = PyannoteSegment(seg.start, seg.end)
         emb = inference.crop(audio_dict, excerpt)
         embeddings.append(emb)

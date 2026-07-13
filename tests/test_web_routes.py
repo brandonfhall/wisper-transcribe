@@ -2077,3 +2077,59 @@ def test_bulk_campaign_invalid_slug_redirects_with_error(client, tmp_path, monke
 
     assert resp.status_code == 303
     assert "error=invalid_campaign" in resp.headers["location"]
+
+
+# ---------------------------------------------------------------------------
+# F9 -- GET /transcribe/jobs/{job_id}/excerpt/{speaker_name} on-disk fallback
+# must be scoped to the job's own transcript stem, never glob the whole
+# output directory (which could serve a different transcript's same-labelled
+# excerpt clip).
+# ---------------------------------------------------------------------------
+
+def test_job_excerpt_fallback_scoped_to_job_stem(client, tmp_path):
+    """When the in-memory clip_path is missing, the fallback must only look
+    for `<this job's transcript stem>_excerpt_<label>.mp3` -- a decoy file
+    from a different transcript with the same speaker label must never be
+    served."""
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from datetime import datetime
+    import uuid
+
+    transcript = tmp_path / "session01.md"
+    transcript.write_text("# Session 01", encoding="utf-8")
+
+    # The correct on-disk clip for THIS job's transcript stem.
+    correct_clip = tmp_path / "session01_excerpt_SPEAKER_00.mp3"
+    correct_clip.write_bytes(b"correct-clip-bytes")
+
+    # A decoy belonging to a different transcript, same speaker label --
+    # must never be served for this job.
+    decoy_clip = tmp_path / "otherstem_excerpt_SPEAKER_00.mp3"
+    decoy_clip.write_bytes(b"decoy-clip-bytes")
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(tmp_path / "audio.mp3"),
+        kwargs={},
+        output_path=str(transcript),
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    resp = client.get(f"/transcribe/jobs/{job.id}/excerpt/SPEAKER_00")
+
+    assert resp.status_code == 200
+    assert resp.content == b"correct-clip-bytes"
+
+
+def test_job_excerpt_fallback_404_when_job_gone(client, tmp_path):
+    """If the in-memory job is gone (server restarted), the route can't know
+    which transcript stem to scope a fallback glob to -- it must 404 rather
+    than blindly serving whatever matching file happens to exist on disk."""
+    decoy_clip = tmp_path / "session01_excerpt_SPEAKER_00.mp3"
+    decoy_clip.write_bytes(b"should-not-be-served")
+
+    resp = client.get("/transcribe/jobs/nonexistent-job-id/excerpt/SPEAKER_00")
+
+    assert resp.status_code == 404
