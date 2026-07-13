@@ -102,13 +102,13 @@ Unified both wizard submit paths (job-centric `transcribe.py` + transcript-centr
 - **F2** (untouched prefilled fields enroll junk "SPEAKER_XX" profiles): the template only prefills a field when a real (non-raw-label) current name is known — otherwise it's left empty with the raw label shown as a placeholder — and the server refuses any submission whose *new* name matches `^SPEAKER_\d+$`, regardless of what the template did.
 - **F3** (every submit overwrites existing profile embeddings): the shared handler now skips the enroll step entirely when a submitted name is unchanged and a profile already exists; when a profile exists and something *did* change, it extracts and merges via `update_embedding()` (EMA) instead of calling `enroll_speaker()`; two raw labels assigned the same display name in one submit have their embeddings averaged (via a new optional `embedding=` param on `enroll_speaker()`) before being saved/merged.
 
-See `architecture.md` → "Speaker Enrollment Web Flow" for the full current design. F4–F11 below are unaffected and still open.
+See `architecture.md` → "Speaker Enrollment Web Flow" for the full current design. F4–F11 below are unaffected and still open at the time of this phase (F4 fixed in phase 4, see below).
 
-### F4 — HIGH — `match_speakers` greedy exclusivity has no second-choice fallback
+### F4 — Fixed in phase 4 (2026-07-13, branch `fix/enrollment-audit`)
 
-`speaker_manager.py:358-388`: each label records only its single best profile. Labels are sorted by best similarity and claim profiles greedily; a label whose best profile was already claimed falls to "Unknown Speaker N" **even when its second-best profile is above threshold**. Concretely: pyannote splits Alice into SPEAKER_00/SPEAKER_02 → one claims "Alice", the other goes Unknown; or Bob's best-scoring profile is Alice (similar voices) but Alice's own label claimed it — Bob lands Unknown despite scoring 0.78 against his own profile. Combined with F2's junk profiles, misidentification compounds.
+Reworked `match_speakers()` (`speaker_manager.py`) from per-label-best-only greedy assignment to pair-scored greedy assignment: every (label, profile) similarity is computed up front, pairs are sorted by similarity descending (ties broken by label then profile name), and consumed in an exclusive pass that assigns whenever both sides are still free — so a label whose top choice was already claimed naturally falls back to its next-best *unused* profile above threshold instead of going straight to Unknown. A new `allow_many_to_one: bool = False` keyword adds a second pass letting any label still unassigned claim its best profile even if another label already has it (still threshold-gated), for pyannote over-segmenting one real speaker into two labels. Both call sites — `pipeline.process_file()` (~line 512) and `cli.py`'s `speakers test` (~line 720, which now also prints a note when many-to-one is active) — pass `allow_many_to_one=(num_speakers is None)`, since pinning the count is the user asserting one label per person. Unassigned labels (failed embedding, below threshold, or an exclusivity loser with many-to-one off) become "Unknown Speaker N" numbered by sorted label order, not similarity order, so numbering is deterministic.
 
-**Fix direction:** score all (label × profile) pairs, assign greedily over the full pair list (or Hungarian), allowing a label to fall back to its next-best unused profile above threshold. Consider allowing many-to-one matching (two labels → same profile) since over-segmentation of one speaker is common — exclusivity is the wrong invariant when `num_speakers` wasn't pinned.
+See `architecture.md` → "Shared voice embeddings + per-campaign rosters" for the full current design. F8–F11 below are unaffected and still open.
 
 ### F5 — Fixed in phase 2 (2026-07-12, branch `fix/enrollment-audit`)
 
@@ -118,7 +118,7 @@ Moved the temp web-upload audio next to its transcript at job completion instead
 - `apply_enrollment_submit()` now returns an `EnrollmentResult(current_names, audio_missing)` instead of a bare dict; both POST routes redirect with a generic `?notice=enroll_audio_missing` flag (no paths/exception text) when enrollment was skipped, and `transcript_detail.html` shows a banner explaining that names were updated but enrollment didn't run. Both GET wizard routes also show a pre-submit warning banner when the recorded audio path is missing.
 - `POST /transcripts/{name}/delete` (and the bulk-delete route) now also delete `<stem>_diar.json` and the durable audio file it references — that audio exists only to back the wizard for the (now-deleted) transcript, so leaving it behind would be a permanent leak in the same spot F5 just fixed. The delete only targets paths that resolve inside the output dir, so legacy sidecars still pointing at a tempdir path are left untouched.
 
-See `architecture.md` → "Job Queue" and "Speaker Enrollment Web Flow" for the full current design. F4, F6–F11 below are unaffected and still open.
+See `architecture.md` → "Job Queue" and "Speaker Enrollment Web Flow" for the full current design. F4, F6–F11 below are unaffected and still open at the time of this phase (F4 fixed in phase 4, see below).
 
 ### F6/F7 — Fixed in phase 3 (2026-07-12, branch `fix/enrollment-audit`)
 
@@ -157,7 +157,7 @@ The 12 s excerpt is cut at the label's *first* aligned occurrence (`jobs.py:133-
 1. ~~**F1 + F2 + F3**~~ — done, see "F1/F2/F3 — Fixed in phase 1" above.
 2. ~~**F5**~~ — done, see "F5 — Fixed in phase 2" above.
 3. ~~**F6 + F7**~~ — done, see "F6/F7 — Fixed in phase 3" above.
-4. **F4** — assignment algorithm rework (pair-scored greedy, optional many-to-one).
+4. ~~**F4**~~ — done, see "F4 — Fixed in phase 4" above.
 5. **F8** — word-timestamp alignment (biggest quality win, most testing needed).
 6. **F9/F10/F11** — small hardening batch.
 

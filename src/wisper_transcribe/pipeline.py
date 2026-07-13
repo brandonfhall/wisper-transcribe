@@ -516,6 +516,7 @@ def process_file(
                     device=device,
                     threshold=config.get("similarity_threshold", 0.65),
                     profile_filter=profile_filter,
+                    allow_many_to_one=(num_speakers is None),
                 )
                 if matches:
                     speaker_map = matches

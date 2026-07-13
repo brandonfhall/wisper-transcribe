@@ -148,7 +148,13 @@ def test_match_speakers_below_threshold_becomes_unknown(tmp_path):
 
 
 def test_match_speakers_greedy_no_double_assign(tmp_path):
-    """Two speakers should not both be assigned to the same profile."""
+    """Two speakers should not both be assigned to the same profile.
+
+    With the pair-scored algorithm, ties are broken deterministically by
+    label order — SPEAKER_00 wins the shared profile, SPEAKER_01 falls back
+    to Unknown since there's no other profile to claim (allow_many_to_one
+    defaults to False).
+    """
     from wisper_transcribe.speaker_manager import match_speakers
 
     alice_emb = np.array([1.0, 0.0, 0.0])
@@ -164,11 +170,162 @@ def test_match_speakers_greedy_no_double_assign(tmp_path):
     with patch("wisper_transcribe.speaker_manager.extract_embedding", side_effect=fake_extract):
         result = match_speakers(Path("fake.wav"), segs, data_dir=tmp_path, threshold=0.65)
 
-    names = list(result.values())
-    assert "Alice" in names
-    # One should be Alice, the other Unknown (profile already claimed)
-    assert names.count("Alice") == 1
-    assert "Unknown Speaker" in names[1] or "Unknown Speaker" in names[0]
+    assert result["SPEAKER_00"] == "Alice"
+    assert result["SPEAKER_01"] == "Unknown Speaker 1"
+
+
+def test_match_speakers_next_best_fallback(tmp_path):
+    """Label B's best profile is claimed by label A (higher score); B should
+    fall back to its own second-best profile above threshold rather than
+    going to Unknown."""
+    from wisper_transcribe.speaker_manager import match_speakers
+
+    p1_emb = np.array([1.0, 0.0, 0.0])
+    p2_emb = np.array([0.0, 1.0, 0.0])
+    _write_profile(tmp_path, "p1", p1_emb)
+    _write_profile(tmp_path, "p2", p2_emb)
+
+    segs = _fake_diarization(["SPEAKER_00", "SPEAKER_01"])
+
+    # Label A sits mostly along p1 (sim=0.9) — the strongest claim on p1.
+    a_emb = np.array([0.9, 0.0, np.sqrt(1 - 0.9 ** 2)])
+    # Label B scores 0.70 vs p1 (its nominal best, but loses to A's
+    # stronger 0.9) and 0.68 vs p2 (its fallback, still above the 0.65
+    # threshold). The z-component absorbs the remaining norm so both
+    # similarities are simultaneously achievable on a unit vector.
+    b_p1_sim, b_p2_sim = 0.70, 0.68
+    b_emb = np.array([b_p1_sim, b_p2_sim, np.sqrt(1 - b_p1_sim ** 2 - b_p2_sim ** 2)])
+
+    def fake_extract(audio_path, segments, label, device="cpu"):
+        return {"SPEAKER_00": a_emb, "SPEAKER_01": b_emb}[label]
+
+    with patch("wisper_transcribe.speaker_manager.extract_embedding", side_effect=fake_extract):
+        result = match_speakers(Path("fake.wav"), segs, data_dir=tmp_path, threshold=0.65)
+
+    assert result["SPEAKER_00"] == "P1"
+    assert result["SPEAKER_01"] == "P2"
+
+
+def test_match_speakers_many_to_one_disabled_by_default(tmp_path):
+    """Two labels both best-match the same profile; with allow_many_to_one
+    False (default) the loser goes Unknown when no other profile clears
+    threshold."""
+    from wisper_transcribe.speaker_manager import match_speakers
+
+    alice_emb = np.array([1.0, 0.0, 0.0])
+    _write_profile(tmp_path, "alice", alice_emb)
+
+    segs = _fake_diarization(["SPEAKER_00", "SPEAKER_01"])
+
+    def fake_extract(audio_path, segments, label, device="cpu"):
+        return alice_emb
+
+    with patch("wisper_transcribe.speaker_manager.extract_embedding", side_effect=fake_extract):
+        result = match_speakers(
+            Path("fake.wav"), segs, data_dir=tmp_path, threshold=0.65,
+            allow_many_to_one=False,
+        )
+
+    assert result["SPEAKER_00"] == "Alice"
+    assert result["SPEAKER_01"] == "Unknown Speaker 1"
+
+
+def test_match_speakers_many_to_one_enabled(tmp_path):
+    """With allow_many_to_one True, both labels that best-match the same
+    profile above threshold get its display name."""
+    from wisper_transcribe.speaker_manager import match_speakers
+
+    alice_emb = np.array([1.0, 0.0, 0.0])
+    _write_profile(tmp_path, "alice", alice_emb)
+
+    segs = _fake_diarization(["SPEAKER_00", "SPEAKER_01"])
+
+    def fake_extract(audio_path, segments, label, device="cpu"):
+        return alice_emb
+
+    with patch("wisper_transcribe.speaker_manager.extract_embedding", side_effect=fake_extract):
+        result = match_speakers(
+            Path("fake.wav"), segs, data_dir=tmp_path, threshold=0.65,
+            allow_many_to_one=True,
+        )
+
+    assert result["SPEAKER_00"] == "Alice"
+    assert result["SPEAKER_01"] == "Alice"
+
+
+def test_match_speakers_many_to_one_still_respects_threshold(tmp_path):
+    """An unassigned label below threshold stays Unknown even with
+    allow_many_to_one=True."""
+    from wisper_transcribe.speaker_manager import match_speakers
+
+    alice_emb = np.array([1.0, 0.0, 0.0])
+    _write_profile(tmp_path, "alice", alice_emb)
+
+    segs = _fake_diarization(["SPEAKER_00", "SPEAKER_01"])
+    # SPEAKER_01 is orthogonal to Alice — similarity 0.0, well below threshold
+    orthogonal_emb = np.array([0.0, 1.0, 0.0])
+
+    def fake_extract(audio_path, segments, label, device="cpu"):
+        return alice_emb if label == "SPEAKER_00" else orthogonal_emb
+
+    with patch("wisper_transcribe.speaker_manager.extract_embedding", side_effect=fake_extract):
+        result = match_speakers(
+            Path("fake.wav"), segs, data_dir=tmp_path, threshold=0.65,
+            allow_many_to_one=True,
+        )
+
+    assert result["SPEAKER_00"] == "Alice"
+    assert result["SPEAKER_01"] == "Unknown Speaker 1"
+
+
+def test_match_speakers_unknown_numbering_deterministic_by_label_order(tmp_path):
+    """Unknown numbering follows sorted label order, not similarity order."""
+    from wisper_transcribe.speaker_manager import match_speakers
+
+    alice_emb = np.array([1.0, 0.0, 0.0])
+    _write_profile(tmp_path, "alice", alice_emb)
+
+    # Three labels, none matching Alice — all become Unknown. SPEAKER_02's
+    # embedding extraction happens to be the "closest" of the unmatched ones
+    # (still below threshold), which must NOT earn it "Unknown Speaker 1".
+    segs = _fake_diarization(["SPEAKER_00", "SPEAKER_01", "SPEAKER_02"])
+
+    def fake_extract(audio_path, segments, label, device="cpu"):
+        # All orthogonal to alice_emb but with varying (irrelevant) magnitude
+        return {
+            "SPEAKER_00": np.array([0.0, 1.0, 0.0]),
+            "SPEAKER_01": np.array([0.0, 0.0, 1.0]),
+            "SPEAKER_02": np.array([0.0, 2.0, 0.0]),  # still sim 0.0 vs alice
+        }[label]
+
+    with patch("wisper_transcribe.speaker_manager.extract_embedding", side_effect=fake_extract):
+        result = match_speakers(Path("fake.wav"), segs, data_dir=tmp_path, threshold=0.65)
+
+    assert result["SPEAKER_00"] == "Unknown Speaker 1"
+    assert result["SPEAKER_01"] == "Unknown Speaker 2"
+    assert result["SPEAKER_02"] == "Unknown Speaker 3"
+
+
+def test_match_speakers_failed_embedding_stays_unknown(tmp_path):
+    """A label whose embedding extraction raises stays Unknown and doesn't
+    disturb assignment of the other labels."""
+    from wisper_transcribe.speaker_manager import match_speakers
+
+    alice_emb = np.array([1.0, 0.0, 0.0])
+    _write_profile(tmp_path, "alice", alice_emb)
+
+    segs = _fake_diarization(["SPEAKER_00", "SPEAKER_01"])
+
+    def fake_extract(audio_path, segments, label, device="cpu"):
+        if label == "SPEAKER_00":
+            raise RuntimeError("embedding extraction failed")
+        return alice_emb
+
+    with patch("wisper_transcribe.speaker_manager.extract_embedding", side_effect=fake_extract):
+        result = match_speakers(Path("fake.wav"), segs, data_dir=tmp_path, threshold=0.65)
+
+    assert result["SPEAKER_00"] == "Unknown Speaker 1"
+    assert result["SPEAKER_01"] == "Alice"
 
 
 def test_match_speakers_multiple_profiles(tmp_path):

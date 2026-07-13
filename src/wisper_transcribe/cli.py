@@ -717,13 +717,18 @@ def speakers_test(audio: Path, num_speakers: Optional[int], campaign: Optional[s
         profile_filter = get_campaign_profile_keys(safe)
         click.echo(f"  Campaign filter: {safe} ({len(profile_filter)} member(s))")
 
+    allow_many_to_one = num_speakers is None
     matches = match_speakers(wav_path, diarization, device=device,
                              threshold=config.get("similarity_threshold", 0.65),
-                             profile_filter=profile_filter)
+                             profile_filter=profile_filter,
+                             allow_many_to_one=allow_many_to_one)
 
     if not matches:
         click.echo("No enrolled profiles to match against.")
         return
+
+    if allow_many_to_one:
+        click.echo("  (num_speakers not pinned — many-to-one matching enabled)")
 
     for label, name in sorted(matches.items()):
         click.echo(f"  {label} → {name}")

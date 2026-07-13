@@ -1190,6 +1190,44 @@ def test_process_file_no_campaign_passes_none_filter(
     mock_match.assert_called_once()
     call_kwargs = mock_match.call_args.kwargs
     assert call_kwargs.get("profile_filter") is None
+    # num_speakers was not pinned (default None) — many-to-one matching
+    # should be enabled so over-segmented labels can share a profile (F4).
+    assert call_kwargs.get("allow_many_to_one") is True
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=60.0)
+@patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
+@patch("wisper_transcribe.pipeline.get_hf_token", return_value="fake-token")
+@patch("wisper_transcribe.diarizer.diarize")
+@patch("wisper_transcribe.aligner.align")
+@patch("wisper_transcribe.speaker_manager.match_speakers", return_value={})
+def test_process_file_pinned_num_speakers_disables_many_to_one(
+    mock_match, mock_align, mock_diarize, mock_hf_token,
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg,
+    tmp_path,
+):
+    """When num_speakers is pinned by the user, match_speakers receives
+    allow_many_to_one=False — the user's explicit count implies one label
+    per person, so exclusivity should hold (F4)."""
+    from wisper_transcribe.models import DiarizationSegment, AlignedSegment
+    from wisper_transcribe.pipeline import process_file
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    mock_convert.return_value = audio
+
+    diar_seg = DiarizationSegment(0.0, 5.0, "SPEAKER_00")
+    mock_diarize.return_value = [diar_seg]
+    mock_align.return_value = [AlignedSegment(0.0, 5.0, "SPEAKER_00", "Hello")]
+
+    process_file(audio, output_dir=tmp_path, device="cpu", num_speakers=2)
+
+    mock_match.assert_called_once()
+    call_kwargs = mock_match.call_args.kwargs
+    assert call_kwargs.get("allow_many_to_one") is False
 
 
 # ---------------------------------------------------------------------------

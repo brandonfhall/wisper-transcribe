@@ -112,9 +112,14 @@ Audio file
                        ▼
                6. IDENTIFY       speaker_manager.match_speakers()
                   • Extract per-speaker voice embeddings from WAV
-                  • Cosine similarity vs enrolled profiles
-                  • Greedy assignment (each profile used once)
-                  • Below threshold → "Unknown Speaker N"
+                  • Cosine similarity vs enrolled profiles, scored per (label, profile) pair
+                  • Greedy assignment over all pairs, highest similarity first — a label
+                    whose top choice is already claimed falls back to its next-best
+                    unused profile above threshold (F4)
+                  • allow_many_to_one=True (when num_speakers wasn't pinned) lets a
+                    second label also claim an already-used profile, for pyannote
+                    over-segmentation of one real speaker into two labels
+                  • Below threshold → "Unknown Speaker N", numbered by sorted label order
                   • Returns Dict[label → display_name]
                        │
                        ▼
@@ -154,9 +159,10 @@ Both commands are provider-agnostic (Ollama / Anthropic / OpenAI / Google) via t
 
 ### Matching flow (subsequent runs)
 1. Extract embedding for each detected speaker label
-2. Build cosine similarity matrix: `(n_detected × n_enrolled)`
-3. Greedy assignment: highest-similarity pair first, each profile assigned at most once
-4. Similarity below threshold (default 0.65) → label kept as `"Unknown Speaker N"`
+2. Score every (label, profile) pair via cosine similarity
+3. Exclusive pass: consume pairs highest-similarity first, assigning whenever both the label and the profile are still free and similarity clears threshold — a label whose top choice was already claimed falls back to its next-best *unused* profile above threshold instead of skipping straight to Unknown (F4)
+4. Many-to-one pass (`allow_many_to_one=True`, only when `num_speakers` wasn't pinned): any label still unassigned claims its single best profile even if another label already has it, still threshold-gated — for pyannote over-segmenting one real speaker into two labels
+5. Similarity below threshold (default 0.65), or still unassigned after both passes → label kept as `"Unknown Speaker N"`, numbered by sorted label order
 
 ### EMA updates (`wisper enroll --update`)
 New embedding blended with existing: `stored = 0.7 * stored + 0.3 * new`
@@ -268,6 +274,8 @@ The `llm/` package wraps each provider behind a single `LLMClient` ABC with `com
 
 ### Shared voice embeddings + per-campaign rosters
 Full directory isolation per campaign would break cross-campaign recognition (re-enroll the same person for every game). Instead, campaigns are an **additive roster layer** over the global profile store. A `Campaign` holds a set of `profile_key` → `CampaignMember` entries; the voice embeddings in `profiles/embeddings/` remain global and are reused automatically. When `campaign=<slug>` is provided to `process_file()` or `match_speakers()`, a `profile_filter` set is computed via `get_campaign_profile_keys()` and passed to `match_speakers()`, which filters candidates before cosine-similarity scoring. `profile_filter=None` (default, when no campaign is specified) preserves the existing global-match behavior. Deleting a campaign never touches profiles or embeddings.
+
+**`match_speakers()` assignment algorithm (F4).** Every (diarization label, enrolled profile) pair is cosine-scored up front — not just each label's single best profile. Pairs are sorted by similarity descending (ties broken by label then profile name for determinism) and consumed greedily in an **exclusive pass**: a pair is assigned when both the label and the profile are still free and its similarity clears `threshold`. Because the full pair list is available, a label whose top choice was already claimed by a higher-scoring label naturally falls through to its next-best *unused* profile, instead of going straight to "Unknown" (the old bug: each label recorded only its single best profile). An optional **many-to-one pass** (`allow_many_to_one: bool`) then lets any label still unassigned after the exclusive pass claim its single best profile even if another label already has it, still gated on `threshold` — this models pyannote over-segmenting one real speaker into two labels (e.g. `SPEAKER_00` + `SPEAKER_02`), which is common when `num_speakers` isn't pinned. Both call sites (`pipeline.process_file()`, `cli.py`'s `speakers test`) pass `allow_many_to_one=(num_speakers is None)` — pinning the count is the user asserting one label per person, so exclusivity is kept in that case. Labels still unassigned after both passes (failed embedding extraction, below threshold, or an exclusivity loser with many-to-one off) become `"Unknown Speaker N"`, numbered by sorted label order rather than similarity order, so numbering is deterministic regardless of scoring.
 
 Safety invariants the implementation enforces:
 1. **YAML frontmatter is never sent to the LLM and is preserved byte-for-byte** — `parse_transcript()` splits the document into `(frontmatter_dict, body, raw_frontmatter_str)` and only the body is passed downstream. Reassembly uses the original raw string, not a re-serialised copy.
