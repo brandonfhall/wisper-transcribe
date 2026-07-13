@@ -171,7 +171,7 @@ The 12 s excerpt is cut at the label's *first* aligned occurrence (`jobs.py:133-
 5. **F8** — word-timestamp alignment (biggest quality win, most testing needed).
 6. **F9/F10/F11** — small hardening batch.
 
-Related existing plan item: "Enrollment wizard — synchronous embedding extraction blocks the browser" (JOB_ENROLL) — `web/enroll_shared.py` (phase 1) is the natural place to also move enrollment into the JobQueue when that's tackled.
+Related plan item ("Enrollment wizard — synchronous embedding extraction blocks the browser", JOB_ENROLL) is implemented — see "Phase 2.5 split" in `architecture.md` → "Speaker Enrollment Web Flow" and the "Job Queue" section's `JOB_ENROLL` entry.
 
 ---
 
@@ -245,21 +245,3 @@ For very long campaigns (30+ sessions), group sessions into arcs, summarize each
 - All three non-hierarchical features fit into the existing `JobQueue` as new `JOB_CAMPAIGN_*` types, giving them the same SSE progress page as transcription and summarize jobs
 
 ---
-
-## Enrollment wizard — synchronous embedding extraction blocks the browser
-
-**Observed (2026-05-14):** Submitting the "Name speakers" enrollment wizard (`POST /transcripts/{name}/enroll`) hangs the browser tab for 30–120 seconds before redirecting. No progress feedback is shown.
-
-**Why it's slow:**
-- `convert_to_wav()` (pydub) loads the full source MP3 into memory and re-encodes it to a 16 kHz mono WAV — 15–30 s for a 2-hour file.
-- `enroll_speaker()` calls `extract_embedding()` per speaker, which runs pyannote inference on up to 5 audio segments. For 8 speakers that is ~40 pyannote forward passes.
-- On the first enrollment after a server restart the pyannote embedding model (`pyannote/embedding`) must also be loaded from disk (~10–20 s).
-- Everything runs synchronously inside the HTTP request/response cycle — the browser waits with no feedback.
-
-**Fix:** Move enrollment into the async `JobQueue` as a new `JOB_ENROLL` type.
-1. `POST /transcripts/{name}/enroll` reads the form, validates, then submits a `JOB_ENROLL` job and redirects to `/transcribe/jobs/{id}`.
-2. The worker reads the `_diar.json` sidecar, converts to WAV once, runs `enroll_speaker()` for each renamed speaker, adds profiles to the campaign, and marks the job COMPLETED.
-3. The existing job detail page (SSE log stream, progress bar) shows live progress with no extra UI work.
-4. On completion the job detail page links to the transcript — same pattern as post-refine/summarize.
-
-**Prerequisite:** The `_diar.json` sidecar (already implemented) means the worker has everything it needs without the in-memory job.

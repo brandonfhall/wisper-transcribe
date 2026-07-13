@@ -17,6 +17,18 @@ Both enrollment entry points -- the transcript-centric wizard
    name in one submit (F3).
 
 This module holds that logic once so both routes call the same code path.
+
+**Phase 2.5 split:** what used to be a single ``apply_enrollment_submit()``
+(rename + convert-to-WAV + extract embeddings, all synchronous inside the
+HTTP request) is now two functions so the slow half can run in the
+background ``JobQueue`` instead of blocking the browser tab for 30-120s:
+
+- ``apply_renames()`` -- fast, synchronous. Rewrites the transcript markdown
+  and returns the validated rename groups for the caller to hand off.
+- ``enroll_profiles()`` -- slow. WAV conversion + pyannote embedding
+  extraction + campaign membership. Called from ``web/jobs.py``'s
+  ``_run_enroll_job`` (a ``JOB_ENROLL`` job), with an optional ``progress``
+  callback so the job's log stream shows what's happening.
 """
 from __future__ import annotations
 
@@ -24,7 +36,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
 
@@ -128,42 +140,42 @@ def template_current_names(current_names: dict[str, str]) -> dict[str, str]:
 
 
 @dataclass
-class EnrollmentResult:
-    """Outcome of ``apply_enrollment_submit``, for callers/tests that need to
-    tell "renamed + enrolled" apart from "renamed only, audio missing" (F5).
+class RenameResult:
+    """Outcome of ``apply_renames`` -- the fast, synchronous half of the
+    wizard submission.
 
     ``current_names`` is the (unfiltered) current_names map used to resolve
-    renames -- kept for callers/tests that want to inspect it, same as the
-    plain dict this function used to return.
+    renames -- kept for callers/tests that want to inspect it.
 
-    ``audio_missing`` is True only when there was at least one rename that
-    *would* have triggered an enroll/update step (i.e. renaming actually
-    happened and something was eligible for enrollment) but the source audio
-    file could not be found on disk. Routes use this to surface a notice
-    instead of a silent success redirect.
+    ``groups`` maps *target display name* -> list of raw pyannote labels
+    assigned to it, for every rename that is actually eligible for
+    enrollment (F2's raw-label guard and F3's unchanged-name-with-existing-
+    profile skip have both already been applied). Empty when nothing
+    submitted was eligible -- callers use this to decide whether a
+    ``JOB_ENROLL`` job is worth enqueueing at all.
     """
 
     current_names: dict[str, str] = field(default_factory=dict)
-    audio_missing: bool = False
+    groups: dict[str, list[str]] = field(default_factory=dict)
 
 
-def apply_enrollment_submit(
-    *,
+def apply_renames(
     md_path: Path,
     segments: list,
-    input_path: Path,
-    campaign_slug: Optional[str],
-    device: str,
     renames: dict[str, str],
     data_dir=None,
-) -> EnrollmentResult:
-    """Apply a wizard submission: rename in the transcript, enroll/update profiles.
+) -> RenameResult:
+    """Apply a wizard submission's renames to the transcript markdown.
 
-    ``segments`` must be ``DiarizationSegment``-like objects (attribute
-    access) -- both callers normalise to that before calling in.
+    Synchronous and fast -- this is the part that used to run inline with
+    the (now-async) embedding extraction; it stays inline in the HTTP
+    request. ``segments`` must be ``DiarizationSegment``-like objects
+    (attribute access) -- both callers normalise to that before calling in.
 
-    Returns an ``EnrollmentResult`` -- see its docstring for what
-    ``audio_missing`` means and why callers care.
+    Returns a ``RenameResult`` whose ``groups`` the caller hands to
+    ``enroll_profiles()`` -- directly, or (the web routes' choice) via a
+    ``JOB_ENROLL`` job so the slow embedding-extraction step doesn't block
+    the response.
     """
     from wisper_transcribe.formatter import update_speaker_names
     from wisper_transcribe.speaker_manager import load_profiles
@@ -176,7 +188,7 @@ def apply_enrollment_submit(
         raw: new for raw, new in renames.items() if not RAW_LABEL_RE.match(new)
     }
     if not valid:
-        return EnrollmentResult(current_names, audio_missing=False)
+        return RenameResult(current_names, groups={})
 
     existing_profiles = load_profiles(data_dir)
 
@@ -202,7 +214,7 @@ def apply_enrollment_submit(
     md_path.write_text(content, encoding="utf-8")
 
     if not segments:
-        return EnrollmentResult(current_names, audio_missing=False)
+        return RenameResult(current_names, groups={})
 
     # Group eligible raw labels by target display name -- handles two raw
     # labels being assigned the same display name in one submit (F3).
@@ -212,25 +224,58 @@ def apply_enrollment_submit(
             continue
         groups.setdefault(new, []).append(raw)
 
-    if not groups:
-        return EnrollmentResult(current_names, audio_missing=False)
+    return RenameResult(current_names, groups=groups)
 
-    # F5: only *now* -- once we know there's actually something eligible to
-    # enroll -- do we check for audio. Checking earlier would flag
-    # audio_missing even when every rename was a no-op that wouldn't have
-    # touched the audio anyway.
-    if not input_path.exists():
-        log.warning("Enrollment skipped: source audio not found at %s", input_path)
-        return EnrollmentResult(current_names, audio_missing=True)
+
+def enroll_profiles(
+    *,
+    input_path: Path,
+    segments: list,
+    groups: dict[str, list[str]],
+    campaign_slug: Optional[str],
+    device: str,
+    data_dir=None,
+    progress: Optional[Callable[[str], None]] = None,
+) -> None:
+    """Convert audio to WAV, extract/merge/enroll embeddings, update campaign.
+
+    This is the slow half of the wizard submission -- WAV conversion (15-30s
+    for a long file) and pyannote embedding extraction per speaker (up to 5
+    forward passes each). Callers run this off the request thread (the
+    ``JOB_ENROLL`` job runner in ``web/jobs.py``), passing ``progress`` so
+    status lines land in the job's log stream.
+
+    ``groups`` is ``apply_renames()``'s ``RenameResult.groups`` -- target
+    display name -> raw pyannote labels assigned to it. Semantics (F3 EMA
+    merge, averaging across raw labels, campaign membership) are unchanged
+    from the pre-split ``apply_enrollment_submit``.
+
+    Raises if ``input_path`` doesn't exist or WAV conversion fails; per-group
+    enroll/update failures are logged and skipped so one bad speaker doesn't
+    abort the rest.
+    """
+    if not groups:
+        return
+
+    def _progress(msg: str) -> None:
+        if progress is not None:
+            progress(msg)
+
+    from wisper_transcribe.speaker_manager import load_profiles
+
+    existing_profiles = load_profiles(data_dir)
 
     import numpy as np
 
     from wisper_transcribe.audio_utils import convert_to_wav
     from wisper_transcribe.speaker_manager import enroll_speaker, extract_embedding, update_embedding
 
+    _progress("Converting audio…")
     wav_path = convert_to_wav(input_path)
     try:
-        for display_name, raw_labels in groups.items():
+        total = len(groups)
+        for i, (display_name, raw_labels) in enumerate(groups.items(), start=1):
+            _progress(f"Extracting embedding for {display_name} ({i}/{total})…")
             profile_key = display_name.lower().replace(" ", "_")
             profile_exists = profile_key in existing_profiles
             try:
@@ -288,5 +333,3 @@ def apply_enrollment_submit(
     finally:
         if wav_path != input_path and wav_path.exists():
             wav_path.unlink(missing_ok=True)
-
-    return EnrollmentResult(current_names, audio_missing=False)

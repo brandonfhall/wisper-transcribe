@@ -16,6 +16,14 @@ Design:
 - LLM jobs: sys.stderr is redirected per-job so Ollama's streaming status
   messages ("Connecting…", "Generating: ·····") are captured the same way.
   Safe because the queue is single-worker — only one job runs at a time.
+- Enroll jobs (JOB_ENROLL): the speaker-enrollment wizard's slow half (WAV
+  conversion + pyannote embedding extraction, formerly synchronous in the
+  HTTP request) runs here too. The wizard route applies renames to the
+  transcript synchronously, then enqueues a JOB_ENROLL job carrying only the
+  transcript path and the validated rename groups; the runner re-reads the
+  transcript's _diar.json sidecar for segments/input_path/campaign. Progress
+  is pushed via a plain callback straight into job.log_lines (no tqdm/stderr
+  capture needed — enroll_profiles() calls back directly).
 """
 from __future__ import annotations
 
@@ -42,6 +50,7 @@ FAILED = "failed"
 JOB_TRANSCRIPTION = "transcription"
 JOB_REFINE = "refine"
 JOB_SUMMARIZE = "summarize"
+JOB_ENROLL = "enroll"
 
 _EXCERPT_SECONDS = 12  # length of each speaker audio clip
 
@@ -282,6 +291,18 @@ class Job:
     # failure-path cleanup — recording-sourced or other durable inputs must
     # never be moved or deleted.
     is_web_upload: bool = False
+    # For JOB_ENROLL jobs: path to the transcript markdown.  The runner
+    # re-reads the transcript's <stem>_diar.json sidecar for segments,
+    # input_path, and campaign at run time (restart-irrelevant since the
+    # queue is in-memory anyway, but it keeps this payload small and avoids
+    # serialising DiarizationSegment objects onto the job).
+    enroll_md_path: Optional[str] = None
+    # For JOB_ENROLL jobs: the validated rename groups from apply_renames()
+    # -- display_name -> [raw_label, ...] -- carried on the job because they
+    # came from the form and can't be reconstructed from the sidecar alone.
+    enroll_groups: dict[str, list[str]] = field(default_factory=dict)
+    # For JOB_ENROLL jobs: device to run embedding extraction on.
+    enroll_device: str = "cpu"
 
     @property
     def needs_extraction(self) -> bool:
@@ -413,6 +434,43 @@ class JobQueue:
         self._queue.put_nowait(job.id)
         return job
 
+    def submit_enroll(
+        self,
+        md_path: str,
+        transcript_name: str,
+        groups: dict[str, list[str]],
+        device: str = "cpu",
+    ) -> Job:
+        """Enqueue the slow half of a speaker-enrollment wizard submission.
+
+        The fast half (renaming the transcript body) has already happened
+        synchronously in the route via ``enroll_shared.apply_renames()`` --
+        this job only runs WAV conversion + embedding extraction
+        (``enroll_shared.enroll_profiles()``), which is what used to block
+        the browser tab for 30-120s.
+
+        ``output_path`` is set to ``md_path`` immediately (not just on
+        completion, unlike the LLM jobs) so the job detail page's "View
+        transcript" link works even while the job is still running -- the
+        rename already happened, only enrollment is pending.
+        """
+        job = Job(
+            id=str(uuid.uuid4()),
+            status=PENDING,
+            created_at=datetime.now(),
+            input_path=md_path,
+            kwargs={},
+            name=f"Enroll: {transcript_name}",
+            job_type=JOB_ENROLL,
+            output_path=md_path,
+            enroll_md_path=md_path,
+            enroll_groups=groups,
+            enroll_device=device,
+        )
+        self._jobs[job.id] = job
+        self._queue.put_nowait(job.id)
+        return job
+
     def get(self, job_id: str) -> Optional[Job]:
         return self._jobs.get(job_id)
 
@@ -465,6 +523,8 @@ class JobQueue:
         """Dispatch to the appropriate worker based on job_type."""
         if job.job_type in (JOB_REFINE, JOB_SUMMARIZE):
             self._run_llm_job(job)
+        elif job.job_type == JOB_ENROLL:
+            self._run_enroll_job(job)
         else:
             self._run_transcription_job(job)
 
@@ -621,6 +681,68 @@ class JobQueue:
             raise
         finally:
             _sys.stderr = old_stderr
+            job.finished_at = datetime.now()
+
+    def _run_enroll_job(self, job: Job) -> None:
+        """Run the slow half of a wizard submission (WAV convert + embedding
+        extraction) in a thread.
+
+        Mirrors ``_run_llm_job``'s status-transition structure, with one
+        deliberate difference: exceptions are never re-raised after being
+        recorded on ``job.error``. ``_worker()``'s own except-block would
+        otherwise overwrite ``job.error`` with ``str(exc)`` -- which, for
+        this job type, can contain a filesystem path (e.g. a WAV-conversion
+        failure message) that the job detail page renders directly into
+        HTML. Per the security rules (never reflect paths/exception text
+        into a response), every failure path here sets a generic message
+        instead and swallows the exception locally.
+        """
+        from pathlib import Path
+
+        from wisper_transcribe.web.enroll_shared import _load_diar_sidecar
+
+        md_path = Path(job.enroll_md_path or job.output_path or "")
+        diar = _load_diar_sidecar(md_path)
+        if not diar:
+            job.status = FAILED
+            job.error = "Source audio not available"
+            job.finished_at = datetime.now()
+            return
+
+        input_path = Path(diar.get("input_path", ""))
+        if not input_path.exists():
+            job.status = FAILED
+            job.error = "Source audio not available"
+            job.finished_at = datetime.now()
+            return
+
+        from wisper_transcribe.models import DiarizationSegment
+
+        segments = [
+            DiarizationSegment(start=s["start"], end=s["end"], speaker=s["speaker"])
+            for s in diar.get("diarization_segments", [])
+        ]
+        campaign_slug = diar.get("campaign")
+
+        def _progress(msg: str) -> None:
+            job.log_lines.append(msg)
+
+        try:
+            from wisper_transcribe.web.enroll_shared import enroll_profiles
+
+            enroll_profiles(
+                input_path=input_path,
+                segments=segments,
+                groups=job.enroll_groups,
+                campaign_slug=campaign_slug,
+                device=job.enroll_device,
+                progress=_progress,
+            )
+            job.status = COMPLETED
+        except Exception:
+            job.status = FAILED
+            job.error = "Enrollment failed"
+        finally:
             job.finished_at = datetime.now()
 
     def _do_llm_work(

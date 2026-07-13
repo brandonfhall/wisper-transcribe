@@ -536,3 +536,181 @@ def test_completed_job_no_diarization_deletes_upload_not_moves(tmp_path):
     assert not upload.exists()
     assert not (out_dir / "Session 12.mp3").exists()
     assert not (out_dir / "Session 12_diar.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# JOB_ENROLL — Phase 2.5 (speaker-enrollment wizard's slow half as a job)
+# ---------------------------------------------------------------------------
+
+def test_submit_enroll_creates_pending_job_with_groups():
+    q = _make_queue()
+    job = q.submit_enroll(
+        md_path="/tmp/session01.md",
+        transcript_name="session01",
+        groups={"Alice": ["SPEAKER_00"]},
+        device="cpu",
+    )
+    assert job.status == "pending"
+    assert job.job_type == "enroll"
+    assert job.enroll_groups == {"Alice": ["SPEAKER_00"]}
+    assert job.enroll_md_path == "/tmp/session01.md"
+    assert job.enroll_device == "cpu"
+    # (4) output_path is set immediately -- not just on completion -- so the
+    # job detail page's "View transcript" link works while it's still running.
+    assert job.output_path == "/tmp/session01.md"
+
+
+def _write_sidecar(tmp_path, md_path, input_path, campaign=None):
+    import json
+    diar = {
+        "input_path": str(input_path),
+        "campaign": campaign,
+        "diarization_segments": [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"}],
+    }
+    md_path.with_name(md_path.stem + "_diar.json").write_text(
+        json.dumps(diar), encoding="utf-8"
+    )
+
+
+def test_run_enroll_job_success_calls_enroll_profiles_and_completes(tmp_path):
+    """(d) The success path calls enroll_profiles() and sets COMPLETED +
+    output_path."""
+    from wisper_transcribe.web.jobs import JobQueue, COMPLETED
+
+    md_path = tmp_path / "session01.md"
+    md_path.write_text("# Session 01", encoding="utf-8")
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake")
+    _write_sidecar(tmp_path, md_path, audio)
+
+    q = JobQueue()
+    job = q.submit_enroll(
+        md_path=str(md_path),
+        transcript_name="session01",
+        groups={"Alice": ["SPEAKER_00"]},
+        device="cpu",
+    )
+
+    with patch("wisper_transcribe.web.enroll_shared.enroll_profiles") as mock_enroll_profiles:
+        q._run_enroll_job(job)
+
+    mock_enroll_profiles.assert_called_once()
+    kw = mock_enroll_profiles.call_args.kwargs
+    assert kw["input_path"] == audio
+    assert kw["groups"] == {"Alice": ["SPEAKER_00"]}
+    assert kw["device"] == "cpu"
+    assert job.status == COMPLETED
+    assert job.output_path == str(md_path)
+    assert job.finished_at is not None
+
+
+def test_run_enroll_job_progress_lines_land_in_log(tmp_path):
+    """(f) Progress lines the runner passes to enroll_profiles() land in
+    job.log_lines (so the SSE stream picks them up)."""
+    from wisper_transcribe.web.jobs import JobQueue, COMPLETED
+
+    md_path = tmp_path / "session01.md"
+    md_path.write_text("# Session 01", encoding="utf-8")
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake")
+    _write_sidecar(tmp_path, md_path, audio)
+
+    q = JobQueue()
+    job = q.submit_enroll(
+        md_path=str(md_path),
+        transcript_name="session01",
+        groups={"Alice": ["SPEAKER_00"]},
+        device="cpu",
+    )
+
+    def fake_enroll_profiles(*, input_path, segments, groups, campaign_slug,
+                              device, data_dir=None, progress=None):
+        if progress is not None:
+            progress("Converting audio…")
+            progress("Extracting embedding for Alice (1/1)…")
+
+    with patch("wisper_transcribe.web.enroll_shared.enroll_profiles", side_effect=fake_enroll_profiles):
+        q._run_enroll_job(job)
+
+    assert job.status == COMPLETED
+    assert "Converting audio…" in job.log_lines
+    assert any("Alice" in line for line in job.log_lines)
+
+
+def test_run_enroll_job_missing_audio_sets_generic_error(tmp_path):
+    """(e) Missing source audio fails the job with a generic message --
+    never the path."""
+    from wisper_transcribe.web.jobs import JobQueue, FAILED
+
+    md_path = tmp_path / "session01.md"
+    md_path.write_text("# Session 01", encoding="utf-8")
+    missing_audio = tmp_path / "nonexistent.mp3"
+    _write_sidecar(tmp_path, md_path, missing_audio)
+
+    q = JobQueue()
+    job = q.submit_enroll(
+        md_path=str(md_path),
+        transcript_name="session01",
+        groups={"Alice": ["SPEAKER_00"]},
+        device="cpu",
+    )
+
+    q._run_enroll_job(job)
+
+    assert job.status == FAILED
+    assert job.error == "Source audio not available"
+    assert str(tmp_path) not in job.error
+    assert job.finished_at is not None
+
+
+def test_run_enroll_job_missing_sidecar_sets_generic_error(tmp_path):
+    """No _diar.json at all (e.g. deleted between wizard submit and job run)
+    also fails generically rather than raising."""
+    from wisper_transcribe.web.jobs import JobQueue, FAILED
+
+    md_path = tmp_path / "session01.md"
+    md_path.write_text("# Session 01", encoding="utf-8")
+    # No sidecar written.
+
+    q = JobQueue()
+    job = q.submit_enroll(
+        md_path=str(md_path),
+        transcript_name="session01",
+        groups={"Alice": ["SPEAKER_00"]},
+        device="cpu",
+    )
+
+    q._run_enroll_job(job)
+
+    assert job.status == FAILED
+    assert job.error == "Source audio not available"
+
+
+def test_run_enroll_job_exception_sets_generic_error_not_path(tmp_path):
+    """(e) An unexpected exception from enroll_profiles() (e.g. a WAV
+    conversion failure whose message contains a path) must never leak that
+    path into job.error -- the job detail page renders it directly into
+    HTML."""
+    from wisper_transcribe.web.jobs import JobQueue, FAILED
+
+    md_path = tmp_path / "session01.md"
+    md_path.write_text("# Session 01", encoding="utf-8")
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake")
+    _write_sidecar(tmp_path, md_path, audio)
+
+    q = JobQueue()
+    job = q.submit_enroll(
+        md_path=str(md_path),
+        transcript_name="session01",
+        groups={"Alice": ["SPEAKER_00"]},
+        device="cpu",
+    )
+
+    boom = RuntimeError(f"couldn't decode {tmp_path / 'session01.mp3'}")
+    with patch("wisper_transcribe.web.enroll_shared.enroll_profiles", side_effect=boom):
+        q._run_enroll_job(job)
+
+    assert job.status == FAILED
+    assert job.error == "Enrollment failed"
+    assert str(tmp_path) not in job.error

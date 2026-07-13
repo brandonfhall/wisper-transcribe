@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import html as _html_module
 import json
+import logging
 import os
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import quote
+
+log = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
@@ -599,7 +602,7 @@ async def assign_campaign(request: Request, name: str) -> HTMLResponse:
 # behind the interval-matching approach and the F1/F2/F3 fixes.
 from wisper_transcribe.web.enroll_shared import (
     _load_diar_sidecar,
-    apply_enrollment_submit,
+    apply_renames,
     build_legacy_label_map as _build_legacy_label_map,
     template_current_names,
 )
@@ -720,39 +723,60 @@ async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
             headers={"Location": f"/transcripts/{quote(name)}"},
         )
 
-    # Rename + enroll/update voice profiles via the shared handler (unifies
-    # this path with the legacy job-centric wizard in transcribe.py). See
-    # enroll_shared.apply_enrollment_submit for the current-name resolution
-    # (F1), raw-label refusal (F2), and EMA-merge (F3) logic.
+    # Rename synchronously (fast) via the shared handler (unifies this path
+    # with the legacy job-centric wizard in transcribe.py). See
+    # enroll_shared.apply_renames for the current-name resolution (F1) and
+    # raw-label refusal (F2) logic. The slow half (WAV convert + embedding
+    # extraction, F3's EMA-merge logic) now runs in a JOB_ENROLL job instead
+    # of blocking this request (Phase 2.5) -- see enroll_shared.enroll_profiles.
     from wisper_transcribe.models import DiarizationSegment
-    from wisper_transcribe.config import get_device, load_config
 
     raw_segments = [
         DiarizationSegment(start=s["start"], end=s["end"], speaker=s["speaker"])
         for s in diar.get("diarization_segments", [])
     ]
     input_path = Path(diar["input_path"])
-    campaign_slug = diar.get("campaign")
+
+    rename_result = apply_renames(md_path, raw_segments, renames)
+
+    location = f"/transcripts/{quote(name)}"
+    if not rename_result.groups:
+        # Nothing eligible for enrollment (all skipped/unchanged/refused) --
+        # the rename (if any) already happened; no job needed.
+        return HTMLResponse(
+            content="", status_code=303,
+            headers={"Location": location},
+        )
+
+    # F5: only enqueue a job when there's actually something eligible to
+    # enroll AND the source audio is known to exist. A pre-check here (as
+    # opposed to inside the job) avoids enqueueing a job that can only ever
+    # fail, and keeps the existing "notice" UX exactly as before.
+    if not input_path.exists():
+        log.warning("Enrollment skipped: source audio not found at %s", input_path)
+        location += "?notice=enroll_audio_missing"
+        return HTMLResponse(
+            content="", status_code=303,
+            headers={"Location": location},
+        )
+
+    from wisper_transcribe.config import get_device, load_config
+    from . import get_queue
 
     device = load_config().get("device", "auto")
     if device == "auto":
         device = get_device()
 
-    result = apply_enrollment_submit(
-        md_path=md_path,
-        segments=raw_segments,
-        input_path=input_path,
-        campaign_slug=campaign_slug,
+    queue = get_queue(request)
+    job = queue.submit_enroll(
+        md_path=str(md_path),
+        transcript_name=name,
+        groups=rename_result.groups,
         device=device,
-        renames=renames,
     )
-
-    location = f"/transcripts/{quote(name)}"
-    if result.audio_missing:
-        location += "?notice=enroll_audio_missing"
     return HTMLResponse(
         content="", status_code=303,
-        headers={"Location": location},
+        headers={"Location": f"/transcribe/jobs/{job.id}"},
     )
 
 

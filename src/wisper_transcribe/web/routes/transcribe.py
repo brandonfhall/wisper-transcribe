@@ -381,33 +381,38 @@ async def enroll_submit(request: Request, job_id: str) -> Response:
             old_name = key[len("speaker_"):]
             renames[old_name] = str(value).strip()
 
-    audio_missing = False
-    if renames:
-        # Rename + enroll/update voice profiles via the shared handler
-        # (unifies this legacy job-centric path with the transcript-centric
-        # wizard in transcripts.py). See enroll_shared.apply_enrollment_submit
-        # for the current-name resolution (F1), raw-label refusal (F2), and
-        # EMA-merge (F3) logic.
-        from wisper_transcribe.web.enroll_shared import apply_enrollment_submit
-
-        device = job.kwargs.get("device", "cpu")
-        if device == "auto":
-            from wisper_transcribe.config import get_device
-            device = get_device()
-        campaign_slug = job.kwargs.get("campaign")
-
-        result = apply_enrollment_submit(
-            md_path=Path(job.output_path),
-            segments=job.diarization_segments,
-            input_path=Path(job.input_path),
-            campaign_slug=campaign_slug,
-            device=device,
-            renames=renames,
-        )
-        audio_missing = result.audio_missing
-
     transcript_name = Path(job.output_path).stem
     url = f"/transcripts/{quote(transcript_name, safe='')}"
-    if audio_missing:
-        url += "?notice=enroll_audio_missing"
+
+    if renames:
+        # Rename synchronously (fast) via the shared handler (unifies this
+        # legacy job-centric path with the transcript-centric wizard in
+        # transcripts.py). See enroll_shared.apply_renames for the
+        # current-name resolution (F1) and raw-label refusal (F2) logic. The
+        # slow half (WAV convert + embedding extraction, F3's EMA-merge
+        # logic) now runs in a JOB_ENROLL job instead of blocking this
+        # request (Phase 2.5) -- see enroll_shared.enroll_profiles.
+        from wisper_transcribe.web.enroll_shared import apply_renames
+
+        md_path = Path(job.output_path)
+        rename_result = apply_renames(md_path, job.diarization_segments, renames)
+
+        if rename_result.groups:
+            input_path = Path(job.input_path)
+            if not input_path.exists():
+                url += "?notice=enroll_audio_missing"
+            else:
+                device = job.kwargs.get("device", "cpu")
+                if device == "auto":
+                    from wisper_transcribe.config import get_device
+                    device = get_device()
+
+                enroll_job = queue.submit_enroll(
+                    md_path=str(md_path),
+                    transcript_name=transcript_name,
+                    groups=rename_result.groups,
+                    device=device,
+                )
+                return RedirectResponse(url=f"/transcribe/jobs/{enroll_job.id}", status_code=303)
+
     return RedirectResponse(url=url, status_code=303)

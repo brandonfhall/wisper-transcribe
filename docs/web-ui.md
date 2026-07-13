@@ -32,7 +32,9 @@ The interactive CLI enrollment prompt is replaced by a post-job wizard. After tr
 
 If you reopen the wizard later from the transcript detail page (**Name speakers** in the sidebar), the input fields are pre-filled with the names you applied previously — so you can fix a typo or change an assignment without re-typing every speaker.
 
-For a web upload, the source audio file is kept alongside its transcript in the output folder (instead of being deleted from the temp folder) so the wizard keeps working even after a server restart; it's removed automatically when you delete the transcript. If that audio file is ever missing, the wizard still lets you rename speakers — you'll just see a notice that voice enrollment was skipped.
+Submitting the wizard renames the transcript immediately, then takes you to a live job progress page instead of leaving the tab hanging — extracting a voice embedding per speaker (and, on the first enrollment after a restart, loading the embedding model) used to block the browser for 30–120 seconds with no feedback. The job page streams a log line per speaker being processed and links back to the transcript once enrollment finishes.
+
+For a web upload, the source audio file is kept alongside its transcript in the output folder (instead of being deleted from the temp folder) so the wizard keeps working even after a server restart; it's removed automatically when you delete the transcript. If that audio file is ever missing, the wizard still lets you rename speakers — you'll just see a notice that voice enrollment was skipped (no enrollment job is created in that case).
 
 ---
 
