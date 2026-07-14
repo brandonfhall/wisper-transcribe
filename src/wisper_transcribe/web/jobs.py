@@ -16,6 +16,14 @@ Design:
 - LLM jobs: sys.stderr is redirected per-job so Ollama's streaming status
   messages ("Connecting…", "Generating: ·····") are captured the same way.
   Safe because the queue is single-worker — only one job runs at a time.
+- Enroll jobs (JOB_ENROLL): the speaker-enrollment wizard's slow half (WAV
+  conversion + pyannote embedding extraction, formerly synchronous in the
+  HTTP request) runs here too. The wizard route applies renames to the
+  transcript synchronously, then enqueues a JOB_ENROLL job carrying only the
+  transcript path and the validated rename groups; the runner re-reads the
+  transcript's _diar.json sidecar for segments/input_path/campaign. Progress
+  is pushed via a plain callback straight into job.log_lines (no tqdm/stderr
+  capture needed — enroll_profiles() calls back directly).
 """
 from __future__ import annotations
 
@@ -42,6 +50,7 @@ FAILED = "failed"
 JOB_TRANSCRIPTION = "transcription"
 JOB_REFINE = "refine"
 JOB_SUMMARIZE = "summarize"
+JOB_ENROLL = "enroll"
 
 _EXCERPT_SECONDS = 12  # length of each speaker audio clip
 
@@ -101,6 +110,11 @@ def _write_enrollment_sidecar(job: "Job", output_path: "Path") -> None:  # type:
                 {"start": s.start, "end": s.end, "speaker": s.speaker}
                 for s in job.diarization_segments
             ],
+            # F7: authoritative raw_label -> display_name map. Present on
+            # every new transcript; absent on sidecars written before this
+            # key existed, which is exactly the legacy fallback
+            # resolve_current_names() handles.
+            "speaker_map": dict(job.speaker_map) if job.speaker_map else {},
         }
         sidecar_path = out.with_name(out.stem + "_diar.json")
         sidecar_path.write_text(_json.dumps(sidecar, indent=2), encoding="utf-8")
@@ -108,15 +122,126 @@ def _write_enrollment_sidecar(job: "Job", output_path: "Path") -> None:  # type:
         pass
 
 
+def _move_upload_to_output(input_path: str, output_path: "Path") -> str:  # type: ignore[name-defined]
+    """Move a temp web-upload file next to its finished transcript.
+
+    F5 fix: web uploads land in a ``wisper_upload_*`` NamedTemporaryFile in the
+    OS tempdir (renamed to a friendly ``<original_stem><suffix>`` name by
+    ``JobQueue.submit`` before the job even starts — see ``Job.is_web_upload``
+    for why the *original* prefix is captured at submit time rather than
+    re-derived from the current basename here).  That file is never cleaned
+    up when a job completes, and the startup orphan sweep only recognises the
+    unrenamed ``wisper_upload_*`` prefix, so it leaks until a lucky restart
+    happens to catch it mid-flight.  Moving it next to the transcript makes it
+    durable (the enrollment sidecar's ``input_path`` then survives restarts)
+    and removes it from the tempdir, closing the leak.
+
+    Returns the new durable path as a string, or the original ``input_path``
+    unchanged if the source is missing or the move fails for any reason —
+    callers should treat that as "enrollment audio may be unavailable" rather
+    than a hard failure, since the transcript itself is already written.
+    """
+    import shutil
+    from pathlib import Path as _Path
+
+    src = _Path(input_path)
+    if not src.exists():
+        return input_path
+
+    out = _Path(output_path)
+    out_dir = out.parent
+    stem = out.stem
+    suffix = src.suffix
+
+    dest = out_dir / f"{stem}{suffix}"
+    counter = 1
+    while dest.exists():
+        dest = out_dir / f"{stem}_{counter}{suffix}"
+        counter += 1
+
+    try:
+        shutil.move(str(src), str(dest))
+    except OSError:
+        return input_path
+    return str(dest)
+
+
+def _delete_temp_upload(job: "Job") -> None:  # type: ignore[name-defined]
+    """Delete the job's temp web-upload file on failure/cancel.
+
+    Only ever acts on files ``Job.is_web_upload`` marks as originating from a
+    ``wisper_upload_*`` temp file — recording-sourced or other durable inputs
+    are never touched.  A failed/cancelled job never reaches
+    ``_move_upload_to_output``, so the temp file would otherwise sit in the
+    tempdir leaking disk until the next server restart.
+    """
+    if not job.is_web_upload:
+        return
+    from pathlib import Path as _Path
+
+    try:
+        p = _Path(job.input_path)
+        if p.exists():
+            p.unlink()
+    except OSError:
+        pass
+
+
+def _longest_aligned_segment(aligned_segments: list, label: str) -> Optional[tuple]:
+    """Return (start, duration, text) of the LONGEST aligned segment for a raw
+    label (by ``end - start``), or None if the label has no segments.
+
+    Used as the fallback excerpt window when no diarization turn is available
+    for a label -- the pre-F12 behavior. A short interjection ("mm-hmm", a
+    cross-talk aside) is often misattributed and plays mostly someone else's
+    voice, while the longest block for a label is far more likely to actually
+    be that speaker talking.
+    """
+    best = None
+    best_duration = -1.0
+    for seg in aligned_segments:
+        if getattr(seg, "speaker", None) != label:
+            continue
+        duration = float(seg.end) - float(seg.start)
+        if duration > best_duration:
+            best_duration = duration
+            best = seg
+    if best is None:
+        return None
+    return float(best.start), best_duration, (getattr(best, "text", "") or "").strip()
+
+
 def _extract_speaker_excerpts(job: "Job", output_path: "Path",  # type: ignore[name-defined]
-                              aligned_segments: list | None = None) -> None:
+                              aligned_segments: list | None = None,
+                              diarization_segments: list | None = None) -> None:
     """Extract a short audio clip per speaker from the transcribed file.
 
-    Walks the aligned segments to find the first occurrence of each *raw*
-    speaker label (e.g. ``SPEAKER_00``), then uses ffmpeg to cut a ~12 s clip
-    from the original input audio. Clips are saved alongside the transcript
-    as ``<stem>_excerpt_<raw_label>.mp3`` so the enrollment wizard — which
-    keys off the raw labels stored in ``_diar.json`` — can find them.
+    F12: for each *raw* speaker label (e.g. ``SPEAKER_00``), the clip window
+    is chosen from the speaker's longest **solo diarization turn** --
+    ``speaker_manager._select_embedding_segments(diarization_segments, label,
+    max_count=1)``, the same solo-preferred / 2-20s-band / graceful-fallback
+    policy F10b uses to pick embedding source audio, so the clip is (as much
+    as diarization allows) audio of ONLY that speaker. The clip duration is
+    strictly clamped to ``min(_EXCERPT_SECONDS, turn length)`` -- no padding
+    floor when the turn is shorter than 12s: a short clip of only the target
+    speaker beats 12s that runs into someone else's turn (decision
+    2026-07-13). The persisted ``.txt`` snippet is built from ALL of that
+    label's aligned word-runs (post-F8, a whisper segment can split into
+    several word-run AlignedSegments) that overlap the clip window, joined in
+    time order -- so the displayed text matches exactly what the listener
+    hears, instead of one word-run that can be a mid-sentence fragment.
+
+    A label with no diarization segments (or a `diarization_segments` list
+    without any turn for that label -- `_select_embedding_segments` raises
+    `ValueError`) falls back to the pre-F12 behavior: the clip is cut at the
+    label's longest ALIGNED segment, with the full fixed `_EXCERPT_SECONDS`
+    window and that single segment's text. This keeps the function robust for
+    legacy callers/tests that only pass `aligned_segments`, and means one
+    label's lookup failure never affects any other label.
+
+    Clips are saved alongside the transcript as
+    ``<stem>_excerpt_<raw_label>.mp3`` so the enrollment wizard -- which keys
+    off the raw labels stored in ``_diar.json`` -- can find them.
 
     Earlier versions parsed the rendered markdown and so keyed files by the
     *display* name ("Unknown Speaker 1", etc.), which never matched the
@@ -127,34 +252,64 @@ def _extract_speaker_excerpts(job: "Job", output_path: "Path",  # type: ignore[n
     import re
     from pathlib import Path as _Path
 
+    from wisper_transcribe.speaker_manager import _select_embedding_segments
+
     if not aligned_segments:
         return
 
-    first_ts: dict[str, float] = {}
-    first_text: dict[str, str] = {}
-    for seg in aligned_segments:
-        label = getattr(seg, "speaker", None)
-        if not label or label == "UNKNOWN" or label in first_ts:
-            continue
-        first_ts[label] = float(seg.start)
-        first_text[label] = (getattr(seg, "text", "") or "").strip()
-
-    if not first_ts:
+    labels = sorted({
+        getattr(seg, "speaker", None)
+        for seg in aligned_segments
+        if getattr(seg, "speaker", None) and getattr(seg, "speaker", None) != "UNKNOWN"
+    })
+    if not labels:
         return
 
     out_dir = _Path(output_path).parent
     stem = _Path(output_path).stem
     input_path = _Path(job.input_path)
 
-    for speaker, start in first_ts.items():
-        safe_name = re.sub(r"[^\w\-]", "_", speaker)
+    for label in labels:
+        turn = None
+        if diarization_segments:
+            try:
+                turn = _select_embedding_segments(diarization_segments, label, max_count=1)[0]
+            except ValueError:
+                turn = None
+
+        if turn is not None:
+            start = float(turn.start)
+            duration = min(_EXCERPT_SECONDS, float(turn.end) - float(turn.start))
+            window_end = start + duration
+            overlapping = sorted(
+                (
+                    seg for seg in aligned_segments
+                    if getattr(seg, "speaker", None) == label
+                    and float(seg.start) < window_end
+                    and float(seg.end) > start
+                ),
+                key=lambda seg: seg.start,
+            )
+            text = " ".join(
+                stripped for stripped in (
+                    (getattr(seg, "text", "") or "").strip() for seg in overlapping
+                ) if stripped
+            )
+        else:
+            fallback = _longest_aligned_segment(aligned_segments, label)
+            if fallback is None:
+                continue
+            start, _longest_duration, text = fallback
+            duration = _EXCERPT_SECONDS
+
+        safe_name = re.sub(r"[^\w\-]", "_", label)
         clip_path = out_dir / f"{stem}_excerpt_{safe_name}.mp3"
         try:
             subprocess.run(
                 [
                     "ffmpeg", "-y",
                     "-ss", str(start),
-                    "-t", str(_EXCERPT_SECONDS),
+                    "-t", str(duration),
                     "-i", str(input_path),
                     "-ac", "1",
                     "-ar", "22050",
@@ -164,14 +319,14 @@ def _extract_speaker_excerpts(job: "Job", output_path: "Path",  # type: ignore[n
                 check=True,
                 capture_output=True,
             )
-            job.speaker_excerpts[speaker] = str(clip_path)
+            job.speaker_excerpts[label] = str(clip_path)
         except Exception:
             pass
 
         # Persist the transcript snippet to disk so it survives server restarts.
         text_path = out_dir / f"{stem}_excerpt_{safe_name}.txt"
         try:
-            text_path.write_text(first_text.get(speaker, ""), encoding="utf-8")
+            text_path.write_text(text, encoding="utf-8")
         except Exception:
             pass
 
@@ -198,6 +353,12 @@ class Job:
     diarization_labels: list[str] = field(default_factory=list)
     # Full diarization segments retained for post-job enrollment (enroll_submit uses these)
     diarization_segments: list = field(default_factory=list)
+    # F7: authoritative raw_label -> display_name map the formatter used when
+    # writing the transcript (pipeline.process_file()'s speaker_map local).
+    # Persisted into the _diar.json sidecar so the enrollment wizard can
+    # resolve current names without reconstructing them from rendered
+    # markdown timestamps -- see enroll_shared.resolve_current_names.
+    speaker_map: dict[str, str] = field(default_factory=dict)
     # speaker_label -> path to a short audio excerpt (for enrollment wizard)
     speaker_excerpts: dict[str, str] = field(default_factory=dict)
     # Threading event set by cancel() to signal the worker to abort
@@ -211,6 +372,24 @@ class Job:
     llm_transcript_path: Optional[str] = None
     # For summarize jobs: path to the generated .summary.md file
     summary_path: Optional[str] = None
+    # True when input_path originated from a wisper_upload_* temp file (set by
+    # JobQueue.submit from the *original* basename before the friendly-name
+    # rename below strips that prefix).  Drives the F5 move-to-output and
+    # failure-path cleanup — recording-sourced or other durable inputs must
+    # never be moved or deleted.
+    is_web_upload: bool = False
+    # For JOB_ENROLL jobs: path to the transcript markdown.  The runner
+    # re-reads the transcript's <stem>_diar.json sidecar for segments,
+    # input_path, and campaign at run time (restart-irrelevant since the
+    # queue is in-memory anyway, but it keeps this payload small and avoids
+    # serialising DiarizationSegment objects onto the job).
+    enroll_md_path: Optional[str] = None
+    # For JOB_ENROLL jobs: the validated rename groups from apply_renames()
+    # -- display_name -> [raw_label, ...] -- carried on the job because they
+    # came from the form and can't be reconstructed from the sidecar alone.
+    enroll_groups: dict[str, list[str]] = field(default_factory=dict)
+    # For JOB_ENROLL jobs: device to run embedding extraction on.
+    enroll_device: str = "cpu"
 
     @property
     def needs_extraction(self) -> bool:
@@ -286,6 +465,12 @@ class JobQueue:
         if not original_stem:
             original_stem = Path(input_path).stem
 
+        # Capture the web-upload marker from the *original* basename before
+        # the friendly-name rename below strips the "wisper_upload_" prefix
+        # (F5: the renamed file still lives in the tempdir and must still be
+        # recognised as a temp upload at job-completion/failure time).
+        is_web_upload = Path(input_path).name.startswith("wisper_upload_")
+
         # Rename temp file so process_file writes <stem>.md instead of a UUID
         tmp_path = Path(input_path)
         if tmp_path.exists() and tmp_path.stem != original_stem:
@@ -303,6 +488,7 @@ class JobQueue:
             job_type=JOB_TRANSCRIPTION,
             post_refine=post_refine,
             post_summarize=post_summarize,
+            is_web_upload=is_web_upload,
         )
         self._jobs[job.id] = job
         if on_complete is not None:
@@ -330,6 +516,43 @@ class JobQueue:
             name=f"{label}: {display_name}",
             job_type=job_type,
             llm_transcript_path=transcript_path,
+        )
+        self._jobs[job.id] = job
+        self._queue.put_nowait(job.id)
+        return job
+
+    def submit_enroll(
+        self,
+        md_path: str,
+        transcript_name: str,
+        groups: dict[str, list[str]],
+        device: str = "cpu",
+    ) -> Job:
+        """Enqueue the slow half of a speaker-enrollment wizard submission.
+
+        The fast half (renaming the transcript body) has already happened
+        synchronously in the route via ``enroll_shared.apply_renames()`` --
+        this job only runs WAV conversion + embedding extraction
+        (``enroll_shared.enroll_profiles()``), which is what used to block
+        the browser tab for 30-120s.
+
+        ``output_path`` is set to ``md_path`` immediately (not just on
+        completion, unlike the LLM jobs) so the job detail page's "View
+        transcript" link works even while the job is still running -- the
+        rename already happened, only enrollment is pending.
+        """
+        job = Job(
+            id=str(uuid.uuid4()),
+            status=PENDING,
+            created_at=datetime.now(),
+            input_path=md_path,
+            kwargs={},
+            name=f"Enroll: {transcript_name}",
+            job_type=JOB_ENROLL,
+            output_path=md_path,
+            enroll_md_path=md_path,
+            enroll_groups=groups,
+            enroll_device=device,
         )
         self._jobs[job.id] = job
         self._queue.put_nowait(job.id)
@@ -387,6 +610,8 @@ class JobQueue:
         """Dispatch to the appropriate worker based on job_type."""
         if job.job_type in (JOB_REFINE, JOB_SUMMARIZE):
             self._run_llm_job(job)
+        elif job.job_type == JOB_ENROLL:
+            self._run_enroll_job(job)
         else:
             self._run_transcription_job(job)
 
@@ -444,9 +669,34 @@ class JobQueue:
             _result_store: dict = {}
             output_path = process_file(Path(job.input_path), _result_store=_result_store, job_id=job.id, **job.kwargs)
             job.diarization_segments = _result_store.get("diarization_segments", [])
+            job.speaker_map = _result_store.get("speaker_map", {})
             job.output_path = str(output_path)
+
+            # F5: move the temp web upload next to the transcript so the
+            # enrollment sidecar's input_path is durable across restarts and
+            # the tempdir copy doesn't leak. Must happen before excerpt
+            # extraction and the sidecar write so both use the durable path.
+            #
+            # Only move it when there's diarization data: no segments means
+            # _write_enrollment_sidecar (below) never writes a _diar.json, so
+            # a moved copy would sit in the output dir with nothing recording
+            # its path -- an unreclaimable leak in exactly the spot F5 is
+            # fixing. With no enrollment wizard possible, just delete the temp
+            # file, same as the failure path.
+            if job.is_web_upload:
+                if job.diarization_segments:
+                    job.input_path = _move_upload_to_output(job.input_path, output_path)
+                else:
+                    _delete_temp_upload(job)
+                # Either way the temp-upload obligation is discharged: never
+                # let a later failure (e.g. in post-processing) fall into the
+                # except-block cleanup and delete what is now either the
+                # user's durable transcript-adjacent audio or already gone.
+                job.is_web_upload = False
+
             _extract_speaker_excerpts(job, output_path,
-                                      aligned_segments=_result_store.get("aligned_segments", []))
+                                      aligned_segments=_result_store.get("aligned_segments", []),
+                                      diarization_segments=job.diarization_segments)
             _write_enrollment_sidecar(job, output_path)
 
             # Chain LLM post-processing if requested; defer COMPLETED until done
@@ -464,9 +714,11 @@ class JobQueue:
         except InterruptedError:
             job.status = FAILED
             job.error = "Cancelled"
+            _delete_temp_upload(job)
         except Exception as exc:
             job.status = FAILED
             job.error = str(exc)
+            _delete_temp_upload(job)
             raise
         finally:
             _tqdm_module.tqdm.write = original_write  # type: ignore[method-assign]
@@ -518,6 +770,68 @@ class JobQueue:
             raise
         finally:
             _sys.stderr = old_stderr
+            job.finished_at = datetime.now()
+
+    def _run_enroll_job(self, job: Job) -> None:
+        """Run the slow half of a wizard submission (WAV convert + embedding
+        extraction) in a thread.
+
+        Mirrors ``_run_llm_job``'s status-transition structure, with one
+        deliberate difference: exceptions are never re-raised after being
+        recorded on ``job.error``. ``_worker()``'s own except-block would
+        otherwise overwrite ``job.error`` with ``str(exc)`` -- which, for
+        this job type, can contain a filesystem path (e.g. a WAV-conversion
+        failure message) that the job detail page renders directly into
+        HTML. Per the security rules (never reflect paths/exception text
+        into a response), every failure path here sets a generic message
+        instead and swallows the exception locally.
+        """
+        from pathlib import Path
+
+        from wisper_transcribe.web.enroll_shared import _load_diar_sidecar
+
+        md_path = Path(job.enroll_md_path or job.output_path or "")
+        diar = _load_diar_sidecar(md_path)
+        if not diar:
+            job.status = FAILED
+            job.error = "Source audio not available"
+            job.finished_at = datetime.now()
+            return
+
+        input_path = Path(diar.get("input_path", ""))
+        if not input_path.exists():
+            job.status = FAILED
+            job.error = "Source audio not available"
+            job.finished_at = datetime.now()
+            return
+
+        from wisper_transcribe.models import DiarizationSegment
+
+        segments = [
+            DiarizationSegment(start=s["start"], end=s["end"], speaker=s["speaker"])
+            for s in diar.get("diarization_segments", [])
+        ]
+        campaign_slug = diar.get("campaign")
+
+        def _progress(msg: str) -> None:
+            job.log_lines.append(msg)
+
+        try:
+            from wisper_transcribe.web.enroll_shared import enroll_profiles
+
+            enroll_profiles(
+                input_path=input_path,
+                segments=segments,
+                groups=job.enroll_groups,
+                campaign_slug=campaign_slug,
+                device=job.enroll_device,
+                progress=_progress,
+            )
+            job.status = COMPLETED
+        except Exception:
+            job.status = FAILED
+            job.error = "Enrollment failed"
+        finally:
             job.finished_at = datetime.now()
 
     def _do_llm_work(

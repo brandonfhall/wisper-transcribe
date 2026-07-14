@@ -7,10 +7,19 @@ from typing import Literal, Optional
 
 
 @dataclass
+class Word:
+    """A single word-level timestamp within a TranscriptionSegment."""
+    start: float
+    end: float
+    text: str
+
+
+@dataclass
 class TranscriptionSegment:
     start: float
     end: float
     text: str
+    words: Optional[list] = None  # list[Word], when word timestamps are available
 
 
 @dataclass

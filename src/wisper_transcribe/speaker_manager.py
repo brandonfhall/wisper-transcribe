@@ -129,23 +129,74 @@ def _get_hf_token() -> str:
         return ""
 
 
+def _segments_overlap(a: DiarizationSegment, b: DiarizationSegment) -> bool:
+    """Strict time overlap between two segments: ``max(starts) < min(ends)``."""
+    return max(a.start, b.start) < min(a.end, b.end)
+
+
+def _select_embedding_segments(
+    segments: list[DiarizationSegment],
+    speaker_label: str,
+    max_count: int = 5,
+) -> list[DiarizationSegment]:
+    """Pick up to ``max_count`` segments to source a speaker's voice embedding.
+
+    Selection policy (in order):
+
+    1. ``speaker_segs`` = all segments carrying ``speaker_label``. Raises
+       ``ValueError`` if there are none (same as before this was split out).
+    2. ``solo`` = the subset of ``speaker_segs`` that do NOT strictly
+       time-overlap any segment belonging to a *different* speaker --
+       overlapping segments are exactly where tabletop audio has cross-talk
+       (or music) bleeding into a diarization turn, which pollutes the
+       embedding.
+    3. Prefer solo segments 2.0-20.0s long (a "sweet spot": long enough to
+       carry real voice characteristics, short enough to stay single-topic
+       and avoid drifting into silence/noise), sorted longest-first, up to
+       ``max_count``.
+    4. If none fall in that band, fall back to all solo segments sorted
+       longest-first, up to ``max_count``.
+    5. If there are no solo segments at all (e.g. constant cross-talk),
+       fall back to the original behavior: the ``max_count`` longest
+       ``speaker_segs`` regardless of overlap.
+    """
+    speaker_segs = [s for s in segments if s.speaker == speaker_label]
+    if not speaker_segs:
+        raise ValueError(f"No segments found for speaker {speaker_label!r}")
+
+    other_segs = [s for s in segments if s.speaker != speaker_label]
+    solo = [
+        s for s in speaker_segs
+        if not any(_segments_overlap(s, o) for o in other_segs)
+    ]
+
+    if solo:
+        banded = [s for s in solo if 2.0 <= (s.end - s.start) <= 20.0]
+        pool = banded if banded else solo
+        return sorted(pool, key=lambda s: s.end - s.start, reverse=True)[:max_count]
+
+    return sorted(speaker_segs, key=lambda s: s.end - s.start, reverse=True)[:max_count]
+
+
 def extract_embedding(
     audio_path: Path,
     segments: list[DiarizationSegment],
     speaker_label: str,
     device: str = "cpu",
 ) -> np.ndarray:
-    """Extract a voice embedding for a speaker by averaging their longest segments."""
+    """Extract a voice embedding for a speaker by averaging select segments.
+
+    Segment choice is delegated to ``_select_embedding_segments()``: it
+    prefers segments that don't overlap another speaker's turn (avoiding
+    cross-talk/music bleed) and are a moderate 2-20s long, falling back to
+    the longest available segments when nothing fits that profile. See that
+    function's docstring for the full policy.
+    """
     from pyannote.core import Segment as PyannoteSegment
 
     inference = _load_embedding_model(device)
 
-    speaker_segs = [s for s in segments if s.speaker == speaker_label]
-    if not speaker_segs:
-        raise ValueError(f"No segments found for speaker {speaker_label!r}")
-
-    # Use up to 5 longest segments
-    longest = sorted(speaker_segs, key=lambda s: s.end - s.start, reverse=True)[:5]
+    selected = _select_embedding_segments(segments, speaker_label)
 
     # Pre-load audio via scipy so pyannote never calls torchaudio (removed in 2.x).
     from .audio_utils import load_wav_as_tensor
@@ -153,7 +204,7 @@ def extract_embedding(
     audio_dict = load_wav_as_tensor(audio_path)
 
     embeddings = []
-    for seg in longest:
+    for seg in selected:
         excerpt = PyannoteSegment(seg.start, seg.end)
         emb = inference.crop(audio_dict, excerpt)
         embeddings.append(emb)
@@ -175,11 +226,20 @@ def enroll_speaker(
     device: str = "cpu",
     data_dir: Optional[Path] = None,
     notes: str = "",
+    embedding: Optional[np.ndarray] = None,
 ) -> SpeakerProfile:
-    """Extract embedding and save a new speaker profile."""
+    """Extract embedding and save a new speaker profile.
+
+    ``embedding``, when provided, is used as-is instead of calling
+    ``extract_embedding()`` internally. This lets callers average embeddings
+    extracted from multiple raw diarization labels before saving -- e.g. when
+    two pyannote labels are assigned the same display name in one enrollment
+    wizard submit (over-segmentation of a single real speaker).
+    """
     import datetime
 
-    embedding = extract_embedding(audio_path, segments, speaker_label, device)
+    if embedding is None:
+        embedding = extract_embedding(audio_path, segments, speaker_label, device)
 
     emb_dir = _get_embeddings_dir(data_dir)
     emb_dir.mkdir(parents=True, exist_ok=True)
@@ -319,6 +379,7 @@ def match_speakers(
     device: str = "cpu",
     threshold: float = 0.65,
     profile_filter: Optional[set] = None,
+    allow_many_to_one: bool = False,
 ) -> dict[str, str]:
     """Match anonymous speaker labels to enrolled profiles via cosine similarity.
 
@@ -327,6 +388,21 @@ def match_speakers(
 
     profile_filter: when provided, only profiles whose key is in this set are
     considered candidates.  None (default) uses all enrolled profiles.
+
+    Assignment is pair-scored rather than per-label-best-only: every
+    (label, profile) similarity is computed, then pairs are consumed
+    greedily by descending similarity so a label whose top choice was
+    already claimed by a higher-scoring label still falls back to its
+    next-best *unused* profile above threshold, instead of going straight
+    to "Unknown".
+
+    allow_many_to_one: when True, after the exclusive pass any label still
+    unassigned is given its single best-scoring profile even if that
+    profile was already claimed by another label (still gated on
+    threshold). This models diarization over-segmentation (one real
+    speaker split into two labels) and should only be enabled when the
+    speaker count was not pinned by the user — pinning implies the caller
+    expects one label per person, so exclusivity should hold.
     """
     profiles = load_profiles(data_dir)
     if profile_filter is not None:
@@ -355,33 +431,57 @@ def match_speakers(
     if not enrolled:
         return {}
 
-    # Greedy best-match assignment
-    result: dict[str, str] = {}
-    used_profiles: set[str] = set()
-    unknown_counter = 1
-
-    # Sort by best available similarity (descending) so highest-confidence matches go first
-    scored = []
+    # Score every (label, profile) pair for labels whose embedding extraction
+    # succeeded. Labels with a failed extraction never produce a pair and are
+    # picked up by the final Unknown-numbering pass below.
+    pairs: list[tuple[float, str, str]] = []  # (sim, label, profile_name)
     for label, q_emb in query_embeddings.items():
         if q_emb is None:
-            scored.append((label, None, -1.0))
             continue
-        best_name = None
-        best_sim = -1.0
         for pname, e_emb in enrolled.items():
             sim = _cosine_similarity(q_emb, e_emb)
-            if sim > best_sim:
-                best_sim = sim
-                best_name = pname
-        scored.append((label, best_name, best_sim))
+            pairs.append((sim, label, pname))
 
-    scored.sort(key=lambda x: x[2], reverse=True)
+    # Deterministic ordering: highest similarity first, ties broken by label
+    # then profile name so results don't depend on dict/insertion order.
+    pairs.sort(key=lambda p: (-p[0], p[1], p[2]))
 
-    for label, best_name, best_sim in scored:
-        if best_name is not None and best_sim >= threshold and best_name not in used_profiles:
-            result[label] = profiles[best_name].display_name
-            used_profiles.add(best_name)
-        else:
+    result: dict[str, str] = {}
+    used_profiles: set[str] = set()
+
+    # Exclusive pass: greedily assign the best remaining pair whenever both
+    # the label and the profile are still free. This is what gives a label
+    # whose top choice was already taken the next-best *unused* profile
+    # instead of going straight to Unknown.
+    for sim, label, pname in pairs:
+        if sim < threshold:
+            break  # pairs are sorted descending; nothing further clears threshold
+        if label in result or pname in used_profiles:
+            continue
+        result[label] = profiles[pname].display_name
+        used_profiles.add(pname)
+
+    # Many-to-one pass: each still-unassigned label takes its single best
+    # profile (over ALL enrolled profiles, used or not) if that best score
+    # clears threshold. A label reaching here with best_sim >= threshold
+    # necessarily lost that profile to another label in the exclusive pass.
+    if allow_many_to_one:
+        best_by_label: dict[str, tuple[float, str]] = {}
+        for sim, label, pname in pairs:
+            if label in result:
+                continue
+            if label not in best_by_label or sim > best_by_label[label][0]:
+                best_by_label[label] = (sim, pname)
+        for label, (sim, pname) in best_by_label.items():
+            if sim >= threshold:
+                result[label] = profiles[pname].display_name
+
+    # Remaining unassigned labels (below threshold, exclusivity losers with
+    # many-to-one off, or failed embeddings) become "Unknown Speaker N",
+    # numbered deterministically by sorted label order.
+    unknown_counter = 1
+    for label in unique_labels:
+        if label not in result:
             result[label] = f"Unknown Speaker {unknown_counter}"
             unknown_counter += 1
 

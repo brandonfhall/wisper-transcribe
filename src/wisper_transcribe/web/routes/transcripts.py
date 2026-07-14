@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import html as _html_module
+import json
+import logging
 import os
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import quote
+
+log = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
@@ -117,6 +121,53 @@ def _get_safe_content_path(request: Request, name: str, suffix: str) -> Path | N
     return Path(target_path)
 
 
+def _delete_diar_sidecar_and_audio(request: Request, name: str) -> None:
+    """Remove the ``_diar.json`` enrollment sidecar and the durable audio copy
+    it points to, if any.
+
+    F5 decision: the audio file living next to a transcript exists solely to
+    back the enrollment wizard (it was moved there from the tempdir by
+    ``_move_upload_to_output`` in ``web/jobs.py``). Once the transcript is
+    deleted there's nothing left to enroll against, so leaving that audio
+    file (and the now-dangling sidecar referencing it) behind would be a
+    permanent leak -- the exact kind of leak F5 was fixing in the first
+    place, just relocated from the tempdir to the output dir. Deleting both
+    here keeps that promise. Excerpt clips (``*_excerpt_*.mp3``/``.txt``) are
+    a separate, pre-existing concern (F9/F10) and are intentionally left
+    untouched.
+    """
+    diar_path = _get_safe_content_path(request, name, "_diar.json")
+    if not diar_path or not diar_path.exists():
+        return
+
+    try:
+        diar = json.loads(diar_path.read_text(encoding="utf-8"))
+        stored_input_path = diar.get("input_path")
+    except Exception:
+        stored_input_path = None
+
+    if stored_input_path:
+        # Only delete the referenced audio if it actually resolves inside the
+        # output dir -- i.e. it's the durable moved copy, not some external
+        # user file (legacy sidecars from before the F5 fix may still point
+        # at a tempdir path, which must never be touched here).
+        out_dir = get_output_dir().resolve()
+        base_dir = os.path.abspath(str(out_dir))
+        if not base_dir.endswith(os.sep):
+            base_dir += os.sep
+        candidate_abs = os.path.abspath(stored_input_path)
+        if candidate_abs.startswith(base_dir):
+            try:
+                Path(candidate_abs).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    try:
+        diar_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 @router.get("/partials/recent", response_class=HTMLResponse)
 async def recent_transcripts_partial(request: Request) -> HTMLResponse:
     """HTMX partial: 6 most recent transcripts for the dashboard archive section."""
@@ -199,6 +250,7 @@ async def bulk_delete_transcripts(request: Request) -> HTMLResponse:
         summary = _get_safe_content_path(request, stem, ".summary.md")
         if summary and summary.exists():
             summary.unlink()
+        _delete_diar_sidecar_and_audio(request, stem)
     return HTMLResponse(content="", status_code=303, headers={"Location": "/transcripts"})
 
 
@@ -309,6 +361,9 @@ async def delete_transcript(request: Request, name: str) -> HTMLResponse:
     summary_path = _get_safe_content_path(request, name, ".summary.md")
     if summary_path and summary_path.exists():
         summary_path.unlink()
+    # F5: also remove the enrollment sidecar and the durable audio copy it
+    # references -- see _delete_diar_sidecar_and_audio for the reasoning.
+    _delete_diar_sidecar_and_audio(request, name)
     return HTMLResponse(
         content="",
         status_code=303,
@@ -542,84 +597,16 @@ async def assign_campaign(request: Request, name: str) -> HTMLResponse:
 # Transcript-centric enrollment wizard
 # ---------------------------------------------------------------------------
 
-def _load_diar_sidecar(md_path: "Path") -> dict | None:  # type: ignore[name-defined]
-    """Load the enrollment sidecar for a transcript, or None if absent/corrupt."""
-    import json as _json
-    sidecar_path = md_path.with_name(md_path.stem + "_diar.json")
-    if not sidecar_path.exists():
-        return None
-    try:
-        return _json.loads(sidecar_path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-
-
-def _build_legacy_label_map(md_path: "Path", segments: list) -> dict[str, str]:  # type: ignore[name-defined]
-    """Map raw pyannote labels → display names by interval-matching markdown timestamps.
-
-    Pre-fix transcripts saved excerpt files keyed by the *display* name, while
-    the wizard looks them up by the raw label from the sidecar. To rebuild
-    the mapping, for each `**display_name** *(HH:MM:SS)*` line in the
-    markdown, find the pyannote segment whose [start, end] interval contains
-    that timestamp — the segment's raw label is the one the aligner assigned
-    to that whisper line. Exact start-time matching does NOT work here:
-    pyannote's first-occurrence-of-SPEAKER_00 timestamp rarely equals the
-    first whisper segment assigned to SPEAKER_00 (whisper may skip silence,
-    aligner may assign nearby segments to UNKNOWN, etc.).
-    """
-    import re as _re
-
-    label_map: dict[str, str] = {}
-    try:
-        # Normalise sidecar segments to (start, end, speaker) tuples.
-        intervals: list[tuple[float, float, str]] = []
-        for seg in segments:
-            if isinstance(seg, dict):
-                sp, start, end = seg.get("speaker"), seg.get("start"), seg.get("end")
-            else:
-                sp = getattr(seg, "speaker", None)
-                start = getattr(seg, "start", None)
-                end = getattr(seg, "end", None)
-            if sp is None or start is None or end is None:
-                continue
-            intervals.append((float(start), float(end), sp))
-
-        if not intervals:
-            return {}
-
-        md_pattern = _re.compile(
-            r"\*\*(.+?)\*\*\s+\*\((\d+:\d{2}(?::\d{2})?)\)\*"
-        )
-        md_text = md_path.read_text(encoding="utf-8")
-
-        for m in md_pattern.finditer(md_text):
-            display = m.group(1)
-            if display == "UNKNOWN":
-                continue
-            parts = m.group(2).split(":")
-            if len(parts) == 2:
-                t_sec = int(parts[0]) * 60 + int(parts[1])
-            else:
-                t_sec = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-            t = float(t_sec)
-            # Prefer an interval containing t exactly; fall back to the nearest
-            # by start time so a whisper segment that starts slightly outside
-            # the pyannote turn still maps somewhere reasonable.
-            containing = next(
-                ((s, e, sp) for s, e, sp in intervals if s <= t <= e),
-                None,
-            )
-            if containing is None:
-                containing = min(intervals, key=lambda iv: abs(iv[0] - t))
-            raw_label = containing[2]
-            # First-write wins: a display name only maps to its first interval-
-            # matched raw label (multiple markdown blocks may share a display
-            # name when match_speakers matched several raw labels to the same
-            # enrolled profile — we only need one for excerpt lookup).
-            label_map.setdefault(raw_label, display)
-    except Exception:
-        pass
-    return label_map
+# Shared with web/routes/transcribe.py (the legacy job-centric wizard) via
+# wisper_transcribe.web.enroll_shared -- see that module for the rationale
+# behind the interval-matching approach and the F1/F2/F3 fixes.
+from wisper_transcribe.web.enroll_shared import (
+    _load_diar_sidecar,
+    apply_renames,
+    build_legacy_label_map as _build_legacy_label_map,
+    resolve_current_names,
+    template_current_names,
+)
 
 
 @router.get("/{name}/enroll", response_class=HTMLResponse)
@@ -679,6 +666,13 @@ async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
                 break
 
     from wisper_transcribe.speaker_manager import load_profiles
+
+    # F5: warn before submission when the sidecar's recorded input_path is
+    # gone (e.g. transcript predates the move-to-output fix, or the move
+    # failed) rather than letting the wizard silently rename-only on submit.
+    diar_input_path = diar.get("input_path", "")
+    audio_missing = not (diar_input_path and Path(diar_input_path).exists())
+
     return templates.TemplateResponse(
         request,
         "speaker_enroll.html",
@@ -692,11 +686,20 @@ async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
             "existing_profiles": load_profiles(),
             "speaker_excerpts": speaker_excerpts,
             "speaker_excerpt_texts": speaker_excerpt_texts,
-            # raw_label -> current display name in the transcript, derived by
-            # interval-matching markdown timestamps against pyannote segments.
-            # Lets the wizard pre-fill names the user previously applied so
-            # they can edit corrections instead of re-typing from scratch.
-            "current_names": legacy_label_map,
+            # raw_label -> current display name in the transcript. F7:
+            # resolved from the sidecar's authoritative speaker_map when
+            # present, falling back to the (fragile) interval-matching
+            # heuristic only for legacy sidecars that predate that key --
+            # see resolve_current_names. Lets the wizard pre-fill names the
+            # user previously applied so they can edit corrections instead
+            # of re-typing from scratch. Raw-label-valued entries (first
+            # pass, no renames applied yet) are filtered out so the input
+            # starts empty rather than prefilled with "SPEAKER_00" (F2) --
+            # see template_current_names.
+            "current_names": template_current_names(
+                resolve_current_names(md_path, diar, diar.get("diarization_segments", []))
+            ),
+            "audio_missing": audio_missing,
         },
     )
 
@@ -726,79 +729,60 @@ async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
             headers={"Location": f"/transcripts/{quote(name)}"},
         )
 
-    # Rename in the transcript.
-    # The form keys are raw pyannote labels (e.g. "SPEAKER_00"), but after a
-    # previous wizard pass the markdown body no longer contains those raw
-    # labels — it has whatever display name the user applied. Look up the
-    # *current* display name for each raw label so the rename targets the
-    # right string. Without this, a second pass through the wizard is a no-op.
-    from wisper_transcribe.formatter import update_speaker_names
-    content = md_path.read_text(encoding="utf-8")
-    current_names = _build_legacy_label_map(md_path, diar.get("diarization_segments", []))
-    for raw_label, new_name in renames.items():
-        old_name = current_names.get(raw_label, raw_label)
-        if old_name == new_name:
-            continue
-        content = update_speaker_names(content, old_name, new_name)
-    md_path.write_text(content, encoding="utf-8")
-
-    # Enroll voice profiles
-    import logging
+    # Rename synchronously (fast) via the shared handler (unifies this path
+    # with the legacy job-centric wizard in transcribe.py). See
+    # enroll_shared.apply_renames for the current-name resolution (F1) and
+    # raw-label refusal (F2) logic. The slow half (WAV convert + embedding
+    # extraction, F3's EMA-merge logic) now runs in a JOB_ENROLL job instead
+    # of blocking this request (Phase 2.5) -- see enroll_shared.enroll_profiles.
     from wisper_transcribe.models import DiarizationSegment
-    from wisper_transcribe.speaker_manager import enroll_speaker
-    from wisper_transcribe.audio_utils import convert_to_wav
-    from wisper_transcribe.config import get_device
 
-    log = logging.getLogger(__name__)
     raw_segments = [
         DiarizationSegment(start=s["start"], end=s["end"], speaker=s["speaker"])
         for s in diar.get("diarization_segments", [])
     ]
     input_path = Path(diar["input_path"])
-    campaign_slug = diar.get("campaign")
 
-    if raw_segments and input_path.exists():
-        from wisper_transcribe.config import load_config
-        device = load_config().get("device", "auto")
-        if device == "auto":
-            device = get_device()
+    rename_result = apply_renames(md_path, raw_segments, renames)
 
-        wav_path = convert_to_wav(input_path)
-        try:
-            for old_label, display_name in renames.items():
-                profile_key = display_name.lower().replace(" ", "_")
-                try:
-                    enroll_speaker(
-                        name=profile_key,
-                        display_name=display_name,
-                        role="",
-                        audio_path=wav_path,
-                        segments=raw_segments,
-                        speaker_label=old_label,
-                        device=device,
-                    )
-                except Exception as exc:
-                    log.warning("enroll_speaker failed for %s: %s", display_name, exc)
-                    continue
-                if campaign_slug:
-                    try:
-                        from wisper_transcribe.campaign_manager import add_member, load_campaigns
-                        campaigns = load_campaigns()
-                        if (campaign_slug in campaigns
-                                and profile_key not in campaigns[campaign_slug].members):
-                            add_member(campaign_slug, profile_key)
-                    except Exception as exc:
-                        log.warning("add_member failed for %s in %s: %s",
-                                    profile_key, campaign_slug, exc)
-        finally:
-            if wav_path != input_path and wav_path.exists():
-                wav_path.unlink(missing_ok=True)
-    elif raw_segments:
+    location = f"/transcripts/{quote(name)}"
+    if not rename_result.groups:
+        # Nothing eligible for enrollment (all skipped/unchanged/refused) --
+        # the rename (if any) already happened; no job needed.
+        return HTMLResponse(
+            content="", status_code=303,
+            headers={"Location": location},
+        )
+
+    # F5: only enqueue a job when there's actually something eligible to
+    # enroll AND the source audio is known to exist. A pre-check here (as
+    # opposed to inside the job) avoids enqueueing a job that can only ever
+    # fail, and keeps the existing "notice" UX exactly as before.
+    if not input_path.exists():
         log.warning("Enrollment skipped: source audio not found at %s", input_path)
+        location += "?notice=enroll_audio_missing"
+        return HTMLResponse(
+            content="", status_code=303,
+            headers={"Location": location},
+        )
 
+    from wisper_transcribe.config import get_device, load_config
+    from . import get_queue
+
+    device = load_config().get("device", "auto")
+    if device == "auto":
+        device = get_device()
+
+    queue = get_queue(request)
+    job = queue.submit_enroll(
+        md_path=str(md_path),
+        transcript_name=name,
+        groups=rename_result.groups,
+        device=device,
+    )
     return HTMLResponse(
         content="", status_code=303,
-        headers={"Location": f"/transcripts/{quote(name)}"},
+        headers={"Location": f"/transcribe/jobs/{job.id}"},
     )
 
 

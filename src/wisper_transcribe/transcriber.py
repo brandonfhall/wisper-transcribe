@@ -2,7 +2,7 @@ import platform
 from pathlib import Path
 from typing import Optional
 
-from .models import TranscriptionSegment
+from .models import TranscriptionSegment, Word
 
 _model = None
 
@@ -72,11 +72,20 @@ def _transcribe_mlx(
         initial_prompt=effective_prompt or None,
     )
 
-    return [
-        TranscriptionSegment(start=seg["start"], end=seg["end"], text=seg["text"].strip())
-        for seg in result.get("segments", [])
-        if seg.get("text", "").strip()
-    ]
+    segments = []
+    for seg in result.get("segments", []):
+        if not seg.get("text", "").strip():
+            continue
+        words = [
+            Word(start=w["start"], end=w["end"], text=w["word"].strip())
+            for w in (seg.get("words") or [])
+        ]
+        segments.append(
+            TranscriptionSegment(
+                start=seg["start"], end=seg["end"], text=seg["text"].strip(), words=words
+            )
+        )
+    return segments
 
 
 def load_model(model_size: str, device: str, compute_type: str = "auto"):
@@ -196,6 +205,7 @@ def transcribe(
         vad_filter=vad_filter,
         initial_prompt=initial_prompt,
         hotwords=hotwords,
+        word_timestamps=True,
     )
 
     from tqdm import tqdm
@@ -213,7 +223,15 @@ def transcribe(
     ) as pbar:
         for seg in segments:
             if seg.text.strip():
-                result.append(TranscriptionSegment(start=seg.start, end=seg.end, text=seg.text.strip()))
+                words = [
+                    Word(start=w.start, end=w.end, text=w.word.strip())
+                    for w in (seg.words or [])
+                ]
+                result.append(
+                    TranscriptionSegment(
+                        start=seg.start, end=seg.end, text=seg.text.strip(), words=words
+                    )
+                )
             # Update progress bar by the difference between the segment's end and our current progress tracker
             pbar.update(seg.end - pbar.n)
 

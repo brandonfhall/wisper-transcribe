@@ -122,6 +122,40 @@ def test_transcribe_excerpt_path_traversal_blocked(client: TestClient, payload: 
     assert "Invalid speaker name" in resp.text
 
 
+@pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS)
+def test_transcribe_excerpt_job_present_path_traversal_blocked(
+    client: TestClient, payload: str, tmp_path
+):
+    """F9's on-disk fallback (job present, in-memory clip_path missing/stale)
+    builds a path from the sanitised speaker label -- confirm a malicious or
+    regex-busting speaker_name never results in a served file, even with a
+    real job (and a same-stem excerpt clip) present, not just the
+    job-not-found short-circuit the other test above exercises."""
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from datetime import datetime
+    import uuid
+
+    transcript = tmp_path / "session01.md"
+    transcript.write_text("# Session 01", encoding="utf-8")
+    # A legitimately-named clip that must never be served for a malicious
+    # or malformed speaker_name.
+    (tmp_path / "session01_excerpt_SPEAKER_00.mp3").write_bytes(b"clip-bytes")
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(tmp_path / "audio.mp3"),
+        kwargs={},
+        output_path=str(transcript),
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    safe_url = quote(payload)
+    resp = client.get(f"/transcribe/jobs/{job.id}/excerpt/{safe_url}")
+    assert resp.status_code != 200
+
+
 # Payloads that try to trick the redirect mechanism (Open Redirect / CRLF)
 # Note: Payloads with forward slashes ("/") are omitted because FastAPI's default 
 # path router strictly blocks them, returning a 404 before our handlers even run.

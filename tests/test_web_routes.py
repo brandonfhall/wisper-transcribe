@@ -1045,6 +1045,63 @@ def test_delete_transcript_also_removes_summary(client, tmp_path):
     assert not sm.exists()
 
 
+def test_delete_transcript_also_removes_diar_sidecar_and_audio(client, tmp_path):
+    """(g) F5: deleting a transcript must also remove the _diar.json sidecar
+    and the durable audio copy it references -- that audio exists only to
+    back the (now-deleted) transcript's enrollment wizard, so leaving it
+    behind would be a permanent leak."""
+    import json
+
+    md = tmp_path / "session01.md"
+    md.write_text(_TRANSCRIPT_MD)
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake-audio")
+    diar = tmp_path / "session01_diar.json"
+    diar.write_text(json.dumps({
+        "input_path": str(audio),
+        "campaign": None,
+        "diarization_segments": [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}],
+    }), encoding="utf-8")
+
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
+        resp = client.post("/transcripts/session01/delete", follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert not md.exists()
+    assert not audio.exists()
+    assert not diar.exists()
+
+
+def test_delete_transcript_never_deletes_audio_outside_output_dir(client, tmp_path):
+    """A legacy sidecar pointing at a path outside the output dir (e.g. a
+    pre-F5 tempdir path) must never be deleted by the transcript-delete
+    route -- only durable copies that actually live in the output dir."""
+    import json
+
+    md = tmp_path / "session01.md"
+    md.write_text(_TRANSCRIPT_MD)
+    outside_dir = tmp_path.parent / "outside_audio_dir"
+    outside_dir.mkdir(exist_ok=True)
+    outside_audio = outside_dir / "session01.mp3"
+    outside_audio.write_bytes(b"fake-audio")
+    diar = tmp_path / "session01_diar.json"
+    diar.write_text(json.dumps({
+        "input_path": str(outside_audio),
+        "campaign": None,
+        "diarization_segments": [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}],
+    }), encoding="utf-8")
+
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
+        resp = client.post("/transcripts/session01/delete", follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert not md.exists()
+    assert not diar.exists()
+    assert outside_audio.exists()
+    outside_audio.unlink()
+    outside_dir.rmdir()
+
+
 def test_transcribe_post_processing_flags_set_on_job(client, tmp_path):
     """Toggle checkboxes send 'on'; the job must have post_refine/post_summarize=True."""
     audio_file = tmp_path / "test.mp3"
@@ -1501,17 +1558,26 @@ def test_assign_campaign_unlinks_when_empty(client, tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Enrollment bug fix — enroll_submit must call enroll_speaker()
+# Enrollment — job-centric wizard submit enqueues a JOB_ENROLL job (Phase 2.5)
+#
+# The synchronous enroll_speaker()/add_member() assertions that used to live
+# here now live at the enroll_shared.enroll_profiles() unit-test level (see
+# tests/test_transcript_enroll.py) and at the JOB_ENROLL runner level (see
+# tests/test_web_jobs.py) -- the route itself no longer calls those functions
+# inline, so asserting on them right after a POST would be racing the
+# background job queue's worker. These tests instead verify the route's own
+# responsibility: applying the rename synchronously and enqueueing (or not
+# enqueueing) a job with the right payload.
 # ---------------------------------------------------------------------------
 
 
-def test_enroll_submit_calls_enroll_speaker_when_segments_present(
+def test_enroll_submit_enqueues_job_when_segments_present(
     client, tmp_path, monkeypatch
 ):
-    """enroll_submit() must call enroll_speaker() for each rename when diarization_segments exist."""
+    """(a)+(b) job-centric POST renames synchronously and enqueues a
+    JOB_ENROLL job carrying the validated rename groups."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
 
-    # Set up a completed job with diarization_segments
     from wisper_transcribe.web.jobs import Job, COMPLETED
     from datetime import datetime
     import uuid
@@ -1537,159 +1603,31 @@ def test_enroll_submit_calls_enroll_speaker_when_segments_present(
     )
     client.app.state.job_queue._jobs[job.id] = job
 
-    wav_audio = tmp_path / "audio.wav"
-    with patch("wisper_transcribe.speaker_manager.enroll_speaker") as mock_enroll, \
-         patch("wisper_transcribe.audio_utils.convert_to_wav", return_value=wav_audio):
-        resp = client.post(
-            f"/transcribe/jobs/{job.id}/enroll",
-            data={"speaker_SPEAKER_00": "Alice"},
-            follow_redirects=False,
-        )
+    resp = client.post(
+        f"/transcribe/jobs/{job.id}/enroll",
+        data={"speaker_SPEAKER_00": "Alice"},
+        follow_redirects=False,
+    )
 
     assert resp.status_code == 303
-    mock_enroll.assert_called_once()
-    call_kwargs = mock_enroll.call_args.kwargs
-    assert call_kwargs["display_name"] == "Alice"
-    assert call_kwargs["name"] == "alice"
-    assert call_kwargs["speaker_label"] == "SPEAKER_00"
-    # Must use the WAV path, not the original MP3
-    assert call_kwargs["audio_path"] == wav_audio
+    location = resp.headers["location"]
+    assert location.startswith("/transcribe/jobs/")
+    assert location != f"/transcribe/jobs/{job.id}"  # a NEW enroll job, not the original
 
+    enroll_job_id = location.rsplit("/", 1)[-1]
+    enroll_job = client.app.state.job_queue.get(enroll_job_id)
+    assert enroll_job is not None
+    assert enroll_job.job_type == "enroll"
+    assert enroll_job.enroll_groups == {"Alice": ["SPEAKER_00"]}
 
-def test_enroll_submit_adds_speaker_to_job_campaign(client, tmp_path, monkeypatch):
-    """When the job was submitted with a campaign, enrolled speakers must be added to it."""
-    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-
-    from wisper_transcribe.web.jobs import Job, COMPLETED
-    from wisper_transcribe.campaign_manager import create_campaign, get_campaign_profile_keys
-    from datetime import datetime
-    import uuid
-
-    # Pre-create the campaign that the job references
-    create_campaign("D&D Mondays")
-
-    transcript = tmp_path / "session01.md"
-    transcript.write_text(
-        "---\nspeakers:\n  - name: SPEAKER_00\n---\n\n**SPEAKER_00** *(00:00)*: Hi."
-    )
-    audio = tmp_path / "audio.mp3"
-    audio.write_bytes(b"fake")
-    fake_segment = MagicMock()
-    fake_segment.speaker = "SPEAKER_00"
-
-    job = Job(
-        id=str(uuid.uuid4()),
-        status=COMPLETED,
-        created_at=datetime.now(),
-        input_path=str(audio),
-        kwargs={"device": "cpu", "campaign": "d-d-mondays"},
-        output_path=str(transcript),
-        diarization_segments=[fake_segment],
-    )
-    client.app.state.job_queue._jobs[job.id] = job
-
-    with patch("wisper_transcribe.speaker_manager.enroll_speaker"), \
-         patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=lambda p: p):
-        resp = client.post(
-            f"/transcribe/jobs/{job.id}/enroll",
-            data={"speaker_SPEAKER_00": "Alice"},
-            follow_redirects=False,
-        )
-
-    assert resp.status_code == 303
-    # The enrolled profile must now be a member of the campaign
-    assert "alice" in get_campaign_profile_keys("d-d-mondays")
-
-
-def test_enroll_submit_no_campaign_skips_add_member(client, tmp_path, monkeypatch):
-    """No campaign on the job → add_member is never called (normal enrollment path)."""
-    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-
-    from wisper_transcribe.web.jobs import Job, COMPLETED
-    from datetime import datetime
-    import uuid
-
-    transcript = tmp_path / "session01.md"
-    transcript.write_text(
-        "---\nspeakers:\n  - name: SPEAKER_00\n---\n\n**SPEAKER_00** *(00:00)*: Hi."
-    )
-    audio = tmp_path / "audio.mp3"
-    audio.write_bytes(b"fake")
-    fake_segment = MagicMock()
-    fake_segment.speaker = "SPEAKER_00"
-
-    job = Job(
-        id=str(uuid.uuid4()),
-        status=COMPLETED,
-        created_at=datetime.now(),
-        input_path=str(audio),
-        kwargs={"device": "cpu"},  # no campaign
-        output_path=str(transcript),
-        diarization_segments=[fake_segment],
-    )
-    client.app.state.job_queue._jobs[job.id] = job
-
-    with patch("wisper_transcribe.speaker_manager.enroll_speaker"), \
-         patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=lambda p: p), \
-         patch("wisper_transcribe.campaign_manager.add_member") as mock_add_member:
-        resp = client.post(
-            f"/transcribe/jobs/{job.id}/enroll",
-            data={"speaker_SPEAKER_00": "Bob"},
-            follow_redirects=False,
-        )
-
-    assert resp.status_code == 303
-    mock_add_member.assert_not_called()
-
-
-def test_enroll_submit_skips_add_member_if_already_in_campaign(client, tmp_path, monkeypatch):
-    """If the profile is already in the campaign, add_member must not be called (avoids clobbering role/character)."""
-    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-
-    from wisper_transcribe.web.jobs import Job, COMPLETED
-    from wisper_transcribe.campaign_manager import create_campaign, add_member
-    from datetime import datetime
-    import uuid
-
-    create_campaign("D&D Mondays")
-    add_member("d-d-mondays", "alice", role="player", character="Tika")
-
-    transcript = tmp_path / "session01.md"
-    transcript.write_text(
-        "---\nspeakers:\n  - name: SPEAKER_00\n---\n\n**SPEAKER_00** *(00:00)*: Hi."
-    )
-    audio = tmp_path / "audio.mp3"
-    audio.write_bytes(b"fake")
-    fake_segment = MagicMock()
-    fake_segment.speaker = "SPEAKER_00"
-
-    job = Job(
-        id=str(uuid.uuid4()),
-        status=COMPLETED,
-        created_at=datetime.now(),
-        input_path=str(audio),
-        kwargs={"device": "cpu", "campaign": "d-d-mondays"},
-        output_path=str(transcript),
-        diarization_segments=[fake_segment],
-    )
-    client.app.state.job_queue._jobs[job.id] = job
-
-    with patch("wisper_transcribe.speaker_manager.enroll_speaker"), \
-         patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=lambda p: p), \
-         patch("wisper_transcribe.campaign_manager.add_member") as mock_add_member:
-        resp = client.post(
-            f"/transcribe/jobs/{job.id}/enroll",
-            data={"speaker_SPEAKER_00": "Alice"},
-            follow_redirects=False,
-        )
-
-    assert resp.status_code == 303
-    # add_member must not be invoked a second time — Alice is already in the roster
-    mock_add_member.assert_not_called()
+    # (b) rename applied synchronously, before the redirect
+    assert "**Alice**" in transcript.read_text(encoding="utf-8")
 
 
 def test_enroll_submit_skips_enroll_when_no_segments(client, tmp_path, monkeypatch):
-    """enroll_submit() must not call enroll_speaker() when no diarization_segments are stored."""
+    """No JOB_ENROLL is enqueued when the completed job has no diarization
+    segments -- apply_renames() has nothing to group, so the route falls
+    back to the plain transcript redirect."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
 
     from wisper_transcribe.web.jobs import Job, COMPLETED
@@ -1712,15 +1650,15 @@ def test_enroll_submit_skips_enroll_when_no_segments(client, tmp_path, monkeypat
     )
     client.app.state.job_queue._jobs[job.id] = job
 
-    with patch("wisper_transcribe.speaker_manager.enroll_speaker") as mock_enroll:
-        resp = client.post(
-            f"/transcribe/jobs/{job.id}/enroll",
-            data={"speaker_SPEAKER_00": "Bob"},
-            follow_redirects=False,
-        )
+    resp = client.post(
+        f"/transcribe/jobs/{job.id}/enroll",
+        data={"speaker_SPEAKER_00": "Bob"},
+        follow_redirects=False,
+    )
 
     assert resp.status_code == 303
-    mock_enroll.assert_not_called()
+    assert resp.headers["location"] == "/transcripts/session01"
+    assert all(j.job_type != "enroll" for j in client.app.state.job_queue.list_all())
 
 
 def test_enroll_form_uses_diarization_segments_not_frontmatter(client, tmp_path, monkeypatch):
@@ -1767,6 +1705,301 @@ def test_enroll_form_uses_diarization_segments_not_frontmatter(client, tmp_path,
     assert "SPEAKER_01" in body
     assert 'name="speaker_SPEAKER_00"' in body
     assert 'name="speaker_SPEAKER_01"' in body
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 audit fixes — F1 (legacy job-path rename no-op), F2 (junk
+# "SPEAKER_XX" profiles from untouched fields), F3 (EMA merge instead of
+# overwrite on resubmission / two labels -> one profile averaging)
+# ---------------------------------------------------------------------------
+
+
+def test_job_path_rename_works_when_transcript_has_display_names(
+    client, tmp_path, monkeypatch
+):
+    """F1: once match_speakers has already written a display name into the
+    body (e.g. from a prior session's enrollment), the job-path submit
+    handler must still resolve the raw label -> current display name and
+    rename correctly, instead of silently no-op'ing against a body that no
+    longer contains "**SPEAKER_00**"."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from wisper_transcribe.models import DiarizationSegment
+    from datetime import datetime
+    import uuid
+
+    transcript = tmp_path / "session01.md"
+    transcript.write_text(
+        "---\nspeakers:\n  - name: Unknown Speaker 1\n---\n\n"
+        "**Unknown Speaker 1** *(00:00)*: Hello everyone.",
+        encoding="utf-8",
+    )
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"fake")
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(audio),
+        kwargs={"device": "cpu"},
+        output_path=str(transcript),
+        diarization_segments=[
+            DiarizationSegment(start=0.0, end=5.0, speaker="SPEAKER_00"),
+        ],
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
+         patch("wisper_transcribe.speaker_manager.enroll_speaker"), \
+         patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=lambda p: p):
+        resp = client.post(
+            f"/transcribe/jobs/{job.id}/enroll",
+            data={"speaker_SPEAKER_00": "Alice"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    content = transcript.read_text(encoding="utf-8")
+    assert "**Alice**" in content
+    assert "Unknown Speaker 1" not in content
+
+
+def test_job_path_get_form_prefills_current_display_name(client, tmp_path, monkeypatch):
+    """F1: the GET wizard form must also resolve current_names on the job
+    path (previously only the transcript-centric path did this)."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from wisper_transcribe.models import DiarizationSegment
+    from datetime import datetime
+    import uuid
+
+    transcript = tmp_path / "session01.md"
+    transcript.write_text(
+        "---\nspeakers:\n  - name: Brandon\n---\n\n"
+        "**Brandon** *(00:00)*: Hello everyone.",
+        encoding="utf-8",
+    )
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(tmp_path / "audio.mp3"),
+        kwargs={"device": "cpu"},
+        output_path=str(transcript),
+        diarization_segments=[
+            DiarizationSegment(start=0.0, end=5.0, speaker="SPEAKER_00"),
+        ],
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        resp = client.get(f"/transcribe/jobs/{job.id}/enroll")
+
+    assert resp.status_code == 200
+    assert 'value="Brandon"' in resp.content.decode()
+
+
+def test_raw_label_shaped_submission_refused(client, tmp_path, monkeypatch):
+    """F2: submitting an untouched field (value still "SPEAKER_05", pyannote's
+    raw format) must not rename the transcript or enroll a junk profile."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from wisper_transcribe.models import DiarizationSegment
+    from datetime import datetime
+    import uuid
+
+    transcript = tmp_path / "session01.md"
+    original = (
+        "---\nspeakers:\n  - name: SPEAKER_05\n---\n\n"
+        "**SPEAKER_05** *(00:00)*: Hello."
+    )
+    transcript.write_text(original, encoding="utf-8")
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"fake")
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(audio),
+        kwargs={"device": "cpu"},
+        output_path=str(transcript),
+        diarization_segments=[
+            DiarizationSegment(start=0.0, end=5.0, speaker="SPEAKER_05"),
+        ],
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
+         patch("wisper_transcribe.speaker_manager.enroll_speaker") as mock_enroll, \
+         patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=lambda p: p):
+        resp = client.post(
+            f"/transcribe/jobs/{job.id}/enroll",
+            data={"speaker_SPEAKER_05": "SPEAKER_05"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    mock_enroll.assert_not_called()
+    assert transcript.read_text(encoding="utf-8") == original
+
+
+def test_existing_profile_name_still_enqueues_job(client, tmp_path, monkeypatch):
+    """F3: resubmitting a name that already has a voice profile (but the
+    *transcript's* current name differs, i.e. an actual change) still groups
+    and enqueues a JOB_ENROLL job -- the EMA-vs-overwrite branching itself is
+    covered at the enroll_shared.enroll_profiles() unit-test level (see
+    tests/test_transcript_enroll.py), since it now runs in the job worker,
+    not inline with this POST."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from wisper_transcribe.models import DiarizationSegment
+    from datetime import datetime
+    import uuid
+
+    transcript = tmp_path / "session01.md"
+    transcript.write_text(
+        "---\nspeakers:\n  - name: SPEAKER_00\n---\n\n"
+        "**SPEAKER_00** *(00:00)*: Hello.",
+        encoding="utf-8",
+    )
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"fake")
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(audio),
+        kwargs={"device": "cpu"},
+        output_path=str(transcript),
+        diarization_segments=[
+            DiarizationSegment(start=0.0, end=5.0, speaker="SPEAKER_00"),
+        ],
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    resp = client.post(
+        f"/transcribe/jobs/{job.id}/enroll",
+        data={"speaker_SPEAKER_00": "Alice"},
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 303
+    location = resp.headers["location"]
+    assert location.startswith("/transcribe/jobs/")
+    enroll_job = client.app.state.job_queue.get(location.rsplit("/", 1)[-1])
+    assert enroll_job.job_type == "enroll"
+    assert enroll_job.enroll_groups == {"Alice": ["SPEAKER_00"]}
+
+
+def test_two_labels_same_name_grouped_into_one_job_entry(client, tmp_path, monkeypatch):
+    """F3: when two raw pyannote labels are assigned the same display name in
+    one submit (pyannote over-segmented one real speaker), apply_renames()
+    must group them together on the job so enroll_profiles() (unit-tested
+    separately) can average their embeddings -- not create two competing
+    entries."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from wisper_transcribe.models import DiarizationSegment
+    from datetime import datetime
+    import uuid
+
+    transcript = tmp_path / "session01.md"
+    transcript.write_text(
+        "---\nspeakers:\n  - name: SPEAKER_00\n  - name: SPEAKER_01\n---\n\n"
+        "**SPEAKER_00** *(00:00)*: Hello.\n**SPEAKER_01** *(00:10)*: Hi again.",
+        encoding="utf-8",
+    )
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"fake")
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(audio),
+        kwargs={"device": "cpu"},
+        output_path=str(transcript),
+        diarization_segments=[
+            DiarizationSegment(start=0.0, end=5.0, speaker="SPEAKER_00"),
+            DiarizationSegment(start=10.0, end=15.0, speaker="SPEAKER_01"),
+        ],
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    resp = client.post(
+        f"/transcribe/jobs/{job.id}/enroll",
+        data={"speaker_SPEAKER_00": "Alice", "speaker_SPEAKER_01": "Alice"},
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 303
+    location = resp.headers["location"]
+    enroll_job = client.app.state.job_queue.get(location.rsplit("/", 1)[-1])
+    assert enroll_job.enroll_groups == {"Alice": ["SPEAKER_00", "SPEAKER_01"]}
+
+
+def test_unchanged_name_with_existing_profile_skips_enroll(client, tmp_path, monkeypatch):
+    """F3: resubmitting the same (already-current) display name for a
+    speaker that already has a profile must not call enroll_speaker OR
+    update_embedding -- nothing changed, so nothing should be re-extracted."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from wisper_transcribe.models import DiarizationSegment, SpeakerProfile
+    from datetime import datetime
+    import uuid
+
+    transcript = tmp_path / "session01.md"
+    transcript.write_text(
+        "---\nspeakers:\n  - name: Alice\n---\n\n"
+        "**Alice** *(00:00)*: Hello.",
+        encoding="utf-8",
+    )
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"fake")
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(audio),
+        kwargs={"device": "cpu"},
+        output_path=str(transcript),
+        diarization_segments=[
+            DiarizationSegment(start=0.0, end=5.0, speaker="SPEAKER_00"),
+        ],
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    existing_alice = SpeakerProfile(
+        name="alice", display_name="Alice", role="", embedding_path=tmp_path / "alice.npy",
+        enrolled_date="2026-01-01", enrollment_source="old.mp3",
+    )
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={"alice": existing_alice}), \
+         patch("wisper_transcribe.speaker_manager.extract_embedding") as mock_extract, \
+         patch("wisper_transcribe.speaker_manager.update_embedding") as mock_update, \
+         patch("wisper_transcribe.speaker_manager.enroll_speaker") as mock_enroll, \
+         patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=lambda p: p):
+        resp = client.post(
+            f"/transcribe/jobs/{job.id}/enroll",
+            data={"speaker_SPEAKER_00": "Alice"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    mock_enroll.assert_not_called()
+    mock_update.assert_not_called()
+    mock_extract.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1844,3 +2077,59 @@ def test_bulk_campaign_invalid_slug_redirects_with_error(client, tmp_path, monke
 
     assert resp.status_code == 303
     assert "error=invalid_campaign" in resp.headers["location"]
+
+
+# ---------------------------------------------------------------------------
+# F9 -- GET /transcribe/jobs/{job_id}/excerpt/{speaker_name} on-disk fallback
+# must be scoped to the job's own transcript stem, never glob the whole
+# output directory (which could serve a different transcript's same-labelled
+# excerpt clip).
+# ---------------------------------------------------------------------------
+
+def test_job_excerpt_fallback_scoped_to_job_stem(client, tmp_path):
+    """When the in-memory clip_path is missing, the fallback must only look
+    for `<this job's transcript stem>_excerpt_<label>.mp3` -- a decoy file
+    from a different transcript with the same speaker label must never be
+    served."""
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from datetime import datetime
+    import uuid
+
+    transcript = tmp_path / "session01.md"
+    transcript.write_text("# Session 01", encoding="utf-8")
+
+    # The correct on-disk clip for THIS job's transcript stem.
+    correct_clip = tmp_path / "session01_excerpt_SPEAKER_00.mp3"
+    correct_clip.write_bytes(b"correct-clip-bytes")
+
+    # A decoy belonging to a different transcript, same speaker label --
+    # must never be served for this job.
+    decoy_clip = tmp_path / "otherstem_excerpt_SPEAKER_00.mp3"
+    decoy_clip.write_bytes(b"decoy-clip-bytes")
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(tmp_path / "audio.mp3"),
+        kwargs={},
+        output_path=str(transcript),
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    resp = client.get(f"/transcribe/jobs/{job.id}/excerpt/SPEAKER_00")
+
+    assert resp.status_code == 200
+    assert resp.content == b"correct-clip-bytes"
+
+
+def test_job_excerpt_fallback_404_when_job_gone(client, tmp_path):
+    """If the in-memory job is gone (server restarted), the route can't know
+    which transcript stem to scope a fallback glob to -- it must 404 rather
+    than blindly serving whatever matching file happens to exist on disk."""
+    decoy_clip = tmp_path / "session01_excerpt_SPEAKER_00.mp3"
+    decoy_clip.write_bytes(b"should-not-be-served")
+
+    resp = client.get("/transcribe/jobs/nonexistent-job-id/excerpt/SPEAKER_00")
+
+    assert resp.status_code == 404

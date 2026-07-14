@@ -56,6 +56,8 @@
       {% if job.needs_extraction %}{% set steps = [("extract","E","Extract")] + steps %}{% endif %}
     {% elif job.job_type == "refine" %}
       {% set steps = [("refine","R","Refine")] %}
+    {% elif job.job_type == "enroll" %}
+      {% set steps = [("enroll","E","Enroll")] %}
     {% else %}
       {% set steps = [("summarize","S","Summarize")] %}
     {% endif %}
@@ -161,6 +163,8 @@
       {% if job.post_summarize %}'summarize',{% endif %}
     {% elif job.job_type == "refine" %}
       'refine',
+    {% elif job.job_type == "enroll" %}
+      'enroll',
     {% else %}
       'summarize',
     {% endif %}
@@ -204,6 +208,7 @@
       extract: 'Extracting audio…', transcribe: 'Transcribing…',
       diarize: 'Diarizing…', format: 'Formatting…',
       refine: 'Refining…', summarize: 'Summarizing…',
+      enroll: 'Enrolling voices…',
     }[STEPS[idx]] || STEPS[idx] + '…';
     setBar(idx * sliceWidth);
   }
@@ -234,6 +239,7 @@
     else if (lo.includes('wrote') || lo.includes('format') || lo.includes('speaker match')) activateStep(STEPS.indexOf('format'));
     else if (lo.includes('refin') || lo.includes('fix_vocabulary')) { const i = STEPS.indexOf('refine'); if (i>=0) activateStep(i); }
     else if (lo.includes('summariz') || lo.includes('generating')) { const i = STEPS.indexOf('summarize'); if (i>=0) activateStep(i); }
+    else if (lo.includes('converting audio') || lo.includes('extracting embedding')) { const i = STEPS.indexOf('enroll'); if (i>=0) activateStep(i); }
   }
 
   const es = new EventSource('/transcribe/jobs/{{ job.id }}/stream');

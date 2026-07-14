@@ -516,6 +516,7 @@ def process_file(
                     device=device,
                     threshold=config.get("similarity_threshold", 0.65),
                     profile_filter=profile_filter,
+                    allow_many_to_one=(num_speakers is None),
                 )
                 if matches:
                     speaker_map = matches
@@ -543,6 +544,13 @@ def process_file(
     }
     if job_id:
         metadata["job_id"] = job_id
+
+    if _result_store is not None:
+        # F7: persist the authoritative raw_label -> display_name map the
+        # formatter is about to render, so the web enrollment wizard never
+        # has to reconstruct it later by matching rendered timestamps back
+        # against pyannote intervals (see web/enroll_shared.resolve_current_names).
+        _result_store["speaker_map"] = dict(speaker_map) if speaker_map else {}
 
     content = to_markdown(
         aligned_segments,

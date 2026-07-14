@@ -1,6 +1,13 @@
+import yaml
 import pytest
 
-from wisper_transcribe.formatter import to_markdown, update_speaker_names, parse_transcript_blocks, rewrite_transcript_blocks
+from wisper_transcribe.formatter import (
+    rewrite_frontmatter_speakers,
+    to_markdown,
+    update_speaker_names,
+    parse_transcript_blocks,
+    rewrite_transcript_blocks,
+)
 from wisper_transcribe.time_utils import format_timestamp as _format_timestamp
 from wisper_transcribe.models import AlignedSegment, TranscriptionSegment
 
@@ -109,6 +116,84 @@ def test_update_speaker_names_in_frontmatter():
     result = update_speaker_names(content, "Alice", "Diana")
     assert "- name: Diana" in result
     assert "- name: Alice" not in result
+
+
+# ---------------------------------------------------------------------------
+# F11 — rewrite_frontmatter_speakers (parse/re-dump YAML, not regex)
+# ---------------------------------------------------------------------------
+
+def _speaker_names(content: str) -> list[str]:
+    """Parse the frontmatter's `speakers:` list and return the `name` values,
+    in order -- used to make assertions independent of yaml.dump's exact
+    formatting/quoting/key-ordering choices."""
+    _prefix, raw, _body = content.split("---", 2)
+    frontmatter = yaml.safe_load(raw)
+    return [e["name"] for e in frontmatter["speakers"]]
+
+
+def test_rewrite_frontmatter_speakers_no_prefix_collision():
+    """A rename of 'Dan' must not corrupt an unrelated 'Dan Smith' entry --
+    the old regex (`- name: Dan` with no end anchor) matched as a prefix."""
+    content = (
+        "---\nspeakers:\n- name: Dan\n- name: Dan Smith\n---\n\n"
+        "**Dan** *(00:00)*: hi\n**Dan Smith** *(00:05)*: hello\n"
+    )
+    result = rewrite_frontmatter_speakers(content, {"Dan": "Daniel"})
+    assert _speaker_names(result) == ["Daniel", "Dan Smith"]
+
+
+def test_rewrite_frontmatter_speakers_quoted_name_renamed():
+    """A name that was previously yaml.dump-quoted (e.g. because it contains
+    an apostrophe) must still be matched and renamed -- the old unquoted
+    regex pattern never matched this and silently left it stale."""
+    content = "---\nspeakers:\n- name: 'O''Brien'\n---\n\n**O'Brien** *(00:00)*: hi\n"
+    result = rewrite_frontmatter_speakers(content, {"O'Brien": "Sean"})
+    assert _speaker_names(result) == ["Sean"]
+
+
+def test_rewrite_frontmatter_speakers_unicode_name():
+    content = "---\nspeakers:\n- name: Zoë\n---\n\n**Zoë** *(00:00)*: hi\n"
+    result = rewrite_frontmatter_speakers(content, {"Zoë": "李雷"})
+    assert _speaker_names(result) == ["李雷"]
+    # allow_unicode=True -- must not be escaped as \uXXXX
+    assert "\\u" not in result
+
+
+def test_rewrite_frontmatter_speakers_no_frontmatter_unchanged():
+    content = "Just a plain document\nwith no frontmatter at all.\n"
+    assert rewrite_frontmatter_speakers(content, {"Dan": "Daniel"}) == content
+
+
+def test_rewrite_frontmatter_speakers_unclosed_frontmatter_unchanged():
+    content = "---\nspeakers:\n- name: Dan\nNo closing marker here\n"
+    assert rewrite_frontmatter_speakers(content, {"Dan": "Daniel"}) == content
+
+
+def test_rewrite_frontmatter_speakers_body_preserved_byte_for_byte():
+    body = (
+        "\n\n# Session 01\n\n**Dan** *(00:00)*: hi   \n"
+        "*(00:05)* narrator aside\n\n---\n*Transcribed by wisper-transcribe v1.0*\n"
+    )
+    content = "---\nspeakers:\n- name: Dan\n---" + body
+    result = rewrite_frontmatter_speakers(content, {"Dan": "Daniel"})
+    _prefix, _raw, result_body = result.split("---", 2)
+    assert result_body == body
+
+
+def test_rewrite_frontmatter_speakers_swap_in_one_pass():
+    """Alice<->Bob swapped in a single call -- a sequential loop of
+    substitutions would have the second replacement match text the first
+    one just wrote. Also verifies each entry's other fields (role) stay
+    attached to that entry rather than getting shuffled."""
+    content = (
+        "---\nspeakers:\n- name: Alice\n  role: DM\n- name: Bob\n  role: Player\n"
+        "---\n\n**Alice** *(00:00)*: hi\n**Bob** *(00:05)*: hey\n"
+    )
+    result = rewrite_frontmatter_speakers(content, {"Alice": "Bob", "Bob": "Alice"})
+    _prefix, raw, _body = result.split("---", 2)
+    speakers = yaml.safe_load(raw)["speakers"]
+    by_role = {e["role"]: e["name"] for e in speakers}
+    assert by_role == {"DM": "Bob", "Player": "Alice"}
 
 
 # ---------------------------------------------------------------------------

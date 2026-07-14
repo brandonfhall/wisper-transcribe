@@ -3,15 +3,24 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from wisper_transcribe.models import TranscriptionSegment
+from wisper_transcribe.models import TranscriptionSegment, Word
 
 
-def _make_mock_segment(start, end, text):
+def _make_mock_segment(start, end, text, words=None):
     seg = MagicMock()
     seg.start = start
     seg.end = end
     seg.text = f" {text} "  # whisper typically pads with spaces
+    seg.words = words
     return seg
+
+
+def _make_mock_word(start, end, text):
+    w = MagicMock()
+    w.start = start
+    w.end = end
+    w.word = text  # faster-whisper Word objects carry a leading space
+    return w
 
 
 def _make_mock_info(duration: float = 10.0):
@@ -66,6 +75,60 @@ def test_transcribe_filters_empty_segments():
     assert "More text" in texts
     assert "" not in texts
     assert len(result) == 2
+
+
+def test_transcribe_passes_word_timestamps():
+    """word_timestamps=True is forwarded to model.transcribe() (F8)."""
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = (iter([]), _make_mock_info(1.0))
+
+    import wisper_transcribe.transcriber as t
+    t._model = mock_model
+
+    t.transcribe(Path("fake.wav"), device="cpu")
+    _, kwargs = mock_model.transcribe.call_args
+    assert kwargs.get("word_timestamps") is True
+
+
+def test_transcribe_captures_words_onto_segments():
+    """Mocked word objects (.start/.end/.word) land as Word entries on the
+    resulting TranscriptionSegment, with the leading space stripped."""
+    mock_model = MagicMock()
+    words = [
+        _make_mock_word(0.0, 0.5, " Hello "),
+        _make_mock_word(0.5, 1.0, " world "),
+    ]
+    raw_segments = [_make_mock_segment(0.0, 1.0, "Hello world", words=words)]
+    mock_model.transcribe.return_value = (iter(raw_segments), _make_mock_info(1.0))
+
+    import wisper_transcribe.transcriber as t
+    t._model = mock_model
+
+    result = t.transcribe(Path("fake.wav"), device="cpu")
+
+    assert len(result) == 1
+    assert result[0].words is not None
+    assert len(result[0].words) == 2
+    assert all(isinstance(w, Word) for w in result[0].words)
+    assert result[0].words[0].text == "Hello"
+    assert result[0].words[0].start == 0.0
+    assert result[0].words[0].end == 0.5
+    assert result[0].words[1].text == "world"
+
+
+def test_transcribe_segment_with_words_none_does_not_crash():
+    """A mocked segment with words=None (degenerate/older mock) doesn't crash."""
+    mock_model = MagicMock()
+    raw_segments = [_make_mock_segment(0.0, 1.0, "Hello world", words=None)]
+    mock_model.transcribe.return_value = (iter(raw_segments), _make_mock_info(1.0))
+
+    import wisper_transcribe.transcriber as t
+    t._model = mock_model
+
+    result = t.transcribe(Path("fake.wav"), device="cpu")
+
+    assert len(result) == 1
+    assert result[0].words == []
 
 
 def test_load_model_passes_compute_type():
