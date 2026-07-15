@@ -188,9 +188,9 @@ When fixing: `docs/configuration.md` (R5 dead keys), `docs/cli-reference.md` (R7
 1. **Phase A (small, surgical, high value):** R1, R3, R8, R15, R29 + env fix R35. Each is a few lines + a test.
 2. **Phase B (config/CLI coherence):** R5, R19, R20, R21, R22, R23, R30, R33, R34.
 3. **Phase C (leaks + memory):** R9 (all five), R10, R14, R26, R28.
-4. **Phase D (web correctness/security):** R4, R6, R13, R16, R17, R18, R24, R25, R31.
-5. **Phase E (Discord audio subsystem):** R2 + R12 together — needs a wire-format design decision first; do not start piecemeal.
-6. **Phase F (nits):** R11, R27, R32, R36–R38 opportunistically.
+4. **Phase D (web correctness/security):** R4, R6, R13, R16, R17, R18, R24, R25, R31. **Scoped in from "Job cancellation — best-effort GPU stop" (below):** option (1) — run single-stage transcription in a subprocess and SIGTERM on cancel. Same file as R3 (`web/jobs.py`), reuses the existing `parallel_stages` subprocess plumbing, and converts cancel from cooperative to real. Optional: if Phase D runs long, ship R3 alone (3-line fix) and keep option (1) parked.
+5. **Phase E (Discord audio subsystem):** R2 + R12 together — needs a wire-format design decision first; do not start piecemeal. **Constraint from "DAVE Sidecar → Python migration" (below):** that section promises the future Java→Python sidecar swap leaves `SegmentedOggWriter` untouched — R12 changes the writer, so pick the wire format with the planned ~100-line Python sidecar in mind and update the migration section's "nothing else changes" claim in the same commit.
+6. **Phase F (nits):** R11, R27, R32, R36–R38 opportunistically. (The formerly-empty `## UI Bugs` section was deleted when these findings were scoped — 2026-07-15.)
 
 Each phase = one PR-sized branch, tests green + docs synced per Definition of Done, pause for user review between phases.
 
@@ -276,10 +276,6 @@ Nothing else changes — `SegmentedOggWriter`, the web UI, campaigns, CLI, and a
 - Multi-user or networked deployments are needed (SQLite WAL mode handles concurrent reads but not concurrent writes from multiple processes)
 - Job history browsing across restarts becomes a user need
 - A third JSON file with cross-cutting relationships appears (campaigns.json + speakers.json are already two; a third is the smell)
-
----
-
-## UI Bugs
 
 ---
 
