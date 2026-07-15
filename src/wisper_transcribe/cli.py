@@ -674,6 +674,9 @@ def speakers_rename(old_name: str, new_name: str):
     if old_key not in profiles:
         raise click.ClickException(f"Speaker {old_name!r} not found.")
 
+    if new_key != old_key and new_key in profiles:
+        raise click.ClickException(f"Speaker {new_name!r} already exists.")
+
     profile = profiles.pop(old_key)
     profile.name = new_key
     profile.display_name = new_name

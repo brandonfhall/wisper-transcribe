@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -296,7 +297,7 @@ async def recordings_list_html(request: Request) -> HTMLResponse:
     campaigns = load_campaigns(data_dir)
     sorted_recordings = sorted(
         recordings.values(),
-        key=lambda r: r.started_at or r.started_at,
+        key=lambda r: r.started_at or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
     )
     return templates.TemplateResponse(

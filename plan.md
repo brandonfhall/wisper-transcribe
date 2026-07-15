@@ -6,21 +6,13 @@
 
 Full-codebase audit on branch `fix/enrollment-audit`. All of `src/` was read end-to-end; every finding cites file:line and the load-bearing ones were grep-verified. Findings are the actionable work queue for the implementing engineer; suggested execution order at the end.
 
-**Baseline note:** `.venv` currently has **no pytest installed** — `.venv/bin/pytest` (the CLAUDE.md canonical command) fails with "No module named pytest". Reinstall dev deps and establish a green baseline before touching anything (see R35).
+**Progress:** Phase A (R1, R3, R8, R15, R29, R35) completed 2026-07-15 (`fix: Phase A quick wins`); completed findings are removed from this list per plan.md rules. Suite baseline was 872 passed, now 878.
 
 ## CRITICAL — broken features / guaranteed runtime errors
-
-### R1 — `NameError`: missing `import os` in `speaker_manager.py`
-`src/wisper_transcribe/speaker_manager.py:291-296` uses `os.path.abspath` / `os.sep` inside `enroll_speaker_from_audio_dir()`, but the module never imports `os`. Every call raises `NameError`. The only caller is the web route `record.py:394` (`recording_enroll_html`), whose blanket `except Exception` swallows it into `?error=enroll_failed` — so **enrolling a Discord speaker from a recording is 100% broken** and looks like a generic failure. The test suite never catches it because `tests/test_record_routes.py:290` mocks the entire function.
-**Fix:** add `import os` to module imports. Add a real (non-mocked) unit test for `enroll_speaker_from_audio_dir` path validation that would have caught this.
 
 ### R2 — Recording → transcription hand-off can never succeed (`combined_path` never set)
 `Recording.combined_path` is assigned exactly once, to `None` (`recording_manager.py:259`), and never populated anywhere (grep-verified). `record.py:452` (`recording_transcribe_html`) requires `recording.combined_path` to exist → always redirects `?error=no_audio`. `BotManager._finalise` (`discord_bot.py:458`) closes the mixed-track segment writer but never merges `recordings/<id>/combined/*.opus` into a single file nor sets `combined_path`.
 **Fix:** in `_finalise`, concatenate/transcode the combined-track segments to `recordings/<id>/combined.wav`, set `recording.combined_path`, save. Or change the hand-off to consume the segment directory directly.
-
-### R3 — Cancelling a PENDING job doesn't cancel it; the worker revives and runs it
-`web/jobs.py:574-587`: `cancel()` on a PENDING job sets `status=FAILED`, but the job id is still in the asyncio queue. `_worker()` (`jobs.py:593-607`) dequeues it and unconditionally sets `status = RUNNING` and runs it — the "cancelled" job runs to completion anyway, and its status lies the whole time.
-**Fix:** in `_worker`, skip jobs whose status is not PENDING at dequeue time (`if job is None or job.status != PENDING: continue`).
 
 ### R4 — Model caches ignore parameter changes; failed pipeline load leaves poisoned cache
 - `transcriber.py:198`: `if _model is None: load_model(...)` — the cache key ignores `model_size`/`device`/`compute_type`. In the long-running web server, the **first job's model is silently reused for every later job** regardless of the model chosen in the upload form or config.
@@ -45,10 +37,6 @@ Full-codebase audit on branch `fix/enrollment-audit`. All of `src/` was read end
 **Fix:** implement the JSON API by delegating to the same code the HTML routes use, or remove the CLI subcommands until it exists. Update `docs/cli-reference.md` accordingly.
 
 ## HIGH — correctness bugs and resource leaks
-
-### R8 — `recordings_list_html` sort crashes on `started_at=None` and contains a no-op expression
-`routes/record.py:297-301`: `key=lambda r: r.started_at or r.started_at` — `x or x` is `x`; comparing `None` with `datetime` raises `TypeError`, taking down the whole recordings page if any recording has a null `started_at` (possible via `_str_to_dt(None)` on legacy/corrupt metadata).
-**Fix:** `key=lambda r: r.started_at or datetime.min.replace(tzinfo=timezone.utc)`.
 
 ### R9 — Temp/orphan file leaks (five distinct ones)
 1. `routes/speakers.py:117`: `wisper_enroll_*` temp uploads are never deleted (success or failure), and the startup sweep (`app.py:63`) only globs `wisper_upload_*`.
@@ -81,10 +69,6 @@ Full-codebase audit on branch `fix/enrollment-audit`. All of `src/` was read end
 ### R14 — Unbounded memory growth in the job queue
 `JobQueue._jobs` is never pruned and each `Job.log_lines` grows without limit (LLM stderr capture can be large). A server left running for weeks accumulates every job ever run.
 **Fix:** cap retained finished jobs (e.g. keep last 50) and/or cap `log_lines` length per job.
-
-### R15 — `speakers rename` (CLI) silently overwrites an existing profile on key collision
-`cli.py:663-690`: `wisper speakers rename A B` where `B`'s key already exists replaces B's entry and renames A's embedding over B's `.npy`. Data loss with no warning.
-**Fix:** refuse when `new_key in profiles`.
 
 ## MEDIUM — security posture
 
@@ -141,9 +125,6 @@ Default models: `config._LLM_DEFAULT_MODELS`, `cli.setup` `provider_defaults` (`
 ### R28 — `_interactive_enroll` extracts the same embedding twice per speaker
 `pipeline.py:251` (ranking) and `pipeline.py:285` (profile update) both call `extract_embedding` for the same label. Each is up to 5 pyannote forward passes. Cache the first result.
 
-### R29 — `transcript_enroll_submit` KeyErrors on legacy sidecars
-`routes/transcripts.py:744` indexes `diar["input_path"]` directly (500 on absence) while the sibling GET route uses `.get(...)` (`transcripts.py:673`). Use `.get` + the existing `enroll_audio_missing` notice.
-
 ### R30 — `wisper record start` ignores `discord_default_guild`/`discord_default_channel`
 `cli.py:1339-1362` requires `--guild`/`--voice-channel` or a preset, never falling back to the config defaults that `wisper config discord` (and the web form) maintain. Wire in the fallback or stop collecting the defaults.
 
@@ -171,9 +152,6 @@ Web (`routes/speakers.py:179-190`) changes `display_name` only; CLI (`cli.py:663
 
 ## PROCESS / environment
 
-### R35 — Dev environment broken vs CLAUDE.md
-`.venv` lacks pytest; the documented `.venv/bin/pytest tests/ -v` fails. Reinstall dev deps; consider a `make test` or setup script that pins this.
-
 ### R36 — tqdm monkey-patching is load-bearing in three layers (accepted; document it)
 `debug_log.Logger._patch_tqdm` (permanent tee), `jobs._run_transcription_job` (per-job capture + restore), and `pipeline._patch_tqdm_for_queue` (per-subprocess) all patch process-global tqdm state. It works because of the one-job-at-a-time invariant, but any concurrency change breaks all of it, and job cancellation only fires when tqdm writes (already noted elsewhere in plan.md). Action: `architecture.md` note tying the three together; revisit if R6's fix or multi-worker lands.
 
@@ -185,7 +163,7 @@ When fixing: `docs/configuration.md` (R5 dead keys), `docs/cli-reference.md` (R7
 
 ## Suggested execution order
 
-1. **Phase A (small, surgical, high value):** R1, R3, R8, R15, R29 + env fix R35. Each is a few lines + a test.
+1. ~~**Phase A (small, surgical, high value):** R1, R3, R8, R15, R29 + env fix R35.~~ ✅ Done 2026-07-15.
 2. **Phase B (config/CLI coherence):** R5, R19, R20, R21, R22, R23, R30, R33, R34.
 3. **Phase C (leaks + memory):** R9 (all five), R10, R14, R26, R28.
 4. **Phase D (web correctness/security):** R4, R6, R13, R16, R17, R18, R24, R25, R31. **Scoped in from "Job cancellation — best-effort GPU stop" (below):** option (1) — run single-stage transcription in a subprocess and SIGTERM on cancel. Same file as R3 (`web/jobs.py`), reuses the existing `parallel_stages` subprocess plumbing, and converts cancel from cooperative to real. Optional: if Phase D runs long, ship R3 alone (3-line fix) and keep option (1) parked.

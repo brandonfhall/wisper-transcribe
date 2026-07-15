@@ -595,6 +595,12 @@ class JobQueue:
             job_id = await self._queue.get()
             job = self._jobs.get(job_id)
             if job is None:
+                self._queue.task_done()
+                continue
+            if job.status != PENDING:
+                # Job was cancelled (or otherwise moved on) while it sat in
+                # the asyncio queue -- do not revive it (R3).
+                self._queue.task_done()
                 continue
             job.status = RUNNING
             try:

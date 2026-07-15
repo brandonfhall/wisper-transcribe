@@ -182,6 +182,31 @@ def test_speakers_rename_success(tmp_path, monkeypatch):
     assert profiles["alicia"].display_name == "Alicia"
 
 
+def test_speakers_rename_refuses_to_overwrite_existing_profile(tmp_path, monkeypatch):
+    """R15 regression: renaming onto an existing speaker key used to
+    silently pop the target profile and overwrite its embedding .npy --
+    permanent data loss. It must now fail loudly and leave both untouched.
+    """
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    _make_fake_profile(tmp_path, "Alice", display_name="Alice")
+    _make_fake_profile(tmp_path, "Bob", display_name="Bob")
+
+    result = CliRunner().invoke(main, ["speakers", "rename", "Alice", "Bob"])
+    assert result.exit_code != 0
+    assert "already exists" in result.output.lower()
+
+    from wisper_transcribe.speaker_manager import load_profiles
+    profiles = load_profiles(data_dir=tmp_path)
+    assert "alice" in profiles
+    assert "bob" in profiles
+    assert profiles["alice"].display_name == "Alice"
+    assert profiles["bob"].display_name == "Bob"
+
+    emb_dir = tmp_path / "profiles" / "embeddings"
+    assert (emb_dir / "alice.npy").exists()
+    assert (emb_dir / "bob.npy").exists()
+
+
 def test_speakers_reset_empty(tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     result = CliRunner().invoke(main, ["speakers", "reset", "--yes"])

@@ -199,6 +199,24 @@ def test_recordings_list_groups_by_campaign(client):
     assert rec.id[:8] in resp.text
 
 
+def test_recordings_list_handles_null_started_at(client):
+    """R8 regression: sorting used `r.started_at or r.started_at`, a no-op
+    that raises TypeError (None vs datetime comparison) as soon as any
+    recording has started_at=None, 500ing the whole /recordings page."""
+    c, tmp_path = client
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+
+    rec_with_time = create_recording("VC1", "G1", data_dir=tmp_path)
+    rec_no_time = create_recording("VC2", "G1", data_dir=tmp_path)
+    rec_no_time.started_at = None
+    save_recording(rec_no_time, data_dir=tmp_path)
+
+    resp = c.get("/recordings")
+    assert resp.status_code == 200
+    assert rec_with_time.id[:8] in resp.text
+    assert rec_no_time.id[:8] in resp.text
+
+
 def test_recording_detail_returns_200(client):
     c, tmp_path = client
     from wisper_transcribe.recording_manager import create_recording

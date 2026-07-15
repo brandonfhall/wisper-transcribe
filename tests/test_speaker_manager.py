@@ -660,3 +660,46 @@ def test_match_speakers_none_filter_uses_all_profiles(tmp_path):
 
     assert result["SPEAKER_00"] == "Alice"
     assert result["SPEAKER_01"] == "Bob"
+
+
+# ---------------------------------------------------------------------------
+# enroll_speaker_from_audio_dir (R1: path-traversal guard needs `os` import)
+# ---------------------------------------------------------------------------
+
+def test_enroll_speaker_from_audio_dir_rejects_dir_outside_recordings_tree(tmp_path):
+    """R1 regression: the per_user_dir guard uses os.path.abspath/os.sep,
+    which previously raised NameError because `os` was never imported into
+    speaker_manager.py. This exercises those exact lines -- the validation
+    happens before any file is read, so no audio is needed."""
+    from wisper_transcribe.speaker_manager import enroll_speaker_from_audio_dir
+
+    outside_dir = tmp_path / "elsewhere" / "someuser"
+    outside_dir.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="per_user_dir outside expected recordings tree"):
+        enroll_speaker_from_audio_dir(
+            name="alice",
+            display_name="Alice",
+            role="Player",
+            per_user_dir=outside_dir,
+            data_dir=tmp_path,
+        )
+
+
+def test_enroll_speaker_from_audio_dir_no_audio_files_found(tmp_path):
+    """A per_user_dir inside the recordings tree but with no .opus files
+    should raise a clear 'No audio files found' error rather than crashing
+    or silently succeeding."""
+    from wisper_transcribe.speaker_manager import enroll_speaker_from_audio_dir
+
+    per_user_dir = tmp_path / "recordings" / "session01" / "someuser"
+    per_user_dir.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="No audio files found"):
+        enroll_speaker_from_audio_dir(
+            name="alice",
+            display_name="Alice",
+            role="Player",
+            per_user_dir=per_user_dir,
+            data_dir=tmp_path,
+        )

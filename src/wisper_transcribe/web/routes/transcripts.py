@@ -741,7 +741,8 @@ async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
         DiarizationSegment(start=s["start"], end=s["end"], speaker=s["speaker"])
         for s in diar.get("diarization_segments", [])
     ]
-    input_path = Path(diar["input_path"])
+    diar_input_path = diar.get("input_path", "")
+    input_path = Path(diar_input_path) if diar_input_path else None
 
     rename_result = apply_renames(md_path, raw_segments, renames)
 
@@ -758,7 +759,7 @@ async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
     # enroll AND the source audio is known to exist. A pre-check here (as
     # opposed to inside the job) avoids enqueueing a job that can only ever
     # fail, and keeps the existing "notice" UX exactly as before.
-    if not input_path.exists():
+    if input_path is None or not input_path.exists():
         log.warning("Enrollment skipped: source audio not found at %s", input_path)
         location += "?notice=enroll_audio_missing"
         return HTMLResponse(

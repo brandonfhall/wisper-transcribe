@@ -5,6 +5,8 @@ import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 
 def _make_queue():
     from wisper_transcribe.web.jobs import JobQueue
@@ -122,6 +124,34 @@ def test_cancel_pending_job_marks_failed():
     assert job.status == FAILED
     assert job.error == "Cancelled"
     assert job.finished_at is not None
+
+
+@pytest.mark.anyio
+async def test_worker_does_not_revive_cancelled_pending_job():
+    """R3 regression: cancel() marks a PENDING job FAILED, but its id stays
+    in the asyncio queue. _worker() must skip it instead of dequeuing it and
+    unconditionally running it as if it were still pending.
+    """
+    from wisper_transcribe.web.jobs import FAILED
+
+    q = _make_queue()
+    with patch("wisper_transcribe.web.jobs.process_file") as mock_process:
+        job = q.submit("/tmp/a.mp3", model_size="tiny", no_diarize=True)
+        assert q.cancel(job.id) is True
+        assert job.status == FAILED
+        assert job.error == "Cancelled"
+
+        # Drive the worker loop just long enough to dequeue the cancelled
+        # job's id; it blocks forever afterwards waiting on an empty queue,
+        # so bound it with a timeout instead of awaiting it directly.
+        try:
+            await asyncio.wait_for(q._worker(), timeout=0.2)
+        except asyncio.TimeoutError:
+            pass
+
+    assert job.status == FAILED
+    assert job.error == "Cancelled"
+    mock_process.assert_not_called()
 
 
 def test_cancel_unknown_job_returns_false():
