@@ -26,14 +26,28 @@ def _validate_job_id(job_id: str) -> str | None:
 
 
 
+#: Model sizes exposed as radio options in transcribe.html. A curated subset
+#: of config.MODEL_SIZES — the template does not surface every Whisper size.
+_FORM_MODEL_CHOICES = ("small", "medium", "large-v3-turbo")
+
+
 @router.get("", response_class=HTMLResponse)
 async def transcribe_form(request: Request) -> HTMLResponse:
     """Render the upload / options form."""
+    from wisper_transcribe.config import load_config
+
     campaigns = load_campaigns()
+    config = load_config()
+    # R5: preselect the model radio from config, falling back to the form's
+    # own default when the configured model isn't one of the exposed choices
+    # (e.g. "large-v3" or "tiny" — the template only offers a curated subset).
+    selected_model = config.get("model", "large-v3-turbo")
+    if selected_model not in _FORM_MODEL_CHOICES:
+        selected_model = "large-v3-turbo"
     return templates.TemplateResponse(
         request,
         "transcribe.html",
-        {"request": request, "campaigns": campaigns},
+        {"request": request, "campaigns": campaigns, "selected_model": selected_model},
     )
 
 
@@ -42,7 +56,7 @@ async def start_transcribe(
     request: Request,
     file: Annotated[UploadFile, File()],
     model_size: Annotated[str, Form()] = "large-v3-turbo",
-    language: Annotated[str, Form()] = "en",
+    language: Annotated[Optional[str], Form()] = None,
     device: Annotated[str, Form()] = "auto",
     num_speakers: Annotated[Optional[str], Form()] = None,
     min_speakers: Annotated[Optional[str], Form()] = None,
@@ -50,7 +64,7 @@ async def start_transcribe(
     no_diarize: Annotated[bool, Form()] = False,
     compute_type: Annotated[str, Form()] = "auto",
     vad: Annotated[Optional[str], Form()] = None,
-    include_timestamps: Annotated[bool, Form()] = True,
+    include_timestamps: Annotated[Optional[bool], Form()] = None,
     initial_prompt: Annotated[Optional[str], Form()] = None,
     post_refine: Annotated[Optional[str], Form()] = None,
     post_summarize: Annotated[Optional[str], Form()] = None,
@@ -58,6 +72,14 @@ async def start_transcribe(
     vocab_file: Annotated[Optional[UploadFile], File()] = None,
 ) -> RedirectResponse:
     """Accept an uploaded audio file, save it to a temp location, enqueue job."""
+    # R33: validate enum fields against the same canonical sets the CLI's
+    # click.Choice lists use, before any file I/O — an invalid value must
+    # never orphan a wisper_upload_* temp file. Never echo the bad value
+    # back (CLAUDE.md: no str(exc)/raw input in redirect params).
+    from wisper_transcribe.config import COMPUTE_TYPES, DEVICES, MODEL_SIZES
+    if model_size not in MODEL_SIZES or device not in DEVICES or compute_type not in COMPUTE_TYPES:
+        return error_redirect("/transcribe", "invalid_option")
+
     # Save uploaded file to a persistent temp location (job must outlive request)
     suffix = Path(file.filename or "audio.mp3").suffix or ".mp3"
     tmp = tempfile.NamedTemporaryFile(
@@ -113,7 +135,9 @@ async def start_transcribe(
         input_path=tmp.name,
         original_stem=original_stem,
         model_size=model_size,
-        language=None if language == "auto" else language,
+        # "auto" is resolved to auto-detect inside process_file (R5 sentinel
+        # convention) — do not map it to None here, None means "use config".
+        language=language,
         device=device,
         num_speakers=_int_or_none(num_speakers),
         min_speakers=_int_or_none(min_speakers),

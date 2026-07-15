@@ -1296,3 +1296,155 @@ def test_process_file_no_diarize_exports_empty_speaker_map(
     )
 
     assert result_store["speaker_map"] == {}
+
+
+# ---------------------------------------------------------------------------
+# R5 — sentinel-default refactor: None (not "medium"/"en") is the only
+# "use config" marker for model_size/language/include_timestamps.
+# ---------------------------------------------------------------------------
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=300.0)
+@patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
+def test_process_file_model_none_applies_config(
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg, tmp_path
+):
+    """model_size=None (the caller default) resolves from config['model']."""
+    audio = tmp_path / "ep.mp3"
+    audio.write_bytes(b"fake")
+    mock_convert.return_value = audio
+
+    with patch("wisper_transcribe.pipeline.load_config", return_value={
+        "model": "large-v3", "language": "en", "compute_type": "auto",
+        "vad_filter": True, "hotwords": [],
+    }):
+        from wisper_transcribe.pipeline import process_file
+        process_file(audio, output_dir=tmp_path, device="cpu", no_diarize=True, model_size=None)
+
+    _, kwargs = mock_transcribe.call_args
+    assert kwargs.get("model_size") == "large-v3"
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=300.0)
+@patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
+def test_process_file_explicit_medium_not_overridden_by_config(
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg, tmp_path
+):
+    """R5 regression: a caller who explicitly asks for 'medium' must get
+    'medium', even though config specifies a different model. Before the
+    fix, 'medium' was itself the sentinel and got silently overridden."""
+    audio = tmp_path / "ep.mp3"
+    audio.write_bytes(b"fake")
+    mock_convert.return_value = audio
+
+    with patch("wisper_transcribe.pipeline.load_config", return_value={
+        "model": "large-v3-turbo", "language": "en", "compute_type": "auto",
+        "vad_filter": True, "hotwords": [],
+    }):
+        from wisper_transcribe.pipeline import process_file
+        process_file(audio, output_dir=tmp_path, device="cpu", no_diarize=True, model_size="medium")
+
+    _, kwargs = mock_transcribe.call_args
+    assert kwargs.get("model_size") == "medium"
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=300.0)
+@patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
+def test_process_file_language_auto_resolves_to_none(
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg, tmp_path
+):
+    """language='auto' is a distinct explicit marker (not the None config
+    sentinel) — it is resolved to None right before transcribe(), which
+    already treats a falsy language as auto-detect."""
+    audio = tmp_path / "ep.mp3"
+    audio.write_bytes(b"fake")
+    mock_convert.return_value = audio
+
+    from wisper_transcribe.pipeline import process_file
+    process_file(audio, output_dir=tmp_path, device="cpu", no_diarize=True, language="auto")
+
+    _, kwargs = mock_transcribe.call_args
+    assert kwargs.get("language") is None
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=60.0)
+@patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
+@patch("wisper_transcribe.pipeline.get_hf_token", return_value="fake-token")
+@patch("wisper_transcribe.diarizer.diarize")
+@patch("wisper_transcribe.aligner.align")
+@patch("wisper_transcribe.speaker_manager.match_speakers", return_value={})
+def test_process_file_config_min_max_speakers_reach_diarize(
+    mock_match, mock_align, mock_diarize, mock_hf_token,
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg,
+    tmp_path,
+):
+    """R5: when the caller pins neither num_speakers nor min/max, config's
+    min_speakers/max_speakers reach the diarize() call."""
+    from wisper_transcribe.models import DiarizationSegment, AlignedSegment
+    from wisper_transcribe.pipeline import process_file
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    mock_convert.return_value = audio
+    mock_diarize.return_value = [DiarizationSegment(0.0, 5.0, "SPEAKER_00")]
+    mock_align.return_value = [AlignedSegment(0.0, 5.0, "SPEAKER_00", "Hello")]
+
+    with patch("wisper_transcribe.pipeline.load_config", return_value={
+        "model": "medium", "language": "en", "compute_type": "auto",
+        "vad_filter": True, "hotwords": [], "min_speakers": 3, "max_speakers": 6,
+    }):
+        process_file(audio, output_dir=tmp_path, device="cpu")
+
+    mock_diarize.assert_called_once()
+    call_kwargs = mock_diarize.call_args.kwargs
+    assert call_kwargs.get("min_speakers") == 3
+    assert call_kwargs.get("max_speakers") == 6
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=60.0)
+@patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
+@patch("wisper_transcribe.pipeline.get_hf_token", return_value="fake-token")
+@patch("wisper_transcribe.diarizer.diarize")
+@patch("wisper_transcribe.aligner.align")
+@patch("wisper_transcribe.speaker_manager.match_speakers", return_value={})
+def test_process_file_explicit_num_speakers_suppresses_config_min_max(
+    mock_match, mock_align, mock_diarize, mock_hf_token,
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg,
+    tmp_path,
+):
+    """R5: an explicit num_speakers from the caller suppresses the
+    config-driven min/max-speakers fallback entirely."""
+    from wisper_transcribe.models import DiarizationSegment, AlignedSegment
+    from wisper_transcribe.pipeline import process_file
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    mock_convert.return_value = audio
+    mock_diarize.return_value = [DiarizationSegment(0.0, 5.0, "SPEAKER_00")]
+    mock_align.return_value = [AlignedSegment(0.0, 5.0, "SPEAKER_00", "Hello")]
+
+    with patch("wisper_transcribe.pipeline.load_config", return_value={
+        "model": "medium", "language": "en", "compute_type": "auto",
+        "vad_filter": True, "hotwords": [], "min_speakers": 3, "max_speakers": 6,
+    }):
+        process_file(audio, output_dir=tmp_path, device="cpu", num_speakers=4)
+
+    mock_diarize.assert_called_once()
+    call_kwargs = mock_diarize.call_args.kwargs
+    assert call_kwargs.get("num_speakers") == 4
+    assert call_kwargs.get("min_speakers") is None
+    assert call_kwargs.get("max_speakers") is None

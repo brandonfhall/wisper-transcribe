@@ -30,7 +30,7 @@ def test_process_folder_transcribes_all(
 
     from wisper_transcribe.pipeline import process_folder
 
-    successes, errors = process_folder(
+    successes, skipped, errors = process_folder(
         tmp_path, output_dir=tmp_path, no_diarize=True, device="cpu"
     )
 
@@ -54,13 +54,14 @@ def test_process_folder_skips_existing(
 
     from wisper_transcribe.pipeline import process_folder
 
-    successes, errors = process_folder(
+    successes, skipped, errors = process_folder(
         tmp_path, output_dir=tmp_path, no_diarize=True, device="cpu", overwrite=False
     )
 
     # transcribe should NOT have been called (file was skipped)
     mock_t.assert_not_called()
     assert successes == []
+    assert skipped == [tmp_path / "s01.mp3"]
     assert (tmp_path / "s01.md").read_text() == "existing"
 
 
@@ -77,7 +78,7 @@ def test_process_folder_continues_on_error(
 
     from wisper_transcribe.pipeline import process_folder
 
-    successes, errors = process_folder(
+    successes, skipped, errors = process_folder(
         tmp_path, output_dir=tmp_path, no_diarize=True, device="cpu"
     )
 
@@ -89,7 +90,7 @@ def test_process_folder_continues_on_error(
 def test_process_folder_empty_dir(tmp_path):
     from wisper_transcribe.pipeline import process_folder
 
-    successes, errors = process_folder(tmp_path)
+    successes, skipped, errors = process_folder(tmp_path)
     assert successes == []
     assert errors == []
 
@@ -114,7 +115,7 @@ def test_process_folder_workers_1_unchanged(
     from wisper_transcribe.pipeline import process_folder
 
     with patch("wisper_transcribe.pipeline.ProcessPoolExecutor") as mock_ppe:
-        successes, errors = process_folder(
+        successes, skipped, errors = process_folder(
             tmp_path, output_dir=tmp_path, no_diarize=True, device="cpu", workers=1
         )
 
@@ -156,12 +157,56 @@ def test_process_folder_workers_2_cpu_uses_process_pool(
 
     with patch("wisper_transcribe.pipeline.ProcessPoolExecutor", return_value=mock_executor) as mock_ppe_cls:
         with patch("wisper_transcribe.pipeline.as_completed", return_value=iter([mock_future_1, mock_future_2])):
-            successes, errors = process_folder(
-                tmp_path, output_dir=tmp_path, no_diarize=True, device="cpu", workers=2
+            # R22: process_folder now pre-filters already-processed files
+            # before ever touching the pool, so overwrite=True is required
+            # here — the outputs are pre-written above to give the mocked
+            # futures somewhere real to point .result() at.
+            successes, skipped, errors = process_folder(
+                tmp_path, output_dir=tmp_path, no_diarize=True, device="cpu",
+                workers=2, overwrite=True,
             )
 
     mock_ppe_cls.assert_called_once_with(max_workers=2)
     assert len(successes) == 2
+    assert errors == []
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=300.0)
+@patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
+def test_process_folder_workers_2_skip_not_counted_as_success(
+    mock_t, mock_d, mock_c, mock_v, mock_f, tmp_path
+):
+    """R22: a file whose output already exists must be pre-filtered before
+    the pool is ever submitted to — it must land in `skipped`, never in
+    `successes`, and process_file/the executor must not be invoked for it."""
+    _make_audio_files(tmp_path, ["s01.mp3", "s02.mp3"])
+    mock_c.side_effect = lambda p: p
+    (tmp_path / "s01.md").write_text("already processed")
+
+    from unittest.mock import MagicMock
+    from wisper_transcribe.pipeline import process_folder
+
+    mock_future = MagicMock()
+    mock_future.result.return_value = tmp_path / "s02.md"
+
+    mock_executor = MagicMock()
+    mock_executor.__enter__ = MagicMock(return_value=mock_executor)
+    mock_executor.__exit__ = MagicMock(return_value=False)
+    mock_executor.submit.side_effect = [mock_future]
+
+    with patch("wisper_transcribe.pipeline.ProcessPoolExecutor", return_value=mock_executor) as mock_ppe_cls:
+        with patch("wisper_transcribe.pipeline.as_completed", return_value=iter([mock_future])):
+            successes, skipped, errors = process_folder(
+                tmp_path, output_dir=tmp_path, no_diarize=True, device="cpu", workers=2
+            )
+
+    # Only the one non-existing-output file is ever submitted to the pool.
+    assert mock_executor.submit.call_count == 1
+    assert successes == [tmp_path / "s02.md"]
+    assert skipped == [tmp_path / "s01.mp3"]
     assert errors == []
 
 
@@ -178,7 +223,7 @@ def test_process_folder_workers_gpu_clamped(mock_gd, tmp_path, capsys):
                 with patch("wisper_transcribe.pipeline.convert_to_wav", side_effect=lambda p: p):
                     with patch("wisper_transcribe.pipeline.get_duration", return_value=10.0):
                         with patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS):
-                            successes, errors = process_folder(
+                            successes, skipped, errors = process_folder(
                                 tmp_path,
                                 output_dir=tmp_path,
                                 no_diarize=True,
@@ -204,7 +249,7 @@ def test_process_folder_workers_auto_device_gpu_clamped(mock_gd, tmp_path):
                 with patch("wisper_transcribe.pipeline.convert_to_wav", side_effect=lambda p: p):
                     with patch("wisper_transcribe.pipeline.get_duration", return_value=10.0):
                         with patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS):
-                            successes, errors = process_folder(
+                            successes, skipped, errors = process_folder(
                                 tmp_path,
                                 output_dir=tmp_path,
                                 no_diarize=True,

@@ -103,8 +103,8 @@
         <div style="display:flex;gap:0;border:1px solid var(--color-rule)">
           {% for m in ['small', 'medium', 'large-v3-turbo'] %}
           <label style="flex:1;padding:8px 10px;text-align:center;font-size:11.5px;font-family:var(--font-mono);border-left:{% if not loop.first %}1px solid var(--color-rule){% else %}none{% endif %};cursor:pointer">
-            <input type="radio" name="model_size" value="{{ m }}" {% if m == 'large-v3-turbo' %}checked{% endif %} style="display:none" onchange="wisperModelSelect(this)"/>
-            <span class="model-label" data-model="{{ m }}" style="color:{% if m == 'large-v3-turbo' %}var(--color-accent){% else %}var(--color-paper-dim){% endif %}">{{ m }}</span>
+            <input type="radio" name="model_size" value="{{ m }}" {% if m == selected_model %}checked{% endif %} style="display:none" onchange="wisperModelSelect(this)"/>
+            <span class="model-label" data-model="{{ m }}" style="color:{% if m == selected_model %}var(--color-accent){% else %}var(--color-paper-dim){% endif %}">{{ m }}</span>
           </label>
           {% endfor %}
         </div>

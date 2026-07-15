@@ -136,6 +136,29 @@ def test_record_start_missing_voice_channel_errors(runner, server_json):
     assert result.exit_code != 0
 
 
+def test_record_start_falls_back_to_config_defaults(runner, server_json):
+    """R30: with no --guild/--voice-channel and no --preset, `record start`
+    falls back to discord_default_guild/discord_default_channel from config
+    (the same keys `wisper config discord` and the web form already use)
+    before erroring."""
+    from wisper_transcribe.config import load_config, save_config
+
+    with patch("wisper_transcribe.config.get_data_dir", return_value=server_json):
+        cfg = load_config()
+        cfg["discord_default_guild"] = "789"
+        cfg["discord_default_channel"] = "456"
+        save_config(cfg)
+
+        with patch("wisper_transcribe.cli._record_request", return_value={"status": "ok"}) as mock_req:
+            result = runner.invoke(main, ["record", "start"])
+
+    assert result.exit_code == 0, result.output
+    mock_req.assert_called_once()
+    payload = mock_req.call_args.kwargs["json"]
+    assert payload["voice_channel_id"] == "456"
+    assert payload["guild_id"] == "789"
+
+
 def test_record_show_valid_id_requests_server(runner, server_json):
     mock_resp = MagicMock()
     mock_resp.json.return_value = {"id": "abc-123", "status": "recording"}

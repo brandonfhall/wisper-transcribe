@@ -273,8 +273,10 @@ def test_transcribe_cli_raises_click_exception_on_error(tmp_path):
     assert "GPU unavailable" in result.output
 
 
-def test_transcribe_cli_language_auto_passes_none(tmp_path):
-    """--language auto passes None to process_file (triggers auto-detection)."""
+def test_transcribe_cli_language_auto_passes_through(tmp_path):
+    """--language auto is forwarded as the literal string "auto" — process_file
+    (not the CLI) is responsible for turning it into None for auto-detection,
+    since None is now the CLI's own "unset, use config" sentinel (R5)."""
     audio = tmp_path / "test.mp3"
     audio.write_bytes(b"fake")
 
@@ -283,7 +285,23 @@ def test_transcribe_cli_language_auto_passes_none(tmp_path):
         CliRunner().invoke(main, ["transcribe", str(audio), "--language", "auto"])
 
     call_kwargs = mock_pf.call_args.kwargs
+    assert call_kwargs["language"] == "auto"
+
+
+def test_transcribe_cli_language_unset_passes_none(tmp_path):
+    """When --language is not passed at all, process_file receives None
+    (the config-fallback sentinel), not any hardcoded default (R5)."""
+    audio = tmp_path / "test.mp3"
+    audio.write_bytes(b"fake")
+
+    with patch("wisper_transcribe.pipeline.process_file", return_value=tmp_path / "test.md") as mock_pf:
+        (tmp_path / "test.md").write_text("# test", encoding="utf-8")
+        CliRunner().invoke(main, ["transcribe", str(audio)])
+
+    call_kwargs = mock_pf.call_args.kwargs
     assert call_kwargs["language"] is None
+    assert call_kwargs["model_size"] is None
+    assert call_kwargs["include_timestamps"] is None
 
 
 def test_transcribe_cli_vocab_file_passes_hotwords(tmp_path):
@@ -312,6 +330,54 @@ def test_transcribe_cli_initial_prompt_passes_through(tmp_path):
 
     call_kwargs = mock_pf.call_args.kwargs
     assert call_kwargs["initial_prompt"] == "Kyra Golarion"
+
+
+def test_config_set_unknown_key_rejected(tmp_path, monkeypatch):
+    """R23: unknown config keys are rejected instead of being silently written."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    result = CliRunner().invoke(main, ["config", "set", "not_a_real_key", "value"])
+    assert result.exit_code != 0
+    assert "Unknown config key" in result.output
+    assert "config show" in result.output
+
+    from wisper_transcribe.config import load_config
+    assert "not_a_real_key" not in load_config()
+
+
+def test_config_set_int_coercion(tmp_path, monkeypatch):
+    """R23: min_speakers (an int-typed default) is coerced to int, not left
+    as a string — bool must be checked before int since bool is an int
+    subclass, so this also guards that ordering."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    result = CliRunner().invoke(main, ["config", "set", "min_speakers", "3"])
+    assert result.exit_code == 0, result.output
+
+    from wisper_transcribe.config import load_config
+    value = load_config()["min_speakers"]
+    assert value == 3
+    assert isinstance(value, int) and not isinstance(value, bool)
+
+
+def test_config_set_int_coercion_recovers_from_bad_stored_type(tmp_path, monkeypatch):
+    """R23 regression: coercion must key off DEFAULTS[key]'s schema type, not
+    cfg[key]'s current runtime type. If a prior bug (or manual config.toml
+    edit) already stored min_speakers as a string, isinstance(cfg[key], int)
+    would miss and silently re-store it as a string forever. Simulate that
+    by pre-seeding a string value, then confirm `config set` self-heals it
+    to int."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.config import load_config, save_config
+
+    cfg = load_config()
+    cfg["min_speakers"] = "5"  # simulate a pre-existing bad-typed value
+    save_config(cfg)
+
+    result = CliRunner().invoke(main, ["config", "set", "min_speakers", "3"])
+    assert result.exit_code == 0, result.output
+
+    value = load_config()["min_speakers"]
+    assert value == 3
+    assert isinstance(value, int) and not isinstance(value, bool)
 
 
 def test_config_set_hotwords_list(tmp_path, monkeypatch):
@@ -429,7 +495,7 @@ def test_transcribe_folder_reports_summary(tmp_path):
     out_md.write_text("# test")
 
     with patch("wisper_transcribe.pipeline.process_file", return_value=out_md), \
-         patch("wisper_transcribe.pipeline.process_folder", return_value=([out_md], [])):
+         patch("wisper_transcribe.pipeline.process_folder", return_value=([out_md], [], [])):
         result = CliRunner().invoke(main, ["transcribe", str(tmp_path)])
 
     assert result.exit_code == 0
@@ -731,6 +797,25 @@ def test_refine_unknown_task_surfaces_suggestions(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "Unknown-speaker suggestions: 1" in result.output
     assert "Bob" in result.output
+
+
+def test_refine_provider_lmstudio_accepted(tmp_path, monkeypatch):
+    """R20: --provider lmstudio must be accepted by argument parsing —
+    _LLM_PROVIDER_CHOICE previously omitted lmstudio and ollama-cloud."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    transcript = _write_transcript(tmp_path)
+
+    fake_client = MagicMock()
+    fake_client.provider = "lmstudio"
+    fake_client.model = "m1"
+    fake_client.complete_json.return_value = {"changes": []}
+    with patch("wisper_transcribe.llm.get_client", return_value=fake_client):
+        result = CliRunner().invoke(
+            main, ["refine", str(transcript), "--provider", "lmstudio", "--no-color"]
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "lmstudio" in result.output
 
 
 def test_refine_rejects_unknown_task():

@@ -118,18 +118,28 @@ wisper transcribe <path>
 
   -o, --output DIR         Output directory (default: same as input)
   -m, --model SIZE         tiny / base / small / medium / large-v3 / large-v3-turbo
-                           (default: large-v3-turbo)
-  -l, --language LANG      Language code, e.g. en, fr, de (default: en)
-                           Use 'auto' to detect automatically
+                           (default: from config — `model` key, itself defaulting
+                           to large-v3-turbo. An explicit --model always wins over
+                           config, even if it happens to match config's own value.)
+  -l, --language LANG      Language code, e.g. en, fr, de
+                           (default: from config — `language` key, itself
+                           defaulting to en). Use 'auto' to detect automatically —
+                           this is a distinct explicit marker, not the "unset" default.
   --device auto|cpu|cuda|mps  Compute device (default: auto-detect; mps = Apple Silicon GPU)
-  -n, --num-speakers INT   Expected speaker count — improves accuracy
-  --min-speakers INT       Minimum speaker count
-  --max-speakers INT       Maximum speaker count
+  -n, --num-speakers INT   Expected speaker count — improves accuracy. Pinning this
+                           suppresses the min/max-speakers config fallback below.
+  --min-speakers INT       Minimum speaker count (default: from config —
+                           `min_speakers` key — when neither this, --max-speakers,
+                           nor --num-speakers is passed)
+  --max-speakers INT       Maximum speaker count (default: from config —
+                           `max_speakers` key — same fallback rule as above)
   --enroll-speakers        Interactively name speakers (use on first run)
   --play-audio             Play each speaker's sample clip during enrollment
   --no-diarize             Skip speaker detection (single-speaker output)
-  --timestamps             Include timestamps (default: on)
+  --timestamps             Include timestamps
   --no-timestamps          Omit timestamps
+                           (default: from config — `timestamps` key, itself
+                           defaulting to on, when neither flag is passed)
   --compute-type TYPE      CTranslate2 dtype: auto|float16|int8_float16|int8|float32
                            (default: auto → float16 on CUDA, int8 on CPU)
   --vad / --no-vad         Voice activity detection — skips silence before transcription
@@ -258,7 +268,7 @@ wisper refine session05.md --tasks vocabulary,unknown   # run both passes
 wisper refine session05.md --provider anthropic         # override default provider
 ```
 
-Options: `--tasks`, `--provider {ollama,lmstudio,anthropic,openai,google}`, `--model NAME`, `--endpoint URL` (ollama/lmstudio), `--dry-run/--apply`, `--no-color`.
+Options: `--tasks`, `--provider {ollama,ollama-cloud,lmstudio,anthropic,openai,google}`, `--model NAME`, `--endpoint URL` (ollama/lmstudio), `--dry-run/--apply`, `--no-color`.
 
 Safety: YAML frontmatter is never sent to the LLM and is preserved byte-for-byte. Network failures soft-fail with a warning and leave the transcript untouched.
 
@@ -286,7 +296,7 @@ type: session-summary
 source: "Episode 47.md"
 refined: true
 provider: anthropic
-model: claude-sonnet-4-6
+model: claude-sonnet-5
 ---
 # Session 47 — Summary
 ## Summary
@@ -312,9 +322,13 @@ wisper config show                        # print all settings (API keys masked 
 wisper config set model large-v3          # use the big model by default
 wisper config set hf_token hf_abc123...   # store HuggingFace token
 wisper config set similarity_threshold 0.70  # stricter speaker matching
+wisper config set min_speakers 2          # min speaker count when diarizing (int)
+wisper config set max_speakers 8          # max speaker count when diarizing (int)
 wisper config path                        # show where config.toml lives
 wisper config llm                         # interactive wizard: provider + model + key/endpoint
 ```
+
+`wisper config set <key> <value>` rejects keys that aren't a recognized config key (`Unknown config key ...; run wisper config show to list keys`) instead of silently writing junk config. The value is coerced to match the existing default's type — bool, int, float, or a comma-split list (`hotwords`) — falling back to a plain string otherwise.
 
 **`wisper config llm`** is the recommended way to configure `refine` / `summarize`. It walks you through the provider (Ollama / Ollama Cloud / LM Studio / Anthropic / OpenAI / Google), endpoint (local providers), model name, and API key (cloud providers) in one flow. For Ollama and LM Studio the wizard lists installed/loaded models so you can pick by number.
 
@@ -334,12 +348,16 @@ Control the Discord recording bot from the command line. The wisper server must 
 wisper record start --voice-channel <ID> --guild <ID>           # join a channel and start recording
 wisper record start --voice-channel <ID> --guild <ID> --campaign d-d-mondays
 wisper record start --preset "Weekly D&D"                       # use a saved preset
+wisper record start                                             # falls back to discord_default_guild/
+                                                                  # discord_default_channel from config
 wisper record stop                                              # stop the active session
 wisper record list                                              # list all recordings
 wisper record show <recording_id>                               # show metadata for a recording
 wisper record transcribe <recording_id>                         # re-queue transcription
 wisper record delete <recording_id>                             # remove recording entry (files kept)
 ```
+
+`record start` resolves `--guild`/`--voice-channel` in this order: explicit flag → `--preset <name>` → `discord_default_guild`/`discord_default_channel` from config (set via `wisper config discord`) — the same defaults the web Record page uses. It only errors if none of those resolve a value.
 
 **Managing channel presets:**
 

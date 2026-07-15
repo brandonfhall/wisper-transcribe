@@ -1,8 +1,6 @@
 """Dashboard route — job queue overview and system status."""
 from __future__ import annotations
 
-from pathlib import Path
-
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
@@ -14,6 +12,7 @@ from wisper_transcribe.config import (  # noqa: F401 (get_data_dir used in templ
     load_config,
     resolve_llm_model,
 )
+from wisper_transcribe.path_utils import get_output_dir
 
 router = APIRouter()
 
@@ -29,9 +28,14 @@ async def dashboard(request: Request) -> HTMLResponse:
         or __import__("os").environ.get("HF_TOKEN")
     )
 
-    # Count transcripts in output dirs
-    output_dir = Path(get_data_dir()) / "output" if not (Path.cwd() / "output").exists() else Path.cwd() / "output"
-    transcript_count = len(list(output_dir.glob("*.md"))) if output_dir.exists() else 0
+    # Count transcripts in the output dir (R21: shared with the CLI/upload
+    # path via path_utils.get_output_dir). Exclude .summary.md sidecars —
+    # those are LLM-generated notes, not transcripts, and the Transcripts
+    # page already excludes them; this count must agree with that page.
+    output_dir = get_output_dir()
+    transcript_count = len(
+        [p for p in output_dir.glob("*.md") if not p.stem.endswith(".summary")]
+    ) if output_dir.exists() else 0
 
     # Count enrolled speakers
     from wisper_transcribe.speaker_manager import load_profiles

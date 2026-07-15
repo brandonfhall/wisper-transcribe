@@ -22,7 +22,7 @@ def get_client(provider: str, config: Optional[dict] = None) -> LLMClient:
         LLMUnavailableError: provider SDK not installed, or required API key missing.
         ValueError: unknown provider string.
     """
-    from ..config import LLM_PROVIDERS, get_llm_api_key, load_config, resolve_llm_model
+    from ..config import LLM_PROVIDERS, _LLM_API_KEY_ENV, get_llm_api_key, load_config, resolve_llm_model
 
     if provider not in LLM_PROVIDERS:
         raise ValueError(
@@ -48,18 +48,7 @@ def get_client(provider: str, config: Optional[dict] = None) -> LLMClient:
 
     api_key = get_llm_api_key(provider, config=config)
     if not api_key:
-        env_name = {
-            "anthropic":    "ANTHROPIC_API_KEY",
-            "openai":       "OPENAI_API_KEY",
-            "google":       "GOOGLE_API_KEY",
-            "ollama-cloud": "OLLAMA_API_KEY",
-        }[provider]
-        config_key = {
-            "anthropic":    "anthropic_api_key",
-            "openai":       "openai_api_key",
-            "google":       "google_api_key",
-            "ollama-cloud": "ollama_cloud_api_key",
-        }[provider]
+        env_name, config_key = _LLM_API_KEY_ENV[provider]
         raise LLMUnavailableError(
             f"No API key for provider {provider!r}. "
             f"Set env var {env_name} or run `wisper config set {config_key} <key>`."

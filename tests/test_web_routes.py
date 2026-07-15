@@ -36,7 +36,8 @@ def test_dashboard_returns_200(client, tmp_path):
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.load_config", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
-         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)):
+         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)), \
+         patch("wisper_transcribe.web.routes.dashboard.get_output_dir", return_value=tmp_path / "output"):
         resp = client.get("/")
     assert resp.status_code == 200
     assert b"wisper" in resp.content
@@ -54,7 +55,8 @@ def test_dashboard_shows_llm_provider_and_model(client, tmp_path, monkeypatch):
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.load_config", return_value=cfg), \
          patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
-         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)):
+         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)), \
+         patch("wisper_transcribe.web.routes.dashboard.get_output_dir", return_value=tmp_path / "output"):
         resp = client.get("/")
     assert resp.status_code == 200
     body = resp.content.decode()
@@ -76,14 +78,35 @@ def test_dashboard_flags_cloud_provider_missing_key(client, tmp_path, monkeypatc
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.load_config", return_value=cfg), \
          patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
-         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)):
+         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)), \
+         patch("wisper_transcribe.web.routes.dashboard.get_output_dir", return_value=tmp_path / "output"):
         resp = client.get("/")
     assert resp.status_code == 200
     body = resp.content.decode()
     assert "anthropic" in body
     assert "API key missing" in body
     # Resolved default model is shown when llm_model is blank
-    assert "claude-sonnet-4-6" in body
+    assert "claude-sonnet-5" in body
+
+
+def test_dashboard_transcript_count_excludes_summaries(client, tmp_path):
+    """R21: the dashboard's transcript count must exclude .summary.md sidecars,
+    same as the Transcripts page — they are LLM-generated notes, not transcripts."""
+    out_dir = tmp_path / "output"
+    out_dir.mkdir()
+    (out_dir / "session01.md").write_text("# transcript")
+    (out_dir / "session01.summary.md").write_text("# summary")
+    (out_dir / "session02.md").write_text("# transcript 2")
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
+         patch("wisper_transcribe.web.routes.dashboard.load_config", return_value={}), \
+         patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
+         patch("wisper_transcribe.web.routes.dashboard.get_output_dir", return_value=out_dir):
+        resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.content.decode()
+    # Two real transcripts, not three — the summary sidecar must not be counted.
+    assert "2 transcripts in the archive" in body
 
 
 def test_dashboard_jobs_partial_returns_200(client):
@@ -118,6 +141,32 @@ def test_transcribe_post_queues_job_and_redirects(client, tmp_path):
     assert resp.status_code == 303
     location = resp.headers["location"]
     assert location.startswith("/transcribe/jobs/")
+
+
+@pytest.mark.parametrize("field,bad_value", [
+    ("model_size", "not-a-real-model"),
+    ("device", "quantum"),
+    ("compute_type", "bfloat9000"),
+])
+def test_transcribe_post_invalid_enum_redirects_with_generic_error(client, tmp_path, field, bad_value):
+    """R33: model_size/device/compute_type are validated against the same
+    canonical enums the CLI uses. An invalid value redirects to /transcribe
+    with a generic error code — never the raw value (CLAUDE.md: never echo
+    user input into a redirect)."""
+    audio_file = tmp_path / "test.mp3"
+    audio_file.write_bytes(b"fake mp3")
+
+    with open(audio_file, "rb") as f:
+        resp = client.post(
+            "/transcribe",
+            files={"file": ("test.mp3", f, "audio/mpeg")},
+            data={field: bad_value},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/transcribe?error=invalid_option"
+    assert bad_value not in resp.headers["location"]
 
 
 @pytest.mark.parametrize("filename,mime", [

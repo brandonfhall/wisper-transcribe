@@ -6,7 +6,7 @@
 
 Full-codebase audit on branch `fix/enrollment-audit`. All of `src/` was read end-to-end; every finding cites file:line and the load-bearing ones were grep-verified. Findings are the actionable work queue for the implementing engineer; suggested execution order at the end.
 
-**Progress:** Phase A (R1, R3, R8, R15, R29, R35) completed 2026-07-15 (`fix: Phase A quick wins`); completed findings are removed from this list per plan.md rules. Suite baseline was 872 passed, now 878.
+**Progress:** Phase A (R1, R3, R8, R15, R29, R35) completed 2026-07-15 (`fix: Phase A quick wins`). Phase B (R5, R19, R20, R21, R22, R23, R30, R33, R34) completed 2026-07-15 (config/CLI coherence — sentinel-default refactor, LLM provider metadata dedup, output-dir dedup, skip-logic dedup, config-set validation, record-start config fallback, web form enum validation, Anthropic default model id bump). Completed findings are removed from this list per plan.md rules. Suite was 872 at baseline, 878 after Phase A, 894 after Phase B.
 
 ## CRITICAL — broken features / guaranteed runtime errors
 
@@ -18,14 +18,6 @@ Full-codebase audit on branch `fix/enrollment-audit`. All of `src/` was read end
 - `transcriber.py:198`: `if _model is None: load_model(...)` — the cache key ignores `model_size`/`device`/`compute_type`. In the long-running web server, the **first job's model is silently reused for every later job** regardless of the model chosen in the upload form or config.
 - `diarizer.py:91-121`: `load_pipeline()` assigns `_pipeline` *before* the CUDA/MPS availability checks that can raise. On failure the half-initialised (CPU-placed) pipeline stays cached; the next `diarize()` call sees `_pipeline is not None`, skips `load_pipeline`, and silently runs on the wrong device.
 **Fix:** cache alongside a key tuple `(model_size, device, compute_type)` and reload on mismatch; in `load_pipeline`, assign the global only after all checks pass (build into a local first), and reset to `None` on exception.
-
-### R5 — Config sentinel-defaults are wrong in both directions; several config keys are dead
-`pipeline.process_file()` (`pipeline.py:375-387`) applies config with `if model_size == "medium": model_size = config.get("model", ...)` — but both the CLI (`cli.py:27`) and the web form (`routes/transcribe.py:44`) default to `"large-v3-turbo"`. Consequences:
-- The `model` config key is **ignored** on the default CLI/web path (`wisper config set model small` does nothing).
-- A user who *explicitly* selects `medium` gets it silently **overridden** by the config value.
-- Same pattern for `language == "en"`.
-- Additionally the `min_speakers`, `max_speakers`, and `timestamps` config keys are **never read by the pipeline at all** (grep-verified) despite being editable in the web Config UI and having DEFAULTS entries — dead settings that mislead users.
-**Fix:** use `None` as the only sentinel through the whole stack (CLI/web pass `None` unless the user chose something; pipeline resolves `None → config → hardcoded default`). Wire `min_speakers`/`max_speakers`/`timestamps` into `process_file`'s defaults or remove them from config + UI.
 
 ### R6 — Two web routes run minutes of ML work synchronously on the event loop, racing the job worker
 - `routes/speakers.py:90-164` (`enroll_submit`, standalone enroll): calls `convert_to_wav`, `diarize`, `extract_embedding` directly inside the `async def` route — **blocks the entire event loop** (UI, SSE, everything) for the duration, and mutates the module-level `_pipeline`/`_embedding_model` globals **concurrently with a running transcription job's thread**, violating the documented one-job-at-a-time invariant (CLAUDE.md).
@@ -85,26 +77,6 @@ Full-codebase audit on branch `fix/enrollment-audit`. All of `src/` was read end
 
 ## MEDIUM — redundancy / spaghetti (same knowledge in N places)
 
-### R19 — LLM provider metadata exists in four places
-Default models: `config._LLM_DEFAULT_MODELS`, `cli.setup` `provider_defaults` (`cli.py:267-273` — this copy is **missing `ollama-cloud`**), `cli.config_llm` `provider_defaults` (`cli.py:490-497`). Env/config key maps: `config._LLM_API_KEY_ENV`, `cli.setup` `env_map` (`cli.py:310-315`), `cli.config_llm` maps (`cli.py:535-546`), `llm/__init__.get_client` (`llm/__init__.py:51-62`).
-**Fix:** single source of truth in `config.py`; everything else imports it.
-
-### R20 — CLI `--provider` choice list omits valid providers
-`cli.py:1027`: `_LLM_PROVIDER_CHOICE = click.Choice(["ollama", "anthropic", "openai", "google"])` — `lmstudio` and `ollama-cloud` are fully supported (config UI, `get_client`) but unreachable via `wisper refine/summarize --provider`.
-**Fix:** derive the Choice from `config.LLM_PROVIDERS`.
-
-### R21 — Output-dir resolution logic duplicated three times
-`path_utils.get_output_dir()`, `cli.transcripts_list` (`cli.py:924-926`), `routes/dashboard.py:33` all reimplement "CWD `./output` else `data_dir/output`". The dashboard copy also **counts `.summary.md` files as transcripts** (`dashboard.py:34`), so the dashboard count disagrees with the Transcripts page.
-**Fix:** everyone calls `get_output_dir()`; dashboard excludes `.summary.md`.
-
-### R22 — Skip-already-processed logic implemented three times
-`process_file` (`pipeline.py:399-401`), `process_folder`'s sequential loop (`pipeline.py:664-667`), and the CLI's post-hoc "skipped" count (`cli.py:116-121`, reconstructed by set arithmetic over names — fragile).
-**Fix:** have `process_file` return a status (`written|skipped`) and count from that.
-
-### R23 — `wisper config set` validates nothing
-`cli.py:392-410`: unknown keys are silently written (typos become junk config); coercion handles bool/float/list but **not int** (`min_speakers` etc. would be stored as strings — currently masked by R5's dead keys, but a booby trap for the R5 fix).
-**Fix:** reject keys not in `DEFAULTS`; add int coercion.
-
 ### R24 — Excerpt-serving fallback duplicated between the two wizards
 `routes/transcribe.py:337-386` and `routes/transcripts.py:789-832` carry near-identical excerpt-lookup + CodeQL-guard blocks (the comments even cross-reference each other).
 **Fix:** extract one helper into `enroll_shared.py` (e.g. `find_excerpt_clip(out_dir, stem, speaker, legacy_map) -> Path|None`).
@@ -125,9 +97,6 @@ Default models: `config._LLM_DEFAULT_MODELS`, `cli.setup` `provider_defaults` (`
 ### R28 — `_interactive_enroll` extracts the same embedding twice per speaker
 `pipeline.py:251` (ranking) and `pipeline.py:285` (profile update) both call `extract_embedding` for the same label. Each is up to 5 pyannote forward passes. Cache the first result.
 
-### R30 — `wisper record start` ignores `discord_default_guild`/`discord_default_channel`
-`cli.py:1339-1362` requires `--guild`/`--voice-channel` or a preset, never falling back to the config defaults that `wisper config discord` (and the web form) maintain. Wire in the fallback or stop collecting the defaults.
-
 ### R31 — Web speaker "rename" and CLI "rename" do different things
 Web (`routes/speakers.py:179-190`) changes `display_name` only; CLI (`cli.py:663`) rekeys profile + embedding file. After a web rename, the key≠name convention (`name.lower().replace(" ","_")`, CLAUDE.md) silently breaks for that profile. Pick one semantic (suggest: web adopts CLI's rekey behavior via a shared function in `speaker_manager`), and fix the `.mp3` clip rename per R9-5.
 
@@ -144,12 +113,6 @@ Web (`routes/speakers.py:179-190`) changes `display_name` only; CLI (`cli.py:663
 - `debug_log.Logger._patch_tqdm`: repeated `setup_logging()` calls stack tee-wrappers — make idempotent.
 - `summarize._linkify`'s `(?<!\[)`/`(?!\])` guards only check one bracket char — double-wrap possible in edge cases.
 
-### R33 — Web form enums unvalidated
-`routes/transcribe.py:44-51`: `model_size`, `device`, `compute_type` accepted as free strings and passed to the ML stack (failure surfaces later as a cryptic job error). Validate against the same choice lists the CLI uses.
-
-### R34 — Anthropic default model id should be verified
-`config.py:60`: `"claude-sonnet-4-6"`. Verify against the current Anthropic models list and update `_LLM_DEFAULT_MODELS` if stale.
-
 ## PROCESS / environment
 
 ### R36 — tqdm monkey-patching is load-bearing in three layers (accepted; document it)
@@ -159,12 +122,12 @@ Web (`routes/speakers.py:179-190`) changes `display_name` only; CLI (`cli.py:663
 `campaign_manager`/`speaker_manager` do unlocked load→modify→save of shared JSON (`recording_manager` got per-record locks; the others didn't). Two simultaneous wizard submits or campaign edits can lose writes. Low likelihood single-user; fix opportunistically by mirroring `recording_manager`'s lock pattern.
 
 ### R38 — Docs drift to fix alongside the above
-When fixing: `docs/configuration.md` (R5 dead keys), `docs/cli-reference.md` (R7, R20, R30), `docs/web-ui.md` (R16 trust model), `architecture.md` (R4 cache keys, R12 audio format contract, R36 tqdm layers), CLAUDE.md Non-Obvious Gotchas if invariants change.
+When fixing: `docs/cli-reference.md` (R7), `docs/web-ui.md` (R16 trust model), `architecture.md` (R4 cache keys, R12 audio format contract, R36 tqdm layers), CLAUDE.md Non-Obvious Gotchas if invariants change.
 
 ## Suggested execution order
 
 1. ~~**Phase A (small, surgical, high value):** R1, R3, R8, R15, R29 + env fix R35.~~ ✅ Done 2026-07-15.
-2. **Phase B (config/CLI coherence):** R5, R19, R20, R21, R22, R23, R30, R33, R34.
+2. ~~**Phase B (config/CLI coherence):** R5, R19, R20, R21, R22, R23, R30, R33, R34.~~ ✅ Done 2026-07-15.
 3. **Phase C (leaks + memory):** R9 (all five), R10, R14, R26, R28.
 4. **Phase D (web correctness/security):** R4, R6, R13, R16, R17, R18, R24, R25, R31. **Scoped in from "Job cancellation — best-effort GPU stop" (below):** option (1) — run single-stage transcription in a subprocess and SIGTERM on cancel. Same file as R3 (`web/jobs.py`), reuses the existing `parallel_stages` subprocess plumbing, and converts cancel from cooperative to real. Optional: if Phase D runs long, ship R3 alone (3-line fix) and keep option (1) parked.
 5. **Phase E (Discord audio subsystem):** R2 + R12 together — needs a wire-format design decision first; do not start piecemeal. **Constraint from "DAVE Sidecar → Python migration" (below):** that section promises the future Java→Python sidecar swap leaves `SegmentedOggWriter` untouched — R12 changes the writer, so pick the wire format with the planned ~100-line Python sidecar in mind and update the migration section's "nothing else changes" claim in the same commit.
