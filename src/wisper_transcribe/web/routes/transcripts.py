@@ -133,8 +133,8 @@ def _delete_diar_sidecar_and_audio(request: Request, name: str) -> None:
     permanent leak -- the exact kind of leak F5 was fixing in the first
     place, just relocated from the tempdir to the output dir. Deleting both
     here keeps that promise. Excerpt clips (``*_excerpt_*.mp3``/``.txt``) are
-    a separate, pre-existing concern (F9/F10) and are intentionally left
-    untouched.
+    a separate concern handled by ``_delete_excerpt_clips`` (R9-4), called
+    alongside this function from both delete routes.
     """
     diar_path = _get_safe_content_path(request, name, "_diar.json")
     if not diar_path or not diar_path.exists():
@@ -166,6 +166,34 @@ def _delete_diar_sidecar_and_audio(request: Request, name: str) -> None:
         diar_path.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _delete_excerpt_clips(request: Request, name: str) -> None:
+    """Delete ``<stem>_excerpt_*`` speaker-preview clips (``.mp3`` and
+    ``.txt``) left behind by transcription/enrollment (R9-4).
+
+    ``_get_safe_content_path`` already applies the os.path.basename +
+    abspath/startswith guard (CLAUDE.md security note) and returns a path
+    guaranteed to live inside the output dir, so the glob results derived
+    from it -- always children of that same directory -- need no further
+    per-file *path-traversal* check. ``md_path.stem`` is still untrusted
+    text, though (a transcript can be named e.g. ``mix*``), so it must be
+    ``glob.escape()``-d before being embedded in the pattern -- otherwise
+    a stem containing ``*``/``?``/``[`` would turn this into a wildcard
+    match against *every* transcript's excerpt clips instead of just this
+    one's, deleting other transcripts' clips on a single delete.
+    """
+    import glob as _glob
+
+    md_path = _get_safe_content_path(request, name, ".md")
+    if md_path is None:
+        return
+    out_dir = md_path.parent
+    for clip in out_dir.glob(f"{_glob.escape(md_path.stem)}_excerpt_*"):
+        try:
+            clip.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 @router.get("/partials/recent", response_class=HTMLResponse)
@@ -251,6 +279,8 @@ async def bulk_delete_transcripts(request: Request) -> HTMLResponse:
         if summary and summary.exists():
             summary.unlink()
         _delete_diar_sidecar_and_audio(request, stem)
+        # R9-4: also remove <stem>_excerpt_*.mp3/.txt clips.
+        _delete_excerpt_clips(request, stem)
     return HTMLResponse(content="", status_code=303, headers={"Location": "/transcripts"})
 
 
@@ -364,6 +394,9 @@ async def delete_transcript(request: Request, name: str) -> HTMLResponse:
     # F5: also remove the enrollment sidecar and the durable audio copy it
     # references -- see _delete_diar_sidecar_and_audio for the reasoning.
     _delete_diar_sidecar_and_audio(request, name)
+    # R9-4: also remove <stem>_excerpt_*.mp3/.txt clips left behind by
+    # transcription/enrollment -- previously left orphaned on delete.
+    _delete_excerpt_clips(request, name)
     return HTMLResponse(
         content="",
         status_code=303,

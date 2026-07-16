@@ -86,8 +86,10 @@ async def start_transcribe(
         delete=False, suffix=suffix, prefix="wisper_upload_"
     )
     try:
-        content = await file.read()
-        tmp.write(content)
+        # R10: stream to disk in 1 MiB chunks instead of buffering the whole
+        # upload (multi-hour audio can be multi-GB) into RAM at once.
+        while chunk := await file.read(1 << 20):
+            tmp.write(chunk)
     finally:
         tmp.close()
 
@@ -206,12 +208,20 @@ async def job_stream(request: Request, job_id: str) -> StreamingResponse:
                 yield "event: error\ndata: Job not found\n\n"
                 return
 
-            # Send any new log lines
-            new_lines = job.log_lines[last_line_idx:]
+            # Send any new log lines. R14: job.log_lines can have its oldest
+            # entries trimmed once it exceeds jobs._MAX_LOG_LINES --
+            # job.log_lines_dropped counts how many, so last_line_idx (an
+            # absolute count of lines produced so far) has to be translated
+            # into an index into the currently-retained list rather than
+            # sliced directly. A client that fell more than the cap behind
+            # simply resumes from whatever's still retained instead of
+            # crashing or replaying stale data.
+            retained_start = job.log_lines_dropped
+            new_lines = job.log_lines[max(last_line_idx, retained_start) - retained_start:]
             for line in new_lines:
                 data = json.dumps({"type": "log", "message": line})
                 yield f"data: {data}\n\n"
-            last_line_idx += len(new_lines)
+            last_line_idx = retained_start + len(job.log_lines)
 
             # Send overall progress update (sequential mode)
             if job.progress and job.progress != last_progress:

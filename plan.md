@@ -6,7 +6,7 @@
 
 Full-codebase audit on branch `fix/enrollment-audit`. All of `src/` was read end-to-end; every finding cites file:line and the load-bearing ones were grep-verified. Findings are the actionable work queue for the implementing engineer; suggested execution order at the end.
 
-**Progress:** Phase A (R1, R3, R8, R15, R29, R35) completed 2026-07-15 (`fix: Phase A quick wins`). Phase B (R5, R19, R20, R21, R22, R23, R30, R33, R34) completed 2026-07-15 (config/CLI coherence — sentinel-default refactor, LLM provider metadata dedup, output-dir dedup, skip-logic dedup, config-set validation, record-start config fallback, web form enum validation, Anthropic default model id bump). Completed findings are removed from this list per plan.md rules. Suite was 872 at baseline, 878 after Phase A, 894 after Phase B.
+**Progress:** Phase A (R1, R3, R8, R15, R29, R35) completed 2026-07-15 (`fix: Phase A quick wins`). Phase B (R5, R19, R20, R21, R22, R23, R30, R33, R34) completed 2026-07-15 (config/CLI coherence — sentinel-default refactor, LLM provider metadata dedup, output-dir dedup, skip-logic dedup, config-set validation, record-start config fallback, web form enum validation, Anthropic default model id bump). Phase C (R9 all five, R10, R14, R26, R28) completed 2026-07-15 (leaks + memory — temp/orphan file cleanup incl. converted-WAV finally-unlink and `.mp3` clip lifecycle via shared `remove_profile_files`/`rename_profile_files`, chunked upload streaming, job-retention + log-line caps with SSE index translation, ffprobe-first `get_duration`, per-label embedding cache in `_interactive_enroll`). Completed findings are removed from this list per plan.md rules. Suite was 872 at baseline, 878 after Phase A, 894 after Phase B, 921 after Phase C.
 
 ## CRITICAL — broken features / guaranteed runtime errors
 
@@ -30,18 +30,6 @@ Full-codebase audit on branch `fix/enrollment-audit`. All of `src/` was read end
 
 ## HIGH — correctness bugs and resource leaks
 
-### R9 — Temp/orphan file leaks (five distinct ones)
-1. `routes/speakers.py:117`: `wisper_enroll_*` temp uploads are never deleted (success or failure), and the startup sweep (`app.py:63`) only globs `wisper_upload_*`.
-2. `audio_utils.convert_to_wav` writes a converted WAV to the OS tempdir; **neither the CLI pipeline nor the web transcription job ever deletes it** — every non-16k-WAV transcription leaks a full-length WAV. (`enroll_shared.enroll_profiles` cleans up its own — lines 501-503 — proving the pattern; the main path doesn't.)
-3. `audio_utils._extract_first_audio_track:145-150`: on ffmpeg failure the partial `out_path` is left behind.
-4. Deleting a transcript leaves its `*_excerpt_*.mp3`/`.txt` clips forever (`routes/transcripts.py:124-137` explicitly punts on this).
-5. Speaker profile removal/rename (both CLI `cli.py:643-690` and web `routes/speakers.py:167-190`) leaves the `embeddings/<key>.mp3` reference clip behind; CLI rename moves the `.npy` but not the `.mp3`, so the Speakers-page play button silently breaks after rename.
-**Fix:** (1) reuse the `wisper_upload_` prefix or add the enroll prefix to the sweep + delete in a `finally`; (2) delete `wav_path` in `process_file`'s completion path when `wav_path != path`; (3) unlink on the error branch; (4) glob-delete `<stem>_excerpt_*` in `delete_transcript`/`bulk_delete`; (5) delete/rename the clip alongside the `.npy`.
-
-### R10 — Whole-file upload buffering in RAM
-`routes/transcribe.py:67` (`content = await file.read()`) and `routes/speakers.py:119` read the entire upload into memory. This is a tool whose primary input is multi-hour (potentially multi-GB) session audio.
-**Fix:** stream to the temp file in chunks (`while chunk := await file.read(1 << 20): tmp.write(chunk)`).
-
 ### R11 — `refine.apply_edits` does global substring replacement
 `refine.py:189-201`: each accepted edit runs `body.replace(original, corrected)` over the whole body — a short `original` ("Dan" → "Don") also rewrites every occurrence inside longer words ("Dandy" → "Dondy") and inside `**Speaker**` labels. The edit-distance guard validates the *target*, not the *blast radius*.
 **Fix:** word-boundary regex replacement (`re.sub(rf"\b{re.escape(original)}\b", ...)`), and skip lines that are speaker-label positions.
@@ -57,10 +45,6 @@ Full-codebase audit on branch `fix/enrollment-audit`. All of `src/` was read end
 ### R13 — Transcription job errors leak raw exception text (inconsistent with the project's own rule)
 `jobs.py:604` and `jobs.py:719-721` put `str(exc)` into `job.error`, which the job-detail page and SSE stream render. `_run_enroll_job` (`jobs.py:775-835`) was deliberately written to use generic messages *because* exception text can contain filesystem paths (its docstring says so, and CLAUDE.md forbids reflecting exception text). Transcription/LLM jobs violate the same rule.
 **Fix:** map exceptions to generic user-facing messages on all job types; log the real exception server-side.
-
-### R14 — Unbounded memory growth in the job queue
-`JobQueue._jobs` is never pruned and each `Job.log_lines` grows without limit (LLM stderr capture can be large). A server left running for weeks accumulates every job ever run.
-**Fix:** cap retained finished jobs (e.g. keep last 50) and/or cap `log_lines` length per job.
 
 ## MEDIUM — security posture
 
@@ -86,19 +70,12 @@ Full-codebase audit on branch `fix/enrollment-audit`. All of `src/` was read end
 
 ## LOW — smaller bugs, efficiency, style
 
-### R26 — `get_duration` loads the entire file through pydub
-`audio_utils.py:181-184`. Contradicts the module's own >4 GB rationale for avoiding pydub, and wastes seconds/GBs just to read a duration. `_probe_duration` (ffprobe, same file) already exists 140 lines up.
-**Fix:** use `_probe_duration`, falling back to the `wave` header for WAVs.
-
 ### R27 — `aligner._assign_word_speakers` is O(words × turns)
 `aligner.py:57-82`: linear scan of all diarization turns per word. A 3-hour session (~30k words × ~2k turns) is ~60M overlap computations in pure Python.
 **Fix:** sort turns once, walk with a two-pointer/bisect. Keep `_best_overlap_speaker` for the no-words fallback.
 
-### R28 — `_interactive_enroll` extracts the same embedding twice per speaker
-`pipeline.py:251` (ranking) and `pipeline.py:285` (profile update) both call `extract_embedding` for the same label. Each is up to 5 pyannote forward passes. Cache the first result.
-
 ### R31 — Web speaker "rename" and CLI "rename" do different things
-Web (`routes/speakers.py:179-190`) changes `display_name` only; CLI (`cli.py:663`) rekeys profile + embedding file. After a web rename, the key≠name convention (`name.lower().replace(" ","_")`, CLAUDE.md) silently breaks for that profile. Pick one semantic (suggest: web adopts CLI's rekey behavior via a shared function in `speaker_manager`), and fix the `.mp3` clip rename per R9-5.
+Web (`routes/speakers.py:179-190`) changes `display_name` only; CLI (`cli.py:663`) rekeys profile + embedding file. After a web rename, the key≠name convention (`name.lower().replace(" ","_")`, CLAUDE.md) silently breaks for that profile. Pick one semantic (suggest: web adopts CLI's rekey behavior via a shared function in `speaker_manager`). Phase C already added `speaker_manager.rename_profile_files(old_key, new_key)` (moves both `.npy` and `.mp3`, used by the CLI rename) — a web rekey can reuse it directly.
 
 ### R32 — Minor per-module nits (batch these)
 - `speaker_manager.py:128`: `except (RuntimeError, Exception)` — just `Exception`.
@@ -128,7 +105,7 @@ When fixing: `docs/cli-reference.md` (R7), `docs/web-ui.md` (R16 trust model), `
 
 1. ~~**Phase A (small, surgical, high value):** R1, R3, R8, R15, R29 + env fix R35.~~ ✅ Done 2026-07-15.
 2. ~~**Phase B (config/CLI coherence):** R5, R19, R20, R21, R22, R23, R30, R33, R34.~~ ✅ Done 2026-07-15.
-3. **Phase C (leaks + memory):** R9 (all five), R10, R14, R26, R28.
+3. ~~**Phase C (leaks + memory):** R9 (all five), R10, R14, R26, R28.~~ ✅ Done 2026-07-15.
 4. **Phase D (web correctness/security):** R4, R6, R13, R16, R17, R18, R24, R25, R31. **Scoped in from "Job cancellation — best-effort GPU stop" (below):** option (1) — run single-stage transcription in a subprocess and SIGTERM on cancel. Same file as R3 (`web/jobs.py`), reuses the existing `parallel_stages` subprocess plumbing, and converts cancel from cooperative to real. Optional: if Phase D runs long, ship R3 alone (3-line fix) and keep option (1) parked.
 5. **Phase E (Discord audio subsystem):** R2 + R12 together — needs a wire-format design decision first; do not start piecemeal. **Constraint from "DAVE Sidecar → Python migration" (below):** that section promises the future Java→Python sidecar swap leaves `SegmentedOggWriter` untouched — R12 changes the writer, so pick the wire format with the planned ~100-line Python sidecar in mind and update the migration section's "nothing else changes" claim in the same commit.
 6. **Phase F (nits):** R11, R27, R32, R36–R38 opportunistically. (The formerly-empty `## UI Bugs` section was deleted when these findings were scoped — 2026-07-15.)

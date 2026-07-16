@@ -54,6 +54,14 @@ JOB_ENROLL = "enroll"
 
 _EXCERPT_SECONDS = 12  # length of each speaker audio clip
 
+# R14: unbounded memory growth guards. _jobs is an in-memory dict that is
+# never otherwise pruned, and a single verbose job (e.g. an LLM job whose
+# stderr capture runs long) can append log lines forever -- both caps are
+# constants rather than config keys since they're internal resource limits,
+# not something a user needs to tune.
+_MAX_RETAINED_JOBS = 50   # cap on retained COMPLETED/FAILED jobs (never PENDING/RUNNING)
+_MAX_LOG_LINES = 1000     # cap on Job.log_lines, oldest lines dropped first
+
 
 # ---------------------------------------------------------------------------
 # Stderr capture — funnels LLM client status messages into job.log_lines
@@ -78,7 +86,7 @@ class _StderrCapture:
             line, self._buf = self._buf.split("\n", 1)
             stripped = line.strip()
             if stripped:
-                self._job.log_lines.append(stripped)
+                self._job.append_log(stripped)
 
     def flush(self) -> None:
         pass
@@ -345,6 +353,12 @@ class Job:
     output_path: Optional[str] = None
     error: Optional[str] = None
     log_lines: list[str] = field(default_factory=list)
+    # R14: total count of log lines ever dropped from the front of
+    # log_lines once _MAX_LOG_LINES was exceeded. The SSE stream
+    # (job_stream in routes/transcribe.py) uses this to keep its
+    # absolute line-index bookkeeping correct even after older lines
+    # have been trimmed away -- see append_log().
+    log_lines_dropped: int = 0
     progress: Optional[str] = None
     # Parallel mode: per-channel progress strings keyed by channel name
     progress_channels: dict[str, str] = field(default_factory=dict)
@@ -390,6 +404,24 @@ class Job:
     enroll_groups: dict[str, list[str]] = field(default_factory=dict)
     # For JOB_ENROLL jobs: device to run embedding extraction on.
     enroll_device: str = "cpu"
+
+    def append_log(self, line: str) -> None:
+        """Append a log line, trimming the oldest lines once _MAX_LOG_LINES
+        is exceeded (R14).
+
+        Every call site that used to do ``job.log_lines.append(...)``
+        directly now goes through this method so a single verbose job (e.g.
+        a large LLM stderr capture) can't grow log_lines without bound.
+        Trimmed lines are counted in ``log_lines_dropped`` rather than just
+        discarded silently, so the SSE stream in routes/transcribe.py can
+        still translate its absolute line index into a valid slice of
+        whatever remains.
+        """
+        self.log_lines.append(line)
+        overflow = len(self.log_lines) - _MAX_LOG_LINES
+        if overflow > 0:
+            del self.log_lines[:overflow]
+            self.log_lines_dropped += overflow
 
     @property
     def needs_extraction(self) -> bool:
@@ -580,11 +612,31 @@ class JobQueue:
             job.status = FAILED
             job.error = "Cancelled"
             job.finished_at = datetime.now()
+            self._prune_finished_jobs()
             return True
         if job.status == RUNNING:
             job._cancel_event.set()
             return True
         return False
+
+    def _prune_finished_jobs(self) -> None:
+        """Cap retained terminal (COMPLETED/FAILED) jobs at
+        _MAX_RETAINED_JOBS (R14), dropping the oldest first.
+
+        PENDING/RUNNING jobs are never candidates -- only jobs that have
+        already reached a terminal state count against the cap. A pruned
+        job simply disappears from the dashboard/jobs list, which is
+        acceptable per the review finding (this is a single-user, in-memory
+        tool with no persistence expectation between restarts anyway).
+        """
+        terminal = [j for j in self._jobs.values() if j.status in (COMPLETED, FAILED)]
+        if len(terminal) <= _MAX_RETAINED_JOBS:
+            return
+        terminal.sort(key=lambda j: j.created_at)
+        excess = len(terminal) - _MAX_RETAINED_JOBS
+        for job in terminal[:excess]:
+            self._jobs.pop(job.id, None)
+            self._on_complete_callbacks.pop(job.id, None)
 
     # ------------------------------------------------------------------
     # Background worker
@@ -610,6 +662,10 @@ class JobQueue:
                 job.error = str(exc)
                 job.finished_at = datetime.now()
             finally:
+                # R14: runs after every job that leaves RUNNING, however it
+                # got there (success, failure inside _run_job, or an
+                # uncaught exception here) -- exactly once per processed job.
+                self._prune_finished_jobs()
                 self._queue.task_done()
 
     def _run_job(self, job: Job) -> None:
@@ -644,7 +700,7 @@ class JobQueue:
             if m:
                 job.progress_channels[m.group(1)] = m.group(2)
                 return
-            job.log_lines.append(stripped)
+            job.append_log(stripped)
 
         original_init = _tqdm_module.tqdm.__init__
 
@@ -750,7 +806,7 @@ class JobQueue:
                 do_summarize=job.post_summarize,
             )
         except Exception as exc:
-            job.log_lines.append(f"Post-processing error: {exc}")
+            job.append_log(f"Post-processing error: {exc}")
         finally:
             _sys.stderr = old_stderr
 
@@ -820,7 +876,7 @@ class JobQueue:
         campaign_slug = diar.get("campaign")
 
         def _progress(msg: str) -> None:
-            job.log_lines.append(msg)
+            job.append_log(msg)
 
         try:
             from wisper_transcribe.web.enroll_shared import enroll_profiles
@@ -857,7 +913,7 @@ class JobQueue:
         client = get_client(cfg.get("llm_provider", "ollama"), config=cfg)
         provider = getattr(client, "provider", "")
         model = getattr(client, "model", "")
-        job.log_lines.append(f"LLM: {provider} / {model}")
+        job.append_log(f"LLM: {provider} / {model}")
 
         profiles = load_profiles()
         md = transcript_path.read_text(encoding="utf-8")
@@ -872,7 +928,7 @@ class JobQueue:
                         t = token.strip()
                         if t and not t.lower().startswith("voice_of:"):
                             character_names.append(t)
-            job.log_lines.append(f"Refining vocabulary in {transcript_path.name} ...")
+            job.append_log(f"Refining vocabulary in {transcript_path.name} ...")
             try:
                 refined_md, edits, _unresolved = refine_transcript(
                     md,
@@ -883,18 +939,18 @@ class JobQueue:
                     tasks=["vocabulary"],
                 )
             except (LLMUnavailableError, LLMResponseError) as exc:
-                job.log_lines.append(f"Refine failed: {exc}")
+                job.append_log(f"Refine failed: {exc}")
                 refined_md, edits = md, []
             if edits and refined_md != md:
                 backup = transcript_path.with_suffix(transcript_path.suffix + ".bak")
                 backup.write_text(md, encoding="utf-8")
                 transcript_path.write_text(refined_md, encoding="utf-8")
-                job.log_lines.append(
+                job.append_log(
                     f"Applied {len(edits)} edit(s). Backup: {backup.name}"
                 )
                 md = refined_md
             else:
-                job.log_lines.append("No vocabulary changes needed.")
+                job.append_log("No vocabulary changes needed.")
             job.output_path = str(transcript_path)
 
         if do_summarize:
@@ -903,7 +959,7 @@ class JobQueue:
                 default_summary_path,
                 render_markdown,
             )
-            job.log_lines.append(
+            job.append_log(
                 f"Generating campaign summary for {transcript_path.name} ..."
             )
             try:
@@ -916,8 +972,8 @@ class JobQueue:
                 out_path = default_summary_path(transcript_path)
                 body = render_markdown(note, profiles=profiles)
                 out_path.write_text(body, encoding="utf-8")
-                job.log_lines.append(f"Summary written: {out_path.name}")
+                job.append_log(f"Summary written: {out_path.name}")
                 job.summary_path = str(out_path)
             except (LLMUnavailableError, LLMResponseError) as exc:
-                job.log_lines.append(f"Summarize failed: {exc}")
+                job.append_log(f"Summarize failed: {exc}")
             job.output_path = str(transcript_path)

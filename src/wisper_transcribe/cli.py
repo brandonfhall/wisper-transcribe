@@ -567,40 +567,47 @@ def enroll(name: str, audio: Path, segment: Optional[str], notes: str, update: b
     device = get_device() if config.get("device", "auto") == "auto" else config["device"]
 
     wav_path = convert_to_wav(audio)
+    try:
+        # Build a fake single-segment diarization covering the whole file (or requested segment)
+        if segment:
+            start_str, end_str = segment.split("-")
+            def _parse_time(t: str) -> float:
+                parts = t.strip().split(":")
+                return sum(float(p) * (60 ** (len(parts) - 1 - i)) for i, p in enumerate(parts))
+            start = _parse_time(start_str)
+            end = _parse_time(end_str)
+        else:
+            from .audio_utils import get_duration
+            start, end = 0.0, get_duration(wav_path)
 
-    # Build a fake single-segment diarization covering the whole file (or requested segment)
-    if segment:
-        start_str, end_str = segment.split("-")
-        def _parse_time(t: str) -> float:
-            parts = t.strip().split(":")
-            return sum(float(p) * (60 ** (len(parts) - 1 - i)) for i, p in enumerate(parts))
-        start = _parse_time(start_str)
-        end = _parse_time(end_str)
-    else:
-        from .audio_utils import get_duration
-        start, end = 0.0, get_duration(wav_path)
+        from .models import DiarizationSegment
+        fake_segs = [DiarizationSegment(start=start, end=end, speaker="SPEAKER_00")]
 
-    from .models import DiarizationSegment
-    fake_segs = [DiarizationSegment(start=start, end=end, speaker="SPEAKER_00")]
+        key = name.lower().replace(" ", "_")
 
-    key = name.lower().replace(" ", "_")
-
-    if update:
-        new_emb = extract_embedding(wav_path, fake_segs, "SPEAKER_00", device)
-        update_embedding(key, new_emb)
-        click.echo(f"Updated embedding for {name!r} (EMA blend).")
-    else:
-        profile = enroll_speaker(
-            name=key,
-            display_name=name,
-            role="",
-            audio_path=wav_path,
-            segments=fake_segs,
-            speaker_label="SPEAKER_00",
-            device=device,
-            notes=notes,
-        )
-        click.echo(f"Enrolled {profile.display_name!r}.")
+        if update:
+            new_emb = extract_embedding(wav_path, fake_segs, "SPEAKER_00", device)
+            update_embedding(key, new_emb)
+            click.echo(f"Updated embedding for {name!r} (EMA blend).")
+        else:
+            profile = enroll_speaker(
+                name=key,
+                display_name=name,
+                role="",
+                audio_path=wav_path,
+                segments=fake_segs,
+                speaker_label="SPEAKER_00",
+                device=device,
+                notes=notes,
+            )
+            click.echo(f"Enrolled {profile.display_name!r}.")
+    finally:
+        # R9-2: convert_to_wav() writes to the OS tempdir when the input
+        # isn't already a 16kHz mono WAV -- clean it up here, mirroring
+        # enroll_shared.enroll_profiles(). No-op when `audio` was already a
+        # correct WAV (convert_to_wav returns it unchanged).
+        if wav_path != audio:
+            wav_path.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -632,16 +639,16 @@ def speakers_list():
 @click.argument("name")
 def speakers_remove(name: str):
     """Remove an enrolled speaker profile."""
-    from .speaker_manager import _get_embeddings_dir, load_profiles, save_profiles
+    from .speaker_manager import load_profiles, remove_profile_files, save_profiles
 
     profiles = load_profiles()
     key = name.lower().replace(" ", "_")
     if key not in profiles:
         raise click.ClickException(f"Speaker {name!r} not found.")
 
-    emb_path = _get_embeddings_dir() / f"{key}.npy"
-    if emb_path.exists():
-        emb_path.unlink()
+    # R9-5: removes both the .npy embedding and the .mp3 reference clip so
+    # the Speakers-page play button doesn't dangle for a since-removed profile.
+    remove_profile_files(key)
 
     del profiles[key]
     save_profiles(profiles)
@@ -653,7 +660,7 @@ def speakers_remove(name: str):
 @click.argument("new_name")
 def speakers_rename(old_name: str, new_name: str):
     """Rename an enrolled speaker."""
-    from .speaker_manager import _get_embeddings_dir, load_profiles, save_profiles
+    from .speaker_manager import load_profiles, rename_profile_files, save_profiles
 
     profiles = load_profiles()
     old_key = old_name.lower().replace(" ", "_")
@@ -669,12 +676,9 @@ def speakers_rename(old_name: str, new_name: str):
     profile.name = new_key
     profile.display_name = new_name
 
-    emb_dir = _get_embeddings_dir()
-    old_emb = emb_dir / f"{old_key}.npy"
-    new_emb = emb_dir / f"{new_key}.npy"
-    if old_emb.exists():
-        old_emb.rename(new_emb)
-    profile.embedding_path = new_emb
+    # R9-5: rekeys both the .npy embedding and the .mp3 reference clip so
+    # playback keeps working after a CLI rename.
+    profile.embedding_path = rename_profile_files(old_key, new_key)
 
     profiles[new_key] = profile
     save_profiles(profiles)
@@ -697,32 +701,37 @@ def speakers_test(audio: Path, num_speakers: Optional[int], campaign: Optional[s
     hf_token = get_hf_token(config)
 
     wav_path = convert_to_wav(audio)
-    diarization = diarize(wav_path, hf_token=hf_token, device=device, num_speakers=num_speakers)
+    try:
+        diarization = diarize(wav_path, hf_token=hf_token, device=device, num_speakers=num_speakers)
 
-    profile_filter = None
-    if campaign:
-        from .campaign_manager import _validate_campaign_slug, get_campaign_profile_keys
-        safe = _validate_campaign_slug(campaign)
-        if safe is None:
-            raise click.ClickException(f"Invalid campaign slug: {campaign!r}")
-        profile_filter = get_campaign_profile_keys(safe)
-        click.echo(f"  Campaign filter: {safe} ({len(profile_filter)} member(s))")
+        profile_filter = None
+        if campaign:
+            from .campaign_manager import _validate_campaign_slug, get_campaign_profile_keys
+            safe = _validate_campaign_slug(campaign)
+            if safe is None:
+                raise click.ClickException(f"Invalid campaign slug: {campaign!r}")
+            profile_filter = get_campaign_profile_keys(safe)
+            click.echo(f"  Campaign filter: {safe} ({len(profile_filter)} member(s))")
 
-    allow_many_to_one = num_speakers is None
-    matches = match_speakers(wav_path, diarization, device=device,
-                             threshold=config.get("similarity_threshold", 0.65),
-                             profile_filter=profile_filter,
-                             allow_many_to_one=allow_many_to_one)
+        allow_many_to_one = num_speakers is None
+        matches = match_speakers(wav_path, diarization, device=device,
+                                 threshold=config.get("similarity_threshold", 0.65),
+                                 profile_filter=profile_filter,
+                                 allow_many_to_one=allow_many_to_one)
 
-    if not matches:
-        click.echo("No enrolled profiles to match against.")
-        return
+        if not matches:
+            click.echo("No enrolled profiles to match against.")
+            return
 
-    if allow_many_to_one:
-        click.echo("  (num_speakers not pinned — many-to-one matching enabled)")
+        if allow_many_to_one:
+            click.echo("  (num_speakers not pinned — many-to-one matching enabled)")
 
-    for label, name in sorted(matches.items()):
-        click.echo(f"  {label} → {name}")
+        for label, name in sorted(matches.items()):
+            click.echo(f"  {label} → {name}")
+    finally:
+        # R9-2: see the `enroll` command above for why this cleanup exists.
+        if wav_path != audio:
+            wav_path.unlink(missing_ok=True)
 
 
 @speakers.command("reset")

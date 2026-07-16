@@ -143,6 +143,78 @@ def test_transcribe_post_queues_job_and_redirects(client, tmp_path):
     assert location.startswith("/transcribe/jobs/")
 
 
+def test_transcribe_post_streams_large_upload_correctly(client, tmp_path):
+    """R10: uploads are streamed to disk in 1 MiB chunks rather than
+    buffered whole into memory. A payload spanning multiple chunks must
+    still land on disk byte-for-byte before the job is submitted."""
+    payload = b"A" * (1 << 20) + b"B" * (1 << 19)  # 1.5 MiB, crosses a chunk boundary
+
+    captured: dict = {}
+
+    class _FakeJob:
+        id = "fake-job-id"
+
+    def _fake_submit(input_path, **kwargs):
+        captured["content"] = Path(input_path).read_bytes()
+        return _FakeJob()
+
+    with patch.object(client.app.state.job_queue, "submit", side_effect=_fake_submit):
+        resp = client.post(
+            "/transcribe",
+            files={"file": ("test.mp3", payload, "audio/mpeg")},
+            data={},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    assert captured.get("content") == payload
+
+
+def test_job_stream_serves_lines_after_log_trimming(client, tmp_path):
+    """R14: once Job.log_lines has been trimmed (log_lines_dropped > 0), the
+    SSE stream must still serve the retained lines using the translated
+    index instead of crashing or resending stale data."""
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from datetime import datetime
+
+    job = Job(
+        id="trim-test-job",
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(tmp_path / "audio.mp3"),
+        kwargs={},
+        finished_at=datetime.now(),
+    )
+    # Simulate a job that appended far more than _MAX_LOG_LINES: only the
+    # tail is retained, and log_lines_dropped records how much was trimmed.
+    job.log_lines = ["line 998", "line 999"]
+    job.log_lines_dropped = 998
+
+    client.app.state.job_queue._jobs[job.id] = job
+
+    with client.stream("GET", f"/transcribe/jobs/{job.id}/stream") as resp:
+        body = "".join(resp.iter_text())
+
+    assert '"line 998"' in body
+    assert '"line 999"' in body
+    assert '"status": "completed"' in body
+
+
+def test_transcribe_post_empty_upload_still_queues(client, tmp_path):
+    """An empty upload is still accepted at the route layer (the chunked
+    read loop must not choke on an immediate EOF) -- validation of the
+    resulting empty file happens downstream in the job itself, unchanged
+    by the R10 streaming fix."""
+    resp = client.post(
+        "/transcribe",
+        files={"file": ("empty.mp3", b"", "audio/mpeg")},
+        data={},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"].startswith("/transcribe/jobs/")
+
+
 @pytest.mark.parametrize("field,bad_value", [
     ("model_size", "not-a-real-model"),
     ("device", "quantum"),
@@ -914,6 +986,35 @@ def test_preset_add_missing_name_rejected(client):
 
 
 # ---------------------------------------------------------------------------
+# Startup orphan sweep (R9-1)
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_orphaned_uploads_removes_both_prefixes(tmp_path, monkeypatch):
+    """R9-1: the startup sweep also recognizes wisper_enroll_* temp files
+    (the standalone speaker-enroll route's crash-window safety net), not
+    just wisper_upload_*."""
+    import tempfile
+
+    from wisper_transcribe.web.app import _cleanup_orphaned_uploads
+
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+
+    upload = tmp_path / "wisper_upload_abc123.mp3"
+    enroll = tmp_path / "wisper_enroll_def456.wav"
+    other = tmp_path / "unrelated.txt"
+    upload.write_bytes(b"x")
+    enroll.write_bytes(b"x")
+    other.write_bytes(b"x")
+
+    _cleanup_orphaned_uploads()
+
+    assert not upload.exists()
+    assert not enroll.exists()
+    assert other.exists()
+
+
+# ---------------------------------------------------------------------------
 # Speakers
 # ---------------------------------------------------------------------------
 
@@ -927,6 +1028,80 @@ def test_speakers_list_returns_200(client):
 def test_speakers_enroll_form_returns_200(client):
     resp = client.get("/speakers/enroll")
     assert resp.status_code == 200
+
+
+def test_speakers_enroll_submit_success_cleans_up_temp_files(client, tmp_path):
+    """R9-1/R9-2/R10: a successful standalone enroll POST streams the upload
+    to disk (not buffered whole into RAM) and, once enrollment is done,
+    deletes both the raw wisper_enroll_* upload and the WAV convert_to_wav()
+    produced -- neither should be left in the OS tempdir."""
+    from wisper_transcribe.models import DiarizationSegment
+
+    written_tmp_paths: list[Path] = []
+
+    def _fake_convert(path):
+        written_tmp_paths.append(Path(path))
+        converted = Path(str(path) + "_converted.wav")
+        converted.write_bytes(b"RIFF" + b"\x00" * 36)
+        return converted
+
+    diarization = [DiarizationSegment(start=0.0, end=2.0, speaker="SPEAKER_00")]
+
+    with patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=_fake_convert), \
+         patch("wisper_transcribe.config.get_device", return_value="cpu"), \
+         patch("wisper_transcribe.config.get_hf_token", return_value="fake-token"), \
+         patch("wisper_transcribe.diarizer.diarize", return_value=diarization), \
+         patch("wisper_transcribe.speaker_manager.enroll_speaker") as mock_enroll, \
+         patch("wisper_transcribe.web.routes.speakers.load_profiles", return_value={}):
+        resp = client.post(
+            "/speakers/enroll",
+            data={"name": "TestSpeaker", "role": "", "notes": ""},
+            files={"audio": ("clip.mp3", b"fake audio bytes", "audio/mpeg")},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/speakers"
+    mock_enroll.assert_called_once()
+
+    assert written_tmp_paths, "convert_to_wav was never called"
+    original_tmp = written_tmp_paths[0]
+    assert original_tmp.name.startswith("wisper_enroll_")
+    assert not original_tmp.exists()
+    converted = Path(str(original_tmp) + "_converted.wav")
+    assert not converted.exists()
+
+
+def test_speakers_enroll_submit_cleans_up_temp_files_on_failure(client, tmp_path):
+    """R9-1: the temp upload and converted WAV are cleaned up even when
+    enrollment fails partway through."""
+    written_tmp_paths: list[Path] = []
+
+    def _fake_convert(path):
+        written_tmp_paths.append(Path(path))
+        converted = Path(str(path) + "_converted.wav")
+        converted.write_bytes(b"RIFF" + b"\x00" * 36)
+        return converted
+
+    with patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=_fake_convert), \
+         patch("wisper_transcribe.config.get_device", return_value="cpu"), \
+         patch("wisper_transcribe.config.get_hf_token", return_value="fake-token"), \
+         patch("wisper_transcribe.diarizer.diarize", side_effect=RuntimeError("boom")):
+        resp = client.post(
+            "/speakers/enroll",
+            data={"name": "TestSpeaker", "role": "", "notes": ""},
+            files={"audio": ("clip.mp3", b"fake audio bytes", "audio/mpeg")},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    assert "error=enroll_failed" in resp.headers["location"]
+
+    assert written_tmp_paths, "convert_to_wav was never called"
+    original_tmp = written_tmp_paths[0]
+    assert not original_tmp.exists()
+    converted = Path(str(original_tmp) + "_converted.wav")
+    assert not converted.exists()
 
 
 def test_speakers_remove_redirects(client, tmp_path):
@@ -949,6 +1124,35 @@ def test_speakers_remove_redirects(client, tmp_path):
 
     assert resp.status_code == 303
     mock_save.assert_called_once_with({})  # alice removed, empty dict saved
+
+
+def test_speakers_remove_deletes_reference_clip(client, tmp_path):
+    """R9-5: the web removal route deletes the .mp3 reference clip alongside
+    the .npy embedding, not just the profile entry."""
+    from wisper_transcribe.models import SpeakerProfile
+
+    emb_dir = tmp_path / "profiles" / "embeddings"
+    emb_dir.mkdir(parents=True)
+    npy_path = emb_dir / "alice.npy"
+    mp3_path = emb_dir / "alice.mp3"
+    npy_path.write_bytes(b"")
+    mp3_path.write_bytes(b"fake mp3")
+
+    fake_profile = SpeakerProfile(
+        name="alice", display_name="Alice", role="DM",
+        embedding_path=npy_path,
+        enrolled_date="2026-04-07", enrollment_source="test.mp3",
+    )
+    profiles = {"alice": fake_profile}
+
+    with patch("wisper_transcribe.web.routes.speakers.load_profiles", return_value=profiles), \
+         patch("wisper_transcribe.web.routes.speakers.save_profiles"), \
+         patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path):
+        resp = client.post("/speakers/alice/remove", follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert not npy_path.exists()
+    assert not mp3_path.exists()
 
 
 def test_speakers_rename_updates_display_name(client):
@@ -1119,6 +1323,57 @@ def test_delete_transcript_also_removes_diar_sidecar_and_audio(client, tmp_path)
     assert not md.exists()
     assert not audio.exists()
     assert not diar.exists()
+
+
+def test_delete_transcript_also_removes_excerpt_clips(client, tmp_path):
+    """R9-4: deleting a transcript removes its <stem>_excerpt_*.mp3/.txt
+    speaker-preview clips, which the code previously left behind."""
+    md = tmp_path / "session01.md"
+    md.write_text(_TRANSCRIPT_MD)
+    clip_mp3 = tmp_path / "session01_excerpt_SPEAKER_00.mp3"
+    clip_txt = tmp_path / "session01_excerpt_SPEAKER_00.txt"
+    clip_mp3.write_bytes(b"fake mp3")
+    clip_txt.write_text("Hello there")
+    # A different transcript's excerpt with a similar prefix must survive.
+    unrelated = tmp_path / "session01x_excerpt_SPEAKER_00.mp3"
+    unrelated.write_bytes(b"unrelated")
+
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
+        resp = client.post("/transcripts/session01/delete", follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert not md.exists()
+    assert not clip_mp3.exists()
+    assert not clip_txt.exists()
+    assert unrelated.exists()
+    unrelated.unlink()
+
+
+def test_delete_transcript_glob_metacharacter_stem_does_not_leak_other_clips(client, tmp_path):
+    """Regression: a transcript stem containing glob metacharacters (e.g.
+    an uploaded file literally named 'mix*.mp3') must not turn
+    _delete_excerpt_clips's pattern into a wildcard that also matches a
+    DIFFERENT transcript's excerpt clips. Without glob.escape(), deleting
+    "mix*" builds the pattern "mix*_excerpt_*", which also matches
+    "mix2_excerpt_SPEAKER_00.mp3" -- a completely unrelated transcript."""
+    from urllib.parse import quote
+
+    victim_stem = "mix*"
+    victim_md = tmp_path / f"{victim_stem}.md"
+    victim_md.write_text(_TRANSCRIPT_MD)
+
+    bystander_clip = tmp_path / "mix2_excerpt_SPEAKER_00.mp3"
+    bystander_clip.write_bytes(b"unrelated transcript's clip")
+
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
+        resp = client.post(
+            f"/transcripts/{quote(victim_stem, safe='')}/delete", follow_redirects=False
+        )
+
+    assert resp.status_code == 303
+    assert not victim_md.exists()
+    assert bystander_clip.exists()
+    bystander_clip.unlink()
 
 
 def test_delete_transcript_never_deletes_audio_outside_output_dir(client, tmp_path):
@@ -2075,6 +2330,24 @@ def test_bulk_delete_removes_multiple_transcripts(client, tmp_path, monkeypatch)
     assert not (tmp_path / "session01.md").exists()
     assert not (tmp_path / "session02.md").exists()
     assert not (tmp_path / "session02.summary.md").exists()
+
+
+def test_bulk_delete_removes_excerpt_clips(client, tmp_path, monkeypatch):
+    """R9-4: bulk-delete removes each stem's excerpt clips too."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    (tmp_path / "session01.md").write_text("# S1")
+    clip = tmp_path / "session01_excerpt_SPEAKER_00.mp3"
+    clip.write_bytes(b"fake mp3")
+
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
+        resp = client.post(
+            "/transcripts/bulk-delete",
+            data={"stems": ["session01"]},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    assert not clip.exists()
 
 
 def test_bulk_delete_skips_invalid_stems(client, tmp_path, monkeypatch):

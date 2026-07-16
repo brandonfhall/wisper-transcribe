@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Resp
 
 from . import templates
 from wisper_transcribe.path_utils import validate_path_component
-from wisper_transcribe.speaker_manager import load_profiles, save_profiles
+from wisper_transcribe.speaker_manager import load_profiles, remove_profile_files, save_profiles
 from wisper_transcribe.web._responses import error_redirect, invalid_input_response
 
 router = APIRouter(prefix="/speakers")
@@ -115,12 +115,20 @@ async def enroll_submit(
 
     suffix = Path(audio.filename or "audio.mp3").suffix or ".mp3"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix, prefix="wisper_enroll_")
+    tmp_path = Path(tmp.name)
     try:
-        content = await audio.read()
-        tmp.write(content)
+        # R10: stream to disk in 1 MiB chunks instead of buffering the whole
+        # upload (potentially a multi-GB reference clip) in RAM at once.
+        while chunk := await audio.read(1 << 20):
+            tmp.write(chunk)
     finally:
         tmp.close()
 
+    # R9-1/R9-2: unlike the transcribe route, this upload is never handed off
+    # to a background job -- it's only needed for the duration of this
+    # request. wav_path starts equal to tmp_path so the finally below is
+    # correct even if convert_to_wav() itself raises.
+    wav_path: Path = tmp_path
     try:
         from wisper_transcribe.audio_utils import convert_to_wav
         from wisper_transcribe.config import get_device, get_hf_token, load_config
@@ -130,7 +138,7 @@ async def enroll_submit(
         config = load_config()
         device = get_device()
         hf_token = get_hf_token(config)
-        wav_path = convert_to_wav(Path(tmp.name))
+        wav_path = convert_to_wav(tmp_path)
 
         # Diarize to get segment boundaries
         diarization = diarize(wav_path, hf_token=hf_token, device=device)
@@ -160,6 +168,12 @@ async def enroll_submit(
             )
     except Exception:
         return error_redirect("/speakers/enroll", "enroll_failed")
+    finally:
+        # Always clean up both the raw upload and (if convert_to_wav produced
+        # a separate converted file) the temp WAV -- success or failure.
+        tmp_path.unlink(missing_ok=True)
+        if wav_path != tmp_path:
+            wav_path.unlink(missing_ok=True)
 
     return RedirectResponse(url="/speakers", status_code=303)
 
@@ -168,10 +182,9 @@ async def enroll_submit(
 async def remove_speaker(request: Request, name: str) -> RedirectResponse:
     profiles = load_profiles()
     if name in profiles:
-        profile = profiles.pop(name)
-        # Remove embedding file
-        if profile.embedding_path.exists():
-            profile.embedding_path.unlink()
+        profiles.pop(name)
+        # R9-5: removes both the .npy embedding and the .mp3 reference clip.
+        remove_profile_files(name)
         save_profiles(profiles)
     return RedirectResponse(url="/speakers", status_code=303)
 

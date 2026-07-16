@@ -161,6 +161,22 @@ def test_speakers_remove_success(tmp_path, monkeypatch):
     assert "alice" not in load_profiles(data_dir=tmp_path)
 
 
+def test_speakers_remove_deletes_reference_clip(tmp_path, monkeypatch):
+    """R9-5: removing a profile also deletes its .mp3 reference clip, not
+    just the .npy embedding, so the Speakers-page play button doesn't
+    dangle after a CLI removal."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    _make_fake_profile(tmp_path, "Alice")
+    emb_dir = tmp_path / "profiles" / "embeddings"
+    clip_path = emb_dir / "alice.mp3"
+    clip_path.write_bytes(b"fake mp3")
+
+    result = CliRunner().invoke(main, ["speakers", "remove", "Alice"])
+    assert result.exit_code == 0
+    assert not clip_path.exists()
+    assert not (emb_dir / "alice.npy").exists()
+
+
 def test_speakers_rename_not_found(tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     result = CliRunner().invoke(main, ["speakers", "rename", "Ghost", "Spectre"])
@@ -180,6 +196,35 @@ def test_speakers_rename_success(tmp_path, monkeypatch):
     assert "alicia" in profiles
     assert "alice" not in profiles
     assert profiles["alicia"].display_name == "Alicia"
+
+
+def test_speakers_rename_moves_reference_clip(tmp_path, monkeypatch):
+    """R9-5: renaming a profile moves its .mp3 reference clip alongside the
+    embedding, so playback keeps working under the new key."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    _make_fake_profile(tmp_path, "Alice")
+    emb_dir = tmp_path / "profiles" / "embeddings"
+    old_clip = emb_dir / "alice.mp3"
+    old_clip.write_bytes(b"fake mp3")
+
+    result = CliRunner().invoke(main, ["speakers", "rename", "Alice", "Alicia"])
+    assert result.exit_code == 0
+
+    new_clip = emb_dir / "alicia.mp3"
+    assert not old_clip.exists()
+    assert new_clip.exists()
+    assert new_clip.read_bytes() == b"fake mp3"
+
+
+def test_speakers_rename_success_without_reference_clip(tmp_path, monkeypatch):
+    """A profile enrolled before reference clips existed (no .mp3 on disk)
+    must still rename cleanly -- the clip move is best-effort."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    _make_fake_profile(tmp_path, "Alice")
+
+    result = CliRunner().invoke(main, ["speakers", "rename", "Alice", "Alicia"])
+    assert result.exit_code == 0
+    assert not (tmp_path / "profiles" / "embeddings" / "alicia.mp3").exists()
 
 
 def test_speakers_rename_refuses_to_overwrite_existing_profile(tmp_path, monkeypatch):
@@ -205,6 +250,27 @@ def test_speakers_rename_refuses_to_overwrite_existing_profile(tmp_path, monkeyp
     emb_dir = tmp_path / "profiles" / "embeddings"
     assert (emb_dir / "alice.npy").exists()
     assert (emb_dir / "bob.npy").exists()
+
+
+def test_speakers_test_deletes_converted_wav(tmp_path, monkeypatch):
+    """R9-2: `wisper speakers test` deletes the WAV produced by
+    convert_to_wav() once matching is done, mirroring the `enroll` command."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    audio = tmp_path / "clip.mp3"
+    audio.write_bytes(b"fake audio")
+
+    converted_wav = tmp_path / "converted.wav"
+    converted_wav.write_bytes(b"RIFF" + b"\x00" * 36)
+
+    with patch("wisper_transcribe.audio_utils.convert_to_wav", return_value=converted_wav), \
+         patch("wisper_transcribe.config.get_hf_token", return_value="fake-token"), \
+         patch("wisper_transcribe.diarizer.diarize", return_value=[]), \
+         patch("wisper_transcribe.speaker_manager.match_speakers", return_value={}):
+        result = CliRunner().invoke(main, ["speakers", "test", str(audio)])
+
+    assert result.exit_code == 0
+    assert not converted_wav.exists()
+    assert audio.exists()
 
 
 def test_speakers_reset_empty(tmp_path, monkeypatch):
@@ -481,6 +547,34 @@ def test_enroll_cli_with_update_flag(tmp_path, monkeypatch):
 
     assert result.exit_code == 0
     assert "Updated" in result.output
+
+
+def test_enroll_cli_deletes_converted_wav(tmp_path, monkeypatch):
+    """R9-2: when convert_to_wav() produces a separate temp WAV (input isn't
+    already a correct WAV), `wisper enroll` deletes it afterwards instead of
+    leaking it in the OS tempdir."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    audio = tmp_path / "clip.mp3"
+    audio.write_bytes(b"fake audio")
+
+    converted_wav = tmp_path / "converted.wav"
+    converted_wav.write_bytes(b"RIFF" + b"\x00" * 36)
+
+    with patch("wisper_transcribe.audio_utils.convert_to_wav", return_value=converted_wav), \
+         patch("wisper_transcribe.speaker_manager.extract_embedding", return_value=np.ones(512)), \
+         patch("wisper_transcribe.speaker_manager._save_reference_clip"), \
+         patch("wisper_transcribe.audio_utils.get_duration", return_value=30.0):
+        mock_torch = MagicMock()
+        mock_torch.cuda.is_available.return_value = False
+        mock_torch.backends.mps.is_available.return_value = False
+        with patch.dict("sys.modules", {"torch": mock_torch}):
+            result = CliRunner().invoke(
+                main, ["enroll", "TestSpeaker", "--audio", str(audio)]
+            )
+
+    assert result.exit_code == 0
+    assert not converted_wav.exists()
+    assert audio.exists()  # original input untouched
 
 
 # ---------------------------------------------------------------------------

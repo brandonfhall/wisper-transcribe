@@ -103,16 +103,75 @@ def test_convert_to_wav_converts_mp3(tmp_path):
     assert "-ac" in cmd and "1" in cmd
 
 
+@patch("wisper_transcribe.audio_utils._probe_duration", return_value=42.5)
+def test_get_duration_prefers_ffprobe(mock_probe, tmp_path):
+    """R26: ffprobe (header-only) is tried first; pydub is never invoked."""
+    from wisper_transcribe.audio_utils import get_duration
+
+    f = tmp_path / "audio.mp3"
+    f.write_bytes(b"fake mp3 data")
+
+    with patch("wisper_transcribe.audio_utils.AudioSegment") as mock_audio_segment:
+        duration = get_duration(f)
+        mock_audio_segment.from_file.assert_not_called()
+
+    assert duration == 42.5
+    mock_probe.assert_called_once_with(f)
+
+
+@patch("wisper_transcribe.audio_utils._probe_duration", return_value=None)
+def test_get_duration_falls_back_to_wave_header(mock_probe, tmp_path):
+    """R26: when ffprobe fails, a .wav falls back to the stdlib wave header
+    (still no full-file decode) rather than jumping straight to pydub."""
+    import numpy as np
+    import scipy.io.wavfile as wavfile
+
+    from wisper_transcribe.audio_utils import get_duration
+
+    wav_file = tmp_path / "audio.wav"
+    wavfile.write(str(wav_file), 16000, np.zeros(32000, dtype=np.int16))  # 2.0s
+
+    with patch("wisper_transcribe.audio_utils.AudioSegment") as mock_audio_segment:
+        duration = get_duration(wav_file)
+        mock_audio_segment.from_file.assert_not_called()
+
+    assert duration == pytest.approx(2.0)
+
+
 @patch("wisper_transcribe.audio_utils.AudioSegment")
-def test_get_duration(mock_audio_segment):
+@patch("wisper_transcribe.audio_utils._probe_duration", return_value=None)
+def test_get_duration_falls_back_to_pydub(mock_probe, mock_audio_segment, tmp_path):
+    """R26: pydub remains the last resort when ffprobe fails and the file
+    isn't a .wav (or the wave header can't be read)."""
     mock_audio = MagicMock()
     mock_audio.__len__ = MagicMock(return_value=90000)  # 90 seconds in ms
     mock_audio_segment.from_file.return_value = mock_audio
 
     from wisper_transcribe.audio_utils import get_duration
 
-    duration = get_duration(Path("fake.mp3"))
+    f = tmp_path / "fake.mp3"
+    f.write_bytes(b"fake mp3 data")
+
+    duration = get_duration(f)
     assert duration == 90.0
+
+
+@patch("wisper_transcribe.audio_utils.AudioSegment")
+@patch("wisper_transcribe.audio_utils._probe_duration", return_value=None)
+def test_get_duration_falls_back_to_pydub_for_unreadable_wav(mock_probe, mock_audio_segment, tmp_path):
+    """A .wav that isn't a valid PCM wave (e.g. ADPCM) can't be opened by the
+    stdlib `wave` module -- falls through to pydub rather than raising."""
+    mock_audio = MagicMock()
+    mock_audio.__len__ = MagicMock(return_value=5000)
+    mock_audio_segment.from_file.return_value = mock_audio
+
+    from wisper_transcribe.audio_utils import get_duration
+
+    bad_wav = tmp_path / "bad.wav"
+    bad_wav.write_bytes(b"not a real wav file")
+
+    duration = get_duration(bad_wav)
+    assert duration == 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +294,44 @@ def test_extract_first_audio_track_ffmpeg_failure(tmp_path):
                side_effect=_failing_popen):
         with pytest.raises(ValueError, match="audio track"):
             convert_to_wav(mp4_file)
+
+
+def test_extract_first_audio_track_ffmpeg_failure_cleans_up_partial_file(tmp_path):
+    """R9-3: a partial output WAV left by a failing ffmpeg run must be
+    deleted, not leaked in the OS tempdir."""
+    mp4_file = tmp_path / "bad.mp4"
+    mp4_file.write_bytes(b"fake")
+
+    from wisper_transcribe.audio_utils import convert_to_wav
+
+    def _failing_popen_writes_partial(cmd, **kw):
+        # ffmpeg writes a partial file before dying mid-stream.
+        Path(cmd[-1]).write_bytes(b"RIFF" + b"\x00" * 10)
+        mock_proc = MagicMock()
+        mock_proc.stdout.__iter__ = lambda _: iter([b"progress=end\n"])
+        mock_proc.stderr.__iter__ = lambda _: iter(
+            [b"Invalid data found when processing input\n"]
+        )
+        mock_proc.returncode = 1
+        mock_proc.wait = MagicMock()
+        return mock_proc
+
+    written_paths: list[Path] = []
+    orig_popen_side_effect = _failing_popen_writes_partial
+
+    def _tracking_popen(cmd, **kw):
+        written_paths.append(Path(cmd[-1]))
+        return orig_popen_side_effect(cmd, **kw)
+
+    with patch("wisper_transcribe.audio_utils.subprocess.run",
+               return_value=_mock_ffprobe(None)), \
+         patch("wisper_transcribe.audio_utils.subprocess.Popen",
+               side_effect=_tracking_popen):
+        with pytest.raises(ValueError, match="audio track"):
+            convert_to_wav(mp4_file)
+
+    assert written_paths, "test setup error: Popen was never called"
+    assert not written_paths[0].exists()
 
 
 def test_extract_first_audio_track_ffmpeg_not_found(tmp_path):

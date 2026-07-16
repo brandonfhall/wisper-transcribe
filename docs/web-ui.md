@@ -62,7 +62,8 @@ When a `.summary.md` sidecar exists, the transcript detail page shows a green "C
 - The job detail page shows a **real-time progress bar** with per-phase step indicators. For transcription jobs: Transcribing → Diarizing → Formatting with ETA and speed counter. For LLM jobs: a single step indicator (R for Refine, S for Summarize) with Ollama streaming messages in the log.
 - A **Stop Job** button lets you cancel any pending or running job.
 - Transcripts are saved to `./output/` (or `data_dir/output`) and are immediately visible on the Transcripts page after the job completes.
-- Transcripts can be **deleted** from the Transcripts page (trash icon with confirmation). Deleting a transcript also removes its `.summary.md` sidecar if present.
+- Transcripts can be **deleted** from the Transcripts page (trash icon with confirmation). Deleting a transcript also removes its `.summary.md` sidecar and any per-speaker preview clips (`<stem>_excerpt_*.mp3`/`.txt`) generated for the enrollment wizard.
+- The job list keeps at most the 50 most recently finished jobs (completed or failed) — older ones are dropped to bound server memory, oldest first. Pending and running jobs are never affected by this limit. Transcripts themselves are unaffected; this only prunes entries from the in-memory job list.
 
 ---
 

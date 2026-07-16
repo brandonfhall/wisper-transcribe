@@ -85,6 +85,57 @@ def test_process_file_creates_markdown(
 @patch("wisper_transcribe.pipeline.convert_to_wav")
 @patch("wisper_transcribe.pipeline.get_duration", return_value=600.0)
 @patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
+def test_process_file_deletes_converted_wav_on_success(
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg, tmp_path
+):
+    """R9-2: a WAV produced by convert_to_wav (different from the original
+    input) is deleted once process_file no longer needs it. The original
+    input file itself must never be touched."""
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+
+    converted_wav = tmp_path / "converted_temp.wav"
+    converted_wav.write_bytes(b"RIFF" + b"\x00" * 36)
+    mock_convert.return_value = converted_wav
+
+    from wisper_transcribe.pipeline import process_file
+
+    out = process_file(audio, output_dir=tmp_path, device="cpu", model_size="tiny", no_diarize=True)
+
+    assert out.exists()
+    assert not converted_wav.exists()  # temp WAV cleaned up
+    assert audio.exists()  # original input untouched
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=600.0)
+@patch("wisper_transcribe.pipeline.transcribe", side_effect=RuntimeError("boom"))
+def test_process_file_deletes_converted_wav_on_failure(
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg, tmp_path
+):
+    """R9-2: the converted WAV is cleaned up even when a later stage raises."""
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+
+    converted_wav = tmp_path / "converted_temp.wav"
+    converted_wav.write_bytes(b"RIFF" + b"\x00" * 36)
+    mock_convert.return_value = converted_wav
+
+    from wisper_transcribe.pipeline import process_file
+
+    with pytest.raises(RuntimeError, match="boom"):
+        process_file(audio, output_dir=tmp_path, device="cpu", model_size="tiny", no_diarize=True)
+
+    assert not converted_wav.exists()
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=600.0)
+@patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
 def test_process_file_skips_existing(
     mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg, tmp_path
 ):
@@ -383,7 +434,8 @@ def test_enroll_pick_existing_speaker_confirm_yes_updates_embedding(
     mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg,
     tmp_path,
 ):
-    """Confirming yes on an existing speaker extracts a new embedding and blends it via EMA."""
+    """Confirming yes on an existing speaker reuses the ranking-step embedding
+    (R28: cached per label) and blends it into the profile via EMA."""
     from wisper_transcribe.models import SpeakerProfile
 
     audio = tmp_path / "session01.mp3"
@@ -413,8 +465,9 @@ def test_enroll_pick_existing_speaker_confirm_yes_updates_embedding(
                         from wisper_transcribe.pipeline import process_file
                         process_file(audio, output_dir=tmp_path, device="cpu", enroll_speakers=True)
 
-    # extract_embedding called twice: once for ranking display, once for EMA update
-    assert mock_extract.call_count == 2
+    # R28: extract_embedding is called once (for ranking display) and the
+    # same result is reused for the EMA update instead of re-extracting.
+    assert mock_extract.call_count == 1
     mock_update.assert_called_once_with("alice", fake_emb)
     mock_enroll.assert_not_called()
 

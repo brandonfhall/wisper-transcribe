@@ -208,6 +208,105 @@ def test_run_job_completed_after_post_process(tmp_path):
     assert job.status == COMPLETED
 
 
+# ---------------------------------------------------------------------------
+# R14 -- unbounded memory growth guards
+# ---------------------------------------------------------------------------
+
+
+def test_append_log_caps_log_lines_and_tracks_dropped():
+    """R14: Job.append_log trims the oldest lines once _MAX_LOG_LINES is
+    exceeded and counts them in log_lines_dropped, rather than growing
+    log_lines without bound."""
+    from wisper_transcribe.web.jobs import Job, _MAX_LOG_LINES
+    from datetime import datetime
+
+    job = Job(id="log-cap-test", status="running", created_at=datetime.now(), input_path="/tmp/a.mp3", kwargs={})
+
+    total = _MAX_LOG_LINES + 250
+    for i in range(total):
+        job.append_log(f"line {i}")
+
+    assert len(job.log_lines) == _MAX_LOG_LINES
+    assert job.log_lines_dropped == total - _MAX_LOG_LINES
+    # Oldest lines are the ones dropped; the retained tail is contiguous
+    # and ends with the most recent line appended.
+    assert job.log_lines[0] == f"line {job.log_lines_dropped}"
+    assert job.log_lines[-1] == f"line {total - 1}"
+
+
+def test_append_log_under_cap_does_not_trim():
+    from wisper_transcribe.web.jobs import Job
+    from datetime import datetime
+
+    job = Job(id="log-nocap-test", status="running", created_at=datetime.now(), input_path="/tmp/a.mp3", kwargs={})
+    for i in range(10):
+        job.append_log(f"line {i}")
+
+    assert len(job.log_lines) == 10
+    assert job.log_lines_dropped == 0
+
+
+def test_prune_finished_jobs_caps_terminal_jobs_only(monkeypatch):
+    """R14: only COMPLETED/FAILED jobs count against _MAX_RETAINED_JOBS, and
+    the OLDEST terminal jobs are dropped first. PENDING/RUNNING jobs are
+    never pruned, even when the terminal-job count alone exceeds the cap."""
+    from wisper_transcribe.web.jobs import COMPLETED, FAILED, PENDING, RUNNING
+    import wisper_transcribe.web.jobs as jobs_mod
+
+    monkeypatch.setattr(jobs_mod, "_MAX_RETAINED_JOBS", 3)
+
+    q = _make_queue()
+    terminal_jobs = [q.submit(f"/tmp/t{i}.mp3") for i in range(5)]
+    for i, j in enumerate(terminal_jobs):
+        j.status = COMPLETED if i % 2 == 0 else FAILED
+
+    pending_job = q.submit("/tmp/pending.mp3")
+    running_job = q.submit("/tmp/running.mp3")
+    running_job.status = RUNNING
+
+    q._prune_finished_jobs()
+
+    remaining_ids = {j.id for j in q._jobs.values()}
+    # 5 terminal jobs pruned down to the cap of 3 -- the 2 oldest gone.
+    assert len(remaining_ids & {j.id for j in terminal_jobs}) == 3
+    for j in terminal_jobs[:2]:
+        assert j.id not in remaining_ids
+    for j in terminal_jobs[2:]:
+        assert j.id in remaining_ids
+    # PENDING/RUNNING jobs are always retained, regardless of the cap.
+    assert pending_job.id in remaining_ids
+    assert running_job.id in remaining_ids
+
+
+def test_prune_finished_jobs_noop_under_cap():
+    q = _make_queue()
+    from wisper_transcribe.web.jobs import COMPLETED
+    job = q.submit("/tmp/a.mp3")
+    job.status = COMPLETED
+    q._prune_finished_jobs()
+    assert q.get(job.id) is job
+
+
+def test_cancel_pending_job_triggers_prune(monkeypatch):
+    """R14: cancelling a PENDING job (which sets it straight to FAILED
+    without ever passing through the worker's finally block) still gets
+    swept by the retention cap."""
+    from wisper_transcribe.web.jobs import COMPLETED
+    import wisper_transcribe.web.jobs as jobs_mod
+
+    monkeypatch.setattr(jobs_mod, "_MAX_RETAINED_JOBS", 1)
+
+    q = _make_queue()
+    old_job = q.submit("/tmp/old.mp3")
+    old_job.status = COMPLETED
+
+    new_job = q.submit("/tmp/new.mp3")
+    assert q.cancel(new_job.id) is True
+
+    assert q.get(old_job.id) is None  # pruned
+    assert q.get(new_job.id) is new_job  # the newly-cancelled job survives
+
+
 def test_list_recent_respects_limit():
     q = _make_queue()
     for i in range(5):

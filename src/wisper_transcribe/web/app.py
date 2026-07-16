@@ -61,12 +61,16 @@ def _build_tailwind() -> None:
         warnings.warn(f"Tailwind CSS build failed: {exc}. Using existing tailwind.min.css.")
 
 def _cleanup_orphaned_uploads() -> None:
-    """Delete wisper_upload_* temp files left by jobs that crashed mid-transcription.
+    """Delete wisper_upload_*/wisper_enroll_* temp files left by requests
+    that crashed mid-flight.
 
     The web upload route saves the file to a NamedTemporaryFile with the
-    wisper_upload_ prefix before enqueuing the job.  If the server crashes
-    while a job is running, the temp file is never cleaned up.  We sweep on
-    startup — the files are only needed while a job is running, so anything
+    wisper_upload_ prefix before enqueuing the job; the standalone speaker
+    enroll route (routes/speakers.py) uses the wisper_enroll_ prefix and is
+    always cleaned up within the same request (R9-1) — this sweep is only
+    the crash-window safety net for both. If the server crashes mid-request,
+    the temp file is never cleaned up.  We sweep on startup — these files
+    are only needed for the duration of a single request/job, so anything
     still on disk at boot time is safe to remove.
     """
     import glob
@@ -74,8 +78,8 @@ def _cleanup_orphaned_uploads() -> None:
     import tempfile
 
     tmp_dir = tempfile.gettempdir()
-    pattern = str(Path(tmp_dir) / "wisper_upload_*")
-    orphans = glob.glob(pattern)
+    patterns = ("wisper_upload_*", "wisper_enroll_*")
+    orphans = [p for pattern in patterns for p in glob.glob(str(Path(tmp_dir) / pattern))]
     if not orphans:
         return
     log = logging.getLogger(__name__)

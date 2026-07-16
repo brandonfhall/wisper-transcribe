@@ -463,6 +463,21 @@ def test_reset_profiles_removes_all(tmp_path):
     assert not (tmp_path / "profiles" / "embeddings" / "bob.npy").exists()
 
 
+def test_reset_profiles_removes_reference_clips(tmp_path):
+    """R9-5: a full reset must also clear .mp3 reference clips, not just
+    .npy embeddings -- otherwise every enrolled speaker's clip leaks."""
+    from wisper_transcribe.speaker_manager import reset_profiles
+
+    _write_profile(tmp_path, "alice", np.ones(3))
+    emb_dir = tmp_path / "profiles" / "embeddings"
+    clip = emb_dir / "alice.mp3"
+    clip.write_bytes(b"fake mp3")
+
+    reset_profiles(data_dir=tmp_path)
+
+    assert not clip.exists()
+
+
 def test_reset_profiles_empty(tmp_path):
     from wisper_transcribe.speaker_manager import reset_profiles
 

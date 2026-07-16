@@ -76,6 +76,44 @@ def save_profiles(profiles: dict[str, SpeakerProfile], data_dir: Optional[Path] 
         json.dump(raw, f, indent=2)
 
 
+def remove_profile_files(key: str, data_dir: Optional[Path] = None) -> None:
+    """Delete a profile's embedding (``.npy``) and reference clip (``.mp3``).
+
+    R9-5: the reference clip is a convenience file for web playback that both
+    the CLI (``speakers remove``) and the web ``/speakers/{name}/remove``
+    route need to clean up alongside the embedding -- shared here so neither
+    caller can forget the clip. Both files are optional (``missing_ok=True``);
+    a profile enrolled before clips existed, or one whose clip extraction
+    failed, is a normal case, not an error.
+    """
+    emb_dir = _get_embeddings_dir(data_dir)
+    (emb_dir / f"{key}.npy").unlink(missing_ok=True)
+    (emb_dir / f"{key}.mp3").unlink(missing_ok=True)
+
+
+def rename_profile_files(old_key: str, new_key: str, data_dir: Optional[Path] = None) -> Path:
+    """Rename a profile's embedding and reference clip to a new key.
+
+    R9-5: mirrors ``remove_profile_files`` for the rekey path (CLI
+    ``speakers rename`` only -- the web rename route is display-name-only
+    and never changes the profile key; see R31). Returns the new embedding
+    path so callers can update ``profile.embedding_path``. The clip rename
+    is best-effort (``missing_ok=True``) since it may legitimately not exist.
+    """
+    emb_dir = _get_embeddings_dir(data_dir)
+    old_npy = emb_dir / f"{old_key}.npy"
+    new_npy = emb_dir / f"{new_key}.npy"
+    if old_npy.exists():
+        old_npy.rename(new_npy)
+
+    old_mp3 = emb_dir / f"{old_key}.mp3"
+    new_mp3 = emb_dir / f"{new_key}.mp3"
+    if old_mp3.exists():
+        old_mp3.rename(new_mp3)
+
+    return new_npy
+
+
 def reset_profiles(data_dir: Optional[Path] = None) -> int:
     """Delete all speaker profiles and embeddings. Returns number of speakers removed."""
     speakers_json = _get_speakers_json(data_dir)
@@ -91,6 +129,11 @@ def reset_profiles(data_dir: Optional[Path] = None) -> int:
     if emb_dir.exists():
         for npy in emb_dir.glob("*.npy"):
             npy.unlink()
+        # R9-5: a full reset must also clear .mp3 reference clips -- the
+        # same leak the removal/rename fixes above target, just for every
+        # profile at once instead of one at a time.
+        for mp3 in emb_dir.glob("*.mp3"):
+            mp3.unlink()
 
     return count
 
