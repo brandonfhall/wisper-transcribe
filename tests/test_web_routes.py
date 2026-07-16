@@ -486,6 +486,26 @@ def test_config_get_uses_os_specific_open_label(client, platform, expected_label
     assert expected_label.encode() in resp.content
 
 
+def test_config_open_data_dir_get_is_rejected(client):
+    """R16: open-data-dir spawns an OS process (state-changing), so the GET
+    verb — triggerable cross-site via <img src=...> — must not be routed."""
+    with patch("subprocess.Popen") as mock_popen:
+        resp = client.get("/config/open-data-dir")
+    assert resp.status_code == 405
+    mock_popen.assert_not_called()
+
+
+def test_config_open_data_dir_post_opens_file_manager(client, tmp_path):
+    with patch("wisper_transcribe.config.get_data_dir", return_value=tmp_path), \
+         patch("subprocess.Popen") as mock_popen:
+        resp = client.post("/config/open-data-dir")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    mock_popen.assert_called_once()
+    # The spawned command targets the data dir, nothing user-controlled.
+    assert str(tmp_path) in mock_popen.call_args.args[0]
+
+
 def test_config_post_saves_and_redirects(client):
     with patch("wisper_transcribe.web.routes.config.load_config", return_value={}), \
          patch("wisper_transcribe.web.routes.config.save_config") as mock_save:
@@ -990,10 +1010,11 @@ def test_preset_add_missing_name_rejected(client):
 # ---------------------------------------------------------------------------
 
 
-def test_cleanup_orphaned_uploads_removes_both_prefixes(tmp_path, monkeypatch):
-    """R9-1: the startup sweep also recognizes wisper_enroll_* temp files
-    (the standalone speaker-enroll route's crash-window safety net), not
-    just wisper_upload_*."""
+def test_cleanup_orphaned_uploads_removes_all_prefixes(tmp_path, monkeypatch):
+    """R9-1/R6: the startup sweep recognizes wisper_enroll_* temp files (the
+    standalone speaker-enroll route's crash-window safety net) and the
+    wisper_enrollsrc_* files a pending standalone enroll job was renamed to,
+    not just wisper_upload_*."""
     import tempfile
 
     from wisper_transcribe.web.app import _cleanup_orphaned_uploads
@@ -1002,15 +1023,18 @@ def test_cleanup_orphaned_uploads_removes_both_prefixes(tmp_path, monkeypatch):
 
     upload = tmp_path / "wisper_upload_abc123.mp3"
     enroll = tmp_path / "wisper_enroll_def456.wav"
+    enrollsrc = tmp_path / "wisper_enrollsrc_ghi789.mp3"
     other = tmp_path / "unrelated.txt"
     upload.write_bytes(b"x")
     enroll.write_bytes(b"x")
+    enrollsrc.write_bytes(b"x")
     other.write_bytes(b"x")
 
     _cleanup_orphaned_uploads()
 
     assert not upload.exists()
     assert not enroll.exists()
+    assert not enrollsrc.exists()
     assert other.exists()
 
 
@@ -1030,78 +1054,74 @@ def test_speakers_enroll_form_returns_200(client):
     assert resp.status_code == 200
 
 
-def test_speakers_enroll_submit_success_cleans_up_temp_files(client, tmp_path):
-    """R9-1/R9-2/R10: a successful standalone enroll POST streams the upload
-    to disk (not buffered whole into RAM) and, once enrollment is done,
-    deletes both the raw wisper_enroll_* upload and the WAV convert_to_wav()
-    produced -- neither should be left in the OS tempdir."""
-    from wisper_transcribe.models import DiarizationSegment
+def test_speakers_enroll_submit_enqueues_standalone_job(app, client, tmp_path, monkeypatch):
+    """R6: the standalone enroll POST no longer runs WAV conversion /
+    diarization / embedding extraction inside the request — it saves the
+    upload (streamed, R10), hands ownership to a JOB_ENROLL job (mode
+    "standalone"), and redirects to the job detail page. At submit time the
+    wisper_enroll_* upload is renamed to wisper_enrollsrc_<job-id> so the
+    startup sweep can never delete a pending job's file (F5 pattern)."""
+    import tempfile as _tempfile
 
-    written_tmp_paths: list[Path] = []
-
-    def _fake_convert(path):
-        written_tmp_paths.append(Path(path))
-        converted = Path(str(path) + "_converted.wav")
-        converted.write_bytes(b"RIFF" + b"\x00" * 36)
-        return converted
-
-    diarization = [DiarizationSegment(start=0.0, end=2.0, speaker="SPEAKER_00")]
-
-    with patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=_fake_convert), \
-         patch("wisper_transcribe.config.get_device", return_value="cpu"), \
-         patch("wisper_transcribe.config.get_hf_token", return_value="fake-token"), \
-         patch("wisper_transcribe.diarizer.diarize", return_value=diarization), \
-         patch("wisper_transcribe.speaker_manager.enroll_speaker") as mock_enroll, \
-         patch("wisper_transcribe.web.routes.speakers.load_profiles", return_value={}):
+    monkeypatch.setattr(_tempfile, "tempdir", str(tmp_path))
+    try:
         resp = client.post(
             "/speakers/enroll",
-            data={"name": "TestSpeaker", "role": "", "notes": ""},
+            data={"name": "TestSpeaker", "role": "DM", "notes": "n"},
             files={"audio": ("clip.mp3", b"fake audio bytes", "audio/mpeg")},
             follow_redirects=False,
         )
+    finally:
+        monkeypatch.setattr(_tempfile, "tempdir", None)
 
     assert resp.status_code == 303
-    assert resp.headers["location"] == "/speakers"
-    mock_enroll.assert_called_once()
+    location = resp.headers["location"]
+    assert location.startswith("/transcribe/jobs/")
 
-    assert written_tmp_paths, "convert_to_wav was never called"
-    original_tmp = written_tmp_paths[0]
-    assert original_tmp.name.startswith("wisper_enroll_")
-    assert not original_tmp.exists()
-    converted = Path(str(original_tmp) + "_converted.wav")
-    assert not converted.exists()
+    queue = app.state.job_queue
+    job_id = location.rsplit("/", 1)[-1]
+    job = queue.get(job_id)
+    assert job is not None
+    assert job.job_type == "enroll"
+    assert job.enroll_mode == "standalone"
+    assert job.enroll_params["profile_key"] == "testspeaker"
+    assert job.enroll_params["display_name"] == "TestSpeaker"
+    assert job.enroll_params["role"] == "DM"
+    assert job.enroll_params["notes"] == "n"
+
+    # Upload renamed out of the wisper_enroll_* sweep glob, owned by the job.
+    upload = Path(job.input_path)
+    assert upload.name == f"wisper_enrollsrc_{job.id}.mp3"
+    assert upload.exists()
+    assert not list(tmp_path.glob("wisper_enroll_*"))
+    upload.unlink()  # the (unstarted) job would normally delete it
 
 
-def test_speakers_enroll_submit_cleans_up_temp_files_on_failure(client, tmp_path):
-    """R9-1: the temp upload and converted WAV are cleaned up even when
-    enrollment fails partway through."""
-    written_tmp_paths: list[Path] = []
+def test_speakers_enroll_submit_cleans_up_temp_file_when_submit_fails(client, tmp_path, monkeypatch):
+    """R9-1/R6: if the job hand-off itself fails, the route still deletes the
+    temp upload (ownership never transferred) and redirects with a generic
+    error code."""
+    import tempfile as _tempfile
+    from wisper_transcribe.web.jobs import JobQueue
 
-    def _fake_convert(path):
-        written_tmp_paths.append(Path(path))
-        converted = Path(str(path) + "_converted.wav")
-        converted.write_bytes(b"RIFF" + b"\x00" * 36)
-        return converted
-
-    with patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=_fake_convert), \
-         patch("wisper_transcribe.config.get_device", return_value="cpu"), \
-         patch("wisper_transcribe.config.get_hf_token", return_value="fake-token"), \
-         patch("wisper_transcribe.diarizer.diarize", side_effect=RuntimeError("boom")):
-        resp = client.post(
-            "/speakers/enroll",
-            data={"name": "TestSpeaker", "role": "", "notes": ""},
-            files={"audio": ("clip.mp3", b"fake audio bytes", "audio/mpeg")},
-            follow_redirects=False,
-        )
+    monkeypatch.setattr(_tempfile, "tempdir", str(tmp_path))
+    try:
+        with patch.object(
+            JobQueue, "submit_standalone_enroll", side_effect=RuntimeError("boom")
+        ):
+            resp = client.post(
+                "/speakers/enroll",
+                data={"name": "TestSpeaker", "role": "", "notes": ""},
+                files={"audio": ("clip.mp3", b"fake audio bytes", "audio/mpeg")},
+                follow_redirects=False,
+            )
+    finally:
+        monkeypatch.setattr(_tempfile, "tempdir", None)
 
     assert resp.status_code == 303
     assert "error=enroll_failed" in resp.headers["location"]
-
-    assert written_tmp_paths, "convert_to_wav was never called"
-    original_tmp = written_tmp_paths[0]
-    assert not original_tmp.exists()
-    converted = Path(str(original_tmp) + "_converted.wav")
-    assert not converted.exists()
+    assert "boom" not in resp.headers["location"]
+    assert not list(tmp_path.iterdir())  # no orphaned upload left behind
 
 
 def test_speakers_remove_redirects(client, tmp_path):
@@ -1155,28 +1175,155 @@ def test_speakers_remove_deletes_reference_clip(client, tmp_path):
     assert not mp3_path.exists()
 
 
-def test_speakers_rename_updates_display_name(client):
+def _seed_profile_store(tmp_path, key="alice", display="Alice", with_clip=True):
+    """Write a real speakers.json + embedding files under tmp_path (used as
+    the data dir) and return the embeddings dir."""
+    import numpy as np
     from wisper_transcribe.models import SpeakerProfile
-    fake_profile = SpeakerProfile(
-        name="alice",
-        display_name="Alice",
-        role="DM",
-        embedding_path=Path("/tmp/alice.npy"),
-        enrolled_date="2026-04-07",
-        enrollment_source="test.mp3",
-    )
-    profiles = {"alice": fake_profile}
+    from wisper_transcribe.speaker_manager import save_profiles as _save
 
-    with patch("wisper_transcribe.web.routes.speakers.load_profiles", return_value=profiles), \
-         patch("wisper_transcribe.web.routes.speakers.save_profiles"):
+    emb_dir = tmp_path / "profiles" / "embeddings"
+    emb_dir.mkdir(parents=True, exist_ok=True)
+    np.save(str(emb_dir / f"{key}.npy"), np.zeros(4))
+    if with_clip:
+        (emb_dir / f"{key}.mp3").write_bytes(b"fake mp3")
+
+    profile = SpeakerProfile(
+        name=key, display_name=display, role="DM",
+        embedding_path=emb_dir / f"{key}.npy",
+        enrolled_date="2026-04-07", enrollment_source="test.mp3",
+    )
+    _save({key: profile}, data_dir=tmp_path)
+    return emb_dir
+
+
+def test_speakers_rename_rekeys_profile_and_moves_files(client, tmp_path):
+    """R31: the web rename route adopts the CLI's rekey semantic — the
+    profile key changes and the .npy/.mp3 files move with it (previously the
+    web route changed display_name only)."""
+    from wisper_transcribe.speaker_manager import load_profiles as _load
+
+    emb_dir = _seed_profile_store(tmp_path)
+
+    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path):
         resp = client.post(
             "/speakers/alice/rename",
-            data={"new_name": "Alice (DM)"},
+            data={"new_name": "Alicia"},
             follow_redirects=False,
         )
 
     assert resp.status_code == 303
-    assert profiles["alice"].display_name == "Alice (DM)"
+    assert resp.headers["location"] == "/speakers"
+    profiles = _load(data_dir=tmp_path)
+    assert "alice" not in profiles
+    assert "alicia" in profiles
+    assert profiles["alicia"].display_name == "Alicia"
+    assert (emb_dir / "alicia.npy").exists()
+    assert (emb_dir / "alicia.mp3").exists()
+    assert not (emb_dir / "alice.npy").exists()
+    assert not (emb_dir / "alice.mp3").exists()
+
+
+def test_speakers_rename_updates_campaign_membership(client, tmp_path):
+    """R31: a web rename rekeys campaign rosters too — membership (including
+    the Discord ID binding) follows the profile instead of dangling."""
+    from wisper_transcribe.campaign_manager import (
+        add_member, bind_discord_id, create_campaign, load_campaigns,
+    )
+
+    _seed_profile_store(tmp_path)
+
+    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path):
+        campaign = create_campaign("Test Campaign", data_dir=tmp_path)
+        add_member(campaign.slug, "alice", role="player", data_dir=tmp_path)
+        bind_discord_id(campaign.slug, "alice", "123456789012345678", data_dir=tmp_path)
+
+        resp = client.post(
+            "/speakers/alice/rename",
+            data={"new_name": "Alicia"},
+            follow_redirects=False,
+        )
+
+        campaigns = load_campaigns(data_dir=tmp_path)
+
+    assert resp.status_code == 303
+    members = campaigns[campaign.slug].members
+    assert "alice" not in members
+    assert "alicia" in members
+    assert members["alicia"].role == "player"
+    assert members["alicia"].discord_user_id == "123456789012345678"
+    assert members["alicia"].profile_key == "alicia"
+
+
+def test_speakers_rename_collision_redirects_generic_error(client, tmp_path):
+    """R31: renaming onto an existing key fails with a generic error code —
+    the CLI's collision guard, without reflecting the submitted name."""
+    from wisper_transcribe.models import SpeakerProfile
+    from wisper_transcribe.speaker_manager import load_profiles as _load, save_profiles as _save
+
+    emb_dir = _seed_profile_store(tmp_path)
+    profiles = _load(data_dir=tmp_path)
+    profiles["bob"] = SpeakerProfile(
+        name="bob", display_name="Bob", role="",
+        embedding_path=emb_dir / "bob.npy",
+        enrolled_date="2026-04-07", enrollment_source="t.mp3",
+    )
+    _save(profiles, data_dir=tmp_path)
+
+    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path):
+        resp = client.post(
+            "/speakers/alice/rename",
+            data={"new_name": "Bob"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/speakers?error=rename_failed"
+    profiles = _load(data_dir=tmp_path)
+    assert "alice" in profiles  # unchanged
+
+
+def test_speakers_rename_invalid_key_redirects_generic_error(client, tmp_path):
+    """R31: a new name whose derived key fails the path-component guard is
+    refused with a generic error code — never reflected into the redirect."""
+    _seed_profile_store(tmp_path)
+
+    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path):
+        resp = client.post(
+            "/speakers/alice/rename",
+            data={"new_name": "evil/../../name"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/speakers?error=rename_failed"
+    assert "evil" not in resp.headers["location"]
+
+
+def test_speakers_rename_display_case_only_keeps_key(client, tmp_path):
+    """Renaming to a name that derives the same key updates display_name
+    without moving files or breaking the profile key."""
+    from wisper_transcribe.speaker_manager import load_profiles as _load
+
+    emb_dir = _seed_profile_store(tmp_path, display="alice")
+
+    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path):
+        resp = client.post(
+            "/speakers/alice/rename",
+            data={"new_name": "Alice"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    profiles = _load(data_dir=tmp_path)
+    assert "alice" in profiles
+    assert profiles["alice"].display_name == "Alice"
+    assert (emb_dir / "alice.npy").exists()
 
 
 # ---------------------------------------------------------------------------

@@ -11,6 +11,29 @@ wisper server
 
 ---
 
+## Trust Model
+
+The web UI is a **single-user tool with no authentication and no CSRF
+protection** — anyone who can reach the port has full read-write control:
+uploading and deleting files, changing configuration (including stored API
+keys), managing speaker profiles, and starting/stopping Discord recordings.
+
+- By default `wisper server` binds **`127.0.0.1`** (localhost only), so
+  nothing on your network can reach it.
+- Use `wisper server --host 0.0.0.0` **only on trusted networks** (e.g. a
+  home LAN you control). Do not expose the port to the internet.
+- The Docker services pass `--host 0.0.0.0` explicitly inside the container;
+  access from outside the machine is then governed by Docker's port
+  publishing — the default `"8080:8080"` in `docker-compose.yml` publishes on
+  **all host interfaces**; change it to `"127.0.0.1:8080:8080"` to keep the UI
+  host-local (see [docker.md](docker.md)).
+- Adding full CSRF tokens is an explicit non-goal for this single-user tool;
+  state-changing endpoints use POST and responses carry defensive headers
+  (CSP, `X-Frame-Options: DENY`, `nosniff`), but that is not a substitute
+  for network-level trust.
+
+---
+
 ## Pages
 
 | Page | URL | Description |
@@ -18,7 +41,7 @@ wisper server
 | Dashboard | `/` | Job queue, system status (device, model, HF token), quick upload |
 | Transcribe | `/transcribe` | Drag-and-drop upload with a byte-level progress bar (XHR-based, so large files don't leave the browser looking frozen — shows "Uploading… N%" then "Processing…" while the server spools the file and creates the job, then navigates to the job page), all transcription options, live progress stream; **Detect speakers** toggle (on by default — turn off for audiobooks/lectures to skip diarization entirely) reveals a count selector with **?** (auto-detect, default) or pinned **1–10**; the **Whisper model** radio preselects whichever model is set in `wisper config` (falling back to `large-v3-turbo` if the configured model isn't one of the three offered); optional "Refine vocabulary" and "Generate campaign summary" post-processing checkboxes. Submitting an unrecognized model/device/compute-type value (not reachable through the UI itself) redirects back with a generic `?error=invalid_option` rather than queuing a job. |
 | Transcripts | `/transcripts` | Browse output files, view rendered markdown, download, delete; green notes icon on cards that have a campaign summary |
-| Speakers | `/speakers` | Enroll, rename, remove speaker profiles |
+| Speakers | `/speakers` | Enroll, rename, remove speaker profiles. Renaming uses the same semantics as `wisper speakers rename`: the profile is re-keyed (embedding and sample clip files move with it) and campaign rosters — including Discord ID bindings — follow automatically. A rename fails with a notice if the new name collides with an existing profile or contains unsupported characters. |
 | Campaigns | `/campaigns` | Create and manage campaigns; add/remove roster members; scope transcription to a campaign |
 | Record | `/record` | Start and stop live Discord voice channel recording sessions; shows active session with live speaker and segment counts via SSE; **Browse bot's channels** panel lists available guilds and voice channels so you can click-to-fill IDs without leaving the page |
 | Recordings | `/recordings` | Browse all recordings, grouped by campaign; view per-recording detail (status, speakers, segments); delete entries |
@@ -36,11 +59,13 @@ Submitting the wizard renames the transcript immediately, then takes you to a li
 
 For a web upload, the source audio file is kept alongside its transcript in the output folder (instead of being deleted from the temp folder) so the wizard keeps working even after a server restart; it's removed automatically when you delete the transcript. If that audio file is ever missing, the wizard still lets you rename speakers — you'll just see a notice that voice enrollment was skipped (no enrollment job is created in that case).
 
+**Standalone enrollment** (`/speakers/enroll`) — uploading a clean reference clip for a single speaker — also runs as a background job now: submitting the form takes you to a live job progress page (Converting audio → Detecting speech → Extracting embedding) instead of blocking the browser tab while the ML work runs. The new profile appears on the Speakers page once the job completes.
+
 ---
 
 ## Auto-Enrollment from Recordings
 
-When the Discord bot records a session, any speaker whose Discord user ID is **not** bound to a campaign member is added to the recording's "Unknown Speakers" list. After the session ends, open the recording's detail page (`/recordings/{id}`) to see the panel. Enter a display name next to each unknown Discord ID and click **Enroll** — wisper extracts a voice embedding from their per-user audio track and creates a new speaker profile. The Discord ID is then bound to that profile in the campaign roster automatically, so future sessions tag them correctly without manual intervention.
+When the Discord bot records a session, any speaker whose Discord user ID is **not** bound to a campaign member is added to the recording's "Unknown Speakers" list. After the session ends, open the recording's detail page (`/recordings/{id}`) to see the panel. Enter a display name next to each unknown Discord ID and click **Enroll** — wisper extracts a voice embedding from their per-user audio track and creates a new speaker profile. This runs as a background job (you're taken to a live progress page); when it completes, the Discord ID is bound to that profile in the campaign roster automatically, so future sessions tag them correctly without manual intervention.
 
 ---
 
@@ -64,6 +89,7 @@ When a `.summary.md` sidecar exists, the transcript detail page shows a green "C
 - Transcripts are saved to `./output/` (or `data_dir/output`) and are immediately visible on the Transcripts page after the job completes.
 - Transcripts can be **deleted** from the Transcripts page (trash icon with confirmation). Deleting a transcript also removes its `.summary.md` sidecar and any per-speaker preview clips (`<stem>_excerpt_*.mp3`/`.txt`) generated for the enrollment wizard.
 - The job list keeps at most the 50 most recently finished jobs (completed or failed) — older ones are dropped to bound server memory, oldest first. Pending and running jobs are never affected by this limit. Transcripts themselves are unaffected; this only prunes entries from the in-memory job list.
+- When a job fails, the page shows a **generic error message** ("Transcription failed — see server logs", "Enrollment failed", …) rather than the raw exception — exception text can contain server file paths. The full exception and traceback are written to the server log (the terminal running `wisper server`, or the debug log with `--debug`).
 
 ---
 

@@ -4,7 +4,14 @@ from typing import Optional
 
 from .models import TranscriptionSegment, Word
 
+# Module-level model cache. _model_key records the parameters the cached
+# model was loaded with — (model_size, device, compute_type) as passed by the
+# caller (pre-resolution; "auto" resolves deterministically per device, so
+# raw params are a stable key). R4: without the key, a long-running web
+# server would silently reuse the first job's model for every later job
+# regardless of the model size chosen in the upload form or config.
 _model = None
+_model_key: Optional[tuple] = None
 
 # Maps standard model-size names to MLX Community HuggingFace repo IDs.
 # Only used on Apple Silicon (macOS + MPS) when mlx-whisper is installed.
@@ -89,8 +96,13 @@ def _transcribe_mlx(
 
 
 def load_model(model_size: str, device: str, compute_type: str = "auto"):
-    """Load faster-whisper model, caching it module-level."""
-    global _model
+    """Load faster-whisper model, caching it module-level.
+
+    The cache is keyed by (model_size, device, compute_type) — see _model_key.
+    The old model reference is dropped BEFORE the new one is constructed so
+    peak memory never holds two multi-GB models at once (R4).
+    """
+    global _model, _model_key
 
     # On Windows, explicitly add PyTorch's bundled CUDA libraries to the PATH
     # so CTranslate2 (faster-whisper's backend) can find cublas64_12.dll
@@ -147,7 +159,13 @@ def load_model(model_size: str, device: str, compute_type: str = "auto"):
     from .config import resolve_compute_type
 
     ct2_compute = resolve_compute_type(compute_type, ct2_device)
+    # Free the old model reference before loading the new one so peak memory
+    # doesn't hold two models; clear the key too so a failed load leaves the
+    # cache empty rather than mismatched (R4).
+    _model = None
+    _model_key = None
     _model = WhisperModel(model_size, device=ct2_device, compute_type=ct2_compute)
+    _model_key = (model_size, device, compute_type)
     return _model
 
 
@@ -195,7 +213,10 @@ def transcribe(
             )
         # mlx not available → fall through to CPU path below
 
-    if _model is None:
+    # R4: reload when the requested parameters differ from what the cached
+    # model was loaded with — the web server is long-running, so a later job
+    # may legitimately ask for a different model size/device/compute type.
+    if _model is None or _model_key != (model_size, device, compute_type):
         load_model(model_size, device, compute_type)
 
     segments, info = _model.transcribe(

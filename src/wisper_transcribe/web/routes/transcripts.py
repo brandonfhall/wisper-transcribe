@@ -30,7 +30,15 @@ router = APIRouter(prefix="/transcripts")
 
 
 class _HtmlSanitizer(HTMLParser):
-    """Strip <script> elements and on* event-handler attributes from HTML.
+    """Strip dangerous elements and attributes from HTML.
+
+    Removes ``<script>``/``<iframe>``/``<object>``/``<embed>`` elements,
+    ``on*`` event-handler attributes, and ``href``/``src`` attributes whose
+    value carries a ``javascript:``/``data:``/``vbscript:`` scheme (R17 —
+    checked after conservatively stripping whitespace/control characters so
+    obfuscations like ``java\\tscript:`` don't slip through; HTMLParser has
+    already decoded character references like ``&#106;`` by the time
+    attribute values reach us).
 
     Uses Python's built-in HTMLParser rather than regex so that all syntactic
     variants of tags (e.g. ``</script >``, ``</SCRIPT>``) are handled
@@ -38,20 +46,46 @@ class _HtmlSanitizer(HTMLParser):
     case variations in closing tags (A03 XSS — CWE-79).
     """
 
-    _STRIP_TAGS: frozenset[str] = frozenset({"script"})
+    # Content-bearing tags stripped together with everything inside them.
+    _STRIP_TAGS: frozenset[str] = frozenset({"script", "iframe", "object"})
+    # Void tags dropped outright (no closing tag, so no depth tracking —
+    # an unclosed <embed> must not swallow the rest of the document).
+    _VOID_STRIP_TAGS: frozenset[str] = frozenset({"embed"})
+    # Attributes whose value is a URL and must not carry an active scheme.
+    _URL_ATTRS: frozenset[str] = frozenset({"href", "src"})
+    _BAD_SCHEMES: tuple[str, ...] = ("javascript:", "data:", "vbscript:")
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self._output: list[str] = []
         self._skip_depth: int = 0
 
+    @classmethod
+    def _is_unsafe_url(cls, value: str) -> bool:
+        """True when *value* resolves to a javascript:/data:/vbscript: URL.
+
+        Conservative normalisation: drop every ASCII control char and
+        whitespace (codepoints <= 0x20) anywhere in the value, then
+        lowercase — browsers tolerate ``java\\tscript:`` and leading
+        whitespace, so a simple startswith on the raw value is bypassable.
+        """
+        cleaned = "".join(ch for ch in value if ord(ch) > 0x20).lower()
+        return cleaned.startswith(cls._BAD_SCHEMES)
+
     def handle_starttag(self, tag: str, attrs: list) -> None:  # type: ignore[override]
-        if tag.lower() in self._STRIP_TAGS:
+        t = tag.lower()
+        if t in self._STRIP_TAGS:
             self._skip_depth += 1
             return
         if self._skip_depth:
             return
-        safe_attrs = [(k, v) for k, v in attrs if not k.lower().startswith("on")]
+        if t in self._VOID_STRIP_TAGS:
+            return
+        safe_attrs = [
+            (k, v) for k, v in attrs
+            if not k.lower().startswith("on")
+            and not (k.lower() in self._URL_ATTRS and v is not None and self._is_unsafe_url(v))
+        ]
         attr_str = "".join(
             f' {k}="{_html_module.escape(v)}"' if v is not None else f" {k}"
             for k, v in safe_attrs
@@ -59,10 +93,13 @@ class _HtmlSanitizer(HTMLParser):
         self._output.append(f"<{tag}{attr_str}>")
 
     def handle_endtag(self, tag: str) -> None:  # type: ignore[override]
-        if tag.lower() in self._STRIP_TAGS:
+        t = tag.lower()
+        if t in self._STRIP_TAGS:
             self._skip_depth = max(0, self._skip_depth - 1)
             return
         if self._skip_depth:
+            return
+        if t in self._VOID_STRIP_TAGS:
             return
         self._output.append(f"</{tag}>")
 
@@ -75,7 +112,8 @@ class _HtmlSanitizer(HTMLParser):
 
 
 def _sanitize_html(html_input: str) -> str:
-    """Return *html_input* with script elements and on* handlers removed."""
+    """Return *html_input* with script/iframe/object/embed elements, on*
+    handlers, and javascript:/data: URLs removed (see _HtmlSanitizer)."""
     sanitizer = _HtmlSanitizer()
     sanitizer.feed(html_input)
     return sanitizer.get_output()
@@ -96,7 +134,7 @@ def _parse_frontmatter(content: str) -> tuple[dict, str]:
     return {}, content
 
 
-def _get_safe_content_path(request: Request, name: str, suffix: str) -> Path | None:
+def _get_safe_content_path(name: str, suffix: str) -> Path | None:
     """Resolve and sanitize a transcript output path, mitigating path traversal.
 
     `suffix` is the file extension to append, e.g. ".md" or ".summary.md".
@@ -121,7 +159,7 @@ def _get_safe_content_path(request: Request, name: str, suffix: str) -> Path | N
     return Path(target_path)
 
 
-def _delete_diar_sidecar_and_audio(request: Request, name: str) -> None:
+def _delete_diar_sidecar_and_audio(name: str) -> None:
     """Remove the ``_diar.json`` enrollment sidecar and the durable audio copy
     it points to, if any.
 
@@ -136,7 +174,7 @@ def _delete_diar_sidecar_and_audio(request: Request, name: str) -> None:
     a separate concern handled by ``_delete_excerpt_clips`` (R9-4), called
     alongside this function from both delete routes.
     """
-    diar_path = _get_safe_content_path(request, name, "_diar.json")
+    diar_path = _get_safe_content_path(name, "_diar.json")
     if not diar_path or not diar_path.exists():
         return
 
@@ -168,7 +206,7 @@ def _delete_diar_sidecar_and_audio(request: Request, name: str) -> None:
         pass
 
 
-def _delete_excerpt_clips(request: Request, name: str) -> None:
+def _delete_excerpt_clips(name: str) -> None:
     """Delete ``<stem>_excerpt_*`` speaker-preview clips (``.mp3`` and
     ``.txt``) left behind by transcription/enrollment (R9-4).
 
@@ -185,7 +223,7 @@ def _delete_excerpt_clips(request: Request, name: str) -> None:
     """
     import glob as _glob
 
-    md_path = _get_safe_content_path(request, name, ".md")
+    md_path = _get_safe_content_path(name, ".md")
     if md_path is None:
         return
     out_dir = md_path.parent
@@ -272,15 +310,15 @@ async def bulk_delete_transcripts(request: Request) -> HTMLResponse:
     form = await request.form()
     stems = form.getlist("stems")
     for stem in stems:
-        md_path = _get_safe_content_path(request, stem, ".md")
+        md_path = _get_safe_content_path(stem, ".md")
         if md_path and md_path.exists():
             md_path.unlink()
-        summary = _get_safe_content_path(request, stem, ".summary.md")
+        summary = _get_safe_content_path(stem, ".summary.md")
         if summary and summary.exists():
             summary.unlink()
-        _delete_diar_sidecar_and_audio(request, stem)
+        _delete_diar_sidecar_and_audio(stem)
         # R9-4: also remove <stem>_excerpt_*.mp3/.txt clips.
-        _delete_excerpt_clips(request, stem)
+        _delete_excerpt_clips(stem)
     return HTMLResponse(content="", status_code=303, headers={"Location": "/transcripts"})
 
 
@@ -301,7 +339,7 @@ async def bulk_assign_campaign(request: Request) -> HTMLResponse:
             )
 
     for stem in stems:
-        path = _get_safe_content_path(request, stem, ".md")
+        path = _get_safe_content_path(stem, ".md")
         if path is None:
             continue
         try:
@@ -317,7 +355,7 @@ async def bulk_assign_campaign(request: Request) -> HTMLResponse:
 
 @router.get("/{name}", response_class=HTMLResponse)
 async def transcript_detail(request: Request, name: str) -> HTMLResponse:
-    md_path = _get_safe_content_path(request, name, ".md")
+    md_path = _get_safe_content_path(name, ".md")
     if not md_path:
         return invalid_input_response("Invalid name")
     if not md_path.exists():
@@ -330,11 +368,11 @@ async def transcript_detail(request: Request, name: str) -> HTMLResponse:
     html_body = _sanitize_html(_md.markdown(body, extensions=["nl2br"]))
 
     # Check for summary sidecar
-    summary_path = _get_safe_content_path(request, name, ".summary.md")
+    summary_path = _get_safe_content_path(name, ".summary.md")
     has_summary = bool(summary_path and summary_path.exists())
 
     # Check for enrollment sidecar (transcript-centric wizard)
-    diar_path = _get_safe_content_path(request, name, "_diar.json")
+    diar_path = _get_safe_content_path(name, "_diar.json")
     has_diar_sidecar = bool(diar_path and diar_path.exists())
 
     # Load current LLM config for display
@@ -367,7 +405,7 @@ async def transcript_detail(request: Request, name: str) -> HTMLResponse:
 
 @router.get("/{name}/download")
 async def transcript_download(request: Request, name: str):
-    md_path = _get_safe_content_path(request, name, ".md")
+    md_path = _get_safe_content_path(name, ".md")
     if not md_path:
         return invalid_input_response("Invalid name")
     if not md_path.exists():
@@ -382,21 +420,21 @@ async def transcript_download(request: Request, name: str):
 @router.post("/{name}/delete", response_class=HTMLResponse)
 async def delete_transcript(request: Request, name: str) -> HTMLResponse:
     """Delete a transcript .md file (and its summary sidecar if present)."""
-    md_path = _get_safe_content_path(request, name, ".md")
+    md_path = _get_safe_content_path(name, ".md")
     if not md_path:
         return invalid_input_response("Invalid name")
     if md_path.exists():
         md_path.unlink()
     # Also remove summary sidecar if present
-    summary_path = _get_safe_content_path(request, name, ".summary.md")
+    summary_path = _get_safe_content_path(name, ".summary.md")
     if summary_path and summary_path.exists():
         summary_path.unlink()
     # F5: also remove the enrollment sidecar and the durable audio copy it
     # references -- see _delete_diar_sidecar_and_audio for the reasoning.
-    _delete_diar_sidecar_and_audio(request, name)
+    _delete_diar_sidecar_and_audio(name)
     # R9-4: also remove <stem>_excerpt_*.mp3/.txt clips left behind by
     # transcription/enrollment -- previously left orphaned on delete.
-    _delete_excerpt_clips(request, name)
+    _delete_excerpt_clips(name)
     return HTMLResponse(
         content="",
         status_code=303,
@@ -407,7 +445,7 @@ async def delete_transcript(request: Request, name: str) -> HTMLResponse:
 @router.get("/{name}/edit", response_class=HTMLResponse)
 async def transcript_edit(request: Request, name: str) -> HTMLResponse:
     """Edit page — shows each speaker block with an editable speaker field."""
-    md_path = _get_safe_content_path(request, name, ".md")
+    md_path = _get_safe_content_path(name, ".md")
     if not md_path:
         return invalid_input_response("Invalid name")
     if not md_path.exists():
@@ -437,7 +475,7 @@ async def transcript_edit(request: Request, name: str) -> HTMLResponse:
 @router.post("/{name}/edit", response_class=HTMLResponse)
 async def transcript_edit_save(request: Request, name: str) -> HTMLResponse:
     """Save per-block speaker name changes."""
-    md_path = _get_safe_content_path(request, name, ".md")
+    md_path = _get_safe_content_path(name, ".md")
     if not md_path:
         return invalid_input_response("Invalid name")
     if not md_path.exists():
@@ -472,7 +510,7 @@ async def transcript_edit_save(request: Request, name: str) -> HTMLResponse:
 @router.post("/{name}/fix-speaker", response_class=HTMLResponse)
 async def fix_speaker(request: Request, name: str) -> HTMLResponse:
     """Rename a speaker in an existing transcript."""
-    md_path = _get_safe_content_path(request, name, ".md")
+    md_path = _get_safe_content_path(name, ".md")
     if not md_path:
         return invalid_input_response("Invalid name")
     if not md_path.exists():
@@ -498,7 +536,7 @@ async def fix_speaker(request: Request, name: str) -> HTMLResponse:
 @router.post("/{name}/refine", response_class=HTMLResponse)
 async def post_refine(request: Request, name: str) -> HTMLResponse:
     """Submit a vocabulary-refine LLM job for an existing transcript."""
-    md_path = _get_safe_content_path(request, name, ".md")
+    md_path = _get_safe_content_path(name, ".md")
     if not md_path:
         return invalid_input_response("Invalid name")
     if not md_path.exists():
@@ -523,7 +561,7 @@ async def post_refine(request: Request, name: str) -> HTMLResponse:
 @router.post("/{name}/summarize", response_class=HTMLResponse)
 async def post_summarize(request: Request, name: str) -> HTMLResponse:
     """Submit a campaign-summary LLM job for an existing transcript."""
-    md_path = _get_safe_content_path(request, name, ".md")
+    md_path = _get_safe_content_path(name, ".md")
     if not md_path:
         return invalid_input_response("Invalid name")
     if not md_path.exists():
@@ -548,11 +586,11 @@ async def post_summarize(request: Request, name: str) -> HTMLResponse:
 @router.get("/{name}/summary", response_class=HTMLResponse)
 async def summary_detail(request: Request, name: str) -> HTMLResponse:
     """Render the campaign-notes summary for a transcript."""
-    md_path = _get_safe_content_path(request, name, ".md")
+    md_path = _get_safe_content_path(name, ".md")
     if not md_path:
         return invalid_input_response("Invalid name")
 
-    summary_path = _get_safe_content_path(request, name, ".summary.md")
+    summary_path = _get_safe_content_path(name, ".summary.md")
     if not summary_path or not summary_path.exists():
         return HTMLResponse(content="Summary not found", status_code=404)
 
@@ -578,7 +616,7 @@ async def summary_detail(request: Request, name: str) -> HTMLResponse:
 @router.get("/{name}/summary/download")
 async def summary_download(request: Request, name: str):
     """Download the .summary.md sidecar file."""
-    summary_path = _get_safe_content_path(request, name, ".summary.md")
+    summary_path = _get_safe_content_path(name, ".summary.md")
     if not summary_path:
         return invalid_input_response("Invalid name")
     if not summary_path.exists():
@@ -593,7 +631,7 @@ async def summary_download(request: Request, name: str):
 @router.post("/{name}/campaign", response_class=HTMLResponse)
 async def assign_campaign(request: Request, name: str) -> HTMLResponse:
     """Assign or remove a campaign association for a transcript."""
-    safe_name = _get_safe_content_path(request, name, ".md")
+    safe_name = _get_safe_content_path(name, ".md")
     if not safe_name:
         return invalid_input_response("Invalid name")
 
@@ -645,7 +683,7 @@ from wisper_transcribe.web.enroll_shared import (
 @router.get("/{name}/enroll", response_class=HTMLResponse)
 async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
     """Speaker enrollment wizard — transcript-centric, restart-safe."""
-    md_path = _get_safe_content_path(request, name, ".md")
+    md_path = _get_safe_content_path(name, ".md")
     if not md_path:
         return invalid_input_response("Invalid name")
     if not md_path.exists():
@@ -740,7 +778,7 @@ async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
 @router.post("/{name}/enroll", response_class=HTMLResponse)
 async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
     """Apply speaker name assignments from the transcript enrollment wizard."""
-    md_path = _get_safe_content_path(request, name, ".md")
+    md_path = _get_safe_content_path(name, ".md")
     if not md_path:
         return invalid_input_response("Invalid name")
     if not md_path.exists():
@@ -823,44 +861,34 @@ async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
 @router.get("/{name}/excerpt/{speaker_name}")
 async def transcript_excerpt(request: Request, name: str, speaker_name: str):
     """Serve a speaker excerpt clip for the transcript-centric enrollment wizard."""
-    import re as _re
     if not speaker_name or "\x00" in speaker_name:
         return invalid_input_response("Invalid speaker name")
     safe_sp = os.path.basename(speaker_name)
     if safe_sp != speaker_name or safe_sp in {".", ".."}:
         return invalid_input_response("Invalid speaker name")
 
-    md_path = _get_safe_content_path(request, name, ".md")
+    md_path = _get_safe_content_path(name, ".md")
     if not md_path:
         return invalid_input_response("Invalid name")
 
     from fastapi.responses import FileResponse
-    out_dir = md_path.parent
-    stem = md_path.stem
 
     # Try the raw label first; fall back to the legacy display-name file
     # (pre-fix transcripts keyed excerpts by display name).
-    candidates: list[str] = [_re.sub(r"[^\w\-]", "_", safe_sp)]
+    candidates: list[str] = [safe_sp]
     diar = _load_diar_sidecar(md_path)
     if diar:
         legacy_label_map = _build_legacy_label_map(md_path, diar.get("diarization_segments", []))
         legacy = legacy_label_map.get(safe_sp)
         if legacy:
-            candidates.append(_re.sub(r"[^\w\-]", "_", legacy))
+            candidates.append(legacy)
 
-    # Path-traversal guard: re.sub(r"[^\w\-]", "_", …) is already a tight
-    # whitelist, but CodeQL's taint tracker only recognises the
-    # os.path.abspath + startswith pattern (CLAUDE.md security note).
-    base_dir = os.path.abspath(str(out_dir))
-    if not base_dir.endswith(os.sep):
-        base_dir += os.sep
-    for safe_label in candidates:
-        candidate_abs = os.path.abspath(
-            os.path.join(base_dir, f"{stem}_excerpt_{safe_label}.mp3")
-        )
-        if not candidate_abs.startswith(base_dir):
-            continue
-        clip = Path(candidate_abs)
-        if clip.exists():
-            return FileResponse(path=str(clip), media_type="audio/mpeg")
+    # R24: shared lookup + CodeQL guard — same helper the job-centric
+    # wizard's excerpt route uses (transcribe.py). The whitelist re.sub and
+    # the os.path.abspath + startswith round-trip both live inside it.
+    from wisper_transcribe.web.enroll_shared import find_excerpt_clip
+
+    clip = find_excerpt_clip(md_path.parent, md_path.stem, candidates)
+    if clip is not None:
+        return FileResponse(path=str(clip), media_type="audio/mpeg")
     return HTMLResponse(content="Excerpt not available", status_code=404)

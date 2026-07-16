@@ -24,6 +24,10 @@
   <div style="padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber);margin-bottom:20px">
     Enrollment failed. Please check the audio file and try again.
   </div>
+  {% elif request.query_params.get('error') == 'rename_failed' %}
+  <div style="padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber);margin-bottom:20px">
+    Rename failed. The name may already be in use or contain unsupported characters — use letters, numbers, spaces, and hyphens.
+  </div>
   {% elif request.query_params.get('enrolled') %}
   <div style="padding:12px 14px;background:#7bd88f12;border:1px solid #7bd88f30;border-radius:4px;font-size:12.5px;color:var(--color-signal-green);margin-bottom:20px">
     ✓ Speaker enrolled successfully.

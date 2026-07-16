@@ -22,8 +22,6 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 
 from wisper_transcribe.campaign_manager import (
-    add_member,
-    bind_discord_id,
     load_campaigns,
     move_transcript_to_campaign,
 )
@@ -35,7 +33,6 @@ from wisper_transcribe.recording_manager import (
     save_recording,
 )
 from wisper_transcribe.web._responses import error_redirect, invalid_input_response
-from wisper_transcribe.speaker_manager import enroll_speaker_from_audio_dir
 from wisper_transcribe.web.routes import get_bot_manager, templates
 
 log = logging.getLogger(__name__)
@@ -391,40 +388,24 @@ async def recording_enroll_html(
 
     per_user_dir = data_dir / "recordings" / recording.id / "per-user" / safe_uid
 
-    try:
-        enroll_speaker_from_audio_dir(
-            name=profile_key,
-            display_name=profile_name.strip(),
-            role="player",
-            per_user_dir=per_user_dir,
-            data_dir=data_dir,
-        )
-    except Exception:
-        log.warning("Speaker enrollment from audio dir failed", exc_info=True)
-        return RedirectResponse(
-            url=f"/recordings/{recording.id}?error=enroll_failed", status_code=303
-        )
+    # R6: the pydub decode + embedding extraction used to run synchronously
+    # here, blocking the event loop and touching the module-level ML caches
+    # concurrently with the job worker thread. It now runs as a JOB_ENROLL
+    # job (one job at a time); the runner also applies the recording-state
+    # updates (unbound list, discord_speakers binding, campaign membership)
+    # that used to happen inline after the enroll. Redirect to the job
+    # detail page — job.id is server-generated (uuid4), no user-controlled
+    # data in the URL.
+    queue = request.app.state.job_queue
+    job = queue.submit_recording_enroll(
+        recording_id=recording.id,
+        discord_uid=safe_uid,
+        per_user_dir=str(per_user_dir),
+        profile_key=profile_key,
+        display_name=profile_name.strip(),
+    )
 
-    recording.unbound_speakers = [
-        uid for uid in recording.unbound_speakers if uid != safe_uid
-    ]
-    recording.discord_speakers[safe_uid] = profile_key
-    save_recording(recording, data_dir)
-
-    if recording.campaign_slug:
-        try:
-            campaigns = load_campaigns(data_dir)
-            if recording.campaign_slug in campaigns:
-                campaign = campaigns[recording.campaign_slug]
-                if profile_key not in campaign.members:
-                    add_member(recording.campaign_slug, profile_key, data_dir=data_dir)
-                bind_discord_id(
-                    recording.campaign_slug, profile_key, safe_uid, data_dir=data_dir
-                )
-        except Exception:
-            log.warning("Failed to auto-bind discord ID to campaign", exc_info=True)
-
-    return RedirectResponse(url=f"/recordings/{recording.id}", status_code=303)
+    return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
 
 
 # ---------------------------------------------------------------------------

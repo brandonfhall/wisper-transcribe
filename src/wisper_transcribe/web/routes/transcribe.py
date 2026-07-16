@@ -397,23 +397,15 @@ async def speaker_excerpt(request: Request, job_id: str, speaker_name: str) -> R
     # what serves excerpts after a restart; this route intentionally 404s
     # instead of guessing.
     if job is not None and job.output_path and (not clip_path or not Path(clip_path).exists()):
-        import re as _re
-        safe_label = _re.sub(r"[^\w\-]", "_", speaker_name)
-        out_dir = Path(job.output_path).parent
-        stem = Path(job.output_path).stem
+        # R24: shared lookup + CodeQL guard — same helper the
+        # transcript-centric wizard's excerpt route uses (transcripts.py).
+        from wisper_transcribe.web.enroll_shared import find_excerpt_clip
 
-        # Path-traversal guard: re.sub(r"[^\w\-]", "_", …) is already a
-        # tight whitelist, but CodeQL's taint tracker only recognises the
-        # os.path.abspath + startswith pattern (CLAUDE.md security note) --
-        # same guard as the mirrored fallback in transcripts.py.
-        base_dir = os.path.abspath(str(out_dir))
-        if not base_dir.endswith(os.sep):
-            base_dir += os.sep
-        candidate_abs = os.path.abspath(
-            os.path.join(base_dir, f"{stem}_excerpt_{safe_label}.mp3")
+        found = find_excerpt_clip(
+            Path(job.output_path).parent, Path(job.output_path).stem, [speaker_name]
         )
-        if candidate_abs.startswith(base_dir) and os.path.exists(candidate_abs):
-            clip_path = candidate_abs
+        if found is not None:
+            clip_path = str(found)
 
     if not clip_path or not Path(clip_path).exists():
         return HTMLResponse(content="Excerpt not available", status_code=404)

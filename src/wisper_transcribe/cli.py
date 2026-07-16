@@ -137,7 +137,12 @@ def _audio_extensions():
 
 
 @main.command()
-@click.option("--host", default="0.0.0.0", show_default=True, help="Bind host")
+# R16: default to loopback — the web UI has no authentication or CSRF
+# protection, so binding all interfaces by default exposed full read-write
+# control to anyone on the network. Pass --host 0.0.0.0 explicitly to serve
+# a trusted network (Docker does this in docker-compose.yml).
+@click.option("--host", default="127.0.0.1", show_default=True,
+              help="Bind host (use 0.0.0.0 to expose on the network — no auth, trusted networks only)")
 @click.option("--port", default=8080, show_default=True, type=int, help="Bind port")
 @click.option("--reload", is_flag=True, default=False, help="Auto-reload on code change (dev mode)")
 @click.option("--debug", is_flag=True, default=False,
@@ -660,28 +665,20 @@ def speakers_remove(name: str):
 @click.argument("new_name")
 def speakers_rename(old_name: str, new_name: str):
     """Rename an enrolled speaker."""
-    from .speaker_manager import load_profiles, rename_profile_files, save_profiles
+    # R31: the rekey semantic (profile dict entry, .npy/.mp3 files, campaign
+    # membership) lives in speaker_manager.rename_profile — shared with the
+    # web rename route so both entry points do the same thing.
+    from .speaker_manager import rename_profile
 
-    profiles = load_profiles()
     old_key = old_name.lower().replace(" ", "_")
-    new_key = new_name.lower().replace(" ", "_")
-
-    if old_key not in profiles:
+    try:
+        rename_profile(old_key, new_name)
+    except KeyError:
         raise click.ClickException(f"Speaker {old_name!r} not found.")
-
-    if new_key != old_key and new_key in profiles:
-        raise click.ClickException(f"Speaker {new_name!r} already exists.")
-
-    profile = profiles.pop(old_key)
-    profile.name = new_key
-    profile.display_name = new_name
-
-    # R9-5: rekeys both the .npy embedding and the .mp3 reference clip so
-    # playback keeps working after a CLI rename.
-    profile.embedding_path = rename_profile_files(old_key, new_key)
-
-    profiles[new_key] = profile
-    save_profiles(profiles)
+    except ValueError as e:
+        if "exists" in str(e):
+            raise click.ClickException(f"Speaker {new_name!r} already exists.")
+        raise click.ClickException(f"Invalid speaker name: {new_name!r}")
     click.echo(f"Renamed {old_name!r} → {new_name!r}.")
 
 

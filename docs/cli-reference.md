@@ -377,10 +377,18 @@ Presets are also manageable via the web UI — the Record page has an inline "Sa
 Start the browser-based web UI:
 
 ```bash
-wisper server                  # default: http://0.0.0.0:8080
-wisper server --port 9000      # custom port
-wisper server --reload         # dev mode — auto-reloads on code changes
+wisper server                   # default: http://127.0.0.1:8080 (localhost only)
+wisper server --port 9000       # custom port
+wisper server --host 0.0.0.0    # expose on the network — trusted networks only, see below
+wisper server --reload          # dev mode — auto-reloads on code changes
 ```
+
+> **Security:** the web UI has **no authentication** — anyone who can reach the
+> port has full read-write control (uploads, deletions, configuration,
+> recording control). The server therefore binds `127.0.0.1` by default.
+> Pass `--host 0.0.0.0` only on networks you trust (the Docker setup does
+> this explicitly inside the container, publishing the port via Docker).
+> See [web-ui.md](web-ui.md#trust-model) for the full trust model.
 
 ---
 

@@ -26,6 +26,15 @@ make start-gpu
 
 On first run the server downloads the Whisper and pyannote models (~2 GB) into `./cache/` — this only happens once.
 
+> **Note on binding:** inside the container the web services run
+> `wisper server --host 0.0.0.0 --port 8080` (set explicitly in
+> `docker-compose.yml` — the CLI's own default is `127.0.0.1`, which would be
+> unreachable from outside the container). Whether the UI is reachable from
+> other machines is controlled by Docker's port mapping; the default
+> `"8080:8080"` publishes on all host interfaces, so change it to
+> `"127.0.0.1:8080:8080"` if the host is on an untrusted network — the UI
+> has no authentication (see [web-ui.md](web-ui.md#trust-model)).
+
 ### Makefile Targets
 
 | Command | Description |

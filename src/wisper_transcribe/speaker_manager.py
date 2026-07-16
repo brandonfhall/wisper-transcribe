@@ -15,7 +15,12 @@ _suppress()
 from .config import get_data_dir
 from .models import DiarizationSegment, SpeakerProfile
 
+# Module-level embedding-model cache, keyed by the device it was moved to
+# (R4 — same staleness pattern as transcriber._model / diarizer._pipeline:
+# without the key, the first caller's device would silently stick for the
+# lifetime of a long-running web server).
 _embedding_model = None
+_embedding_device: Optional[str] = None
 
 
 def _get_profiles_dir(data_dir: Optional[Path] = None) -> Path:
@@ -94,11 +99,12 @@ def remove_profile_files(key: str, data_dir: Optional[Path] = None) -> None:
 def rename_profile_files(old_key: str, new_key: str, data_dir: Optional[Path] = None) -> Path:
     """Rename a profile's embedding and reference clip to a new key.
 
-    R9-5: mirrors ``remove_profile_files`` for the rekey path (CLI
-    ``speakers rename`` only -- the web rename route is display-name-only
-    and never changes the profile key; see R31). Returns the new embedding
-    path so callers can update ``profile.embedding_path``. The clip rename
-    is best-effort (``missing_ok=True``) since it may legitimately not exist.
+    R9-5: mirrors ``remove_profile_files`` for the rekey path. Called from
+    ``rename_profile()`` below, which both the CLI ``speakers rename``
+    command and the web rename route go through (R31). Returns the new
+    embedding path so callers can update ``profile.embedding_path``. The
+    clip rename is best-effort (``missing_ok=True``) since it may
+    legitimately not exist.
     """
     emb_dir = _get_embeddings_dir(data_dir)
     old_npy = emb_dir / f"{old_key}.npy"
@@ -112,6 +118,66 @@ def rename_profile_files(old_key: str, new_key: str, data_dir: Optional[Path] = 
         old_mp3.rename(new_mp3)
 
     return new_npy
+
+
+def rename_profile(old_key: str, new_name: str, data_dir: Optional[Path] = None) -> SpeakerProfile:
+    """Rename an enrolled speaker: rekey the profile, move its files, and
+    update campaign membership — shared by the CLI ``speakers rename``
+    command and the web rename route (R31; previously the web route changed
+    ``display_name`` only, so the same action did two different things
+    depending on the entry point).
+
+    Steps, in order:
+
+    1. Derive ``new_key`` via the standard key convention
+       (``name.lower().replace(" ", "_")``) and validate it with
+       ``validate_path_component`` — the key becomes a filesystem filename
+       and URL slug, so a name whose derived key fails the ``[\\w-]``
+       whitelist is refused (``ValueError``). This also breaks the CodeQL
+       taint chain for the web route, whose ``new_name`` comes from form
+       data and flows into file paths below.
+    2. Collision check: renaming onto a different existing key raises
+       ``ValueError`` (the CLI's guard, now enforced for the web too).
+    3. Rekey the profiles dict entry and update ``name``/``display_name``/
+       ``embedding_path``; move the ``.npy`` embedding and ``.mp3``
+       reference clip (``rename_profile_files``).
+    4. Rekey campaign membership (``campaign_manager.rekey_member``) so
+       rosters, per-campaign roles/characters, and Discord ID bindings
+       follow the profile instead of dangling.
+
+    Raises ``KeyError`` when ``old_key`` is not an enrolled profile.
+    Renaming to a name that derives the same key (display-name-case tweak,
+    e.g. "alice" -> "Alice") skips the file move and campaign rekey but
+    still updates ``display_name``.
+    """
+    from .path_utils import validate_path_component
+
+    profiles = load_profiles(data_dir)
+    if old_key not in profiles:
+        raise KeyError(f"Speaker profile {old_key!r} not found")
+
+    new_key = new_name.lower().replace(" ", "_")
+    safe_new_key = validate_path_component(new_key, "_rename_profile_guard")
+    if safe_new_key is None:
+        raise ValueError("invalid profile name")
+    if safe_new_key != old_key and safe_new_key in profiles:
+        raise ValueError("profile already exists")
+
+    profile = profiles.pop(old_key)
+    profile.name = safe_new_key
+    profile.display_name = new_name
+    if safe_new_key != old_key:
+        # R9-5: rekeys both the .npy embedding and the .mp3 reference clip
+        # so playback keeps working after a rename.
+        profile.embedding_path = rename_profile_files(old_key, safe_new_key, data_dir)
+    profiles[safe_new_key] = profile
+    save_profiles(profiles, data_dir)
+
+    if safe_new_key != old_key:
+        from .campaign_manager import rekey_member
+        rekey_member(old_key, safe_new_key, data_dir)
+
+    return profile
 
 
 def reset_profiles(data_dir: Optional[Path] = None) -> int:
@@ -143,8 +209,13 @@ def reset_profiles(data_dir: Optional[Path] = None) -> int:
 # ---------------------------------------------------------------------------
 
 def _load_embedding_model(device: str):
-    global _embedding_model
-    if _embedding_model is None:
+    """Load (and cache) the pyannote embedding model for *device*.
+
+    R4: cached per device, and built into a local so a failed load/move never
+    leaves a half-initialised model in the module-level cache.
+    """
+    global _embedding_model, _embedding_device
+    if _embedding_model is None or _embedding_device != device:
         from pyannote.audio import Model, Inference
         try:
             model = Model.from_pretrained(
@@ -158,10 +229,16 @@ def _load_embedding_model(device: str):
                     "Please ensure you have an active internet connection for the first run."
                 ) from e
             raise
-        _embedding_model = Inference(model, window="whole")
+        inference = Inference(model, window="whole")
         if device in ("cuda", "mps"):
             import torch
-            _embedding_model.to(torch.device(device))
+            inference.to(torch.device(device))
+        # Publish to the cache only after the device move succeeded; drop the
+        # old reference first so peak memory doesn't hold two models.
+        _embedding_model = None
+        _embedding_device = None
+        _embedding_model = inference
+        _embedding_device = device
     return _embedding_model
 
 

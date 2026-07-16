@@ -281,14 +281,16 @@ def test_recording_live_returns_501(client):
 # Phase 6 — enrollment routes
 # ---------------------------------------------------------------------------
 
-def test_enroll_unknown_speaker_creates_profile(client):
-    """POST /recordings/{id}/enroll with a valid unbound speaker creates a profile
-    and removes the user from unbound_speakers."""
-    from pathlib import Path
+def test_enroll_unknown_speaker_enqueues_job(client):
+    """R6: POST /recordings/{id}/enroll no longer runs the pydub decode +
+    embedding extraction synchronously in the request — it enqueues a
+    JOB_ENROLL job (mode "recording") carrying the validated parameters and
+    redirects to the job detail page. The recording-state updates now happen
+    in the job runner (covered in tests/test_web_jobs.py)."""
     from unittest.mock import patch
 
-    from wisper_transcribe.models import SpeakerProfile
-    from wisper_transcribe.recording_manager import create_recording, load_recordings, save_recording
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+    from wisper_transcribe.web.jobs import JOB_ENROLL, JobQueue
 
     c, tmp_path = client
     rec = create_recording("VC1", "G1", data_dir=tmp_path)
@@ -296,26 +298,29 @@ def test_enroll_unknown_speaker_creates_profile(client):
     rec.discord_speakers["999999999999999999"] = ""
     save_recording(rec, tmp_path)
 
-    dummy_profile = SpeakerProfile(
-        name="bob",
-        display_name="Bob",
-        role="player",
-        embedding_path=Path("/fake/bob.npy"),
-        enrolled_date="2025-01-01",
-        enrollment_source="test.opus",
-    )
-
-    with patch("wisper_transcribe.web.routes.record.enroll_speaker_from_audio_dir", return_value=dummy_profile):
+    # Neutralise the runner so the live worker (this fixture runs the app
+    # lifespan) can't race the assertions below.
+    with patch.object(JobQueue, "_run_enroll_job", lambda self, job: None):
         resp = c.post(
             f"/recordings/{rec.id}/enroll",
             data={"discord_user_id": "999999999999999999", "profile_name": "Bob"},
             follow_redirects=False,
         )
 
-    assert resp.status_code == 303
-    loaded = load_recordings(tmp_path)[rec.id]
-    assert "999999999999999999" not in loaded.unbound_speakers
-    assert loaded.discord_speakers.get("999999999999999999") == "bob"
+        assert resp.status_code == 303
+        location = resp.headers["location"]
+        assert location.startswith("/transcribe/jobs/")
+
+        queue = c.app.state.job_queue
+        job_id = location.rsplit("/", 1)[-1]
+        job = queue.get(job_id)
+        assert job is not None
+        assert job.job_type == JOB_ENROLL
+        assert job.enroll_mode == "recording"
+        assert job.enroll_params["recording_id"] == rec.id
+        assert job.enroll_params["discord_uid"] == "999999999999999999"
+        assert job.enroll_params["profile_key"] == "bob"
+        assert job.enroll_params["per_user_dir"].endswith("999999999999999999")
 
 
 def test_enroll_unknown_speaker_invalid_id_returns_400(client):

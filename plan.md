@@ -6,23 +6,13 @@
 
 Full-codebase audit on branch `fix/enrollment-audit`. All of `src/` was read end-to-end; every finding cites file:line and the load-bearing ones were grep-verified. Findings are the actionable work queue for the implementing engineer; suggested execution order at the end.
 
-**Progress:** Phase A (R1, R3, R8, R15, R29, R35) completed 2026-07-15 (`fix: Phase A quick wins`). Phase B (R5, R19, R20, R21, R22, R23, R30, R33, R34) completed 2026-07-15 (config/CLI coherence — sentinel-default refactor, LLM provider metadata dedup, output-dir dedup, skip-logic dedup, config-set validation, record-start config fallback, web form enum validation, Anthropic default model id bump). Phase C (R9 all five, R10, R14, R26, R28) completed 2026-07-15 (leaks + memory — temp/orphan file cleanup incl. converted-WAV finally-unlink and `.mp3` clip lifecycle via shared `remove_profile_files`/`rename_profile_files`, chunked upload streaming, job-retention + log-line caps with SSE index translation, ffprobe-first `get_duration`, per-label embedding cache in `_interactive_enroll`). Completed findings are removed from this list per plan.md rules. Suite was 872 at baseline, 878 after Phase A, 894 after Phase B, 921 after Phase C.
+**Progress:** Phase A (R1, R3, R8, R15, R29, R35) completed 2026-07-15 (`fix: Phase A quick wins`). Phase B (R5, R19, R20, R21, R22, R23, R30, R33, R34) completed 2026-07-15 (config/CLI coherence — sentinel-default refactor, LLM provider metadata dedup, output-dir dedup, skip-logic dedup, config-set validation, record-start config fallback, web form enum validation, Anthropic default model id bump). Phase C (R9 all five, R10, R14, R26, R28) completed 2026-07-15 (leaks + memory — temp/orphan file cleanup incl. converted-WAV finally-unlink and `.mp3` clip lifecycle via shared `remove_profile_files`/`rename_profile_files`, chunked upload streaming, job-retention + log-line caps with SSE index translation, ffprobe-first `get_duration`, per-label embedding cache in `_interactive_enroll`). Phase D (R4, R6, R13, R16, R17, R18, R24, R25, R31) completed 2026-07-16 (web correctness/security — parameter-keyed ML model caches with no-poison-on-failure, standalone/recording enroll moved onto the JobQueue, generic job-error messages, 127.0.0.1 default bind + trust-model docs + open-data-dir POST, sanitizer scheme/tag hardening, X-Frame-Options DENY, shared `find_excerpt_clip` helper, unused `request` param removed, unified web/CLI speaker rename with campaign rekey). The optional subprocess-SIGTERM job cancel stays parked. Completed findings are removed from this list per plan.md rules. Suite was 872 at baseline, 878 after Phase A, 894 after Phase B, 921 after Phase C, 979 after Phase D.
 
 ## CRITICAL — broken features / guaranteed runtime errors
 
 ### R2 — Recording → transcription hand-off can never succeed (`combined_path` never set)
 `Recording.combined_path` is assigned exactly once, to `None` (`recording_manager.py:259`), and never populated anywhere (grep-verified). `record.py:452` (`recording_transcribe_html`) requires `recording.combined_path` to exist → always redirects `?error=no_audio`. `BotManager._finalise` (`discord_bot.py:458`) closes the mixed-track segment writer but never merges `recordings/<id>/combined/*.opus` into a single file nor sets `combined_path`.
 **Fix:** in `_finalise`, concatenate/transcode the combined-track segments to `recordings/<id>/combined.wav`, set `recording.combined_path`, save. Or change the hand-off to consume the segment directory directly.
-
-### R4 — Model caches ignore parameter changes; failed pipeline load leaves poisoned cache
-- `transcriber.py:198`: `if _model is None: load_model(...)` — the cache key ignores `model_size`/`device`/`compute_type`. In the long-running web server, the **first job's model is silently reused for every later job** regardless of the model chosen in the upload form or config.
-- `diarizer.py:91-121`: `load_pipeline()` assigns `_pipeline` *before* the CUDA/MPS availability checks that can raise. On failure the half-initialised (CPU-placed) pipeline stays cached; the next `diarize()` call sees `_pipeline is not None`, skips `load_pipeline`, and silently runs on the wrong device.
-**Fix:** cache alongside a key tuple `(model_size, device, compute_type)` and reload on mismatch; in `load_pipeline`, assign the global only after all checks pass (build into a local first), and reset to `None` on exception.
-
-### R6 — Two web routes run minutes of ML work synchronously on the event loop, racing the job worker
-- `routes/speakers.py:90-164` (`enroll_submit`, standalone enroll): calls `convert_to_wav`, `diarize`, `extract_embedding` directly inside the `async def` route — **blocks the entire event loop** (UI, SSE, everything) for the duration, and mutates the module-level `_pipeline`/`_embedding_model` globals **concurrently with a running transcription job's thread**, violating the documented one-job-at-a-time invariant (CLAUDE.md).
-- `routes/record.py:394` (`recording_enroll_html`): same pattern with pydub decode + embedding extraction (currently masked by R1).
-**Fix:** route both through the JobQueue (a JOB_ENROLL-style job, exactly like the wizard's Phase 2.5 split in `enroll_shared.py`), or minimally `asyncio.to_thread` + a queue-level lock. The JobQueue path is the right one — the plumbing already exists.
 
 ### R7 — `wisper record list/show/transcribe/delete` CLI commands call 501 stubs
 `routes/record.py:166-193`: `/api/recordings` (+ detail/transcribe/delete) return `_NOT_IMPLEMENTED` (501). The CLI (`cli.py:1380-1422`) calls exactly these endpoints, so four documented `wisper record` subcommands always fail with "Server returned 501". Working HTML equivalents exist (`/recordings`, `/recordings/{id}/transcribe`, …).
@@ -42,40 +32,11 @@ Full-codebase audit on branch `fix/enrollment-audit`. All of `src/` was read end
 - `mix()` is called once per **incoming** frame (`discord_bot.py:415`), so with N concurrent speakers the combined track advances N×20 ms per real 20 ms — combined-track duration scales with speaker count.
 **Fix:** decide the wire format once (plan.md says the sidecar sends PCM). Then: per-user writers should encode PCM→Opus (or store WAV segments), compute real Ogg CRCs, fix the lacing terminator, and drive `mix()` off a 20 ms clock (or per unique-frame-set), not per frame. This subsystem needs a focused pass with a real end-to-end decode test.
 
-### R13 — Transcription job errors leak raw exception text (inconsistent with the project's own rule)
-`jobs.py:604` and `jobs.py:719-721` put `str(exc)` into `job.error`, which the job-detail page and SSE stream render. `_run_enroll_job` (`jobs.py:775-835`) was deliberately written to use generic messages *because* exception text can contain filesystem paths (its docstring says so, and CLAUDE.md forbids reflecting exception text). Transcription/LLM jobs violate the same rule.
-**Fix:** map exceptions to generic user-facing messages on all job types; log the real exception server-side.
-
-## MEDIUM — security posture
-
-### R16 — Default bind `0.0.0.0` + zero auth + zero CSRF protection
-`cli.py:139` defaults `wisper server` to `0.0.0.0`. Every state-changing endpoint (bulk-delete transcripts, config save **including API keys and tokens**, start/stop Discord recordings, job cancel) is an unauthenticated POST with no CSRF token; `open_data_dir` (`routes/config.py:414`) is a state-changing **GET**, triggerable cross-site by an `<img>` tag. On a home LAN this is a full read-write surface for anyone on the network.
-**Fix (pragmatic for a single-user tool):** default `--host` to `127.0.0.1` (keep `0.0.0.0` opt-in for Docker, which can pass it explicitly); document the trust model in `docs/web-ui.md`; make `open_data_dir` a POST. Full CSRF tokens optional beyond that.
-
-### R17 — `_HtmlSanitizer` gaps
-`routes/transcripts.py:32-81` strips `<script>` and `on*` attributes but allows `javascript:` URLs in `href`/`src` and doesn't strip `<iframe>/<object>/<embed>`. Transcript bodies are mostly self-generated, but LLM refine output is written into the same files and re-rendered.
-**Fix:** drop `href`/`src` attributes whose value (case/whitespace-normalised) starts with `javascript:`/`data:`; add iframe/object/embed to `_STRIP_TAGS`.
-
-### R18 — Header contradiction
-`app.py:104-121`: CSP says `frame-ancestors 'none'` while `X-Frame-Options: SAMEORIGIN`. Cosmetic (CSP wins) but pick one story — `DENY` matches the CSP.
-
-## MEDIUM — redundancy / spaghetti (same knowledge in N places)
-
-### R24 — Excerpt-serving fallback duplicated between the two wizards
-`routes/transcribe.py:337-386` and `routes/transcripts.py:789-832` carry near-identical excerpt-lookup + CodeQL-guard blocks (the comments even cross-reference each other).
-**Fix:** extract one helper into `enroll_shared.py` (e.g. `find_excerpt_clip(out_dir, stem, speaker, legacy_map) -> Path|None`).
-
-### R25 — `_get_safe_content_path(request, …)` takes an unused `request` parameter
-`routes/transcripts.py:99` — every one of ~15 call sites threads `request` through for nothing. Remove the parameter.
-
 ## LOW — smaller bugs, efficiency, style
 
 ### R27 — `aligner._assign_word_speakers` is O(words × turns)
 `aligner.py:57-82`: linear scan of all diarization turns per word. A 3-hour session (~30k words × ~2k turns) is ~60M overlap computations in pure Python.
 **Fix:** sort turns once, walk with a two-pointer/bisect. Keep `_best_overlap_speaker` for the no-words fallback.
-
-### R31 — Web speaker "rename" and CLI "rename" do different things
-Web (`routes/speakers.py:179-190`) changes `display_name` only; CLI (`cli.py:663`) rekeys profile + embedding file. After a web rename, the key≠name convention (`name.lower().replace(" ","_")`, CLAUDE.md) silently breaks for that profile. Pick one semantic (suggest: web adopts CLI's rekey behavior via a shared function in `speaker_manager`). Phase C already added `speaker_manager.rename_profile_files(old_key, new_key)` (moves both `.npy` and `.mp3`, used by the CLI rename) — a web rekey can reuse it directly.
 
 ### R32 — Minor per-module nits (batch these)
 - `speaker_manager.py:128`: `except (RuntimeError, Exception)` — just `Exception`.
@@ -99,14 +60,14 @@ Web (`routes/speakers.py:179-190`) changes `display_name` only; CLI (`cli.py:663
 `campaign_manager`/`speaker_manager` do unlocked load→modify→save of shared JSON (`recording_manager` got per-record locks; the others didn't). Two simultaneous wizard submits or campaign edits can lose writes. Low likelihood single-user; fix opportunistically by mirroring `recording_manager`'s lock pattern.
 
 ### R38 — Docs drift to fix alongside the above
-When fixing: `docs/cli-reference.md` (R7), `docs/web-ui.md` (R16 trust model), `architecture.md` (R4 cache keys, R12 audio format contract, R36 tqdm layers), CLAUDE.md Non-Obvious Gotchas if invariants change.
+When fixing: `docs/cli-reference.md` (R7), `architecture.md` (R12 audio format contract, R36 tqdm layers), CLAUDE.md Non-Obvious Gotchas if invariants change. (R16 trust model and R4 cache keys were documented in Phase D.)
 
 ## Suggested execution order
 
 1. ~~**Phase A (small, surgical, high value):** R1, R3, R8, R15, R29 + env fix R35.~~ ✅ Done 2026-07-15.
 2. ~~**Phase B (config/CLI coherence):** R5, R19, R20, R21, R22, R23, R30, R33, R34.~~ ✅ Done 2026-07-15.
 3. ~~**Phase C (leaks + memory):** R9 (all five), R10, R14, R26, R28.~~ ✅ Done 2026-07-15.
-4. **Phase D (web correctness/security):** R4, R6, R13, R16, R17, R18, R24, R25, R31. **Scoped in from "Job cancellation — best-effort GPU stop" (below):** option (1) — run single-stage transcription in a subprocess and SIGTERM on cancel. Same file as R3 (`web/jobs.py`), reuses the existing `parallel_stages` subprocess plumbing, and converts cancel from cooperative to real. Optional: if Phase D runs long, ship R3 alone (3-line fix) and keep option (1) parked.
+4. ~~**Phase D (web correctness/security):** R4, R6, R13, R16, R17, R18, R24, R25, R31.~~ ✅ Done 2026-07-16. The scoped-in optional job-cancel option (1) (subprocess + SIGTERM) was NOT done — it stays parked in "Job cancellation — best-effort GPU stop" below.
 5. **Phase E (Discord audio subsystem):** R2 + R12 together — needs a wire-format design decision first; do not start piecemeal. **Constraint from "DAVE Sidecar → Python migration" (below):** that section promises the future Java→Python sidecar swap leaves `SegmentedOggWriter` untouched — R12 changes the writer, so pick the wire format with the planned ~100-line Python sidecar in mind and update the migration section's "nothing else changes" claim in the same commit.
 6. **Phase F (nits):** R11, R27, R32, R36–R38 opportunistically. (The formerly-empty `## UI Bugs` section was deleted when these findings were scoped — 2026-07-15.)
 

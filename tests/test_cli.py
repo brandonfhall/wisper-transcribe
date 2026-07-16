@@ -216,6 +216,43 @@ def test_speakers_rename_moves_reference_clip(tmp_path, monkeypatch):
     assert new_clip.read_bytes() == b"fake mp3"
 
 
+def test_speakers_rename_updates_campaign_membership(tmp_path, monkeypatch):
+    """R31: a CLI rename rekeys campaign rosters (including the Discord ID
+    binding) so membership follows the profile instead of dangling."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    _make_fake_profile(tmp_path, "Alice")
+
+    from wisper_transcribe.campaign_manager import (
+        add_member, bind_discord_id, create_campaign, load_campaigns,
+    )
+    campaign = create_campaign("Test Campaign", data_dir=tmp_path)
+    add_member(campaign.slug, "alice", role="player", data_dir=tmp_path)
+    bind_discord_id(campaign.slug, "alice", "123456789012345678", data_dir=tmp_path)
+
+    result = CliRunner().invoke(main, ["speakers", "rename", "Alice", "Alicia"])
+    assert result.exit_code == 0
+
+    members = load_campaigns(data_dir=tmp_path)[campaign.slug].members
+    assert "alice" not in members
+    assert "alicia" in members
+    assert members["alicia"].role == "player"
+    assert members["alicia"].discord_user_id == "123456789012345678"
+
+
+def test_speakers_rename_rejects_unsafe_new_name(tmp_path, monkeypatch):
+    """R31: the shared rename_profile refuses a new name whose derived key
+    fails the path-component guard (the key becomes a filename/URL slug)."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    _make_fake_profile(tmp_path, "Alice")
+
+    result = CliRunner().invoke(main, ["speakers", "rename", "Alice", "../escape"])
+    assert result.exit_code != 0
+    assert "Invalid speaker name" in result.output
+
+    emb_dir = tmp_path / "profiles" / "embeddings"
+    assert (emb_dir / "alice.npy").exists()
+
+
 def test_speakers_rename_success_without_reference_clip(tmp_path, monkeypatch):
     """A profile enrolled before reference clips existed (no .mp3 on disk)
     must still rename cleanly -- the clip move is best-effort."""
@@ -493,6 +530,27 @@ def test_server_missing_uvicorn():
             result = CliRunner().invoke(main, ["server"])
             # Either exits non-zero or mentions uvicorn in output
             assert result.exit_code != 0 or "uvicorn" in result.output.lower()
+
+
+def test_server_defaults_to_loopback():
+    """R16: `wisper server` binds 127.0.0.1 by default — the UI has no auth,
+    so all-interfaces exposure must be an explicit opt-in."""
+    mock_uvicorn = MagicMock()
+    with patch.dict("sys.modules", {"uvicorn": mock_uvicorn}):
+        result = CliRunner().invoke(main, ["server"])
+    assert result.exit_code == 0
+    _, kwargs = mock_uvicorn.run.call_args
+    assert kwargs["host"] == "127.0.0.1"
+
+
+def test_server_explicit_host_still_works():
+    """R16: --host 0.0.0.0 remains available for trusted networks/Docker."""
+    mock_uvicorn = MagicMock()
+    with patch.dict("sys.modules", {"uvicorn": mock_uvicorn}):
+        result = CliRunner().invoke(main, ["server", "--host", "0.0.0.0"])
+    assert result.exit_code == 0
+    _, kwargs = mock_uvicorn.run.call_args
+    assert kwargs["host"] == "0.0.0.0"
 
 
 # ---------------------------------------------------------------------------

@@ -718,3 +718,50 @@ def test_enroll_speaker_from_audio_dir_no_audio_files_found(tmp_path):
             per_user_dir=per_user_dir,
             data_dir=tmp_path,
         )
+
+
+# ---------------------------------------------------------------------------
+# R4: embedding-model cache keyed by device
+# ---------------------------------------------------------------------------
+
+def test_load_embedding_model_reuses_cache_on_same_device():
+    import wisper_transcribe.speaker_manager as sm
+    from unittest.mock import MagicMock, patch as _patch
+
+    cached = MagicMock()
+    sm._embedding_model = cached
+    sm._embedding_device = "cpu"
+    try:
+        with _patch("pyannote.audio.Model") as mock_model_cls:
+            result = sm._load_embedding_model("cpu")
+            mock_model_cls.from_pretrained.assert_not_called()
+        assert result is cached
+    finally:
+        sm._embedding_model = None
+        sm._embedding_device = None
+
+
+def test_load_embedding_model_reloads_on_device_change():
+    """R4: a cached CPU embedding model is not reused when a later caller
+    asks for a different device."""
+    import wisper_transcribe.speaker_manager as sm
+    from unittest.mock import MagicMock, patch as _patch
+
+    stale = MagicMock()
+    sm._embedding_model = stale
+    sm._embedding_device = "cuda"
+
+    fresh = MagicMock()
+    try:
+        with _patch("pyannote.audio.Model") as mock_model_cls, \
+             _patch("pyannote.audio.Inference", return_value=fresh) as mock_inf:
+            mock_model_cls.from_pretrained.return_value = MagicMock()
+            result = sm._load_embedding_model("cpu")
+            mock_model_cls.from_pretrained.assert_called_once()
+            mock_inf.assert_called_once()
+        assert result is fresh
+        assert sm._embedding_model is fresh
+        assert sm._embedding_device == "cpu"
+    finally:
+        sm._embedding_model = None
+        sm._embedding_device = None

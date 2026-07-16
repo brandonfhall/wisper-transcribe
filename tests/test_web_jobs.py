@@ -113,7 +113,11 @@ def test_run_job_records_error_on_failure(tmp_path):
             pass
 
     assert job.status == FAILED
-    assert "boom" in job.error
+    # R13: raw exception text must never reach job.error (it renders into
+    # the job-detail page and SSE stream) — a generic message is used and
+    # the real exception goes to the server log.
+    assert "boom" not in job.error
+    assert job.error == "Transcription failed — see server logs"
 
 
 def test_cancel_pending_job_marks_failed():
@@ -843,3 +847,352 @@ def test_run_enroll_job_exception_sets_generic_error_not_path(tmp_path):
     assert job.status == FAILED
     assert job.error == "Enrollment failed"
     assert str(tmp_path) not in job.error
+
+
+# ---------------------------------------------------------------------------
+# R13: generic job error messages — no raw exception text in job.error
+# ---------------------------------------------------------------------------
+
+def _make_failed_job(job_type, exc, **fields):
+    from datetime import datetime as _dt
+    from wisper_transcribe.web.jobs import Job
+    return Job(
+        id="r13-id",
+        status="running",
+        created_at=_dt.now(),
+        input_path=str(fields.pop("input_path", "/tmp/whatever.mp3")),
+        kwargs={},
+        job_type=job_type,
+        **fields,
+    )
+
+
+def test_transcription_error_does_not_leak_paths(tmp_path):
+    """R13: an exception message carrying a filesystem path must not land in
+    job.error for a transcription job."""
+    from wisper_transcribe.web.jobs import FAILED, JobQueue
+
+    q = JobQueue()
+    secret = tmp_path / "private" / "session.mp3"
+    job = _make_failed_job("transcription", None, input_path=secret)
+
+    with patch(
+        "wisper_transcribe.web.jobs.process_file",
+        side_effect=RuntimeError(f"ffmpeg failed on {secret}"),
+    ):
+        try:
+            q._run_job(job)
+        except RuntimeError:
+            pass
+
+    assert job.status == FAILED
+    assert str(tmp_path) not in job.error
+    assert job.error == "Transcription failed — see server logs"
+
+
+def test_llm_job_error_is_generic(tmp_path):
+    """R13: standalone refine/summarize job failures use a generic message."""
+    from wisper_transcribe.web.jobs import FAILED, JOB_REFINE, JobQueue
+
+    q = JobQueue()
+    md = tmp_path / "t.md"
+    md.write_text("body", encoding="utf-8")
+    job = _make_failed_job(JOB_REFINE, None, llm_transcript_path=str(md))
+
+    with patch.object(
+        JobQueue, "_do_llm_work",
+        side_effect=RuntimeError(f"cannot open {tmp_path}/secret.bin"),
+    ):
+        try:
+            q._run_job(job)
+        except RuntimeError:
+            pass
+
+    assert job.status == FAILED
+    assert str(tmp_path) not in job.error
+    assert job.error == "Post-processing failed — see server logs"
+
+
+def test_file_not_found_maps_to_short_safe_message():
+    """R13: known input errors get short safe text, still with no path."""
+    from wisper_transcribe.web.jobs import FAILED, JobQueue
+
+    q = JobQueue()
+    job = _make_failed_job("transcription", None)
+
+    with patch(
+        "wisper_transcribe.web.jobs.process_file",
+        side_effect=FileNotFoundError("/tmp/gone/file.mp3"),
+    ):
+        try:
+            q._run_job(job)
+        except FileNotFoundError:
+            pass
+
+    assert job.status == FAILED
+    assert job.error == "Input file not found"
+    assert "/tmp/gone" not in job.error
+
+
+def test_cancelled_error_string_is_preserved():
+    """R13: the literal "Cancelled" string survives the generic-error policy
+    (other code and the job template check for it)."""
+    from wisper_transcribe.web.jobs import FAILED, JobQueue
+
+    q = JobQueue()
+    job = _make_failed_job("transcription", None)
+
+    with patch(
+        "wisper_transcribe.web.jobs.process_file",
+        side_effect=InterruptedError("Job cancelled by user"),
+    ):
+        q._run_job(job)
+
+    assert job.status == FAILED
+    assert job.error == "Cancelled"
+
+
+def test_post_process_log_line_is_generic(tmp_path):
+    """R13: the post-processing failure line appended to job.log_lines (also
+    rendered in the UI) never carries raw exception text."""
+    from wisper_transcribe.web.jobs import JobQueue
+
+    q = JobQueue()
+    job = _make_failed_job("transcription", None, post_refine=True)
+
+    with patch.object(
+        JobQueue, "_do_llm_work",
+        side_effect=RuntimeError(f"boom at {tmp_path}/x"),
+    ):
+        q._run_post_process(job, tmp_path / "t.md")
+
+    assert any("Post-processing failed — see server logs" == l for l in job.log_lines)
+    assert not any(str(tmp_path) in l for l in job.log_lines)
+
+
+# ---------------------------------------------------------------------------
+# R6: standalone / recording enroll job runners
+# ---------------------------------------------------------------------------
+
+def _make_standalone_enroll_job(tmp_path, **param_overrides):
+    from datetime import datetime as _dt
+    from wisper_transcribe.web.jobs import JOB_ENROLL, Job
+
+    upload = tmp_path / "wisper_enrollsrc_test.mp3"
+    upload.write_bytes(b"fake audio")
+    params = {
+        "profile_key": "alice",
+        "display_name": "Alice",
+        "role": "DM",
+        "notes": "",
+        "update": False,
+    }
+    params.update(param_overrides)
+    return Job(
+        id="standalone-test",
+        status="running",
+        created_at=_dt.now(),
+        input_path=str(upload),
+        kwargs={},
+        job_type=JOB_ENROLL,
+        enroll_mode="standalone",
+        enroll_params=params,
+    ), upload
+
+
+def test_standalone_enroll_job_success_cleans_temp_files(tmp_path):
+    """R6/R9-1: the standalone enroll runner enrolls the primary speaker and
+    deletes both the temp upload and the converted WAV — the cleanup that
+    lived in the route before the hand-off."""
+    from wisper_transcribe.models import DiarizationSegment
+    from wisper_transcribe.web.jobs import COMPLETED, JobQueue
+
+    q = JobQueue()
+    job, upload = _make_standalone_enroll_job(tmp_path)
+
+    converted = tmp_path / "converted.wav"
+
+    def _fake_convert(path):
+        converted.write_bytes(b"RIFF" + b"\x00" * 36)
+        return converted
+
+    diarization = [DiarizationSegment(start=0.0, end=2.0, speaker="SPEAKER_00")]
+
+    with patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=_fake_convert), \
+         patch("wisper_transcribe.config.get_device", return_value="cpu"), \
+         patch("wisper_transcribe.config.get_hf_token", return_value="fake-token"), \
+         patch("wisper_transcribe.config.load_config", return_value={}), \
+         patch("wisper_transcribe.diarizer.diarize", return_value=diarization), \
+         patch("wisper_transcribe.speaker_manager.enroll_speaker") as mock_enroll, \
+         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        q._run_job(job)
+
+    assert job.status == COMPLETED
+    mock_enroll.assert_called_once()
+    kwargs = mock_enroll.call_args.kwargs
+    assert kwargs["name"] == "alice"
+    assert kwargs["display_name"] == "Alice"
+    assert kwargs["speaker_label"] == "SPEAKER_00"
+    assert not upload.exists()
+    assert not converted.exists()
+
+
+def test_standalone_enroll_job_update_merges_embedding(tmp_path):
+    """update=True with an existing profile goes through update_embedding
+    (EMA merge) instead of enroll_speaker."""
+    from wisper_transcribe.models import DiarizationSegment
+    from wisper_transcribe.web.jobs import COMPLETED, JobQueue
+
+    q = JobQueue()
+    job, upload = _make_standalone_enroll_job(tmp_path, update=True)
+
+    diarization = [DiarizationSegment(start=0.0, end=2.0, speaker="SPEAKER_00")]
+
+    with patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=lambda p: p), \
+         patch("wisper_transcribe.config.get_device", return_value="cpu"), \
+         patch("wisper_transcribe.config.get_hf_token", return_value="fake-token"), \
+         patch("wisper_transcribe.config.load_config", return_value={}), \
+         patch("wisper_transcribe.diarizer.diarize", return_value=diarization), \
+         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={"alice": object()}), \
+         patch("wisper_transcribe.speaker_manager.extract_embedding", return_value=[0.0]) as mock_extract, \
+         patch("wisper_transcribe.speaker_manager.update_embedding") as mock_update, \
+         patch("wisper_transcribe.speaker_manager.enroll_speaker") as mock_enroll:
+        q._run_job(job)
+
+    assert job.status == COMPLETED
+    mock_extract.assert_called_once()
+    mock_update.assert_called_once()
+    mock_enroll.assert_not_called()
+    assert not upload.exists()
+
+
+def test_standalone_enroll_job_failure_is_generic_and_cleans_up(tmp_path):
+    """R6/R13: a failure mid-enroll sets a generic error (no exception text,
+    no paths) and still deletes the temp upload."""
+    from wisper_transcribe.web.jobs import FAILED, JobQueue
+
+    q = JobQueue()
+    job, upload = _make_standalone_enroll_job(tmp_path)
+
+    with patch("wisper_transcribe.audio_utils.convert_to_wav",
+               side_effect=RuntimeError(f"ffmpeg failed on {upload}")):
+        q._run_job(job)  # must not raise — enroll jobs swallow locally
+
+    assert job.status == FAILED
+    assert job.error == "Enrollment failed"
+    assert str(tmp_path) not in job.error
+    assert not upload.exists()
+
+
+def test_standalone_enroll_job_no_speech_sets_safe_error(tmp_path):
+    from wisper_transcribe.web.jobs import FAILED, JobQueue
+
+    q = JobQueue()
+    job, upload = _make_standalone_enroll_job(tmp_path)
+
+    with patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=lambda p: p), \
+         patch("wisper_transcribe.config.get_device", return_value="cpu"), \
+         patch("wisper_transcribe.config.get_hf_token", return_value="fake-token"), \
+         patch("wisper_transcribe.config.load_config", return_value={}), \
+         patch("wisper_transcribe.diarizer.diarize", return_value=[]):
+        q._run_job(job)
+
+    assert job.status == FAILED
+    assert job.error == "No speech detected in the uploaded audio"
+    assert not upload.exists()
+
+
+def test_standalone_enroll_job_missing_upload_fails_safely(tmp_path):
+    from wisper_transcribe.web.jobs import FAILED, JobQueue
+
+    q = JobQueue()
+    job, upload = _make_standalone_enroll_job(tmp_path)
+    upload.unlink()
+
+    q._run_job(job)
+
+    assert job.status == FAILED
+    assert job.error == "Source audio not available"
+
+
+def _make_recording_enroll_job(recording_id, uid="999999999999999999"):
+    from datetime import datetime as _dt
+    from wisper_transcribe.web.jobs import JOB_ENROLL, Job
+
+    return Job(
+        id="recording-enroll-test",
+        status="running",
+        created_at=_dt.now(),
+        input_path="/tmp/recordings/whatever",
+        kwargs={},
+        job_type=JOB_ENROLL,
+        enroll_mode="recording",
+        enroll_params={
+            "recording_id": recording_id,
+            "discord_uid": uid,
+            "per_user_dir": f"/tmp/recordings/{recording_id}/per-user/{uid}",
+            "profile_key": "bob",
+            "display_name": "Bob",
+        },
+    )
+
+
+def test_recording_enroll_job_updates_recording_state(tmp_path):
+    """R6: the recording-state updates (unbound list, discord binding,
+    campaign membership) moved from the route into the job runner."""
+    from wisper_transcribe.campaign_manager import create_campaign, load_campaigns
+    from wisper_transcribe.recording_manager import create_recording, load_recordings, save_recording
+    from wisper_transcribe.web.jobs import COMPLETED, JobQueue
+
+    campaign = create_campaign("Test Campaign", data_dir=tmp_path)
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    rec.unbound_speakers = ["999999999999999999"]
+    rec.discord_speakers["999999999999999999"] = ""
+    rec.campaign_slug = campaign.slug
+    save_recording(rec, tmp_path)
+
+    q = JobQueue()
+    job = _make_recording_enroll_job(rec.id)
+
+    with patch("wisper_transcribe.config.get_data_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.speaker_manager.enroll_speaker_from_audio_dir") as mock_enroll:
+        q._run_job(job)
+
+    assert job.status == COMPLETED
+    mock_enroll.assert_called_once()
+    assert mock_enroll.call_args.kwargs["name"] == "bob"
+
+    loaded = load_recordings(tmp_path)[rec.id]
+    assert "999999999999999999" not in loaded.unbound_speakers
+    assert loaded.discord_speakers["999999999999999999"] == "bob"
+
+    members = load_campaigns(data_dir=tmp_path)[campaign.slug].members
+    assert "bob" in members
+    assert members["bob"].discord_user_id == "999999999999999999"
+
+
+def test_recording_enroll_job_failure_is_generic(tmp_path):
+    """R6/R13: an enroll failure sets a generic error and leaves the
+    recording's speaker state untouched."""
+    from wisper_transcribe.recording_manager import create_recording, load_recordings, save_recording
+    from wisper_transcribe.web.jobs import FAILED, JobQueue
+
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    rec.unbound_speakers = ["999999999999999999"]
+    save_recording(rec, tmp_path)
+
+    q = JobQueue()
+    job = _make_recording_enroll_job(rec.id)
+
+    with patch("wisper_transcribe.config.get_data_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.speaker_manager.enroll_speaker_from_audio_dir",
+               side_effect=RuntimeError(f"no opus files in {tmp_path}")):
+        q._run_job(job)  # must not raise
+
+    assert job.status == FAILED
+    assert job.error == "Enrollment failed"
+    assert str(tmp_path) not in job.error
+
+    loaded = load_recordings(tmp_path)[rec.id]
+    assert loaded.unbound_speakers == ["999999999999999999"]

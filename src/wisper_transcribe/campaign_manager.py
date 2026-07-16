@@ -165,6 +165,34 @@ def add_member(
     save_campaigns(campaigns, data_dir)
 
 
+def rekey_member(old_key: str, new_key: str, data_dir: Optional[Path] = None) -> int:
+    """Rekey a profile across every campaign roster it appears in (R31).
+
+    Called by ``speaker_manager.rename_profile()`` when a profile's key
+    changes — campaign membership is keyed by profile key, so a rekey
+    without this would leave every roster entry (including its Discord ID
+    binding and role/character overrides) dangling. The full
+    ``CampaignMember`` record is preserved under the new key; only
+    ``profile_key`` is rewritten. If a member already exists under
+    ``new_key`` (shouldn't happen — ``rename_profile`` refuses key
+    collisions), the existing entry wins and the old one is dropped.
+
+    Returns the number of campaigns updated.
+    """
+    campaigns = load_campaigns(data_dir)
+    changed = 0
+    for campaign in campaigns.values():
+        if old_key in campaign.members:
+            member = campaign.members.pop(old_key)
+            if new_key not in campaign.members:
+                member.profile_key = new_key
+                campaign.members[new_key] = member
+            changed += 1
+    if changed:
+        save_campaigns(campaigns, data_dir)
+    return changed
+
+
 def remove_member(slug: str, profile_key: str, data_dir: Optional[Path] = None) -> None:
     """Remove a profile from a campaign roster. No-op if profile not in roster."""
     campaigns = load_campaigns(data_dir)

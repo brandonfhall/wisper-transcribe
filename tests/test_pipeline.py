@@ -602,6 +602,7 @@ def test_transcribe_passes_hotwords():
 
     import wisper_transcribe.transcriber as t
     t._model = mock_model
+    t._model_key = ("medium", "cpu", "auto")
 
     t.transcribe(Path("fake.wav"), device="cpu", hotwords=["Kyra", "Golarion"])
     _, kwargs = mock_model.transcribe.call_args
@@ -616,6 +617,7 @@ def test_transcribe_passes_initial_prompt():
 
     import wisper_transcribe.transcriber as t
     t._model = mock_model
+    t._model_key = ("medium", "cpu", "auto")
 
     t.transcribe(Path("fake.wav"), device="cpu", initial_prompt="Kyra Zeldris Golarion")
     _, kwargs = mock_model.transcribe.call_args
@@ -630,6 +632,7 @@ def test_transcribe_hotwords_none_by_default():
 
     import wisper_transcribe.transcriber as t
     t._model = mock_model
+    t._model_key = ("medium", "cpu", "auto")
 
     t.transcribe(Path("fake.wav"), device="cpu")
     _, kwargs = mock_model.transcribe.call_args
