@@ -49,6 +49,24 @@ def test_list_all_sorted_by_created_at():
     assert jobs[1].id == j1.id
 
 
+def test_list_all_ties_break_by_submission_order():
+    """R32-9: two jobs submitted within the same clock tick share an equal
+    `created_at` -- the tie must break by insertion order, most-recently
+    -submitted first (same guarantee the old reverse-then-stable-sort trick
+    gave, now via an explicit (created_at, insertion_index) sort key)."""
+    q = _make_queue()
+    j1 = q.submit("/tmp/a.mp3")
+    j2 = q.submit("/tmp/b.mp3")
+    j3 = q.submit("/tmp/c.mp3")
+    # Force an exact tie between all three.
+    same_time = j2.created_at
+    j1.created_at = same_time
+    j3.created_at = same_time
+
+    jobs = q.list_all()
+    assert [j.id for j in jobs] == [j3.id, j2.id, j1.id]
+
+
 def test_active_count():
     q = _make_queue()
     assert q.active_count() == 0

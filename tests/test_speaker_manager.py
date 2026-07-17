@@ -803,6 +803,107 @@ def test_load_embedding_model_reuses_cache_on_same_device():
         sm._embedding_device = None
 
 
+# ---------------------------------------------------------------------------
+# R37 — concurrent mutation must not lose writes
+# ---------------------------------------------------------------------------
+
+def test_enroll_speaker_atomic_under_concurrent_calls(tmp_path):
+    """R37: speakers.json is a single shared JSON store -- concurrent
+    enroll_speaker() calls used to unlocked-load/modify/save the profiles
+    dict, so a losing thread's new profile entry could be clobbered by
+    another thread's save. Mirrors test_recording_manager.py's concurrent
+    append_segment test. `embedding=` is passed explicitly so no ML model
+    is invoked; `segments=[]` skips the ffmpeg reference-clip step."""
+    import threading
+
+    from wisper_transcribe.speaker_manager import enroll_speaker, load_profiles
+
+    n = 20
+
+    def _enroll(i):
+        enroll_speaker(
+            name=f"speaker_{i:02d}",
+            display_name=f"Speaker {i:02d}",
+            role="",
+            audio_path=tmp_path / "fake.wav",
+            segments=[],
+            speaker_label="SPEAKER_00",
+            data_dir=tmp_path,
+            embedding=np.zeros(4),
+        )
+
+    threads = [threading.Thread(target=_enroll, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    loaded = load_profiles(data_dir=tmp_path)
+    assert len(loaded) == n
+    for i in range(n):
+        assert f"speaker_{i:02d}" in loaded
+
+
+def test_remove_profile_and_enroll_speaker_do_not_lose_writes_concurrently(tmp_path):
+    """Concurrent remove_profile() (on pre-seeded distinct profiles) and
+    enroll_speaker() (adding new distinct profiles) must not clobber each
+    other's write to profiles.json."""
+    import threading
+
+    from wisper_transcribe.speaker_manager import (
+        enroll_speaker,
+        load_profiles,
+        remove_profile,
+        save_profiles,
+    )
+    from wisper_transcribe.models import SpeakerProfile
+
+    n = 10
+    # Pre-seed n profiles to be removed concurrently with n new enrollments.
+    existing = {
+        f"old_{i:02d}": SpeakerProfile(
+            name=f"old_{i:02d}",
+            display_name=f"Old {i:02d}",
+            role="",
+            embedding_path=tmp_path / "profiles" / "embeddings" / f"old_{i:02d}.npy",
+            enrolled_date="2026-01-01",
+            enrollment_source="seed",
+        )
+        for i in range(n)
+    }
+    save_profiles(existing, data_dir=tmp_path)
+
+    def _remove(i):
+        remove_profile(f"old_{i:02d}", data_dir=tmp_path)
+
+    def _enroll(i):
+        enroll_speaker(
+            name=f"new_{i:02d}",
+            display_name=f"New {i:02d}",
+            role="",
+            audio_path=tmp_path / "fake.wav",
+            segments=[],
+            speaker_label="SPEAKER_00",
+            data_dir=tmp_path,
+            embedding=np.zeros(4),
+        )
+
+    threads = (
+        [threading.Thread(target=_remove, args=(i,)) for i in range(n)]
+        + [threading.Thread(target=_enroll, args=(i,)) for i in range(n)]
+    )
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    loaded = load_profiles(data_dir=tmp_path)
+    assert len(loaded) == n  # all n "old_*" removed, all n "new_*" added
+    for i in range(n):
+        assert f"old_{i:02d}" not in loaded
+        assert f"new_{i:02d}" in loaded
+
+
 def test_load_embedding_model_reloads_on_device_change():
     """R4: a cached CPU embedding model is not reused when a later caller
     asks for a different device."""

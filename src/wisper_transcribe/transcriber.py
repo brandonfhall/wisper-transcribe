@@ -60,7 +60,20 @@ def _transcribe_mlx(
     # a "Fetching N files" verification bar on every call. Suppress it.
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
-    repo = _MLX_MODEL_MAP.get(model_size, f"mlx-community/whisper-{model_size}-mlx")
+    # R32-3: this used to fall back to an f-string-built repo name
+    # (`mlx-community/whisper-{model_size}-mlx`) for any size not in the
+    # map -- a plausible-looking guess that 404s against the Hub for any
+    # size config.MODEL_SIZES doesn't happen to also carry an MLX build
+    # for, surfacing as an opaque download error deep in mlx_whisper instead
+    # of a clear message here.
+    repo = _MLX_MODEL_MAP.get(model_size)
+    if repo is None:
+        raise ValueError(
+            f"No MLX-Whisper repo mapping for model size {model_size!r}. "
+            f"Supported sizes: {', '.join(sorted(_MLX_MODEL_MAP))}. "
+            "Use --device cpu (or device=cpu in config) to fall back to the "
+            "faster-whisper backend instead."
+        )
     tqdm.write(f"  Using MLX-Whisper backend ({repo})")
 
     # Inject hotwords into initial_prompt (mlx-whisper has no native hotwords param).
@@ -253,7 +266,13 @@ def transcribe(
                         start=seg.start, end=seg.end, text=seg.text.strip(), words=words
                     )
                 )
-            # Update progress bar by the difference between the segment's end and our current progress tracker
-            pbar.update(seg.end - pbar.n)
+            # Update progress bar by the difference between the segment's end
+            # and our current progress tracker. R32-4: segments aren't
+            # guaranteed strictly monotonic (a later segment can end before
+            # an earlier one in edge cases), which would make this delta
+            # negative and walk the bar backward -- clamp to >= 0.
+            delta = seg.end - pbar.n
+            if delta > 0:
+                pbar.update(delta)
 
     return result

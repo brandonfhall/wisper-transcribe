@@ -209,6 +209,36 @@ def test_linkify_idempotent():
     assert out2.count("[[Alice]]") == 1
 
 
+def test_linkify_does_not_double_wrap_interior_word_of_existing_link():
+    """R32-11: a shorter term that is an interior word of a longer term's
+    link (e.g. "the" inside "[[Bob the Guard]]") must not be re-wrapped --
+    the old (?<!\\[)/(?!\\]) lookaround only checked the character
+    immediately touching a bracket, which never applies to an interior
+    word."""
+    out = _linkify("Bob the Guard walked in.", {"Bob the Guard", "the"})
+    assert out.count("[[") == 1
+    assert out.count("]]") == 1
+    assert "[[Bob the Guard]]" in out
+    assert "[[the]]" not in out
+
+
+def test_linkify_does_not_double_wrap_pre_existing_link_interior_word():
+    """Same protection when the [[...]] span already exists in the input
+    text (e.g. from a previous _linkify() call or literal LLM output),
+    not just one created during this call."""
+    out = _linkify("[[Bob the Guard]] walked in.", {"the"})
+    assert out == "[[Bob the Guard]] walked in."
+
+
+def test_linkify_still_wraps_term_outside_existing_link():
+    """A term outside any existing link span is still linkified normally,
+    proving the existing-link split doesn't suppress unrelated matches."""
+    out = _linkify("[[Bob the Guard]] talked to Alice.", {"the", "Alice"})
+    assert "[[Bob the Guard]]" in out
+    assert "[[Alice]]" in out
+    assert "[[the]]" not in out
+
+
 # ---------------------------------------------------------------------------
 # default_summary_path / summarize_transcript orchestration
 # ---------------------------------------------------------------------------

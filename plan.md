@@ -1,65 +1,15 @@
-`# wisper-transcribe — Open Items
+# wisper-transcribe — Open Items
 
 ---
 
-# Code Review Findings — 2026-07-15 (senior review)
+## Senior review — closed 2026-07-16
 
-Full-codebase audit on branch `fix/enrollment-audit`. All of `src/` was read end-to-end; every finding cites file:line and the load-bearing ones were grep-verified. Findings are the actionable work queue for the implementing engineer; suggested execution order at the end.
+The full-codebase senior review (findings R1–R38, opened 2026-07-15) is **complete**: all 38 findings remediated across six phase commits on `docs/senior-review` (Phase A quick wins → B config/CLI coherence → C leaks/memory → D web correctness/security → E Discord audio rebuild → F nits/R7/docs/locking). Suite grew 872 → 1025 over the review. Details live in the six phase commit messages.
 
-**Progress:** Phase A (R1, R3, R8, R15, R29, R35) completed 2026-07-15 (`fix: Phase A quick wins`). Phase B (R5, R19, R20, R21, R22, R23, R30, R33, R34) completed 2026-07-15 (config/CLI coherence — sentinel-default refactor, LLM provider metadata dedup, output-dir dedup, skip-logic dedup, config-set validation, record-start config fallback, web form enum validation, Anthropic default model id bump). Phase C (R9 all five, R10, R14, R26, R28) completed 2026-07-15 (leaks + memory — temp/orphan file cleanup incl. converted-WAV finally-unlink and `.mp3` clip lifecycle via shared `remove_profile_files`/`rename_profile_files`, chunked upload streaming, job-retention + log-line caps with SSE index translation, ffprobe-first `get_duration`, per-label embedding cache in `_interactive_enroll`). Phase D (R4, R6, R13, R16, R17, R18, R24, R25, R31) completed 2026-07-16 (web correctness/security — parameter-keyed ML model caches with no-poison-on-failure, standalone/recording enroll moved onto the JobQueue, generic job-error messages, 127.0.0.1 default bind + trust-model docs + open-data-dir POST, sanitizer scheme/tag hardening, X-Frame-Options DENY, shared `find_excerpt_clip` helper, unused `request` param removed, unified web/CLI speaker rename with campaign rekey). The optional subprocess-SIGTERM job cancel stays parked. Phase E (R2, R12) completed 2026-07-16 (Discord audio — `SegmentedWavWriter` replaces the hand-rolled Ogg muxer, 16 kHz mono WAV segments, `__mixed__` written directly as combined track, `RealtimePCMMixer` deleted, `_finalise` merges `combined.wav` + sets `combined_path`; wire format unchanged; **awaiting one live Discord session as final acceptance**). Completed findings are removed from this list per plan.md rules. Suite was 872 at baseline, 878 after Phase A, 894 after Phase B, 921 after Phase C, 979 after Phase D, 993 after Phase E.
+**Open follow-ups from the review:**
 
-## CRITICAL — broken features / guaranteed runtime errors
-
-### R7 — `wisper record list/show/transcribe/delete` CLI commands call 501 stubs
-`routes/record.py:166-193`: `/api/recordings` (+ detail/transcribe/delete) return `_NOT_IMPLEMENTED` (501). The CLI (`cli.py:1380-1422`) calls exactly these endpoints, so four documented `wisper record` subcommands always fail with "Server returned 501". Working HTML equivalents exist (`/recordings`, `/recordings/{id}/transcribe`, …).
-**Fix:** implement the JSON API by delegating to the same code the HTML routes use, or remove the CLI subcommands until it exists. Update `docs/cli-reference.md` accordingly.
-
-## HIGH — correctness bugs and resource leaks
-
-### R11 — `refine.apply_edits` does global substring replacement
-`refine.py:189-201`: each accepted edit runs `body.replace(original, corrected)` over the whole body — a short `original` ("Dan" → "Don") also rewrites every occurrence inside longer words ("Dandy" → "Dondy") and inside `**Speaker**` labels. The edit-distance guard validates the *target*, not the *blast radius*.
-**Fix:** word-boundary regex replacement (`re.sub(rf"\b{re.escape(original)}\b", ...)`), and skip lines that are speaker-label positions.
-
-## LOW — smaller bugs, efficiency, style
-
-### R27 — `aligner._assign_word_speakers` is O(words × turns)
-`aligner.py:57-82`: linear scan of all diarization turns per word. A 3-hour session (~30k words × ~2k turns) is ~60M overlap computations in pure Python.
-**Fix:** sort turns once, walk with a two-pointer/bisect. Keep `_best_overlap_speaker` for the no-words fallback.
-
-### R32 — Minor per-module nits (batch these)
-- `speaker_manager.py:128`: `except (RuntimeError, Exception)` — just `Exception`.
-- `speaker_manager.py:423`: `None` stored into `dict[str, np.ndarray]` (typed lie; use a separate `failed: set[str]`).
-- `transcriber.py:56`: MLX repo fallback f-string will 404 for unmapped sizes — raise a clear error instead.
-- `transcriber.py:236`: `pbar.update(seg.end - pbar.n)` can go negative on non-monotonic segments — clamp.
-- `routes/dashboard.py:28-29`: `__import__("os")` inline — import normally.
-- `routes/speakers.py:20-21`: redundant `import os` inside `_clip_path` (already module-level).
-- `formatter.update_speaker_names` (`formatter.py:247`): `**Old**` regex also rewrites matching bold text in the body — worth a docstring warning.
-- `app.py:41-43`: `_INPUT_CSS.stat()` raises uncaught `FileNotFoundError` at startup if `input.css` is missing — guard it.
-- `web/jobs.py:566`: `sorted(list(...)[::-1], key=..., reverse=True)` — replace with an explicit `(created_at, seq)` key or at least comment the reverse-then-stable-sort trick.
-- `debug_log.Logger._patch_tqdm`: repeated `setup_logging()` calls stack tee-wrappers — make idempotent.
-- `summarize._linkify`'s `(?<!\[)`/`(?!\])` guards only check one bracket char — double-wrap possible in edge cases.
-
-## PROCESS / environment
-
-### R36 — tqdm monkey-patching is load-bearing in three layers (accepted; document it)
-`debug_log.Logger._patch_tqdm` (permanent tee), `jobs._run_transcription_job` (per-job capture + restore), and `pipeline._patch_tqdm_for_queue` (per-subprocess) all patch process-global tqdm state. It works because of the one-job-at-a-time invariant, but any concurrency change breaks all of it, and job cancellation only fires when tqdm writes (already noted elsewhere in plan.md). Action: `architecture.md` note tying the three together; revisit if R6's fix or multi-worker lands.
-
-### R37 — Unlocked read-modify-write on shared JSON stores
-`campaign_manager`/`speaker_manager` do unlocked load→modify→save of shared JSON (`recording_manager` got per-record locks; the others didn't). Two simultaneous wizard submits or campaign edits can lose writes. Low likelihood single-user; fix opportunistically by mirroring `recording_manager`'s lock pattern.
-
-### R38 — Docs drift to fix alongside the above
-When fixing: `docs/cli-reference.md` (R7), `architecture.md` (R36 tqdm layers), CLAUDE.md Non-Obvious Gotchas if invariants change. (R16 trust model and R4 cache keys were documented in Phase D; R12 audio format contract in Phase E.)
-
-## Suggested execution order
-
-1. ~~**Phase A (small, surgical, high value):** R1, R3, R8, R15, R29 + env fix R35.~~ ✅ Done 2026-07-15.
-2. ~~**Phase B (config/CLI coherence):** R5, R19, R20, R21, R22, R23, R30, R33, R34.~~ ✅ Done 2026-07-15.
-3. ~~**Phase C (leaks + memory):** R9 (all five), R10, R14, R26, R28.~~ ✅ Done 2026-07-15.
-4. ~~**Phase D (web correctness/security):** R4, R6, R13, R16, R17, R18, R24, R25, R31.~~ ✅ Done 2026-07-16. The scoped-in optional job-cancel option (1) (subprocess + SIGTERM) was NOT done — it stays parked in "Job cancellation — best-effort GPU stop" below.
-5. ~~**Phase E (Discord audio subsystem):** R2 + R12 together.~~ ✅ Done 2026-07-16. Wire format confirmed from `SocketWriter.java` (length-prefixed 48 kHz stereo PCM, unchanged — sidecar untouched); storage rewritten to `SegmentedWavWriter` (16 kHz mono WAV segments); `RealtimePCMMixer` deleted (JDA's `__mixed__` pre-mixed track written directly as the combined track); `_finalise` now merges `combined.wav` and sets `combined_path` (R2); DAVE-migration section claim updated below. **Not yet live-verified:** needs one real Discord session as the acceptance test. Known leftover (pre-existing, out of scope): `segment_manifest`/`append_segment` is never populated, so UI segment counters read 0.
-6. **Phase F (nits):** R11, R27, R32, R36–R38 opportunistically. (The formerly-empty `## UI Bugs` section was deleted when these findings were scoped — 2026-07-15.)
-
-Each phase = one PR-sized branch, tests green + docs synced per Definition of Done, pause for user review between phases.
+- **Live Discord acceptance test (Phase E).** The recording pipeline rebuild (WAV segments, `__mixed__` combined track, `combined_path` hand-off) is fully covered by synthesized-PCM decode tests, but the JDA→socket→Python path can only be proven with one real Discord session: record a few minutes with 2+ speakers, play the per-user WAVs, and run Transcribe on the recording.
+- **`segment_manifest` never populated.** `_route_frame`/writer rotation never calls `recording_manager.append_segment`, so the UI's segment counters always read 0. Pre-existing latent bug found during Phase E, deliberately out of scope.
 
 ---
 
@@ -110,8 +60,6 @@ Recommendation: option (1) — reuse the parallel-stages subprocess plumbing for
 Nothing else changes — the Unix-socket wire protocol (length-prefixed user_id + 48 kHz stereo PCM) is unchanged and remains the stable interface for the sidecar swap; the web UI, campaigns, and CLI are unaffected. (Note, post-R12/R2 fix 2026-07-16: Python-side storage is now `SegmentedWavWriter` — WAV segments, 16 kHz mono, downsampled at write time — and JDA's `__mixed__` pre-mixed track is written directly as the combined track; `SegmentedOggWriter`/`RealtimePCMMixer` no longer exist. A future Python sidecar only needs to emit the same wire format, including a pre-mixed `__mixed__` stream.)
 
 **Structural fallback (Strategy B), if the native-binding ecosystem stalls:** both JDAVE and `davey` are small-maintainer libraries tracking a protocol Discord controls and can change. The only DAVE-churn-immune approach is to *not* implement DAVE at all — run a real Discord client joined to the channel and capture its client-side-decrypted audio via a virtual audio (loopback) device. Heavier operationally and loses per-speaker SSRC separation, so not worth building now — documented as the escape hatch if jdave/davey break on a future protocol bump.
-
----
 
 ---
 

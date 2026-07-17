@@ -79,6 +79,27 @@ def test_transcribe_filters_empty_segments():
     assert len(result) == 2
 
 
+def test_transcribe_non_monotonic_segments_do_not_crash_progress_bar():
+    """R32-4: pbar.update(seg.end - pbar.n) goes negative when a later
+    segment ends before an earlier one (non-monotonic segment stream) --
+    must clamp to >= 0 instead of passing a negative delta to tqdm."""
+    mock_model = MagicMock()
+    raw_segments = [
+        _make_mock_segment(0.0, 5.0, "First"),
+        _make_mock_segment(1.0, 2.0, "Out of order, ends earlier"),
+        _make_mock_segment(5.0, 8.0, "Back on track"),
+    ]
+    mock_model.transcribe.return_value = (iter(raw_segments), _make_mock_info(8.0))
+
+    import wisper_transcribe.transcriber as t
+    t._model = mock_model
+    t._model_key = ("medium", "cpu", "auto")
+
+    # Must not raise even though the second segment's delta is negative.
+    result = t.transcribe(Path("fake.wav"), device="cpu")
+    assert len(result) == 3
+
+
 def test_transcribe_passes_word_timestamps():
     """word_timestamps=True is forwarded to model.transcribe() (F8)."""
     mock_model = MagicMock()
@@ -363,6 +384,20 @@ def test_transcribe_mlx_injects_hotwords_into_prompt():
     _, kwargs = mock_mlx.transcribe.call_args
     assert "Kyra" in kwargs.get("initial_prompt", "")
     assert "Golarion" in kwargs.get("initial_prompt", "")
+
+
+def test_transcribe_mlx_unmapped_model_size_raises_clear_error():
+    """R32-3: an unmapped model size must raise a clear ValueError instead of
+    falling back to a guessed `mlx-community/whisper-{size}-mlx` repo name
+    that would 404 against the Hub."""
+    import wisper_transcribe.transcriber as t
+
+    mock_mlx = MagicMock()
+    with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+        with patch("wisper_transcribe.transcriber.platform.system", return_value="Darwin"):
+            with pytest.raises(ValueError, match="No MLX-Whisper repo mapping"):
+                t._transcribe_mlx(Path("fake.wav"), model_size="distil-large-v3")
+    mock_mlx.transcribe.assert_not_called()
 
 
 def test_transcribe_mlx_not_dispatched_on_non_mps():

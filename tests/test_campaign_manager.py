@@ -368,3 +368,32 @@ def test_rekey_member_noop_when_absent(tmp_path):
 
     create_campaign("Campaign One", data_dir=tmp_path)
     assert rekey_member("ghost", "spectre", data_dir=tmp_path) == 0
+
+
+# ---------------------------------------------------------------------------
+# R37 — concurrent mutation must not lose writes
+# ---------------------------------------------------------------------------
+
+def test_add_member_atomic_under_concurrent_calls(tmp_path):
+    """R37: campaigns.json is a single shared JSON store -- concurrent
+    add_member() calls used to unlocked-load/modify/save, so a losing thread's
+    write to the roster could be clobbered by another thread's save.
+    Mirrors test_recording_manager.py's concurrent append_segment test."""
+    import threading
+
+    campaign = create_campaign("Concurrency Test", data_dir=tmp_path)
+    n = 20
+
+    def _add(i):
+        add_member(campaign.slug, f"member_{i:02d}", data_dir=tmp_path)
+
+    threads = [threading.Thread(target=_add, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    loaded = load_campaigns(tmp_path)
+    assert len(loaded[campaign.slug].members) == n
+    for i in range(n):
+        assert f"member_{i:02d}" in loaded[campaign.slug].members

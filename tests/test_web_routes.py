@@ -1125,49 +1125,31 @@ def test_speakers_enroll_submit_cleans_up_temp_file_when_submit_fails(client, tm
 
 
 def test_speakers_remove_redirects(client, tmp_path):
-    from wisper_transcribe.models import SpeakerProfile
-    fake_emb = tmp_path / "alice.npy"
-    fake_emb.write_bytes(b"")
-    fake_profile = SpeakerProfile(
-        name="alice",
-        display_name="Alice",
-        role="DM",
-        embedding_path=fake_emb,
-        enrolled_date="2026-04-07",
-        enrollment_source="test.mp3",
-    )
-    profiles = {"alice": fake_profile}
+    # R37: removal now goes through speaker_manager.remove_profile() (a
+    # locked load-modify-save against the real profiles.json), mirroring
+    # the rename route's real-file test pattern below rather than mocking
+    # load_profiles/save_profiles in the route module (which no longer
+    # calls them directly for removal).
+    from wisper_transcribe.speaker_manager import load_profiles as _load
 
-    with patch("wisper_transcribe.web.routes.speakers.load_profiles", return_value=profiles), \
-         patch("wisper_transcribe.web.routes.speakers.save_profiles") as mock_save:
+    _seed_profile_store(tmp_path)
+
+    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path):
         resp = client.post("/speakers/alice/remove", follow_redirects=False)
 
     assert resp.status_code == 303
-    mock_save.assert_called_once_with({})  # alice removed, empty dict saved
+    assert _load(data_dir=tmp_path) == {}
 
 
 def test_speakers_remove_deletes_reference_clip(client, tmp_path):
     """R9-5: the web removal route deletes the .mp3 reference clip alongside
     the .npy embedding, not just the profile entry."""
-    from wisper_transcribe.models import SpeakerProfile
-
-    emb_dir = tmp_path / "profiles" / "embeddings"
-    emb_dir.mkdir(parents=True)
+    emb_dir = _seed_profile_store(tmp_path)
     npy_path = emb_dir / "alice.npy"
     mp3_path = emb_dir / "alice.mp3"
-    npy_path.write_bytes(b"")
-    mp3_path.write_bytes(b"fake mp3")
+    assert npy_path.exists() and mp3_path.exists()
 
-    fake_profile = SpeakerProfile(
-        name="alice", display_name="Alice", role="DM",
-        embedding_path=npy_path,
-        enrolled_date="2026-04-07", enrollment_source="test.mp3",
-    )
-    profiles = {"alice": fake_profile}
-
-    with patch("wisper_transcribe.web.routes.speakers.load_profiles", return_value=profiles), \
-         patch("wisper_transcribe.web.routes.speakers.save_profiles"), \
-         patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path):
+    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path):
         resp = client.post("/speakers/alice/remove", follow_redirects=False)
 
     assert resp.status_code == 303
@@ -1670,20 +1652,16 @@ def test_transcribe_post_no_vocab_file_hotwords_is_none(client, tmp_path, monkey
     assert call_kwargs.get("hotwords") is None
 
 
-def test_speakers_rename_empty_name_no_change(client):
-    from wisper_transcribe.models import SpeakerProfile
-    fake_profile = SpeakerProfile(
-        name="alice",
-        display_name="Alice",
-        role="DM",
-        embedding_path=Path("/tmp/alice.npy"),
-        enrolled_date="2026-04-07",
-        enrollment_source="test.mp3",
-    )
-    profiles = {"alice": fake_profile}
+def test_speakers_rename_empty_name_no_change(client, tmp_path):
+    # An empty new_name short-circuits before the route ever calls
+    # speaker_manager.rename_profile(), so no profiles.json write happens --
+    # verified against the real store rather than mocking module-level
+    # load_profiles/save_profiles (the route no longer imports the latter).
+    from wisper_transcribe.speaker_manager import load_profiles as _load
 
-    with patch("wisper_transcribe.web.routes.speakers.load_profiles", return_value=profiles), \
-         patch("wisper_transcribe.web.routes.speakers.save_profiles") as mock_save:
+    _seed_profile_store(tmp_path)
+
+    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path):
         resp = client.post(
             "/speakers/alice/rename",
             data={"new_name": ""},
@@ -1691,8 +1669,7 @@ def test_speakers_rename_empty_name_no_change(client):
         )
 
     assert resp.status_code == 303
-    mock_save.assert_not_called()  # empty name: no save
-    assert profiles["alice"].display_name == "Alice"  # unchanged
+    assert _load(data_dir=tmp_path)["alice"].display_name == "Alice"  # unchanged
 
 
 # ---------------------------------------------------------------------------
@@ -2602,3 +2579,25 @@ def test_job_excerpt_fallback_404_when_job_gone(client, tmp_path):
     resp = client.get("/transcribe/jobs/nonexistent-job-id/excerpt/SPEAKER_00")
 
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# R32-8: _build_tailwind must not crash startup when input.css is missing
+# ---------------------------------------------------------------------------
+
+def test_build_tailwind_missing_input_css_does_not_raise(tmp_path, monkeypatch):
+    """_INPUT_CSS.stat() used to raise an uncaught FileNotFoundError when
+    input.css was absent (e.g. a stripped install), crashing app startup
+    instead of falling into the existing warn-and-continue path."""
+    import wisper_transcribe.web.app as app_module
+
+    missing_input = tmp_path / "does-not-exist.css"
+    output_css = tmp_path / "tailwind.min.css"
+    output_css.write_text("/* stale */", encoding="utf-8")
+
+    monkeypatch.setattr(app_module, "_INPUT_CSS", missing_input)
+    monkeypatch.setattr(app_module, "_OUTPUT_CSS", output_css)
+
+    # Should not raise, and should fall through to attempt (and gracefully
+    # fail) the subprocess rebuild rather than crashing on the stat() call.
+    app_module._build_tailwind()

@@ -1,6 +1,8 @@
+import random
+
 import pytest
 
-from wisper_transcribe.aligner import align
+from wisper_transcribe.aligner import _assign_word_speakers, align
 from wisper_transcribe.models import AlignedSegment, DiarizationSegment, TranscriptionSegment, Word
 
 
@@ -444,3 +446,108 @@ def test_align_cascading_absorption_collapses_to_single_run():
     assert len(result) == 1
     assert result[0].speaker == "A"
     assert result[0].text == "one two three four five"
+
+
+# ---------------------------------------------------------------------------
+# R27 — _assign_word_speakers two-pointer rewrite must match brute force
+# ---------------------------------------------------------------------------
+
+def _brute_force_assign_word_speakers(
+    words: list[Word], diarization: list[DiarizationSegment]
+) -> list[str]:
+    """Reference implementation: the original O(words * turns) algorithm
+    `_assign_word_speakers` used before the R27 two-pointer rewrite. Kept
+    independent (not imported from aligner.py) so a regression in the
+    production sweep can't be masked by comparing it to itself."""
+    from wisper_transcribe.aligner import _best_overlap_speaker, _nearest_speaker
+
+    speakers: list[str] = []
+    prev_speaker = "UNKNOWN"
+    for w in words:
+        if diarization:
+            speaker, found = _best_overlap_speaker(w.start, w.end, diarization)
+            if not found:
+                midpoint = (w.start + w.end) / 2.0
+                speaker = _nearest_speaker(midpoint, diarization)
+        else:
+            speaker = prev_speaker
+        speakers.append(speaker)
+        prev_speaker = speaker
+    return speakers
+
+
+def test_assign_word_speakers_matches_brute_force_randomized():
+    """The two-pointer `_assign_word_speakers` must produce output identical
+    to the old brute-force scan -- including tie-breaking -- for randomized
+    words/turns with overlapping turns, zero-length words, and words
+    entirely outside all turns. Diarization turns are intentionally shuffled
+    to prove tie-breaking depends on original list order, not sorted order
+    or sweep-visit order. Half the trials also shuffle the WORD order (not
+    just turns) -- the sweep's sortedness precondition only holds for
+    time-ordered words (true for real whisper output), so an unsorted trial
+    must fall back to the brute-force reference internally and still match
+    it exactly, proving identity doesn't silently depend on that
+    precondition holding."""
+    rng = random.Random(1234)
+
+    for trial in range(30):
+        n_turns = rng.randint(1, 40)
+        turns: list[DiarizationSegment] = []
+        t = 0.0
+        for i in range(n_turns):
+            t += rng.uniform(0.0, 3.0)
+            dur = rng.uniform(0.0, 5.0)
+            turns.append(DiarizationSegment(start=t, end=t + dur, speaker=f"SPK_{i % 5}"))
+            if rng.random() < 0.3:
+                # Occasionally back the next turn's start up into this one's
+                # span, so genuinely overlapping (cross-talk) turns occur.
+                t = max(0.0, t - rng.uniform(0.0, dur))
+        rng.shuffle(turns)  # tie-break correctness must not depend on sort order
+
+        n_words = rng.randint(1, 60)
+        words: list[Word] = []
+        wt = rng.uniform(-2.0, 2.0)  # some words start before any turn
+        for i in range(n_words):
+            wt += rng.uniform(0.0, 1.0)
+            wdur = rng.choice([0.0, rng.uniform(0.0, 1.0)])  # zero-length words too
+            words.append(Word(start=wt, end=wt + wdur, text=f"w{i}"))
+            wt += wdur
+
+        if trial % 2 == 0 and len(words) > 1:
+            rng.shuffle(words)  # break the sortedness precondition on purpose
+
+        expected = _brute_force_assign_word_speakers(words, turns)
+        actual = _assign_word_speakers(words, turns)
+        assert actual == expected, f"trial {trial}: mismatch\nturns={turns}\nwords={words}"
+
+
+def test_assign_word_speakers_unsorted_words_falls_back_to_bruteforce_and_matches():
+    """Explicit (non-randomized) regression for the sortedness fallback:
+    words given out of time-order must still produce output identical to
+    the brute-force reference, not whatever the sweep's expiry logic would
+    (incorrectly) produce if it ran on unsorted input."""
+    words = [
+        Word(start=5.0, end=6.0, text="later"),
+        Word(start=0.0, end=1.0, text="earlier"),
+        Word(start=3.0, end=4.0, text="middle"),
+    ]
+    turns = [
+        DiarizationSegment(start=0.0, end=2.0, speaker="A"),
+        DiarizationSegment(start=2.0, end=4.5, speaker="B"),
+        DiarizationSegment(start=4.5, end=7.0, speaker="C"),
+    ]
+    expected = _brute_force_assign_word_speakers(words, turns)
+    actual = _assign_word_speakers(words, turns)
+    assert actual == expected == ["C", "A", "B"]
+
+
+def test_assign_word_speakers_empty_diarization_falls_back_to_prev_speaker():
+    words = [Word(start=0.0, end=1.0, text="a"), Word(start=1.0, end=2.0, text="b")]
+    assert _assign_word_speakers(words, []) == ["UNKNOWN", "UNKNOWN"]
+
+
+def test_assign_word_speakers_no_words():
+    assert _assign_word_speakers([], []) == []
+    assert _assign_word_speakers(
+        [], [DiarizationSegment(start=0.0, end=1.0, speaker="A")]
+    ) == []

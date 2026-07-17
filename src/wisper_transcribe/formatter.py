@@ -240,7 +240,17 @@ def rewrite_frontmatter_speakers(content: str, old_to_new: dict[str, str]) -> st
 
 
 def update_speaker_names(content: str, old_name: str, new_name: str) -> str:
-    """Replace all occurrences of a speaker name in an existing markdown transcript."""
+    """Replace all occurrences of a speaker name in an existing markdown transcript.
+
+    R32-7 warning: the `**OldName**` regex matches ANY bold text equal to
+    `old_name`, not just genuine `**Speaker**` block headers -- if `old_name`
+    also happens to appear as bold body text elsewhere in the transcript
+    (coincidentally, not as a speaker label), that occurrence is rewritten
+    too. This is a known, accepted limitation (not fixed here); callers that
+    need header-only precision should go through
+    `rewrite_transcript_blocks()` instead, which operates on parsed
+    per-block indices rather than a body-wide regex.
+    """
     import re
 
     # Replace in bold speaker labels: **OldName**

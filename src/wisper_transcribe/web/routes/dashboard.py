@@ -1,6 +1,8 @@
 """Dashboard route — job queue overview and system status."""
 from __future__ import annotations
 
+import os
+
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
@@ -24,8 +26,8 @@ async def dashboard(request: Request) -> HTMLResponse:
     device = get_device()
     hf_token_set = bool(
         config.get("hf_token")
-        or __import__("os").environ.get("HUGGINGFACE_TOKEN")
-        or __import__("os").environ.get("HF_TOKEN")
+        or os.environ.get("HUGGINGFACE_TOKEN")
+        or os.environ.get("HF_TOKEN")
     )
 
     # Count transcripts in the output dir (R21: shared with the CLI/upload

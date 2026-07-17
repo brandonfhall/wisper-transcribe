@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -21,6 +22,16 @@ from .models import DiarizationSegment, SpeakerProfile
 # lifetime of a long-running web server).
 _embedding_model = None
 _embedding_device: Optional[str] = None
+
+# R37: speakers.json is a single shared JSON store (unlike recording_manager,
+# which is per-record and already locked). The mutating operations below
+# (remove/rename/reset, and the JSON-store portion of enroll) did an
+# unlocked load -> modify -> save; two concurrent web requests (e.g. two
+# browser tabs both hitting /speakers/{name}/rename or /remove) can lose one
+# write. Mirrors recording_manager's lock pattern: held around each
+# function's load/modify/save, never around load_profiles/save_profiles
+# themselves (that would deadlock the callers below that already hold it).
+_profiles_lock = threading.Lock()
 
 
 def _get_profiles_dir(data_dir: Optional[Path] = None) -> Path:
@@ -96,6 +107,27 @@ def remove_profile_files(key: str, data_dir: Optional[Path] = None) -> None:
     (emb_dir / f"{key}.mp3").unlink(missing_ok=True)
 
 
+def remove_profile(key: str, data_dir: Optional[Path] = None) -> None:
+    """Remove an enrolled speaker profile: drop the ``profiles.json`` entry
+    and delete its embedding + reference clip files.
+
+    R37: shared by the CLI ``speakers remove`` command and the web
+    ``/speakers/{name}/remove`` route so both go through the same locked
+    load-modify-save sequence instead of two unlocked copies (previously
+    each route duplicated ``load_profiles()`` / ``profiles.pop()`` /
+    ``save_profiles()`` inline). Raises ``KeyError`` if ``key`` is not an
+    enrolled profile.
+    """
+    with _profiles_lock:
+        profiles = load_profiles(data_dir)
+        if key not in profiles:
+            raise KeyError(f"Speaker profile {key!r} not found")
+        profiles.pop(key)
+        # R9-5: removes both the .npy embedding and the .mp3 reference clip.
+        remove_profile_files(key, data_dir)
+        save_profiles(profiles, data_dir)
+
+
 def rename_profile_files(old_key: str, new_key: str, data_dir: Optional[Path] = None) -> Path:
     """Rename a profile's embedding and reference clip to a new key.
 
@@ -152,56 +184,63 @@ def rename_profile(old_key: str, new_name: str, data_dir: Optional[Path] = None)
     """
     from .path_utils import validate_path_component
 
-    profiles = load_profiles(data_dir)
-    if old_key not in profiles:
-        raise KeyError(f"Speaker profile {old_key!r} not found")
+    with _profiles_lock:
+        profiles = load_profiles(data_dir)
+        if old_key not in profiles:
+            raise KeyError(f"Speaker profile {old_key!r} not found")
 
-    new_key = new_name.lower().replace(" ", "_")
-    safe_new_key = validate_path_component(new_key, "_rename_profile_guard")
-    if safe_new_key is None:
-        raise ValueError("invalid profile name")
-    if safe_new_key != old_key and safe_new_key in profiles:
-        raise ValueError("profile already exists")
+        new_key = new_name.lower().replace(" ", "_")
+        safe_new_key = validate_path_component(new_key, "_rename_profile_guard")
+        if safe_new_key is None:
+            raise ValueError("invalid profile name")
+        if safe_new_key != old_key and safe_new_key in profiles:
+            raise ValueError("profile already exists")
 
-    profile = profiles.pop(old_key)
-    profile.name = safe_new_key
-    profile.display_name = new_name
-    if safe_new_key != old_key:
-        # R9-5: rekeys both the .npy embedding and the .mp3 reference clip
-        # so playback keeps working after a rename.
-        profile.embedding_path = rename_profile_files(old_key, safe_new_key, data_dir)
-    profiles[safe_new_key] = profile
-    save_profiles(profiles, data_dir)
+        profile = profiles.pop(old_key)
+        profile.name = safe_new_key
+        profile.display_name = new_name
+        if safe_new_key != old_key:
+            # R9-5: rekeys both the .npy embedding and the .mp3 reference clip
+            # so playback keeps working after a rename.
+            profile.embedding_path = rename_profile_files(old_key, safe_new_key, data_dir)
+        profiles[safe_new_key] = profile
+        save_profiles(profiles, data_dir)
 
-    if safe_new_key != old_key:
-        from .campaign_manager import rekey_member
-        rekey_member(old_key, safe_new_key, data_dir)
+        if safe_new_key != old_key:
+            # campaign_manager.rekey_member() takes its own lock
+            # (_campaigns_lock) -- a different lock object, always acquired
+            # in this fixed order (profiles then campaigns), so this nested
+            # call cannot deadlock against anything that only ever acquires
+            # campaigns_lock first.
+            from .campaign_manager import rekey_member
+            rekey_member(old_key, safe_new_key, data_dir)
 
-    return profile
+        return profile
 
 
 def reset_profiles(data_dir: Optional[Path] = None) -> int:
     """Delete all speaker profiles and embeddings. Returns number of speakers removed."""
-    speakers_json = _get_speakers_json(data_dir)
-    emb_dir = _get_embeddings_dir(data_dir)
+    with _profiles_lock:
+        speakers_json = _get_speakers_json(data_dir)
+        emb_dir = _get_embeddings_dir(data_dir)
 
-    count = 0
-    if speakers_json.exists():
-        import json as _json
-        with open(speakers_json, encoding="utf-8") as f:
-            count = len(_json.load(f))
-        speakers_json.unlink()
+        count = 0
+        if speakers_json.exists():
+            import json as _json
+            with open(speakers_json, encoding="utf-8") as f:
+                count = len(_json.load(f))
+            speakers_json.unlink()
 
-    if emb_dir.exists():
-        for npy in emb_dir.glob("*.npy"):
-            npy.unlink()
-        # R9-5: a full reset must also clear .mp3 reference clips -- the
-        # same leak the removal/rename fixes above target, just for every
-        # profile at once instead of one at a time.
-        for mp3 in emb_dir.glob("*.mp3"):
-            mp3.unlink()
+        if emb_dir.exists():
+            for npy in emb_dir.glob("*.npy"):
+                npy.unlink()
+            # R9-5: a full reset must also clear .mp3 reference clips -- the
+            # same leak the removal/rename fixes above target, just for every
+            # profile at once instead of one at a time.
+            for mp3 in emb_dir.glob("*.mp3"):
+                mp3.unlink()
 
-    return count
+        return count
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +285,7 @@ def _get_hf_token() -> str:
     from .config import get_hf_token
     try:
         return get_hf_token()
-    except (RuntimeError, Exception):
+    except Exception:
         return ""
 
 
@@ -377,9 +416,14 @@ def enroll_speaker(
         notes=notes,
     )
 
-    profiles = load_profiles(data_dir)
-    profiles[name] = profile
-    save_profiles(profiles, data_dir)
+    # R37: lock scoped to just the load/modify/save of the shared
+    # profiles.json store -- the (possibly slow) embedding extraction and
+    # .npy write above intentionally happen outside the lock so they don't
+    # serialize unrelated enrollments against each other.
+    with _profiles_lock:
+        profiles = load_profiles(data_dir)
+        profiles[name] = profile
+        save_profiles(profiles, data_dir)
 
     # Save a short reference audio clip alongside the embedding for web playback.
     # Failures are silently swallowed — the clip is a convenience, not critical.
@@ -550,13 +594,17 @@ def match_speakers(
 
     unique_labels = sorted({s.speaker for s in diarization_segments})
 
-    # Extract query embeddings
+    # Extract query embeddings. R32-2: a failed extraction used to be
+    # recorded as `query_embeddings[label] = None`, a typed lie against the
+    # declared `dict[str, np.ndarray]` -- failures are tracked in a separate
+    # `failed` set instead, so the dict's value type is honest.
     query_embeddings: dict[str, np.ndarray] = {}
+    failed: set[str] = set()
     for label in unique_labels:
         try:
             query_embeddings[label] = extract_embedding(audio_path, diarization_segments, label, device)
         except Exception:
-            query_embeddings[label] = None  # type: ignore[assignment]
+            failed.add(label)
 
     # Load enrolled embeddings
     enrolled: dict[str, np.ndarray] = {}
@@ -568,12 +616,12 @@ def match_speakers(
         return {}
 
     # Score every (label, profile) pair for labels whose embedding extraction
-    # succeeded. Labels with a failed extraction never produce a pair and are
-    # picked up by the final Unknown-numbering pass below.
+    # succeeded. `query_embeddings` only ever holds successful extractions
+    # (failures go to `failed` instead, never inserted here), so iterating
+    # it already excludes them -- failed labels are picked up by the final
+    # Unknown-numbering pass below.
     pairs: list[tuple[float, str, str]] = []  # (sim, label, profile_name)
     for label, q_emb in query_embeddings.items():
-        if q_emb is None:
-            continue
         for pname, e_emb in enrolled.items():
             sim = _cosine_similarity(q_emb, e_emb)
             pairs.append((sim, label, pname))

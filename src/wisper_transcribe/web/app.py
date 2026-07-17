@@ -38,10 +38,18 @@ def _build_tailwind() -> None:
     no Node.js required).  Safe to call on every startup; skips the build
     if output is already up-to-date.
     """
-    if (
-        _OUTPUT_CSS.exists()
-        and _INPUT_CSS.stat().st_mtime <= _OUTPUT_CSS.stat().st_mtime
-    ):
+    # R32-8: _INPUT_CSS.stat() raised an uncaught FileNotFoundError here (a
+    # stripped/partial install missing input.css would crash startup instead
+    # of falling into the warn-and-continue path below).
+    try:
+        up_to_date = (
+            _OUTPUT_CSS.exists()
+            and _INPUT_CSS.stat().st_mtime <= _OUTPUT_CSS.stat().st_mtime
+        )
+    except OSError:
+        up_to_date = False
+
+    if up_to_date:
         return  # already up-to-date
 
     try:

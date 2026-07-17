@@ -95,6 +95,52 @@ def test_apply_edits_idempotent():
 
 
 # ---------------------------------------------------------------------------
+# R11 — apply_edits word-boundary + speaker-label regressions
+# ---------------------------------------------------------------------------
+
+def test_apply_edits_does_not_corrupt_longer_word():
+    """'Dan' -> 'Don' must not also rewrite 'Dandy' -> 'Dondy'."""
+    body = "**Alice** *(00:01)*: Dan brought his Dandy hat.\n"
+    out = apply_edits(body, [Edit("Dan", "Don")])
+    assert "Don brought his Dandy hat" in out
+    assert "Dondy" not in out
+
+
+def test_apply_edits_does_not_rewrite_speaker_label():
+    """The bolded **Speaker** header must never be touched by a vocabulary
+    edit, even when the edit's `original` matches the speaker's name — only
+    speaker_manager.rename_profile is allowed to change a speaker's name."""
+    body = "**Dan** *(00:01)*: Dan said hello to Dan.\n"
+    out = apply_edits(body, [Edit("Dan", "Don")])
+    assert out.startswith("**Dan** *(00:01)*:")
+    assert "Don said hello to Don" in out
+
+
+def test_apply_edits_does_not_rewrite_speaker_label_no_timestamp():
+    """Same as above but for the include_timestamps=False block format
+    (`**Speaker**: text`, no `*(ts)*`)."""
+    body = "**Dan**: Dan said hello.\n"
+    out = apply_edits(body, [Edit("Dan", "Don")])
+    assert out.startswith("**Dan**:")
+    assert "Don said hello" in out
+
+
+def test_apply_edits_at_line_start_and_end():
+    body = "Dan\nsaid hi Dan\n"
+    out = apply_edits(body, [Edit("Dan", "Don")])
+    assert out == "Don\nsaid hi Don\n"
+
+
+def test_apply_edits_original_with_punctuation():
+    """`\\b` misbehaves at a non-word edge — original ending in an
+    apostrophe-s must still match without over- or under-matching."""
+    body = "**Alice** *(00:01)*: That's Dan's hat.\n"
+    out = apply_edits(body, [Edit("Dan's", "Don's")])
+    assert "Don's hat" in out
+    assert "Dan's" not in out
+
+
+# ---------------------------------------------------------------------------
 # fix_vocabulary
 # ---------------------------------------------------------------------------
 

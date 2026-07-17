@@ -34,6 +34,13 @@ _FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 _SPEAKER_LINE_RE = re.compile(r"^\*\*(?P<speaker>[^*]+)\*\*")
 _UNKNOWN_LABEL_RE = re.compile(r"^\*\*(?P<label>Unknown Speaker \d+)\*\*", re.IGNORECASE)
 
+# R11: matches a transcript block's `**Speaker**` / `**Speaker** *(ts)*:`
+# header (see formatter.to_markdown / parse_transcript_blocks) so apply_edits
+# can split it off and never run vocabulary substitutions over the speaker
+# label itself. Group 1 is the header (kept verbatim); group 2 is the
+# spoken-text remainder that substitutions are allowed to touch.
+_BLOCK_HEADER_RE = re.compile(r"^(\*\*.+?\*\*(?:\s*\*\(.+?\)\*)?:\s*)(.*)$")
+
 
 # ---------------------------------------------------------------------------
 # Frontmatter / body parsing
@@ -186,19 +193,59 @@ def fix_vocabulary(body: str, hotwords: list[str], character_names: list[str],
     return unique
 
 
-def apply_edits(body: str, edits: list[Edit]) -> str:
-    """Apply line-level string substitutions.
+def _word_boundary_pattern(token: str) -> re.Pattern:
+    """Compile a whole-word-anchored regex for `token`.
 
-    Only the body (no YAML frontmatter) should be passed. Each edit's `original`
-    substring is replaced with `corrected` across the body. Order-preserving;
+    `\\b` only makes sense next to a "word" character ([\\w]); when `token`
+    starts or ends with punctuation (e.g. "Dan," or "O'Brien"), a `\\b` on
+    that edge would never engage the way a caller expects, so that side
+    falls back to a plain (unanchored) edge instead of `\\b`.
+    """
+    left = r"\b" if token[:1].isalnum() or token[:1] == "_" else ""
+    right = r"\b" if token[-1:].isalnum() or token[-1:] == "_" else ""
+    return re.compile(left + re.escape(token) + right)
+
+
+def apply_edits(body: str, edits: list[Edit]) -> str:
+    """Apply whole-word substitutions to transcript body text.
+
+    Only the body (no YAML frontmatter) should be passed. Each edit's
+    `original` token is replaced with `corrected` -- but only as a whole
+    word (`\\b`-anchored regex, never a raw substring match), and only in
+    the spoken-text portion of a transcript block, never inside the
+    `**Speaker**` label itself.
+
+    R11: the previous implementation ran `body.replace(original, corrected)`
+    over the whole body, so a short `original` like "Dan" also rewrote
+    "Dandy" -> "Dondy" mid-word, and rewrote the `**Dan**:` speaker header
+    to `**Don**:` -- silently renaming the speaker as a side effect of a
+    vocabulary-only fix (speaker renames go through
+    `speaker_manager.rename_profile`, not this pass). Order-preserving;
     duplicates across edits do not compound.
     """
-    out = body
-    for edit in edits:
-        if not edit.original:
-            continue
-        out = out.replace(edit.original, edit.corrected)
-    return out
+    lines = body.splitlines(keepends=True)
+    patterns = [
+        (_word_boundary_pattern(edit.original), edit.corrected)
+        for edit in edits
+        if edit.original
+    ]
+    if not patterns:
+        return body
+
+    out_lines = []
+    for line in lines:
+        stripped = line.rstrip("\r\n")
+        line_ending = line[len(stripped):]
+
+        m = _BLOCK_HEADER_RE.match(stripped)
+        header, text = (m.group(1), m.group(2)) if m else ("", stripped)
+
+        for pattern, corrected in patterns:
+            text = pattern.sub(lambda _m, _c=corrected: _c, text)
+
+        out_lines.append(header + text + line_ending)
+
+    return "".join(out_lines)
 
 
 # ---------------------------------------------------------------------------

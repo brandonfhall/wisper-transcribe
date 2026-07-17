@@ -10,14 +10,13 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Resp
 
 from . import get_queue as _get_queue, templates
 from wisper_transcribe.path_utils import validate_path_component
-from wisper_transcribe.speaker_manager import load_profiles, remove_profile_files, save_profiles
+from wisper_transcribe.speaker_manager import load_profiles, remove_profile
 from wisper_transcribe.web._responses import error_redirect, invalid_input_response
 
 router = APIRouter(prefix="/speakers")
 
 
 def _clip_path(key: str) -> "Path":
-    import os
     from wisper_transcribe.speaker_manager import _get_embeddings_dir
     return _get_embeddings_dir() / f"{os.path.basename(key)}.mp3"
 
@@ -155,12 +154,13 @@ async def enroll_submit(
 
 @router.post("/{name}/remove", response_class=HTMLResponse)
 async def remove_speaker(request: Request, name: str) -> RedirectResponse:
-    profiles = load_profiles()
-    if name in profiles:
-        profiles.pop(name)
-        # R9-5: removes both the .npy embedding and the .mp3 reference clip.
-        remove_profile_files(name)
-        save_profiles(profiles)
+    # R37: goes through speaker_manager.remove_profile() (locked
+    # load-modify-save, R9-5's .npy + .mp3 cleanup) -- shared with the CLI
+    # `speakers remove` command instead of duplicating the sequence here.
+    try:
+        remove_profile(name)
+    except KeyError:
+        pass  # already gone -- same no-op the old "if name in profiles" gave
     return RedirectResponse(url="/speakers", status_code=303)
 
 

@@ -644,19 +644,16 @@ def speakers_list():
 @click.argument("name")
 def speakers_remove(name: str):
     """Remove an enrolled speaker profile."""
-    from .speaker_manager import load_profiles, remove_profile_files, save_profiles
+    # R37: goes through speaker_manager.remove_profile() (locked
+    # load-modify-save, R9-5's .npy + .mp3 cleanup) -- shared with the web
+    # /speakers/{name}/remove route instead of duplicating the sequence here.
+    from .speaker_manager import remove_profile
 
-    profiles = load_profiles()
     key = name.lower().replace(" ", "_")
-    if key not in profiles:
+    try:
+        remove_profile(key)
+    except KeyError:
         raise click.ClickException(f"Speaker {name!r} not found.")
-
-    # R9-5: removes both the .npy embedding and the .mp3 reference clip so
-    # the Speakers-page play button doesn't dangle for a since-removed profile.
-    remove_profile_files(key)
-
-    del profiles[key]
-    save_profiles(profiles)
     click.echo(f"Removed speaker {name!r}.")
 
 

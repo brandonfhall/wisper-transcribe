@@ -736,8 +736,19 @@ class JobQueue:
         return self._jobs.get(job_id)
 
     def list_all(self) -> list[Job]:
-        # Reverse insertion order first so that ties in created_at put newer jobs first
-        return sorted(list(self._jobs.values())[::-1], key=lambda j: j.created_at, reverse=True)
+        # R32-9: sort newest-first by created_at; ties (two jobs submitted
+        # within the same clock tick share a `datetime.now()` value) break by
+        # insertion order, most-recently-submitted first. `self._jobs` is a
+        # plain dict (insertion-ordered since Python 3.7), so its enumerate
+        # index is used as an explicit tiebreaker in the sort key instead of
+        # the previous "reverse the list, then stable-sort with reverse=True"
+        # trick, which relied on sort-stability semantics to get the same
+        # result less legibly.
+        indexed = enumerate(self._jobs.values())
+        return [
+            job
+            for _, job in sorted(indexed, key=lambda pair: (pair[1].created_at, pair[0]), reverse=True)
+        ]
 
     def list_recent(self, limit: int = 20) -> list[Job]:
         return self.list_all()[:limit]
