@@ -1063,6 +1063,15 @@ def test_speakers_enroll_submit_enqueues_standalone_job(app, client, tmp_path, m
     startup sweep can never delete a pending job's file (F5 pattern)."""
     import tempfile as _tempfile
 
+    from wisper_transcribe.web.jobs import JobQueue
+
+    # This test asserts submit-time state (job fields + renamed upload on
+    # disk). The app's live background worker races us to the job — if it
+    # wins, _run_standalone_enroll fails (no ffmpeg in CI) and its finally
+    # deletes the upload before our assertions run (flaked on CI 3.14).
+    # Neutralise the runner so the on-disk state is deterministic either way.
+    monkeypatch.setattr(JobQueue, "_run_enroll_job", lambda self, job: None)
+
     monkeypatch.setattr(_tempfile, "tempdir", str(tmp_path))
     try:
         resp = client.post(
