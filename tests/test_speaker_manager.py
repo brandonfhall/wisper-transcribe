@@ -463,6 +463,21 @@ def test_reset_profiles_removes_all(tmp_path):
     assert not (tmp_path / "profiles" / "embeddings" / "bob.npy").exists()
 
 
+def test_reset_profiles_removes_reference_clips(tmp_path):
+    """R9-5: a full reset must also clear .mp3 reference clips, not just
+    .npy embeddings -- otherwise every enrolled speaker's clip leaks."""
+    from wisper_transcribe.speaker_manager import reset_profiles
+
+    _write_profile(tmp_path, "alice", np.ones(3))
+    emb_dir = tmp_path / "profiles" / "embeddings"
+    clip = emb_dir / "alice.mp3"
+    clip.write_bytes(b"fake mp3")
+
+    reset_profiles(data_dir=tmp_path)
+
+    assert not clip.exists()
+
+
 def test_reset_profiles_empty(tmp_path):
     from wisper_transcribe.speaker_manager import reset_profiles
 
@@ -660,3 +675,256 @@ def test_match_speakers_none_filter_uses_all_profiles(tmp_path):
 
     assert result["SPEAKER_00"] == "Alice"
     assert result["SPEAKER_01"] == "Bob"
+
+
+# ---------------------------------------------------------------------------
+# enroll_speaker_from_audio_dir (R1: path-traversal guard needs `os` import)
+# ---------------------------------------------------------------------------
+
+def test_enroll_speaker_from_audio_dir_rejects_dir_outside_recordings_tree(tmp_path):
+    """R1 regression: the per_user_dir guard uses os.path.abspath/os.sep,
+    which previously raised NameError because `os` was never imported into
+    speaker_manager.py. This exercises those exact lines -- the validation
+    happens before any file is read, so no audio is needed."""
+    from wisper_transcribe.speaker_manager import enroll_speaker_from_audio_dir
+
+    outside_dir = tmp_path / "elsewhere" / "someuser"
+    outside_dir.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="per_user_dir outside expected recordings tree"):
+        enroll_speaker_from_audio_dir(
+            name="alice",
+            display_name="Alice",
+            role="Player",
+            per_user_dir=outside_dir,
+            data_dir=tmp_path,
+        )
+
+
+def test_enroll_speaker_from_audio_dir_no_audio_files_found(tmp_path):
+    """A per_user_dir inside the recordings tree but with no .wav or .opus
+    segment files should raise a clear 'No audio files found' error rather
+    than crashing or silently succeeding."""
+    from wisper_transcribe.speaker_manager import enroll_speaker_from_audio_dir
+
+    per_user_dir = tmp_path / "recordings" / "session01" / "someuser"
+    per_user_dir.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="No audio files found"):
+        enroll_speaker_from_audio_dir(
+            name="alice",
+            display_name="Alice",
+            role="Player",
+            per_user_dir=per_user_dir,
+            data_dir=tmp_path,
+        )
+
+
+def _write_fake_wav_segment(path: Path, seconds: float = 0.5) -> None:
+    """Write a tiny real 16 kHz mono 16-bit WAV file (silence) for decode tests."""
+    import wave as _wave
+
+    n_samples = int(16000 * seconds)
+    with _wave.open(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(b"\x00\x00" * n_samples)
+
+
+def test_enroll_speaker_from_audio_dir_prefers_wav_over_legacy_opus(tmp_path):
+    """R12: since the writer now produces .wav segments, enroll must read
+    those -- and prefer them even if stale .opus files are also present
+    (e.g. a directory re-recorded after the R12 fix)."""
+    from wisper_transcribe.speaker_manager import enroll_speaker_from_audio_dir
+
+    per_user_dir = tmp_path / "recordings" / "session01" / "someuser"
+    per_user_dir.mkdir(parents=True)
+    _write_fake_wav_segment(per_user_dir / "0000.wav", seconds=0.5)
+    _write_fake_wav_segment(per_user_dir / "0001.wav", seconds=0.5)
+    # A stale/garbage .opus alongside real .wav segments must be ignored.
+    (per_user_dir / "0000.opus").write_bytes(b"not a real opus stream")
+
+    fake_emb = np.ones(512)
+    with patch("wisper_transcribe.speaker_manager.extract_embedding", return_value=fake_emb), \
+         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        profile = enroll_speaker_from_audio_dir(
+            name="alice",
+            display_name="Alice",
+            role="Player",
+            per_user_dir=per_user_dir,
+            data_dir=tmp_path,
+        )
+
+    assert profile.display_name == "Alice"
+    assert (tmp_path / "profiles" / "embeddings" / "alice.npy").exists()
+
+
+def test_enroll_speaker_from_audio_dir_legacy_opus_fallback_fails_gracefully(tmp_path):
+    """R12: a pre-R12 recording directory has only .opus files, which were
+    never valid Opus streams (the old writer wrote raw PCM into an Ogg/Opus
+    container). enroll_speaker_from_audio_dir attempts them as a
+    best-effort fallback, but must raise a normal exception -- not crash --
+    so the JOB_ENROLL runner's generic error handling still applies."""
+    from wisper_transcribe.speaker_manager import enroll_speaker_from_audio_dir
+
+    per_user_dir = tmp_path / "recordings" / "session01" / "someuser"
+    per_user_dir.mkdir(parents=True)
+    (per_user_dir / "0000.opus").write_bytes(b"not a real opus stream" * 10)
+
+    with pytest.raises(Exception):
+        enroll_speaker_from_audio_dir(
+            name="alice",
+            display_name="Alice",
+            role="Player",
+            per_user_dir=per_user_dir,
+            data_dir=tmp_path,
+        )
+
+
+# ---------------------------------------------------------------------------
+# R4: embedding-model cache keyed by device
+# ---------------------------------------------------------------------------
+
+def test_load_embedding_model_reuses_cache_on_same_device():
+    import wisper_transcribe.speaker_manager as sm
+    from unittest.mock import MagicMock, patch as _patch
+
+    cached = MagicMock()
+    sm._embedding_model = cached
+    sm._embedding_device = "cpu"
+    try:
+        with _patch("pyannote.audio.Model") as mock_model_cls:
+            result = sm._load_embedding_model("cpu")
+            mock_model_cls.from_pretrained.assert_not_called()
+        assert result is cached
+    finally:
+        sm._embedding_model = None
+        sm._embedding_device = None
+
+
+# ---------------------------------------------------------------------------
+# R37 — concurrent mutation must not lose writes
+# ---------------------------------------------------------------------------
+
+def test_enroll_speaker_atomic_under_concurrent_calls(tmp_path):
+    """R37: speakers.json is a single shared JSON store -- concurrent
+    enroll_speaker() calls used to unlocked-load/modify/save the profiles
+    dict, so a losing thread's new profile entry could be clobbered by
+    another thread's save. Mirrors test_recording_manager.py's concurrent
+    append_segment test. `embedding=` is passed explicitly so no ML model
+    is invoked; `segments=[]` skips the ffmpeg reference-clip step."""
+    import threading
+
+    from wisper_transcribe.speaker_manager import enroll_speaker, load_profiles
+
+    n = 20
+
+    def _enroll(i):
+        enroll_speaker(
+            name=f"speaker_{i:02d}",
+            display_name=f"Speaker {i:02d}",
+            role="",
+            audio_path=tmp_path / "fake.wav",
+            segments=[],
+            speaker_label="SPEAKER_00",
+            data_dir=tmp_path,
+            embedding=np.zeros(4),
+        )
+
+    threads = [threading.Thread(target=_enroll, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    loaded = load_profiles(data_dir=tmp_path)
+    assert len(loaded) == n
+    for i in range(n):
+        assert f"speaker_{i:02d}" in loaded
+
+
+def test_remove_profile_and_enroll_speaker_do_not_lose_writes_concurrently(tmp_path):
+    """Concurrent remove_profile() (on pre-seeded distinct profiles) and
+    enroll_speaker() (adding new distinct profiles) must not clobber each
+    other's write to profiles.json."""
+    import threading
+
+    from wisper_transcribe.speaker_manager import (
+        enroll_speaker,
+        load_profiles,
+        remove_profile,
+        save_profiles,
+    )
+    from wisper_transcribe.models import SpeakerProfile
+
+    n = 10
+    # Pre-seed n profiles to be removed concurrently with n new enrollments.
+    existing = {
+        f"old_{i:02d}": SpeakerProfile(
+            name=f"old_{i:02d}",
+            display_name=f"Old {i:02d}",
+            role="",
+            embedding_path=tmp_path / "profiles" / "embeddings" / f"old_{i:02d}.npy",
+            enrolled_date="2026-01-01",
+            enrollment_source="seed",
+        )
+        for i in range(n)
+    }
+    save_profiles(existing, data_dir=tmp_path)
+
+    def _remove(i):
+        remove_profile(f"old_{i:02d}", data_dir=tmp_path)
+
+    def _enroll(i):
+        enroll_speaker(
+            name=f"new_{i:02d}",
+            display_name=f"New {i:02d}",
+            role="",
+            audio_path=tmp_path / "fake.wav",
+            segments=[],
+            speaker_label="SPEAKER_00",
+            data_dir=tmp_path,
+            embedding=np.zeros(4),
+        )
+
+    threads = (
+        [threading.Thread(target=_remove, args=(i,)) for i in range(n)]
+        + [threading.Thread(target=_enroll, args=(i,)) for i in range(n)]
+    )
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    loaded = load_profiles(data_dir=tmp_path)
+    assert len(loaded) == n  # all n "old_*" removed, all n "new_*" added
+    for i in range(n):
+        assert f"old_{i:02d}" not in loaded
+        assert f"new_{i:02d}" in loaded
+
+
+def test_load_embedding_model_reloads_on_device_change():
+    """R4: a cached CPU embedding model is not reused when a later caller
+    asks for a different device."""
+    import wisper_transcribe.speaker_manager as sm
+    from unittest.mock import MagicMock, patch as _patch
+
+    stale = MagicMock()
+    sm._embedding_model = stale
+    sm._embedding_device = "cuda"
+
+    fresh = MagicMock()
+    try:
+        with _patch("pyannote.audio.Model") as mock_model_cls, \
+             _patch("pyannote.audio.Inference", return_value=fresh) as mock_inf:
+            mock_model_cls.from_pretrained.return_value = MagicMock()
+            result = sm._load_embedding_model("cpu")
+            mock_model_cls.from_pretrained.assert_called_once()
+            mock_inf.assert_called_once()
+        assert result is fresh
+        assert sm._embedding_model is fresh
+        assert sm._embedding_device == "cpu"
+    finally:
+        sm._embedding_model = None
+        sm._embedding_device = None

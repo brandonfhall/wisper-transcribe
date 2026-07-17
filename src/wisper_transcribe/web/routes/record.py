@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -21,8 +22,6 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 
 from wisper_transcribe.campaign_manager import (
-    add_member,
-    bind_discord_id,
     load_campaigns,
     move_transcript_to_campaign,
 )
@@ -34,7 +33,6 @@ from wisper_transcribe.recording_manager import (
     save_recording,
 )
 from wisper_transcribe.web._responses import error_redirect, invalid_input_response
-from wisper_transcribe.speaker_manager import enroll_speaker_from_audio_dir
 from wisper_transcribe.web.routes import get_bot_manager, templates
 
 log = logging.getLogger(__name__)
@@ -48,6 +46,13 @@ _NOT_IMPLEMENTED = JSONResponse(
 
 
 def _recording_to_dict(rec) -> dict:
+    """Serialize a Recording for the JSON API.
+
+    R7: IDs, names, status, timestamps, and derived booleans only -- never a
+    raw filesystem path (CLAUDE.md web-route security rules). ``has_audio``
+    / ``has_transcript`` let a CLI/API caller know whether ``transcribe`` is
+    likely to succeed without exposing where the files actually live.
+    """
     return {
         "id": rec.id,
         "status": rec.status,
@@ -58,6 +63,11 @@ def _recording_to_dict(rec) -> dict:
         "ended_at": rec.ended_at.isoformat() if rec.ended_at else None,
         "discord_speakers": rec.discord_speakers,
         "segment_count": len(rec.segment_manifest),
+        "unbound_speakers": list(rec.unbound_speakers),
+        "job_id": rec.job_id,
+        "notes": rec.notes,
+        "has_audio": bool(rec.combined_path),
+        "has_transcript": bool(rec.transcript_path),
     }
 
 
@@ -162,35 +172,85 @@ async def record_channels(request: Request):
 # ---------------------------------------------------------------------------
 # JSON API — recordings CRUD
 # ---------------------------------------------------------------------------
+#
+# R7: these four endpoints back `wisper record list/show/transcribe/delete`
+# (cli.py) -- they used to be 501 stubs, so every documented `record`
+# subcommand except start/stop always failed. Each delegates to the exact
+# same manager functions / job-submission path the working HTML routes
+# (`/recordings`, `/recordings/{id}/transcribe`, `/recordings/{id}/delete`)
+# already use, via `_submit_recording_transcription()` below for the
+# transcribe hand-off. Responses are generic error codes (never `str(exc)`
+# or a filesystem path) per CLAUDE.md's web route security rules.
 
 @router.get("/api/recordings")
 async def recordings_list(request: Request):
-    """List all recordings, optionally filtered by campaign. (stub)"""
-    return _NOT_IMPLEMENTED
+    """List all recordings, optionally filtered by `?campaign=<slug>`."""
+    data_dir = get_data_dir()
+    recordings = load_recordings(data_dir)
+
+    campaign = request.query_params.get("campaign")
+    values = list(recordings.values())
+    if campaign:
+        values = [r for r in values if r.campaign_slug == campaign]
+
+    sorted_recordings = sorted(
+        values,
+        key=lambda r: r.started_at or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    return JSONResponse({"recordings": [_recording_to_dict(r) for r in sorted_recordings]})
 
 
 @router.get("/api/recordings/{recording_id}")
 async def recording_detail_api(recording_id: str, request: Request):
     safe_id = _validate_recording_id(recording_id)
     if safe_id is None:
-        return JSONResponse({"detail": "invalid recording id"}, status_code=400)
-    return _NOT_IMPLEMENTED
+        return JSONResponse({"error": "invalid_id"}, status_code=400)
+
+    data_dir = get_data_dir()
+    recording = load_recordings(data_dir).get(safe_id)
+    if recording is None:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+
+    return JSONResponse(_recording_to_dict(recording))
 
 
 @router.post("/api/recordings/{recording_id}/transcribe")
 async def recording_transcribe(recording_id: str, request: Request):
     safe_id = _validate_recording_id(recording_id)
     if safe_id is None:
-        return JSONResponse({"detail": "invalid recording id"}, status_code=400)
-    return _NOT_IMPLEMENTED
+        return JSONResponse({"error": "invalid_id"}, status_code=400)
+
+    data_dir = get_data_dir()
+    recording = load_recordings(data_dir).get(safe_id)
+    if recording is None:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+
+    job, error = _submit_recording_transcription(recording, request, data_dir)
+    if error is not None:
+        # not_ready: recording hasn't finished / already transcribing/failed.
+        # no_audio: recording has no combined_path to hand off.
+        status_code = 409 if error == "not_ready" else 422
+        return JSONResponse({"error": error}, status_code=status_code)
+
+    return JSONResponse({"id": recording.id, "job_id": job.id, "status": "transcribing"}, status_code=202)
 
 
 @router.post("/api/recordings/{recording_id}/delete")
 async def recording_delete_api(recording_id: str, request: Request):
     safe_id = _validate_recording_id(recording_id)
     if safe_id is None:
-        return JSONResponse({"detail": "invalid recording id"}, status_code=400)
-    return _NOT_IMPLEMENTED
+        return JSONResponse({"error": "invalid_id"}, status_code=400)
+
+    data_dir = get_data_dir()
+    recording = load_recordings(data_dir).get(safe_id)
+    if recording is None:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+
+    # Same removal semantics as the HTML delete route: index entry only,
+    # audio/transcript files on disk are left in place.
+    delete_recording(recording.id, data_dir)
+    return JSONResponse({"id": recording.id, "deleted": True})
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +356,7 @@ async def recordings_list_html(request: Request) -> HTMLResponse:
     campaigns = load_campaigns(data_dir)
     sorted_recordings = sorted(
         recordings.values(),
-        key=lambda r: r.started_at or r.started_at,
+        key=lambda r: r.started_at or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
     )
     return templates.TemplateResponse(
@@ -390,40 +450,24 @@ async def recording_enroll_html(
 
     per_user_dir = data_dir / "recordings" / recording.id / "per-user" / safe_uid
 
-    try:
-        enroll_speaker_from_audio_dir(
-            name=profile_key,
-            display_name=profile_name.strip(),
-            role="player",
-            per_user_dir=per_user_dir,
-            data_dir=data_dir,
-        )
-    except Exception:
-        log.warning("Speaker enrollment from audio dir failed", exc_info=True)
-        return RedirectResponse(
-            url=f"/recordings/{recording.id}?error=enroll_failed", status_code=303
-        )
+    # R6: the pydub decode + embedding extraction used to run synchronously
+    # here, blocking the event loop and touching the module-level ML caches
+    # concurrently with the job worker thread. It now runs as a JOB_ENROLL
+    # job (one job at a time); the runner also applies the recording-state
+    # updates (unbound list, discord_speakers binding, campaign membership)
+    # that used to happen inline after the enroll. Redirect to the job
+    # detail page — job.id is server-generated (uuid4), no user-controlled
+    # data in the URL.
+    queue = request.app.state.job_queue
+    job = queue.submit_recording_enroll(
+        recording_id=recording.id,
+        discord_uid=safe_uid,
+        per_user_dir=str(per_user_dir),
+        profile_key=profile_key,
+        display_name=profile_name.strip(),
+    )
 
-    recording.unbound_speakers = [
-        uid for uid in recording.unbound_speakers if uid != safe_uid
-    ]
-    recording.discord_speakers[safe_uid] = profile_key
-    save_recording(recording, data_dir)
-
-    if recording.campaign_slug:
-        try:
-            campaigns = load_campaigns(data_dir)
-            if recording.campaign_slug in campaigns:
-                campaign = campaigns[recording.campaign_slug]
-                if profile_key not in campaign.members:
-                    add_member(recording.campaign_slug, profile_key, data_dir=data_dir)
-                bind_discord_id(
-                    recording.campaign_slug, profile_key, safe_uid, data_dir=data_dir
-                )
-        except Exception:
-            log.warning("Failed to auto-bind discord ID to campaign", exc_info=True)
-
-    return RedirectResponse(url=f"/recordings/{recording.id}", status_code=303)
+    return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
 
 
 # ---------------------------------------------------------------------------
@@ -431,26 +475,26 @@ async def recording_enroll_html(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/recordings/{recording_id}/transcribe", response_class=HTMLResponse)
-async def recording_transcribe_html(recording_id: str, request: Request) -> RedirectResponse:
-    """Hand off a completed recording to the transcription JobQueue."""
-    safe_id = _validate_recording_id(recording_id)
-    if safe_id is None:
-        return invalid_input_response("Invalid recording ID")
+def _submit_recording_transcription(recording, request: Request, data_dir: Path):
+    """Validate a recording and submit its transcription job.
 
-    from wisper_transcribe.path_utils import get_output_dir
+    Shared by the HTML hand-off route (``POST /recordings/{id}/transcribe``)
+    and the JSON API (``POST /api/recordings/{id}/transcribe``, R7) so both
+    entry points run the identical checks and ``JobQueue.submit`` call
+    instead of two copies drifting apart.
 
-    data_dir = get_data_dir()
-    recordings = load_recordings(data_dir)
-    recording = recordings.get(safe_id)
-    if recording is None:
-        return error_redirect("/recordings", "not_found")
-
+    Returns ``(job, None)`` on success, or ``(None, error_code)`` where
+    ``error_code`` is ``"not_ready"`` or ``"no_audio"`` -- generic codes
+    only, never ``str(exc)`` or a filesystem path, per CLAUDE.md's web
+    route security rules.
+    """
     if recording.status not in ("completed", "transcribed"):
-        return error_redirect(f"/recordings/{recording.id}", "not_ready")
+        return None, "not_ready"
 
     if recording.combined_path is None or not recording.combined_path.exists():
-        return error_redirect(f"/recordings/{recording.id}", "no_audio")
+        return None, "no_audio"
+
+    from wisper_transcribe.path_utils import get_output_dir
 
     # Copy combined.wav to output dir so the transcript lands alongside existing ones
     output_dir = get_output_dir()
@@ -487,5 +531,25 @@ async def recording_transcribe_html(recording_id: str, request: Request) -> Redi
     recording.job_id = job.id
     recording.status = "transcribing"
     save_recording(recording, data_dir)
+
+    return job, None
+
+
+@router.post("/recordings/{recording_id}/transcribe", response_class=HTMLResponse)
+async def recording_transcribe_html(recording_id: str, request: Request) -> RedirectResponse:
+    """Hand off a completed recording to the transcription JobQueue."""
+    safe_id = _validate_recording_id(recording_id)
+    if safe_id is None:
+        return invalid_input_response("Invalid recording ID")
+
+    data_dir = get_data_dir()
+    recordings = load_recordings(data_dir)
+    recording = recordings.get(safe_id)
+    if recording is None:
+        return error_redirect("/recordings", "not_found")
+
+    _job, error = _submit_recording_transcription(recording, request, data_dir)
+    if error is not None:
+        return error_redirect(f"/recordings/{recording.id}", error)
 
     return RedirectResponse(url=f"/recordings/{recording.id}", status_code=303)

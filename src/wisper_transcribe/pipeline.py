@@ -228,6 +228,18 @@ def _interactive_enroll(
         if prof.embedding_path.exists():
             enrolled_embeddings[pname] = np.load(str(prof.embedding_path))
 
+    # R28: extract_embedding() does up to 5 pyannote forward passes per call.
+    # Each label is queried once here for ranking, then again below if the
+    # user asks to update an existing profile's embedding with this episode's
+    # audio -- cache the first extraction per label so the second reuses it
+    # instead of re-running inference on the same segments.
+    _embedding_cache: dict[str, np.ndarray] = {}
+
+    def _get_embedding(label: str) -> np.ndarray:
+        if label not in _embedding_cache:
+            _embedding_cache[label] = extract_embedding(wav_path, diarization, label, device)
+        return _embedding_cache[label]
+
     click.echo(f"\n  Found {len(unique_speakers)} speaker(s). Let's name them.")
 
     for i, label in enumerate(unique_speakers, 1):
@@ -248,7 +260,7 @@ def _interactive_enroll(
         if enrolled_embeddings:
             ranked: list[tuple[str, float]] = []
             try:
-                query_emb = extract_embedding(wav_path, diarization, label, device)
+                query_emb = _get_embedding(label)
                 for pname, emb in enrolled_embeddings.items():
                     ranked.append((pname, _cosine_similarity(query_emb, emb)))
                 ranked.sort(key=lambda x: x[1], reverse=True)
@@ -282,7 +294,7 @@ def _interactive_enroll(
                 default=False,
             ):
                 try:
-                    new_emb = extract_embedding(wav_path, diarization, label, device)
+                    new_emb = _get_embedding(label)
                     update_embedding(profile_key, new_emb)
                     click.echo(f"  Updated voice profile for {name}.")
                 except Exception as exc:
@@ -300,6 +312,12 @@ def _interactive_enroll(
                 device=device,
                 data_dir=None,
                 notes=notes,
+                # Reuse the ranking-step embedding when available (R28) so a
+                # brand-new speaker doesn't trigger a third extraction for
+                # the same label; enroll_speaker() falls back to computing
+                # it internally when the cache has nothing for this label
+                # (e.g. no profiles were enrolled yet, so ranking never ran).
+                embedding=_embedding_cache.get(label),
             )
             # Refresh in-memory dicts so subsequent speakers in this file see
             # the new enrollment in the ranked candidates list.
@@ -347,10 +365,10 @@ def _prompt_speaker_name(
 def process_file(
     path: Path,
     output_dir: Optional[Path] = None,
-    model_size: str = "medium",
+    model_size: Optional[str] = None,
     device: str = "auto",
-    language: Optional[str] = "en",
-    include_timestamps: bool = True,
+    language: Optional[str] = None,
+    include_timestamps: Optional[bool] = None,
     overwrite: bool = False,
     no_diarize: bool = False,
     num_speakers: Optional[int] = None,
@@ -366,7 +384,30 @@ def process_file(
     job_id: Optional[str] = None,
     _result_store: Optional[dict] = None,
 ) -> Path:
-    """Run the full pipeline on a single audio file. Returns path to output .md."""
+    """Run the full pipeline on a single audio file. Returns path to output .md.
+
+    Sentinel convention (R5): ``None`` is the *only* "use config, else hardcoded
+    fallback" marker for ``model_size``, ``language``, ``include_timestamps``.
+    A caller-supplied value — including one that happens to equal the
+    hardcoded fallback, e.g. explicit ``model_size="medium"`` — always wins
+    over config; it is never re-overridden.
+
+    ``language`` has one extra wrinkle: the string ``"auto"`` is a distinct,
+    explicit "auto-detect" marker (used by the CLI's ``-l auto`` and passed
+    through unresolved). It is only interpreted *after* the ``None`` → config
+    resolution, so config's own ``language`` value may itself be ``"auto"``.
+    ``"auto"`` always resolves to ``None`` before reaching ``transcribe()``,
+    which already treats a falsy language as auto-detect.
+
+    ``device="auto"`` and ``compute_type="auto"`` keep their pre-existing
+    sentinel semantics (unrelated to this refactor) — ``"auto"`` triggers
+    device autodetection / compute-type resolution, not a config lookup.
+    ``vad_filter=None`` also keeps its existing "use config" semantics.
+
+    When diarization is enabled and the caller passes neither ``num_speakers``
+    nor ``min_speakers``/``max_speakers``, the config keys ``min_speakers``/
+    ``max_speakers`` are applied as a fallback constraint on the diarizer.
+    """
     from .config import resolve_compute_type
 
     path = Path(path)
@@ -374,10 +415,14 @@ def process_file(
 
     if device == "auto":
         device = get_device()
-    if model_size == "medium":
-        model_size = config.get("model", "medium")
-    if language == "en":
+    if model_size is None:
+        model_size = config.get("model", "large-v3-turbo")
+    if language is None:
         language = config.get("language", "en")
+    if language == "auto":
+        language = None
+    if include_timestamps is None:
+        include_timestamps = config.get("timestamps", True)
     if compute_type == "auto":
         compute_type = config.get("compute_type", "auto")
     if vad_filter is None:
@@ -385,6 +430,14 @@ def process_file(
     if hotwords is None:
         config_hotwords = config.get("hotwords", [])
         hotwords = config_hotwords if config_hotwords else None
+    if (
+        not no_diarize
+        and num_speakers is None
+        and min_speakers is None
+        and max_speakers is None
+    ):
+        min_speakers = config.get("min_speakers")
+        max_speakers = config.get("max_speakers")
 
     use_mlx: str = config.get("use_mlx", "auto")
     parallel_stages: bool = config.get("parallel_stages", False)
@@ -416,161 +469,181 @@ def process_file(
 
     wav_path = convert_to_wav(path)
 
-    # Resolve the HF token before any model runs so we know whether diarization
-    # is possible. This is needed up-front in the parallel path.
-    hf_token = ""
-    if not no_diarize:
-        hf_token = get_hf_token(config)
+    # Freed in the finally below once transcription/diarization/enrollment
+    # no longer need the converted copy — process_file's own local, never
+    # referenced by the _diar.json sidecar (that always records the
+    # ORIGINAL input path via job.input_path, not wav_path).
+    try:
 
-    # Decide whether to run transcription + diarization concurrently.
-    _run_parallel = parallel_stages and not no_diarize and bool(hf_token)
+        # Resolve the HF token before any model runs so we know whether diarization
+        # is possible. This is needed up-front in the parallel path.
+        hf_token = ""
+        if not no_diarize:
+            hf_token = get_hf_token(config)
 
-    diarization = None
-    if _run_parallel:
-        transcribe_kw = dict(
-            model_size=model_size,
-            device=device,
-            language=language,
-            compute_type=compute_type,
-            vad_filter=vad_filter,
-            initial_prompt=initial_prompt,
-            hotwords=hotwords,
-            use_mlx=use_mlx,
-        )
-        diarize_kw = dict(
-            hf_token=hf_token,
-            device=device,
-            num_speakers=num_speakers,
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
-        )
-        segments, diarization = _run_parallel_transcribe_diarize(
-            wav_path, transcribe_kw, diarize_kw
-        )
-    else:
-        segments: list[TranscriptionSegment] = transcribe(
-            wav_path,
-            model_size=model_size,
-            device=device,
-            language=language,
-            compute_type=compute_type,
-            vad_filter=vad_filter,
-            initial_prompt=initial_prompt,
-            hotwords=hotwords,
-            use_mlx=use_mlx,
-        )
+        # Decide whether to run transcription + diarization concurrently.
+        _run_parallel = parallel_stages and not no_diarize and bool(hf_token)
 
-    duration = get_duration(wav_path)
-    aligned_segments = segments
-    speaker_map: Optional[dict[str, str]] = None
-    speaker_metadata: list[dict] = []
-
-    if not no_diarize:
-        from .aligner import align
-
-        if diarization is None and hf_token:
-            # Sequential path: diarize now (parallel path already populated diarization).
-            from .diarizer import diarize
-            diarization = diarize(
-                wav_path,
+        diarization = None
+        if _run_parallel:
+            transcribe_kw = dict(
+                model_size=model_size,
+                device=device,
+                language=language,
+                compute_type=compute_type,
+                vad_filter=vad_filter,
+                initial_prompt=initial_prompt,
+                hotwords=hotwords,
+                use_mlx=use_mlx,
+            )
+            diarize_kw = dict(
                 hf_token=hf_token,
                 device=device,
                 num_speakers=num_speakers,
                 min_speakers=min_speakers,
                 max_speakers=max_speakers,
             )
-
-        if diarization is not None:
-            if _result_store is not None:
-                _result_store["diarization_segments"] = list(diarization)
-            aligned_segments = align(segments, diarization)
-            if _result_store is not None:
-                _result_store["aligned_segments"] = list(aligned_segments)
-
-            unique_speakers = sorted(
-                {seg.speaker for seg in aligned_segments if seg.speaker != "UNKNOWN"},
-                key=lambda label: min(s.start for s in aligned_segments if s.speaker == label),
+            segments, diarization = _run_parallel_transcribe_diarize(
+                wav_path, transcribe_kw, diarize_kw
+            )
+        else:
+            segments: list[TranscriptionSegment] = transcribe(
+                wav_path,
+                model_size=model_size,
+                device=device,
+                language=language,
+                compute_type=compute_type,
+                vad_filter=vad_filter,
+                initial_prompt=initial_prompt,
+                hotwords=hotwords,
+                use_mlx=use_mlx,
             )
 
-            if enroll_speakers:
-                speaker_map, speaker_metadata = _interactive_enroll(
-                    wav_path=wav_path,
-                    aligned_segments=aligned_segments,
-                    diarization=diarization,
-                    unique_speakers=unique_speakers,
+        duration = get_duration(wav_path)
+        aligned_segments = segments
+        speaker_map: Optional[dict[str, str]] = None
+        speaker_metadata: list[dict] = []
+
+        if not no_diarize:
+            from .aligner import align
+
+            if diarization is None and hf_token:
+                # Sequential path: diarize now (parallel path already populated diarization).
+                from .diarizer import diarize
+                diarization = diarize(
+                    wav_path,
+                    hf_token=hf_token,
                     device=device,
-                    play_audio=play_audio,
-                    similarity_threshold=config.get("similarity_threshold", 0.65),
+                    num_speakers=num_speakers,
+                    min_speakers=min_speakers,
+                    max_speakers=max_speakers,
                 )
-            else:
-                from .speaker_manager import match_speakers
-                profile_filter: Optional[set] = None
-                if campaign:
-                    from .campaign_manager import get_campaign_profile_keys
-                    profile_filter = get_campaign_profile_keys(campaign)
-                    tqdm.write(f"  Campaign filter: {campaign} ({len(profile_filter)} member(s))")
-                matches = match_speakers(
-                    audio_path=wav_path,
-                    diarization_segments=diarization,
-                    data_dir=None,
-                    device=device,
-                    threshold=config.get("similarity_threshold", 0.65),
-                    profile_filter=profile_filter,
-                    allow_many_to_one=(num_speakers is None),
+
+            if diarization is not None:
+                if _result_store is not None:
+                    _result_store["diarization_segments"] = list(diarization)
+                aligned_segments = align(segments, diarization)
+                if _result_store is not None:
+                    _result_store["aligned_segments"] = list(aligned_segments)
+
+                unique_speakers = sorted(
+                    {seg.speaker for seg in aligned_segments if seg.speaker != "UNKNOWN"},
+                    key=lambda label: min(s.start for s in aligned_segments if s.speaker == label),
                 )
-                if matches:
-                    speaker_map = matches
-                    tqdm.write("  Speaker matches:")
-                    for label, name in sorted(matches.items()):
-                        tqdm.write(f"    {label} → {name}")
-                    # Build speaker metadata from matched names (deduplicated, preserving order)
-                    seen: set[str] = set()
-                    for name in matches.values():
-                        if name not in seen:
-                            seen.add(name)
-                            speaker_metadata.append({"name": name, "role": ""})
+
+                if enroll_speakers:
+                    speaker_map, speaker_metadata = _interactive_enroll(
+                        wav_path=wav_path,
+                        aligned_segments=aligned_segments,
+                        diarization=diarization,
+                        unique_speakers=unique_speakers,
+                        device=device,
+                        play_audio=play_audio,
+                        similarity_threshold=config.get("similarity_threshold", 0.65),
+                    )
                 else:
-                    # No profiles yet — use raw labels
-                    speaker_map = {s: s for s in unique_speakers}
-                    for label in unique_speakers:
-                        speaker_metadata.append({"name": label, "role": ""})
+                    from .speaker_manager import match_speakers
+                    profile_filter: Optional[set] = None
+                    if campaign:
+                        from .campaign_manager import get_campaign_profile_keys
+                        profile_filter = get_campaign_profile_keys(campaign)
+                        tqdm.write(f"  Campaign filter: {campaign} ({len(profile_filter)} member(s))")
+                    matches = match_speakers(
+                        audio_path=wav_path,
+                        diarization_segments=diarization,
+                        data_dir=None,
+                        device=device,
+                        threshold=config.get("similarity_threshold", 0.65),
+                        profile_filter=profile_filter,
+                        allow_many_to_one=(num_speakers is None),
+                    )
+                    if matches:
+                        speaker_map = matches
+                        tqdm.write("  Speaker matches:")
+                        for label, name in sorted(matches.items()):
+                            tqdm.write(f"    {label} → {name}")
+                        # Build speaker metadata from matched names (deduplicated, preserving order)
+                        seen: set[str] = set()
+                        for name in matches.values():
+                            if name not in seen:
+                                seen.add(name)
+                                speaker_metadata.append({"name": name, "role": ""})
+                    else:
+                        # No profiles yet — use raw labels
+                        speaker_map = {s: s for s in unique_speakers}
+                        for label in unique_speakers:
+                            speaker_metadata.append({"name": label, "role": ""})
 
-    metadata = {
-        "title": path.stem.replace("_", " ").replace("-", " ").title(),
-        "source_file": path.name,
-        "date_processed": datetime.date.today().isoformat(),
-        "duration": format_duration(duration),
-        "speakers": speaker_metadata,
-    }
-    if job_id:
-        metadata["job_id"] = job_id
+        metadata = {
+            "title": path.stem.replace("_", " ").replace("-", " ").title(),
+            "source_file": path.name,
+            "date_processed": datetime.date.today().isoformat(),
+            "duration": format_duration(duration),
+            "speakers": speaker_metadata,
+        }
+        if job_id:
+            metadata["job_id"] = job_id
 
-    if _result_store is not None:
-        # F7: persist the authoritative raw_label -> display_name map the
-        # formatter is about to render, so the web enrollment wizard never
-        # has to reconstruct it later by matching rendered timestamps back
-        # against pyannote intervals (see web/enroll_shared.resolve_current_names).
-        _result_store["speaker_map"] = dict(speaker_map) if speaker_map else {}
+        if _result_store is not None:
+            # F7: persist the authoritative raw_label -> display_name map the
+            # formatter is about to render, so the web enrollment wizard never
+            # has to reconstruct it later by matching rendered timestamps back
+            # against pyannote intervals (see web/enroll_shared.resolve_current_names).
+            _result_store["speaker_map"] = dict(speaker_map) if speaker_map else {}
 
-    content = to_markdown(
-        aligned_segments,
-        speaker_map=speaker_map,
-        metadata=metadata,
-        include_timestamps=include_timestamps,
-    )
+        content = to_markdown(
+            aligned_segments,
+            speaker_map=speaker_map,
+            metadata=metadata,
+            include_timestamps=include_timestamps,
+        )
 
-    out_path.write_text(content, encoding="utf-8")
-    tqdm.write(f"  Wrote {out_path.name}")
+        out_path.write_text(content, encoding="utf-8")
+        tqdm.write(f"  Wrote {out_path.name}")
 
-    # Associate transcript with campaign so the list view can group it.
-    if campaign:
-        try:
-            from .campaign_manager import move_transcript_to_campaign
-            move_transcript_to_campaign(out_path.stem, campaign)
-        except Exception:
-            pass  # Non-fatal — transcript is still written
+        # Associate transcript with campaign so the list view can group it.
+        if campaign:
+            try:
+                from .campaign_manager import move_transcript_to_campaign
+                move_transcript_to_campaign(out_path.stem, campaign)
+            except Exception:
+                pass  # Non-fatal — transcript is still written
 
-    return out_path
+        return out_path
+    finally:
+        if wav_path != path:
+            wav_path.unlink(missing_ok=True)
+
+
+def _folder_output_path(input_path: Path, output_dir: Optional[Path], folder: Path) -> Path:
+    """Return the .md output path process_file would use for a folder member.
+
+    Mirrors process_file's own ``out_dir / (path.stem + ".md")`` logic
+    (output_dir if given, else the input's parent — which for folder
+    processing is always ``folder`` since audio_files are direct children).
+    """
+    out_base = Path(output_dir) if output_dir else folder
+    return out_base / (input_path.stem + ".md")
 
 
 def process_folder(
@@ -579,11 +652,14 @@ def process_folder(
     verbose: bool = False,
     workers: int = 1,
     **kwargs,
-) -> tuple[list[Path], list[str]]:
+) -> tuple[list[Path], list[Path], list[str]]:
     """Process all audio files in a folder.
 
-    Returns (successful_paths, error_messages).
+    Returns (successful_paths, skipped_paths, error_messages).
     Skips files whose .md output already exists unless overwrite=True is in kwargs.
+    Skip detection happens once, up front, in this function — files that would
+    be skipped are never submitted to process_file (sequentially or via the
+    worker pool), so a skip can never be miscounted as a success (R22).
 
     workers > 1 enables parallel processing via ProcessPoolExecutor.  Only
     supported when device resolves to "cpu" — GPU processing is single-worker
@@ -595,7 +671,7 @@ def process_folder(
     )
 
     if not audio_files:
-        return [], []
+        return [], [], []
 
     # Resolve effective device and enforce CPU-only guard
     effective_device = kwargs.get("device", "auto")
@@ -616,12 +692,28 @@ def process_folder(
         )
         workers = 1
 
+    overwrite = kwargs.get("overwrite", False)
+    to_process: list[Path] = []
+    skipped: list[Path] = []
+    for f in audio_files:
+        out_path = _folder_output_path(f, output_dir, folder)
+        if out_path.exists() and not overwrite:
+            skipped.append(f)
+        else:
+            to_process.append(f)
+
+    for f in skipped:
+        tqdm.write(f"  Skipping {f.name} — already processed (use --overwrite to re-run)")
+
     successes: list[Path] = []
     errors: list[str] = []
 
+    if not to_process:
+        return successes, skipped, errors
+
     if workers > 1:
         progress = tqdm(
-            total=len(audio_files),
+            total=len(to_process),
             desc="Folder Progress",
             unit="file",
             position=0,
@@ -632,7 +724,7 @@ def process_folder(
         with ProcessPoolExecutor(max_workers=workers) as executor:
             future_to_file = {
                 executor.submit(process_file, f, output_dir=output_dir, **kwargs): f
-                for f in audio_files
+                for f in to_process
             }
             for future in as_completed(future_to_file):
                 f = future_to_file[future]
@@ -646,11 +738,8 @@ def process_folder(
                     tqdm.write(f"  ERROR {f.name}: {exc}")
         progress.close()
     else:
-        overwrite = kwargs.get("overwrite", False)
-        out_base = Path(output_dir) if output_dir else folder
-
         progress = tqdm(
-            audio_files,
+            to_process,
             desc="Folder Progress",
             unit="file",
             position=0,
@@ -661,10 +750,6 @@ def process_folder(
 
         for f in progress:
             progress.set_description(f"Processing {f.name}")
-            out_path = out_base / (f.stem + ".md")
-            if out_path.exists() and not overwrite:
-                tqdm.write(f"  Skipping {f.name} — already processed (use --overwrite to re-run)")
-                continue
             try:
                 result = process_file(f, output_dir=output_dir, **kwargs)
                 successes.append(result)
@@ -672,4 +757,4 @@ def process_folder(
                 errors.append(f"{f.name}: {exc}")
                 tqdm.write(f"  ERROR {f.name}: {exc}")
 
-    return successes, errors
+    return successes, skipped, errors

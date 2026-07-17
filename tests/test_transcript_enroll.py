@@ -652,6 +652,32 @@ def test_enroll_submit_redirects_with_notice_when_audio_missing(
     assert location == "/transcripts/session01?notice=enroll_audio_missing"
 
 
+def test_enroll_submit_missing_input_path_key_redirects_with_notice(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """R29 regression: a legacy sidecar without an "input_path" key used to
+    raise KeyError (-> 500) via `diar["input_path"]`. It must instead be
+    treated the same as a known-missing audio file (F5's pre-check) and
+    redirect with the generic notice, not crash."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    diar = {k: v for k, v in _SAMPLE_DIAR.items() if k != "input_path"}
+    assert "input_path" not in diar
+    _write_transcript(tmp_path, diar=diar)
+
+    with _patch_output(tmp_path), \
+         patch("wisper_transcribe.speaker_manager.enroll_speaker"):
+        resp = client.post(
+            "/transcripts/session01/enroll",
+            data={"speaker_SPEAKER_00": "Alice"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    location = resp.headers["location"]
+    assert location == "/transcripts/session01?notice=enroll_audio_missing"
+    assert client.app.state.job_queue.list_all() == []
+
+
 def test_enroll_submit_no_notice_when_audio_present(
     client: TestClient, tmp_path: Path
 ):

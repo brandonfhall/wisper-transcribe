@@ -1,4 +1,15 @@
-`# wisper-transcribe — Open Items
+# wisper-transcribe — Open Items
+
+---
+
+## Senior review — closed 2026-07-16
+
+The full-codebase senior review (findings R1–R38, opened 2026-07-15) is **complete**: all 38 findings remediated across six phase commits on `docs/senior-review` (Phase A quick wins → B config/CLI coherence → C leaks/memory → D web correctness/security → E Discord audio rebuild → F nits/R7/docs/locking). Suite grew 872 → 1025 over the review. Details live in the six phase commit messages.
+
+**Open follow-ups from the review:**
+
+- **Live Discord acceptance test (Phase E).** The recording pipeline rebuild (WAV segments, `__mixed__` combined track, `combined_path` hand-off) is fully covered by synthesized-PCM decode tests, but the JDA→socket→Python path can only be proven with one real Discord session: record a few minutes with 2+ speakers, play the per-user WAVs, and run Transcribe on the recording.
+- **`segment_manifest` never populated.** `_route_frame`/writer rotation never calls `recording_manager.append_segment`, so the UI's segment counters always read 0. Pre-existing latent bug found during Phase E, deliberately out of scope.
 
 ---
 
@@ -46,11 +57,9 @@ Recommendation: option (1) — reuse the parallel-stages subprocess plumbing for
 3. Update `BotManager` to launch the Python script instead of the JAR
 4. Remove the Java builder stages from `Dockerfile` and the Java 25 requirement from launchers + README
 
-Nothing else changes — `SegmentedOggWriter`, the web UI, campaigns, CLI, and all tests remain unaffected.
+Nothing else changes — the Unix-socket wire protocol (length-prefixed user_id + 48 kHz stereo PCM) is unchanged and remains the stable interface for the sidecar swap; the web UI, campaigns, and CLI are unaffected. (Note, post-R12/R2 fix 2026-07-16: Python-side storage is now `SegmentedWavWriter` — WAV segments, 16 kHz mono, downsampled at write time — and JDA's `__mixed__` pre-mixed track is written directly as the combined track; `SegmentedOggWriter`/`RealtimePCMMixer` no longer exist. A future Python sidecar only needs to emit the same wire format, including a pre-mixed `__mixed__` stream.)
 
 **Structural fallback (Strategy B), if the native-binding ecosystem stalls:** both JDAVE and `davey` are small-maintainer libraries tracking a protocol Discord controls and can change. The only DAVE-churn-immune approach is to *not* implement DAVE at all — run a real Discord client joined to the channel and capture its client-side-decrypted audio via a virtual audio (loopback) device. Heavier operationally and loses per-speaker SSRC separation, so not worth building now — documented as the escape hatch if jdave/davey break on a future protocol bump.
-
----
 
 ---
 
@@ -82,10 +91,6 @@ Nothing else changes — `SegmentedOggWriter`, the web UI, campaigns, CLI, and a
 - Multi-user or networked deployments are needed (SQLite WAL mode handles concurrent reads but not concurrent writes from multiple processes)
 - Job history browsing across restarts becomes a user need
 - A third JSON file with cross-cutting relationships appears (campaigns.json + speakers.json are already two; a third is the smell)
-
----
-
-## UI Bugs
 
 ---
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -18,6 +19,18 @@ from typing import Optional
 from .config import get_data_dir
 from .models import Campaign, CampaignMember
 from .path_utils import validate_path_component
+
+# R37: campaigns.json is a single shared JSON store (unlike recording_manager,
+# which is per-record and already locked). Every mutating CRUD function below
+# does an unlocked load -> modify -> save; two concurrent web requests (e.g.
+# two campaign-editor tabs, or a wizard submit racing a roster edit) can lose
+# one write. Mirrors recording_manager's lock pattern: a module-level lock
+# held around each function's load/modify/save, not around the pure readers
+# (load_campaigns, get_campaign_profile_keys, lookup_profile_by_discord_id,
+# get_transcripts_for_campaign, get_campaign_for_transcript) or the low-level
+# save_campaigns() primitive itself -- locking save_campaigns() too would
+# deadlock the CRUD functions that call it while already holding the lock.
+_campaigns_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -122,28 +135,30 @@ def create_campaign(display_name: str, data_dir: Optional[Path] = None) -> Campa
     if not slug:
         raise ValueError(f"Cannot derive a valid slug from name: {display_name!r}")
 
-    campaigns = load_campaigns(data_dir)
-    if slug in campaigns:
-        raise ValueError(f"Campaign with slug {slug!r} already exists")
+    with _campaigns_lock:
+        campaigns = load_campaigns(data_dir)
+        if slug in campaigns:
+            raise ValueError(f"Campaign with slug {slug!r} already exists")
 
-    campaign = Campaign(
-        slug=slug,
-        display_name=display_name,
-        created=date.today().isoformat(),
-        members={},
-    )
-    campaigns[slug] = campaign
-    save_campaigns(campaigns, data_dir)
-    return campaign
+        campaign = Campaign(
+            slug=slug,
+            display_name=display_name,
+            created=date.today().isoformat(),
+            members={},
+        )
+        campaigns[slug] = campaign
+        save_campaigns(campaigns, data_dir)
+        return campaign
 
 
 def delete_campaign(slug: str, data_dir: Optional[Path] = None) -> None:
     """Delete a campaign. Raises KeyError if not found. Never touches profiles or embeddings."""
-    campaigns = load_campaigns(data_dir)
-    if slug not in campaigns:
-        raise KeyError(f"Campaign {slug!r} not found")
-    del campaigns[slug]
-    save_campaigns(campaigns, data_dir)
+    with _campaigns_lock:
+        campaigns = load_campaigns(data_dir)
+        if slug not in campaigns:
+            raise KeyError(f"Campaign {slug!r} not found")
+        del campaigns[slug]
+        save_campaigns(campaigns, data_dir)
 
 
 def add_member(
@@ -154,24 +169,55 @@ def add_member(
     data_dir: Optional[Path] = None,
 ) -> None:
     """Add or update a profile's membership in a campaign. Raises KeyError if campaign missing."""
-    campaigns = load_campaigns(data_dir)
-    if slug not in campaigns:
-        raise KeyError(f"Campaign {slug!r} not found")
-    campaigns[slug].members[profile_key] = CampaignMember(
-        profile_key=profile_key,
-        role=role,
-        character=character,
-    )
-    save_campaigns(campaigns, data_dir)
+    with _campaigns_lock:
+        campaigns = load_campaigns(data_dir)
+        if slug not in campaigns:
+            raise KeyError(f"Campaign {slug!r} not found")
+        campaigns[slug].members[profile_key] = CampaignMember(
+            profile_key=profile_key,
+            role=role,
+            character=character,
+        )
+        save_campaigns(campaigns, data_dir)
+
+
+def rekey_member(old_key: str, new_key: str, data_dir: Optional[Path] = None) -> int:
+    """Rekey a profile across every campaign roster it appears in (R31).
+
+    Called by ``speaker_manager.rename_profile()`` when a profile's key
+    changes — campaign membership is keyed by profile key, so a rekey
+    without this would leave every roster entry (including its Discord ID
+    binding and role/character overrides) dangling. The full
+    ``CampaignMember`` record is preserved under the new key; only
+    ``profile_key`` is rewritten. If a member already exists under
+    ``new_key`` (shouldn't happen — ``rename_profile`` refuses key
+    collisions), the existing entry wins and the old one is dropped.
+
+    Returns the number of campaigns updated.
+    """
+    with _campaigns_lock:
+        campaigns = load_campaigns(data_dir)
+        changed = 0
+        for campaign in campaigns.values():
+            if old_key in campaign.members:
+                member = campaign.members.pop(old_key)
+                if new_key not in campaign.members:
+                    member.profile_key = new_key
+                    campaign.members[new_key] = member
+                changed += 1
+        if changed:
+            save_campaigns(campaigns, data_dir)
+        return changed
 
 
 def remove_member(slug: str, profile_key: str, data_dir: Optional[Path] = None) -> None:
     """Remove a profile from a campaign roster. No-op if profile not in roster."""
-    campaigns = load_campaigns(data_dir)
-    if slug not in campaigns:
-        raise KeyError(f"Campaign {slug!r} not found")
-    campaigns[slug].members.pop(profile_key, None)
-    save_campaigns(campaigns, data_dir)
+    with _campaigns_lock:
+        campaigns = load_campaigns(data_dir)
+        if slug not in campaigns:
+            raise KeyError(f"Campaign {slug!r} not found")
+        campaigns[slug].members.pop(profile_key, None)
+        save_campaigns(campaigns, data_dir)
 
 
 def get_campaign_profile_keys(slug: str, data_dir: Optional[Path] = None) -> set[str]:
@@ -199,20 +245,21 @@ def bind_discord_id(
     Pass discord_user_id=None to clear the binding.
     Raises KeyError if the campaign or member is not found.
     """
-    campaigns = load_campaigns(data_dir)
-    if slug not in campaigns:
-        raise KeyError(f"Campaign {slug!r} not found")
-    if profile_key not in campaigns[slug].members:
-        raise KeyError(f"Member {profile_key!r} not in campaign {slug!r}")
+    with _campaigns_lock:
+        campaigns = load_campaigns(data_dir)
+        if slug not in campaigns:
+            raise KeyError(f"Campaign {slug!r} not found")
+        if profile_key not in campaigns[slug].members:
+            raise KeyError(f"Member {profile_key!r} not in campaign {slug!r}")
 
-    if discord_user_id:
-        # Clear any existing binding for this discord_user_id (one-to-one)
-        for key, member in campaigns[slug].members.items():
-            if member.discord_user_id == discord_user_id and key != profile_key:
-                member.discord_user_id = None
+        if discord_user_id:
+            # Clear any existing binding for this discord_user_id (one-to-one)
+            for key, member in campaigns[slug].members.items():
+                if member.discord_user_id == discord_user_id and key != profile_key:
+                    member.discord_user_id = None
 
-    campaigns[slug].members[profile_key].discord_user_id = discord_user_id or None
-    save_campaigns(campaigns, data_dir)
+        campaigns[slug].members[profile_key].discord_user_id = discord_user_id or None
+        save_campaigns(campaigns, data_dir)
 
 
 def lookup_profile_by_discord_id(
@@ -243,28 +290,30 @@ def move_transcript_to_campaign(
     Removes the stem from any other campaign first (one transcript → one campaign).
     Raises KeyError if the target campaign slug is not found.
     """
-    campaigns = load_campaigns(data_dir)
-    if slug not in campaigns:
-        raise KeyError(f"Campaign {slug!r} not found")
-    # Remove from any existing campaign first
-    for s, c in campaigns.items():
-        if stem in c.transcripts and s != slug:
-            c.transcripts.remove(stem)
-    if stem not in campaigns[slug].transcripts:
-        campaigns[slug].transcripts.append(stem)
-    save_campaigns(campaigns, data_dir)
+    with _campaigns_lock:
+        campaigns = load_campaigns(data_dir)
+        if slug not in campaigns:
+            raise KeyError(f"Campaign {slug!r} not found")
+        # Remove from any existing campaign first
+        for s, c in campaigns.items():
+            if stem in c.transcripts and s != slug:
+                c.transcripts.remove(stem)
+        if stem not in campaigns[slug].transcripts:
+            campaigns[slug].transcripts.append(stem)
+        save_campaigns(campaigns, data_dir)
 
 
 def remove_transcript_from_campaign(stem: str, data_dir: Optional[Path] = None) -> None:
     """Disassociate a transcript stem from whichever campaign it belongs to (no-op if none)."""
-    campaigns = load_campaigns(data_dir)
-    changed = False
-    for c in campaigns.values():
-        if stem in c.transcripts:
-            c.transcripts.remove(stem)
-            changed = True
-    if changed:
-        save_campaigns(campaigns, data_dir)
+    with _campaigns_lock:
+        campaigns = load_campaigns(data_dir)
+        changed = False
+        for c in campaigns.values():
+            if stem in c.transcripts:
+                c.transcripts.remove(stem)
+                changed = True
+        if changed:
+            save_campaigns(campaigns, data_dir)
 
 
 def get_campaign_for_transcript(stem: str, data_dir: Optional[Path] = None) -> Optional[str]:

@@ -57,7 +57,7 @@ _LLM_DEFAULT_MODELS = {
     "ollama": "llama3.1:8b",
     "ollama-cloud": "gpt-oss:120b",
     "lmstudio": "",          # blank → use whatever model is loaded in LM Studio
-    "anthropic": "claude-sonnet-4-6",
+    "anthropic": "claude-sonnet-5",
     "openai": "gpt-4o-mini",
     "google": "gemini-1.5-flash",
 }
@@ -84,6 +84,11 @@ LLM_SECRET_KEYS = frozenset({
 })
 
 COMPUTE_TYPES = ("auto", "float16", "int8_float16", "int8", "float32")
+
+# Canonical enum tuples shared by the CLI's click.Choice lists and the web
+# form's server-side validation (R33) — one source of truth for both.
+MODEL_SIZES = ("tiny", "base", "small", "medium", "large-v3", "large-v3-turbo")
+DEVICES = ("auto", "cpu", "cuda", "mps")
 
 
 def resolve_compute_type(compute_type: str, device: str) -> str:

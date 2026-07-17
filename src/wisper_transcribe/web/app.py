@@ -38,10 +38,18 @@ def _build_tailwind() -> None:
     no Node.js required).  Safe to call on every startup; skips the build
     if output is already up-to-date.
     """
-    if (
-        _OUTPUT_CSS.exists()
-        and _INPUT_CSS.stat().st_mtime <= _OUTPUT_CSS.stat().st_mtime
-    ):
+    # R32-8: _INPUT_CSS.stat() raised an uncaught FileNotFoundError here (a
+    # stripped/partial install missing input.css would crash startup instead
+    # of falling into the warn-and-continue path below).
+    try:
+        up_to_date = (
+            _OUTPUT_CSS.exists()
+            and _INPUT_CSS.stat().st_mtime <= _OUTPUT_CSS.stat().st_mtime
+        )
+    except OSError:
+        up_to_date = False
+
+    if up_to_date:
         return  # already up-to-date
 
     try:
@@ -61,21 +69,28 @@ def _build_tailwind() -> None:
         warnings.warn(f"Tailwind CSS build failed: {exc}. Using existing tailwind.min.css.")
 
 def _cleanup_orphaned_uploads() -> None:
-    """Delete wisper_upload_* temp files left by jobs that crashed mid-transcription.
+    """Delete wisper_upload_*/wisper_enroll_*/wisper_enrollsrc_* temp files
+    left by requests or jobs that crashed mid-flight.
 
     The web upload route saves the file to a NamedTemporaryFile with the
-    wisper_upload_ prefix before enqueuing the job.  If the server crashes
-    while a job is running, the temp file is never cleaned up.  We sweep on
-    startup — the files are only needed while a job is running, so anything
-    still on disk at boot time is safe to remove.
+    wisper_upload_ prefix before enqueuing the job; the standalone speaker
+    enroll route (routes/speakers.py) uses the wisper_enroll_ prefix, which
+    JobQueue.submit_standalone_enroll immediately renames to
+    wisper_enrollsrc_<job-id> at submit time (R6 — same rename-at-submit
+    pattern as F5, so a *pending* job's file never matches the
+    wisper_enroll_* glob; the job deletes it in a finally). This sweep is
+    only the crash-window safety net for all three prefixes. Sweeping
+    wisper_enrollsrc_* here is safe because the sweep runs at startup, when
+    the in-memory job queue is necessarily empty — any such file on disk at
+    boot time belongs to a job that died with the previous process.
     """
     import glob
     import logging
     import tempfile
 
     tmp_dir = tempfile.gettempdir()
-    pattern = str(Path(tmp_dir) / "wisper_upload_*")
-    orphans = glob.glob(pattern)
+    patterns = ("wisper_upload_*", "wisper_enroll_*", "wisper_enrollsrc_*")
+    orphans = [p for pattern in patterns for p in glob.glob(str(Path(tmp_dir) / pattern))]
     if not orphans:
         return
     log = logging.getLogger(__name__)
@@ -117,7 +132,9 @@ class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
     ) -> StarletteResponse:
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "SAMEORIGIN"
+        # R18: must agree with the CSP's `frame-ancestors 'none'` — DENY, not
+        # SAMEORIGIN (the two headers previously contradicted each other).
+        response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Content-Security-Policy"] = _CSP
         return response
@@ -135,8 +152,9 @@ def create_app() -> FastAPI:
 
         # Write server.json so CLI can discover the running server.
         # WISPER_BIND is set by the `wisper server` CLI command; falls back to
-        # 0.0.0.0:8080. 0.0.0.0 is normalised to 127.0.0.1 for CLI use.
-        raw_bind = os.environ.get("WISPER_BIND", "0.0.0.0:8080")
+        # 127.0.0.1:8080 (the CLI's default bind since R16). 0.0.0.0 is
+        # normalised to 127.0.0.1 for CLI use.
+        raw_bind = os.environ.get("WISPER_BIND", "127.0.0.1:8080")
         host, _, port = raw_bind.rpartition(":")
         cli_host = "127.0.0.1" if host in ("0.0.0.0", "") else host
         server_url = f"http://{cli_host}:{port}"

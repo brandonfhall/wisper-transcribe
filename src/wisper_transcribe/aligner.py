@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 from .models import AlignedSegment, DiarizationSegment, TranscriptionSegment, Word
 
 # F13: thresholds for the micro-run smoothing pass in `_smooth_word_speakers()`.
@@ -54,15 +56,14 @@ def _nearest_speaker(midpoint: float, diarization: list[DiarizationSegment]) -> 
     return best_speaker
 
 
-def _assign_word_speakers(
+def _assign_word_speakers_bruteforce(
     words: list[Word], diarization: list[DiarizationSegment]
 ) -> list[str]:
-    """Assign a speaker label to each word.
+    """Original O(words * turns) implementation -- the correctness reference.
 
-    Each word is assigned the diarization turn with max time overlap. A word
-    overlapping no turn inherits the nearest turn's speaker by word-midpoint
-    distance. If there is no diarization at all, a word falls back to the
-    previous word's assigned speaker, or "UNKNOWN" for the first word.
+    Kept as the unconditional fallback for `_assign_word_speakers()` below
+    when its sweep's sortedness precondition doesn't hold, so identity with
+    this function is guaranteed for ANY input, not just time-ordered words.
     """
     speakers: list[str] = []
     prev_speaker = "UNKNOWN"
@@ -78,6 +79,99 @@ def _assign_word_speakers(
 
         speakers.append(speaker)
         prev_speaker = speaker
+
+    return speakers
+
+
+def _assign_word_speakers(
+    words: list[Word], diarization: list[DiarizationSegment]
+) -> list[str]:
+    """Assign a speaker label to each word.
+
+    Each word is assigned the diarization turn with max time overlap. A word
+    overlapping no turn inherits the nearest turn's speaker by word-midpoint
+    distance. If there is no diarization at all, a word falls back to the
+    previous word's assigned speaker, or "UNKNOWN" for the first word.
+
+    R27: a 3-hour session can carry ~30k words and ~2k diarization turns; a
+    brute-force per-word scan of every turn (`_best_overlap_speaker`) is
+    ~60M overlap computations. This assigns turns once by `start` and walks
+    words with a sweep (two-pointer) over that ordering, keeping only the
+    turns that can still overlap the current word ("active" set) instead of
+    rescanning all of them -- amortized O(words + turns) in the common case
+    where turns don't all overlap each other, vs. O(words * turns) before.
+
+    The sweep's expiry step drops a turn once its `end` falls behind the
+    *current* word's `start`, on the assumption that no later word could
+    need it back -- true only when `words` is time-ordered (non-decreasing
+    `start`), which always holds for whisper/faster-whisper output but
+    isn't a guarantee this function should silently rely on. So identity
+    with `_assign_word_speakers_bruteforce()` is made unconditional instead
+    of assumed: a single ascending-order check up front routes any
+    unsorted input straight to the brute-force reference rather than
+    running the sweep on an input it isn't valid for.
+
+    Tie-breaking is bit-identical to the old brute-force scan: for the
+    max-overlap turn, `_best_overlap_speaker`'s `if overlap > best_overlap`
+    is strict, so among turns tied for the max overlap value, the one
+    appearing EARLIEST in the original (caller-supplied) `diarization` list
+    order wins -- not the one found first during the sweep. This is
+    reproduced here by comparing original list indices among ties rather
+    than relying on visit order. The nearest-turn fallback (no word overlaps
+    any turn) reuses `_nearest_speaker` unchanged -- it triggers only for
+    words diarization doesn't cover at all, which is rare, so it stays
+    brute-force without hurting the common-case complexity.
+    """
+    if not diarization:
+        speakers: list[str] = []
+        prev_speaker = "UNKNOWN"
+        for _ in words:
+            speakers.append(prev_speaker)
+        return speakers
+
+    for i in range(len(words) - 1):
+        if words[i].start > words[i + 1].start:
+            return _assign_word_speakers_bruteforce(words, diarization)
+
+    speakers = []
+    n = len(diarization)
+    order = sorted(range(n), key=lambda i: diarization[i].start)
+    sorted_starts = [diarization[i].start for i in order]
+
+    # Active window: (original_index, turn) pairs admitted because their
+    # start is before the current word's end, not yet expired because their
+    # end is still >= the current word's start.
+    active: list[tuple[int, DiarizationSegment]] = []
+    next_idx = 0
+
+    for w in words:
+        while next_idx < n and sorted_starts[next_idx] <= w.end:
+            oi = order[next_idx]
+            active.append((oi, diarization[oi]))
+            next_idx += 1
+
+        if active:
+            active = [(oi, t) for oi, t in active if t.end >= w.start]
+
+        best_oi: Optional[int] = None
+        best_overlap = 0.0
+        for oi, t in active:
+            overlap = min(w.end, t.end) - max(w.start, t.start)
+            if overlap <= 0.0:
+                continue
+            if best_oi is None or overlap > best_overlap or (
+                overlap == best_overlap and oi < best_oi
+            ):
+                best_overlap = overlap
+                best_oi = oi
+
+        if best_oi is not None:
+            speaker = diarization[best_oi].speaker
+        else:
+            midpoint = (w.start + w.end) / 2.0
+            speaker = _nearest_speaker(midpoint, diarization)
+
+        speakers.append(speaker)
 
     return speakers
 

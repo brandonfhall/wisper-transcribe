@@ -248,14 +248,18 @@ def test_validate_job_id_rejects_invalid_inputs(bad_id: str):
 # ---------------------------------------------------------------------------
 
 def test_speakers_enroll_error_does_not_leak_exception(client: TestClient):
-    """A failed enrollment must redirect with a generic code, not exception details."""
-    with patch("wisper_transcribe.config.load_config", return_value={}), \
-         patch("wisper_transcribe.config.get_device", return_value="cpu"), \
-         patch("wisper_transcribe.config.get_hf_token", return_value="tok"), \
-         patch(
-             "wisper_transcribe.audio_utils.convert_to_wav",
-             side_effect=RuntimeError("secret internal path: /home/user/.config"),
-         ):
+    """A failed enrollment hand-off must redirect with a generic code, not
+    exception details. (R6: the ML work itself now runs in a background
+    JOB_ENROLL job whose generic job.error is covered in
+    tests/test_web_jobs.py; the route's remaining failure surface is the
+    job submission itself.)"""
+    from wisper_transcribe.web.jobs import JobQueue
+
+    with patch.object(
+        JobQueue,
+        "submit_standalone_enroll",
+        side_effect=RuntimeError("secret internal path: /home/user/.config"),
+    ):
         resp = client.post(
             "/speakers/enroll",
             files={"audio": ("clip.mp3", b"fake", "audio/mpeg")},
@@ -417,3 +421,94 @@ def test_recordings_html_path_traversal_blocked(client, payload):
     assert resp.status_code in (400, 404, 501)
 
 
+
+
+# ---------------------------------------------------------------------------
+# R24: shared excerpt-clip lookup helper (enroll_shared.find_excerpt_clip)
+# ---------------------------------------------------------------------------
+
+def test_find_excerpt_clip_traversal_payloads_stay_inside_out_dir(tmp_path):
+    """Traversal-shaped labels must never resolve outside the output dir —
+    the helper's re.sub whitelist + abspath/startswith guard neutralise them."""
+    from wisper_transcribe.web.enroll_shared import find_excerpt_clip
+
+    out_dir = tmp_path / "output"
+    out_dir.mkdir()
+    secret = tmp_path / "secret.mp3"
+    secret.write_bytes(b"outside")
+
+    for payload in ["../secret", "..\\secret", "a/../../secret", "\x00", "x\x00y"]:
+        assert find_excerpt_clip(out_dir, "stem", [payload]) is None
+
+
+def test_find_excerpt_clip_regex_busting_labels_are_sanitised(tmp_path):
+    """Labels with regex-busting characters are collapsed to underscores and
+    only match a file that literally carries the sanitised name."""
+    from wisper_transcribe.web.enroll_shared import find_excerpt_clip
+
+    out_dir = tmp_path / "output"
+    out_dir.mkdir()
+    clip = out_dir / "stem_excerpt_invalid_name.mp3"
+    clip.write_bytes(b"audio")
+
+    found = find_excerpt_clip(out_dir, "stem", ["invalid*name"])
+    assert found == clip
+
+
+def test_find_excerpt_clip_returns_first_existing_candidate(tmp_path):
+    from wisper_transcribe.web.enroll_shared import find_excerpt_clip
+
+    out_dir = tmp_path / "output"
+    out_dir.mkdir()
+    legacy = out_dir / "stem_excerpt_Alice.mp3"
+    legacy.write_bytes(b"audio")
+
+    found = find_excerpt_clip(out_dir, "stem", ["SPEAKER_00", "Alice"])
+    assert found == legacy
+
+
+def test_find_excerpt_clip_missing_returns_none(tmp_path):
+    from wisper_transcribe.web.enroll_shared import find_excerpt_clip
+
+    out_dir = tmp_path / "output"
+    out_dir.mkdir()
+    assert find_excerpt_clip(out_dir, "stem", ["SPEAKER_00"]) is None
+
+
+# ---------------------------------------------------------------------------
+# R31: rename target name (form field) flows into file paths via the profile
+# key — must be guarded like any other path component
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS + [
+    "../escape", "a/b", "..", "with space/../x",
+])
+def test_speakers_rename_new_name_path_guard(client: TestClient, payload: str, tmp_path):
+    """R31: the web rename rekeys the profile (moves .npy/.mp3 files), so the
+    submitted new name must pass the path-component guard; hostile names are
+    refused with a generic error code and never reflected."""
+    import numpy as np
+    from wisper_transcribe.models import SpeakerProfile
+    from wisper_transcribe.speaker_manager import save_profiles
+
+    emb_dir = tmp_path / "profiles" / "embeddings"
+    emb_dir.mkdir(parents=True)
+    np.save(str(emb_dir / "alice.npy"), np.zeros(2))
+    save_profiles({"alice": SpeakerProfile(
+        name="alice", display_name="Alice", role="",
+        embedding_path=emb_dir / "alice.npy",
+        enrolled_date="2026-04-07", enrollment_source="t.mp3",
+    )}, data_dir=tmp_path)
+
+    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path):
+        resp = client.post(
+            "/speakers/alice/rename",
+            data={"new_name": payload},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/speakers?error=rename_failed"
+    # No file escaped or moved
+    assert (emb_dir / "alice.npy").exists()

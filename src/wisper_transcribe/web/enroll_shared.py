@@ -45,6 +45,41 @@ log = logging.getLogger(__name__)
 RAW_LABEL_RE = re.compile(r"^SPEAKER_\d+$")
 
 
+def find_excerpt_clip(out_dir: Path, stem: str, candidates: list[str]) -> Optional[Path]:
+    """Locate an on-disk speaker excerpt clip (``<stem>_excerpt_<label>.mp3``).
+
+    R24: this lookup (and its CodeQL guard) used to be duplicated between the
+    two enrollment wizards' excerpt routes (``routes/transcribe.py`` and
+    ``routes/transcripts.py``); it lives here once now.
+
+    ``candidates`` are speaker labels to try in order (e.g. the raw pyannote
+    label first, then a legacy display-name key for pre-fix transcripts).
+    Each is whitelisted to ``[\\w-]`` via ``re.sub`` and then run through the
+    ``os.path.abspath`` + ``startswith`` round-trip — the ``re.sub`` is
+    already a tight whitelist, but CodeQL's taint tracker only recognises the
+    ``os.path`` pattern as a path sanitiser (CLAUDE.md security note), so
+    both layers are required. Do not weaken either.
+
+    Returns the first existing clip path, or None.
+    """
+    import os as _os
+    import re as _re
+
+    base_dir = _os.path.abspath(str(out_dir))
+    if not base_dir.endswith(_os.sep):
+        base_dir += _os.sep
+    for cand in candidates:
+        safe_label = _re.sub(r"[^\w\-]", "_", cand)
+        candidate_abs = _os.path.abspath(
+            _os.path.join(base_dir, f"{stem}_excerpt_{safe_label}.mp3")
+        )
+        if not candidate_abs.startswith(base_dir):
+            continue
+        if _os.path.exists(candidate_abs):
+            return Path(candidate_abs)
+    return None
+
+
 def _load_diar_sidecar(md_path: Path) -> Optional[dict]:
     """Load the enrollment sidecar for a transcript, or None if absent/corrupt."""
     import json as _json

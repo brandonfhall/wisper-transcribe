@@ -13,6 +13,7 @@ if not os.environ.get("WISPER_DEBUG"):
     warnings.filterwarnings("ignore", module="pyannote.audio.core.io")
 
 from . import __version__
+from . import config as _config
 
 
 @click.group()
@@ -24,11 +25,11 @@ def main():
 @main.command()
 @click.argument("path", type=click.Path(exists=True, path_type=Path))
 @click.option("-o", "--output", "output_dir", type=click.Path(path_type=Path), default=None, help="Output directory (default: same as input)")
-@click.option("-m", "--model", "model_size", default="large-v3-turbo", show_default=True, type=click.Choice(["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"]), help="Whisper model size")
-@click.option("-l", "--language", default="en", show_default=True, help="Language code (e.g. en, fr) or 'auto'")
-@click.option("--device", default="auto", show_default=True, type=click.Choice(["auto", "cpu", "cuda", "mps"]), help="Compute device")
+@click.option("-m", "--model", "model_size", default=None, type=click.Choice(_config.MODEL_SIZES), help="Whisper model size (default: from config)")
+@click.option("-l", "--language", default=None, help="Language code (e.g. en, fr) or 'auto' for auto-detect (default: from config)")
+@click.option("--device", default="auto", show_default=True, type=click.Choice(_config.DEVICES), help="Compute device")
 @click.option("--overwrite", is_flag=True, default=False, help="Overwrite existing output files")
-@click.option("--timestamps/--no-timestamps", default=True, show_default=True, help="Include timestamps in output")
+@click.option("--timestamps/--no-timestamps", default=None, help="Include timestamps in output (default: from config)")
 @click.option("-n", "--num-speakers", default=None, type=int, help="Expected number of speakers (improves diarization)")
 @click.option("--min-speakers", default=None, type=int, help="Minimum number of speakers")
 @click.option("--max-speakers", default=None, type=int, help="Maximum number of speakers")
@@ -36,7 +37,7 @@ def main():
 @click.option("--enroll-speakers", is_flag=True, default=False, help="Interactively name and enroll detected speakers")
 @click.option("--play-audio", is_flag=True, default=False, help="Play each speaker's audio excerpt during enrollment")
 @click.option("--compute-type", default="auto", show_default=True,
-              type=click.Choice(["auto", "float16", "int8_float16", "int8", "float32"]),
+              type=click.Choice(_config.COMPUTE_TYPES),
               help="CTranslate2 quantization (auto=float16 on CUDA, int8 on CPU)")
 @click.option("--vad/--no-vad", default=None,
               help="Voice activity detection to skip silence (default: on, from config)")
@@ -54,11 +55,11 @@ def main():
 def transcribe(
     path: Path,
     output_dir: Optional[Path],
-    model_size: str,
-    language: str,
+    model_size: Optional[str],
+    language: Optional[str],
     device: str,
     overwrite: bool,
-    timestamps: bool,
+    timestamps: Optional[bool],
     num_speakers: Optional[int],
     min_speakers: Optional[int],
     max_speakers: Optional[int],
@@ -74,7 +75,15 @@ def transcribe(
     debug: bool,
     campaign: Optional[str],
 ):
-    """Transcribe an audio file (or folder of files) to markdown."""
+    """Transcribe an audio file (or folder of files) to markdown.
+
+    ``--model``/``--language``/``--timestamps`` default to None, meaning
+    "use the value from config" (see process_file's sentinel docstring for
+    the full resolution order). Passing ``--language auto`` is a distinct
+    explicit marker for auto-detection — it is forwarded as the literal
+    string ``"auto"`` and resolved to ``None`` inside process_file, so it
+    is never confused with the "unset, use config" None sentinel.
+    """
     if debug or verbose:
         from .debug_log import setup_logging
         log_path = setup_logging(debug=debug, verbose=verbose)
@@ -82,8 +91,6 @@ def transcribe(
             click.echo(f"  Debug log: {log_path}")
 
     from .pipeline import process_file, process_folder
-
-    lang = None if language == "auto" else language
 
     hotwords: Optional[list[str]] = None
     if vocab_file is not None:
@@ -94,7 +101,7 @@ def transcribe(
         output_dir=output_dir,
         model_size=model_size,
         device=device,
-        language=lang,
+        language=language,
         include_timestamps=timestamps,
         overwrite=overwrite,
         no_diarize=no_diarize,
@@ -112,14 +119,8 @@ def transcribe(
 
     if path.is_dir():
         click.echo(f"Processing folder: {path}")
-        successes, errors = process_folder(path, verbose=verbose, workers=workers, **kwargs)
-        skipped = sum(
-            1 for f in path.iterdir()
-            if f.suffix.lower() in _audio_extensions()
-            and (kwargs.get("output_dir") or path) / (f.stem + ".md") not in successes
-            and not any(e.startswith(f.name) for e in errors)
-        )
-        click.echo(f"\nDone. {len(successes)} transcribed, {skipped} skipped, {len(errors)} errors.")
+        successes, skipped, errors = process_folder(path, verbose=verbose, workers=workers, **kwargs)
+        click.echo(f"\nDone. {len(successes)} transcribed, {len(skipped)} skipped, {len(errors)} errors.")
         for err in errors:
             click.echo(f"  ERROR: {err}", err=True)
     else:
@@ -136,7 +137,12 @@ def _audio_extensions():
 
 
 @main.command()
-@click.option("--host", default="0.0.0.0", show_default=True, help="Bind host")
+# R16: default to loopback — the web UI has no authentication or CSRF
+# protection, so binding all interfaces by default exposed full read-write
+# control to anyone on the network. Pass --host 0.0.0.0 explicitly to serve
+# a trusted network (Docker does this in docker-compose.yml).
+@click.option("--host", default="127.0.0.1", show_default=True,
+              help="Bind host (use 0.0.0.0 to expose on the network — no auth, trusted networks only)")
 @click.option("--port", default=8080, show_default=True, type=int, help="Bind port")
 @click.option("--reload", is_flag=True, default=False, help="Auto-reload on code change (dev mode)")
 @click.option("--debug", is_flag=True, default=False,
@@ -263,15 +269,8 @@ def setup():
         if provider not in LLM_PROVIDERS:
             click.echo(f"   WARN: unknown provider {provider!r} — skipping LLM setup", err=True)
         else:
-            from .config import _LLM_DEFAULT_ENDPOINTS
-            provider_defaults = {
-                "ollama": "llama3.1:8b",
-                "lmstudio": "",
-                "anthropic": "claude-sonnet-4-6",
-                "openai": "gpt-4o-mini",
-                "google": "gemini-1.5-flash",
-            }
-            suggested_model = config.get("llm_model", "") or provider_defaults.get(provider, "")
+            from .config import _LLM_DEFAULT_ENDPOINTS, _LLM_DEFAULT_MODELS
+            suggested_model = config.get("llm_model", "") or _LLM_DEFAULT_MODELS.get(provider, "")
 
             if provider in ("ollama", "lmstudio"):
                 default_ep = _LLM_DEFAULT_ENDPOINTS.get(provider, "http://localhost:11434")
@@ -307,13 +306,8 @@ def setup():
             config["llm_model"] = model_choice
 
             if provider not in ("ollama", "lmstudio"):
-                env_map = {
-                    "anthropic":    ("ANTHROPIC_API_KEY", "anthropic_api_key"),
-                    "openai":       ("OPENAI_API_KEY",    "openai_api_key"),
-                    "google":       ("GOOGLE_API_KEY",    "google_api_key"),
-                    "ollama-cloud": ("OLLAMA_API_KEY",    "ollama_cloud_api_key"),
-                }
-                env_name, config_key = env_map[provider]
+                from .config import _LLM_API_KEY_ENV
+                env_name, config_key = _LLM_API_KEY_ENV[provider]
                 click.echo(f"\n   Tip: the env var {env_name} always takes precedence if set.")
                 click.echo("   Leave blank to set it later via the env var.")
                 entered = click.prompt("   API key", default="", show_default=False,
@@ -394,20 +388,39 @@ def config_show():
 @click.argument("value")
 def config_set(key: str, value: str):
     """Set a configuration value."""
-    from .config import load_config, save_config
+    from .config import DEFAULTS, load_config, save_config
+
+    if key not in DEFAULTS:
+        raise click.ClickException(
+            f"Unknown config key {key!r}; run `wisper config show` to list keys."
+        )
 
     cfg = load_config()
-    # Attempt to coerce to existing type
-    if key in cfg and isinstance(cfg[key], bool):
-        value = value.lower() in ("true", "1", "yes")
-    elif key in cfg and isinstance(cfg[key], float):
-        value = float(value)
-    elif key in cfg and isinstance(cfg[key], list):
+    # Coerce against the schema's default type, not cfg[key]'s current
+    # runtime type — if a value was previously stored as the wrong type
+    # (e.g. an old bug wrote min_speakers as a string), cfg[key] would
+    # reflect that wrong type and every isinstance check below would miss,
+    # silently re-storing the bad type forever. DEFAULTS[key] is always the
+    # canonical schema type since `key` was already validated above.
+    # bool is checked before int/float since bool is a subclass of int in
+    # Python — isinstance(True, int) is True, so an int check first would
+    # silently coerce booleans wrong.
+    schema_value = DEFAULTS[key]
+    coerced: object
+    if isinstance(schema_value, bool):
+        coerced = value.lower() in ("true", "1", "yes")
+    elif isinstance(schema_value, int):
+        coerced = int(value)
+    elif isinstance(schema_value, float):
+        coerced = float(value)
+    elif isinstance(schema_value, list):
         # Accept comma-separated input: "Kyra, Golarion, Zeldris" → ["Kyra", "Golarion", "Zeldris"]
-        value = [w.strip() for w in value.split(",") if w.strip()]
-    cfg[key] = value
+        coerced = [w.strip() for w in value.split(",") if w.strip()]
+    else:
+        coerced = value
+    cfg[key] = coerced
     save_config(cfg)
-    click.echo(f"Set {key} = {value!r}")
+    click.echo(f"Set {key} = {coerced!r}")
 
 
 @config.command("path")
@@ -486,16 +499,8 @@ def config_llm():
     if provider not in LLM_PROVIDERS:
         raise click.ClickException(f"Unknown provider: {provider!r}")
 
-    from .config import _LLM_DEFAULT_ENDPOINTS
-    provider_defaults = {
-        "ollama": "llama3.1:8b",
-        "ollama-cloud": "gpt-oss:120b",
-        "lmstudio": "",
-        "anthropic": "claude-sonnet-4-6",
-        "openai": "gpt-4o-mini",
-        "google": "gemini-1.5-flash",
-    }
-    suggested_model = cfg.get("llm_model", "") or provider_defaults.get(provider, "")
+    from .config import _LLM_DEFAULT_ENDPOINTS, _LLM_DEFAULT_MODELS
+    suggested_model = cfg.get("llm_model", "") or _LLM_DEFAULT_MODELS.get(provider, "")
 
     if provider in ("ollama", "lmstudio"):
         default_ep = _LLM_DEFAULT_ENDPOINTS.get(provider, "http://localhost:11434")
@@ -532,20 +537,8 @@ def config_llm():
     cfg["llm_model"] = model
 
     if provider not in ("ollama", "lmstudio"):
-        env_name_map = {
-            "anthropic":    "ANTHROPIC_API_KEY",
-            "openai":       "OPENAI_API_KEY",
-            "google":       "GOOGLE_API_KEY",
-            "ollama-cloud": "OLLAMA_API_KEY",
-        }
-        config_key_map = {
-            "anthropic":    "anthropic_api_key",
-            "openai":       "openai_api_key",
-            "google":       "google_api_key",
-            "ollama-cloud": "ollama_cloud_api_key",
-        }
-        env_name = env_name_map[provider]
-        config_key = config_key_map[provider]
+        from .config import _LLM_API_KEY_ENV
+        env_name, config_key = _LLM_API_KEY_ENV[provider]
         click.echo(
             f"\nAPI key: the env var {env_name} always takes precedence if set.\n"
             "Leave blank to keep the current stored value (or rely on the env var)."
@@ -579,40 +572,47 @@ def enroll(name: str, audio: Path, segment: Optional[str], notes: str, update: b
     device = get_device() if config.get("device", "auto") == "auto" else config["device"]
 
     wav_path = convert_to_wav(audio)
+    try:
+        # Build a fake single-segment diarization covering the whole file (or requested segment)
+        if segment:
+            start_str, end_str = segment.split("-")
+            def _parse_time(t: str) -> float:
+                parts = t.strip().split(":")
+                return sum(float(p) * (60 ** (len(parts) - 1 - i)) for i, p in enumerate(parts))
+            start = _parse_time(start_str)
+            end = _parse_time(end_str)
+        else:
+            from .audio_utils import get_duration
+            start, end = 0.0, get_duration(wav_path)
 
-    # Build a fake single-segment diarization covering the whole file (or requested segment)
-    if segment:
-        start_str, end_str = segment.split("-")
-        def _parse_time(t: str) -> float:
-            parts = t.strip().split(":")
-            return sum(float(p) * (60 ** (len(parts) - 1 - i)) for i, p in enumerate(parts))
-        start = _parse_time(start_str)
-        end = _parse_time(end_str)
-    else:
-        from .audio_utils import get_duration
-        start, end = 0.0, get_duration(wav_path)
+        from .models import DiarizationSegment
+        fake_segs = [DiarizationSegment(start=start, end=end, speaker="SPEAKER_00")]
 
-    from .models import DiarizationSegment
-    fake_segs = [DiarizationSegment(start=start, end=end, speaker="SPEAKER_00")]
+        key = name.lower().replace(" ", "_")
 
-    key = name.lower().replace(" ", "_")
-
-    if update:
-        new_emb = extract_embedding(wav_path, fake_segs, "SPEAKER_00", device)
-        update_embedding(key, new_emb)
-        click.echo(f"Updated embedding for {name!r} (EMA blend).")
-    else:
-        profile = enroll_speaker(
-            name=key,
-            display_name=name,
-            role="",
-            audio_path=wav_path,
-            segments=fake_segs,
-            speaker_label="SPEAKER_00",
-            device=device,
-            notes=notes,
-        )
-        click.echo(f"Enrolled {profile.display_name!r}.")
+        if update:
+            new_emb = extract_embedding(wav_path, fake_segs, "SPEAKER_00", device)
+            update_embedding(key, new_emb)
+            click.echo(f"Updated embedding for {name!r} (EMA blend).")
+        else:
+            profile = enroll_speaker(
+                name=key,
+                display_name=name,
+                role="",
+                audio_path=wav_path,
+                segments=fake_segs,
+                speaker_label="SPEAKER_00",
+                device=device,
+                notes=notes,
+            )
+            click.echo(f"Enrolled {profile.display_name!r}.")
+    finally:
+        # R9-2: convert_to_wav() writes to the OS tempdir when the input
+        # isn't already a 16kHz mono WAV -- clean it up here, mirroring
+        # enroll_shared.enroll_profiles(). No-op when `audio` was already a
+        # correct WAV (convert_to_wav returns it unchanged).
+        if wav_path != audio:
+            wav_path.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -644,19 +644,16 @@ def speakers_list():
 @click.argument("name")
 def speakers_remove(name: str):
     """Remove an enrolled speaker profile."""
-    from .speaker_manager import _get_embeddings_dir, load_profiles, save_profiles
+    # R37: goes through speaker_manager.remove_profile() (locked
+    # load-modify-save, R9-5's .npy + .mp3 cleanup) -- shared with the web
+    # /speakers/{name}/remove route instead of duplicating the sequence here.
+    from .speaker_manager import remove_profile
 
-    profiles = load_profiles()
     key = name.lower().replace(" ", "_")
-    if key not in profiles:
+    try:
+        remove_profile(key)
+    except KeyError:
         raise click.ClickException(f"Speaker {name!r} not found.")
-
-    emb_path = _get_embeddings_dir() / f"{key}.npy"
-    if emb_path.exists():
-        emb_path.unlink()
-
-    del profiles[key]
-    save_profiles(profiles)
     click.echo(f"Removed speaker {name!r}.")
 
 
@@ -665,28 +662,20 @@ def speakers_remove(name: str):
 @click.argument("new_name")
 def speakers_rename(old_name: str, new_name: str):
     """Rename an enrolled speaker."""
-    from .speaker_manager import _get_embeddings_dir, load_profiles, save_profiles
+    # R31: the rekey semantic (profile dict entry, .npy/.mp3 files, campaign
+    # membership) lives in speaker_manager.rename_profile — shared with the
+    # web rename route so both entry points do the same thing.
+    from .speaker_manager import rename_profile
 
-    profiles = load_profiles()
     old_key = old_name.lower().replace(" ", "_")
-    new_key = new_name.lower().replace(" ", "_")
-
-    if old_key not in profiles:
+    try:
+        rename_profile(old_key, new_name)
+    except KeyError:
         raise click.ClickException(f"Speaker {old_name!r} not found.")
-
-    profile = profiles.pop(old_key)
-    profile.name = new_key
-    profile.display_name = new_name
-
-    emb_dir = _get_embeddings_dir()
-    old_emb = emb_dir / f"{old_key}.npy"
-    new_emb = emb_dir / f"{new_key}.npy"
-    if old_emb.exists():
-        old_emb.rename(new_emb)
-    profile.embedding_path = new_emb
-
-    profiles[new_key] = profile
-    save_profiles(profiles)
+    except ValueError as e:
+        if "exists" in str(e):
+            raise click.ClickException(f"Speaker {new_name!r} already exists.")
+        raise click.ClickException(f"Invalid speaker name: {new_name!r}")
     click.echo(f"Renamed {old_name!r} → {new_name!r}.")
 
 
@@ -706,32 +695,37 @@ def speakers_test(audio: Path, num_speakers: Optional[int], campaign: Optional[s
     hf_token = get_hf_token(config)
 
     wav_path = convert_to_wav(audio)
-    diarization = diarize(wav_path, hf_token=hf_token, device=device, num_speakers=num_speakers)
+    try:
+        diarization = diarize(wav_path, hf_token=hf_token, device=device, num_speakers=num_speakers)
 
-    profile_filter = None
-    if campaign:
-        from .campaign_manager import _validate_campaign_slug, get_campaign_profile_keys
-        safe = _validate_campaign_slug(campaign)
-        if safe is None:
-            raise click.ClickException(f"Invalid campaign slug: {campaign!r}")
-        profile_filter = get_campaign_profile_keys(safe)
-        click.echo(f"  Campaign filter: {safe} ({len(profile_filter)} member(s))")
+        profile_filter = None
+        if campaign:
+            from .campaign_manager import _validate_campaign_slug, get_campaign_profile_keys
+            safe = _validate_campaign_slug(campaign)
+            if safe is None:
+                raise click.ClickException(f"Invalid campaign slug: {campaign!r}")
+            profile_filter = get_campaign_profile_keys(safe)
+            click.echo(f"  Campaign filter: {safe} ({len(profile_filter)} member(s))")
 
-    allow_many_to_one = num_speakers is None
-    matches = match_speakers(wav_path, diarization, device=device,
-                             threshold=config.get("similarity_threshold", 0.65),
-                             profile_filter=profile_filter,
-                             allow_many_to_one=allow_many_to_one)
+        allow_many_to_one = num_speakers is None
+        matches = match_speakers(wav_path, diarization, device=device,
+                                 threshold=config.get("similarity_threshold", 0.65),
+                                 profile_filter=profile_filter,
+                                 allow_many_to_one=allow_many_to_one)
 
-    if not matches:
-        click.echo("No enrolled profiles to match against.")
-        return
+        if not matches:
+            click.echo("No enrolled profiles to match against.")
+            return
 
-    if allow_many_to_one:
-        click.echo("  (num_speakers not pinned — many-to-one matching enabled)")
+        if allow_many_to_one:
+            click.echo("  (num_speakers not pinned — many-to-one matching enabled)")
 
-    for label, name in sorted(matches.items()):
-        click.echo(f"  {label} → {name}")
+        for label, name in sorted(matches.items()):
+            click.echo(f"  {label} → {name}")
+    finally:
+        # R9-2: see the `enroll` command above for why this cleanup exists.
+        if wav_path != audio:
+            wav_path.unlink(missing_ok=True)
 
 
 @speakers.command("reset")
@@ -913,17 +907,14 @@ def transcripts():
 def transcripts_list(campaign: Optional[str]):
     """List transcripts, grouped by campaign."""
     from wisper_transcribe.campaign_manager import load_campaigns, _validate_campaign_slug
-    from wisper_transcribe.config import get_data_dir
-    from pathlib import Path as _Path
+    from wisper_transcribe.path_utils import get_output_dir
 
     if campaign:
         safe = _validate_campaign_slug(campaign)
         if safe is None:
             raise click.ClickException("Invalid campaign slug")
 
-    out_dir = _Path("output")
-    if not out_dir.exists():
-        out_dir = _Path(get_data_dir()) / "output"
+    out_dir = get_output_dir()
 
     all_stems = sorted(p.stem for p in out_dir.glob("*.md") if not p.stem.endswith(".summary"))
 
@@ -1024,7 +1015,13 @@ def fix(transcript: Path, speaker: str, new_name: str, re_enroll: bool):
 # wisper refine  /  wisper summarize
 # ---------------------------------------------------------------------------
 
-_LLM_PROVIDER_CHOICE = click.Choice(["ollama", "anthropic", "openai", "google"])
+def _llm_provider_choice() -> click.Choice:
+    """Derive the CLI --provider choice list from config.LLM_PROVIDERS (R20)."""
+    from .config import LLM_PROVIDERS
+    return click.Choice(LLM_PROVIDERS)
+
+
+_LLM_PROVIDER_CHOICE = _llm_provider_choice()
 
 
 def _get_llm_client(provider: Optional[str], model: Optional[str],
@@ -1042,7 +1039,7 @@ def _get_llm_client(provider: Optional[str], model: Optional[str],
     if model:
         cfg = dict(cfg)
         cfg["llm_model"] = model
-    if endpoint and effective_provider == "ollama":
+    if endpoint and effective_provider in ("ollama", "lmstudio"):
         cfg = dict(cfg)
         cfg["llm_endpoint"] = endpoint
 
@@ -1355,6 +1352,15 @@ def record_start(campaign: Optional[str], voice_channel: Optional[str], guild: O
         if voice_channel is None:
             voice_channel = match["channel_id"]
         click.echo(f"Using preset {preset!r}: guild={guild}, channel={voice_channel}")
+
+    # Fall back to the saved defaults from `wisper config discord` before
+    # erroring — the web form already relies on these same keys (R30).
+    if guild is None or voice_channel is None:
+        cfg = load_config()
+        if guild is None:
+            guild = cfg.get("discord_default_guild") or None
+        if voice_channel is None:
+            voice_channel = cfg.get("discord_default_channel") or None
 
     if not voice_channel:
         raise click.ClickException("--voice-channel is required. Use --preset <name> or pass --voice-channel directly.")

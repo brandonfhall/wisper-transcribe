@@ -32,11 +32,19 @@ from wisper_transcribe.recording_manager import (
     load_recordings,
     save_recording,
 )
-from wisper_transcribe.web.audio_writer import RealtimePCMMixer, SegmentedOggWriter
+from wisper_transcribe.web.audio_writer import (
+    SegmentedWavWriter,
+    concat_wav_segments,
+    downsample_48k_stereo_to_16k_mono,
+)
 
 log = logging.getLogger(__name__)
 
 CTRL_USER_ID = "__ctrl__"
+# JDA's pre-mixed all-speakers track (see discord-bot Main.java
+# handleCombinedAudio) — delivered reliably alongside per-user frames, so it
+# is written directly as the combined/mixed track rather than re-mixed here.
+MIXED_USER_ID = "__mixed__"
 
 # Close codes: close codes that warrant a retry vs hard abort
 _TRANSIENT = frozenset({4009, 4015})
@@ -241,9 +249,9 @@ class BotManager:
         self._backoff = _backoff if _backoff is not None else self.DEFAULT_BACKOFF
 
         self._active_recording: Optional[Recording] = None
-        self._writers: dict[str, SegmentedOggWriter] = {}
-        self._mixer: Optional[RealtimePCMMixer] = None
-        self._mixed_writer: Optional[SegmentedOggWriter] = None
+        self._writers: dict[str, SegmentedWavWriter] = {}
+        self._combined_writer: Optional[SegmentedWavWriter] = None
+        self._combined_dir: Optional[Path] = None
         self._stop_event = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
 
@@ -376,18 +384,29 @@ class BotManager:
         return False  # source exhausted cleanly
 
     def _ensure_writers(self, recording: Recording) -> None:
-        """Initialise combined writer and mixer (idempotent)."""
-        if self._mixed_writer is None:
-            combined_dir = (
+        """Initialise the combined-track writer (idempotent across reconnects)."""
+        if self._combined_writer is None:
+            self._combined_dir = (
                 self._data_dir / "recordings" / recording.id / "combined"
             )
-            self._mixed_writer = SegmentedOggWriter(stream_dir=combined_dir)
-            self._mixer = RealtimePCMMixer()
+            self._combined_writer = SegmentedWavWriter(stream_dir=self._combined_dir)
 
     def _route_frame(
         self, user_id: str, pcm: bytes, recording: Recording
     ) -> None:
-        """Route one 20 ms PCM frame to per-user and combined writers."""
+        """Route one 20 ms 48 kHz stereo PCM frame to the right writer.
+
+        `__mixed__` is JDA's pre-mixed all-speakers track (see
+        `handleCombinedAudio` in Main.java) — it is the combined track
+        directly, not a per-user stream, so it bypasses per-user-dir
+        creation, auto-tagging, and unbound-speaker tracking entirely.
+        """
+        mono_16k = downsample_48k_stereo_to_16k_mono(pcm)
+
+        if user_id == MIXED_USER_ID:
+            self._combined_writer.write(mono_16k)
+            return
+
         if user_id not in self._writers:
             per_user_dir = (
                 self._data_dir
@@ -396,7 +415,7 @@ class BotManager:
                 / "per-user"
                 / user_id
             )
-            self._writers[user_id] = SegmentedOggWriter(stream_dir=per_user_dir)
+            self._writers[user_id] = SegmentedWavWriter(stream_dir=per_user_dir)
             if user_id not in recording.discord_speakers:
                 profile_key = ""
                 if recording.campaign_slug:
@@ -410,10 +429,7 @@ class BotManager:
                     recording.unbound_speakers.append(user_id)
                 save_recording(recording, self._data_dir)
 
-        self._writers[user_id].write(pcm)
-        self._mixer.add_frame(user_id, pcm)
-        mixed = self._mixer.mix()
-        self._mixed_writer.write(mixed)
+        self._writers[user_id].write(mono_16k)
 
     async def _handle_disconnect(
         self, recording: Recording, close_code: int, attempt: int
@@ -456,7 +472,16 @@ class BotManager:
         return True
 
     async def _finalise(self, recording: Recording) -> None:
-        """Close all writers and mark recording completed."""
+        """Close all writers, merge the combined track, mark recording completed.
+
+        R2: `Recording.combined_path` used to be assigned exactly once, to
+        `None`, and never populated — the segmented combined-track WAV
+        files were closed but never merged into a single file, so the
+        transcribe hand-off (`recording_transcribe_html`) always redirected
+        with `?error=no_audio`. This concatenates the combined writer's
+        segments into `recordings/<id>/combined.wav` and sets
+        `combined_path` when there was any audio to merge.
+        """
         for writer in self._writers.values():
             try:
                 writer.finalize()
@@ -464,16 +489,34 @@ class BotManager:
                 log.warning("Failed to finalise writer: %s", exc)
         self._writers.clear()
 
-        if self._mixed_writer:
+        if self._combined_writer:
             try:
-                self._mixed_writer.finalize()
+                self._combined_writer.finalize()
             except Exception as exc:
                 log.warning("Failed to finalise combined writer: %s", exc)
-            self._mixed_writer = None
-        self._mixer = None
 
-        if recording.status == "recording":
+            combined_dir = self._combined_dir
+            self._combined_writer = None
+            self._combined_dir = None
+
+            combined_out = self._data_dir / "recordings" / recording.id / "combined.wav"
+            try:
+                merged = concat_wav_segments(combined_dir, combined_out)
+            except Exception as exc:
+                log.warning("Failed to concatenate combined-track segments: %s", exc)
+                merged = None
+            if merged is not None:
+                recording.combined_path = merged
+                log.info("Recording %s combined track written to %s", recording.id, merged)
+
+        became_completed = recording.status == "recording"
+        if became_completed:
             recording.status = "completed"
             recording.ended_at = datetime.now(timezone.utc)
-            save_recording(recording, self._data_dir)
+
+        # Always persist — combined_path (and, when applicable, the
+        # completed-status transition) must survive even if an earlier
+        # disconnect handler already saved a terminal status (failed/degraded).
+        save_recording(recording, self._data_dir)
+        if became_completed:
             log.info("Recording %s finalised as completed", recording.id)

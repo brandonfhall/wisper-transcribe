@@ -4,7 +4,14 @@ from typing import Optional
 
 from .models import TranscriptionSegment, Word
 
+# Module-level model cache. _model_key records the parameters the cached
+# model was loaded with — (model_size, device, compute_type) as passed by the
+# caller (pre-resolution; "auto" resolves deterministically per device, so
+# raw params are a stable key). R4: without the key, a long-running web
+# server would silently reuse the first job's model for every later job
+# regardless of the model size chosen in the upload form or config.
 _model = None
+_model_key: Optional[tuple] = None
 
 # Maps standard model-size names to MLX Community HuggingFace repo IDs.
 # Only used on Apple Silicon (macOS + MPS) when mlx-whisper is installed.
@@ -53,7 +60,20 @@ def _transcribe_mlx(
     # a "Fetching N files" verification bar on every call. Suppress it.
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
-    repo = _MLX_MODEL_MAP.get(model_size, f"mlx-community/whisper-{model_size}-mlx")
+    # R32-3: this used to fall back to an f-string-built repo name
+    # (`mlx-community/whisper-{model_size}-mlx`) for any size not in the
+    # map -- a plausible-looking guess that 404s against the Hub for any
+    # size config.MODEL_SIZES doesn't happen to also carry an MLX build
+    # for, surfacing as an opaque download error deep in mlx_whisper instead
+    # of a clear message here.
+    repo = _MLX_MODEL_MAP.get(model_size)
+    if repo is None:
+        raise ValueError(
+            f"No MLX-Whisper repo mapping for model size {model_size!r}. "
+            f"Supported sizes: {', '.join(sorted(_MLX_MODEL_MAP))}. "
+            "Use --device cpu (or device=cpu in config) to fall back to the "
+            "faster-whisper backend instead."
+        )
     tqdm.write(f"  Using MLX-Whisper backend ({repo})")
 
     # Inject hotwords into initial_prompt (mlx-whisper has no native hotwords param).
@@ -89,8 +109,13 @@ def _transcribe_mlx(
 
 
 def load_model(model_size: str, device: str, compute_type: str = "auto"):
-    """Load faster-whisper model, caching it module-level."""
-    global _model
+    """Load faster-whisper model, caching it module-level.
+
+    The cache is keyed by (model_size, device, compute_type) — see _model_key.
+    The old model reference is dropped BEFORE the new one is constructed so
+    peak memory never holds two multi-GB models at once (R4).
+    """
+    global _model, _model_key
 
     # On Windows, explicitly add PyTorch's bundled CUDA libraries to the PATH
     # so CTranslate2 (faster-whisper's backend) can find cublas64_12.dll
@@ -147,7 +172,13 @@ def load_model(model_size: str, device: str, compute_type: str = "auto"):
     from .config import resolve_compute_type
 
     ct2_compute = resolve_compute_type(compute_type, ct2_device)
+    # Free the old model reference before loading the new one so peak memory
+    # doesn't hold two models; clear the key too so a failed load leaves the
+    # cache empty rather than mismatched (R4).
+    _model = None
+    _model_key = None
     _model = WhisperModel(model_size, device=ct2_device, compute_type=ct2_compute)
+    _model_key = (model_size, device, compute_type)
     return _model
 
 
@@ -195,7 +226,10 @@ def transcribe(
             )
         # mlx not available → fall through to CPU path below
 
-    if _model is None:
+    # R4: reload when the requested parameters differ from what the cached
+    # model was loaded with — the web server is long-running, so a later job
+    # may legitimately ask for a different model size/device/compute type.
+    if _model is None or _model_key != (model_size, device, compute_type):
         load_model(model_size, device, compute_type)
 
     segments, info = _model.transcribe(
@@ -232,7 +266,13 @@ def transcribe(
                         start=seg.start, end=seg.end, text=seg.text.strip(), words=words
                     )
                 )
-            # Update progress bar by the difference between the segment's end and our current progress tracker
-            pbar.update(seg.end - pbar.n)
+            # Update progress bar by the difference between the segment's end
+            # and our current progress tracker. R32-4: segments aren't
+            # guaranteed strictly monotonic (a later segment can end before
+            # an earlier one in edge cases), which would make this delta
+            # negative and walk the bar backward -- clamp to >= 0.
+            delta = seg.end - pbar.n
+            if delta > 0:
+                pbar.update(delta)
 
     return result

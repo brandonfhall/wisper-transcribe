@@ -1,7 +1,9 @@
 """Tests for /record and /recordings HTML routes + /api/record JSON API."""
 from __future__ import annotations
 
+import asyncio
 import json
+import wave
 from pathlib import Path
 from unittest.mock import patch
 
@@ -199,6 +201,24 @@ def test_recordings_list_groups_by_campaign(client):
     assert rec.id[:8] in resp.text
 
 
+def test_recordings_list_handles_null_started_at(client):
+    """R8 regression: sorting used `r.started_at or r.started_at`, a no-op
+    that raises TypeError (None vs datetime comparison) as soon as any
+    recording has started_at=None, 500ing the whole /recordings page."""
+    c, tmp_path = client
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+
+    rec_with_time = create_recording("VC1", "G1", data_dir=tmp_path)
+    rec_no_time = create_recording("VC2", "G1", data_dir=tmp_path)
+    rec_no_time.started_at = None
+    save_recording(rec_no_time, data_dir=tmp_path)
+
+    resp = c.get("/recordings")
+    assert resp.status_code == 200
+    assert rec_with_time.id[:8] in resp.text
+    assert rec_no_time.id[:8] in resp.text
+
+
 def test_recording_detail_returns_200(client):
     c, tmp_path = client
     from wisper_transcribe.recording_manager import create_recording
@@ -263,14 +283,16 @@ def test_recording_live_returns_501(client):
 # Phase 6 — enrollment routes
 # ---------------------------------------------------------------------------
 
-def test_enroll_unknown_speaker_creates_profile(client):
-    """POST /recordings/{id}/enroll with a valid unbound speaker creates a profile
-    and removes the user from unbound_speakers."""
-    from pathlib import Path
+def test_enroll_unknown_speaker_enqueues_job(client):
+    """R6: POST /recordings/{id}/enroll no longer runs the pydub decode +
+    embedding extraction synchronously in the request — it enqueues a
+    JOB_ENROLL job (mode "recording") carrying the validated parameters and
+    redirects to the job detail page. The recording-state updates now happen
+    in the job runner (covered in tests/test_web_jobs.py)."""
     from unittest.mock import patch
 
-    from wisper_transcribe.models import SpeakerProfile
-    from wisper_transcribe.recording_manager import create_recording, load_recordings, save_recording
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+    from wisper_transcribe.web.jobs import JOB_ENROLL, JobQueue
 
     c, tmp_path = client
     rec = create_recording("VC1", "G1", data_dir=tmp_path)
@@ -278,26 +300,29 @@ def test_enroll_unknown_speaker_creates_profile(client):
     rec.discord_speakers["999999999999999999"] = ""
     save_recording(rec, tmp_path)
 
-    dummy_profile = SpeakerProfile(
-        name="bob",
-        display_name="Bob",
-        role="player",
-        embedding_path=Path("/fake/bob.npy"),
-        enrolled_date="2025-01-01",
-        enrollment_source="test.opus",
-    )
-
-    with patch("wisper_transcribe.web.routes.record.enroll_speaker_from_audio_dir", return_value=dummy_profile):
+    # Neutralise the runner so the live worker (this fixture runs the app
+    # lifespan) can't race the assertions below.
+    with patch.object(JobQueue, "_run_enroll_job", lambda self, job: None):
         resp = c.post(
             f"/recordings/{rec.id}/enroll",
             data={"discord_user_id": "999999999999999999", "profile_name": "Bob"},
             follow_redirects=False,
         )
 
-    assert resp.status_code == 303
-    loaded = load_recordings(tmp_path)[rec.id]
-    assert "999999999999999999" not in loaded.unbound_speakers
-    assert loaded.discord_speakers.get("999999999999999999") == "bob"
+        assert resp.status_code == 303
+        location = resp.headers["location"]
+        assert location.startswith("/transcribe/jobs/")
+
+        queue = c.app.state.job_queue
+        job_id = location.rsplit("/", 1)[-1]
+        job = queue.get(job_id)
+        assert job is not None
+        assert job.job_type == JOB_ENROLL
+        assert job.enroll_mode == "recording"
+        assert job.enroll_params["recording_id"] == rec.id
+        assert job.enroll_params["discord_uid"] == "999999999999999999"
+        assert job.enroll_params["profile_key"] == "bob"
+        assert job.enroll_params["per_user_dir"].endswith("999999999999999999")
 
 
 def test_enroll_unknown_speaker_invalid_id_returns_400(client):
@@ -411,8 +436,224 @@ def test_transcribe_recording_no_audio_rejects(client):
     assert "error=no_audio" in resp.headers["location"]
 
 
+def test_transcribe_recording_no_audio_regression_after_real_bot_session(client):
+    """R2 end-to-end regression: before the fix, `Recording.combined_path`
+    was assigned exactly once, to None, and never populated by a real
+    BotManager session, so this hand-off ALWAYS redirected with
+    ?error=no_audio — even for a session that actually captured audio.
+    Runs a real BotManager session (fake audio source, no JDA/socket) that
+    captures a `__mixed__` combined track, then verifies the hand-off route
+    accepts it."""
+    from wisper_transcribe.recording_manager import load_recordings
+    from wisper_transcribe.web.discord_bot import BotManager
+    from wisper_transcribe.web.jobs import Job as JobCls
+    from tests._discord_fakes import make_pcm_frame, scripted_source
+    import uuid as _uuid
+
+    c, tmp_path = client
+
+    frames = [("__mixed__", make_pcm_frame())] * 5
+    factory = scripted_source(frames)
+    bm = BotManager(data_dir=tmp_path, audio_source_factory=factory)
+
+    async def _run_session():
+        bm.start()
+        rec = await bm.start_session(None, "VC1", "G1")
+        await asyncio.wait_for(bm._task, timeout=5)
+        return rec
+
+    rec = asyncio.run(_run_session())
+
+    loaded = load_recordings(tmp_path)[rec.id]
+    assert loaded.status == "completed"
+    assert loaded.combined_path is not None, "R2: combined_path should be populated"
+    assert loaded.combined_path.exists()
+
+    fake_job = JobCls(
+        id=str(_uuid.uuid4()),
+        status="pending",
+        created_at=loaded.started_at,
+        input_path=str(tmp_path / "output" / f"{rec.id}.wav"),
+        kwargs={},
+        name=rec.id,
+    )
+    with patch.object(c.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
+        resp = c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert "error=no_audio" not in resp.headers["location"]
+    assert f"/recordings/{rec.id}" in resp.headers["location"]
+    mock_submit.assert_called_once()
+
+    dest = tmp_path / "output" / f"{rec.id}.wav"
+    assert dest.exists()
+    with wave.open(str(dest), "rb") as wf:
+        assert wf.getframerate() == 16000
+        assert wf.getnchannels() == 1
+        assert wf.getnframes() > 0
+
+
 def test_transcribe_recording_invalid_id_blocked(client):
     """POST /recordings/{id}/transcribe blocks traversal payloads."""
     c, _ = client
     resp = c.post("/recordings/../evil/transcribe", follow_redirects=False)
     assert resp.status_code in (400, 404)
+
+
+# ---------------------------------------------------------------------------
+# R7 — JSON API: /api/recordings (list/detail/transcribe/delete)
+#
+# These back `wisper record list/show/transcribe/delete` (cli.py); they used
+# to be 501 stubs so every documented subcommand except start/stop always
+# failed with "Server returned 501".
+# ---------------------------------------------------------------------------
+
+def test_api_recordings_list_empty(client):
+    c, _ = client
+    resp = c.get("/api/recordings")
+    assert resp.status_code == 200
+    assert resp.json() == {"recordings": []}
+
+
+def test_api_recordings_list_returns_recordings(client):
+    c, tmp_path = client
+    from wisper_transcribe.recording_manager import create_recording
+
+    rec = create_recording("VC1", "G1", campaign_slug="my-game", data_dir=tmp_path)
+    resp = c.get("/api/recordings")
+    assert resp.status_code == 200
+    data = resp.json()["recordings"]
+    assert len(data) == 1
+    assert data[0]["id"] == rec.id
+    assert data[0]["campaign_slug"] == "my-game"
+    assert data[0]["status"] == "recording"
+    # No filesystem paths leaked.
+    assert "combined_path" not in data[0]
+    assert "per_user_dir" not in data[0]
+    assert "transcript_path" not in data[0]
+
+
+def test_api_recordings_list_filters_by_campaign(client):
+    c, tmp_path = client
+    from wisper_transcribe.recording_manager import create_recording
+
+    rec1 = create_recording("VC1", "G1", campaign_slug="game-a", data_dir=tmp_path)
+    create_recording("VC2", "G1", campaign_slug="game-b", data_dir=tmp_path)
+
+    resp = c.get("/api/recordings", params={"campaign": "game-a"})
+    assert resp.status_code == 200
+    data = resp.json()["recordings"]
+    assert len(data) == 1
+    assert data[0]["id"] == rec1.id
+
+
+def test_api_recording_detail_returns_200(client):
+    c, tmp_path = client
+    from wisper_transcribe.recording_manager import create_recording
+
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    resp = c.get(f"/api/recordings/{rec.id}")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["id"] == rec.id
+    assert data["status"] == "recording"
+    assert "combined_path" not in data
+
+
+def test_api_recording_detail_unknown_id_returns_404(client):
+    c, _ = client
+    import uuid
+    resp = c.get(f"/api/recordings/{uuid.uuid4()}")
+    assert resp.status_code == 404
+    assert resp.json() == {"error": "not_found"}
+
+
+def test_api_recording_delete_removes_entry(client):
+    c, tmp_path = client
+    from wisper_transcribe.recording_manager import create_recording, load_recordings
+
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    resp = c.post(f"/api/recordings/{rec.id}/delete")
+    assert resp.status_code == 200
+    assert resp.json() == {"id": rec.id, "deleted": True}
+    assert load_recordings(tmp_path).get(rec.id) is None
+
+
+def test_api_recording_delete_unknown_id_returns_404(client):
+    c, _ = client
+    import uuid
+    resp = c.post(f"/api/recordings/{uuid.uuid4()}/delete")
+    assert resp.status_code == 404
+    assert resp.json() == {"error": "not_found"}
+
+
+def test_api_recording_transcribe_handoff(client):
+    """POST /api/recordings/{id}/transcribe submits the same job the HTML
+    hand-off route submits and returns the job id as JSON."""
+    from wisper_transcribe.recording_manager import create_recording, load_recordings, save_recording
+    from wisper_transcribe.web.jobs import Job as JobCls
+    import uuid as _uuid
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", campaign_slug="my-game", data_dir=tmp_path)
+
+    combined = tmp_path / "recordings" / rec.id / "final" / "combined.wav"
+    combined.parent.mkdir(parents=True, exist_ok=True)
+    combined.write_bytes(b"fake wav data")
+    rec.combined_path = combined
+    rec.status = "completed"
+    save_recording(rec, tmp_path)
+
+    fake_job = JobCls(
+        id=str(_uuid.uuid4()),
+        status="pending",
+        created_at=rec.started_at,
+        input_path=str(tmp_path / "output" / f"{rec.id}.wav"),
+        kwargs={},
+        name=rec.id,
+    )
+    with patch.object(c.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
+        resp = c.post(f"/api/recordings/{rec.id}/transcribe")
+
+    assert resp.status_code == 202
+    data = resp.json()
+    assert data["id"] == rec.id
+    assert data["job_id"] == fake_job.id
+    assert data["status"] == "transcribing"
+
+    loaded = load_recordings(tmp_path)[rec.id]
+    assert loaded.status == "transcribing"
+    assert loaded.job_id == fake_job.id
+    mock_submit.assert_called_once()
+
+
+def test_api_recording_transcribe_not_ready_returns_409(client):
+    c, tmp_path = client
+    from wisper_transcribe.recording_manager import create_recording
+
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)  # still "recording"
+    resp = c.post(f"/api/recordings/{rec.id}/transcribe")
+    assert resp.status_code == 409
+    assert resp.json() == {"error": "not_ready"}
+
+
+def test_api_recording_transcribe_no_audio_returns_422(client):
+    c, tmp_path = client
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    rec.status = "completed"
+    rec.combined_path = None
+    save_recording(rec, tmp_path)
+
+    resp = c.post(f"/api/recordings/{rec.id}/transcribe")
+    assert resp.status_code == 422
+    assert resp.json() == {"error": "no_audio"}
+
+
+def test_api_recording_transcribe_unknown_id_returns_404(client):
+    c, _ = client
+    import uuid
+    resp = c.post(f"/api/recordings/{uuid.uuid4()}/transcribe")
+    assert resp.status_code == 404
+    assert resp.json() == {"error": "not_found"}

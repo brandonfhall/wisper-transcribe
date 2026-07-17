@@ -28,6 +28,7 @@ Design:
 from __future__ import annotations
 
 import asyncio
+import logging
 import subprocess
 import sys as _sys
 import threading
@@ -39,6 +40,8 @@ from typing import Any, Callable, Optional
 import tqdm as _tqdm_module
 
 from wisper_transcribe.pipeline import process_file
+
+log = logging.getLogger(__name__)
 
 # Job status literals
 PENDING = "pending"
@@ -53,6 +56,46 @@ JOB_SUMMARIZE = "summarize"
 JOB_ENROLL = "enroll"
 
 _EXCERPT_SECONDS = 12  # length of each speaker audio clip
+
+# R13: user-facing error strings per job type. job.error is rendered directly
+# into the job-detail page and SSE stream, and raw exception text routinely
+# carries filesystem paths (WAV-conversion failures, ffmpeg command lines,
+# HF cache paths) — so EVERY failure path maps to one of these generic
+# messages and the real exception is logged server-side with its traceback
+# (see _set_job_error). _run_enroll_job already followed this policy; this
+# extends it to transcription and LLM jobs.
+_GENERIC_JOB_ERRORS = {
+    JOB_TRANSCRIPTION: "Transcription failed — see server logs",
+    JOB_REFINE: "Post-processing failed — see server logs",
+    JOB_SUMMARIZE: "Post-processing failed — see server logs",
+    JOB_ENROLL: "Enrollment failed",
+}
+
+
+def _set_job_error(job: "Job", exc: BaseException) -> None:
+    """Record a generic, path-free error message on *job* and log the real
+    exception (with traceback) server-side (R13).
+
+    The literal ``"Cancelled"`` string is preserved for cancellation — other
+    code and the job-detail template check for it.
+    """
+    if isinstance(exc, InterruptedError):
+        job.error = "Cancelled"
+        return
+    log.error("Job %s (%s) failed", job.id, job.job_type, exc_info=exc)
+    if isinstance(exc, FileNotFoundError):
+        # Known input error — short, safe text with no path reflected.
+        job.error = "Input file not found"
+        return
+    job.error = _GENERIC_JOB_ERRORS.get(job.job_type, "Job failed — see server logs")
+
+# R14: unbounded memory growth guards. _jobs is an in-memory dict that is
+# never otherwise pruned, and a single verbose job (e.g. an LLM job whose
+# stderr capture runs long) can append log lines forever -- both caps are
+# constants rather than config keys since they're internal resource limits,
+# not something a user needs to tune.
+_MAX_RETAINED_JOBS = 50   # cap on retained COMPLETED/FAILED jobs (never PENDING/RUNNING)
+_MAX_LOG_LINES = 1000     # cap on Job.log_lines, oldest lines dropped first
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +121,7 @@ class _StderrCapture:
             line, self._buf = self._buf.split("\n", 1)
             stripped = line.strip()
             if stripped:
-                self._job.log_lines.append(stripped)
+                self._job.append_log(stripped)
 
     def flush(self) -> None:
         pass
@@ -345,6 +388,12 @@ class Job:
     output_path: Optional[str] = None
     error: Optional[str] = None
     log_lines: list[str] = field(default_factory=list)
+    # R14: total count of log lines ever dropped from the front of
+    # log_lines once _MAX_LOG_LINES was exceeded. The SSE stream
+    # (job_stream in routes/transcribe.py) uses this to keep its
+    # absolute line-index bookkeeping correct even after older lines
+    # have been trimmed away -- see append_log().
+    log_lines_dropped: int = 0
     progress: Optional[str] = None
     # Parallel mode: per-channel progress strings keyed by channel name
     progress_channels: dict[str, str] = field(default_factory=dict)
@@ -390,6 +439,34 @@ class Job:
     enroll_groups: dict[str, list[str]] = field(default_factory=dict)
     # For JOB_ENROLL jobs: device to run embedding extraction on.
     enroll_device: str = "cpu"
+    # R6: JOB_ENROLL flavor. "wizard" is the original post-transcription
+    # wizard job (sidecar-driven); "standalone" is the /speakers/enroll
+    # upload flow; "recording" enrolls from a Discord recording's per-user
+    # audio dir. The latter two used to run minutes of ML work synchronously
+    # inside their route handlers, blocking the event loop and mutating the
+    # module-level ML caches concurrently with the worker thread.
+    enroll_mode: str = "wizard"
+    # R6: mode-specific parameters for standalone/recording enroll jobs
+    # (profile key, display name, etc. — all plain strings).
+    enroll_params: dict[str, Any] = field(default_factory=dict)
+
+    def append_log(self, line: str) -> None:
+        """Append a log line, trimming the oldest lines once _MAX_LOG_LINES
+        is exceeded (R14).
+
+        Every call site that used to do ``job.log_lines.append(...)``
+        directly now goes through this method so a single verbose job (e.g.
+        a large LLM stderr capture) can't grow log_lines without bound.
+        Trimmed lines are counted in ``log_lines_dropped`` rather than just
+        discarded silently, so the SSE stream in routes/transcribe.py can
+        still translate its absolute line index into a valid slice of
+        whatever remains.
+        """
+        self.log_lines.append(line)
+        overflow = len(self.log_lines) - _MAX_LOG_LINES
+        if overflow > 0:
+            del self.log_lines[:overflow]
+            self.log_lines_dropped += overflow
 
     @property
     def needs_extraction(self) -> bool:
@@ -558,12 +635,120 @@ class JobQueue:
         self._queue.put_nowait(job.id)
         return job
 
+    def submit_standalone_enroll(
+        self,
+        upload_path: str,
+        *,
+        profile_key: str,
+        display_name: str,
+        role: str = "",
+        notes: str = "",
+        update: bool = False,
+    ) -> Job:
+        """Enqueue a standalone speaker enrollment from an uploaded file (R6).
+
+        The /speakers/enroll route used to run WAV conversion, diarization,
+        and embedding extraction synchronously inside the request — blocking
+        the event loop for minutes and touching the module-level ML caches
+        concurrently with any running job's worker thread. It now saves the
+        upload and hands off here.
+
+        Temp-file ownership moves to the job with it (R9-1 interplay): the
+        ``wisper_enroll_*`` upload is renamed to ``wisper_enrollsrc_<id>``
+        at submit time — the same immediate-rename pattern as ``submit()``
+        (F5) — so the startup sweep's ``wisper_enroll_*`` glob can never
+        match a file a pending job needs. The sweep also clears
+        ``wisper_enrollsrc_*`` orphans, which is safe because it only runs
+        at startup, when the (in-memory) queue is necessarily empty.
+        ``_run_standalone_enroll`` deletes the file in a ``finally``.
+        """
+        from pathlib import Path
+        import shutil
+
+        job_id = str(uuid.uuid4())
+        src = Path(upload_path)
+        if src.exists() and src.name.startswith("wisper_enroll_"):
+            renamed = src.with_name(f"wisper_enrollsrc_{job_id}{src.suffix}")
+            shutil.move(str(src), str(renamed))
+            src = renamed
+
+        job = Job(
+            id=job_id,
+            status=PENDING,
+            created_at=datetime.now(),
+            input_path=str(src),
+            kwargs={},
+            name=f"Enroll: {display_name}",
+            job_type=JOB_ENROLL,
+            enroll_mode="standalone",
+            enroll_params={
+                "profile_key": profile_key,
+                "display_name": display_name,
+                "role": role,
+                "notes": notes,
+                "update": bool(update),
+            },
+        )
+        self._jobs[job.id] = job
+        self._queue.put_nowait(job.id)
+        return job
+
+    def submit_recording_enroll(
+        self,
+        *,
+        recording_id: str,
+        discord_uid: str,
+        per_user_dir: str,
+        profile_key: str,
+        display_name: str,
+    ) -> Job:
+        """Enqueue enrollment of an unbound speaker from a Discord recording's
+        per-user audio directory (R6 — was synchronous pydub decode +
+        embedding extraction inside the /recordings/{id}/enroll route).
+
+        The per-user audio dir is durable recording storage — never deleted
+        by the job. On success the runner also updates the recording's
+        speaker bindings and campaign membership (the state changes the
+        route used to apply inline after the synchronous enroll).
+        """
+        job = Job(
+            id=str(uuid.uuid4()),
+            status=PENDING,
+            created_at=datetime.now(),
+            input_path=per_user_dir,
+            kwargs={},
+            name=f"Enroll: {display_name}",
+            job_type=JOB_ENROLL,
+            enroll_mode="recording",
+            enroll_params={
+                "recording_id": recording_id,
+                "discord_uid": discord_uid,
+                "per_user_dir": per_user_dir,
+                "profile_key": profile_key,
+                "display_name": display_name,
+            },
+        )
+        self._jobs[job.id] = job
+        self._queue.put_nowait(job.id)
+        return job
+
     def get(self, job_id: str) -> Optional[Job]:
         return self._jobs.get(job_id)
 
     def list_all(self) -> list[Job]:
-        # Reverse insertion order first so that ties in created_at put newer jobs first
-        return sorted(list(self._jobs.values())[::-1], key=lambda j: j.created_at, reverse=True)
+        # R32-9: sort newest-first by created_at; ties (two jobs submitted
+        # within the same clock tick share a `datetime.now()` value) break by
+        # insertion order, most-recently-submitted first. `self._jobs` is a
+        # plain dict (insertion-ordered since Python 3.7), so its enumerate
+        # index is used as an explicit tiebreaker in the sort key instead of
+        # the previous "reverse the list, then stable-sort with reverse=True"
+        # trick, which relied on sort-stability semantics to get the same
+        # result less legibly.
+        indexed = enumerate(self._jobs.values())
+        return [
+            job
+            for _, job in sorted(indexed, key=lambda pair: (pair[1].created_at, pair[0]), reverse=True)
+        ]
 
     def list_recent(self, limit: int = 20) -> list[Job]:
         return self.list_all()[:limit]
@@ -580,11 +765,31 @@ class JobQueue:
             job.status = FAILED
             job.error = "Cancelled"
             job.finished_at = datetime.now()
+            self._prune_finished_jobs()
             return True
         if job.status == RUNNING:
             job._cancel_event.set()
             return True
         return False
+
+    def _prune_finished_jobs(self) -> None:
+        """Cap retained terminal (COMPLETED/FAILED) jobs at
+        _MAX_RETAINED_JOBS (R14), dropping the oldest first.
+
+        PENDING/RUNNING jobs are never candidates -- only jobs that have
+        already reached a terminal state count against the cap. A pruned
+        job simply disappears from the dashboard/jobs list, which is
+        acceptable per the review finding (this is a single-user, in-memory
+        tool with no persistence expectation between restarts anyway).
+        """
+        terminal = [j for j in self._jobs.values() if j.status in (COMPLETED, FAILED)]
+        if len(terminal) <= _MAX_RETAINED_JOBS:
+            return
+        terminal.sort(key=lambda j: j.created_at)
+        excess = len(terminal) - _MAX_RETAINED_JOBS
+        for job in terminal[:excess]:
+            self._jobs.pop(job.id, None)
+            self._on_complete_callbacks.pop(job.id, None)
 
     # ------------------------------------------------------------------
     # Background worker
@@ -595,15 +800,30 @@ class JobQueue:
             job_id = await self._queue.get()
             job = self._jobs.get(job_id)
             if job is None:
+                self._queue.task_done()
+                continue
+            if job.status != PENDING:
+                # Job was cancelled (or otherwise moved on) while it sat in
+                # the asyncio queue -- do not revive it (R3).
+                self._queue.task_done()
                 continue
             job.status = RUNNING
             try:
                 await asyncio.to_thread(self._run_job, job)
             except Exception as exc:
                 job.status = FAILED
-                job.error = str(exc)
+                # R13: never put raw exception text (paths, ffmpeg command
+                # lines) into job.error — it renders into HTML/SSE. The job
+                # runner usually already set a generic message before
+                # re-raising; keep it if so.
+                if not job.error:
+                    _set_job_error(job, exc)
                 job.finished_at = datetime.now()
             finally:
+                # R14: runs after every job that leaves RUNNING, however it
+                # got there (success, failure inside _run_job, or an
+                # uncaught exception here) -- exactly once per processed job.
+                self._prune_finished_jobs()
                 self._queue.task_done()
 
     def _run_job(self, job: Job) -> None:
@@ -638,7 +858,7 @@ class JobQueue:
             if m:
                 job.progress_channels[m.group(1)] = m.group(2)
                 return
-            job.log_lines.append(stripped)
+            job.append_log(stripped)
 
         original_init = _tqdm_module.tqdm.__init__
 
@@ -717,7 +937,7 @@ class JobQueue:
             _delete_temp_upload(job)
         except Exception as exc:
             job.status = FAILED
-            job.error = str(exc)
+            _set_job_error(job, exc)  # R13: generic message, real exc logged
             _delete_temp_upload(job)
             raise
         finally:
@@ -744,7 +964,10 @@ class JobQueue:
                 do_summarize=job.post_summarize,
             )
         except Exception as exc:
-            job.log_lines.append(f"Post-processing error: {exc}")
+            # R13: log_lines render into the job page too — keep the line
+            # generic and put the real exception in the server log.
+            log.error("Post-processing for job %s failed", job.id, exc_info=exc)
+            job.append_log("Post-processing failed — see server logs")
         finally:
             _sys.stderr = old_stderr
 
@@ -766,25 +989,183 @@ class JobQueue:
             job.status = COMPLETED
         except Exception as exc:
             job.status = FAILED
-            job.error = str(exc)
+            _set_job_error(job, exc)  # R13: generic message, real exc logged
             raise
         finally:
             _sys.stderr = old_stderr
             job.finished_at = datetime.now()
 
     def _run_enroll_job(self, job: Job) -> None:
+        """Dispatch a JOB_ENROLL job to its mode-specific runner (R6).
+
+        All three runners share the enroll-job error policy: exceptions are
+        never re-raised after being recorded on ``job.error``. ``_worker()``
+        would otherwise handle the exception again, and exception text for
+        this job type can contain a filesystem path (e.g. a WAV-conversion
+        failure message) that the job detail page renders directly into
+        HTML. Per the security rules (never reflect paths/exception text
+        into a response), every failure path sets a generic message instead
+        and swallows the exception locally (logging it server-side).
+        """
+        if job.enroll_mode == "standalone":
+            self._run_standalone_enroll(job)
+            return
+        if job.enroll_mode == "recording":
+            self._run_recording_enroll(job)
+            return
+        self._run_wizard_enroll(job)
+
+    def _run_standalone_enroll(self, job: Job) -> None:
+        """Run a standalone /speakers/enroll upload job in a thread (R6).
+
+        Owns the renamed temp upload (``wisper_enrollsrc_*``): it is deleted
+        in the ``finally`` — success or failure — along with the converted
+        WAV, the cleanup that lived in the route's ``finally`` before the
+        hand-off (R9-1).
+        """
+        from collections import defaultdict
+        from pathlib import Path
+
+        p = job.enroll_params
+        tmp_path = Path(job.input_path)
+        wav_path = tmp_path
+        try:
+            if not tmp_path.exists():
+                job.status = FAILED
+                job.error = "Source audio not available"
+                return
+
+            from wisper_transcribe.audio_utils import convert_to_wav
+            from wisper_transcribe.config import get_device, get_hf_token, load_config
+            from wisper_transcribe.diarizer import diarize
+            from wisper_transcribe.speaker_manager import (
+                enroll_speaker,
+                extract_embedding,
+                load_profiles,
+                update_embedding,
+            )
+
+            config = load_config()
+            device = get_device()
+            hf_token = get_hf_token(config)
+
+            job.append_log("Converting audio…")
+            wav_path = convert_to_wav(tmp_path)
+
+            job.append_log("Detecting speech…")
+            diarization = diarize(wav_path, hf_token=hf_token, device=device)
+
+            # Primary speaker = label with the most total speech time.
+            speaker_time: dict[str, float] = defaultdict(float)
+            for seg in diarization:
+                speaker_time[seg.speaker] += seg.end - seg.start
+            if not speaker_time:
+                job.status = FAILED
+                job.error = "No speech detected in the uploaded audio"
+                return
+            primary_label = max(speaker_time, key=lambda k: speaker_time[k])
+
+            job.append_log(f"Extracting embedding for {p['display_name']}…")
+            if p.get("update") and p["profile_key"] in load_profiles():
+                new_emb = extract_embedding(wav_path, diarization, primary_label, device)
+                update_embedding(p["profile_key"], new_emb)
+            else:
+                enroll_speaker(
+                    name=p["profile_key"],
+                    display_name=p["display_name"],
+                    role=p.get("role", ""),
+                    audio_path=wav_path,
+                    segments=diarization,
+                    speaker_label=primary_label,
+                    device=device,
+                    notes=p.get("notes", ""),
+                )
+            job.append_log("Speaker enrolled.")
+            job.status = COMPLETED
+        except Exception as exc:
+            log.error("Standalone enroll job %s failed", job.id, exc_info=exc)
+            job.status = FAILED
+            job.error = "Enrollment failed"
+        finally:
+            tmp_path.unlink(missing_ok=True)
+            if wav_path != tmp_path:
+                wav_path.unlink(missing_ok=True)
+            job.finished_at = datetime.now()
+
+    def _run_recording_enroll(self, job: Job) -> None:
+        """Enroll an unbound Discord speaker from a recording dir (R6).
+
+        On success, applies the recording-state updates the route used to do
+        inline: drop the uid from ``unbound_speakers``, bind it in
+        ``discord_speakers``, and add/bind the profile in the recording's
+        campaign. Those follow-up updates are best-effort — a failure there
+        is logged but doesn't fail the (already successful) enrollment.
+        """
+        from pathlib import Path
+
+        p = job.enroll_params
+        try:
+            from wisper_transcribe.config import get_data_dir
+            from wisper_transcribe.speaker_manager import enroll_speaker_from_audio_dir
+
+            data_dir = get_data_dir()
+
+            job.append_log(f"Enrolling {p['display_name']} from recording audio…")
+            enroll_speaker_from_audio_dir(
+                name=p["profile_key"],
+                display_name=p["display_name"],
+                role="player",
+                per_user_dir=Path(p["per_user_dir"]),
+                data_dir=data_dir,
+            )
+        except Exception as exc:
+            log.error("Recording enroll job %s failed", job.id, exc_info=exc)
+            job.status = FAILED
+            job.error = "Enrollment failed"
+            job.finished_at = datetime.now()
+            return
+
+        try:
+            from wisper_transcribe.campaign_manager import (
+                add_member,
+                bind_discord_id,
+                load_campaigns,
+            )
+            from wisper_transcribe.recording_manager import load_recordings, save_recording
+
+            recordings = load_recordings(data_dir)
+            rec = recordings.get(p["recording_id"])
+            if rec is not None:
+                rec.unbound_speakers = [
+                    uid for uid in rec.unbound_speakers if uid != p["discord_uid"]
+                ]
+                rec.discord_speakers[p["discord_uid"]] = p["profile_key"]
+                save_recording(rec, data_dir)
+
+                if rec.campaign_slug:
+                    campaigns = load_campaigns(data_dir)
+                    if rec.campaign_slug in campaigns:
+                        if p["profile_key"] not in campaigns[rec.campaign_slug].members:
+                            add_member(rec.campaign_slug, p["profile_key"], data_dir=data_dir)
+                        bind_discord_id(
+                            rec.campaign_slug, p["profile_key"], p["discord_uid"],
+                            data_dir=data_dir,
+                        )
+        except Exception:
+            log.warning(
+                "Failed to update recording state after enrollment", exc_info=True
+            )
+
+        job.append_log("Speaker enrolled.")
+        job.status = COMPLETED
+        job.finished_at = datetime.now()
+
+    def _run_wizard_enroll(self, job: Job) -> None:
         """Run the slow half of a wizard submission (WAV convert + embedding
         extraction) in a thread.
 
-        Mirrors ``_run_llm_job``'s status-transition structure, with one
-        deliberate difference: exceptions are never re-raised after being
-        recorded on ``job.error``. ``_worker()``'s own except-block would
-        otherwise overwrite ``job.error`` with ``str(exc)`` -- which, for
-        this job type, can contain a filesystem path (e.g. a WAV-conversion
-        failure message) that the job detail page renders directly into
-        HTML. Per the security rules (never reflect paths/exception text
-        into a response), every failure path here sets a generic message
-        instead and swallows the exception locally.
+        Mirrors ``_run_llm_job``'s status-transition structure, minus the
+        re-raise — see ``_run_enroll_job`` for the error policy.
         """
         from pathlib import Path
 
@@ -814,7 +1195,7 @@ class JobQueue:
         campaign_slug = diar.get("campaign")
 
         def _progress(msg: str) -> None:
-            job.log_lines.append(msg)
+            job.append_log(msg)
 
         try:
             from wisper_transcribe.web.enroll_shared import enroll_profiles
@@ -851,7 +1232,7 @@ class JobQueue:
         client = get_client(cfg.get("llm_provider", "ollama"), config=cfg)
         provider = getattr(client, "provider", "")
         model = getattr(client, "model", "")
-        job.log_lines.append(f"LLM: {provider} / {model}")
+        job.append_log(f"LLM: {provider} / {model}")
 
         profiles = load_profiles()
         md = transcript_path.read_text(encoding="utf-8")
@@ -866,7 +1247,7 @@ class JobQueue:
                         t = token.strip()
                         if t and not t.lower().startswith("voice_of:"):
                             character_names.append(t)
-            job.log_lines.append(f"Refining vocabulary in {transcript_path.name} ...")
+            job.append_log(f"Refining vocabulary in {transcript_path.name} ...")
             try:
                 refined_md, edits, _unresolved = refine_transcript(
                     md,
@@ -877,18 +1258,18 @@ class JobQueue:
                     tasks=["vocabulary"],
                 )
             except (LLMUnavailableError, LLMResponseError) as exc:
-                job.log_lines.append(f"Refine failed: {exc}")
+                job.append_log(f"Refine failed: {exc}")
                 refined_md, edits = md, []
             if edits and refined_md != md:
                 backup = transcript_path.with_suffix(transcript_path.suffix + ".bak")
                 backup.write_text(md, encoding="utf-8")
                 transcript_path.write_text(refined_md, encoding="utf-8")
-                job.log_lines.append(
+                job.append_log(
                     f"Applied {len(edits)} edit(s). Backup: {backup.name}"
                 )
                 md = refined_md
             else:
-                job.log_lines.append("No vocabulary changes needed.")
+                job.append_log("No vocabulary changes needed.")
             job.output_path = str(transcript_path)
 
         if do_summarize:
@@ -897,7 +1278,7 @@ class JobQueue:
                 default_summary_path,
                 render_markdown,
             )
-            job.log_lines.append(
+            job.append_log(
                 f"Generating campaign summary for {transcript_path.name} ..."
             )
             try:
@@ -910,8 +1291,8 @@ class JobQueue:
                 out_path = default_summary_path(transcript_path)
                 body = render_markdown(note, profiles=profiles)
                 out_path.write_text(body, encoding="utf-8")
-                job.log_lines.append(f"Summary written: {out_path.name}")
+                job.append_log(f"Summary written: {out_path.name}")
                 job.summary_path = str(out_path)
             except (LLMUnavailableError, LLMResponseError) as exc:
-                job.log_lines.append(f"Summarize failed: {exc}")
+                job.append_log(f"Summarize failed: {exc}")
             job.output_path = str(transcript_path)

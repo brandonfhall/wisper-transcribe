@@ -26,14 +26,28 @@ def _validate_job_id(job_id: str) -> str | None:
 
 
 
+#: Model sizes exposed as radio options in transcribe.html. A curated subset
+#: of config.MODEL_SIZES — the template does not surface every Whisper size.
+_FORM_MODEL_CHOICES = ("small", "medium", "large-v3-turbo")
+
+
 @router.get("", response_class=HTMLResponse)
 async def transcribe_form(request: Request) -> HTMLResponse:
     """Render the upload / options form."""
+    from wisper_transcribe.config import load_config
+
     campaigns = load_campaigns()
+    config = load_config()
+    # R5: preselect the model radio from config, falling back to the form's
+    # own default when the configured model isn't one of the exposed choices
+    # (e.g. "large-v3" or "tiny" — the template only offers a curated subset).
+    selected_model = config.get("model", "large-v3-turbo")
+    if selected_model not in _FORM_MODEL_CHOICES:
+        selected_model = "large-v3-turbo"
     return templates.TemplateResponse(
         request,
         "transcribe.html",
-        {"request": request, "campaigns": campaigns},
+        {"request": request, "campaigns": campaigns, "selected_model": selected_model},
     )
 
 
@@ -42,7 +56,7 @@ async def start_transcribe(
     request: Request,
     file: Annotated[UploadFile, File()],
     model_size: Annotated[str, Form()] = "large-v3-turbo",
-    language: Annotated[str, Form()] = "en",
+    language: Annotated[Optional[str], Form()] = None,
     device: Annotated[str, Form()] = "auto",
     num_speakers: Annotated[Optional[str], Form()] = None,
     min_speakers: Annotated[Optional[str], Form()] = None,
@@ -50,7 +64,7 @@ async def start_transcribe(
     no_diarize: Annotated[bool, Form()] = False,
     compute_type: Annotated[str, Form()] = "auto",
     vad: Annotated[Optional[str], Form()] = None,
-    include_timestamps: Annotated[bool, Form()] = True,
+    include_timestamps: Annotated[Optional[bool], Form()] = None,
     initial_prompt: Annotated[Optional[str], Form()] = None,
     post_refine: Annotated[Optional[str], Form()] = None,
     post_summarize: Annotated[Optional[str], Form()] = None,
@@ -58,14 +72,24 @@ async def start_transcribe(
     vocab_file: Annotated[Optional[UploadFile], File()] = None,
 ) -> RedirectResponse:
     """Accept an uploaded audio file, save it to a temp location, enqueue job."""
+    # R33: validate enum fields against the same canonical sets the CLI's
+    # click.Choice lists use, before any file I/O — an invalid value must
+    # never orphan a wisper_upload_* temp file. Never echo the bad value
+    # back (CLAUDE.md: no str(exc)/raw input in redirect params).
+    from wisper_transcribe.config import COMPUTE_TYPES, DEVICES, MODEL_SIZES
+    if model_size not in MODEL_SIZES or device not in DEVICES or compute_type not in COMPUTE_TYPES:
+        return error_redirect("/transcribe", "invalid_option")
+
     # Save uploaded file to a persistent temp location (job must outlive request)
     suffix = Path(file.filename or "audio.mp3").suffix or ".mp3"
     tmp = tempfile.NamedTemporaryFile(
         delete=False, suffix=suffix, prefix="wisper_upload_"
     )
     try:
-        content = await file.read()
-        tmp.write(content)
+        # R10: stream to disk in 1 MiB chunks instead of buffering the whole
+        # upload (multi-hour audio can be multi-GB) into RAM at once.
+        while chunk := await file.read(1 << 20):
+            tmp.write(chunk)
     finally:
         tmp.close()
 
@@ -113,7 +137,9 @@ async def start_transcribe(
         input_path=tmp.name,
         original_stem=original_stem,
         model_size=model_size,
-        language=None if language == "auto" else language,
+        # "auto" is resolved to auto-detect inside process_file (R5 sentinel
+        # convention) — do not map it to None here, None means "use config".
+        language=language,
         device=device,
         num_speakers=_int_or_none(num_speakers),
         min_speakers=_int_or_none(min_speakers),
@@ -182,12 +208,20 @@ async def job_stream(request: Request, job_id: str) -> StreamingResponse:
                 yield "event: error\ndata: Job not found\n\n"
                 return
 
-            # Send any new log lines
-            new_lines = job.log_lines[last_line_idx:]
+            # Send any new log lines. R14: job.log_lines can have its oldest
+            # entries trimmed once it exceeds jobs._MAX_LOG_LINES --
+            # job.log_lines_dropped counts how many, so last_line_idx (an
+            # absolute count of lines produced so far) has to be translated
+            # into an index into the currently-retained list rather than
+            # sliced directly. A client that fell more than the cap behind
+            # simply resumes from whatever's still retained instead of
+            # crashing or replaying stale data.
+            retained_start = job.log_lines_dropped
+            new_lines = job.log_lines[max(last_line_idx, retained_start) - retained_start:]
             for line in new_lines:
                 data = json.dumps({"type": "log", "message": line})
                 yield f"data: {data}\n\n"
-            last_line_idx += len(new_lines)
+            last_line_idx = retained_start + len(job.log_lines)
 
             # Send overall progress update (sequential mode)
             if job.progress and job.progress != last_progress:
@@ -363,23 +397,15 @@ async def speaker_excerpt(request: Request, job_id: str, speaker_name: str) -> R
     # what serves excerpts after a restart; this route intentionally 404s
     # instead of guessing.
     if job is not None and job.output_path and (not clip_path or not Path(clip_path).exists()):
-        import re as _re
-        safe_label = _re.sub(r"[^\w\-]", "_", speaker_name)
-        out_dir = Path(job.output_path).parent
-        stem = Path(job.output_path).stem
+        # R24: shared lookup + CodeQL guard — same helper the
+        # transcript-centric wizard's excerpt route uses (transcripts.py).
+        from wisper_transcribe.web.enroll_shared import find_excerpt_clip
 
-        # Path-traversal guard: re.sub(r"[^\w\-]", "_", …) is already a
-        # tight whitelist, but CodeQL's taint tracker only recognises the
-        # os.path.abspath + startswith pattern (CLAUDE.md security note) --
-        # same guard as the mirrored fallback in transcripts.py.
-        base_dir = os.path.abspath(str(out_dir))
-        if not base_dir.endswith(os.sep):
-            base_dir += os.sep
-        candidate_abs = os.path.abspath(
-            os.path.join(base_dir, f"{stem}_excerpt_{safe_label}.mp3")
+        found = find_excerpt_clip(
+            Path(job.output_path).parent, Path(job.output_path).stem, [speaker_name]
         )
-        if candidate_abs.startswith(base_dir) and os.path.exists(candidate_abs):
-            clip_path = candidate_abs
+        if found is not None:
+            clip_path = str(found)
 
     if not clip_path or not Path(clip_path).exists():
         return HTMLResponse(content="Excerpt not available", status_code=404)

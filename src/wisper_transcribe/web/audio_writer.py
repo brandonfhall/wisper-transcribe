@@ -1,133 +1,113 @@
-"""Segmented Ogg/Opus audio writer.
+"""Segmented WAV audio writer + PCM downsampling for Discord recordings.
 
-Writes a continuous Opus stream as a sequence of self-contained Ogg files,
-each capped at `segment_duration_s` seconds (default 60). Each file is a
-valid Ogg bitstream with a proper EOS page so it can be decoded independently.
+Writes 16 kHz mono 16-bit PCM as a sequence of self-contained WAV files,
+each capped at `segment_duration_s` seconds (default 60), using the stdlib
+`wave` module.
 
-File-format invariants honoured (all five from plan.md):
-  1. Each segment is a self-contained Ogg/Opus container.
-  2. Segment manifest is append-only (callers responsibility via recording_manager).
-  3. Segment length capped at 60 s.
-  4. Per-user directory layout is a versioned contract.
-  5. Not applicable here (Recording.status managed by recording_manager).
-
-JDA delivers PCM at 48 kHz stereo 16-bit; Whisper expects 16 kHz mono.
-The caller (BotManager / Phase 3) downsamples before calling write(). This
-writer stores whatever bytes it receives — it does not re-encode.
-
-Ogg page structure used here is minimal but valid:
-  - Capture pattern  b"OggS"
-  - One Opus header page (identification + comment), then data pages.
-  - Final page has header_type bit 0x04 (EOS) set.
-
-We use a lightweight hand-rolled Ogg muxer rather than depending on a
-Python Ogg library to keep the install footprint zero for this module.
+Crash safety: `wave.Wave_write.writeframes()` patches the RIFF/`data` chunk
+sizes in the file's header on every call after the first (see cpython's
+`wave.py` — `_patchheader()`), so a segment's header always reflects
+whatever has actually been written through Python's file buffer. We also
+`flush()` after every `write()` call to push that header patch + PCM data
+out of the Python-level buffer, and `fsync()` on segment close/finalize.
+A hard process crash mid-segment can therefore leave the *current* segment
+mildly short of the last few frames, but its header and data length always
+agree, so `wave`/anything else can open and play it — no corruption, only
+a possibly-truncated tail. All previously-rotated segments are already
+closed and fully valid. This replaces the old hand-rolled Ogg/Opus muxer
+(`SegmentedOggWriter`), which wrote raw 48 kHz stereo PCM frames into Ogg
+pages as though they were pre-encoded Opus packets — producing files that
+no Opus decoder could read (see senior-review finding R12).
 """
 from __future__ import annotations
 
+import logging
 import os
-import struct
 import threading
+import wave
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 
-# ---------------------------------------------------------------------------
-# Minimal Ogg muxer
-# ---------------------------------------------------------------------------
-
-class _OggMuxer:
-    """Writes raw Opus packets into a minimal, standards-compliant Ogg stream."""
-
-    _CAPTURE = b"OggS"
-
-    def __init__(self, stream_id: int):
-        self._serial = stream_id
-        self._seq = 0
-        self._granule = 0
-        self._buf: list[bytes] = []
-
-    def _page(self, packets: list[bytes], granule: int, flags: int = 0) -> bytes:
-        """Build one Ogg page containing the given packets."""
-        # Segment table: each packet split into 255-byte laces
-        segments: list[bytes] = []
-        for pkt in packets:
-            while len(pkt) > 255:
-                segments.append(b"\xff")
-                pkt = pkt[255:]
-            segments.append(bytes([len(pkt)]))
-            # packet data follows inline — we include it in body
-        body = b"".join(packets)
-        seg_table = b"".join(segments)
-
-        header = struct.pack(
-            "<4sBBqIIB",
-            self._CAPTURE,
-            0,              # version
-            flags,
-            granule,
-            self._serial,
-            self._seq,
-            len(seg_table),
-        )
-        self._seq += 1
-        # CRC placeholder — most players tolerate CRC=0 for bot-internal use
-        page = header + seg_table + body
-        return page
-
-    def begin(self) -> bytes:
-        """Emit the Opus ID header page (BOS) and comment header page."""
-        # Opus ID header (19 bytes)
-        opus_head = (
-            b"OpusHead"
-            + struct.pack("<BBHIH", 1, 1, 312, 48000, 0)  # channels=1, preskip, rate, gain
-        )
-        # Opus comment header
-        opus_tags = b"OpusTags" + struct.pack("<I", 7) + b"wisper\x00" + struct.pack("<I", 0)
-
-        bos = self._page([opus_head], granule=0, flags=0x02)
-        comment = self._page([opus_tags], granule=0, flags=0x00)
-        return bos + comment
-
-    def write_packet(self, packet: bytes, sample_count: int = 960) -> bytes:
-        """Emit one Opus packet as an Ogg page. Returns the page bytes."""
-        self._granule += sample_count  # 960 samples @ 48 kHz = 20 ms
-        return self._page([packet], granule=self._granule)
-
-    def end(self) -> bytes:
-        """Emit an empty EOS page."""
-        return self._page([], granule=self._granule, flags=0x04)
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# SegmentedOggWriter
+# PCM downsampling: 48 kHz stereo 16-bit -> 16 kHz mono 16-bit
 # ---------------------------------------------------------------------------
 
-class SegmentedOggWriter:
-    """Writes Opus packets into rotating, self-contained 60-second Ogg files.
+def downsample_48k_stereo_to_16k_mono(pcm: bytes) -> bytes:
+    """Convert 48 kHz stereo 16-bit PCM to 16 kHz mono 16-bit PCM.
 
-    Thread-safe: write() and finalize() may be called from different threads.
+    JDA delivers raw 48 kHz stereo 16-bit PCM (both per-user and the
+    pre-mixed `__mixed__` track); everything downstream (embedding
+    extraction, `convert_to_wav`) wants 16 kHz mono, so we downsample at
+    write time rather than storing ~6x more data than needed.
+
+    Pure NumPy/stdlib (Python 3.13 removed `audioop`): average L+R to mono,
+    apply a cheap 3-tap moving-average low-pass as anti-aliasing, then
+    decimate by 3 (48000 / 16000 = 3). This is not broadcast-quality
+    resampling, but it's more than adequate for speech destined for
+    Whisper/pyannote, both of which resample to 16 kHz internally anyway.
+
+    A full 20 ms frame at 48 kHz (960 stereo samples) downsamples to
+    exactly 320 mono samples (20 ms at 16 kHz) — one incoming frame maps to
+    one 20 ms chunk of output, preserving wall-clock duration exactly.
     """
+    if not pcm:
+        return b""
+    n_frames = len(pcm) // 4  # 2 channels * 2 bytes/sample
+    if n_frames == 0:
+        return b""
+
+    samples = np.frombuffer(pcm[: n_frames * 4], dtype="<i2").reshape(-1, 2)
+    mono = samples.astype(np.float64).mean(axis=1)  # average L+R
+
+    if len(mono) >= 3:
+        kernel = np.array([1.0, 1.0, 1.0]) / 3.0
+        filtered = np.convolve(mono, kernel, mode="same")
+    else:
+        filtered = mono
+
+    decimated = np.clip(np.round(filtered[::3]), -32768, 32767).astype("<i2")
+    return decimated.tobytes()
+
+
+# ---------------------------------------------------------------------------
+# SegmentedWavWriter
+# ---------------------------------------------------------------------------
+
+class SegmentedWavWriter:
+    """Writes 16 kHz mono 16-bit PCM into rotating, self-contained WAV files.
+
+    Thread-safe: write() and finalize() may be called from different
+    threads. This writer stores whatever 16 kHz mono 16-bit PCM bytes it
+    receives — downsampling from Discord's native 48 kHz stereo happens in
+    the caller via `downsample_48k_stereo_to_16k_mono()`.
+    """
+
+    RATE = 16000
+    CHANNELS = 1
+    SAMPWIDTH = 2
 
     def __init__(
         self,
         stream_dir: Path,
         segment_duration_s: float = 60.0,
-        stream_id: Optional[int] = None,
     ):
         self._dir = Path(stream_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
         self._duration = segment_duration_s
-        self._stream_id = stream_id or (os.getpid() & 0xFFFFFFFF)
+        self._samples_per_seg = int(self._duration * self.RATE)
 
         self._lock = threading.Lock()
         # Start at the next index after any existing segments (crash recovery).
-        existing = sorted(self._dir.glob("*.opus"))
+        existing = sorted(self._dir.glob("*.wav"))
         self._seg_index = (int(existing[-1].stem) + 1) if existing else 0
-        self._seg_packets = 0          # packets written to current segment
-        self._packets_per_seg = int(self._duration / 0.020)  # media-time rotation
+        self._seg_samples = 0          # samples written to current segment
         self._fh: Optional[object] = None
-        self._muxer: Optional[_OggMuxer] = None
+        self._wf: Optional[wave.Wave_write] = None
 
         self._open_segment()
 
@@ -136,53 +116,60 @@ class SegmentedOggWriter:
     # ------------------------------------------------------------------
 
     def _segment_path(self, index: int) -> Path:
-        return self._dir / f"{index:04d}.opus"
+        return self._dir / f"{index:04d}.wav"
 
     def _open_segment(self) -> None:
         path = self._segment_path(self._seg_index)
-        self._muxer = _OggMuxer(stream_id=self._stream_id)
         self._fh = open(path, "wb")
-        self._fh.write(self._muxer.begin())
-        self._seg_packets = 0
+        self._wf = wave.open(self._fh, "wb")
+        self._wf.setnchannels(self.CHANNELS)
+        self._wf.setsampwidth(self.SAMPWIDTH)
+        self._wf.setframerate(self.RATE)
+        self._seg_samples = 0
 
     def _close_segment(self) -> Path:
-        """Write EOS page, flush, close. Returns the path of the closed segment."""
+        """Patch header, flush, fsync, close. Returns the closed segment's path."""
         path = self._segment_path(self._seg_index)
-        self._fh.write(self._muxer.end())
+        self._wf.close()  # patches header sizes if needed
         self._fh.flush()
         os.fsync(self._fh.fileno())
         self._fh.close()
         self._fh = None
+        self._wf = None
         return path
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def write(self, opus_packet: bytes, sample_count: int = 960) -> Optional[Path]:
-        """Write one Opus packet. Rotates to a new segment if media duration exceeded.
+    def write(self, pcm_16k_mono: bytes) -> Optional[Path]:
+        """Write one chunk of 16 kHz mono 16-bit PCM. Rotates if the current
+        segment has reached its media-time duration cap.
 
-        Rotation is based on packet count (media time), not wall-clock time,
-        so tests that feed packets faster than real-time work correctly.
-        Returns the path of the completed segment if rotation occurred, else None.
+        Rotation is based on sample count (media time), not wall-clock
+        time, so tests that feed frames faster than real-time work
+        correctly. Returns the path of the completed segment if rotation
+        occurred, else None.
         """
+        if not pcm_16k_mono:
+            return None
         with self._lock:
             completed_path: Optional[Path] = None
 
-            if self._seg_packets >= self._packets_per_seg:
+            if self._seg_samples >= self._samples_per_seg:
                 completed_path = self._close_segment()
                 self._seg_index += 1
                 self._open_segment()
 
-            self._fh.write(self._muxer.write_packet(opus_packet, sample_count))
-            self._seg_packets += 1
+            self._wf.writeframes(pcm_16k_mono)
+            self._fh.flush()
+            self._seg_samples += len(pcm_16k_mono) // (self.CHANNELS * self.SAMPWIDTH)
             return completed_path
 
     def finalize(self) -> Path:
-        """Close the current segment with an EOS page. Returns its path."""
+        """Close the current segment. Returns its path."""
         with self._lock:
-            path = self._close_segment()
-            return path
+            return self._close_segment()
 
     @property
     def current_segment_index(self) -> int:
@@ -192,52 +179,59 @@ class SegmentedOggWriter:
     def current_segment_path(self) -> Path:
         return self._segment_path(self._seg_index)
 
+    @property
+    def stream_dir(self) -> Path:
+        return self._dir
+
 
 # ---------------------------------------------------------------------------
-# Real-time PCM mixer (48 kHz stereo → 16 kHz mono, for combined track)
+# Segment concatenation (R2: combined-track finalisation)
 # ---------------------------------------------------------------------------
 
-class RealtimePCMMixer:
-    """Accumulates 48 kHz stereo PCM from multiple users, mixes to 16 kHz mono.
+def concat_wav_segments(segments_dir: Path, out_path: Path) -> Optional[Path]:
+    """Concatenate rotated WAV segments in `segments_dir` into one WAV file.
 
-    Call add_frame(user_id, pcm_bytes) as frames arrive (20 ms / 960 samples
-    per user at 48 kHz stereo 16-bit = 3840 bytes per frame).
-    Call mix() to get the 16 kHz mono 16-bit PCM for the combined track.
+    All segments share the same params (written by the same
+    `SegmentedWavWriter`), so this is a plain frame-concatenation via the
+    stdlib `wave` module — no re-encoding needed.
 
-    CPU cost: ~2% of one core for 6 users per benchmarks in plan.md.
+    Unreadable/corrupt segments (e.g. a zero-byte segment left behind by a
+    crash before any frame was written) are skipped with a warning rather
+    than aborting the whole merge, so a crash loses at most its own
+    segment's tail.
+
+    Returns `out_path` on success, or `None` if there were no segments (or
+    none were readable) — callers should leave `Recording.combined_path`
+    unset in that case so the existing "no audio" state stays reportable.
     """
+    segments_dir = Path(segments_dir)
+    segments = sorted(segments_dir.glob("*.wav"))
 
-    _CHANNELS = 2
-    _IN_RATE = 48000
-    _OUT_RATE = 16000
-    _DOWNSAMPLE = _IN_RATE // _OUT_RATE  # 3
-    _FRAME_SAMPLES = 960                 # 20 ms at 48 kHz
+    out_wf: Optional[wave.Wave_write] = None
+    wrote_any = False
+    try:
+        for seg_path in segments:
+            try:
+                with wave.open(str(seg_path), "rb") as in_wf:
+                    frames = in_wf.readframes(in_wf.getnframes())
+                    if not frames:
+                        continue
+                    if out_wf is None:
+                        out_path.parent.mkdir(parents=True, exist_ok=True)
+                        out_wf = wave.open(str(out_path), "wb")
+                        out_wf.setnchannels(in_wf.getnchannels())
+                        out_wf.setsampwidth(in_wf.getsampwidth())
+                        out_wf.setframerate(in_wf.getframerate())
+                    out_wf.writeframes(frames)
+                    wrote_any = True
+            except (wave.Error, EOFError, OSError) as exc:
+                log.warning("Skipping unreadable combined-track segment %s: %s", seg_path, exc)
+    finally:
+        if out_wf is not None:
+            out_wf.close()
 
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._pending: dict[str, bytes] = {}  # user_id → latest PCM frame
-
-    def add_frame(self, user_id: str, pcm_stereo_48k: bytes) -> None:
-        with self._lock:
-            self._pending[user_id] = pcm_stereo_48k
-
-    def mix(self) -> bytes:
-        """Return a 16 kHz mono 16-bit PCM frame and clear pending buffers."""
-        with self._lock:
-            frames = list(self._pending.values())
-            self._pending.clear()
-
-        n_out = self._FRAME_SAMPLES // self._DOWNSAMPLE  # 320 samples out
-        out = [0] * n_out
-
-        for pcm in frames:
-            for i in range(n_out):
-                # Take every 3rd stereo pair, average L+R to mono
-                src = i * self._DOWNSAMPLE * self._CHANNELS * 2  # byte offset
-                if src + 3 < len(pcm):
-                    l_sample = struct.unpack_from("<h", pcm, src)[0]
-                    r_sample = struct.unpack_from("<h", pcm, src + 2)[0]
-                    mono = (l_sample + r_sample) >> 1
-                    out[i] = max(-32768, min(32767, out[i] + mono))
-
-        return struct.pack(f"<{n_out}h", *out)
+    if not wrote_any:
+        if out_path.exists():
+            out_path.unlink()
+        return None
+    return out_path

@@ -83,19 +83,34 @@ class Logger:
         self._file = open(self.log_path, "w", encoding="utf-8", buffering=1)
 
     def _patch_tqdm(self) -> None:
-        """Tee tqdm.write() through this logger so file output is captured."""
+        """Tee tqdm.write() through this logger so file output is captured.
+
+        R32-10: idempotent against repeated `setup_logging()` calls in the
+        same process (e.g. Click's `CliRunner` invoking the CLI entry point
+        multiple times in a test suite). Without the marker below, each call
+        wrapped whatever `tqdm.write` currently was -- including a *previous*
+        tee -- so the wrapper chain grew by one closure every call, and a
+        single `tqdm.write()` would cascade through every still-referenced
+        prior Logger's `_write_to_file()`. The marker records the true
+        (unwrapped) original on the tee function itself, so re-patching always
+        wraps that original directly and the chain never grows past one
+        layer -- the newest Logger instance is simply the one actively
+        capturing output, matching "permanent tee, but only one at a time".
+        """
         try:
             import tqdm as _tqdm_mod
         except ImportError:
             return
 
-        _orig = _tqdm_mod.tqdm.write
+        current = _tqdm_mod.tqdm.write
+        _orig = getattr(current, "_wisper_tee_original", current)
         _self = self
 
         def _tee(msg: str, *a, **kw) -> None:
             _orig(msg, *a, **kw)   # always write to the normal tqdm destination
             _self._write_to_file(msg)
 
+        _tee._wisper_tee_original = _orig  # type: ignore[attr-defined]
         _tqdm_mod.tqdm.write = _tee  # type: ignore[method-assign]
 
     def _configure_python_logging(self) -> None:

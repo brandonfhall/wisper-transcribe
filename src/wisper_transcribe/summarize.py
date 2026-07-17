@@ -315,15 +315,39 @@ def _linkify(text: str, terms: set[str]) -> str:
     """Wrap whole-word occurrences of each term in [[...]] (Obsidian wiki-link).
 
     Idempotent: if a term is already inside [[...]], it is not double-wrapped.
+
+    R32-11: before EACH term's substitution, text is split on any ``[[...]]``
+    spans that exist at that point -- spans already present when ``_linkify``
+    was called (an earlier call, or a literal wiki-link that arrived
+    verbatim in the LLM's own output) as well as spans this same call just
+    created for a longer term processed earlier (terms are applied
+    longest-first). Substitution runs only on the segments OUTSIDE those
+    spans; the spans themselves are left completely untouched. A previous
+    version used a per-match ``(?<!\\[)`` / ``(?!\\])`` lookaround that only
+    checked the single character immediately adjacent to a candidate match
+    -- that protects a term sitting exactly at a link's edge (e.g. "Bob" in
+    "[[Bob]]"), but a *different*, shorter term that is an interior word of
+    an already-wrapped multi-word term (e.g. term="the" inside a
+    just-wrapped "[[Bob the Guard]]") is nowhere near a bracket and was not
+    protected at all, producing a nested double-wrap
+    "[[Bob [[the]] Guard]]". Re-splitting before every term closes that gap
+    regardless of where in the span the term falls or when the span was
+    created.
     """
     if not text or not terms:
         return text
     import re as _re
 
+    existing_link_re = _re.compile(r"(\[\[.*?\]\])")
     # Sort longest-first so "Bob the Guard" wraps before "Bob".
     for term in sorted(terms, key=len, reverse=True):
-        pattern = _re.compile(rf"(?<!\[)\b{_re.escape(term)}\b(?!\])")
-        text = pattern.sub(f"[[{term}]]", text)
+        pattern = _re.compile(rf"\b{_re.escape(term)}\b")
+        parts = existing_link_re.split(text)
+        for i, part in enumerate(parts):
+            if i % 2 == 1:
+                continue  # odd indices are [[...]] spans -- leave untouched
+            parts[i] = pattern.sub(f"[[{term}]]", part)
+        text = "".join(parts)
     return text
 
 

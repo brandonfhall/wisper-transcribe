@@ -519,7 +519,8 @@ if (_presetData.length === 0) { _emptyMsg.textContent = 'No presets saved yet.';
 else { _presetData.forEach(function(p) { _presetRows.appendChild(_makePresetRow(p)); }); }
 
 function wisperOpenDataDir() {
-  fetch('/config/open-data-dir')
+  // POST — the endpoint spawns an OS process, so it must not be a GET (R16).
+  fetch('/config/open-data-dir', {method: 'POST'})
     .then(function(r) { return r.json(); })
     .then(function(d) { if (!d.ok) console.warn('Could not open data dir:', d.error); })
     .catch(function() {});

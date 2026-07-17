@@ -36,7 +36,8 @@ def test_dashboard_returns_200(client, tmp_path):
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.load_config", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
-         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)):
+         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)), \
+         patch("wisper_transcribe.web.routes.dashboard.get_output_dir", return_value=tmp_path / "output"):
         resp = client.get("/")
     assert resp.status_code == 200
     assert b"wisper" in resp.content
@@ -54,7 +55,8 @@ def test_dashboard_shows_llm_provider_and_model(client, tmp_path, monkeypatch):
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.load_config", return_value=cfg), \
          patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
-         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)):
+         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)), \
+         patch("wisper_transcribe.web.routes.dashboard.get_output_dir", return_value=tmp_path / "output"):
         resp = client.get("/")
     assert resp.status_code == 200
     body = resp.content.decode()
@@ -76,14 +78,35 @@ def test_dashboard_flags_cloud_provider_missing_key(client, tmp_path, monkeypatc
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.load_config", return_value=cfg), \
          patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
-         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)):
+         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)), \
+         patch("wisper_transcribe.web.routes.dashboard.get_output_dir", return_value=tmp_path / "output"):
         resp = client.get("/")
     assert resp.status_code == 200
     body = resp.content.decode()
     assert "anthropic" in body
     assert "API key missing" in body
     # Resolved default model is shown when llm_model is blank
-    assert "claude-sonnet-4-6" in body
+    assert "claude-sonnet-5" in body
+
+
+def test_dashboard_transcript_count_excludes_summaries(client, tmp_path):
+    """R21: the dashboard's transcript count must exclude .summary.md sidecars,
+    same as the Transcripts page — they are LLM-generated notes, not transcripts."""
+    out_dir = tmp_path / "output"
+    out_dir.mkdir()
+    (out_dir / "session01.md").write_text("# transcript")
+    (out_dir / "session01.summary.md").write_text("# summary")
+    (out_dir / "session02.md").write_text("# transcript 2")
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
+         patch("wisper_transcribe.web.routes.dashboard.load_config", return_value={}), \
+         patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
+         patch("wisper_transcribe.web.routes.dashboard.get_output_dir", return_value=out_dir):
+        resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.content.decode()
+    # Two real transcripts, not three — the summary sidecar must not be counted.
+    assert "2 transcripts in the archive" in body
 
 
 def test_dashboard_jobs_partial_returns_200(client):
@@ -118,6 +141,104 @@ def test_transcribe_post_queues_job_and_redirects(client, tmp_path):
     assert resp.status_code == 303
     location = resp.headers["location"]
     assert location.startswith("/transcribe/jobs/")
+
+
+def test_transcribe_post_streams_large_upload_correctly(client, tmp_path):
+    """R10: uploads are streamed to disk in 1 MiB chunks rather than
+    buffered whole into memory. A payload spanning multiple chunks must
+    still land on disk byte-for-byte before the job is submitted."""
+    payload = b"A" * (1 << 20) + b"B" * (1 << 19)  # 1.5 MiB, crosses a chunk boundary
+
+    captured: dict = {}
+
+    class _FakeJob:
+        id = "fake-job-id"
+
+    def _fake_submit(input_path, **kwargs):
+        captured["content"] = Path(input_path).read_bytes()
+        return _FakeJob()
+
+    with patch.object(client.app.state.job_queue, "submit", side_effect=_fake_submit):
+        resp = client.post(
+            "/transcribe",
+            files={"file": ("test.mp3", payload, "audio/mpeg")},
+            data={},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    assert captured.get("content") == payload
+
+
+def test_job_stream_serves_lines_after_log_trimming(client, tmp_path):
+    """R14: once Job.log_lines has been trimmed (log_lines_dropped > 0), the
+    SSE stream must still serve the retained lines using the translated
+    index instead of crashing or resending stale data."""
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from datetime import datetime
+
+    job = Job(
+        id="trim-test-job",
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(tmp_path / "audio.mp3"),
+        kwargs={},
+        finished_at=datetime.now(),
+    )
+    # Simulate a job that appended far more than _MAX_LOG_LINES: only the
+    # tail is retained, and log_lines_dropped records how much was trimmed.
+    job.log_lines = ["line 998", "line 999"]
+    job.log_lines_dropped = 998
+
+    client.app.state.job_queue._jobs[job.id] = job
+
+    with client.stream("GET", f"/transcribe/jobs/{job.id}/stream") as resp:
+        body = "".join(resp.iter_text())
+
+    assert '"line 998"' in body
+    assert '"line 999"' in body
+    assert '"status": "completed"' in body
+
+
+def test_transcribe_post_empty_upload_still_queues(client, tmp_path):
+    """An empty upload is still accepted at the route layer (the chunked
+    read loop must not choke on an immediate EOF) -- validation of the
+    resulting empty file happens downstream in the job itself, unchanged
+    by the R10 streaming fix."""
+    resp = client.post(
+        "/transcribe",
+        files={"file": ("empty.mp3", b"", "audio/mpeg")},
+        data={},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"].startswith("/transcribe/jobs/")
+
+
+@pytest.mark.parametrize("field,bad_value", [
+    ("model_size", "not-a-real-model"),
+    ("device", "quantum"),
+    ("compute_type", "bfloat9000"),
+])
+def test_transcribe_post_invalid_enum_redirects_with_generic_error(client, tmp_path, field, bad_value):
+    """R33: model_size/device/compute_type are validated against the same
+    canonical enums the CLI uses. An invalid value redirects to /transcribe
+    with a generic error code — never the raw value (CLAUDE.md: never echo
+    user input into a redirect)."""
+    audio_file = tmp_path / "test.mp3"
+    audio_file.write_bytes(b"fake mp3")
+
+    with open(audio_file, "rb") as f:
+        resp = client.post(
+            "/transcribe",
+            files={"file": ("test.mp3", f, "audio/mpeg")},
+            data={field: bad_value},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/transcribe?error=invalid_option"
+    assert bad_value not in resp.headers["location"]
 
 
 @pytest.mark.parametrize("filename,mime", [
@@ -363,6 +484,26 @@ def test_config_get_uses_os_specific_open_label(client, platform, expected_label
         resp = client.get("/config")
     assert resp.status_code == 200
     assert expected_label.encode() in resp.content
+
+
+def test_config_open_data_dir_get_is_rejected(client):
+    """R16: open-data-dir spawns an OS process (state-changing), so the GET
+    verb — triggerable cross-site via <img src=...> — must not be routed."""
+    with patch("subprocess.Popen") as mock_popen:
+        resp = client.get("/config/open-data-dir")
+    assert resp.status_code == 405
+    mock_popen.assert_not_called()
+
+
+def test_config_open_data_dir_post_opens_file_manager(client, tmp_path):
+    with patch("wisper_transcribe.config.get_data_dir", return_value=tmp_path), \
+         patch("subprocess.Popen") as mock_popen:
+        resp = client.post("/config/open-data-dir")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    mock_popen.assert_called_once()
+    # The spawned command targets the data dir, nothing user-controlled.
+    assert str(tmp_path) in mock_popen.call_args.args[0]
 
 
 def test_config_post_saves_and_redirects(client):
@@ -865,6 +1006,39 @@ def test_preset_add_missing_name_rejected(client):
 
 
 # ---------------------------------------------------------------------------
+# Startup orphan sweep (R9-1)
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_orphaned_uploads_removes_all_prefixes(tmp_path, monkeypatch):
+    """R9-1/R6: the startup sweep recognizes wisper_enroll_* temp files (the
+    standalone speaker-enroll route's crash-window safety net) and the
+    wisper_enrollsrc_* files a pending standalone enroll job was renamed to,
+    not just wisper_upload_*."""
+    import tempfile
+
+    from wisper_transcribe.web.app import _cleanup_orphaned_uploads
+
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+
+    upload = tmp_path / "wisper_upload_abc123.mp3"
+    enroll = tmp_path / "wisper_enroll_def456.wav"
+    enrollsrc = tmp_path / "wisper_enrollsrc_ghi789.mp3"
+    other = tmp_path / "unrelated.txt"
+    upload.write_bytes(b"x")
+    enroll.write_bytes(b"x")
+    enrollsrc.write_bytes(b"x")
+    other.write_bytes(b"x")
+
+    _cleanup_orphaned_uploads()
+
+    assert not upload.exists()
+    assert not enroll.exists()
+    assert not enrollsrc.exists()
+    assert other.exists()
+
+
+# ---------------------------------------------------------------------------
 # Speakers
 # ---------------------------------------------------------------------------
 
@@ -880,50 +1054,258 @@ def test_speakers_enroll_form_returns_200(client):
     assert resp.status_code == 200
 
 
-def test_speakers_remove_redirects(client, tmp_path):
-    from wisper_transcribe.models import SpeakerProfile
-    fake_emb = tmp_path / "alice.npy"
-    fake_emb.write_bytes(b"")
-    fake_profile = SpeakerProfile(
-        name="alice",
-        display_name="Alice",
-        role="DM",
-        embedding_path=fake_emb,
-        enrolled_date="2026-04-07",
-        enrollment_source="test.mp3",
-    )
-    profiles = {"alice": fake_profile}
+def test_speakers_enroll_submit_enqueues_standalone_job(app, client, tmp_path, monkeypatch):
+    """R6: the standalone enroll POST no longer runs WAV conversion /
+    diarization / embedding extraction inside the request — it saves the
+    upload (streamed, R10), hands ownership to a JOB_ENROLL job (mode
+    "standalone"), and redirects to the job detail page. At submit time the
+    wisper_enroll_* upload is renamed to wisper_enrollsrc_<job-id> so the
+    startup sweep can never delete a pending job's file (F5 pattern)."""
+    import tempfile as _tempfile
 
-    with patch("wisper_transcribe.web.routes.speakers.load_profiles", return_value=profiles), \
-         patch("wisper_transcribe.web.routes.speakers.save_profiles") as mock_save:
+    monkeypatch.setattr(_tempfile, "tempdir", str(tmp_path))
+    try:
+        resp = client.post(
+            "/speakers/enroll",
+            data={"name": "TestSpeaker", "role": "DM", "notes": "n"},
+            files={"audio": ("clip.mp3", b"fake audio bytes", "audio/mpeg")},
+            follow_redirects=False,
+        )
+    finally:
+        monkeypatch.setattr(_tempfile, "tempdir", None)
+
+    assert resp.status_code == 303
+    location = resp.headers["location"]
+    assert location.startswith("/transcribe/jobs/")
+
+    queue = app.state.job_queue
+    job_id = location.rsplit("/", 1)[-1]
+    job = queue.get(job_id)
+    assert job is not None
+    assert job.job_type == "enroll"
+    assert job.enroll_mode == "standalone"
+    assert job.enroll_params["profile_key"] == "testspeaker"
+    assert job.enroll_params["display_name"] == "TestSpeaker"
+    assert job.enroll_params["role"] == "DM"
+    assert job.enroll_params["notes"] == "n"
+
+    # Upload renamed out of the wisper_enroll_* sweep glob, owned by the job.
+    upload = Path(job.input_path)
+    assert upload.name == f"wisper_enrollsrc_{job.id}.mp3"
+    assert upload.exists()
+    assert not list(tmp_path.glob("wisper_enroll_*"))
+    upload.unlink()  # the (unstarted) job would normally delete it
+
+
+def test_speakers_enroll_submit_cleans_up_temp_file_when_submit_fails(client, tmp_path, monkeypatch):
+    """R9-1/R6: if the job hand-off itself fails, the route still deletes the
+    temp upload (ownership never transferred) and redirects with a generic
+    error code."""
+    import tempfile as _tempfile
+    from wisper_transcribe.web.jobs import JobQueue
+
+    monkeypatch.setattr(_tempfile, "tempdir", str(tmp_path))
+    try:
+        with patch.object(
+            JobQueue, "submit_standalone_enroll", side_effect=RuntimeError("boom")
+        ):
+            resp = client.post(
+                "/speakers/enroll",
+                data={"name": "TestSpeaker", "role": "", "notes": ""},
+                files={"audio": ("clip.mp3", b"fake audio bytes", "audio/mpeg")},
+                follow_redirects=False,
+            )
+    finally:
+        monkeypatch.setattr(_tempfile, "tempdir", None)
+
+    assert resp.status_code == 303
+    assert "error=enroll_failed" in resp.headers["location"]
+    assert "boom" not in resp.headers["location"]
+    assert not list(tmp_path.iterdir())  # no orphaned upload left behind
+
+
+def test_speakers_remove_redirects(client, tmp_path):
+    # R37: removal now goes through speaker_manager.remove_profile() (a
+    # locked load-modify-save against the real profiles.json), mirroring
+    # the rename route's real-file test pattern below rather than mocking
+    # load_profiles/save_profiles in the route module (which no longer
+    # calls them directly for removal).
+    from wisper_transcribe.speaker_manager import load_profiles as _load
+
+    _seed_profile_store(tmp_path)
+
+    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path):
         resp = client.post("/speakers/alice/remove", follow_redirects=False)
 
     assert resp.status_code == 303
-    mock_save.assert_called_once_with({})  # alice removed, empty dict saved
+    assert _load(data_dir=tmp_path) == {}
 
 
-def test_speakers_rename_updates_display_name(client):
+def test_speakers_remove_deletes_reference_clip(client, tmp_path):
+    """R9-5: the web removal route deletes the .mp3 reference clip alongside
+    the .npy embedding, not just the profile entry."""
+    emb_dir = _seed_profile_store(tmp_path)
+    npy_path = emb_dir / "alice.npy"
+    mp3_path = emb_dir / "alice.mp3"
+    assert npy_path.exists() and mp3_path.exists()
+
+    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path):
+        resp = client.post("/speakers/alice/remove", follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert not npy_path.exists()
+    assert not mp3_path.exists()
+
+
+def _seed_profile_store(tmp_path, key="alice", display="Alice", with_clip=True):
+    """Write a real speakers.json + embedding files under tmp_path (used as
+    the data dir) and return the embeddings dir."""
+    import numpy as np
     from wisper_transcribe.models import SpeakerProfile
-    fake_profile = SpeakerProfile(
-        name="alice",
-        display_name="Alice",
-        role="DM",
-        embedding_path=Path("/tmp/alice.npy"),
-        enrolled_date="2026-04-07",
-        enrollment_source="test.mp3",
-    )
-    profiles = {"alice": fake_profile}
+    from wisper_transcribe.speaker_manager import save_profiles as _save
 
-    with patch("wisper_transcribe.web.routes.speakers.load_profiles", return_value=profiles), \
-         patch("wisper_transcribe.web.routes.speakers.save_profiles"):
+    emb_dir = tmp_path / "profiles" / "embeddings"
+    emb_dir.mkdir(parents=True, exist_ok=True)
+    np.save(str(emb_dir / f"{key}.npy"), np.zeros(4))
+    if with_clip:
+        (emb_dir / f"{key}.mp3").write_bytes(b"fake mp3")
+
+    profile = SpeakerProfile(
+        name=key, display_name=display, role="DM",
+        embedding_path=emb_dir / f"{key}.npy",
+        enrolled_date="2026-04-07", enrollment_source="test.mp3",
+    )
+    _save({key: profile}, data_dir=tmp_path)
+    return emb_dir
+
+
+def test_speakers_rename_rekeys_profile_and_moves_files(client, tmp_path):
+    """R31: the web rename route adopts the CLI's rekey semantic — the
+    profile key changes and the .npy/.mp3 files move with it (previously the
+    web route changed display_name only)."""
+    from wisper_transcribe.speaker_manager import load_profiles as _load
+
+    emb_dir = _seed_profile_store(tmp_path)
+
+    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path):
         resp = client.post(
             "/speakers/alice/rename",
-            data={"new_name": "Alice (DM)"},
+            data={"new_name": "Alicia"},
             follow_redirects=False,
         )
 
     assert resp.status_code == 303
-    assert profiles["alice"].display_name == "Alice (DM)"
+    assert resp.headers["location"] == "/speakers"
+    profiles = _load(data_dir=tmp_path)
+    assert "alice" not in profiles
+    assert "alicia" in profiles
+    assert profiles["alicia"].display_name == "Alicia"
+    assert (emb_dir / "alicia.npy").exists()
+    assert (emb_dir / "alicia.mp3").exists()
+    assert not (emb_dir / "alice.npy").exists()
+    assert not (emb_dir / "alice.mp3").exists()
+
+
+def test_speakers_rename_updates_campaign_membership(client, tmp_path):
+    """R31: a web rename rekeys campaign rosters too — membership (including
+    the Discord ID binding) follows the profile instead of dangling."""
+    from wisper_transcribe.campaign_manager import (
+        add_member, bind_discord_id, create_campaign, load_campaigns,
+    )
+
+    _seed_profile_store(tmp_path)
+
+    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path):
+        campaign = create_campaign("Test Campaign", data_dir=tmp_path)
+        add_member(campaign.slug, "alice", role="player", data_dir=tmp_path)
+        bind_discord_id(campaign.slug, "alice", "123456789012345678", data_dir=tmp_path)
+
+        resp = client.post(
+            "/speakers/alice/rename",
+            data={"new_name": "Alicia"},
+            follow_redirects=False,
+        )
+
+        campaigns = load_campaigns(data_dir=tmp_path)
+
+    assert resp.status_code == 303
+    members = campaigns[campaign.slug].members
+    assert "alice" not in members
+    assert "alicia" in members
+    assert members["alicia"].role == "player"
+    assert members["alicia"].discord_user_id == "123456789012345678"
+    assert members["alicia"].profile_key == "alicia"
+
+
+def test_speakers_rename_collision_redirects_generic_error(client, tmp_path):
+    """R31: renaming onto an existing key fails with a generic error code —
+    the CLI's collision guard, without reflecting the submitted name."""
+    from wisper_transcribe.models import SpeakerProfile
+    from wisper_transcribe.speaker_manager import load_profiles as _load, save_profiles as _save
+
+    emb_dir = _seed_profile_store(tmp_path)
+    profiles = _load(data_dir=tmp_path)
+    profiles["bob"] = SpeakerProfile(
+        name="bob", display_name="Bob", role="",
+        embedding_path=emb_dir / "bob.npy",
+        enrolled_date="2026-04-07", enrollment_source="t.mp3",
+    )
+    _save(profiles, data_dir=tmp_path)
+
+    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path):
+        resp = client.post(
+            "/speakers/alice/rename",
+            data={"new_name": "Bob"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/speakers?error=rename_failed"
+    profiles = _load(data_dir=tmp_path)
+    assert "alice" in profiles  # unchanged
+
+
+def test_speakers_rename_invalid_key_redirects_generic_error(client, tmp_path):
+    """R31: a new name whose derived key fails the path-component guard is
+    refused with a generic error code — never reflected into the redirect."""
+    _seed_profile_store(tmp_path)
+
+    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path):
+        resp = client.post(
+            "/speakers/alice/rename",
+            data={"new_name": "evil/../../name"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/speakers?error=rename_failed"
+    assert "evil" not in resp.headers["location"]
+
+
+def test_speakers_rename_display_case_only_keeps_key(client, tmp_path):
+    """Renaming to a name that derives the same key updates display_name
+    without moving files or breaking the profile key."""
+    from wisper_transcribe.speaker_manager import load_profiles as _load
+
+    emb_dir = _seed_profile_store(tmp_path, display="alice")
+
+    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path):
+        resp = client.post(
+            "/speakers/alice/rename",
+            data={"new_name": "Alice"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    profiles = _load(data_dir=tmp_path)
+    assert "alice" in profiles
+    assert profiles["alice"].display_name == "Alice"
+    assert (emb_dir / "alice.npy").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1070,6 +1452,57 @@ def test_delete_transcript_also_removes_diar_sidecar_and_audio(client, tmp_path)
     assert not md.exists()
     assert not audio.exists()
     assert not diar.exists()
+
+
+def test_delete_transcript_also_removes_excerpt_clips(client, tmp_path):
+    """R9-4: deleting a transcript removes its <stem>_excerpt_*.mp3/.txt
+    speaker-preview clips, which the code previously left behind."""
+    md = tmp_path / "session01.md"
+    md.write_text(_TRANSCRIPT_MD)
+    clip_mp3 = tmp_path / "session01_excerpt_SPEAKER_00.mp3"
+    clip_txt = tmp_path / "session01_excerpt_SPEAKER_00.txt"
+    clip_mp3.write_bytes(b"fake mp3")
+    clip_txt.write_text("Hello there")
+    # A different transcript's excerpt with a similar prefix must survive.
+    unrelated = tmp_path / "session01x_excerpt_SPEAKER_00.mp3"
+    unrelated.write_bytes(b"unrelated")
+
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
+        resp = client.post("/transcripts/session01/delete", follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert not md.exists()
+    assert not clip_mp3.exists()
+    assert not clip_txt.exists()
+    assert unrelated.exists()
+    unrelated.unlink()
+
+
+def test_delete_transcript_glob_metacharacter_stem_does_not_leak_other_clips(client, tmp_path):
+    """Regression: a transcript stem containing glob metacharacters (e.g.
+    an uploaded file literally named 'mix*.mp3') must not turn
+    _delete_excerpt_clips's pattern into a wildcard that also matches a
+    DIFFERENT transcript's excerpt clips. Without glob.escape(), deleting
+    "mix*" builds the pattern "mix*_excerpt_*", which also matches
+    "mix2_excerpt_SPEAKER_00.mp3" -- a completely unrelated transcript."""
+    from urllib.parse import quote
+
+    victim_stem = "mix*"
+    victim_md = tmp_path / f"{victim_stem}.md"
+    victim_md.write_text(_TRANSCRIPT_MD)
+
+    bystander_clip = tmp_path / "mix2_excerpt_SPEAKER_00.mp3"
+    bystander_clip.write_bytes(b"unrelated transcript's clip")
+
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
+        resp = client.post(
+            f"/transcripts/{quote(victim_stem, safe='')}/delete", follow_redirects=False
+        )
+
+    assert resp.status_code == 303
+    assert not victim_md.exists()
+    assert bystander_clip.exists()
+    bystander_clip.unlink()
 
 
 def test_delete_transcript_never_deletes_audio_outside_output_dir(client, tmp_path):
@@ -1219,20 +1652,16 @@ def test_transcribe_post_no_vocab_file_hotwords_is_none(client, tmp_path, monkey
     assert call_kwargs.get("hotwords") is None
 
 
-def test_speakers_rename_empty_name_no_change(client):
-    from wisper_transcribe.models import SpeakerProfile
-    fake_profile = SpeakerProfile(
-        name="alice",
-        display_name="Alice",
-        role="DM",
-        embedding_path=Path("/tmp/alice.npy"),
-        enrolled_date="2026-04-07",
-        enrollment_source="test.mp3",
-    )
-    profiles = {"alice": fake_profile}
+def test_speakers_rename_empty_name_no_change(client, tmp_path):
+    # An empty new_name short-circuits before the route ever calls
+    # speaker_manager.rename_profile(), so no profiles.json write happens --
+    # verified against the real store rather than mocking module-level
+    # load_profiles/save_profiles (the route no longer imports the latter).
+    from wisper_transcribe.speaker_manager import load_profiles as _load
 
-    with patch("wisper_transcribe.web.routes.speakers.load_profiles", return_value=profiles), \
-         patch("wisper_transcribe.web.routes.speakers.save_profiles") as mock_save:
+    _seed_profile_store(tmp_path)
+
+    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path):
         resp = client.post(
             "/speakers/alice/rename",
             data={"new_name": ""},
@@ -1240,8 +1669,7 @@ def test_speakers_rename_empty_name_no_change(client):
         )
 
     assert resp.status_code == 303
-    mock_save.assert_not_called()  # empty name: no save
-    assert profiles["alice"].display_name == "Alice"  # unchanged
+    assert _load(data_dir=tmp_path)["alice"].display_name == "Alice"  # unchanged
 
 
 # ---------------------------------------------------------------------------
@@ -2028,6 +2456,24 @@ def test_bulk_delete_removes_multiple_transcripts(client, tmp_path, monkeypatch)
     assert not (tmp_path / "session02.summary.md").exists()
 
 
+def test_bulk_delete_removes_excerpt_clips(client, tmp_path, monkeypatch):
+    """R9-4: bulk-delete removes each stem's excerpt clips too."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    (tmp_path / "session01.md").write_text("# S1")
+    clip = tmp_path / "session01_excerpt_SPEAKER_00.mp3"
+    clip.write_bytes(b"fake mp3")
+
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
+        resp = client.post(
+            "/transcripts/bulk-delete",
+            data={"stems": ["session01"]},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    assert not clip.exists()
+
+
 def test_bulk_delete_skips_invalid_stems(client, tmp_path, monkeypatch):
     """bulk-delete silently skips stems that fail path validation."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
@@ -2133,3 +2579,25 @@ def test_job_excerpt_fallback_404_when_job_gone(client, tmp_path):
     resp = client.get("/transcribe/jobs/nonexistent-job-id/excerpt/SPEAKER_00")
 
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# R32-8: _build_tailwind must not crash startup when input.css is missing
+# ---------------------------------------------------------------------------
+
+def test_build_tailwind_missing_input_css_does_not_raise(tmp_path, monkeypatch):
+    """_INPUT_CSS.stat() used to raise an uncaught FileNotFoundError when
+    input.css was absent (e.g. a stripped install), crashing app startup
+    instead of falling into the existing warn-and-continue path."""
+    import wisper_transcribe.web.app as app_module
+
+    missing_input = tmp_path / "does-not-exist.css"
+    output_css = tmp_path / "tailwind.min.css"
+    output_css.write_text("/* stale */", encoding="utf-8")
+
+    monkeypatch.setattr(app_module, "_INPUT_CSS", missing_input)
+    monkeypatch.setattr(app_module, "_OUTPUT_CSS", output_css)
+
+    # Should not raise, and should fall through to attempt (and gracefully
+    # fail) the subprocess rebuild rather than crashing on the stat() call.
+    app_module._build_tailwind()

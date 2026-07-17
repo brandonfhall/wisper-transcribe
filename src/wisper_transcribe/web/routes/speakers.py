@@ -8,16 +8,15 @@ from typing import Annotated, Optional
 from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 
-from . import templates
+from . import get_queue as _get_queue, templates
 from wisper_transcribe.path_utils import validate_path_component
-from wisper_transcribe.speaker_manager import load_profiles, save_profiles
+from wisper_transcribe.speaker_manager import load_profiles, remove_profile
 from wisper_transcribe.web._responses import error_redirect, invalid_input_response
 
 router = APIRouter(prefix="/speakers")
 
 
 def _clip_path(key: str) -> "Path":
-    import os
     from wisper_transcribe.speaker_manager import _get_embeddings_dir
     return _get_embeddings_dir() / f"{os.path.basename(key)}.mp3"
 
@@ -97,7 +96,17 @@ async def enroll_submit(
     segment: Annotated[Optional[str], Form()] = None,
     update: Annotated[bool, Form()] = False,
 ) -> RedirectResponse:
-    """Enroll a new speaker or update an existing one from an uploaded audio file."""
+    """Enroll a new speaker or update an existing one from an uploaded audio file.
+
+    R6: the ML work (WAV conversion, diarization, embedding extraction) used
+    to run synchronously inside this ``async def`` — blocking the entire
+    event loop for minutes and mutating the module-level ML caches
+    concurrently with any running job's worker thread. The route now only
+    validates and saves the upload, then enqueues a standalone JOB_ENROLL
+    job (one-job-at-a-time queue) and redirects to the job detail page.
+    Temp-file cleanup moved into the job with the work — see
+    ``JobQueue.submit_standalone_enroll`` (R9-1 interplay).
+    """
     import tempfile
 
     if not name or "\x00" in name:
@@ -115,76 +124,70 @@ async def enroll_submit(
 
     suffix = Path(audio.filename or "audio.mp3").suffix or ".mp3"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix, prefix="wisper_enroll_")
+    tmp_path = Path(tmp.name)
     try:
-        content = await audio.read()
-        tmp.write(content)
+        # R10: stream to disk in 1 MiB chunks instead of buffering the whole
+        # upload (potentially a multi-GB reference clip) in RAM at once.
+        while chunk := await audio.read(1 << 20):
+            tmp.write(chunk)
     finally:
         tmp.close()
 
     try:
-        from wisper_transcribe.audio_utils import convert_to_wav
-        from wisper_transcribe.config import get_device, get_hf_token, load_config
-        from wisper_transcribe.diarizer import diarize
-        from wisper_transcribe.speaker_manager import enroll_speaker, extract_embedding, update_embedding
-
-        config = load_config()
-        device = get_device()
-        hf_token = get_hf_token(config)
-        wav_path = convert_to_wav(Path(tmp.name))
-
-        # Diarize to get segment boundaries
-        diarization = diarize(wav_path, hf_token=hf_token, device=device)
-
-        # Find the primary speaker label (most total speech time)
-        from collections import defaultdict
-        speaker_time: dict[str, float] = defaultdict(float)
-        for seg in diarization:
-            speaker_time[seg.speaker] += seg.end - seg.start
-        if not speaker_time:
-            return error_redirect("/speakers/enroll", "no_speech")
-        primary_label = max(speaker_time, key=lambda k: speaker_time[k])
-
-        if update and profile_key in load_profiles():
-            new_emb = extract_embedding(wav_path, diarization, primary_label, device)
-            update_embedding(profile_key, new_emb)
-        else:
-            enroll_speaker(
-                name=profile_key,
-                display_name=safe_name,
-                role=role,
-                audio_path=wav_path,
-                segments=diarization,
-                speaker_label=primary_label,
-                device=device,
-                notes=notes,
-            )
+        queue = _get_queue(request)
+        job = queue.submit_standalone_enroll(
+            str(tmp_path),
+            profile_key=profile_key,
+            display_name=safe_name,
+            role=role,
+            notes=notes,
+            update=update,
+        )
     except Exception:
+        # Submission failed before the job took ownership of the file.
+        tmp_path.unlink(missing_ok=True)
         return error_redirect("/speakers/enroll", "enroll_failed")
 
-    return RedirectResponse(url="/speakers", status_code=303)
+    # job.id is server-generated (uuid4) — no user-controlled data in the URL.
+    return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
 
 
 @router.post("/{name}/remove", response_class=HTMLResponse)
 async def remove_speaker(request: Request, name: str) -> RedirectResponse:
-    profiles = load_profiles()
-    if name in profiles:
-        profile = profiles.pop(name)
-        # Remove embedding file
-        if profile.embedding_path.exists():
-            profile.embedding_path.unlink()
-        save_profiles(profiles)
+    # R37: goes through speaker_manager.remove_profile() (locked
+    # load-modify-save, R9-5's .npy + .mp3 cleanup) -- shared with the CLI
+    # `speakers remove` command instead of duplicating the sequence here.
+    try:
+        remove_profile(name)
+    except KeyError:
+        pass  # already gone -- same no-op the old "if name in profiles" gave
     return RedirectResponse(url="/speakers", status_code=303)
 
 
 @router.post("/{name}/rename", response_class=HTMLResponse)
 async def rename_speaker(request: Request, name: str) -> RedirectResponse:
+    """Rename an enrolled speaker.
+
+    R31: goes through ``speaker_manager.rename_profile`` — the same rekey
+    semantic as the CLI ``speakers rename`` command (rekeys the profile,
+    moves the .npy/.mp3 files, updates campaign membership) — instead of the
+    old display-name-only update. Failures (unknown profile, key collision,
+    a name whose derived key fails the path guard) redirect with a generic
+    error code; the submitted name is never reflected.
+    """
     form = await request.form()
     new_display = str(form.get("new_name", "")).strip()
     if not new_display:
         return RedirectResponse(url="/speakers", status_code=303)
 
-    profiles = load_profiles()
-    if name in profiles:
-        profiles[name].display_name = new_display
-        save_profiles(profiles)
+    safe_key = validate_path_component(name, "_speakers_rename_guard")
+    if safe_key is None:
+        return error_redirect("/speakers", "rename_failed")
+
+    from wisper_transcribe.speaker_manager import rename_profile
+
+    try:
+        rename_profile(safe_key, new_display)
+    except (KeyError, ValueError):
+        return error_redirect("/speakers", "rename_failed")
     return RedirectResponse(url="/speakers", status_code=303)

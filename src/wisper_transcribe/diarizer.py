@@ -43,7 +43,15 @@ from pyannote.audio import Pipeline
 
 from .models import DiarizationSegment
 
+# Module-level pipeline cache. _pipeline_device records the device the cached
+# pipeline was moved to — the cache key. R4: load_pipeline() previously
+# assigned the global BEFORE the CUDA/MPS availability checks, so a failed
+# load left a half-initialised CPU-placed pipeline cached and the next
+# diarize() silently ran on the wrong device. The pipeline is now built into
+# a local and the globals are assigned only after every check (including the
+# .to(device) move) has succeeded.
 _pipeline = None
+_pipeline_device: Optional[str] = None
 
 
 class _DiarizationProgressHook:
@@ -89,11 +97,18 @@ class _DiarizationProgressHook:
 
 
 def load_pipeline(hf_token: str, device: str):
-    """Load pyannote speaker-diarization-3.1, cache module-level."""
-    global _pipeline
+    """Load pyannote speaker-diarization-3.1, cache module-level.
+
+    R4: the pipeline is built into a local variable and the module-level
+    cache (`_pipeline` / `_pipeline_device`) is only assigned after the
+    device checks AND the `.to(device)` move have all succeeded — a failure
+    anywhere leaves the previous cache state untouched (never a
+    half-initialised pipeline on the wrong device).
+    """
+    global _pipeline, _pipeline_device
 
     try:
-        _pipeline = Pipeline.from_pretrained(
+        pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
             token=hf_token,
         )
@@ -117,7 +132,14 @@ def load_pipeline(hf_token: str, device: str):
         raise RuntimeError(
             "MPS is not available on this system. Use --device cpu instead."
         )
-    _pipeline.to(torch.device(device))
+    pipeline.to(torch.device(device))
+
+    # Free the old pipeline reference before publishing the new one so peak
+    # memory doesn't hold two pipelines.
+    _pipeline = None
+    _pipeline_device = None
+    _pipeline = pipeline
+    _pipeline_device = device
     return _pipeline
 
 
@@ -132,7 +154,10 @@ def diarize(
     """Run speaker diarization and return labeled time segments."""
     global _pipeline
 
-    if _pipeline is None:
+    # R4: the cache is keyed by device — in a long-running web server a later
+    # job can request a different device than the one the cached pipeline was
+    # moved to (e.g. a job-form device override), so reload on mismatch.
+    if _pipeline is None or _pipeline_device != device:
         load_pipeline(hf_token, device)
 
     kwargs: dict = {}

@@ -332,3 +332,68 @@ def test_bind_discord_id_overwrites_previous_binding(tmp_path):
     loaded = load_campaigns(tmp_path)
     assert loaded["test"].members["alice"].discord_user_id is None
     assert loaded["test"].members["bob"].discord_user_id == "123456789012345678"
+
+
+# ---------------------------------------------------------------------------
+# R31: rekey_member — campaign membership follows a profile rename
+# ---------------------------------------------------------------------------
+
+def test_rekey_member_updates_all_campaigns(tmp_path):
+    from wisper_transcribe.campaign_manager import (
+        add_member, bind_discord_id, create_campaign, load_campaigns, rekey_member,
+    )
+
+    c1 = create_campaign("Campaign One", data_dir=tmp_path)
+    c2 = create_campaign("Campaign Two", data_dir=tmp_path)
+    add_member(c1.slug, "alice", role="dm", character="Kyra", data_dir=tmp_path)
+    add_member(c2.slug, "alice", role="player", data_dir=tmp_path)
+    bind_discord_id(c1.slug, "alice", "123456789012345678", data_dir=tmp_path)
+
+    changed = rekey_member("alice", "alicia", data_dir=tmp_path)
+
+    assert changed == 2
+    campaigns = load_campaigns(data_dir=tmp_path)
+    m1 = campaigns[c1.slug].members
+    m2 = campaigns[c2.slug].members
+    assert "alice" not in m1 and "alice" not in m2
+    assert m1["alicia"].role == "dm"
+    assert m1["alicia"].character == "Kyra"
+    assert m1["alicia"].discord_user_id == "123456789012345678"
+    assert m1["alicia"].profile_key == "alicia"
+    assert m2["alicia"].role == "player"
+
+
+def test_rekey_member_noop_when_absent(tmp_path):
+    from wisper_transcribe.campaign_manager import create_campaign, rekey_member
+
+    create_campaign("Campaign One", data_dir=tmp_path)
+    assert rekey_member("ghost", "spectre", data_dir=tmp_path) == 0
+
+
+# ---------------------------------------------------------------------------
+# R37 — concurrent mutation must not lose writes
+# ---------------------------------------------------------------------------
+
+def test_add_member_atomic_under_concurrent_calls(tmp_path):
+    """R37: campaigns.json is a single shared JSON store -- concurrent
+    add_member() calls used to unlocked-load/modify/save, so a losing thread's
+    write to the roster could be clobbered by another thread's save.
+    Mirrors test_recording_manager.py's concurrent append_segment test."""
+    import threading
+
+    campaign = create_campaign("Concurrency Test", data_dir=tmp_path)
+    n = 20
+
+    def _add(i):
+        add_member(campaign.slug, f"member_{i:02d}", data_dir=tmp_path)
+
+    threads = [threading.Thread(target=_add, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    loaded = load_campaigns(tmp_path)
+    assert len(loaded[campaign.slug].members) == n
+    for i in range(n):
+        assert f"member_{i:02d}" in loaded[campaign.slug].members

@@ -47,6 +47,7 @@ def test_transcribe_returns_segments(mock_whisper_cls):
 
         with patch("faster_whisper.WhisperModel", mock_whisper_cls):
             t._model = mock_model
+            t._model_key = ("tiny", "cpu", "auto")
             result = t.transcribe(Path("fake.wav"), model_size="tiny", device="cpu")
 
     assert len(result) == 2
@@ -68,6 +69,7 @@ def test_transcribe_filters_empty_segments():
 
     import wisper_transcribe.transcriber as t
     t._model = mock_model
+    t._model_key = ("medium", "cpu", "auto")
 
     result = t.transcribe(Path("fake.wav"), device="cpu")
     texts = [r.text for r in result]
@@ -77,6 +79,27 @@ def test_transcribe_filters_empty_segments():
     assert len(result) == 2
 
 
+def test_transcribe_non_monotonic_segments_do_not_crash_progress_bar():
+    """R32-4: pbar.update(seg.end - pbar.n) goes negative when a later
+    segment ends before an earlier one (non-monotonic segment stream) --
+    must clamp to >= 0 instead of passing a negative delta to tqdm."""
+    mock_model = MagicMock()
+    raw_segments = [
+        _make_mock_segment(0.0, 5.0, "First"),
+        _make_mock_segment(1.0, 2.0, "Out of order, ends earlier"),
+        _make_mock_segment(5.0, 8.0, "Back on track"),
+    ]
+    mock_model.transcribe.return_value = (iter(raw_segments), _make_mock_info(8.0))
+
+    import wisper_transcribe.transcriber as t
+    t._model = mock_model
+    t._model_key = ("medium", "cpu", "auto")
+
+    # Must not raise even though the second segment's delta is negative.
+    result = t.transcribe(Path("fake.wav"), device="cpu")
+    assert len(result) == 3
+
+
 def test_transcribe_passes_word_timestamps():
     """word_timestamps=True is forwarded to model.transcribe() (F8)."""
     mock_model = MagicMock()
@@ -84,6 +107,7 @@ def test_transcribe_passes_word_timestamps():
 
     import wisper_transcribe.transcriber as t
     t._model = mock_model
+    t._model_key = ("medium", "cpu", "auto")
 
     t.transcribe(Path("fake.wav"), device="cpu")
     _, kwargs = mock_model.transcribe.call_args
@@ -103,6 +127,7 @@ def test_transcribe_captures_words_onto_segments():
 
     import wisper_transcribe.transcriber as t
     t._model = mock_model
+    t._model_key = ("medium", "cpu", "auto")
 
     result = t.transcribe(Path("fake.wav"), device="cpu")
 
@@ -124,6 +149,7 @@ def test_transcribe_segment_with_words_none_does_not_crash():
 
     import wisper_transcribe.transcriber as t
     t._model = mock_model
+    t._model_key = ("medium", "cpu", "auto")
 
     result = t.transcribe(Path("fake.wav"), device="cpu")
 
@@ -189,6 +215,7 @@ def test_transcribe_passes_hotwords():
 
     import wisper_transcribe.transcriber as t
     t._model = mock_model
+    t._model_key = ("medium", "cpu", "auto")
 
     t.transcribe(Path("fake.wav"), device="cpu", hotwords=["Kyra", "Golarion"])
     _, kwargs = mock_model.transcribe.call_args
@@ -202,6 +229,7 @@ def test_transcribe_passes_initial_prompt():
 
     import wisper_transcribe.transcriber as t
     t._model = mock_model
+    t._model_key = ("medium", "cpu", "auto")
 
     t.transcribe(Path("fake.wav"), device="cpu", initial_prompt="Hello world")
     _, kwargs = mock_model.transcribe.call_args
@@ -215,6 +243,7 @@ def test_transcribe_passes_vad_filter_true():
 
     import wisper_transcribe.transcriber as t
     t._model = mock_model
+    t._model_key = ("medium", "cpu", "auto")
 
     t.transcribe(Path("fake.wav"), device="cpu", vad_filter=True)
     _, kwargs = mock_model.transcribe.call_args
@@ -228,6 +257,7 @@ def test_transcribe_passes_vad_filter_false():
 
     import wisper_transcribe.transcriber as t
     t._model = mock_model
+    t._model_key = ("medium", "cpu", "auto")
 
     t.transcribe(Path("fake.wav"), device="cpu", vad_filter=False)
     _, kwargs = mock_model.transcribe.call_args
@@ -273,6 +303,7 @@ def test_transcribe_skips_mlx_when_use_mlx_false():
     mock_model = MagicMock()
     mock_model.transcribe.return_value = (iter([]), _make_mock_info(1.0))
     t._model = mock_model
+    t._model_key = ("medium", "mps", "auto")
 
     with patch.object(t, "_is_mlx_available", return_value=True):
         with patch.object(t, "_transcribe_mlx") as mock_mlx:
@@ -289,6 +320,7 @@ def test_transcribe_falls_back_to_cpu_when_mlx_unavailable():
     mock_model = MagicMock()
     mock_model.transcribe.return_value = (iter([]), _make_mock_info(1.0))
     t._model = mock_model
+    t._model_key = ("medium", "mps", "auto")
 
     with patch.object(t, "_is_mlx_available", return_value=False):
         with patch.object(t, "_transcribe_mlx") as mock_mlx:
@@ -354,6 +386,20 @@ def test_transcribe_mlx_injects_hotwords_into_prompt():
     assert "Golarion" in kwargs.get("initial_prompt", "")
 
 
+def test_transcribe_mlx_unmapped_model_size_raises_clear_error():
+    """R32-3: an unmapped model size must raise a clear ValueError instead of
+    falling back to a guessed `mlx-community/whisper-{size}-mlx` repo name
+    that would 404 against the Hub."""
+    import wisper_transcribe.transcriber as t
+
+    mock_mlx = MagicMock()
+    with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+        with patch("wisper_transcribe.transcriber.platform.system", return_value="Darwin"):
+            with pytest.raises(ValueError, match="No MLX-Whisper repo mapping"):
+                t._transcribe_mlx(Path("fake.wav"), model_size="distil-large-v3")
+    mock_mlx.transcribe.assert_not_called()
+
+
 def test_transcribe_mlx_not_dispatched_on_non_mps():
     """MLX is never used when device is cpu or cuda, regardless of use_mlx."""
     import wisper_transcribe.transcriber as t
@@ -361,9 +407,73 @@ def test_transcribe_mlx_not_dispatched_on_non_mps():
     mock_model = MagicMock()
     mock_model.transcribe.return_value = (iter([]), _make_mock_info(1.0))
     t._model = mock_model
+    t._model_key = ("medium", "cpu", "auto")
 
     with patch.object(t, "_is_mlx_available", return_value=True):
         with patch.object(t, "_transcribe_mlx") as mock_mlx:
             t.transcribe(Path("fake.wav"), device="cpu", use_mlx="auto")
 
     mock_mlx.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# R4: model cache keyed by (model_size, device, compute_type)
+# ---------------------------------------------------------------------------
+
+def test_load_model_sets_cache_key():
+    """load_model records the raw parameters it was called with as the cache key."""
+    with patch("faster_whisper.WhisperModel") as mock_cls:
+        mock_cls.return_value = MagicMock()
+        import wisper_transcribe.transcriber as t
+        t._model = None
+        t._model_key = None
+        t.load_model("tiny", "cpu", compute_type="int8")
+        assert t._model_key == ("tiny", "cpu", "int8")
+        t._model = None
+        t._model_key = None
+
+
+def test_transcribe_reloads_on_parameter_change():
+    """R4: a cached model loaded with different parameters is NOT reused —
+    transcribe() reloads when (model_size, device, compute_type) changes."""
+    import wisper_transcribe.transcriber as t
+
+    stale_model = MagicMock()
+    stale_model.transcribe.return_value = (iter([]), _make_mock_info(1.0))
+    t._model = stale_model
+    t._model_key = ("small", "cpu", "auto")
+
+    fresh_model = MagicMock()
+    fresh_model.transcribe.return_value = (iter([]), _make_mock_info(1.0))
+
+    def _install(model_size, device, compute_type):
+        t._model = fresh_model
+        t._model_key = (model_size, device, compute_type)
+        return fresh_model
+
+    with patch.object(t, "load_model", side_effect=_install) as mock_load:
+        t.transcribe(Path("fake.wav"), model_size="medium", device="cpu")
+
+    mock_load.assert_called_once_with("medium", "cpu", "auto")
+    fresh_model.transcribe.assert_called_once()
+    stale_model.transcribe.assert_not_called()
+    t._model = None
+    t._model_key = None
+
+
+def test_transcribe_reuses_model_on_matching_key():
+    """R4: a cached model whose key matches the requested params is reused."""
+    import wisper_transcribe.transcriber as t
+
+    cached = MagicMock()
+    cached.transcribe.return_value = (iter([]), _make_mock_info(1.0))
+    t._model = cached
+    t._model_key = ("medium", "cpu", "auto")
+
+    with patch.object(t, "load_model") as mock_load:
+        t.transcribe(Path("fake.wav"), model_size="medium", device="cpu")
+
+    mock_load.assert_not_called()
+    cached.transcribe.assert_called_once()
+    t._model = None
+    t._model_key = None

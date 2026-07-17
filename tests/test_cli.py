@@ -161,6 +161,22 @@ def test_speakers_remove_success(tmp_path, monkeypatch):
     assert "alice" not in load_profiles(data_dir=tmp_path)
 
 
+def test_speakers_remove_deletes_reference_clip(tmp_path, monkeypatch):
+    """R9-5: removing a profile also deletes its .mp3 reference clip, not
+    just the .npy embedding, so the Speakers-page play button doesn't
+    dangle after a CLI removal."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    _make_fake_profile(tmp_path, "Alice")
+    emb_dir = tmp_path / "profiles" / "embeddings"
+    clip_path = emb_dir / "alice.mp3"
+    clip_path.write_bytes(b"fake mp3")
+
+    result = CliRunner().invoke(main, ["speakers", "remove", "Alice"])
+    assert result.exit_code == 0
+    assert not clip_path.exists()
+    assert not (emb_dir / "alice.npy").exists()
+
+
 def test_speakers_rename_not_found(tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     result = CliRunner().invoke(main, ["speakers", "rename", "Ghost", "Spectre"])
@@ -180,6 +196,118 @@ def test_speakers_rename_success(tmp_path, monkeypatch):
     assert "alicia" in profiles
     assert "alice" not in profiles
     assert profiles["alicia"].display_name == "Alicia"
+
+
+def test_speakers_rename_moves_reference_clip(tmp_path, monkeypatch):
+    """R9-5: renaming a profile moves its .mp3 reference clip alongside the
+    embedding, so playback keeps working under the new key."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    _make_fake_profile(tmp_path, "Alice")
+    emb_dir = tmp_path / "profiles" / "embeddings"
+    old_clip = emb_dir / "alice.mp3"
+    old_clip.write_bytes(b"fake mp3")
+
+    result = CliRunner().invoke(main, ["speakers", "rename", "Alice", "Alicia"])
+    assert result.exit_code == 0
+
+    new_clip = emb_dir / "alicia.mp3"
+    assert not old_clip.exists()
+    assert new_clip.exists()
+    assert new_clip.read_bytes() == b"fake mp3"
+
+
+def test_speakers_rename_updates_campaign_membership(tmp_path, monkeypatch):
+    """R31: a CLI rename rekeys campaign rosters (including the Discord ID
+    binding) so membership follows the profile instead of dangling."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    _make_fake_profile(tmp_path, "Alice")
+
+    from wisper_transcribe.campaign_manager import (
+        add_member, bind_discord_id, create_campaign, load_campaigns,
+    )
+    campaign = create_campaign("Test Campaign", data_dir=tmp_path)
+    add_member(campaign.slug, "alice", role="player", data_dir=tmp_path)
+    bind_discord_id(campaign.slug, "alice", "123456789012345678", data_dir=tmp_path)
+
+    result = CliRunner().invoke(main, ["speakers", "rename", "Alice", "Alicia"])
+    assert result.exit_code == 0
+
+    members = load_campaigns(data_dir=tmp_path)[campaign.slug].members
+    assert "alice" not in members
+    assert "alicia" in members
+    assert members["alicia"].role == "player"
+    assert members["alicia"].discord_user_id == "123456789012345678"
+
+
+def test_speakers_rename_rejects_unsafe_new_name(tmp_path, monkeypatch):
+    """R31: the shared rename_profile refuses a new name whose derived key
+    fails the path-component guard (the key becomes a filename/URL slug)."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    _make_fake_profile(tmp_path, "Alice")
+
+    result = CliRunner().invoke(main, ["speakers", "rename", "Alice", "../escape"])
+    assert result.exit_code != 0
+    assert "Invalid speaker name" in result.output
+
+    emb_dir = tmp_path / "profiles" / "embeddings"
+    assert (emb_dir / "alice.npy").exists()
+
+
+def test_speakers_rename_success_without_reference_clip(tmp_path, monkeypatch):
+    """A profile enrolled before reference clips existed (no .mp3 on disk)
+    must still rename cleanly -- the clip move is best-effort."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    _make_fake_profile(tmp_path, "Alice")
+
+    result = CliRunner().invoke(main, ["speakers", "rename", "Alice", "Alicia"])
+    assert result.exit_code == 0
+    assert not (tmp_path / "profiles" / "embeddings" / "alicia.mp3").exists()
+
+
+def test_speakers_rename_refuses_to_overwrite_existing_profile(tmp_path, monkeypatch):
+    """R15 regression: renaming onto an existing speaker key used to
+    silently pop the target profile and overwrite its embedding .npy --
+    permanent data loss. It must now fail loudly and leave both untouched.
+    """
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    _make_fake_profile(tmp_path, "Alice", display_name="Alice")
+    _make_fake_profile(tmp_path, "Bob", display_name="Bob")
+
+    result = CliRunner().invoke(main, ["speakers", "rename", "Alice", "Bob"])
+    assert result.exit_code != 0
+    assert "already exists" in result.output.lower()
+
+    from wisper_transcribe.speaker_manager import load_profiles
+    profiles = load_profiles(data_dir=tmp_path)
+    assert "alice" in profiles
+    assert "bob" in profiles
+    assert profiles["alice"].display_name == "Alice"
+    assert profiles["bob"].display_name == "Bob"
+
+    emb_dir = tmp_path / "profiles" / "embeddings"
+    assert (emb_dir / "alice.npy").exists()
+    assert (emb_dir / "bob.npy").exists()
+
+
+def test_speakers_test_deletes_converted_wav(tmp_path, monkeypatch):
+    """R9-2: `wisper speakers test` deletes the WAV produced by
+    convert_to_wav() once matching is done, mirroring the `enroll` command."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    audio = tmp_path / "clip.mp3"
+    audio.write_bytes(b"fake audio")
+
+    converted_wav = tmp_path / "converted.wav"
+    converted_wav.write_bytes(b"RIFF" + b"\x00" * 36)
+
+    with patch("wisper_transcribe.audio_utils.convert_to_wav", return_value=converted_wav), \
+         patch("wisper_transcribe.config.get_hf_token", return_value="fake-token"), \
+         patch("wisper_transcribe.diarizer.diarize", return_value=[]), \
+         patch("wisper_transcribe.speaker_manager.match_speakers", return_value={}):
+        result = CliRunner().invoke(main, ["speakers", "test", str(audio)])
+
+    assert result.exit_code == 0
+    assert not converted_wav.exists()
+    assert audio.exists()
 
 
 def test_speakers_reset_empty(tmp_path, monkeypatch):
@@ -248,8 +376,10 @@ def test_transcribe_cli_raises_click_exception_on_error(tmp_path):
     assert "GPU unavailable" in result.output
 
 
-def test_transcribe_cli_language_auto_passes_none(tmp_path):
-    """--language auto passes None to process_file (triggers auto-detection)."""
+def test_transcribe_cli_language_auto_passes_through(tmp_path):
+    """--language auto is forwarded as the literal string "auto" — process_file
+    (not the CLI) is responsible for turning it into None for auto-detection,
+    since None is now the CLI's own "unset, use config" sentinel (R5)."""
     audio = tmp_path / "test.mp3"
     audio.write_bytes(b"fake")
 
@@ -258,7 +388,23 @@ def test_transcribe_cli_language_auto_passes_none(tmp_path):
         CliRunner().invoke(main, ["transcribe", str(audio), "--language", "auto"])
 
     call_kwargs = mock_pf.call_args.kwargs
+    assert call_kwargs["language"] == "auto"
+
+
+def test_transcribe_cli_language_unset_passes_none(tmp_path):
+    """When --language is not passed at all, process_file receives None
+    (the config-fallback sentinel), not any hardcoded default (R5)."""
+    audio = tmp_path / "test.mp3"
+    audio.write_bytes(b"fake")
+
+    with patch("wisper_transcribe.pipeline.process_file", return_value=tmp_path / "test.md") as mock_pf:
+        (tmp_path / "test.md").write_text("# test", encoding="utf-8")
+        CliRunner().invoke(main, ["transcribe", str(audio)])
+
+    call_kwargs = mock_pf.call_args.kwargs
     assert call_kwargs["language"] is None
+    assert call_kwargs["model_size"] is None
+    assert call_kwargs["include_timestamps"] is None
 
 
 def test_transcribe_cli_vocab_file_passes_hotwords(tmp_path):
@@ -287,6 +433,54 @@ def test_transcribe_cli_initial_prompt_passes_through(tmp_path):
 
     call_kwargs = mock_pf.call_args.kwargs
     assert call_kwargs["initial_prompt"] == "Kyra Golarion"
+
+
+def test_config_set_unknown_key_rejected(tmp_path, monkeypatch):
+    """R23: unknown config keys are rejected instead of being silently written."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    result = CliRunner().invoke(main, ["config", "set", "not_a_real_key", "value"])
+    assert result.exit_code != 0
+    assert "Unknown config key" in result.output
+    assert "config show" in result.output
+
+    from wisper_transcribe.config import load_config
+    assert "not_a_real_key" not in load_config()
+
+
+def test_config_set_int_coercion(tmp_path, monkeypatch):
+    """R23: min_speakers (an int-typed default) is coerced to int, not left
+    as a string — bool must be checked before int since bool is an int
+    subclass, so this also guards that ordering."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    result = CliRunner().invoke(main, ["config", "set", "min_speakers", "3"])
+    assert result.exit_code == 0, result.output
+
+    from wisper_transcribe.config import load_config
+    value = load_config()["min_speakers"]
+    assert value == 3
+    assert isinstance(value, int) and not isinstance(value, bool)
+
+
+def test_config_set_int_coercion_recovers_from_bad_stored_type(tmp_path, monkeypatch):
+    """R23 regression: coercion must key off DEFAULTS[key]'s schema type, not
+    cfg[key]'s current runtime type. If a prior bug (or manual config.toml
+    edit) already stored min_speakers as a string, isinstance(cfg[key], int)
+    would miss and silently re-store it as a string forever. Simulate that
+    by pre-seeding a string value, then confirm `config set` self-heals it
+    to int."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.config import load_config, save_config
+
+    cfg = load_config()
+    cfg["min_speakers"] = "5"  # simulate a pre-existing bad-typed value
+    save_config(cfg)
+
+    result = CliRunner().invoke(main, ["config", "set", "min_speakers", "3"])
+    assert result.exit_code == 0, result.output
+
+    value = load_config()["min_speakers"]
+    assert value == 3
+    assert isinstance(value, int) and not isinstance(value, bool)
 
 
 def test_config_set_hotwords_list(tmp_path, monkeypatch):
@@ -336,6 +530,27 @@ def test_server_missing_uvicorn():
             result = CliRunner().invoke(main, ["server"])
             # Either exits non-zero or mentions uvicorn in output
             assert result.exit_code != 0 or "uvicorn" in result.output.lower()
+
+
+def test_server_defaults_to_loopback():
+    """R16: `wisper server` binds 127.0.0.1 by default — the UI has no auth,
+    so all-interfaces exposure must be an explicit opt-in."""
+    mock_uvicorn = MagicMock()
+    with patch.dict("sys.modules", {"uvicorn": mock_uvicorn}):
+        result = CliRunner().invoke(main, ["server"])
+    assert result.exit_code == 0
+    _, kwargs = mock_uvicorn.run.call_args
+    assert kwargs["host"] == "127.0.0.1"
+
+
+def test_server_explicit_host_still_works():
+    """R16: --host 0.0.0.0 remains available for trusted networks/Docker."""
+    mock_uvicorn = MagicMock()
+    with patch.dict("sys.modules", {"uvicorn": mock_uvicorn}):
+        result = CliRunner().invoke(main, ["server", "--host", "0.0.0.0"])
+    assert result.exit_code == 0
+    _, kwargs = mock_uvicorn.run.call_args
+    assert kwargs["host"] == "0.0.0.0"
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +607,34 @@ def test_enroll_cli_with_update_flag(tmp_path, monkeypatch):
     assert "Updated" in result.output
 
 
+def test_enroll_cli_deletes_converted_wav(tmp_path, monkeypatch):
+    """R9-2: when convert_to_wav() produces a separate temp WAV (input isn't
+    already a correct WAV), `wisper enroll` deletes it afterwards instead of
+    leaking it in the OS tempdir."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    audio = tmp_path / "clip.mp3"
+    audio.write_bytes(b"fake audio")
+
+    converted_wav = tmp_path / "converted.wav"
+    converted_wav.write_bytes(b"RIFF" + b"\x00" * 36)
+
+    with patch("wisper_transcribe.audio_utils.convert_to_wav", return_value=converted_wav), \
+         patch("wisper_transcribe.speaker_manager.extract_embedding", return_value=np.ones(512)), \
+         patch("wisper_transcribe.speaker_manager._save_reference_clip"), \
+         patch("wisper_transcribe.audio_utils.get_duration", return_value=30.0):
+        mock_torch = MagicMock()
+        mock_torch.cuda.is_available.return_value = False
+        mock_torch.backends.mps.is_available.return_value = False
+        with patch.dict("sys.modules", {"torch": mock_torch}):
+            result = CliRunner().invoke(
+                main, ["enroll", "TestSpeaker", "--audio", str(audio)]
+            )
+
+    assert result.exit_code == 0
+    assert not converted_wav.exists()
+    assert audio.exists()  # original input untouched
+
+
 # ---------------------------------------------------------------------------
 # wisper transcribe folder
 # ---------------------------------------------------------------------------
@@ -404,7 +647,7 @@ def test_transcribe_folder_reports_summary(tmp_path):
     out_md.write_text("# test")
 
     with patch("wisper_transcribe.pipeline.process_file", return_value=out_md), \
-         patch("wisper_transcribe.pipeline.process_folder", return_value=([out_md], [])):
+         patch("wisper_transcribe.pipeline.process_folder", return_value=([out_md], [], [])):
         result = CliRunner().invoke(main, ["transcribe", str(tmp_path)])
 
     assert result.exit_code == 0
@@ -706,6 +949,25 @@ def test_refine_unknown_task_surfaces_suggestions(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "Unknown-speaker suggestions: 1" in result.output
     assert "Bob" in result.output
+
+
+def test_refine_provider_lmstudio_accepted(tmp_path, monkeypatch):
+    """R20: --provider lmstudio must be accepted by argument parsing —
+    _LLM_PROVIDER_CHOICE previously omitted lmstudio and ollama-cloud."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    transcript = _write_transcript(tmp_path)
+
+    fake_client = MagicMock()
+    fake_client.provider = "lmstudio"
+    fake_client.model = "m1"
+    fake_client.complete_json.return_value = {"changes": []}
+    with patch("wisper_transcribe.llm.get_client", return_value=fake_client):
+        result = CliRunner().invoke(
+            main, ["refine", str(transcript), "--provider", "lmstudio", "--no-color"]
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "lmstudio" in result.output
 
 
 def test_refine_rejects_unknown_task():

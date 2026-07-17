@@ -42,6 +42,26 @@ Override the storage path with `WISPER_DATA_DIR` (set automatically in Docker).
 
 ---
 
+## Config Resolution Order (CLI / web transcription options)
+
+`wisper transcribe` and the web upload form share the same resolution order for `model`, `language`, and `timestamps`: **explicit CLI/web value → `config.toml` → hardcoded fallback.** An explicit value always wins, even one that happens to match the hardcoded fallback (e.g. explicitly passing `--model medium` is never silently overridden by a `model = "large-v3-turbo"` in config).
+
+| Setting | CLI flag | Config key | Hardcoded fallback |
+|---|---|---|---|
+| Whisper model | `-m/--model` | `model` | `large-v3-turbo` |
+| Language | `-l/--language` | `language` | `en` |
+| Timestamps | `--timestamps/--no-timestamps` | `timestamps` | on (`true`) |
+
+`--language auto` (or a web form value of `auto`) is a separate, explicit "auto-detect" marker — not the same as omitting `--language` — and always wins regardless of what `language` is set to in config.
+
+**Speaker-count fallback:** when diarization is enabled and neither `-n/--num-speakers` nor `--min-speakers`/`--max-speakers` is passed, wisper falls back to the `min_speakers`/`max_speakers` config keys (defaults: `2` / `8`) as a constraint on the diarizer. Pinning `-n/--num-speakers` (an exact expected count) suppresses this fallback entirely — it's the user asserting one label per person, so no min/max range applies.
+
+**`device` and `compute_type`** keep their own separate `"auto"` sentinel (auto-detect hardware / resolve a concrete CTranslate2 dtype) — they are not part of the config-fallback chain above; `--device`/`--compute-type` and their web-form equivalents pass `"auto"` as their own literal default already.
+
+**`wisper config set` validation:** only keys that already exist in the default config schema can be set — `wisper config set some_typo value` fails with `Unknown config key 'some_typo'; run wisper config show to list keys` rather than silently writing an unused key. The value is coerced to match the key's *schema* type (i.e. the type of `DEFAULTS[key]`, not whatever type happens to already be stored — this self-heals a value that was previously stored with the wrong type) using bool → int → float → comma-split list → string, in that check order — bool is checked first since Python's `bool` is an `int` subclass.
+
+---
+
 ## Debugging and Verbose Output
 
 wisper suppresses informational warnings from its dependencies (speechbrain, pyannote, torch) that are not actionable during normal use. Two CLI flags give you more visibility:
