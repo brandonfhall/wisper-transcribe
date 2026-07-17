@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import wave
 from pathlib import Path
 
 import pytest
@@ -63,7 +64,7 @@ async def test_start_session_creates_recording_in_manager(tmp_path):
 # ---------------------------------------------------------------------------
 
 async def test_user_speaks_writes_packets_to_per_user_dir(tmp_path):
-    """PCM frames from user U1 produce .opus segment files in per-user/U1/."""
+    """PCM frames from user U1 produce .wav segment files in per-user/U1/."""
     frames = [("U1", make_pcm_frame())] * 5
     factory = scripted_source(frames)
 
@@ -76,9 +77,13 @@ async def test_user_speaks_writes_packets_to_per_user_dir(tmp_path):
 
     per_user_dir = tmp_path / "recordings" / rec.id / "per-user" / "U1"
     assert per_user_dir.exists(), "per-user/U1/ directory should be created"
-    opus_files = sorted(per_user_dir.glob("*.opus"))
-    assert len(opus_files) >= 1, f"expected .opus files, got: {opus_files}"
-    assert all(f.stat().st_size > 0 for f in opus_files)
+    wav_files = sorted(per_user_dir.glob("*.wav"))
+    assert len(wav_files) >= 1, f"expected .wav files, got: {wav_files}"
+    assert all(f.stat().st_size > 0 for f in wav_files)
+    with wave.open(str(wav_files[0]), "rb") as wf:
+        assert wf.getframerate() == 16000
+        assert wf.getnchannels() == 1
+        assert wf.getsampwidth() == 2
 
     await bm.stop()
 
@@ -246,7 +251,7 @@ async def test_known_speaker_not_added_to_unbound_list(tmp_path):
 # ---------------------------------------------------------------------------
 
 async def test_multiple_users_speak_simultaneously(tmp_path):
-    """Interleaved frames from 3 users all produce per-user .opus files."""
+    """Interleaved frames from 3 users all produce per-user .wav files."""
     frames = []
     for _ in range(10):
         frames.append(("U1", make_pcm_frame()))
@@ -263,8 +268,8 @@ async def test_multiple_users_speak_simultaneously(tmp_path):
     for uid in ("U1", "U2", "U3"):
         user_dir = rec_dir / uid
         assert user_dir.exists(), f"per-user/{uid}/ should exist"
-        opus_files = sorted(user_dir.glob("*.opus"))
-        assert len(opus_files) >= 1, f"{uid} should have .opus segments"
+        wav_files = sorted(user_dir.glob("*.wav"))
+        assert len(wav_files) >= 1, f"{uid} should have .wav segments"
 
 
 async def test_multiple_unknown_speakers_all_in_unbound(tmp_path):
@@ -319,3 +324,134 @@ async def test_simultaneous_known_and_unknown_speakers(tmp_path):
     assert "888888888888888888" in loaded.unbound_speakers
     assert "111111111111111111" not in loaded.unbound_speakers
     assert "222222222222222222" not in loaded.unbound_speakers
+
+
+# ---------------------------------------------------------------------------
+# 10. R12 — __mixed__ track handling + end-to-end WAV decode
+# ---------------------------------------------------------------------------
+
+async def test_mixed_track_frames_do_not_create_per_user_state(tmp_path):
+    """`__mixed__` (JDA's pre-mixed track) must never be treated as a
+    per-user speaker: no per-user/__mixed__/ dir, no discord_speakers entry,
+    no unbound_speakers entry."""
+    frames = [("__mixed__", make_pcm_frame())] * 5
+    factory = scripted_source(frames)
+
+    bm = BotManager(data_dir=tmp_path, audio_source_factory=factory)
+    bm.start()
+    rec = await bm.start_session(None, "VC1", "G1")
+    await asyncio.wait_for(bm._task, timeout=5)
+
+    per_user_dir = tmp_path / "recordings" / rec.id / "per-user"
+    assert not (per_user_dir / "__mixed__").exists()
+
+    loaded = load_recordings(tmp_path)[rec.id]
+    assert "__mixed__" not in loaded.discord_speakers
+    assert "__mixed__" not in loaded.unbound_speakers
+
+
+async def test_combined_track_duration_matches_wall_clock_not_speaker_count(tmp_path):
+    """R12 regression: the old RealtimePCMMixer advanced the combined track
+    once per *any* incoming frame, so N concurrent speakers made the
+    combined track N x 20ms per real 20ms. Now `__mixed__` (JDA's already-
+    mixed track) is written 1:1 with real time, independent of how many
+    per-user frames arrive alongside it."""
+    frames = []
+    n_ticks = 50
+    for _ in range(n_ticks):
+        frames.append(("__mixed__", make_pcm_frame(value=500)))
+        frames.append(("U1", make_pcm_frame(value=500)))
+        frames.append(("U2", make_pcm_frame(value=500)))
+        frames.append(("U3", make_pcm_frame(value=500)))
+
+    factory = scripted_source(frames)
+    bm = BotManager(data_dir=tmp_path, audio_source_factory=factory)
+    bm.start()
+    rec = await bm.start_session(None, "VC1", "G1")
+    await asyncio.wait_for(bm._task, timeout=5)
+
+    combined_dir = tmp_path / "recordings" / rec.id / "combined"
+    segments = sorted(combined_dir.glob("*.wav"))
+    assert len(segments) == 1
+
+    with wave.open(str(segments[0]), "rb") as wf:
+        assert wf.getframerate() == 16000
+        assert wf.getnchannels() == 1
+        assert wf.getsampwidth() == 2
+        nframes = wf.getnframes()
+        pcm = wf.readframes(nframes)
+
+    expected_frames = n_ticks * 320  # 320 samples per 20 ms @ 16 kHz
+    assert nframes == expected_frames, (
+        f"expected {expected_frames} samples ({n_ticks * 0.02}s of real time), "
+        f"got {nframes} ({nframes / 16000}s) — combined track duration must "
+        "track wall-clock time, not the number of concurrent speakers"
+    )
+    # Content survives downsampling: constant non-zero input -> non-silent output.
+    assert any(b != 0 for b in pcm)
+
+
+async def test_finalise_concatenates_combined_segments_and_sets_combined_path(
+    tmp_path, monkeypatch
+):
+    """R2 regression: `Recording.combined_path` used to be assigned exactly
+    once, to None, and never populated — the transcribe hand-off always
+    redirected with ?error=no_audio. This drives BotManager through
+    multiple combined-track segment rotations and verifies `_finalise`
+    merges them into recordings/<id>/combined.wav with `combined_path`
+    pointing at the merged file, whose duration equals the sum of the
+    individual segments'."""
+    import functools
+
+    import wisper_transcribe.web.discord_bot as discord_bot_module
+    from wisper_transcribe.web.audio_writer import SegmentedWavWriter
+
+    # Force short (0.1s = 5 frames) segments so a modest frame count rotates
+    # across multiple combined-track segment files.
+    monkeypatch.setattr(
+        discord_bot_module,
+        "SegmentedWavWriter",
+        functools.partial(SegmentedWavWriter, segment_duration_s=0.1),
+    )
+
+    frames = [("__mixed__", make_pcm_frame())] * 13
+    factory = scripted_source(frames)
+    bm = BotManager(data_dir=tmp_path, audio_source_factory=factory)
+    bm.start()
+    rec = await bm.start_session(None, "VC1", "G1")
+    await asyncio.wait_for(bm._task, timeout=5)
+
+    combined_dir = tmp_path / "recordings" / rec.id / "combined"
+    segments = sorted(combined_dir.glob("*.wav"))
+    assert len(segments) >= 2, "expected rotation across multiple segments"
+
+    loaded = load_recordings(tmp_path)[rec.id]
+    assert loaded.combined_path is not None
+    assert loaded.combined_path.exists()
+    assert loaded.combined_path == tmp_path / "recordings" / rec.id / "combined.wav"
+
+    seg_total = 0
+    for seg in segments:
+        with wave.open(str(seg), "rb") as wf:
+            seg_total += wf.getnframes()
+
+    with wave.open(str(loaded.combined_path), "rb") as wf:
+        assert wf.getframerate() == 16000
+        assert wf.getnchannels() == 1
+        merged_frames = wf.getnframes()
+
+    assert merged_frames == seg_total
+    assert merged_frames == 13 * 320
+
+
+async def test_finalise_leaves_combined_path_none_when_no_audio(tmp_path):
+    """A session with no frames at all (e.g. bot joined and immediately
+    stopped) must leave combined_path unset so ?error=no_audio still works."""
+    factory = scripted_source([])
+    bm = BotManager(data_dir=tmp_path, audio_source_factory=factory)
+    bm.start()
+    rec = await bm.start_session(None, "VC1", "G1")
+    await asyncio.wait_for(bm._task, timeout=5)
+
+    loaded = load_recordings(tmp_path)[rec.id]
+    assert loaded.combined_path is None

@@ -399,8 +399,15 @@ def enroll_speaker_from_audio_dir(
 ) -> SpeakerProfile:
     """Enroll a speaker from a per-user recording directory.
 
-    Concatenates all .opus files in per_user_dir (single-speaker audio) and
-    calls enroll_speaker() with a synthetic full-file DiarizationSegment.
+    Concatenates all .wav files in per_user_dir (single-speaker audio,
+    written by `SegmentedWavWriter` since R12) and calls enroll_speaker()
+    with a synthetic full-file DiarizationSegment.
+
+    Recordings made before the R12 fix only have `.opus` files — those were
+    never valid Opus streams (a pre-R12 bug wrote raw PCM into an Ogg/Opus
+    container), so they are attempted only as a fallback and are expected
+    to fail with the same generic "enrollment failed" error the caller
+    already handles, rather than a crash.
     """
     import tempfile
 
@@ -417,13 +424,21 @@ def enroll_speaker_from_audio_dir(
         raise ValueError("per_user_dir outside expected recordings tree")
     _safe_dir = Path(_resolved)
 
-    opus_files = sorted(_safe_dir.glob("*.opus"))
-    if not opus_files:
-        raise ValueError(f"No audio files found in {_safe_dir}")
+    wav_files = sorted(_safe_dir.glob("*.wav"))
+    if wav_files:
+        combined = PydubSegment.empty()
+        for f in wav_files:
+            combined += PydubSegment.from_file(str(f), format="wav")
+    else:
+        # Legacy pre-R12 recordings: no .wav segments, fall back to the
+        # (unplayable) .opus files as a best-effort attempt.
+        opus_files = sorted(_safe_dir.glob("*.opus"))
+        if not opus_files:
+            raise ValueError(f"No audio files found in {_safe_dir}")
 
-    combined = PydubSegment.empty()
-    for f in opus_files:
-        combined += PydubSegment.from_file(str(f), format="opus")
+        combined = PydubSegment.empty()
+        for f in opus_files:
+            combined += PydubSegment.from_file(str(f), format="opus")
 
     duration_s = combined.duration_seconds
     if duration_s <= 0:

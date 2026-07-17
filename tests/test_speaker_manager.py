@@ -702,15 +702,77 @@ def test_enroll_speaker_from_audio_dir_rejects_dir_outside_recordings_tree(tmp_p
 
 
 def test_enroll_speaker_from_audio_dir_no_audio_files_found(tmp_path):
-    """A per_user_dir inside the recordings tree but with no .opus files
-    should raise a clear 'No audio files found' error rather than crashing
-    or silently succeeding."""
+    """A per_user_dir inside the recordings tree but with no .wav or .opus
+    segment files should raise a clear 'No audio files found' error rather
+    than crashing or silently succeeding."""
     from wisper_transcribe.speaker_manager import enroll_speaker_from_audio_dir
 
     per_user_dir = tmp_path / "recordings" / "session01" / "someuser"
     per_user_dir.mkdir(parents=True)
 
     with pytest.raises(ValueError, match="No audio files found"):
+        enroll_speaker_from_audio_dir(
+            name="alice",
+            display_name="Alice",
+            role="Player",
+            per_user_dir=per_user_dir,
+            data_dir=tmp_path,
+        )
+
+
+def _write_fake_wav_segment(path: Path, seconds: float = 0.5) -> None:
+    """Write a tiny real 16 kHz mono 16-bit WAV file (silence) for decode tests."""
+    import wave as _wave
+
+    n_samples = int(16000 * seconds)
+    with _wave.open(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(b"\x00\x00" * n_samples)
+
+
+def test_enroll_speaker_from_audio_dir_prefers_wav_over_legacy_opus(tmp_path):
+    """R12: since the writer now produces .wav segments, enroll must read
+    those -- and prefer them even if stale .opus files are also present
+    (e.g. a directory re-recorded after the R12 fix)."""
+    from wisper_transcribe.speaker_manager import enroll_speaker_from_audio_dir
+
+    per_user_dir = tmp_path / "recordings" / "session01" / "someuser"
+    per_user_dir.mkdir(parents=True)
+    _write_fake_wav_segment(per_user_dir / "0000.wav", seconds=0.5)
+    _write_fake_wav_segment(per_user_dir / "0001.wav", seconds=0.5)
+    # A stale/garbage .opus alongside real .wav segments must be ignored.
+    (per_user_dir / "0000.opus").write_bytes(b"not a real opus stream")
+
+    fake_emb = np.ones(512)
+    with patch("wisper_transcribe.speaker_manager.extract_embedding", return_value=fake_emb), \
+         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        profile = enroll_speaker_from_audio_dir(
+            name="alice",
+            display_name="Alice",
+            role="Player",
+            per_user_dir=per_user_dir,
+            data_dir=tmp_path,
+        )
+
+    assert profile.display_name == "Alice"
+    assert (tmp_path / "profiles" / "embeddings" / "alice.npy").exists()
+
+
+def test_enroll_speaker_from_audio_dir_legacy_opus_fallback_fails_gracefully(tmp_path):
+    """R12: a pre-R12 recording directory has only .opus files, which were
+    never valid Opus streams (the old writer wrote raw PCM into an Ogg/Opus
+    container). enroll_speaker_from_audio_dir attempts them as a
+    best-effort fallback, but must raise a normal exception -- not crash --
+    so the JOB_ENROLL runner's generic error handling still applies."""
+    from wisper_transcribe.speaker_manager import enroll_speaker_from_audio_dir
+
+    per_user_dir = tmp_path / "recordings" / "session01" / "someuser"
+    per_user_dir.mkdir(parents=True)
+    (per_user_dir / "0000.opus").write_bytes(b"not a real opus stream" * 10)
+
+    with pytest.raises(Exception):
         enroll_speaker_from_audio_dir(
             name="alice",
             display_name="Alice",

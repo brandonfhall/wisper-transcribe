@@ -1,7 +1,9 @@
 """Tests for /record and /recordings HTML routes + /api/record JSON API."""
 from __future__ import annotations
 
+import asyncio
 import json
+import wave
 from pathlib import Path
 from unittest.mock import patch
 
@@ -432,6 +434,63 @@ def test_transcribe_recording_no_audio_rejects(client):
     resp = c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
     assert resp.status_code == 303
     assert "error=no_audio" in resp.headers["location"]
+
+
+def test_transcribe_recording_no_audio_regression_after_real_bot_session(client):
+    """R2 end-to-end regression: before the fix, `Recording.combined_path`
+    was assigned exactly once, to None, and never populated by a real
+    BotManager session, so this hand-off ALWAYS redirected with
+    ?error=no_audio — even for a session that actually captured audio.
+    Runs a real BotManager session (fake audio source, no JDA/socket) that
+    captures a `__mixed__` combined track, then verifies the hand-off route
+    accepts it."""
+    from wisper_transcribe.recording_manager import load_recordings
+    from wisper_transcribe.web.discord_bot import BotManager
+    from wisper_transcribe.web.jobs import Job as JobCls
+    from tests._discord_fakes import make_pcm_frame, scripted_source
+    import uuid as _uuid
+
+    c, tmp_path = client
+
+    frames = [("__mixed__", make_pcm_frame())] * 5
+    factory = scripted_source(frames)
+    bm = BotManager(data_dir=tmp_path, audio_source_factory=factory)
+
+    async def _run_session():
+        bm.start()
+        rec = await bm.start_session(None, "VC1", "G1")
+        await asyncio.wait_for(bm._task, timeout=5)
+        return rec
+
+    rec = asyncio.run(_run_session())
+
+    loaded = load_recordings(tmp_path)[rec.id]
+    assert loaded.status == "completed"
+    assert loaded.combined_path is not None, "R2: combined_path should be populated"
+    assert loaded.combined_path.exists()
+
+    fake_job = JobCls(
+        id=str(_uuid.uuid4()),
+        status="pending",
+        created_at=loaded.started_at,
+        input_path=str(tmp_path / "output" / f"{rec.id}.wav"),
+        kwargs={},
+        name=rec.id,
+    )
+    with patch.object(c.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
+        resp = c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert "error=no_audio" not in resp.headers["location"]
+    assert f"/recordings/{rec.id}" in resp.headers["location"]
+    mock_submit.assert_called_once()
+
+    dest = tmp_path / "output" / f"{rec.id}.wav"
+    assert dest.exists()
+    with wave.open(str(dest), "rb") as wf:
+        assert wf.getframerate() == 16000
+        assert wf.getnchannels() == 1
+        assert wf.getnframes() > 0
 
 
 def test_transcribe_recording_invalid_id_blocked(client):

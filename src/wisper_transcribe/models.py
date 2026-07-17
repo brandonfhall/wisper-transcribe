@@ -85,7 +85,7 @@ class SegmentRecord:
     started_at: datetime
     duration_s: float
     path: Path
-    finalized: bool = False        # True after EOS page flushed to disk
+    finalized: bool = False        # True after the WAV segment is closed (header patched)
 
 
 @dataclass
