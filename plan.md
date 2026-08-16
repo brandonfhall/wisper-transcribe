@@ -390,6 +390,20 @@ closed off the whole class of failure. Fixed at the root instead: new
 to UTF-8 with `errors="replace"`. Tests: `test_ensure_utf8_stdio_*` in
 `test_cli.py`.
 
+First deploy of that fix didn't actually work — re-tested against the
+same recording and it failed identically. Root cause: `wisper server
+--reload` runs `uvicorn.run(..., reload=True)`, which spawns a *fresh
+subprocess* that imports `"wisper_transcribe.web.app:app"` directly and
+never re-runs `cli.py`'s module-level code at all, so the fix never
+reached the process transcription jobs actually run in. Added the same
+reconfigure loop independently in `web/app.py` too (right next to the
+existing `tqdm.monitor_interval = 0` line, which has the identical
+"uvicorn --reload spawns a fresh subprocess" duplication problem and is
+already duplicated into `jobs.py` for the same reason — see that
+comment). Re-verified live end-to-end this time: re-triggered
+transcription on the same previously-failing recording and it completed
+with a real transcript.
+
 ---
 
 ## Senior review — closed 2026-07-16
