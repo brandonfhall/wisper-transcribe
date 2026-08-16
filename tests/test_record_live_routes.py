@@ -19,7 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from wisper_transcribe.web.jobs import JOB_LIVE, RUNNING, Job, JobQueue
-from wisper_transcribe.web.live_transcribe import LiveRingBuffer
+from wisper_transcribe.web.live_transcribe import NOISE_FLOOR_RMS, LiveRingBuffer
 from wisper_transcribe.web.routes.record import _start_live_transcription, _stop_live_transcription
 
 
@@ -70,7 +70,7 @@ def test_start_live_transcription_submits_job_and_wires_sink(tmp_path):
     assert job is not None
     assert job.kwargs == {
         "model_size": "tiny", "device": "cpu", "compute_type": "int8", "language": "en",
-        "mic_label": "You",
+        "mic_label": "You", "noise_floor": NOISE_FLOOR_RMS,
     }
     assert job.live_output_path == str(tmp_path / "recordings" / "rec-123" / "live_transcript.md")
     assert lcm.live_sink == job.live_ring_buffer.push
@@ -367,3 +367,65 @@ def test_generic_cancel_route_unaffected_for_non_live_jobs(client):
     assert resp.status_code == 303
     assert job.status == "failed"
     assert job.error == "Cancelled"
+
+
+# ---------------------------------------------------------------------------
+# POST /api/record/live-noise-floor -- live slider updates a running
+# JOB_LIVE job's noise floor without restarting the session.
+# ---------------------------------------------------------------------------
+
+class _FakeLCMWithActiveRecording:
+    def __init__(self, recording):
+        self.active_recording = recording
+
+
+def test_live_noise_floor_no_active_session_returns_400(client):
+    c, _ = client
+    c.app.state.local_capture_manager = _FakeLCMWithActiveRecording(None)
+
+    resp = c.post("/api/record/live-noise-floor", json={"noise_floor": 200})
+    assert resp.status_code == 400
+
+
+def test_live_noise_floor_invalid_value_returns_400(client):
+    c, data_dir = client
+    from wisper_transcribe.recording_manager import create_recording
+
+    rec = create_recording("", "", data_dir=data_dir, source="local")
+    c.app.state.local_capture_manager = _FakeLCMWithActiveRecording(rec)
+
+    resp = c.post("/api/record/live-noise-floor", json={"noise_floor": "not-a-number"})
+    assert resp.status_code == 400
+
+    resp = c.post("/api/record/live-noise-floor", json={"noise_floor": -5})
+    assert resp.status_code == 400
+
+    resp = c.post("/api/record/live-noise-floor", json={"noise_floor": 999999})
+    assert resp.status_code == 400
+
+
+def test_live_noise_floor_no_active_job_returns_404(client):
+    c, data_dir = client
+    from wisper_transcribe.recording_manager import create_recording
+
+    rec = create_recording("", "", data_dir=data_dir, source="local")
+    c.app.state.local_capture_manager = _FakeLCMWithActiveRecording(rec)
+
+    resp = c.post("/api/record/live-noise-floor", json={"noise_floor": 200})
+    assert resp.status_code == 404
+
+
+def test_live_noise_floor_updates_running_job(client):
+    c, data_dir = client
+    from wisper_transcribe.recording_manager import create_recording
+
+    rec = create_recording("", "", data_dir=data_dir, source="local")
+    c.app.state.local_capture_manager = _FakeLCMWithActiveRecording(rec)
+
+    job = _make_live_job(rec.id, [])
+    c.app.state.job_queue._jobs[job.id] = job
+
+    resp = c.post("/api/record/live-noise-floor", json={"noise_floor": 275})
+    assert resp.status_code == 200
+    assert resp.json()["noise_floor"] == 275
+    assert job.kwargs["noise_floor"] == 275

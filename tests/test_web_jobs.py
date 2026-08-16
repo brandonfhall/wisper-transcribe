@@ -1282,7 +1282,7 @@ def test_recording_enroll_job_failure_is_generic(tmp_path):
 
 def test_submit_live_creates_pending_job_with_ring_buffer(tmp_path):
     from wisper_transcribe.web.jobs import JOB_LIVE, JobQueue
-    from wisper_transcribe.web.live_transcribe import LiveRingBuffer
+    from wisper_transcribe.web.live_transcribe import NOISE_FLOOR_RMS, LiveRingBuffer
 
     q = _make_queue()
     out = tmp_path / "live_transcript.md"
@@ -1298,7 +1298,7 @@ def test_submit_live_creates_pending_job_with_ring_buffer(tmp_path):
     assert job.live_output_path == str(out)
     assert job.kwargs == {
         "model_size": "tiny", "device": "cpu", "compute_type": "int8", "language": "en",
-        "mic_label": "You",
+        "mic_label": "You", "noise_floor": NOISE_FLOOR_RMS,
     }
     assert job.live_lines == []
 
@@ -1403,6 +1403,51 @@ def test_run_live_job_calls_run_live_loop_and_completes(tmp_path):
     assert job.status == COMPLETED
     assert job.finished_at is not None
     assert out.exists()  # header written up front
+
+
+def test_submit_live_seeds_noise_floor_kwarg(tmp_path):
+    from wisper_transcribe.web.jobs import JobQueue
+    from wisper_transcribe.web.live_transcribe import NOISE_FLOOR_RMS
+
+    q = JobQueue()
+    default_job = q.submit_live("rec-1", str(tmp_path / "a.md"))
+    assert default_job.kwargs["noise_floor"] == NOISE_FLOOR_RMS
+
+    custom_job = q.submit_live("rec-2", str(tmp_path / "b.md"), noise_floor=42.0)
+    assert custom_job.kwargs["noise_floor"] == 42.0
+
+
+def test_set_live_noise_floor_updates_running_job_kwargs(tmp_path):
+    from wisper_transcribe.web.jobs import JobQueue
+
+    q = JobQueue()
+    job = q.submit_live("rec-1", str(tmp_path / "a.md"))
+
+    assert q.set_live_noise_floor(job.id, 300.0) is True
+    assert job.kwargs["noise_floor"] == 300.0
+    assert q.set_live_noise_floor("no-such-job", 999.0) is False
+
+
+def test_run_live_job_wires_get_noise_floor_reading_job_kwargs_live(tmp_path):
+    """The getter passed into run_live_loop must read job.kwargs fresh on
+    each call -- not capture the value once at job start -- so a live
+    slider update (set_live_noise_floor) takes effect on a job already
+    running."""
+    from wisper_transcribe.web.jobs import JobQueue
+
+    q = JobQueue()
+    job = q.submit_live("rec-123", str(tmp_path / "live_transcript.md"), noise_floor=150.0)
+    captured = {}
+
+    def fake_run_live_loop(ring_buffer, stop_event, on_line, **kwargs):
+        captured["get_noise_floor"] = kwargs["get_noise_floor"]
+
+    with patch("wisper_transcribe.web.live_transcribe.run_live_loop", side_effect=fake_run_live_loop):
+        q._run_live_job(job)
+
+    assert captured["get_noise_floor"]() == 150.0
+    q.set_live_noise_floor(job.id, 500.0)
+    assert captured["get_noise_floor"]() == 500.0
 
 
 def test_run_live_job_on_line_appends_job_live_lines_and_markdown(tmp_path):

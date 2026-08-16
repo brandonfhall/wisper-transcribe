@@ -109,22 +109,30 @@ per `LIVE_AUDIO_TEST_PLAN.md`) — fixed same day:**
   `test_commit_and_transcribe_drops_hallucination_on_noise_floor` in
   `tests/test_live_transcribe.py`.
 
+**Noise-floor slider — delivered (2026-08-16, same day as the request):**
+`NOISE_FLOOR_RMS = 150.0` is a guess, and different mics/gain/rooms will
+want it higher or lower — the slider lets the user tune it without
+restarting the session. `commit_and_transcribe()` takes a `noise_floor`
+param now (forwarded to `attribute_speaker()`); `run_live_loop()` takes a
+`get_noise_floor` zero-arg callable, called fresh at the top of *every*
+iteration rather than once at loop start; `submit_live(..., noise_floor=)`
+seeds `job.kwargs["noise_floor"]`, and the new `JobQueue.set_live_noise_floor
+(job_id, value)` overwrites that same key on a job that's already
+`RUNNING`. Route: `POST /api/record/live-noise-floor` (resolves the active
+local session + its `JOB_LIVE` job, 400/404 on no session/no job/bad
+value). UI: a range slider in `/record`'s active-session sidebar
+(local-source only), debounce-POSTing on `input`. Resets to the library
+default on page reload — not persisted across sessions. Tests:
+`test_run_live_loop_reads_noise_floor_live_each_chunk`,
+`test_commit_and_transcribe_custom_noise_floor_overrides_default` in
+`test_live_transcribe.py`; `test_submit_live_seeds_noise_floor_kwarg`,
+`test_set_live_noise_floor_updates_running_job_kwargs`,
+`test_run_live_job_wires_get_noise_floor_reading_job_kwargs_live` in
+`test_web_jobs.py`; `test_live_noise_floor_*` in
+`test_record_live_routes.py`.
+
 **Feature requests (2026-08-16, from the same live smoke-test session):**
 
-- **Noise-floor sensitivity slider on the Record page, adjustable live
-  during a session.** The `NOISE_FLOOR_RMS = 150.0` default above is a
-  guess — different mics/gain levels/rooms will want it higher or lower,
-  and the user wants to tune it without restarting the session. Needs:
-  (1) a `noise_floor` param threaded through `submit_live()` →
-  `run_live_loop()` → `commit_and_transcribe()` (currently hardcoded via
-  the `attribute_speaker` default), (2) for *live* adjustment specifically,
-  the value can't just be a fixed kwarg baked in at job-submit time — it
-  needs to live somewhere mutable the running `JOB_LIVE` job's loop reads
-  fresh each iteration (e.g. a `job.live_noise_floor` attribute, mirroring
-  how `live_stop_event` already lets the route layer signal a running
-  job), plus a small API route (`POST /api/record/live-settings` or
-  similar) for the slider to call. (3) UI: a slider control on `/record`'s
-  active-session view, live-updating via that route.
 - **Change mic/system input devices without stopping the recording.**
   Today `LocalCaptureManager.start_session()` binds two capture threads to
   fixed device IDs for the whole session; switching requires Stop then
@@ -136,12 +144,13 @@ per `LIVE_AUDIO_TEST_PLAN.md`) — fixed same day:**
   a *track* going silent via FIFO starvation, but not swapping which
   physical device feeds a track). Not scoped in detail yet — worth a
   design pass before implementation given the size.
-- **Live transcript ticker on `/record` should never drop old lines within
-  a session ("stay and not roll over").** User's stated use case: running
-  this during a tabletop game so they can scroll back if they missed
-  something someone said. `wisperTickerAppend()` in `static/app.js`
-  currently hard-caps the DOM at 12 entries, deleting older ones — see the
-  fix below (implemented same session, not just a request).
+- ~~Live transcript ticker on `/record` should never drop old lines within
+  a session ("stay and not roll over")~~ — **delivered same session.**
+  User's stated use case: running this during a tabletop game so they can
+  scroll back if they missed something someone said. `wisperTickerAppend()`
+  in `static/app.js` hard-capped the DOM at 12 entries, deleting older
+  ones — cap removed, `#live-ticker` now scrolls internally
+  (`max-height` + `overflow-y`) instead.
 
 **Not yet fixed — found during the same smoke test:**
 

@@ -258,6 +258,44 @@ async def record_devices(request: Request):
     return JSONResponse(enumerate_devices())
 
 
+# int16 RMS -- generous headroom above real speech levels observed in
+# testing (~250-1440), just to keep a fat-fingered slider value sane.
+_MAX_NOISE_FLOOR_RMS = 5000.0
+
+
+@router.post("/api/record/live-noise-floor")
+async def record_live_noise_floor(request: Request):
+    """Live-update the noise floor of the running local session's JOB_LIVE
+    job (Record page slider). No effect on a Discord session -- those
+    don't run JOB_LIVE at all.
+    """
+    lcm = get_local_capture_manager(request)
+    if lcm is None or lcm.active_recording is None or lcm.active_recording.status not in ACTIVE_STATUSES:
+        return JSONResponse({"detail": "no active local session"}, status_code=400)
+
+    try:
+        body = await request.json()
+        noise_floor = float(body.get("noise_floor"))
+    except (TypeError, ValueError):
+        return JSONResponse({"detail": "noise_floor must be a number"}, status_code=400)
+    except Exception:
+        return JSONResponse({"detail": "invalid JSON body"}, status_code=400)
+
+    if not (0.0 <= noise_floor <= _MAX_NOISE_FLOOR_RMS):
+        return JSONResponse(
+            {"detail": f"noise_floor must be between 0 and {_MAX_NOISE_FLOOR_RMS:.0f}"},
+            status_code=400,
+        )
+
+    queue = get_queue(request)
+    job = queue.find_live_job_for_recording(lcm.active_recording.id)
+    if job is None:
+        return JSONResponse({"detail": "no active live transcription job"}, status_code=404)
+
+    queue.set_live_noise_floor(job.id, noise_floor)
+    return JSONResponse({"noise_floor": noise_floor})
+
+
 @router.post("/api/record/start-local")
 async def record_start_local(request: Request):
     """Start a local mic + system-audio capture session."""

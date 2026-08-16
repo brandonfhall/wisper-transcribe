@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 from wisper_transcribe.web.live_transcribe import (
+    NOISE_FLOOR_RMS,
     RATE,
     LiveLine,
     LiveRingBuffer,
@@ -296,6 +297,24 @@ def test_commit_and_transcribe_drops_hallucination_on_noise_floor(monkeypatch):
     assert lines == []
 
 
+def test_commit_and_transcribe_custom_noise_floor_overrides_default(monkeypatch):
+    """A caller-supplied noise_floor (the slider) is honored over the
+    module default -- a lower floor lets quieter audio through that the
+    default would have dropped."""
+    _install_fake_model(monkeypatch, [_fake_whisper_segment(0.0, 0.5, "hi")])
+    n = int(0.5 * RATE)
+    mic_bytes = np.full(n, 50, dtype="<i2").tobytes()      # below default NOISE_FLOOR_RMS (150)
+    system_bytes = np.full(n, 0, dtype="<i2").tobytes()
+    mixed_bytes = np.full(n, 50, dtype="<i2").tobytes()
+
+    lines = commit_and_transcribe(
+        mic_bytes, system_bytes, mixed_bytes, chunk_start_s=0.0,
+        model_size="base", device="cpu", noise_floor=10.0,
+    )
+    assert len(lines) == 1
+    assert lines[0].speaker == "You"
+
+
 # ---------------------------------------------------------------------------
 # run_live_loop
 # ---------------------------------------------------------------------------
@@ -408,3 +427,52 @@ def test_run_live_loop_does_not_chain_initial_prompt():
 
     assert call_count["n"] == 2
     assert prompts_seen == [None, None]
+
+
+def test_run_live_loop_reads_noise_floor_live_each_chunk():
+    """get_noise_floor is called fresh every iteration -- not once at loop
+    start -- so a slider adjustment mid-session takes effect on the very
+    next chunk without restarting the session."""
+    buf = LiveRingBuffer()
+    buf.push(_tone_i16(15.0, 1000), _tone_i16(15.0, 1000), _tone_i16(15.0, 1000))
+
+    stop_event = threading.Event()
+    floors_seen = []
+    call_count = {"n": 0}
+    current_floor = {"v": 150.0}
+
+    def fake_commit(*a, **kw):
+        call_count["n"] += 1
+        floors_seen.append(kw.get("noise_floor"))
+        if call_count["n"] >= 2:
+            stop_event.set()
+        else:
+            current_floor["v"] = 400.0  # simulate the slider moving between chunks
+            buf.push(_tone_i16(15.0, 1000), _tone_i16(15.0, 1000), _tone_i16(15.0, 1000))
+        return []
+
+    with patch("wisper_transcribe.web.live_transcribe.commit_and_transcribe", side_effect=fake_commit):
+        run_live_loop(
+            buf, stop_event, lambda line: None, sleep_fn=lambda s: None,
+            get_noise_floor=lambda: current_floor["v"],
+        )
+
+    assert floors_seen == [150.0, 400.0]
+
+
+def test_run_live_loop_defaults_noise_floor_when_not_given():
+    """Without an explicit get_noise_floor, the module default is used."""
+    buf = LiveRingBuffer()
+    buf.push(_tone_i16(15.0, 1000), _tone_i16(15.0, 1000), _tone_i16(15.0, 1000))
+    stop_event = threading.Event()
+    floors_seen = []
+
+    def fake_commit(*a, **kw):
+        floors_seen.append(kw.get("noise_floor"))
+        stop_event.set()
+        return []
+
+    with patch("wisper_transcribe.web.live_transcribe.commit_and_transcribe", side_effect=fake_commit):
+        run_live_loop(buf, stop_event, lambda line: None, sleep_fn=lambda s: None)
+
+    assert floors_seen == [NOISE_FLOOR_RMS]

@@ -794,6 +794,7 @@ class JobQueue:
         compute_type: str = "auto",
         language: Optional[str] = "en",
         mic_label: str = "You",
+        noise_floor: Optional[float] = None,
     ) -> Job:
         """Enqueue a JOB_LIVE job for a just-started local capture session
         (Phase 2). Open-ended -- runs until `stop_live()` is called, holding
@@ -806,11 +807,18 @@ class JobQueue:
         set by the caller from an enrolled profile's `display_name` when
         the user picks one on the Record page.
 
+        `noise_floor` (defaults to `live_transcribe.NOISE_FLOOR_RMS` when
+        `None`) seeds `job.kwargs["noise_floor"]` -- unlike the other
+        params above, this one is *live*-mutable for the running job:
+        `set_live_noise_floor()` updates the same dict key, and
+        `_run_live_job` wires a getter that reads it back out fresh on
+        every chunk (see `run_live_loop`'s `get_noise_floor` docstring).
+
         The caller is responsible for wiring the returned job's
         `live_ring_buffer.push` onto `LocalCaptureManager.set_live_sink()`
         -- this method only creates the buffer and queues the job.
         """
-        from wisper_transcribe.web.live_transcribe import LiveRingBuffer
+        from wisper_transcribe.web.live_transcribe import NOISE_FLOOR_RMS, LiveRingBuffer
 
         # Model params ride on job.kwargs (already a plain dict field on
         # every Job) rather than adding five more dataclass fields.
@@ -823,6 +831,7 @@ class JobQueue:
                 "model_size": model_size, "device": device,
                 "compute_type": compute_type, "language": language,
                 "mic_label": mic_label,
+                "noise_floor": noise_floor if noise_floor is not None else NOISE_FLOOR_RMS,
             },
             name=f"Live: {recording_id[:8]}",
             job_type=JOB_LIVE,
@@ -833,6 +842,15 @@ class JobQueue:
         self._jobs[job.id] = job
         self._queue.put_nowait(job.id)
         return job
+
+    def set_live_noise_floor(self, job_id: str, noise_floor: float) -> bool:
+        """Live-update a running JOB_LIVE job's noise floor. Returns False
+        if the job doesn't exist (route layer turns that into a 404)."""
+        job = self._jobs.get(job_id)
+        if job is None:
+            return False
+        job.kwargs["noise_floor"] = noise_floor
+        return True
 
     def find_live_job_for_recording(self, recording_id: str) -> Optional[Job]:
         """Return the (RUNNING or PENDING) JOB_LIVE job for a recording, if any."""
@@ -1398,7 +1416,7 @@ class JobQueue:
         """
         from pathlib import Path
 
-        from wisper_transcribe.web.live_transcribe import run_live_loop
+        from wisper_transcribe.web.live_transcribe import NOISE_FLOOR_RMS, run_live_loop
 
         def _on_line(line) -> None:
             line_dict = line.to_dict()
@@ -1429,6 +1447,7 @@ class JobQueue:
                 compute_type=job.kwargs.get("compute_type", "auto"),
                 language=job.kwargs.get("language", "en"),
                 mic_label=job.kwargs.get("mic_label", "You"),
+                get_noise_floor=lambda: job.kwargs.get("noise_floor", NOISE_FLOOR_RMS),
             )
             job.status = COMPLETED
         except Exception:

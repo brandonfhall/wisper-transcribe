@@ -181,6 +181,20 @@
       </div>
     </div>
 
+    {% if active_recording.source == 'local' %}
+    <div>
+      <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:8px">
+        <div class="mono-kicker">Noise floor</div>
+        <div id="noise-floor-value" style="font-family:var(--font-mono);font-size:11px;color:var(--color-accent)">150</div>
+      </div>
+      <input type="range" id="noise-floor-slider" min="0" max="1000" step="10" value="150"
+             style="width:100%;accent-color:var(--color-accent)"/>
+      <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:6px;line-height:1.5">
+        Higher filters out more background noise before it reaches the live transcript — but can also cut quiet speech. Adjusts live.
+      </div>
+    </div>
+    {% endif %}
+
     <div>
       <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:10px">
         <div class="mono-kicker">Segment manifest</div>
@@ -443,6 +457,32 @@
     liveSrc.addEventListener('end', function() { liveSrc.close(); });
     liveSrc.onerror = function() { liveSrc.close(); };
   } catch (ex) {}
+})();
+
+// Noise-floor slider -- debounced POST to /api/record/live-noise-floor,
+// which mutates the running JOB_LIVE job's kwargs directly (see
+// run_live_loop's get_noise_floor docstring in live_transcribe.py).
+// Resets to the library default on page load/reload -- not persisted.
+(function(){
+  var slider = document.getElementById('noise-floor-slider');
+  var valueEl = document.getElementById('noise-floor-value');
+  if (!slider) return;
+
+  var debounceTimer = null;
+  function send(v) {
+    fetch('/api/record/live-noise-floor', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({noise_floor: v}),
+    }).catch(function() {});
+  }
+
+  slider.addEventListener('input', function() {
+    var v = parseFloat(slider.value);
+    if (valueEl) valueEl.textContent = v;
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(function() { send(v); }, 200);
+  });
 })();
 </script>
 {% endif %}

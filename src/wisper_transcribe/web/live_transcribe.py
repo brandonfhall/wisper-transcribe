@@ -270,6 +270,7 @@ def commit_and_transcribe(
     initial_prompt: Optional[str] = None,
     mic_label: str = "You",
     other_label: str = "Other",
+    noise_floor: float = NOISE_FLOOR_RMS,
 ) -> list[LiveLine]:
     """Transcribe one committed chunk, attributing each resulting whisper
     segment to a LiveLine. A chunk can yield zero, one, or several lines
@@ -297,7 +298,10 @@ def commit_and_transcribe(
         end_sample = min(len(mic_i16), int(seg.end * RATE))
         mic_span = mic_i16[start_sample:end_sample]
         system_span = system_i16[start_sample:end_sample]
-        speaker = attribute_speaker(mic_span, system_span, mic_label=mic_label, other_label=other_label)
+        speaker = attribute_speaker(
+            mic_span, system_span, mic_label=mic_label, other_label=other_label,
+            noise_floor=noise_floor,
+        )
         if speaker is None:
             # Neither track cleared the noise floor -- Whisper hallucinated
             # text over what was actually just room tone / mic self-noise.
@@ -328,6 +332,7 @@ def run_live_loop(
     mic_label: str = "You",
     poll_interval_s: float = POLL_INTERVAL_S,
     sleep_fn: Callable[[float], None] = time.sleep,
+    get_noise_floor: Callable[[], float] = lambda: NOISE_FLOOR_RMS,
 ) -> None:
     """Poll the ring buffer, commit + transcribe chunks, call `on_line` for
     each resulting line, until `stop_event` is set.
@@ -353,6 +358,14 @@ def run_live_loop(
     repeat re-primed the next prompt, occasionally producing out-of-order
     segment timestamps along with it. Dropped per the decision's own
     documented fallback.
+
+    `get_noise_floor` is called fresh at the top of every iteration (not
+    just once at loop start) so a caller can adjust sensitivity live during
+    a session -- e.g. the Record page's noise-floor slider mutates
+    `job.kwargs["noise_floor"]` and `jobs._run_live_job` wires a getter
+    that reads it back out on each call, mirroring how `stop_event` already
+    lets the route layer signal a running job rather than baking
+    everything into fixed arguments at submit time.
     """
     while not stop_event.is_set():
         mic, system, mixed, elapsed_s = ring_buffer.snapshot()
@@ -371,6 +384,7 @@ def run_live_loop(
                 chunk_start_s=chunk_start_s,
                 model_size=model_size, device=device, compute_type=compute_type,
                 language=language, initial_prompt=initial_prompt, mic_label=mic_label,
+                noise_floor=get_noise_floor(),
             )
         except Exception:
             log.warning("Live transcription chunk failed; skipping", exc_info=True)
