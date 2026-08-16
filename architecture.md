@@ -483,6 +483,7 @@ Config keys: `model`, `language`, `device`, `compute_type`, `vad_filter`, `times
 | Unauthenticated recording API | `POST /api/record/start` and `/stop` have no auth layer. v1 deployment assumes local/trusted network access only. A single-recording lock prevents concurrent abuse; Discord enforces channel join permissions server-side. Web auth is deferred to v2. |
 | Unbounded recording sessions | `BotManager._session_loop()` runs until explicitly stopped — sessions routinely last multiple hours. Disk usage scales linearly (~60 WAV segments/hour/user; ~1.9 MB/min/user at 16 kHz mono 16-bit). Operator is responsible for stopping sessions. |
 | Local recording is native-install only | `soundcard` (the `[live]` extra) needs host audio devices — never usable inside Docker. `enumerate_devices()` degrades to `available: false` (not an error) whenever `soundcard` isn't importable or no devices are found, and the Record page's Local capture card is hidden accordingly. Same one-session-at-a-time invariant as Discord recording, enforced across both managers (`_other_session_active()` in `web/routes/record.py`). |
+| A live session holds the JobQueue's single worker slot | `JOB_LIVE` runs open-ended for the whole local-capture session (see the Job Queue section's `JOB_LIVE` entry) — refine/summarize/enroll/transcription jobs submitted while a live session is running queue behind it rather than running concurrently, consistent with the one-job-at-a-time invariant everywhere else in the app. Stopping the session (`stop_live()`) frees the slot. |
 
 ---
 

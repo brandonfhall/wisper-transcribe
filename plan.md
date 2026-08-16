@@ -51,15 +51,15 @@
 
 ### Open decisions (resolve during implementation)
 
-- Exact loopback-device presentation in the picker (soundcard exposes loopbacks as microphones with `isloopback`-ish naming — verify per-OS labels and filter sensibly).
-- Whether `You` lines auto-tag to an enrolled profile via a "this is me" selector at start (cheap win — mic track is single-speaker by construction). Leaning yes, Phase 3.
-- `initial_prompt` chaining of prior committed text between chunks for context continuity — try it, drop if it causes repetition artifacts.
+- ~~Exact loopback-device presentation in the picker (soundcard exposes loopbacks as microphones with `isloopback`-ish naming — verify per-OS labels and filter sensibly).~~ Resolved: `enumerate_devices()` filters on `getattr(device, "isloopback", False)`. **Unverified against the real `soundcard` package** — no real audio devices in tests; needs a real-device smoke test.
+- ~~Whether `You` lines auto-tag to an enrolled profile via a "this is me" selector at start.~~ Resolved yes, Phase 3: optional `mic_profile_key` on session start resolves to the profile's `display_name`, used as the live-preview label.
+- ~~`initial_prompt` chaining of prior committed text between chunks for context continuity — try it, drop if it causes repetition artifacts.~~ Implemented (`run_live_loop` chains the last committed line's text, tail-bounded to 200 chars). **Not yet field-tested against real speech** — watch for repetition artifacts on first real use and drop if it misbehaves.
 
 ### Phases
 
-1. **Capture layer (recording only, no live transcription).** `[live]` extra + import guard, `resample_to_16k_mono()`, `LocalCaptureManager` + real-time tick mixer, `Recording.source`, device-enumeration + start-local routes, Record page Local section, per-OS setup docs (incl. BlackHole on macOS). Tests: fake device sources modeled on `tests/_discord_fakes.py`; `soundcard` mocked via `sys.modules` injection (same trick as the LLM client tests). Already valuable standalone — recordings flow into the existing transcribe hand-off.
-2. **Live transcription.** `JOB_LIVE`, ring buffer + Silero VAD chunker, energy attribution, `live_transcript.md`, SSE `/recordings/{id}/live`, live view pane, backpressure. Tests: mocked `WhisperModel`, scripted PCM buffers.
-3. **Polish.** "This is me" profile auto-tag, model-size guidance in docs, scenarios/web-ui/setup doc updates, Known Constraints row (native-install only, live session holds the job queue).
+1. ~~**Capture layer (recording only, no live transcription).** `[live]` extra + import guard, `resample_to_16k_mono()`, `LocalCaptureManager` + real-time tick mixer, `Recording.source`, device-enumeration + start-local routes, Record page Local section, per-OS setup docs (incl. BlackHole on macOS). Tests: fake device sources modeled on `tests/_discord_fakes.py`; `soundcard` mocked via `sys.modules` injection (same trick as the LLM client tests). Already valuable standalone — recordings flow into the existing transcribe hand-off.~~ **Done (2026-08-15).** Six commits on `feat/live-audio-recording`; needs a real-device smoke test before it's fully trusted (`_soundcard_capture_factory`/`enumerate_devices()`'s `isloopback` filter are unverified against the real package — no tests exercise real audio).
+2. ~~**Live transcription.** `JOB_LIVE`, ring buffer + Silero VAD chunker, energy attribution, `live_transcript.md`, SSE `/recordings/{id}/live`, live view pane, backpressure. Tests: mocked `WhisperModel`, scripted PCM buffers.~~ **Done (2026-08-15).**
+3. ~~**Polish.** "This is me" profile auto-tag, model-size guidance in docs, scenarios/web-ui/setup doc updates, Known Constraints row (native-install only, live session holds the job queue).~~ **Done (2026-08-15).**
 
 ---
 
