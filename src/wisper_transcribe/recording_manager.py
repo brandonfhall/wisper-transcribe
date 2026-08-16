@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import get_data_dir
-from .models import Recording, RejoinAttempt, SegmentRecord
+from .models import Marker, Recording, RejoinAttempt, SegmentRecord
 from .path_utils import validate_path_component
 
 log = logging.getLogger(__name__)
@@ -121,6 +121,14 @@ def _rejoin_from_dict(d: dict) -> RejoinAttempt:
     )
 
 
+def _marker_to_dict(m: Marker) -> dict:
+    return {"timestamp": _dt_to_str(m.timestamp), "elapsed_s": m.elapsed_s}
+
+
+def _marker_from_dict(d: dict) -> Marker:
+    return Marker(timestamp=_str_to_dt(d["timestamp"]), elapsed_s=d.get("elapsed_s", 0.0))
+
+
 def _recording_to_dict(r: Recording) -> dict:
     return {
         "id": r.id,
@@ -142,6 +150,7 @@ def _recording_to_dict(r: Recording) -> dict:
         "source": r.source,
         "devices": dict(r.devices),
         "name": r.name,
+        "markers": [_marker_to_dict(m) for m in r.markers],
     }
 
 
@@ -166,6 +175,7 @@ def _recording_from_dict(d: dict) -> Recording:
         source=d.get("source", "discord"),
         devices=dict(d.get("devices", {})),
         name=d.get("name"),
+        markers=[_marker_from_dict(m) for m in d.get("markers", [])],
     )
 
 
@@ -316,6 +326,27 @@ def append_segment(
             raise KeyError(f"Recording {recording_id!r} not found")
         recordings[recording_id].segment_manifest.append(segment)
         save_recording(recordings[recording_id], data_dir)
+
+
+def append_marker(recording_id: str, data_dir: Optional[Path] = None) -> Marker:
+    """Atomically append a marker (current elapsed time, no label) to a
+    recording's `markers` list -- the "Add marker" button on `/record`.
+
+    Per-recording mutex mirrors `append_segment()`'s lost-update protection.
+    `elapsed_s` is computed once here, at creation time, rather than derived
+    later from `timestamp` - `started_at` on every read.
+    """
+    with _get_recording_lock(recording_id):
+        recordings = load_recordings(data_dir)
+        if recording_id not in recordings:
+            raise KeyError(f"Recording {recording_id!r} not found")
+        rec = recordings[recording_id]
+        now = datetime.now(timezone.utc)
+        elapsed_s = (now - rec.started_at).total_seconds() if rec.started_at else 0.0
+        marker = Marker(timestamp=now, elapsed_s=elapsed_s)
+        rec.markers.append(marker)
+        save_recording(rec, data_dir)
+        return marker
 
 
 def delete_recording(recording_id: str, data_dir: Optional[Path] = None) -> None:

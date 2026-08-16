@@ -28,6 +28,7 @@ from wisper_transcribe.campaign_manager import (
 from wisper_transcribe.config import get_data_dir, load_config, save_config
 from wisper_transcribe.recording_manager import (
     _validate_recording_id,
+    append_marker,
     delete_recording,
     load_recordings,
     save_recording,
@@ -71,6 +72,7 @@ def _recording_to_dict(rec) -> dict:
         "source": rec.source,
         "devices": dict(rec.devices),
         "name": rec.name,
+        "markers": [{"elapsed_s": m.elapsed_s} for m in rec.markers],
     }
 
 
@@ -302,6 +304,23 @@ async def record_live_noise_floor(request: Request):
 
     queue.set_live_noise_floor(job.id, noise_floor)
     return JSONResponse({"noise_floor": noise_floor})
+
+
+@router.post("/record/marker")
+async def record_marker(request: Request):
+    """Flag the current moment of the active recording (Record page's "Add
+    marker" button) -- any source, not local-only. No label, just a
+    timestamp: `append_marker()` persists it to `Recording.markers`, and
+    the client drops a matching flagged line straight into the live ticker
+    on a successful response (see wisperTickerAppendMarker in app.js) --
+    no page reload, since that would disrupt mid-session use.
+    """
+    rec = _current_active_recording(request)
+    if rec is None:
+        return JSONResponse({"detail": "no active recording"}, status_code=400)
+
+    marker = append_marker(rec.id, get_data_dir())
+    return JSONResponse({"elapsed_s": marker.elapsed_s})
 
 
 _MAX_SESSION_NAME_LEN = 200

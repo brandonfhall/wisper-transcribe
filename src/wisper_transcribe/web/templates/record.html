@@ -30,9 +30,7 @@
     </div>
   </div>
   <div style="display:flex;align-items:center;gap:8px">
-    <form method="post" action="/record/marker" style="display:inline">
-      <button type="submit" class="btn btn-secondary">{{ icon("spark", 12) }} Add marker</button>
-    </form>
+    <button type="button" id="add-marker-btn" class="btn btn-secondary">{{ icon("spark", 12) }} Add marker</button>
     <form method="post" action="{{ '/record/stop-local' if active_recording.source == 'local' else '/record/stop' }}">
       <button type="submit" class="btn btn-rose">
         <span style="width:9px;height:9px;background:#1a0a0a;display:inline-block;flex-shrink:0"></span>
@@ -490,6 +488,23 @@
     };
     src.onerror = function() { src.close(); };
   } catch(ex) {}
+
+  // Add marker -- any source (not local-only). No page reload: a form
+  // POST would reset scroll position in the ticker mid-session, so this
+  // is a plain fetch with the result dropped straight into the ticker.
+  var markerBtn = document.getElementById('add-marker-btn');
+  if (markerBtn) {
+    markerBtn.addEventListener('click', function() {
+      markerBtn.disabled = true;
+      fetch('/record/marker', {method: 'POST'})
+        .then(function(r) { return r.ok ? r.json() : Promise.reject(r); })
+        .then(function(data) {
+          window.wisperTickerAppendMarker && window.wisperTickerAppendMarker(data.elapsed_s);
+        })
+        .catch(function() {})
+        .finally(function() { markerBtn.disabled = false; });
+    });
+  }
 })();
 </script>
 {% if active_recording.source == 'local' %}

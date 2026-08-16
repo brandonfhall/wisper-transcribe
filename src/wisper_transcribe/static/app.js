@@ -114,6 +114,39 @@ window.wisperTickerAppend = function(data) {
   });
 };
 
+// ── Record: "Add marker" flagged line ──
+// Called on a successful POST /record/marker response with the server's
+// computed elapsed_s. Visually distinct from a real transcript line (rose,
+// italic, no speaker) so it can't be mistaken for something Whisper said.
+window.wisperTickerAppendMarker = function(elapsedS) {
+  var ticker = document.getElementById('live-ticker');
+  if (!ticker) return;
+
+  var placeholder = ticker.querySelector('div[style*="font-style"]');
+  if (placeholder) placeholder.remove();
+
+  var s = Math.max(0, Math.floor(elapsedS || 0));
+  var m = Math.floor(s / 60), ss = s % 60;
+  var label = m + ':' + String(ss).padStart(2, '0');
+
+  var line = document.createElement('div');
+  line.style.cssText = 'display:grid;grid-template-columns:60px 90px 1fr;gap:14px;padding:6px 0;align-items:baseline;opacity:1';
+  line.innerHTML =
+    '<span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-signal-rose)">' + label + '</span>' +
+    '<span style="display:flex;align-items:center;gap:7px">' +
+      '<span class="dot-rose" style="width:6px;height:6px"></span>' +
+      '<span style="font-family:var(--font-serif);font-size:13px;color:var(--color-signal-rose);font-style:italic">Marker</span>' +
+    '</span>' +
+    '<span style="font-size:13.5px;color:var(--color-paper-faint);font-style:italic">flagged moment</span>';
+
+  ticker.insertBefore(line, ticker.firstChild);
+
+  var lines = ticker.querySelectorAll('div[style*="grid-template-columns"]');
+  lines.forEach(function(l, i) {
+    l.style.opacity = Math.max(0.45, 1 - i * 0.12);
+  });
+};
+
 // ── Inline audio excerpt player ──
 // Used on the Speakers page and the enrollment wizard.
 // Toggles play/pause on a hidden <audio> element; only one clip plays at a time.

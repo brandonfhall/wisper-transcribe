@@ -310,12 +310,34 @@ twice back-to-back.
    has no JS test harness; verify by hand: reload `/record` mid-session
    and confirm no duplicate lines appear).
 
-**Open question, not yet actioned:** the "Add marker" button on `/record`
-(`POST /record/marker`) has no backend route at all — clicking it 404s.
-No `Recording.markers`-equivalent field exists either. Asked the user
-whether to build it out (bookmark a timestamp during a live session,
-surfaced... where? the ticker? the eventual transcript?) or just remove
-the dead button.
+**"Add marker" — delivered (2026-08-16).** No documented intent existed
+anywhere (checked plan.md, architecture.md, README, docs/, git history —
+the button traces back to a single bulk commit, `fc1e6cd` "Studio
+redesign," that rebuilt all 9 screens from a design mockup handoff in
+one pass; no spec for markers specifically, never wired to a backend).
+User picked: silent bookmark (one click, no typing) + a visible flagged
+line in the live ticker, after confirming no reusable prior art existed
+in the codebase (`Recording.segment_manifest`/`rejoin_log` are the closest
+*pattern* match — list-of-dataclass, per-recording-mutex-guarded — but
+track different things).
+
+New `Marker(timestamp, elapsed_s)` on `Recording.markers`; `append_marker()`
+in `recording_manager.py` mirrors `append_segment()`'s mutex pattern,
+computing `elapsed_s` once at creation time. `POST /record/marker`
+resolves the active recording via the existing `_current_active_recording()`
+(so it works for Discord too, not just local) and returns `{"elapsed_s"}`.
+The "Add marker" button is a plain `fetch()`, not a form POST — a full
+page reload would reset the ticker's scroll position mid-session — and a
+successful response calls the new `wisperTickerAppendMarker()` to drop a
+rose, speaker-less flagged line straight into the ticker. Markers also
+show as elapsed-time pills on `recording_detail.html` under a new
+"Markers" section. Known v1 gap: a page reload doesn't replay past
+markers into the ticker (only real transcript lines come back through the
+SSE snapshot) — they're still safely on `Recording.markers` and visible
+on the detail page, just not re-inserted into the ticker on a fresh load.
+Tests: `test_append_marker_*` in `test_recording_manager.py`;
+`test_record_marker_*`, `test_recording_detail_*_markers*` in
+`test_record_routes.py`.
 
 **Feature requests (2026-08-16, from the same live smoke-test session):**
 

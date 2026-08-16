@@ -11,6 +11,7 @@ import pytest
 from wisper_transcribe.models import Recording, SegmentRecord
 from wisper_transcribe.recording_manager import (
     _validate_recording_id,
+    append_marker,
     append_segment,
     create_recording,
     delete_recording,
@@ -123,6 +124,78 @@ def test_load_legacy_json_without_name_defaults_to_none(tmp_path):
 
     loaded = load_recordings(tmp_path)
     assert loaded[rec.id].name is None
+
+
+# ---------------------------------------------------------------------------
+# Markers ("Add marker" button on /record)
+# ---------------------------------------------------------------------------
+
+def test_append_marker_roundtrips(tmp_path):
+    rec = _make_recording(tmp_path)
+    marker = append_marker(rec.id, tmp_path)
+
+    assert marker.elapsed_s >= 0.0
+    loaded = load_recordings(tmp_path)
+    assert len(loaded[rec.id].markers) == 1
+    assert loaded[rec.id].markers[0].elapsed_s == marker.elapsed_s
+
+
+def test_append_marker_computes_elapsed_since_started_at(tmp_path):
+    from datetime import timedelta
+
+    rec = _make_recording(tmp_path)
+    rec.started_at = datetime.now(timezone.utc) - timedelta(seconds=90)
+    save_recording(rec, tmp_path)
+
+    marker = append_marker(rec.id, tmp_path)
+    assert 89.0 <= marker.elapsed_s <= 91.0
+
+
+def test_append_marker_multiple_calls_accumulate(tmp_path):
+    rec = _make_recording(tmp_path)
+    append_marker(rec.id, tmp_path)
+    append_marker(rec.id, tmp_path)
+    append_marker(rec.id, tmp_path)
+
+    loaded = load_recordings(tmp_path)
+    assert len(loaded[rec.id].markers) == 3
+
+
+def test_append_marker_unknown_id_raises(tmp_path):
+    with pytest.raises(KeyError):
+        append_marker("does-not-exist", tmp_path)
+
+
+def test_append_marker_atomic_under_concurrent_calls(tmp_path):
+    rec = _make_recording(tmp_path)
+    n = 20
+
+    threads = [threading.Thread(target=append_marker, args=(rec.id, tmp_path)) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    loaded = load_recordings(tmp_path)
+    assert len(loaded[rec.id].markers) == n
+
+
+def test_create_recording_defaults_markers_to_empty_list(tmp_path):
+    rec = _make_recording(tmp_path)
+    assert rec.markers == []
+
+
+def test_load_legacy_json_without_markers_defaults_to_empty_list(tmp_path):
+    """A metadata.json written before `markers` existed must still load."""
+    rec = _make_recording(tmp_path)
+    meta_path = get_metadata_path(rec.id, tmp_path)
+    data = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert "markers" in data  # sanity: current writer includes it
+    del data["markers"]
+    meta_path.write_text(json.dumps(data), encoding="utf-8")
+
+    loaded = load_recordings(tmp_path)
+    assert loaded[rec.id].markers == []
 
 
 def test_load_returns_empty_when_no_file(tmp_path):

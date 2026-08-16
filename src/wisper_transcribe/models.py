@@ -97,6 +97,16 @@ class RejoinAttempt:
 
 
 @dataclass
+class Marker:
+    """One user-flagged moment during a live recording session (the
+    Record page's "Add marker" button) -- a bare timestamp bookmark, no
+    label. `elapsed_s` is seconds since `Recording.started_at`, computed
+    once at creation time so it stays stable regardless of when it's read."""
+    timestamp: datetime
+    elapsed_s: float
+
+
+@dataclass
 class Recording:
     id: str                        # uuid4
     campaign_slug: Optional[str]
@@ -117,6 +127,7 @@ class Recording:
     source: str = "discord"        # "discord" | "local" — default keeps legacy JSON loading unchanged
     devices: dict = field(default_factory=dict)  # local: {"mic": "<device name>", "system": "<device name>"} — display-only, never used in a file path
     name: Optional[str] = None     # user-supplied session name, set at start; display-only, never used in a file path
+    markers: list = field(default_factory=list)  # list[Marker] -- user-flagged moments, "Add marker" button on /record
 
 
 # ---------------------------------------------------------------------------

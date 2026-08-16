@@ -194,6 +194,19 @@
 
     <!-- Right: segments + rejoin log -->
     <div>
+      <!-- Markers -->
+      {% if recording.markers %}
+      <div style="margin-bottom:24px">
+        <div class="section-head"><div class="section-head-left"><span class="section-kicker">Flagged</span><h2 class="section-title">Markers</h2></div></div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px">
+          {% for marker in recording.markers %}
+          {%- set m_s = marker.elapsed_s | int -%}
+          <span class="pill pill-rose" style="font-family:var(--font-mono)">{{ "%d:%02d:%02d" | format(m_s // 3600, (m_s % 3600) // 60, m_s % 60) }}</span>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
       <!-- Segment manifest -->
       {%- set mixed_segs = recording.segment_manifest | selectattr("stream", "equalto", "mixed") | list -%}
       {% if mixed_segs %}

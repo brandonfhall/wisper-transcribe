@@ -332,6 +332,87 @@ def test_clean_session_name_blank_and_whitespace_only_is_none():
     assert _clean_session_name("   ") is None
 
 
+# ---------------------------------------------------------------------------
+# POST /record/marker -- "Add marker" button, any active source
+# ---------------------------------------------------------------------------
+
+def test_record_marker_no_active_session_returns_400(client):
+    c, _ = client
+    resp = c.post("/record/marker")
+    assert resp.status_code == 400
+
+
+def test_record_marker_appends_to_active_local_session(client):
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
+
+        resp = c.post("/record/marker")
+        assert resp.status_code == 200
+        assert resp.json()["elapsed_s"] >= 0.0
+
+        from wisper_transcribe.recording_manager import load_recordings
+        rec_id = mgr.active_recording.id
+        loaded = load_recordings(data_dir)
+        assert len(loaded[rec_id].markers) == 1
+    finally:
+        mgr.stop_session()
+
+
+def test_record_marker_appends_to_active_discord_session(client):
+    """Markers aren't local-only -- _current_active_recording resolves
+    whichever manager has an active session, so a Discord recording gets
+    the same behavior."""
+    c, data_dir = client
+    from wisper_transcribe.recording_manager import create_recording, load_recordings
+
+    rec = create_recording("VC1", "G1", data_dir=data_dir, source="discord")
+
+    class _FakeBotManager:
+        active_recording = rec
+
+    c.app.state.bot_manager = _FakeBotManager()
+
+    resp = c.post("/record/marker")
+    assert resp.status_code == 200
+    loaded = load_recordings(data_dir)
+    assert len(loaded[rec.id].markers) == 1
+
+
+def test_record_marker_multiple_clicks_each_append(client):
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
+
+        c.post("/record/marker")
+        c.post("/record/marker")
+        resp = c.post("/record/marker")
+        assert resp.status_code == 200
+
+        from wisper_transcribe.recording_manager import load_recordings
+        rec_id = mgr.active_recording.id
+        loaded = load_recordings(data_dir)
+        assert len(loaded[rec_id].markers) == 3
+    finally:
+        mgr.stop_session()
+
+
 def test_stop_local_with_no_active_session_returns_400(client):
     c, data_dir = client
     c.app.state.local_capture_manager = _scripted_local_capture_manager(data_dir)
@@ -847,6 +928,29 @@ def test_recording_detail_duration_dash_when_not_ended(client):
     resp = c.get(f"/recordings/{rec.id}")
     assert resp.status_code == 200
     assert "Duration" in resp.text
+
+
+def test_recording_detail_shows_markers(client):
+    from wisper_transcribe.recording_manager import append_marker, create_recording
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    append_marker(rec.id, tmp_path)
+
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "Flagged" in resp.text  # section-kicker, only rendered inside the {% if recording.markers %} block
+
+
+def test_recording_detail_omits_markers_section_when_none(client):
+    from wisper_transcribe.recording_manager import create_recording
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "Flagged" not in resp.text
 
 
 def test_recording_detail_unknown_id_redirects(client):
