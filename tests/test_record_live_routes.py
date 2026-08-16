@@ -70,9 +70,62 @@ def test_start_live_transcription_submits_job_and_wires_sink(tmp_path):
     assert job is not None
     assert job.kwargs == {
         "model_size": "tiny", "device": "cpu", "compute_type": "int8", "language": "en",
+        "mic_label": "You",
     }
     assert job.live_output_path == str(tmp_path / "recordings" / "rec-123" / "live_transcript.md")
     assert lcm.live_sink == job.live_ring_buffer.push
+
+
+def test_start_live_transcription_resolves_profile_to_display_name(tmp_path):
+    """Phase 3 'this is me': a valid mic_profile_key resolves to the
+    enrolled profile's display_name for mic-dominant live lines."""
+    from wisper_transcribe.models import SpeakerProfile
+
+    queue = JobQueue()
+    request = _FakeRequest(queue)
+    lcm = _FakeLocalCaptureManager()
+    recording = _fake_recording()
+
+    fake_profile = SpeakerProfile(
+        name="brandon", display_name="Brandon", role="player",
+        embedding_path=tmp_path / "brandon.npy", enrolled_date="2026-01-01",
+        enrollment_source="test",
+    )
+    with patch("wisper_transcribe.web.routes.record.load_config", return_value={}), \
+         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={"brandon": fake_profile}):
+        _start_live_transcription(request, lcm, recording, tmp_path, mic_profile_key="brandon")
+
+    job = queue.find_live_job_for_recording("rec-123")
+    assert job.kwargs["mic_label"] == "Brandon"
+
+
+def test_start_live_transcription_unknown_profile_key_falls_back_to_you(tmp_path):
+    queue = JobQueue()
+    request = _FakeRequest(queue)
+    lcm = _FakeLocalCaptureManager()
+    recording = _fake_recording()
+
+    with patch("wisper_transcribe.web.routes.record.load_config", return_value={}), \
+         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        _start_live_transcription(request, lcm, recording, tmp_path, mic_profile_key="no-such-profile")
+
+    job = queue.find_live_job_for_recording("rec-123")
+    assert job.kwargs["mic_label"] == "You"
+
+
+def test_start_live_transcription_blank_profile_key_skips_lookup(tmp_path):
+    queue = JobQueue()
+    request = _FakeRequest(queue)
+    lcm = _FakeLocalCaptureManager()
+    recording = _fake_recording()
+
+    with patch("wisper_transcribe.web.routes.record.load_config", return_value={}), \
+         patch("wisper_transcribe.speaker_manager.load_profiles") as mock_load:
+        _start_live_transcription(request, lcm, recording, tmp_path, mic_profile_key="")
+
+    mock_load.assert_not_called()
+    job = queue.find_live_job_for_recording("rec-123")
+    assert job.kwargs["mic_label"] == "You"
 
 
 def test_start_live_transcription_failure_is_swallowed(tmp_path):

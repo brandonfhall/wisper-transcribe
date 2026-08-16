@@ -401,6 +401,33 @@ def test_record_page_shows_local_section_with_device_options(client):
     assert "Speakers (loopback)" in resp.text
 
 
+def test_record_page_hides_this_is_me_when_no_profiles(client):
+    c, _ = client
+    fake_result = {"microphones": [], "loopbacks": [], "available": True}
+    with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result), \
+         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        resp = c.get("/record")
+    assert 'name="mic_profile_key"' not in resp.text
+
+
+def test_record_page_shows_this_is_me_dropdown_with_enrolled_profiles(client):
+    from wisper_transcribe.models import SpeakerProfile
+
+    c, data_dir = client
+    fake_devices = {"microphones": [], "loopbacks": [], "available": True}
+    fake_profile = SpeakerProfile(
+        name="brandon", display_name="Brandon", role="player",
+        embedding_path=data_dir / "brandon.npy", enrolled_date="2026-01-01",
+        enrollment_source="test",
+    )
+    with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_devices), \
+         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={"brandon": fake_profile}):
+        resp = c.get("/record")
+    assert 'name="mic_profile_key"' in resp.text
+    assert "Brandon" in resp.text
+    assert 'This is me' in resp.text
+
+
 def test_recordings_list_shows_local_badge(client):
     from wisper_transcribe.recording_manager import create_recording
 

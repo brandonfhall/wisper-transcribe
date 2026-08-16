@@ -150,14 +150,24 @@ def _rms(samples: np.ndarray) -> float:
     return float(np.sqrt(np.mean(samples.astype(np.float64) ** 2)))
 
 
-def attribute_speaker(mic_span: np.ndarray, system_span: np.ndarray) -> str:
-    """"You" (mic dominant) or "Other" (system dominant) by RMS energy.
+def attribute_speaker(
+    mic_span: np.ndarray,
+    system_span: np.ndarray,
+    mic_label: str = "You",
+    other_label: str = "Other",
+) -> str:
+    """`mic_label` (mic dominant) or `other_label` (system dominant) by RMS
+    energy. Defaults to "You"/"Other"; a session started with a "this is
+    me" enrolled-profile selection passes the profile's display_name as
+    `mic_label` instead (Phase 3) -- purely cosmetic, doesn't touch the
+    energy-comparison logic itself.
 
-    Ties (including both silent) resolve to "You" -- a marginal call either
-    way, but false attribution to "Other" would be more misleading (words
-    from your own mic showing up unlabeled as the other party).
+    Ties (including both silent) resolve to `mic_label` -- a marginal call
+    either way, but false attribution to `other_label` would be more
+    misleading (words from your own mic showing up unlabeled as the other
+    party).
     """
-    return "You" if _rms(mic_span) >= _rms(system_span) else "Other"
+    return mic_label if _rms(mic_span) >= _rms(system_span) else other_label
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +228,8 @@ def commit_and_transcribe(
     compute_type: str = "auto",
     language: Optional[str] = "en",
     initial_prompt: Optional[str] = None,
+    mic_label: str = "You",
+    other_label: str = "Other",
 ) -> list[LiveLine]:
     """Transcribe one committed chunk, attributing each resulting whisper
     segment to a LiveLine. A chunk can yield zero, one, or several lines
@@ -245,7 +257,7 @@ def commit_and_transcribe(
         end_sample = min(len(mic_i16), int(seg.end * RATE))
         mic_span = mic_i16[start_sample:end_sample]
         system_span = system_i16[start_sample:end_sample]
-        speaker = attribute_speaker(mic_span, system_span)
+        speaker = attribute_speaker(mic_span, system_span, mic_label=mic_label, other_label=other_label)
         lines.append(LiveLine(
             speaker=speaker,
             text=seg.text,
@@ -268,6 +280,7 @@ def run_live_loop(
     compute_type: str = "auto",
     language: Optional[str] = "en",
     initial_prompt: Optional[str] = None,
+    mic_label: str = "You",
     poll_interval_s: float = POLL_INTERVAL_S,
     sleep_fn: Callable[[float], None] = time.sleep,
 ) -> None:
@@ -304,7 +317,7 @@ def run_live_loop(
                 mic[:cut_bytes], system[:cut_bytes], mixed[:cut_bytes],
                 chunk_start_s=chunk_start_s,
                 model_size=model_size, device=device, compute_type=compute_type,
-                language=language, initial_prompt=running_prompt,
+                language=language, initial_prompt=running_prompt, mic_label=mic_label,
             )
         except Exception:
             log.warning("Live transcription chunk failed; skipping", exc_info=True)

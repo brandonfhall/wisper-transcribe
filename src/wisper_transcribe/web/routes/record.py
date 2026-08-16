@@ -171,9 +171,16 @@ async def record_status(request: Request):
 # JSON API — local capture control
 # ---------------------------------------------------------------------------
 
-def _start_live_transcription(request: Request, lcm, recording, data_dir: Path) -> None:
+def _start_live_transcription(
+    request: Request, lcm, recording, data_dir: Path, mic_profile_key: str = ""
+) -> None:
     """Submit a Phase 2 JOB_LIVE job for a just-started local session and
     wire its ring buffer onto the capture manager's live sink.
+
+    `mic_profile_key` (Phase 3, "this is me") looks up an enrolled
+    profile's display_name to use for mic-dominant lines instead of the
+    generic "You" -- an unknown/blank key just falls back to "You"; never
+    lets a bad profile key fail the live-job submission.
 
     Best-effort: a failure here must not fail the already-started capture
     session -- logged and swallowed. The recording still records fine
@@ -182,6 +189,15 @@ def _start_live_transcription(request: Request, lcm, recording, data_dir: Path) 
     try:
         queue = get_queue(request)
         cfg = load_config()
+
+        mic_label = "You"
+        if mic_profile_key:
+            from wisper_transcribe.speaker_manager import load_profiles
+
+            profile = load_profiles().get(mic_profile_key)
+            if profile is not None:
+                mic_label = profile.display_name
+
         live_output_path = data_dir / "recordings" / recording.id / "live_transcript.md"
         job = queue.submit_live(
             recording_id=recording.id,
@@ -190,6 +206,7 @@ def _start_live_transcription(request: Request, lcm, recording, data_dir: Path) 
             device=cfg.get("device", "auto"),
             compute_type=cfg.get("compute_type", "auto"),
             language=cfg.get("language", "en"),
+            mic_label=mic_label,
         )
         lcm.set_live_sink(job.live_ring_buffer.push)
     except Exception:
@@ -264,7 +281,8 @@ async def record_start_local(request: Request):
     except RuntimeError:
         return JSONResponse({"detail": "recording already in progress"}, status_code=409)
 
-    _start_live_transcription(request, lcm, recording, get_data_dir())
+    mic_profile_key = str(body.get("mic_profile_key", ""))
+    _start_live_transcription(request, lcm, recording, get_data_dir(), mic_profile_key=mic_profile_key)
     return JSONResponse(_recording_to_dict(recording), status_code=201)
 
 
@@ -421,6 +439,8 @@ async def recording_delete_api(recording_id: str, request: Request):
 
 @router.get("/record", response_class=HTMLResponse)
 async def record_page(request: Request) -> HTMLResponse:
+    from wisper_transcribe.speaker_manager import load_profiles
+
     data_dir = get_data_dir()
     campaigns = load_campaigns(data_dir)
     cfg = load_config()
@@ -436,6 +456,7 @@ async def record_page(request: Request) -> HTMLResponse:
             "default_guild": cfg.get("discord_default_guild", ""),
             "default_channel": cfg.get("discord_default_channel", ""),
             "local_devices": enumerate_devices(),
+            "speaker_profiles": load_profiles(data_dir),
         },
     )
 
@@ -515,6 +536,7 @@ async def record_start_local_html(
     mic_id: Annotated[str, Form()],
     system_id: Annotated[str, Form()],
     campaign_slug: Annotated[str, Form()] = "",
+    mic_profile_key: Annotated[str, Form()] = "",
 ) -> RedirectResponse:
     """HTML form handler: start a local capture session and redirect back to /record."""
     lcm = get_local_capture_manager(request)
@@ -543,7 +565,9 @@ async def record_start_local_html(
     except RuntimeError:
         return error_redirect("/record", "already_active")
 
-    _start_live_transcription(request, lcm, recording, get_data_dir())
+    _start_live_transcription(
+        request, lcm, recording, get_data_dir(), mic_profile_key=mic_profile_key.strip()
+    )
     return RedirectResponse(url="/record", status_code=303)
 
 

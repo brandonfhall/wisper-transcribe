@@ -141,6 +141,15 @@ def test_attribute_speaker_empty_spans():
     assert attribute_speaker(np.array([], dtype="<i2"), np.array([], dtype="<i2")) == "You"
 
 
+def test_attribute_speaker_custom_mic_label():
+    """Phase 3 'this is me': mic-dominant lines use the given label instead
+    of the generic 'You'."""
+    mic = np.full(100, 5000, dtype="<i2")
+    system = np.full(100, 100, dtype="<i2")
+    assert attribute_speaker(mic, system, mic_label="Brandon") == "Brandon"
+    assert attribute_speaker(system, mic, mic_label="Brandon") == "Other"
+
+
 # ---------------------------------------------------------------------------
 # transcribe_array / commit_and_transcribe (mocked WhisperModel)
 # ---------------------------------------------------------------------------
@@ -197,6 +206,20 @@ def test_commit_and_transcribe_attributes_by_dominant_track(monkeypatch):
     assert lines[0].end_s == pytest.approx(10.5)
 
 
+def test_commit_and_transcribe_uses_custom_mic_label(monkeypatch):
+    _install_fake_model(monkeypatch, [_fake_whisper_segment(0.0, 0.5, "hi")])
+    n = int(0.5 * RATE)
+    mic_bytes = np.full(n, 5000, dtype="<i2").tobytes()
+    system_bytes = np.full(n, 0, dtype="<i2").tobytes()
+    mixed_bytes = np.full(n, 2500, dtype="<i2").tobytes()
+
+    lines = commit_and_transcribe(
+        mic_bytes, system_bytes, mixed_bytes, chunk_start_s=0.0,
+        model_size="base", device="cpu", mic_label="Brandon",
+    )
+    assert lines[0].speaker == "Brandon"
+
+
 def test_commit_and_transcribe_empty_mixed_returns_no_lines(monkeypatch):
     _install_fake_model(monkeypatch, [])
     lines = commit_and_transcribe(b"", b"", b"", chunk_start_s=0.0)
@@ -240,6 +263,30 @@ def test_run_live_loop_commits_and_calls_on_line(monkeypatch):
     assert len(lines_received) == 1
     assert isinstance(lines_received[0], LiveLine)
     assert lines_received[0].text == "yo"
+
+
+def test_run_live_loop_passes_mic_label_through(monkeypatch):
+    _install_fake_model(monkeypatch, [_fake_whisper_segment(0.0, 1.0, "yo")])
+
+    buf = LiveRingBuffer()
+    buf.push(_tone_i16(1.0, 1000), _silence_i16(1.0), _tone_i16(1.0, 1000))
+    buf.push(_silence_i16(1.0), _silence_i16(1.0), _silence_i16(1.0))
+
+    stop_event = threading.Event()
+    lines_received = []
+
+    def on_line(line):
+        lines_received.append(line)
+        stop_event.set()
+
+    fake_timestamps = [{"start": 0, "end": RATE}]
+    with patch("faster_whisper.vad.get_speech_timestamps", return_value=fake_timestamps):
+        run_live_loop(
+            buf, stop_event, on_line, mic_label="Brandon",
+            model_size="base", device="cpu", poll_interval_s=0.0, sleep_fn=lambda s: None,
+        )
+
+    assert lines_received[0].speaker == "Brandon"
 
 
 def test_run_live_loop_stops_immediately_when_stop_event_already_set():

@@ -784,12 +784,18 @@ class JobQueue:
         device: str = "auto",
         compute_type: str = "auto",
         language: Optional[str] = "en",
+        mic_label: str = "You",
     ) -> Job:
         """Enqueue a JOB_LIVE job for a just-started local capture session
         (Phase 2). Open-ended -- runs until `stop_live()` is called, holding
         the queue's single worker slot for the whole session (consistent
         with the one-job-at-a-time invariant; refine/summarize/enroll/
         transcription jobs queue behind it, same as any other job).
+
+        `mic_label` (Phase 3, "this is me") is the display name used for
+        mic-dominant lines instead of the generic "You" -- purely cosmetic,
+        set by the caller from an enrolled profile's `display_name` when
+        the user picks one on the Record page.
 
         The caller is responsible for wiring the returned job's
         `live_ring_buffer.push` onto `LocalCaptureManager.set_live_sink()`
@@ -798,7 +804,7 @@ class JobQueue:
         from wisper_transcribe.web.live_transcribe import LiveRingBuffer
 
         # Model params ride on job.kwargs (already a plain dict field on
-        # every Job) rather than adding four more dataclass fields.
+        # every Job) rather than adding five more dataclass fields.
         job = Job(
             id=str(uuid.uuid4()),
             status=PENDING,
@@ -807,6 +813,7 @@ class JobQueue:
             kwargs={
                 "model_size": model_size, "device": device,
                 "compute_type": compute_type, "language": language,
+                "mic_label": mic_label,
             },
             name=f"Live: {recording_id[:8]}",
             job_type=JOB_LIVE,
@@ -1373,6 +1380,7 @@ class JobQueue:
                 device=job.kwargs.get("device", "auto"),
                 compute_type=job.kwargs.get("compute_type", "auto"),
                 language=job.kwargs.get("language", "en"),
+                mic_label=job.kwargs.get("mic_label", "You"),
             )
             job.status = COMPLETED
         except Exception:

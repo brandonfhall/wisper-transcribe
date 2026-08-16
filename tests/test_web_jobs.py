@@ -1236,8 +1236,17 @@ def test_submit_live_creates_pending_job_with_ring_buffer(tmp_path):
     assert job.live_recording_id == "rec-123"
     assert isinstance(job.live_ring_buffer, LiveRingBuffer)
     assert job.live_output_path == str(out)
-    assert job.kwargs == {"model_size": "tiny", "device": "cpu", "compute_type": "int8", "language": "en"}
+    assert job.kwargs == {
+        "model_size": "tiny", "device": "cpu", "compute_type": "int8", "language": "en",
+        "mic_label": "You",
+    }
     assert job.live_lines == []
+
+
+def test_submit_live_stores_custom_mic_label(tmp_path):
+    q = _make_queue()
+    job = q.submit_live("rec-123", str(tmp_path / "live.md"), mic_label="Brandon")
+    assert job.kwargs["mic_label"] == "Brandon"
 
 
 def test_find_live_job_for_recording_returns_running_job(tmp_path):
@@ -1286,7 +1295,7 @@ def test_run_live_job_calls_run_live_loop_and_completes(tmp_path):
 
     q = JobQueue()
     out = tmp_path / "live_transcript.md"
-    job = q.submit_live("rec-123", str(out), model_size="tiny", device="cpu")
+    job = q.submit_live("rec-123", str(out), model_size="tiny", device="cpu", mic_label="Brandon")
 
     with patch("wisper_transcribe.web.live_transcribe.run_live_loop") as mock_loop:
         q._run_live_job(job)
@@ -1295,6 +1304,7 @@ def test_run_live_job_calls_run_live_loop_and_completes(tmp_path):
     call_kwargs = mock_loop.call_args
     assert call_kwargs.kwargs["model_size"] == "tiny"
     assert call_kwargs.kwargs["device"] == "cpu"
+    assert call_kwargs.kwargs["mic_label"] == "Brandon"
     assert job.status == COMPLETED
     assert job.finished_at is not None
     assert out.exists()  # header written up front
