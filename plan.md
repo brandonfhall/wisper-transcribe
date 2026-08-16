@@ -183,6 +183,57 @@ template edits needed. Tests: `test_record_status_idle_when_no_active_
 session`, `test_record_status_reports_active_local_session` in
 `test_record_routes.py`.
 
+**Global banner follow-up, part 1 — misleading "queued automatically" copy
+fixed (2026-08-16):** User re-tested the banner and separately asked "I
+don't see any of the live transcriptions under the transcripts page. Does
+live transcribe only persist until I stop the recording then it goes
+through a normal transcribe cycle?" Answer: no auto-transcribe ever
+happens on stop — `/record/stop-local` and `/record/stop` never call
+`_submit_recording_transcription()`; only the recording detail page's
+explicit Transcribe button does (`recording_detail.html` already says so
+correctly at line 144: "generated after you stop and click Transcribe").
+But `record.html`'s "When you stop" sidebar box claimed "Transcription
+queued automatically," which was simply wrong — fixed the copy to say
+"Click Transcribe on the recording to run the full, diarized pass"
+instead of changing behavior (auto-queuing full diarization on every stop
+is a real design decision, not implemented here — would need the user to
+explicitly want that traded off against every stop costing GPU time even
+for a throwaway recording).
+
+**Global banner follow-up, part 2 — the banner actually was broken, root
+cause found by live-reproducing in Chrome (2026-08-16):** The user's
+banner report ("upper right still shows 'start'... still doesn't show")
+turned out to be a real bug, not user error — reproduced by starting a
+real local session via the running dev server and navigating to
+Dashboard in an actual Chrome tab (not just re-reading the code). Root
+cause: `base.html` cache-busts `app.js`/`tailwind.min.css` with
+`?v={{ app_version }}`, and `app_version` is the static package version —
+it never changes across a `--reload` dev session, because static-file
+edits (unlike `.py` edits) don't restart the uvicorn process, so nothing
+ever bumps it. The browser kept serving a stale cached `app.js` (fetched
+before the banner code existed) on every subsequent page load all
+session, silently — `curl` against the same URL confirmed the *server*
+was serving the correct up-to-date file the whole time; only the
+browser's own cached copy was stale. Fix: new `static_mtime(filename)`
+Jinja global (`routes/__init__.py`) stats the file fresh per render and
+returns its mtime as the cache-buster instead of `app_version`, falling
+back to `app_version` if the file's missing; `base.html` now does
+`?v={{ static_mtime('app.js') }}` / `?v={{ static_mtime('tailwind.min.css') }}`.
+Caught a real bug in the fix itself before it shipped: the first version
+of `_STATIC_DIR` in `routes/__init__.py` used `Path(__file__).parent.parent`
+(→ `web/`), one level too shallow — `app.py`'s existing `_STATIC_DIR` needs
+`.parent.parent` from `web/app.py` to reach `wisper_transcribe/static/`,
+but `routes/__init__.py` is one directory deeper (`web/routes/__init__.py`),
+so it needs `.parent.parent.parent`. Writing the test
+(`test_static_mtime_matches_real_file_mtime`) caught this immediately — the
+`except OSError` fallback in `_static_mtime()` would have silently masked
+it in production and the exact bug being fixed would have persisted.
+Tests: `test_static_mtime_*`, `test_dashboard_html_includes_mtime_cache_
+buster` in `test_web_routes.py`. **Lesson for this session going forward:**
+when the user reports something not showing up after a change, verify
+with a live reproduction (browser or curl) before trusting a code read —
+this bug was invisible from reading the diff alone.
+
 **Feature requests (2026-08-16, from the same live smoke-test session):**
 
 - **Change mic/system input devices without stopping the recording.**

@@ -32,6 +32,63 @@ def client(app):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Static-asset cache-busting -- keyed to file mtime, not app_version, so a
+# dev-mode edit to app.js/tailwind.min.css busts the browser's cache
+# immediately (no process restart happens for a static-file-only edit; a
+# static app_version query string would otherwise be reused unchanged
+# across every edit in a session).
+# ---------------------------------------------------------------------------
+
+
+def test_static_mtime_matches_real_file_mtime():
+    from wisper_transcribe.web.routes import _STATIC_DIR, _static_mtime
+
+    expected = str(int((_STATIC_DIR / "app.js").stat().st_mtime))
+    assert _static_mtime("app.js") == expected
+
+
+def test_static_mtime_falls_back_to_app_version_for_missing_file():
+    from wisper_transcribe.web.routes import _app_version, _static_mtime
+
+    assert _static_mtime("does-not-exist.js") == _app_version
+
+
+def test_static_mtime_changes_when_file_is_touched(tmp_path, monkeypatch):
+    from wisper_transcribe.web import routes as routes_module
+
+    fake_static = tmp_path
+    fake_file = fake_static / "app.js"
+    fake_file.write_text("// v1", encoding="utf-8")
+    monkeypatch.setattr(routes_module, "_STATIC_DIR", fake_static)
+
+    first = routes_module._static_mtime("app.js")
+
+    import os
+    import time
+    time.sleep(0.01)
+    fake_file.write_text("// v2", encoding="utf-8")
+    os.utime(fake_file, (time.time() + 5, time.time() + 5))
+
+    second = routes_module._static_mtime("app.js")
+    assert first != second
+
+
+def test_dashboard_html_includes_mtime_cache_buster(client, tmp_path):
+    from wisper_transcribe.web.routes import _static_mtime
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
+         patch("wisper_transcribe.web.routes.dashboard.load_config", return_value={}), \
+         patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
+         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)), \
+         patch("wisper_transcribe.web.routes.dashboard.get_output_dir", return_value=tmp_path / "output"):
+        resp = client.get("/")
+
+    body = resp.text
+    assert f"/static/app.js?v={_static_mtime('app.js')}" in body
+    assert f"/static/tailwind.min.css?v={_static_mtime('tailwind.min.css')}" in body
+
+
 def test_dashboard_returns_200(client, tmp_path):
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.load_config", return_value={}), \
