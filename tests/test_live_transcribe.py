@@ -339,3 +339,34 @@ def test_run_live_loop_skips_flaky_chunk_without_ending_loop(monkeypatch):
         run_live_loop(buf, stop_event, lambda line: None, sleep_fn=lambda s: None)
 
     assert call_count["n"] == 1  # ran once, didn't crash the loop
+
+
+def test_run_live_loop_does_not_chain_initial_prompt():
+    """Regression test: a committed chunk's text must NOT be chained into
+    the next chunk's initial_prompt. Confirmed on real speech to send
+    faster-whisper into repetition loops ("column column column...") that
+    got worse chunk over chunk as each hallucinated repeat re-primed the
+    next prompt -- see run_live_loop's docstring."""
+    buf = LiveRingBuffer()
+    # 15s+ force-cuts (find_commit_boundary short-circuits past real VAD
+    # once total_s >= FORCE_CUT_S), so no VAD mocking is needed here.
+    buf.push(_tone_i16(15.0, 1000), _tone_i16(15.0, 1000), _tone_i16(15.0, 1000))
+
+    stop_event = threading.Event()
+    prompts_seen = []
+    call_count = {"n": 0}
+
+    def fake_commit(*a, **kw):
+        call_count["n"] += 1
+        prompts_seen.append(kw.get("initial_prompt"))
+        if call_count["n"] >= 2:
+            stop_event.set()
+        else:
+            buf.push(_tone_i16(15.0, 1000), _tone_i16(15.0, 1000), _tone_i16(15.0, 1000))
+        return [LiveLine(speaker="You", text="column column column", start_s=0.0, end_s=1.0)]
+
+    with patch("wisper_transcribe.web.live_transcribe.commit_and_transcribe", side_effect=fake_commit):
+        run_live_loop(buf, stop_event, lambda line: None, initial_prompt=None, sleep_fn=lambda s: None)
+
+    assert call_count["n"] == 2
+    assert prompts_seen == [None, None]

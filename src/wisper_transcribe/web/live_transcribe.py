@@ -321,8 +321,16 @@ def run_live_loop(
     A per-chunk transcription exception is logged and skipped rather than
     ending the loop -- a single flaky chunk must not kill an hours-long
     live session.
+
+    `initial_prompt` is passed through unchanged to every chunk -- it is
+    NOT chained from the previous chunk's committed text. That chaining was
+    tried (see plan.md's original open decision) and confirmed on real
+    speech to send the model into repetition loops ("column column column
+    column...") that got worse chunk over chunk as each hallucinated
+    repeat re-primed the next prompt, occasionally producing out-of-order
+    segment timestamps along with it. Dropped per the decision's own
+    documented fallback.
     """
-    running_prompt = initial_prompt
     while not stop_event.is_set():
         mic, system, mixed, elapsed_s = ring_buffer.snapshot()
         mixed_i16 = np.frombuffer(mixed, dtype="<i2")
@@ -339,7 +347,7 @@ def run_live_loop(
                 mic[:cut_bytes], system[:cut_bytes], mixed[:cut_bytes],
                 chunk_start_s=chunk_start_s,
                 model_size=model_size, device=device, compute_type=compute_type,
-                language=language, initial_prompt=running_prompt, mic_label=mic_label,
+                language=language, initial_prompt=initial_prompt, mic_label=mic_label,
             )
         except Exception:
             log.warning("Live transcription chunk failed; skipping", exc_info=True)
@@ -350,13 +358,7 @@ def run_live_loop(
                 on_line(line)
             except Exception:
                 log.warning("Live transcription on_line callback failed", exc_info=True)
-        if lines:
-            # Chain the last committed line's text as context for the next
-            # chunk (open decision in plan.md: try it, drop if it causes
-            # repetition artifacts). Bounded to the tail so the prompt
-            # itself never grows unbounded.
-            running_prompt = lines[-1].text[-200:]
-        else:
+        if not lines:
             # A force-cut with no speech at all consumes the buffer below
             # but produces nothing to hand to on_line -- yield briefly so a
             # long silent stretch doesn't spin the loop.

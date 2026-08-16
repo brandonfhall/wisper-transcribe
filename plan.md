@@ -18,11 +18,14 @@ has been trimmed per this file's own doc rule now that the work is done).
   `mic.recorder(samplerate=...)`/`record(numframes=None)` calls are unverified
   against the real package. `LIVE_AUDIO_TEST_PLAN.md` (repo root, untracked) has
   the manual walkthrough.
-- **`initial_prompt` chaining not yet field-tested.** `run_live_loop` chains the
-  last committed line's text (tail-bounded to 200 chars) as context for the next
-  chunk — implemented per the original open decision, but never run against real
-  speech. Watch for repetition artifacts on first real use; drop the chaining if
-  it misbehaves.
+- **`initial_prompt` chaining — field-tested 2026-08-16, misbehaved, dropped.**
+  Confirmed on real speech to send faster-whisper into repetition loops
+  ("column column column column...", worsening chunk over chunk as each
+  hallucinated repeat re-primed the next prompt) plus at least one
+  out-of-order segment timestamp. `run_live_loop` no longer chains —
+  `initial_prompt` is now passed through unchanged on every chunk. Test:
+  `test_run_live_loop_does_not_chain_initial_prompt` in
+  `tests/test_live_transcribe.py`.
 
 **Session note (2026-08-15):** the post-implementation review pass (code-review
 skill, high effort, full branch diff) found and fixed 6 real bugs — JOB_LIVE
@@ -74,6 +77,21 @@ per `LIVE_AUDIO_TEST_PLAN.md`) — fixed same day:**
   probably `errors="replace"` (or ASCII `"-"*60`) at the `tqdm.write` call
   sites, or forcing UTF-8 stdio at server startup. Unrelated to the
   live-audio branch — general pipeline Windows-console-Unicode gap.
+- **A failed transcribe job leaves its `Recording` stuck at status
+  `"transcribing"` forever, with no retry path in the UI.** Found via the
+  Unicode crash above: `_submit_recording_transcription()` in
+  `web/routes/record.py` sets `recording.status = "transcribing"` before
+  submitting the job, and only its `on_complete` callback (success-only —
+  see `JobQueue._run_transcription_job`'s except-block, which never calls
+  `_on_complete_callbacks`) ever moves it forward. `recording_detail.html`'s
+  action panel has no branch for "transcribing but the job actually
+  failed" — it just shows a permanent "Transcribing…" spinner, and the
+  underlying job page shows FAILED with no link back to retry from the
+  recording. Needs either a symmetric `on_error` hook on `JobQueue.submit()`
+  that reverts `recording.status` to `"completed"` (so the Transcribe
+  button reappears), or have the detail page check the live job status
+  for `"transcribing"` recordings instead of trusting the stored field.
+  Not yet fixed.
 
 ---
 
