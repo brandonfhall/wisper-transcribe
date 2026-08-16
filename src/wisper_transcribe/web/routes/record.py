@@ -68,6 +68,8 @@ def _recording_to_dict(rec) -> dict:
         "notes": rec.notes,
         "has_audio": bool(rec.combined_path),
         "has_transcript": bool(rec.transcript_path),
+        "source": rec.source,
+        "devices": dict(rec.devices),
     }
 
 

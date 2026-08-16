@@ -51,6 +51,44 @@ def test_load_save_roundtrip(tmp_path):
     assert isinstance(r.started_at, datetime)
 
 
+def test_create_recording_defaults_to_discord_source(tmp_path):
+    rec = _make_recording(tmp_path)
+    assert rec.source == "discord"
+    assert rec.devices == {}
+
+
+def test_create_recording_local_source_and_devices_roundtrip(tmp_path):
+    rec = create_recording(
+        voice_channel_id="",
+        guild_id="",
+        data_dir=tmp_path,
+        source="local",
+        devices={"mic": "Built-in Microphone", "system": "Speakers (loopback)"},
+    )
+    loaded = load_recordings(tmp_path)
+    r = loaded[rec.id]
+    assert r.source == "local"
+    assert r.devices == {"mic": "Built-in Microphone", "system": "Speakers (loopback)"}
+    assert r.voice_channel_id == ""
+    assert r.guild_id == ""
+
+
+def test_load_legacy_json_without_source_defaults_to_discord(tmp_path):
+    """A metadata.json written before source/devices existed must still load."""
+    rec = _make_recording(tmp_path)
+    meta_path = get_metadata_path(rec.id, tmp_path)
+    data = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert "source" in data and "devices" in data  # sanity: current writer includes them
+    del data["source"]
+    del data["devices"]
+    meta_path.write_text(json.dumps(data), encoding="utf-8")
+
+    loaded = load_recordings(tmp_path)
+    r = loaded[rec.id]
+    assert r.source == "discord"
+    assert r.devices == {}
+
+
 def test_create_recording_generates_uuid(tmp_path):
     r1 = _make_recording(tmp_path)
     r2 = _make_recording(tmp_path)
