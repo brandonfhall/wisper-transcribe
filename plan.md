@@ -426,6 +426,47 @@ click. Tests: `test_process_file_title_override` in `test_pipeline.py`;
 `test_transcribe_recording_passes_name_as_title`, `test_transcribe_
 recording_no_name_passes_none_title` in `test_record_routes.py`.
 
+**Live-transcript draft now persists on the recording detail page after
+stop — delivered (2026-08-16).** User: "is the live transcription kept
+anywhere after I stop the recording? It would be nice to keep that with
+the recording file on the recording page. Only overwrite it if I do a
+full transcribe job." Answer to the first question: yes, already —
+`live_transcript.md` is never cleaned up. What wasn't true: the detail
+page's live-transcript pane only rendered while `status in ("recording",
+"degraded")`, so it vanished from the page the instant the session
+stopped even though the file was still on disk; separately, its SSE
+snapshot handler discarded the actual content and showed a static
+"Session ended." string (found while investigating, not fixed — see
+below).
+
+`recording_detail_html` now also renders a static, server-side-parsed
+(`formatter.parse_transcript_blocks()`, the same parser transcript
+editing already uses) view of `live_transcript.md` whenever `source ==
+"local"`, the file exists, and `transcript_path` is still `None` — i.e.
+exactly until a real Transcribe job sets it, matching "only overwrite it
+if I do a full transcribe job" precisely (nothing else ever sets
+`transcript_path`). While still `recording`/`degraded` the existing
+SSE-driven pane keeps ownership of the view, mutually exclusive by
+construction (the new branch's route-level condition explicitly excludes
+those two statuses). Tests: `test_recording_detail_shows_persisted_
+live_draft_after_stop`, `test_recording_detail_omits_draft_once_
+transcribed`, `test_recording_detail_omits_draft_when_no_file_on_disk`,
+`test_recording_detail_omits_draft_for_discord_source`, `test_recording_
+detail_active_session_uses_live_pane_not_static_draft` in `test_record_
+routes.py`.
+
+**Known minor gap, not fixed:** the live SSE pane's `type: "snapshot"`
+handler (`recording_detail.html`'s inline script) still discards
+`payload.markdown` and shows a static "Session ended." string instead of
+rendering it, for the narrow race where a session ends while the page is
+still open with an active `EventSource`. Low impact now — a page reload
+immediately shows the correct content via the new static-draft path
+above — but the message is misleading until that reload happens. Fixing
+it properly means either parsing the markdown in JS (no
+`parse_transcript_blocks()` equivalent client-side) or just triggering
+`location.reload()` on that branch; not scoped, since the reload
+workaround already exists.
+
 ---
 
 ## Senior review — closed 2026-07-16

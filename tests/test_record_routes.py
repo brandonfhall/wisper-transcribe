@@ -953,6 +953,97 @@ def test_recording_detail_omits_markers_section_when_none(client):
     assert "Flagged" not in resp.text
 
 
+# ---------------------------------------------------------------------------
+# Persisted live-transcript draft on the recording detail page -- survives
+# past the session ending (live_transcript.md is never cleaned up), shown
+# until an actual Transcribe job sets transcript_path.
+# ---------------------------------------------------------------------------
+
+def _write_live_transcript(tmp_path, rec_id, body):
+    live_dir = tmp_path / "recordings" / rec_id
+    live_dir.mkdir(parents=True, exist_ok=True)
+    (live_dir / "live_transcript.md").write_text(body, encoding="utf-8")
+
+
+def test_recording_detail_shows_persisted_live_draft_after_stop(client):
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+
+    c, tmp_path = client
+    rec = create_recording("", "", data_dir=tmp_path, source="local")
+    rec.status = "completed"
+    save_recording(rec, tmp_path)
+    _write_live_transcript(
+        tmp_path, rec.id,
+        "# Live transcript\n\n**You** *(1.0s)*: hello from disk\n\n**Other** *(3.0s)*: hi there\n\n",
+    )
+
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "hello from disk" in resp.text
+    assert "hi there" in resp.text
+    assert "Saved" in resp.text  # section-kicker for the static-draft branch
+
+
+def test_recording_detail_omits_draft_once_transcribed(client):
+    """Once a real transcript exists, the draft must not still show --
+    "only overwrite it if I do a full transcribe job" means the real
+    transcript wins, not that both coexist."""
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+
+    c, tmp_path = client
+    rec = create_recording("", "", data_dir=tmp_path, source="local")
+    rec.status = "transcribed"
+    rec.transcript_path = tmp_path / "output" / f"{rec.id}.md"
+    save_recording(rec, tmp_path)
+    _write_live_transcript(tmp_path, rec.id, "# Live transcript\n\n**You** *(1.0s)*: hello from disk\n\n")
+
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "hello from disk" not in resp.text
+
+
+def test_recording_detail_omits_draft_when_no_file_on_disk(client):
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+
+    c, tmp_path = client
+    rec = create_recording("", "", data_dir=tmp_path, source="local")
+    rec.status = "completed"
+    save_recording(rec, tmp_path)
+
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "Saved" not in resp.text
+
+
+def test_recording_detail_omits_draft_for_discord_source(client):
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path, source="discord")
+    rec.status = "completed"
+    save_recording(rec, tmp_path)
+    _write_live_transcript(tmp_path, rec.id, "# Live transcript\n\n**You** *(1.0s)*: hello from disk\n\n")
+
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "hello from disk" not in resp.text
+
+
+def test_recording_detail_active_session_uses_live_pane_not_static_draft(client):
+    """While still recording/degraded, the SSE-driven pane owns the view
+    -- the static server-rendered draft must not also appear."""
+    from wisper_transcribe.recording_manager import create_recording
+
+    c, tmp_path = client
+    rec = create_recording("", "", data_dir=tmp_path, source="local")  # status defaults to "recording"
+    _write_live_transcript(tmp_path, rec.id, "# Live transcript\n\n**You** *(1.0s)*: hello from disk\n\n")
+
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "hello from disk" not in resp.text
+    assert "Waiting for speech" in resp.text  # the SSE pane's placeholder
+
+
 def test_recording_detail_unknown_id_redirects(client):
     c, _ = client
     import uuid

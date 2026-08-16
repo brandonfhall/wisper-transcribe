@@ -132,7 +132,10 @@
         {% endif %}
       </div>
 
-      <!-- Live transcript (Phase 2: local capture, in-progress sessions only) -->
+      <!-- Live transcript (Phase 2). Two forms: SSE-driven while the
+           session is still recording/degraded, or a static server-render
+           of the persisted live_transcript.md draft once it has stopped
+           but hasn't been through a full Transcribe yet. -->
       {% if recording.source == 'local' and recording.status in ('recording', 'degraded') %}
       <div style="margin-bottom:28px">
         <div class="section-head">
@@ -147,6 +150,24 @@
         </div>
         <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:6px">
           Draft preview only — the full transcript with real speaker diarization is generated after you stop and click Transcribe.
+        </div>
+      </div>
+      {% elif live_draft_blocks %}
+      <div style="margin-bottom:28px">
+        <div class="section-head">
+          <div class="section-head-left"><span class="section-kicker">Saved · near-real-time</span><h2 class="section-title">Transcript</h2></div>
+          <div style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint);letter-spacing:0.1em">DRAFT · NOT DIARIZED</div>
+        </div>
+        <div style="background:var(--color-ink-700);border:1px solid var(--color-rule);padding:14px 18px;border-radius:4px;max-height:360px;overflow-y:auto">
+          {% for block in live_draft_blocks %}
+          <div style="display:flex;gap:10px;padding:6px 0;border-bottom:1px solid var(--color-rule);font-size:12.5px;line-height:1.5">
+            <span style="flex-shrink:0;width:44px;font-family:var(--font-mono);font-size:10px;letter-spacing:0.08em;color:{{ 'var(--color-paper-dim)' if block.speaker == 'Other' else 'var(--color-accent)' }}">{{ block.speaker }}</span>
+            <span style="color:var(--color-paper)">{{ block.text }}</span>
+          </div>
+          {% endfor %}
+        </div>
+        <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:6px">
+          Draft saved from the live session — will be replaced by the full diarized transcript once you click Transcribe.
         </div>
       </div>
       {% endif %}

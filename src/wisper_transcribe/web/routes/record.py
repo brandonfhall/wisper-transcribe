@@ -798,6 +798,29 @@ async def recording_detail_html(recording_id: str, request: Request) -> HTMLResp
         return error_redirect("/recordings", "not_found")
 
     campaigns = load_campaigns(data_dir)
+
+    # Persisted live-transcript draft (Phase 2 near-real-time preview):
+    # shown whenever recordings/<id>/live_transcript.md exists on disk and
+    # the recording hasn't been through a full Transcribe yet -- never
+    # cleaned up by anything (delete_recording() only pops the index
+    # entry), so it survives indefinitely and would otherwise vanish from
+    # the page the instant the session stopped, even though the file was
+    # still right there. Only overwritten in the user's sense once a real
+    # Transcribe job sets transcript_path -- this block never runs then.
+    # While still actively recording, the existing SSE-driven pane
+    # (below) owns the live view instead of this static one.
+    live_draft_blocks = None
+    if (
+        recording.source == "local"
+        and recording.transcript_path is None
+        and recording.status not in ("recording", "degraded")
+    ):
+        live_path = data_dir / "recordings" / safe_id / "live_transcript.md"
+        if live_path.exists():
+            from wisper_transcribe.formatter import parse_transcript_blocks
+
+            live_draft_blocks = parse_transcript_blocks(live_path.read_text(encoding="utf-8"))
+
     return templates.TemplateResponse(
         request,
         "recording_detail.html",
@@ -805,6 +828,7 @@ async def recording_detail_html(recording_id: str, request: Request) -> HTMLResp
             "request": request,
             "recording": recording,
             "campaigns": campaigns,
+            "live_draft_blocks": live_draft_blocks,
         },
     )
 
