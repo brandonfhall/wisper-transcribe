@@ -110,7 +110,7 @@ per `LIVE_AUDIO_TEST_PLAN.md`) — fixed same day:**
   `tests/test_live_transcribe.py`.
 
 **Noise-floor slider — delivered (2026-08-16, same day as the request):**
-`NOISE_FLOOR_RMS = 150.0` is a guess, and different mics/gain/rooms will
+`NOISE_FLOOR_RMS` (150.0 at the time, since raised to 300.0 — see below) is a guess, and different mics/gain/rooms will
 want it higher or lower — the slider lets the user tune it without
 restarting the session. `commit_and_transcribe()` takes a `noise_floor`
 param now (forwarded to `attribute_speaker()`); `run_live_loop()` takes a
@@ -156,6 +156,13 @@ session`, `test_record_sse_idle_status_omits_level_gauge_fields` in
 `test_record_live_routes.py` (the latter pulls one chunk off `record_sse()`'s
 `StreamingResponse.body_iterator` directly via `asyncio.run` rather than
 over a live TestClient HTTP stream, since the endpoint polls forever).
+
+**Default noise floor raised 150 → 300 (2026-08-16):** With the gauge
+visible, 150 was still visibly letting mic self-noise clear the floor on
+the user's setup. `NOISE_FLOOR_RMS` in `live_transcribe.py` and the
+slider's initial `value`/displayed number in `record.html` both moved to
+300 — still just a starting point, adjustable live via the slider per
+session.
 
 **Global recording-status banner — delivered (2026-08-16):** User report:
 "I can navigate to other pages and the recording seems to keep going, but

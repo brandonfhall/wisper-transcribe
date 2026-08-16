@@ -303,7 +303,7 @@ def test_commit_and_transcribe_custom_noise_floor_overrides_default(monkeypatch)
     default would have dropped."""
     _install_fake_model(monkeypatch, [_fake_whisper_segment(0.0, 0.5, "hi")])
     n = int(0.5 * RATE)
-    mic_bytes = np.full(n, 50, dtype="<i2").tobytes()      # below default NOISE_FLOOR_RMS (150)
+    mic_bytes = np.full(n, 50, dtype="<i2").tobytes()      # below default NOISE_FLOOR_RMS
     system_bytes = np.full(n, 0, dtype="<i2").tobytes()
     mixed_bytes = np.full(n, 50, dtype="<i2").tobytes()
 

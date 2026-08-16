@@ -43,8 +43,9 @@ POLL_INTERVAL_S = 0.25       # how often the live loop checks the ring buffer
 # on that kind of near-silent audio rather than returning nothing -- this
 # is a coarse starting point (real speech observed well above this on a
 # USB condenser mic; true silence measures exactly 0.0) and may need
-# tuning for a given mic's gain/self-noise level.
-NOISE_FLOOR_RMS = 150.0
+# tuning for a given mic's gain/self-noise level. Raised 150 -> 300
+# 2026-08-16 after field use: 150 still let some mic self-noise through.
+NOISE_FLOOR_RMS = 300.0
 
 
 @dataclass
