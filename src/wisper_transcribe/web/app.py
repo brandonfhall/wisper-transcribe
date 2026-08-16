@@ -26,6 +26,22 @@ from .jobs import JobQueue
 # in a web server context.
 _tqdm_module.tqdm.monitor_interval = 0
 
+# Reconfigure stdout/stderr to UTF-8, independently of cli.py's own
+# _ensure_utf8_stdio() -- `uvicorn.run(..., reload=True)` spawns a fresh
+# subprocess that imports this module string ("wisper_transcribe.web.app:app")
+# directly, never re-running cli.py's module-level code, so that fix alone
+# doesn't reach the actual worker process transcription jobs run in. Same
+# per-entrypoint duplication as the tqdm.monitor_interval line above and
+# jobs.py's own copy of it -- see CLAUDE.md's tqdm-patching gotcha. Confirmed
+# live: pipeline.py's tqdm.write("─" * 60) crashed every transcription job
+# with UnicodeEncodeError on this process's inherited cp1252 console codepage.
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None:
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
 _STATIC_DIR = Path(__file__).parent.parent / "static"
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 _INPUT_CSS = _STATIC_DIR / "input.css"
