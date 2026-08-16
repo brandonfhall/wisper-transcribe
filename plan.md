@@ -280,6 +280,43 @@ local_capture.py`; `test_start_local_json_api_accepts_and_trims_name`,
 `test_pending_recordings_*`, `test_transcripts_page_shows_awaiting_
 transcription_section` etc. in `test_web_routes.py`.
 
+**Two more from a fresh smoke-test screenshot (2026-08-16):** User asked
+whether "No speakers mapped yet. Participants will appear as they join."
+under Voices/"At the table" is accurate for a local session, and pointed
+out a screenshot showing the live ticker with the same 6 lines rendered
+twice back-to-back.
+
+1. Not accurate — real bug. `discord_speakers` is populated only by the
+   Discord bot's auto-tag path; `LocalCaptureManager` never touches it, so
+   for a local session that dict is permanently empty and "participants
+   will appear as they join" can never happen (there's no join concept
+   for a fixed mic+system capture). Fixed: the whole speaker-meters
+   section now renders only for `source != "local"`.
+2. Real bug, confirmed from the screenshot's exact pattern (two identical
+   6-line blocks, oldest-line-first within each block — precisely what
+   two independent from-scratch replays of the same backlog produce).
+   Root cause: `GET /recordings/{id}/live`'s resume cursor (`last_idx`)
+   is per-connection server state starting at 0, with no client-side "up
+   to where have I already rendered" signal — so any reconnect (a
+   dev-server restart mid-session, a network blip, a tab waking from
+   sleep) is indistinguishable from a brand-new stream and replays the
+   entire line history from the top. Rather than chase down exactly what
+   triggered the reconnect this particular time, fixed the general case:
+   `wisperTickerAppend()` now de-dupes on a `timestamp|speaker|text` key
+   before rendering, so a replayed line is silently dropped instead of
+   doubled. Tests: `test_record_page_hides_speaker_meters_for_local_
+   session`, `test_record_page_shows_speaker_meters_for_discord_session`
+   in `test_record_routes.py` (the dedupe itself is untested — this repo
+   has no JS test harness; verify by hand: reload `/record` mid-session
+   and confirm no duplicate lines appear).
+
+**Open question, not yet actioned:** the "Add marker" button on `/record`
+(`POST /record/marker`) has no backend route at all — clicking it 404s.
+No `Recording.markers`-equivalent field exists either. Asked the user
+whether to build it out (bookmark a timestamp during a live session,
+surfaced... where? the ticker? the eventual transcript?) or just remove
+the dead button.
+
 **Feature requests (2026-08-16, from the same live smoke-test session):**
 
 - **Change mic/system input devices without stopping the recording.**

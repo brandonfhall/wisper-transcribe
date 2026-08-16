@@ -109,6 +109,7 @@
       </div>
     </div>
 
+    {% if active_recording.source != 'local' %}
     <!-- Speaker meters -->
     <div class="section-head">
       <div class="section-head-left">
@@ -149,6 +150,7 @@
       </div>
       {% endfor %}
     </div>
+    {% endif %}
 
     <!-- Live ticker -->
     <div style="margin-top:28px">

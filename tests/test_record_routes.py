@@ -478,6 +478,49 @@ def test_record_page_shows_local_active_session(client):
         mgr.stop_session()
 
 
+class _FakeBotManagerWithActiveRecording:
+    def __init__(self, recording):
+        self.active_recording = recording
+
+
+def test_record_page_hides_speaker_meters_for_local_session(client):
+    """A local session's `discord_speakers` dict is never populated (that's
+    a Discord-bot-only auto-tag mechanism) -- the 'Voices · live' / 'At the
+    table' section, and its 'Participants will appear as they join' promise,
+    must not render at all for source == 'local', since it can never have
+    anything to show."""
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
+            resp = c.get("/record")
+        assert resp.status_code == 200
+        assert "At the table" not in resp.text
+        assert "No speakers mapped yet" not in resp.text
+    finally:
+        mgr.stop_session()
+
+
+def test_record_page_shows_speaker_meters_for_discord_session(client):
+    c, data_dir = client
+    from wisper_transcribe.recording_manager import create_recording
+
+    rec = create_recording("VC1", "G1", data_dir=data_dir, source="discord")
+    c.app.state.bot_manager = _FakeBotManagerWithActiveRecording(rec)
+
+    resp = c.get("/record")
+    assert resp.status_code == 200
+    assert "At the table" in resp.text
+    assert "No speakers mapped yet" in resp.text
+
+
 def test_record_page_wires_live_ticker_to_recording_live_sse(client):
     """The 'Heard so far' ticker on /record subscribes to the same working
     SSE stream as the recording detail page, not the dead partial_transcript

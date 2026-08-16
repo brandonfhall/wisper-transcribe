@@ -75,6 +75,17 @@ window.wisperTickerAppend = function(data) {
   var ticker = document.getElementById('live-ticker');
   if (!ticker) return;
 
+  // De-dupe against a reconnect replay. The SSE resume cursor
+  // (`last_idx` in GET /recordings/{id}/live) lives server-side per
+  // connection, starting at 0 -- there's no client "I've already seen up
+  // to X" signal, so any reconnect (dev-server restart, a network blip,
+  // tab wake from sleep) looks identical to a brand-new stream and
+  // replays the entire line history from the start.
+  var key = (data.timestamp || '') + '|' + (data.speaker || '') + '|' + (data.text || '');
+  ticker._seenKeys = ticker._seenKeys || new Set();
+  if (ticker._seenKeys.has(key)) return;
+  ticker._seenKeys.add(key);
+
   // Remove placeholder if present
   var placeholder = ticker.querySelector('div[style*="font-style"]');
   if (placeholder) placeholder.remove();
