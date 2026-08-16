@@ -59,6 +59,7 @@ from wisper_transcribe.web.audio_writer import (
     concat_wav_segments,
     resample_to_16k_mono,
 )
+from wisper_transcribe.web.live_transcribe import _rms
 
 log = logging.getLogger(__name__)
 
@@ -269,6 +270,17 @@ class LocalCaptureManager:
         # in addition to (never instead of) the disk writes above. Must be
         # fast/non-blocking -- it runs on the hot tick-thread path.
         self._live_sink: Optional[Callable[[bytes, bytes, bytes], None]] = None
+        # Live level meter (Record page noise-floor gauge): peak per-track
+        # RMS observed since the last `get_and_reset_levels()` read, not an
+        # instantaneous snapshot -- the reader (an ~1s SSE poll) would
+        # otherwise miss short transients between polls. Plain dict +
+        # lock, read from the asyncio event loop thread while written from
+        # the tick thread; no producer/consumer ordering requirement beyond
+        # "don't tear the dict read", so a simple lock is enough (mirrors
+        # `_live_sink`'s read-without-lock tolerance for a single float
+        # would be fine too, but two related values need to stay in sync).
+        self._level_lock = threading.Lock()
+        self._level_peaks: dict[str, float] = {"mic": 0.0, "system": 0.0}
 
     # ------------------------------------------------------------------
     # Lifecycle (mirrors BotManager/JobQueue)
@@ -297,6 +309,16 @@ class LocalCaptureManager:
         tap. Safe to call at any time -- reads of `self._live_sink` in the
         tick thread just see whatever was last set."""
         self._live_sink = sink
+
+    def get_and_reset_levels(self) -> dict[str, float]:
+        """Return `{"mic": rms, "system": rms}` peak levels observed since
+        the last call, then reset the peaks to 0.0. Used by `/record/sse`
+        to drive the Record page's live level gauge; harmless to call when
+        no session is active (returns whatever -- unread -- zeros are there)."""
+        with self._level_lock:
+            levels = dict(self._level_peaks)
+            self._level_peaks = {"mic": 0.0, "system": 0.0}
+        return levels
 
     def start_session(
         self,
@@ -337,6 +359,9 @@ class LocalCaptureManager:
         }
         self._combined_dir = rec_dir / "combined"
         self._combined_writer = SegmentedWavWriter(stream_dir=self._combined_dir)
+
+        with self._level_lock:
+            self._level_peaks = {"mic": 0.0, "system": 0.0}
 
         self._stop_event = threading.Event()
         self._capture_threads = [
@@ -463,6 +488,12 @@ class LocalCaptureManager:
                 samples = np.concatenate([samples, np.zeros(wanted - len(samples), dtype="<i2")])
             track_samples[name] = samples
             self._writers[name].write(samples.tobytes())
+
+        with self._level_lock:
+            for name in _TRACKS:
+                r = _rms(track_samples[name])
+                if r > self._level_peaks[name]:
+                    self._level_peaks[name] = r
 
         mixed = np.zeros(wanted, dtype=np.int32)
         for name in _TRACKS:

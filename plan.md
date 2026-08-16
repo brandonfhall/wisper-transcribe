@@ -131,6 +131,32 @@ default on page reload — not persisted across sessions. Tests:
 `test_web_jobs.py`; `test_live_noise_floor_*` in
 `test_record_live_routes.py`.
 
+**Live level gauge — delivered (2026-08-16, follow-up to the slider):**
+User: "can we include a gauge or better yet show the current noise floor
+on the same gauge?" — the slider had no visual feedback for what level the
+mic/system tracks were actually sitting at relative to the threshold.
+`LocalCaptureManager._do_tick()` now feeds each track's RMS (reusing
+`live_transcribe._rms()`) into `self._level_peaks`, tracking the *peak*
+since the last read rather than an instantaneous snapshot (a 1s poll
+interval would otherwise miss short transients); `get_and_reset_levels()`
+reads and clears it. `GET /record/sse`'s status payload carries
+`mic_rms`/`system_rms` for a local session (idle/Discord payloads omit
+the keys entirely). UI: two horizontal bar gauges (Mic, System) under the
+noise-floor slider in `/record`'s sidebar, 0-2000 RMS scale (wider than
+the slider's 0-1000 so speech peaks don't constantly pin the bar); each
+bar has a rose threshold-marker line at the current noise-floor value and
+turns green when the live level clears it — same gauge shows both the
+signal and the floor, rather than the floor only being a number next to
+the slider. Threshold marker updates live as the slider moves (no extra
+request; client-side only) and is re-synced whenever a level update
+arrives. Tests: `test_get_and_reset_levels_*`, `test_do_tick_updates_
+level_peaks`, `test_start_session_resets_stale_level_peaks` in
+`test_local_capture.py`; `test_record_sse_includes_level_gauge_for_local_
+session`, `test_record_sse_idle_status_omits_level_gauge_fields` in
+`test_record_live_routes.py` (the latter pulls one chunk off `record_sse()`'s
+`StreamingResponse.body_iterator` directly via `asyncio.run` rather than
+over a live TestClient HTTP stream, since the endpoint polls forever).
+
 **Feature requests (2026-08-16, from the same live smoke-test session):**
 
 - **Change mic/system input devices without stopping the recording.**

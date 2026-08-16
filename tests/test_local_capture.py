@@ -464,7 +464,78 @@ def test_live_sink_exception_disables_sink_without_crashing_tick(tmp_path):
     mgr._do_tick()  # second tick proceeds fine with the sink cleared
     assert calls["n"] == 1
 
+
+# ---------------------------------------------------------------------------
+# Live level gauge (Record page noise-floor meter)
+# ---------------------------------------------------------------------------
+
+def test_get_and_reset_levels_defaults_to_zero(tmp_path):
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path, capture_factory=scripted_capture_factory({}), ticker=instant_ticker(0)
+    )
+    assert mgr.get_and_reset_levels() == {"mic": 0.0, "system": 0.0}
+
+
+def test_do_tick_updates_level_peaks(tmp_path):
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path, capture_factory=scripted_capture_factory({}), ticker=instant_ticker(0)
+    )
+    _wire_manual_writers(mgr, tmp_path)
+    mgr._fifos["mic"].push(np.full(320, 1000, dtype="<i2").tobytes())
+    mgr._fifos["system"].push(np.full(320, 2000, dtype="<i2").tobytes())
+
+    mgr._do_tick()
     _finalize_manual_writers(mgr)
+
+    levels = mgr.get_and_reset_levels()
+    assert levels == {"mic": 1000.0, "system": 2000.0}
+
+
+def test_get_and_reset_levels_resets_after_read(tmp_path):
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path, capture_factory=scripted_capture_factory({}), ticker=instant_ticker(0)
+    )
+    _wire_manual_writers(mgr, tmp_path)
+    mgr._fifos["mic"].push(np.full(320, 1000, dtype="<i2").tobytes())
+    mgr._fifos["system"].push(np.full(320, 1000, dtype="<i2").tobytes())
+    mgr._do_tick()
+    _finalize_manual_writers(mgr)
+
+    mgr.get_and_reset_levels()
+    assert mgr.get_and_reset_levels() == {"mic": 0.0, "system": 0.0}
+
+
+def test_get_and_reset_levels_keeps_peak_across_multiple_ticks(tmp_path):
+    """A quiet tick after a loud one must not erase the loud peak -- the
+    gauge should reflect the loudest moment since the last poll, not the
+    most recent tick."""
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path, capture_factory=scripted_capture_factory({}), ticker=instant_ticker(0)
+    )
+    _wire_manual_writers(mgr, tmp_path)
+
+    mgr._fifos["mic"].push(np.full(320, 3000, dtype="<i2").tobytes())
+    mgr._fifos["system"].push(np.full(320, 3000, dtype="<i2").tobytes())
+    mgr._do_tick()
+
+    mgr._fifos["mic"].push(np.full(320, 10, dtype="<i2").tobytes())
+    mgr._fifos["system"].push(np.full(320, 10, dtype="<i2").tobytes())
+    mgr._do_tick()
+    _finalize_manual_writers(mgr)
+
+    assert mgr.get_and_reset_levels() == {"mic": 3000.0, "system": 3000.0}
+
+
+def test_start_session_resets_stale_level_peaks(tmp_path):
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path, capture_factory=scripted_capture_factory({}), ticker=instant_ticker(0)
+    )
+    mgr._level_peaks = {"mic": 500.0, "system": 500.0}
+    mgr.start_session(None, "mic-1", "sys-1")
+    try:
+        assert mgr.get_and_reset_levels() == {"mic": 0.0, "system": 0.0}
+    finally:
+        mgr.stop_session()
 
 
 def test_set_live_sink_replaces_and_clears():

@@ -12,6 +12,8 @@ trying to load an actual Whisper model. The SSE route tests inject a
 """
 from __future__ import annotations
 
+import asyncio
+import json
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
@@ -20,7 +22,11 @@ from fastapi.testclient import TestClient
 
 from wisper_transcribe.web.jobs import JOB_LIVE, RUNNING, Job, JobQueue
 from wisper_transcribe.web.live_transcribe import NOISE_FLOOR_RMS, LiveRingBuffer
-from wisper_transcribe.web.routes.record import _start_live_transcription, _stop_live_transcription
+from wisper_transcribe.web.routes.record import (
+    _start_live_transcription,
+    _stop_live_transcription,
+    record_sse,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -429,3 +435,55 @@ def test_live_noise_floor_updates_running_job(client):
     assert resp.status_code == 200
     assert resp.json()["noise_floor"] == 275
     assert job.kwargs["noise_floor"] == 275
+
+
+# ---------------------------------------------------------------------------
+# GET /record/sse -- level-gauge fields for a local session.
+#
+# `/record/sse` polls forever (`while True: ... await asyncio.sleep(1.0)`),
+# so it's exercised by pulling exactly one chunk off its StreamingResponse's
+# body_iterator directly (asyncio.run) rather than over a live TestClient
+# HTTP stream, which has no clean way to read "just the first event" without
+# risking a hang (see test_current_active_recording_reports_active_local_session
+# in test_record_routes.py for the same convention).
+# ---------------------------------------------------------------------------
+
+class _FakeSSERequest:
+    def __init__(self, app):
+        self.app = app
+
+    async def is_disconnected(self):
+        return False
+
+
+def _first_sse_payload(app) -> dict:
+    async def _get():
+        resp = await record_sse(_FakeSSERequest(app))
+        chunk = await resp.body_iterator.__anext__()
+        return chunk
+
+    chunk = asyncio.run(_get())
+    return json.loads(chunk.split("data: ", 1)[1].strip())
+
+
+def test_record_sse_includes_level_gauge_for_local_session(client):
+    c, data_dir = client
+    from wisper_transcribe.recording_manager import create_recording
+
+    rec = create_recording("", "", data_dir=data_dir, source="local")
+    lcm = _FakeLCMWithActiveRecording(rec)
+    lcm.get_and_reset_levels = lambda: {"mic": 42.0, "system": 7.0}
+    c.app.state.local_capture_manager = lcm
+
+    payload = _first_sse_payload(c.app)
+    assert payload["mic_rms"] == 42.0
+    assert payload["system_rms"] == 7.0
+
+
+def test_record_sse_idle_status_omits_level_gauge_fields(client):
+    c, _ = client
+    c.app.state.local_capture_manager = _FakeLCMWithActiveRecording(None)
+
+    payload = _first_sse_payload(c.app)
+    assert payload["status"] == "idle"
+    assert "mic_rms" not in payload

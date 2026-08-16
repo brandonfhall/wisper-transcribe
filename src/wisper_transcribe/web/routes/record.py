@@ -537,6 +537,12 @@ async def record_sse(request: Request) -> StreamingResponse:
                     "speakers": list(rec.discord_speakers.keys()),
                     "started_at": rec.started_at.isoformat() if rec.started_at else None,
                 }
+                if rec.source == "local":
+                    lcm = get_local_capture_manager(request)
+                    if lcm is not None:
+                        levels = lcm.get_and_reset_levels()
+                        payload["mic_rms"] = levels["mic"]
+                        payload["system_rms"] = levels["system"]
             yield f"data: {json.dumps(payload)}\n\n"
             await asyncio.sleep(1.0)
 

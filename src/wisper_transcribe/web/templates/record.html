@@ -189,8 +189,26 @@
       </div>
       <input type="range" id="noise-floor-slider" min="0" max="1000" step="10" value="150"
              style="width:100%;accent-color:var(--color-accent)"/>
-      <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:6px;line-height:1.5">
+      <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:6px;margin-bottom:14px;line-height:1.5">
         Higher filters out more background noise before it reaches the live transcript — but can also cut quiet speech. Adjusts live.
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:12px">
+        {% for track, label in [("mic", "Mic"), ("system", "System")] %}
+        <div>
+          <div style="display:flex;justify-content:space-between;font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-bottom:4px">
+            <span>{{ label }}</span>
+            <span id="level-value-{{ track }}">0</span>
+          </div>
+          <div id="level-meter-{{ track }}" style="position:relative;height:8px;background:var(--color-ink-700);border:1px solid var(--color-rule);border-radius:3px;overflow:hidden">
+            <div id="level-fill-{{ track }}" style="position:absolute;left:0;top:0;bottom:0;width:0%;background:var(--color-rule-strong)"></div>
+            <div id="level-threshold-{{ track }}" style="position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--color-signal-rose);left:7.5%"></div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:8px;line-height:1.5">
+        Bar shows the live signal on each track; the rose line marks the noise floor. Green means it's clearing the floor and reaching the transcript.
       </div>
     </div>
     {% endif %}
@@ -417,6 +435,29 @@
   }
   tick(); setInterval(tick, 1000);
 
+  // Level gauge -- shares the mic/system RMS peaks the noise-floor slider
+  // script (below) reads/writes `currentNoiseFloor` from, so both live in
+  // window scope rather than duplicating a threshold value in two closures.
+  var LEVEL_METER_MAX = 2000; // headroom above the slider's 0-1000 range so speech peaks don't constantly pin the bar
+  function levelPct(v) { return Math.max(0, Math.min(100, (v / LEVEL_METER_MAX) * 100)); }
+  function updateThresholdMarkers(v) {
+    ['mic', 'system'].forEach(function(track) {
+      var m = document.getElementById('level-threshold-' + track);
+      if (m) m.style.left = levelPct(v) + '%';
+    });
+  }
+  function updateLevelGauge(track, rms) {
+    var fill = document.getElementById('level-fill-' + track);
+    var val = document.getElementById('level-value-' + track);
+    if (fill) {
+      fill.style.width = levelPct(rms) + '%';
+      fill.style.background = rms >= (window.currentNoiseFloor || 0)
+        ? 'var(--color-signal-green)' : 'var(--color-rule-strong)';
+    }
+    if (val) val.textContent = Math.round(rms);
+  }
+  window.updateThresholdMarkers = updateThresholdMarkers;
+
   // Status SSE -- segment count only (voice_activity/segment_sealed meters
   // have no producer yet -- Discord-path speaker meters are unbuilt).
   try {
@@ -425,6 +466,15 @@
       var c = document.getElementById('live-seg-count');
       if (c) c.textContent = parseInt(c.textContent||'0') + 1;
     });
+    src.onmessage = function(e) {
+      try {
+        var payload = JSON.parse(e.data);
+        if (payload.type === 'status' && 'mic_rms' in payload) {
+          updateLevelGauge('mic', payload.mic_rms);
+          updateLevelGauge('system', payload.system_rms);
+        }
+      } catch (ex) {}
+    };
     src.onerror = function() { src.close(); };
   } catch(ex) {}
 })();
@@ -468,6 +518,9 @@
   var valueEl = document.getElementById('noise-floor-value');
   if (!slider) return;
 
+  window.currentNoiseFloor = parseFloat(slider.value);
+  window.updateThresholdMarkers && window.updateThresholdMarkers(window.currentNoiseFloor);
+
   var debounceTimer = null;
   function send(v) {
     fetch('/api/record/live-noise-floor', {
@@ -480,6 +533,8 @@
   slider.addEventListener('input', function() {
     var v = parseFloat(slider.value);
     if (valueEl) valueEl.textContent = v;
+    window.currentNoiseFloor = v;
+    window.updateThresholdMarkers && window.updateThresholdMarkers(v);
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(function() { send(v); }, 200);
   });
