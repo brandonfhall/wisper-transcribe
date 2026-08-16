@@ -32,3 +32,8 @@ def get_queue(request: Request) -> JobQueue:
 def get_bot_manager(request: Request):
     """Retrieve BotManager from app state. Returns None until Phase 3 wires it in."""
     return getattr(request.app.state, "bot_manager", None)
+
+
+def get_local_capture_manager(request: Request):
+    """Retrieve LocalCaptureManager from app state. Returns None before lifespan wiring."""
+    return getattr(request.app.state, "local_capture_manager", None)

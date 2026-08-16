@@ -72,7 +72,11 @@ FIFO_CAP_BYTES = int(FIFO_CAP_S * RATE) * BYTES_PER_SAMPLE
 _DEFAULT_CAPTURE_SAMPLERATE = 48000
 
 _TRACKS = ("mic", "system")
-_ACTIVE_STATUSES = frozenset({"recording", "degraded"})
+# Public: web/routes/record.py imports this for the cross-manager (Discord vs
+# local) mutual-exclusion check -- "is a session actually active" is
+# `.status in ACTIVE_STATUSES`, never `active_recording is not None` (see the
+# module docstring above).
+ACTIVE_STATUSES = frozenset({"recording", "degraded"})
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +275,7 @@ class LocalCaptureManager:
 
     def stop(self) -> None:
         """Called from FastAPI lifespan -- stops any active session. Blocking."""
-        if self._active_recording is not None and self._active_recording.status in _ACTIVE_STATUSES:
+        if self._active_recording is not None and self._active_recording.status in ACTIVE_STATUSES:
             self.stop_session()
         log.info("LocalCaptureManager stopped")
 
@@ -299,7 +303,7 @@ class LocalCaptureManager:
         detail page -- never a client-supplied free-text string. Falls back
         to the raw device id if no name is given.
         """
-        if self._active_recording is not None and self._active_recording.status in _ACTIVE_STATUSES:
+        if self._active_recording is not None and self._active_recording.status in ACTIVE_STATUSES:
             raise RuntimeError(f"Session {self._active_recording.id} is already active")
 
         recording = create_recording(

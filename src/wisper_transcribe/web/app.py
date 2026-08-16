@@ -1,6 +1,7 @@
 """FastAPI application factory for the wisper-transcribe web UI."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -174,9 +175,18 @@ def create_app() -> FastAPI:
         bot_manager.start()
         app.state.bot_manager = bot_manager
 
+        from .local_capture import LocalCaptureManager
+        local_capture_manager = LocalCaptureManager(data_dir=data_dir)
+        local_capture_manager.start()
+        app.state.local_capture_manager = local_capture_manager
+
         try:
             yield
         finally:
+            # LocalCaptureManager is synchronous/thread-based (soundcard
+            # recorders are blocking pulls) -- stop() joins threads, so it
+            # must run off the event loop like any other blocking call.
+            await asyncio.to_thread(local_capture_manager.stop)
             await bot_manager.stop()
             await job_queue.stop()
             try:

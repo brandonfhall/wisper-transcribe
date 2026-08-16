@@ -131,6 +131,233 @@ def test_channels_invalid_token_returns_error(client):
     assert resp.json()["guilds"] == []
 
 
+# ---------------------------------------------------------------------------
+# Live local recording Phase 1 — device enumeration, start/stop-local,
+# cross-manager (Discord vs local) mutual exclusion
+# ---------------------------------------------------------------------------
+
+def _scripted_local_capture_manager(tmp_path, n_ticks=0):
+    """A LocalCaptureManager wired with a scripted, finite (no real audio
+    devices, no soundcard import) capture_factory + instant ticker, for
+    swapping onto `app.state.local_capture_manager` in tests."""
+    from wisper_transcribe.web.local_capture import LocalCaptureManager
+
+    def capture_factory(device_id, samplerate):
+        return iter(())  # no blocks -- fine for lifecycle/route tests
+
+    def ticker():
+        return iter([None] * n_ticks)
+
+    return LocalCaptureManager(data_dir=tmp_path, capture_factory=capture_factory, ticker=ticker)
+
+
+def test_devices_endpoint_unavailable_when_soundcard_not_installed(client):
+    import sys
+    c, _ = client
+    with patch.dict(sys.modules, {"soundcard": None}):
+        resp = c.get("/api/record/devices")
+    assert resp.status_code == 200
+    assert resp.json() == {"microphones": [], "loopbacks": [], "available": False}
+
+
+def test_devices_endpoint_returns_enumerated_devices_when_available(client):
+    c, _ = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Built-in Microphone"}],
+        "loopbacks": [{"id": "loop1", "name": "Speakers (loopback)"}],
+        "available": True,
+    }
+    with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+        resp = c.get("/api/record/devices")
+    assert resp.status_code == 200
+    assert resp.json() == fake_result
+
+
+def test_start_local_unavailable_when_soundcard_not_installed(client):
+    import sys
+    c, _ = client
+    with patch.dict(sys.modules, {"soundcard": None}):
+        resp = c.post("/api/record/start-local", json={"mic_id": "m", "system_id": "s"})
+    assert resp.status_code == 503
+
+
+def test_start_local_missing_ids_returns_400(client):
+    c, _ = client
+    fake_result = {"microphones": [], "loopbacks": [], "available": True}
+    with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+        resp = c.post("/api/record/start-local", json={"mic_id": "", "system_id": "s"})
+    assert resp.status_code == 400
+
+
+def test_start_local_success_creates_local_recording(client):
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Built-in Microphone"}],
+        "loopbacks": [{"id": "loop1", "name": "Speakers (loopback)"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            resp = c.post(
+                "/api/record/start-local",
+                json={"mic_id": "mic1", "system_id": "loop1", "campaign_slug": None},
+            )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["status"] == "recording"
+        assert data["source"] == "local"
+        assert data["devices"] == {"mic": "Built-in Microphone", "system": "Speakers (loopback)"}
+    finally:
+        mgr.stop_session()
+
+
+def test_stop_local_with_no_active_session_returns_400(client):
+    c, data_dir = client
+    c.app.state.local_capture_manager = _scripted_local_capture_manager(data_dir)
+    resp = c.post("/api/record/stop-local")
+    assert resp.status_code == 400
+
+
+def test_stop_local_stops_active_session(client):
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+        start_resp = c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
+    assert start_resp.status_code == 201
+
+    stop_resp = c.post("/api/record/stop-local")
+    assert stop_resp.status_code == 200
+    data = stop_resp.json()
+    assert data["status"] == "completed"
+
+
+def test_start_local_unavailable_when_manager_not_wired(client):
+    c, _ = client
+    c.app.state.local_capture_manager = None
+    resp = c.post("/api/record/start-local", json={"mic_id": "m", "system_id": "s"})
+    assert resp.status_code == 503
+
+
+def test_devices_endpoint_missing_id_field_returns_400(client):
+    c, _ = client
+    fake_result = {"microphones": [], "loopbacks": [], "available": True}
+    with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+        resp = c.post("/api/record/start-local", json={})
+    assert resp.status_code == 400
+
+
+def test_cross_manager_local_active_blocks_discord_start(client):
+    """A live local session must 409 an attempt to start a Discord session,
+    and vice versa (mutual exclusion across managers)."""
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            start_resp = c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
+        assert start_resp.status_code == 201
+
+        resp = c.post("/api/record/start", json={"voice_channel_id": "123", "guild_id": "G1"})
+        assert resp.status_code == 409
+    finally:
+        mgr.stop_session()
+
+
+def test_cross_manager_discord_active_blocks_local_start(client):
+    """A fake "already active" BotManager stands in for the real one here:
+    the real BotManager.start_session() launches an async session loop that,
+    with no Discord token configured in the test environment, races to
+    mark the recording 'failed' almost immediately -- flaky as a setup
+    precondition for a check that only cares about `.active_recording`."""
+    from wisper_transcribe.recording_manager import create_recording
+
+    c, data_dir = client
+    fake_discord_rec = create_recording(voice_channel_id="123", guild_id="G1", data_dir=data_dir)
+
+    class _FakeBotManager:
+        active_recording = fake_discord_rec
+
+    c.app.state.bot_manager = _FakeBotManager()
+
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+        resp = c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
+    assert resp.status_code == 409
+
+
+def test_current_active_recording_reports_active_local_session(client):
+    """R: /record/sse and the /record page used to read bm.active_recording
+    only, so a live local session reported 'idle' -- the shared
+    _current_active_recording() resolver (used by both) fixes that.
+
+    Exercised directly against the resolver rather than over a live
+    `/record/sse` HTTP stream: that endpoint polls forever
+    (`while True: ... await asyncio.sleep(1.0)`), and TestClient's
+    synchronous streaming wrapper has no clean way to read "just the first
+    event" without risking a hang.
+    """
+    from wisper_transcribe.web.routes.record import _current_active_recording
+
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
+
+        class _FakeRequest:
+            app = c.app
+
+        rec = _current_active_recording(_FakeRequest())
+        assert rec is not None
+        assert rec.status == "recording"
+        assert rec.source == "local"
+    finally:
+        mgr.stop_session()
+
+
+def test_record_page_shows_local_active_session(client):
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
+            resp = c.get("/record")
+        assert resp.status_code == 200
+    finally:
+        mgr.stop_session()
+
+
 def test_recording_detail_invalid_id_returns_400(client):
     c, _ = client
     resp = c.get("/api/recordings/../evil")

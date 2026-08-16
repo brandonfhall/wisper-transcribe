@@ -33,7 +33,12 @@ from wisper_transcribe.recording_manager import (
     save_recording,
 )
 from wisper_transcribe.web._responses import error_redirect, invalid_input_response
-from wisper_transcribe.web.routes import get_bot_manager, templates
+from wisper_transcribe.web.local_capture import (
+    ACTIVE_STATUSES,
+    enumerate_devices,
+    resolve_device_name,
+)
+from wisper_transcribe.web.routes import get_bot_manager, get_local_capture_manager, templates
 
 log = logging.getLogger(__name__)
 
@@ -73,6 +78,40 @@ def _recording_to_dict(rec) -> dict:
     }
 
 
+def _current_active_recording(request: Request):
+    """Return whichever manager's Recording is currently active, or None.
+
+    "Active" means `.status in ACTIVE_STATUSES` -- never `is not None`.
+    Neither manager clears `active_recording` back to None once a session
+    finishes (both mirror BotManager's original behaviour here), so a
+    status check is required regardless of which manager is asked. Used by
+    every place that needs "is a recording live right now" without caring
+    which manager owns it (the Record page, the status SSE stream).
+    """
+    for mgr in (get_bot_manager(request), get_local_capture_manager(request)):
+        if mgr is None:
+            continue
+        rec = mgr.active_recording
+        if rec is not None and rec.status in ACTIVE_STATUSES:
+            return rec
+    return None
+
+
+def _other_session_active(request: Request, this_manager) -> bool:
+    """True if a manager other than `this_manager` has an active session.
+
+    Mutual exclusion: only one capture session (Discord or local) may run
+    at a time across both managers.
+    """
+    for mgr in (get_bot_manager(request), get_local_capture_manager(request)):
+        if mgr is None or mgr is this_manager:
+            continue
+        rec = mgr.active_recording
+        if rec is not None and rec.status in ACTIVE_STATUSES:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # JSON API — bot control
 # ---------------------------------------------------------------------------
@@ -92,6 +131,9 @@ async def record_start(request: Request):
     voice_channel_id = body.get("voice_channel_id", "")
     if not voice_channel_id:
         return JSONResponse({"detail": "voice_channel_id is required"}, status_code=400)
+
+    if _other_session_active(request, bm):
+        return JSONResponse({"detail": "recording already in progress"}, status_code=409)
 
     try:
         recording = await bm.start_session(
@@ -123,6 +165,78 @@ async def record_stop(request: Request):
 async def record_status(request: Request):
     """Return current bot + recording status. (stub)"""
     return _NOT_IMPLEMENTED
+
+
+# ---------------------------------------------------------------------------
+# JSON API — local capture control
+# ---------------------------------------------------------------------------
+
+@router.get("/api/record/devices")
+async def record_devices(request: Request):
+    """Enumerate local mic + system-audio (loopback) devices for the picker.
+
+    Always 200 -- `available: false` when `soundcard` is not importable or
+    enumeration otherwise fails, so the Record page can hide the Local
+    section rather than the caller having to handle a 5xx.
+    """
+    return JSONResponse(enumerate_devices())
+
+
+@router.post("/api/record/start-local")
+async def record_start_local(request: Request):
+    """Start a local mic + system-audio capture session."""
+    lcm = get_local_capture_manager(request)
+    if lcm is None:
+        return JSONResponse({"detail": "local capture unavailable"}, status_code=503)
+
+    devices = enumerate_devices()
+    if not devices["available"]:
+        return JSONResponse({"detail": "local capture unavailable"}, status_code=503)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"detail": "invalid JSON body"}, status_code=400)
+
+    mic_id = str(body.get("mic_id", ""))
+    system_id = str(body.get("system_id", ""))
+    if not mic_id or not system_id:
+        return JSONResponse({"detail": "mic_id and system_id are required"}, status_code=400)
+
+    if _other_session_active(request, lcm):
+        return JSONResponse({"detail": "recording already in progress"}, status_code=409)
+
+    mic_name = resolve_device_name(devices["microphones"], mic_id)
+    system_name = resolve_device_name(devices["loopbacks"], system_id)
+
+    try:
+        recording = lcm.start_session(
+            body.get("campaign_slug"),
+            mic_id,
+            system_id,
+            mic_name=mic_name,
+            system_name=system_name,
+        )
+    except RuntimeError:
+        return JSONResponse({"detail": "recording already in progress"}, status_code=409)
+
+    return JSONResponse(_recording_to_dict(recording), status_code=201)
+
+
+@router.post("/api/record/stop-local")
+async def record_stop_local(request: Request):
+    """Stop the active local capture session. Mirrors `/api/record/stop`."""
+    lcm = get_local_capture_manager(request)
+    if lcm is None:
+        return JSONResponse({"detail": "local capture unavailable"}, status_code=503)
+    if lcm.active_recording is None or lcm.active_recording.status not in ACTIVE_STATUSES:
+        return JSONResponse({"detail": "no active recording"}, status_code=400)
+
+    recording = lcm.active_recording
+    # LocalCaptureManager.stop_session() joins threads -- blocking, so it
+    # must run off the event loop (see the module docstring).
+    await asyncio.to_thread(lcm.stop_session)
+    return JSONResponse(_recording_to_dict(recording))
 
 
 _DISCORD_API = "https://discord.com/api/v10"
@@ -261,11 +375,10 @@ async def recording_delete_api(recording_id: str, request: Request):
 
 @router.get("/record", response_class=HTMLResponse)
 async def record_page(request: Request) -> HTMLResponse:
-    bm = get_bot_manager(request)
     data_dir = get_data_dir()
     campaigns = load_campaigns(data_dir)
     cfg = load_config()
-    active_recording = bm.active_recording if bm else None
+    active_recording = _current_active_recording(request)
     return templates.TemplateResponse(
         request,
         "record.html",
@@ -276,6 +389,7 @@ async def record_page(request: Request) -> HTMLResponse:
             "discord_presets": cfg.get("discord_presets", []),
             "default_guild": cfg.get("discord_default_guild", ""),
             "default_channel": cfg.get("discord_default_channel", ""),
+            "local_devices": enumerate_devices(),
         },
     )
 
@@ -283,20 +397,20 @@ async def record_page(request: Request) -> HTMLResponse:
 @router.get("/record/sse")
 async def record_sse(request: Request) -> StreamingResponse:
     """SSE stream of live recording session status (Pattern 6)."""
-    bm = get_bot_manager(request)
 
     async def event_generator():
         while True:
             if await request.is_disconnected():
                 break
-            if bm is None or bm.active_recording is None:
+            rec = _current_active_recording(request)
+            if rec is None:
                 payload = {"type": "status", "status": "idle"}
             else:
-                rec = bm.active_recording
                 payload = {
                     "type": "status",
                     "status": rec.status,
                     "recording_id": rec.id,
+                    "source": rec.source,
                     "segment_count": len(rec.segment_manifest),
                     "speakers": list(rec.discord_speakers.keys()),
                     "started_at": rec.started_at.isoformat() if rec.started_at else None,
@@ -324,6 +438,8 @@ async def record_start_html(
         return error_redirect("/record", "unavailable")
     if not voice_channel_id.strip():
         return error_redirect("/record", "missing_channel")
+    if _other_session_active(request, bm):
+        return error_redirect("/record", "already_active")
 
     try:
         await bm.start_session(
