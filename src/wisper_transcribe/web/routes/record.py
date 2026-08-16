@@ -823,6 +823,12 @@ def _submit_recording_transcription(recording, request: Request, data_dir: Path)
     dest = output_dir / f"{recording.id}.wav"
     shutil.copy2(str(recording.combined_path), str(dest))
 
+    # Preserved so a failed job can put the recording back where it started
+    # (e.g. "transcribed" on a failed re-transcribe keeps the old transcript's
+    # View/Re-transcribe actions available, rather than falling back to a
+    # bare "completed" that hides them even though the old file is still there).
+    previous_status = recording.status
+
     # Build the post-completion callback: auto-associate transcript with campaign
     def _on_complete(job):
         _recordings = load_recordings(data_dir)
@@ -840,6 +846,18 @@ def _submit_recording_transcription(recording, request: Request, data_dir: Path)
                     log.warning("Failed to move transcript to campaign in on_complete", exc_info=True)
         save_recording(rec, data_dir)
 
+    # Symmetric failure callback: without this, a failed job left the
+    # recording stuck at "transcribing" forever with no retry path in the
+    # UI (recording_detail.html only offers Transcribe/Re-transcribe
+    # buttons for "completed"/"transcribed").
+    def _on_error(job):
+        _recordings = load_recordings(data_dir)
+        rec = _recordings.get(recording.id)
+        if rec is None:
+            return
+        rec.status = previous_status
+        save_recording(rec, data_dir)
+
     queue = request.app.state.job_queue
     job = queue.submit(
         str(dest),
@@ -847,6 +865,7 @@ def _submit_recording_transcription(recording, request: Request, data_dir: Path)
         output_dir=str(output_dir),
         campaign=recording.campaign_slug or "",
         on_complete=_on_complete,
+        on_error=_on_error,
     )
 
     recording.job_id = job.id

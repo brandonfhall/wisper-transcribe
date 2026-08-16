@@ -871,6 +871,77 @@ def test_transcribe_recording_handoff(client):
     mock_submit.assert_called_once()
 
 
+def test_transcribe_recording_reverts_status_on_job_failure(client):
+    """A failed transcription job (on_error callback) reverts the recording
+    back to its pre-transcribe status instead of leaving it stuck at
+    'transcribing' forever with no retry path in the UI."""
+    from wisper_transcribe.recording_manager import create_recording, load_recordings, save_recording
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    combined = tmp_path / "recordings" / rec.id / "final" / "combined.wav"
+    combined.parent.mkdir(parents=True, exist_ok=True)
+    combined.write_bytes(b"fake wav data")
+    rec.combined_path = combined
+    rec.status = "completed"
+    save_recording(rec, tmp_path)
+
+    from wisper_transcribe.web.jobs import Job as JobCls, FAILED
+    import uuid as _uuid
+    fake_job = JobCls(
+        id=str(_uuid.uuid4()), status="pending", created_at=rec.started_at,
+        input_path=str(tmp_path / "output" / f"{rec.id}.wav"), kwargs={}, name=rec.id,
+    )
+
+    with patch.object(c.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
+        resp = c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
+    assert resp.status_code == 303
+
+    loaded = load_recordings(tmp_path)[rec.id]
+    assert loaded.status == "transcribing"
+
+    # Simulate the job failing: invoke the on_error callback the route wired up.
+    on_error = mock_submit.call_args.kwargs["on_error"]
+    fake_job.status = FAILED
+    on_error(fake_job)
+
+    reverted = load_recordings(tmp_path)[rec.id]
+    assert reverted.status == "completed"
+
+
+def test_retranscribe_recording_reverts_to_transcribed_on_job_failure(client):
+    """A failed re-transcribe (starting from 'transcribed', not 'completed')
+    reverts back to 'transcribed' -- keeping the old transcript's
+    View/Re-transcribe actions available -- not to a bare 'completed'."""
+    from wisper_transcribe.recording_manager import create_recording, load_recordings, save_recording
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    combined = tmp_path / "recordings" / rec.id / "final" / "combined.wav"
+    combined.parent.mkdir(parents=True, exist_ok=True)
+    combined.write_bytes(b"fake wav data")
+    rec.combined_path = combined
+    rec.status = "transcribed"
+    save_recording(rec, tmp_path)
+
+    from wisper_transcribe.web.jobs import Job as JobCls, FAILED
+    import uuid as _uuid
+    fake_job = JobCls(
+        id=str(_uuid.uuid4()), status="pending", created_at=rec.started_at,
+        input_path=str(tmp_path / "output" / f"{rec.id}.wav"), kwargs={}, name=rec.id,
+    )
+
+    with patch.object(c.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
+        c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
+
+    on_error = mock_submit.call_args.kwargs["on_error"]
+    fake_job.status = FAILED
+    on_error(fake_job)
+
+    reverted = load_recordings(tmp_path)[rec.id]
+    assert reverted.status == "transcribed"
+
+
 def test_transcribe_recording_not_completed_rejects(client):
     """POST /recordings/{id}/transcribe rejects recordings not in completed status."""
     from wisper_transcribe.recording_manager import create_recording

@@ -533,6 +533,7 @@ class JobQueue:
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._worker_task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
         self._on_complete_callbacks: dict[str, Callable[["Job"], None]] = {}
+        self._on_error_callbacks: dict[str, Callable[["Job"], None]] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -560,6 +561,7 @@ class JobQueue:
         input_path: str,
         *,
         on_complete: Optional[Callable[["Job"], None]] = None,
+        on_error: Optional[Callable[["Job"], None]] = None,
         **kwargs: Any,
     ) -> Job:
         """Enqueue a transcription job.  Returns the Job immediately.
@@ -574,7 +576,12 @@ class JobQueue:
         from kwargs before forwarding to process_file.
 
         ``on_complete`` is an optional callback invoked after the job
-        transitions to COMPLETED. It runs in the worker thread.
+        transitions to COMPLETED. ``on_error`` is the symmetric counterpart,
+        invoked after the job transitions to FAILED (including cancellation)
+        -- without it, a caller with external state keyed off "this job is
+        running" (e.g. a Recording's status) has no way to hear about a
+        failure and can be left stuck showing a stale in-progress state
+        forever. Both run in the worker thread.
         """
         from pathlib import Path
         import shutil
@@ -614,6 +621,8 @@ class JobQueue:
         self._jobs[job.id] = job
         if on_complete is not None:
             self._on_complete_callbacks[job.id] = on_complete
+        if on_error is not None:
+            self._on_error_callbacks[job.id] = on_error
         self._queue.put_nowait(job.id)
         return job
 
@@ -920,6 +929,24 @@ class JobQueue:
         for job in terminal[:excess]:
             self._jobs.pop(job.id, None)
             self._on_complete_callbacks.pop(job.id, None)
+            self._on_error_callbacks.pop(job.id, None)
+
+    def _run_on_error_callback(self, job: "Job") -> None:
+        """Invoke and discard the job's `on_error` callback, if any.
+
+        Also discards any `on_complete` registered for this job -- it will
+        never fire now that the job is terminal-failed, so leaving it
+        around would just leak until the next `_prune_finished_jobs` pass.
+        Best-effort like `on_complete`: a callback failure must not mask
+        the job's own error.
+        """
+        self._on_complete_callbacks.pop(job.id, None)
+        cb = self._on_error_callbacks.pop(job.id, None)
+        if cb is not None:
+            try:
+                cb(job)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Background worker
@@ -1067,10 +1094,12 @@ class JobQueue:
             job.status = FAILED
             job.error = "Cancelled"
             _delete_temp_upload(job)
+            self._run_on_error_callback(job)
         except Exception as exc:
             job.status = FAILED
             _set_job_error(job, exc)  # R13: generic message, real exc logged
             _delete_temp_upload(job)
+            self._run_on_error_callback(job)
             raise
         finally:
             _tqdm_module.tqdm.write = original_write  # type: ignore[method-assign]

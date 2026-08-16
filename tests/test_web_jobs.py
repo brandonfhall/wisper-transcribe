@@ -392,6 +392,66 @@ def test_on_complete_callback_not_invoked_on_failure(tmp_path):
     assert job.status == FAILED
 
 
+def test_on_error_callback_invoked_after_failure(tmp_path):
+    """on_error fires exactly once when the job fails, and on_complete
+    (never going to fire now) is discarded too rather than leaking."""
+    from wisper_transcribe.web.jobs import Job, JobQueue, FAILED
+    from datetime import datetime
+
+    calls: list[Job] = []
+    complete_calls: list[Job] = []
+
+    q = JobQueue()
+    job = Job(
+        id="err-test",
+        status="running",
+        created_at=datetime.now(),
+        input_path="/tmp/bad.mp3",
+        kwargs={},
+    )
+    q._on_error_callbacks[job.id] = lambda j: calls.append(j)
+    q._on_complete_callbacks[job.id] = lambda j: complete_calls.append(j)
+
+    with patch("wisper_transcribe.web.jobs.process_file", side_effect=RuntimeError("oops")):
+        try:
+            q._run_job(job)
+        except RuntimeError:
+            pass
+
+    assert len(calls) == 1
+    assert calls[0].status == FAILED
+    assert complete_calls == []
+    # Both callbacks are consumed -- neither leaks or fires a second time
+    assert job.id not in q._on_error_callbacks
+    assert job.id not in q._on_complete_callbacks
+
+
+def test_on_error_callback_invoked_on_cancellation(tmp_path):
+    """Cancellation (InterruptedError) is also a failure path for on_error."""
+    from wisper_transcribe.web.jobs import Job, JobQueue, FAILED
+    from datetime import datetime
+
+    calls: list[Job] = []
+
+    q = JobQueue()
+    job = Job(
+        id="err-cancel-test",
+        status="running",
+        created_at=datetime.now(),
+        input_path="/tmp/bad.mp3",
+        kwargs={},
+    )
+    job._cancel_event.set()
+    q._on_error_callbacks[job.id] = lambda j: calls.append(j)
+
+    with patch("wisper_transcribe.web.jobs.process_file", side_effect=InterruptedError("Job cancelled by user")):
+        q._run_job(job)
+
+    assert len(calls) == 1
+    assert calls[0].status == FAILED
+    assert calls[0].error == "Cancelled"
+
+
 def test_run_job_tqdm_patch_restores_original(tmp_path):
     """tqdm.write should be restored to its original after job completes."""
     import tqdm as _tqdm

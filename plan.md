@@ -63,6 +63,39 @@ per `LIVE_AUDIO_TEST_PLAN.md`) — fixed same day:**
   `recordings.html`'s list view already used, added as a 7th status-strip
   cell on the detail page too.
 
+**More fixes (2026-08-16, same smoke test):**
+
+- **A failed transcribe job left its `Recording` stuck at status
+  `"transcribing"` forever, with no retry path in the UI — fixed.**
+  `JobQueue.submit()` now accepts a symmetric `on_error` callback
+  (invoked from `_run_transcription_job`'s except blocks — both the real
+  exception and cancellation paths — via the new `_run_on_error_callback()`,
+  which also discards any now-dangling `on_complete` for that job).
+  `_submit_recording_transcription()` wires it to revert `recording.status`
+  back to whatever it was before the attempt (`"completed"` for a first
+  transcribe, `"transcribed"` for a failed re-transcribe — not a bare
+  `"completed"` that would hide the old transcript's actions). Tests:
+  `test_on_error_callback_*` in `test_web_jobs.py`,
+  `test_transcribe_recording_reverts_status_on_job_failure` /
+  `test_retranscribe_recording_reverts_to_transcribed_on_job_failure` in
+  `test_record_routes.py`.
+- **"This is me" mic-dominant lines were tagging as the profile name even
+  during system audio, once with the system track measured at exactly
+  0.0 RMS across an entire session.** Diagnosed by computing RMS on the
+  actual per-track WAV segments from two real sessions: one had system
+  audio literally silent the whole time (likely the wrong loopback device
+  selected — nothing was actually routed to it), the other had real but
+  much quieter system signal (RMS ~200 vs mic RMS ~1440, so mic legitimately
+  dominated every window, possibly with acoustic mic bleed from speaker
+  output if headphones weren't used). `attribute_speaker()`'s RMS-compare
+  logic itself checked out correct — no code bug found. **Not code — a
+  design limitation** (this preview is an RMS heuristic, not real
+  diarization, and always resolves ties/silence to the mic label — see
+  `live_transcribe.py`'s module docstring) compounded by a likely test-setup
+  issue (loopback device selection / speaker vs. headphone use). No fix
+  applied; flagged for the user to retest with headphones and confirm the
+  OS default playback device matches the selected loopback device.
+
 **Not yet fixed — found during the same smoke test:**
 
 - **`UnicodeEncodeError` crashed a transcription job.** `pipeline.py`
@@ -77,21 +110,6 @@ per `LIVE_AUDIO_TEST_PLAN.md`) — fixed same day:**
   probably `errors="replace"` (or ASCII `"-"*60`) at the `tqdm.write` call
   sites, or forcing UTF-8 stdio at server startup. Unrelated to the
   live-audio branch — general pipeline Windows-console-Unicode gap.
-- **A failed transcribe job leaves its `Recording` stuck at status
-  `"transcribing"` forever, with no retry path in the UI.** Found via the
-  Unicode crash above: `_submit_recording_transcription()` in
-  `web/routes/record.py` sets `recording.status = "transcribing"` before
-  submitting the job, and only its `on_complete` callback (success-only —
-  see `JobQueue._run_transcription_job`'s except-block, which never calls
-  `_on_complete_callbacks`) ever moves it forward. `recording_detail.html`'s
-  action panel has no branch for "transcribing but the job actually
-  failed" — it just shows a permanent "Transcribing…" spinner, and the
-  underlying job page shows FAILED with no link back to retry from the
-  recording. Needs either a symmetric `on_error` hook on `JobQueue.submit()`
-  that reverts `recording.status` to `"completed"` (so the Transcribe
-  button reappears), or have the detail page check the live job status
-  for `"transcribing"` recordings instead of trusting the stored field.
-  Not yet fixed.
 
 ---
 
