@@ -24,7 +24,7 @@
 
 ```
 src/wisper_transcribe/
-├── cli.py              Click entry points — no business logic, delegates to pipeline/manager; includes setup wizard, server command; --debug and --verbose flags; wisper transcripts command group (list, move)
+├── cli.py              Click entry points — no business logic, delegates to pipeline/manager; includes setup wizard, server command; --debug and --verbose flags; wisper transcripts command group (list, move); `_ensure_utf8_stdio()` reconfigures `sys.stdout`/`stderr` to UTF-8 (`errors="replace"`) at import time, unconditionally for every command — a legacy console codepage (cp1252, cp437) can't encode the Unicode box-drawing/arrow characters `pipeline.py` writes via `tqdm.write()` for decorative log output, which otherwise crashes the whole transcription job with `UnicodeEncodeError` despite transcription itself having succeeded
 ├── pipeline.py         Main orchestrator: process_file(), process_folder(); enrollment logic extracted into _interactive_enroll() and _prompt_speaker_name()
 ├── transcriber.py      faster-whisper wrapper, lazy model cache (_model), CUDA DLL path fix, MLX dispatch
 ├── diarizer.py         pyannote pipeline wrapper, lazy cache (_pipeline), uses load_wav_as_tensor() from audio_utils

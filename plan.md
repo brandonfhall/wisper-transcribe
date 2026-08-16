@@ -352,6 +352,22 @@ Tests: `test_append_marker_*` in `test_recording_manager.py`;
   a *track* going silent via FIFO starvation, but not swapping which
   physical device feeds a track). Not scoped in detail yet — worth a
   design pass before implementation given the size.
+- **Real per-speaker diarization on the live system-audio track**
+  (2026-08-16). Today the system track is a single RMS-attributed "Other"
+  — everyone else on the call is lumped together, since OS-level loopback
+  capture is already a mixed-down stream with no per-participant
+  separation (true even in the full post-session pipeline; the only real
+  question is whether *diarization itself* can run live). User: "I will
+  probably come back to the idea eventually." Not a small addition:
+  pyannote's clustering only gives consistent speaker labels across a
+  *whole-file* pass, which is exactly what the full pipeline does and the
+  live loop's independent ~15s chunks don't — running pyannote per chunk
+  would need an incremental layer on top (embed each turn, compare against
+  a running per-session speaker pool, match-or-create), which pyannote
+  doesn't provide out of the box, plus real added latency/GPU load in the
+  live loop's hot path. Not scoped further; revisit if the "You/Other"
+  split starts being a real limitation in sessions with several other
+  people talking.
 - ~~Live transcript ticker on `/record` should never drop old lines within
   a session ("stay and not roll over")~~ — **delivered same session.**
   User's stated use case: running this during a tabletop game so they can
@@ -360,20 +376,19 @@ Tests: `test_append_marker_*` in `test_recording_manager.py`;
   ones — cap removed, `#live-ticker` now scrolls internally
   (`max-height` + `overflow-y`) instead.
 
-**Not yet fixed — found during the same smoke test:**
-
-- **`UnicodeEncodeError` crashed a transcription job.** `pipeline.py`
-  (lines 458, 468) calls `tqdm.write("─" * 60)` — a Unicode box-drawing
-  separator. `web/jobs.py`'s `capturing_write()` forwards that to the real
-  `tqdm.write` (default target stderr) before capturing it for the job log;
-  on this run that hit a `cp1252` codec that can't encode `─`, killing the
-  job with a traceback instead of a transcript. Unconfirmed whether this
-  reproduces when the server is launched normally (`wisper server --reload`
-  in the user's own PowerShell) rather than through a redirected background
-  process — needs a repro check first. If it does reproduce, the fix is
-  probably `errors="replace"` (or ASCII `"-"*60`) at the `tqdm.write` call
-  sites, or forcing UTF-8 stdio at server startup. Unrelated to the
-  live-audio branch — general pipeline Windows-console-Unicode gap.
+**`UnicodeEncodeError` crashing transcription jobs — fixed (2026-08-16).**
+Confirmed reproducing for real: the user hit it transcribing their local
+recordings (job `0e7f9bd7...` and others), traceback landing at
+`pipeline.py:458`'s `tqdm.write("─" * 60)` — a Unicode box-drawing
+separator hitting a `cp1252` console codec that can't encode it. The
+codebase has other tqdm.write() calls with non-ASCII content too (`→` in
+the speaker-match log line, `path.name`/exception messages that could
+carry non-ASCII text) — patching the two known call sites wouldn't have
+closed off the whole class of failure. Fixed at the root instead: new
+`_ensure_utf8_stdio()` in `cli.py`, called unconditionally at import time
+(every command, not just `--debug`) — reconfigures `sys.stdout`/`stderr`
+to UTF-8 with `errors="replace"`. Tests: `test_ensure_utf8_stdio_*` in
+`test_cli.py`.
 
 ---
 

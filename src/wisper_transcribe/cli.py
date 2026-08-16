@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import warnings
 from pathlib import Path
 from typing import Optional
@@ -11,6 +12,35 @@ import click
 # Set WISPER_DEBUG=1 to disable all warning suppression for debugging.
 if not os.environ.get("WISPER_DEBUG"):
     warnings.filterwarnings("ignore", module="pyannote.audio.core.io")
+
+
+def _ensure_utf8_stdio() -> None:
+    """Reconfigure stdout/stderr to UTF-8, unconditionally (every command,
+    not just --debug).
+
+    A Windows console or a redirected pipe/file often defaults to a legacy
+    codepage (cp1252, cp437) rather than UTF-8. `pipeline.py` writes
+    Unicode box-drawing/arrow characters (`tqdm.write("─" * 60)`,
+    `→` in the speaker-match log line) as decorative log output --
+    under a legacy codepage that raises `UnicodeEncodeError` and crashes
+    the whole transcription job, even though transcription itself
+    succeeded. `errors="replace"` is a defensive fallback (moot for a
+    UTF-8 target, which can represent any codepoint, but cheap insurance
+    against a stray unencodable byte from elsewhere). Swallows
+    `AttributeError`/`ValueError` for a stream that isn't a real
+    `TextIOWrapper` (e.g. a test harness's capture object) -- reconfiguring
+    stdio is a nice-to-have, never worth failing startup over.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
+_ensure_utf8_stdio()
 
 from . import __version__
 from . import config as _config

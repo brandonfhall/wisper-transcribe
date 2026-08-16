@@ -69,6 +69,42 @@ def _make_fake_profile(tmp_path: Path, name: str, display_name: str = "", role: 
 
 
 # ---------------------------------------------------------------------------
+# UTF-8 stdio (crashed transcription jobs writing Unicode via tqdm.write()
+# on a legacy-codepage Windows console -- see pipeline.py's box-drawing
+# separator line)
+# ---------------------------------------------------------------------------
+
+def test_ensure_utf8_stdio_reconfigures_both_streams():
+    from wisper_transcribe.cli import _ensure_utf8_stdio
+
+    fake_out, fake_err = MagicMock(), MagicMock()
+    with patch("sys.stdout", fake_out), patch("sys.stderr", fake_err):
+        _ensure_utf8_stdio()
+
+    fake_out.reconfigure.assert_called_once_with(encoding="utf-8", errors="replace")
+    fake_err.reconfigure.assert_called_once_with(encoding="utf-8", errors="replace")
+
+
+def test_ensure_utf8_stdio_swallows_missing_reconfigure():
+    """A stream without .reconfigure() (e.g. a test harness's capture
+    object) must not crash startup."""
+    from wisper_transcribe.cli import _ensure_utf8_stdio
+
+    class _NoReconfigure:
+        pass
+
+    with patch("sys.stdout", _NoReconfigure()), patch("sys.stderr", _NoReconfigure()):
+        _ensure_utf8_stdio()  # must not raise
+
+
+def test_ensure_utf8_stdio_handles_none_streams():
+    from wisper_transcribe.cli import _ensure_utf8_stdio
+
+    with patch("sys.stdout", None), patch("sys.stderr", None):
+        _ensure_utf8_stdio()  # must not raise
+
+
+# ---------------------------------------------------------------------------
 # wisper config
 # ---------------------------------------------------------------------------
 
