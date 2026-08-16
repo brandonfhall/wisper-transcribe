@@ -23,6 +23,22 @@ def client(tmp_path):
             yield c, tmp_path
 
 
+@pytest.fixture(autouse=True)
+def _no_live_transcription(monkeypatch):
+    """Starting a local session (via the route) submits a real Phase 2
+    JOB_LIVE job. The `client` fixture's app runs a REAL JobQueue background
+    worker (started by app lifespan), which would pick that job up and try
+    to load an actual Whisper model -- exactly what CLAUDE.md's "no GPU, no
+    network, no real audio in tests" rule forbids, and it hangs the test
+    besides. Every test in this file gets JOB_LIVE submission suppressed by
+    default; tests/test_record_live_routes.py exercises the live-job wiring
+    itself with `queue.submit_live`/`run_live_loop` explicitly mocked.
+    """
+    monkeypatch.setattr(
+        "wisper_transcribe.web.routes.record._start_live_transcription", lambda *a, **kw: None
+    )
+
+
 def test_record_start_creates_recording(client):
     c, _ = client
     resp = c.post("/api/record/start", json={"voice_channel_id": "123", "guild_id": "G1"})
@@ -413,6 +429,39 @@ def test_recording_detail_shows_local_device_names(client):
     assert "LOCAL" in resp.text
 
 
+def test_recording_detail_shows_live_pane_for_active_local_session(client):
+    from wisper_transcribe.recording_manager import create_recording
+
+    c, data_dir = client
+    rec = create_recording(voice_channel_id="", guild_id="", data_dir=data_dir, source="local")
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "live-transcript" in resp.text
+    assert f"/recordings/{rec.id}/live" in resp.text
+
+
+def test_recording_detail_hides_live_pane_when_completed(client):
+    from wisper_transcribe.recording_manager import create_recording, update_recording_status
+
+    c, data_dir = client
+    rec = create_recording(voice_channel_id="", guild_id="", data_dir=data_dir, source="local")
+    update_recording_status(rec.id, "completed", data_dir)
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "live-transcript" not in resp.text
+
+
+def test_recording_detail_hides_live_pane_for_discord_source(client):
+    from wisper_transcribe.recording_manager import create_recording
+
+    c, data_dir = client
+    rec = create_recording(voice_channel_id="VC1", guild_id="G1", data_dir=data_dir)
+    assert rec.source == "discord"
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "live-transcript" not in resp.text
+
+
 def test_recording_detail_invalid_id_returns_400(client):
     c, _ = client
     resp = c.get("/api/recordings/../evil")
@@ -552,13 +601,25 @@ def test_recording_delete_removes_entry(client):
     assert load_recordings(tmp_path).get(rec.id) is None
 
 
-def test_recording_live_returns_501(client):
+def test_recording_live_streams_end_event_when_no_live_job(client):
+    """Phase 2: GET /recordings/{id}/live is now a real SSE endpoint. A
+    recording with no active JOB_LIVE session (never started local live
+    transcription) just gets an immediate 'end' event and no snapshot
+    (no live_transcript.md on disk) -- see tests/test_record_live_routes.py
+    for the live-job-wired cases."""
     c, tmp_path = client
     from wisper_transcribe.recording_manager import create_recording
     rec = create_recording("VC1", "G1", data_dir=tmp_path)
-    resp = c.get(f"/recordings/{rec.id}/live")
-    assert resp.status_code == 501
-    assert resp.json().get("detail") == "not implemented in v1"
+    with c.stream("GET", f"/recordings/{rec.id}/live") as resp:
+        assert resp.status_code == 200
+        body = "".join(resp.iter_text())
+    assert "event: end" in body
+
+
+def test_recording_live_invalid_id_returns_400(client):
+    c, _ = client
+    resp = c.get("/recordings/../evil/live")
+    assert resp.status_code in (400, 404)
 
 
 # ---------------------------------------------------------------------------

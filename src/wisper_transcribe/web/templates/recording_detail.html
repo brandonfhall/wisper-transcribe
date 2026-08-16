@@ -121,6 +121,25 @@
         {% endif %}
       </div>
 
+      <!-- Live transcript (Phase 2: local capture, in-progress sessions only) -->
+      {% if recording.source == 'local' and recording.status in ('recording', 'degraded') %}
+      <div style="margin-bottom:28px">
+        <div class="section-head">
+          <div class="section-head-left"><span class="section-kicker">Live · near-real-time</span><h2 class="section-title">Transcript</h2></div>
+          <div style="display:flex;align-items:center;gap:8px;font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint);letter-spacing:0.1em">
+            <span class="dot-live" style="width:6px;height:6px"></span>
+            DRAFT · NOT DIARIZED
+          </div>
+        </div>
+        <div id="live-transcript" style="background:var(--color-ink-700);border:1px solid var(--color-rule);padding:14px 18px;border-radius:4px;min-height:80px;max-height:360px;overflow-y:auto">
+          <div id="live-transcript-empty" style="color:var(--color-paper-faint);font-size:12px;font-style:italic">Waiting for speech…</div>
+        </div>
+        <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:6px">
+          Draft preview only — the full transcript with real speaker diarization is generated after you stop and click Transcribe.
+        </div>
+      </div>
+      {% endif %}
+
       <!-- Speakers -->
       {% if recording.discord_speakers %}
       <div class="section-head"><div class="section-head-left"><span class="section-kicker">Speakers</span><h2 class="section-title">At the table</h2></div></div>
@@ -199,4 +218,50 @@
 
   </div>
 </div>
+
+{% block extra_scripts %}
+{% if recording.source == 'local' and recording.status in ('recording', 'degraded') %}
+<script>
+// Live transcript pane -- SSE from GET /recordings/{id}/live (Phase 2).
+(function(){
+  var container = document.getElementById('live-transcript');
+  var empty = document.getElementById('live-transcript-empty');
+  if (!container) return;
+
+  function appendLine(speaker, text) {
+    if (empty) { empty.remove(); empty = null; }
+    var row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:10px;padding:6px 0;border-bottom:1px solid var(--color-rule);font-size:12.5px;line-height:1.5';
+    var tag = document.createElement('span');
+    tag.textContent = speaker;
+    tag.style.cssText = 'flex-shrink:0;width:44px;font-family:var(--font-mono);font-size:10px;letter-spacing:0.08em;color:' +
+      (speaker === 'You' ? 'var(--color-accent)' : 'var(--color-paper-dim)');
+    var body = document.createElement('span');
+    body.textContent = text;
+    body.style.color = 'var(--color-paper)';
+    row.appendChild(tag);
+    row.appendChild(body);
+    container.appendChild(row);
+    container.scrollTop = container.scrollHeight;
+  }
+
+  try {
+    var src = new EventSource('/recordings/{{ recording.id }}/live');
+    src.onmessage = function(e) {
+      try {
+        var payload = JSON.parse(e.data);
+        if (payload.type === 'line') {
+          appendLine(payload.speaker, payload.text);
+        } else if (payload.type === 'snapshot' && empty) {
+          empty.textContent = 'Session ended.';
+        }
+      } catch (ex) {}
+    };
+    src.addEventListener('end', function() { src.close(); });
+    src.onerror = function() { src.close(); };
+  } catch (ex) {}
+})();
+</script>
+{% endif %}
+{% endblock %}
 {% endblock %}

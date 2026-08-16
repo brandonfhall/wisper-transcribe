@@ -92,9 +92,23 @@ same way regardless of source, and the transcribe hand-off (**Transcribe**
 button → full diarization + speaker ID pass) works identically once the
 session is stopped.
 
-Phase 1 covers capture only — no live transcript preview while recording
-yet (that's a later phase); the mixed track behaves exactly like a
-Discord recording's combined track once the session ends.
+**Live transcript preview.** While a local session is recording, the
+detail page shows a draft transcript that fills in within a few seconds
+of each pause in speech — a rolling-window pass over the mixed audio,
+labeling each line **You** (your mic) or **Other** (system audio) by
+comparing which track is louder. This is a fast preview, not the final
+transcript: there's no real speaker diarization (too heavy to run
+per-chunk), so multiple people talking on the system-audio side all show
+up as "Other." Stop the session and click **Transcribe** to get the real
+thing — full diarization, speaker identification, and a transcript
+matching the quality of every other recording. The draft never overwrites
+or gets used as the real transcript; it's purely a crash-safety/at-a-
+glance copy (`recordings/<id>/live_transcript.md`).
+
+For CPU-only machines, live transcription competes with real-time audio
+capture for CPU cycles — `base` or `small` (set in `wisper config` or the
+Config page) keeps up more reliably than a larger model. GPU machines can
+use any model size.
 
 ---
 

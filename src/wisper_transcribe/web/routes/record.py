@@ -38,7 +38,7 @@ from wisper_transcribe.web.local_capture import (
     enumerate_devices,
     resolve_device_name,
 )
-from wisper_transcribe.web.routes import get_bot_manager, get_local_capture_manager, templates
+from wisper_transcribe.web.routes import get_bot_manager, get_local_capture_manager, get_queue, templates
 
 log = logging.getLogger(__name__)
 
@@ -171,6 +171,50 @@ async def record_status(request: Request):
 # JSON API — local capture control
 # ---------------------------------------------------------------------------
 
+def _start_live_transcription(request: Request, lcm, recording, data_dir: Path) -> None:
+    """Submit a Phase 2 JOB_LIVE job for a just-started local session and
+    wire its ring buffer onto the capture manager's live sink.
+
+    Best-effort: a failure here must not fail the already-started capture
+    session -- logged and swallowed. The recording still records fine
+    without a live preview; only the near-real-time transcript is missing.
+    """
+    try:
+        queue = get_queue(request)
+        cfg = load_config()
+        live_output_path = data_dir / "recordings" / recording.id / "live_transcript.md"
+        job = queue.submit_live(
+            recording_id=recording.id,
+            output_path=str(live_output_path),
+            model_size=cfg.get("model", "large-v3-turbo"),
+            device=cfg.get("device", "auto"),
+            compute_type=cfg.get("compute_type", "auto"),
+            language=cfg.get("language", "en"),
+        )
+        lcm.set_live_sink(job.live_ring_buffer.push)
+    except Exception:
+        log.warning(
+            "Failed to start live transcription for recording %s", recording.id, exc_info=True
+        )
+
+
+def _stop_live_transcription(request: Request, lcm, recording_id: str) -> None:
+    """Detach the live sink and signal the JOB_LIVE job (if any) to end."""
+    try:
+        lcm.set_live_sink(None)
+    except Exception:
+        pass
+    try:
+        queue = get_queue(request)
+        job = queue.find_live_job_for_recording(recording_id)
+        if job is not None:
+            queue.stop_live(job.id)
+    except Exception:
+        log.warning(
+            "Failed to stop live transcription job for recording %s", recording_id, exc_info=True
+        )
+
+
 @router.get("/api/record/devices")
 async def record_devices(request: Request):
     """Enumerate local mic + system-audio (loopback) devices for the picker.
@@ -220,6 +264,7 @@ async def record_start_local(request: Request):
     except RuntimeError:
         return JSONResponse({"detail": "recording already in progress"}, status_code=409)
 
+    _start_live_transcription(request, lcm, recording, get_data_dir())
     return JSONResponse(_recording_to_dict(recording), status_code=201)
 
 
@@ -236,6 +281,7 @@ async def record_stop_local(request: Request):
     # LocalCaptureManager.stop_session() joins threads -- blocking, so it
     # must run off the event loop (see the module docstring).
     await asyncio.to_thread(lcm.stop_session)
+    _stop_live_transcription(request, lcm, recording.id)
     return JSONResponse(_recording_to_dict(recording))
 
 
@@ -487,7 +533,7 @@ async def record_start_local_html(
     system_name = resolve_device_name(devices["loopbacks"], system_id.strip())
 
     try:
-        lcm.start_session(
+        recording = lcm.start_session(
             campaign_slug.strip() or None,
             mic_id.strip(),
             system_id.strip(),
@@ -497,6 +543,7 @@ async def record_start_local_html(
     except RuntimeError:
         return error_redirect("/record", "already_active")
 
+    _start_live_transcription(request, lcm, recording, get_data_dir())
     return RedirectResponse(url="/record", status_code=303)
 
 
@@ -506,9 +553,11 @@ async def record_stop_local_html(request: Request) -> RedirectResponse:
     lcm = get_local_capture_manager(request)
     if lcm is None or lcm.active_recording is None or lcm.active_recording.status not in ACTIVE_STATUSES:
         return error_redirect("/record", "no_session")
+    recording_id = lcm.active_recording.id
     # LocalCaptureManager.stop_session() joins threads -- blocking, so it
     # must run off the event loop (see the module docstring).
     await asyncio.to_thread(lcm.stop_session)
+    _stop_live_transcription(request, lcm, recording_id)
     return RedirectResponse(url="/record", status_code=303)
 
 
@@ -538,11 +587,56 @@ async def recordings_list_html(request: Request) -> HTMLResponse:
 
 
 @router.get("/recordings/{recording_id}/live")
-async def recording_live(recording_id: str, request: Request) -> JSONResponse:
+async def recording_live(recording_id: str, request: Request):
+    """SSE stream of committed live-transcript lines (Phase 2).
+
+    Index-based resume, same pattern as the R14 job-log stream
+    (`GET /jobs/{id}/stream`): `job.live_lines_dropped` translates the
+    absolute count of lines produced so far into a valid slice of whatever
+    is still retained after the `_MAX_LIVE_LINES` cap trims the oldest.
+
+    Once no active `JOB_LIVE` job exists for this recording (never
+    started, or the session already ended), this sends one snapshot of
+    whatever landed in `live_transcript.md` on disk and closes -- there is
+    nothing further to stream. The authoritative transcript is always the
+    post-session full pipeline pass via `POST /recordings/{id}/transcribe`.
+    """
     safe_id = _validate_recording_id(recording_id)
     if safe_id is None:
         return JSONResponse({"detail": "invalid recording id"}, status_code=400)
-    return JSONResponse({"detail": "not implemented in v1"}, status_code=501)
+
+    queue = get_queue(request)
+    data_dir = get_data_dir()
+
+    async def event_generator():
+        last_idx = 0
+        while True:
+            if await request.is_disconnected():
+                break
+
+            job = queue.find_live_job_for_recording(safe_id)
+            if job is None:
+                if last_idx == 0:
+                    live_path = data_dir / "recordings" / safe_id / "live_transcript.md"
+                    if live_path.exists():
+                        payload = {"type": "snapshot", "markdown": live_path.read_text(encoding="utf-8")}
+                        yield f"data: {json.dumps(payload)}\n\n"
+                yield "event: end\ndata: {}\n\n"
+                return
+
+            retained_start = job.live_lines_dropped
+            new_lines = job.live_lines[max(last_idx, retained_start) - retained_start:]
+            for line in new_lines:
+                yield f"data: {json.dumps({'type': 'line', **line})}\n\n"
+            last_idx = retained_start + len(job.live_lines)
+
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/recordings/{recording_id}", response_class=HTMLResponse)
