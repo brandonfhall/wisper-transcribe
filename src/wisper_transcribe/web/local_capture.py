@@ -402,6 +402,27 @@ class LocalCaptureManager:
                     fifo.push(pcm)
         except Exception:
             log.exception("Local capture thread %r failed", name)
+            self._mark_degraded()
+
+    def _mark_degraded(self) -> None:
+        """Flag the active recording as degraded when a capture thread dies
+        unexpectedly (e.g. a USB mic/loopback device unplugged mid-session).
+
+        Without this, ACTIVE_STATUSES's inclusion of "degraded" is
+        misleading -- nothing ever set it for local capture -- and a dead
+        track silently keeps recording silence-substituted audio with no
+        visible signal until the user reviews the resulting file. Never
+        raises: a bookkeeping failure here must not take down the tick
+        thread, which keeps writing (silence for the dead track) regardless.
+        """
+        recording = self._active_recording
+        if recording is None or recording.status != "recording":
+            return
+        try:
+            recording.status = "degraded"
+            save_recording(recording, self._data_dir)
+        except Exception:
+            log.warning("Failed to mark recording %s degraded", recording.id, exc_info=True)
 
     # ------------------------------------------------------------------
     # Tick thread -- does ALL writing

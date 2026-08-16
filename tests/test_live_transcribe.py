@@ -97,12 +97,36 @@ def test_find_commit_boundary_force_cuts_at_15s():
 
 
 def test_find_commit_boundary_cuts_after_trailing_silence_gap():
+    """Only the last _VAD_WINDOW_S seconds of the buffer are scanned (see
+    find_commit_boundary's docstring) -- the mocked VAD result is expressed
+    in tail-relative coordinates, and the returned cut is absolute."""
+    from wisper_transcribe.web.live_transcribe import _VAD_WINDOW_S
+
     n = int(2.0 * RATE)
     mixed = np.zeros(n, dtype="<i2")
-    fake_timestamps = [{"start": 0, "end": int(1.0 * RATE)}]
+    window_samples = int(_VAD_WINDOW_S * RATE)
+    offset = n - window_samples
+    tail_relative_end = int(1.0 * RATE)  # 0.6s of trailing silence within the tail
+    fake_timestamps = [{"start": 0, "end": tail_relative_end}]
     with patch("faster_whisper.vad.get_speech_timestamps", return_value=fake_timestamps):
         cut = find_commit_boundary(mixed)
-    assert cut == int(1.0 * RATE)
+    assert cut == offset + tail_relative_end
+
+
+def test_find_commit_boundary_only_scans_tail_window_not_whole_buffer():
+    """The actual point of the windowing: a 10s buffer should hand VAD only
+    ~_VAD_WINDOW_S seconds, not all 10 -- this is what keeps repeated
+    polling from being O(n^2) across a session."""
+    from wisper_transcribe.web.live_transcribe import _VAD_WINDOW_S
+
+    n = int(10.0 * RATE)  # under FORCE_CUT_S=15s, so VAD does get called
+    mixed = np.zeros(n, dtype="<i2")
+    with patch("faster_whisper.vad.get_speech_timestamps", return_value=[]) as mock_vad:
+        find_commit_boundary(mixed)
+
+    scanned_audio = mock_vad.call_args.args[0]
+    assert len(scanned_audio) == int(_VAD_WINDOW_S * RATE)
+    assert len(scanned_audio) < n
 
 
 def test_find_commit_boundary_waits_when_trailing_silence_too_short():

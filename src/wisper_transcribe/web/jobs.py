@@ -867,6 +867,25 @@ class JobQueue:
     def active_count(self) -> int:
         return sum(1 for j in self._jobs.values() if j.status in (PENDING, RUNNING))
 
+    def stop_all_live(self) -> None:
+        """Signal every active JOB_LIVE job to end (Phase 2).
+
+        `job_queue.stop()` only cancels the asyncio task awaiting
+        `asyncio.to_thread(self._run_job, job)` -- cancelling that awaiting
+        task does NOT stop the underlying executor thread once it's
+        actually running (a `concurrent.futures.Future` that's already
+        executing can't be cancelled), so `run_live_loop`'s blocking
+        `while not stop_event.is_set()` loop would otherwise keep running
+        after shutdown "completes": server restart/--reload can hang
+        (ThreadPoolExecutor joins non-daemon worker threads at interpreter
+        exit) and leaks a loaded Whisper model per incident. Call this
+        BEFORE `job_queue.stop()` (see app.py's lifespan) so the thread
+        notices `live_stop_event` and exits on its own.
+        """
+        for job in self._jobs.values():
+            if job.job_type == JOB_LIVE and job.status in (PENDING, RUNNING):
+                job.live_stop_event.set()
+
     def cancel(self, job_id: str) -> bool:
         """Request cancellation of a pending or running job."""
         job = self._jobs.get(job_id)

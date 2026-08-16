@@ -634,12 +634,29 @@ async def recording_live(recording_id: str, request: Request):
 
     async def event_generator():
         last_idx = 0
+        last_job = None  # last job object seen -- see the None-branch below
         while True:
             if await request.is_disconnected():
                 break
 
             job = queue.find_live_job_for_recording(safe_id)
             if job is None:
+                # find_live_job_for_recording only matches PENDING/RUNNING
+                # (see its docstring), so this fires the instant the job
+                # completes -- which can land in the same ~1s window as a
+                # final chunk committed right before the user hit Stop.
+                # `last_job` is still the same Job object the worker thread
+                # was mutating (Job instances aren't replaced on
+                # completion), so one more read off it here catches lines
+                # that would otherwise never reach an already-open stream.
+                if last_job is not None:
+                    retained_start = last_job.live_lines_dropped
+                    new_lines = last_job.live_lines[max(last_idx, retained_start) - retained_start:]
+                    for line in new_lines:
+                        yield f"data: {json.dumps({'type': 'line', **line})}\n\n"
+                    last_idx = retained_start + len(last_job.live_lines)
+                    last_job = None
+
                 if last_idx == 0:
                     live_path = data_dir / "recordings" / safe_id / "live_transcript.md"
                     if live_path.exists():
@@ -653,6 +670,7 @@ async def recording_live(recording_id: str, request: Request):
             for line in new_lines:
                 yield f"data: {json.dumps({'type': 'line', **line})}\n\n"
             last_idx = retained_start + len(job.live_lines)
+            last_job = job
 
             await asyncio.sleep(1.0)
 

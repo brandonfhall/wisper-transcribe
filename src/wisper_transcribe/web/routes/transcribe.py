@@ -12,8 +12,8 @@ from urllib.parse import quote
 from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
 
-from ..jobs import COMPLETED, FAILED
-from . import get_queue as _get_queue, templates
+from ..jobs import COMPLETED, FAILED, JOB_LIVE
+from . import get_local_capture_manager, get_queue as _get_queue, templates
 from wisper_transcribe.campaign_manager import _validate_campaign_slug as _validate_campaign_slug_cm, load_campaigns
 from wisper_transcribe.path_utils import get_output_dir, validate_path_component
 from wisper_transcribe.web._responses import error_redirect, invalid_input_response
@@ -168,7 +168,24 @@ async def cancel_job(request: Request, job_id: str) -> Response:
         return invalid_input_response("Invalid job ID")
 
     queue = _get_queue(request)
-    queue.cancel(safe_id)
+    job = queue.get(safe_id)
+    if job is not None and job.job_type == JOB_LIVE:
+        # A JOB_LIVE session needs its LocalCaptureManager live-sink torn
+        # down too, not just the job stopped -- queue.cancel() only knows
+        # about jobs, not LocalCaptureManager (correct separation of
+        # concerns), and its _cancel_event mechanism isn't even checked by
+        # run_live_loop (that's live_stop_event, a deliberately separate
+        # signal -- see JOB_LIVE's docstring in jobs.py). Route through the
+        # same teardown the Record page's own Stop button uses instead.
+        # This only ends the live-preview job -- the recording itself (if
+        # still active) keeps running; stopping it is the Record page's job.
+        from wisper_transcribe.web.routes.record import _stop_live_transcription
+
+        lcm = get_local_capture_manager(request)
+        if lcm is not None:
+            _stop_live_transcription(request, lcm, job.live_recording_id or "")
+    else:
+        queue.cancel(safe_id)
     # Use server-generated job.id (UUID) instead of safe_id so CodeQL's
     # py/url-redirection taint tracker sees no user-controlled data in the URL.
     job = queue.get(safe_id)

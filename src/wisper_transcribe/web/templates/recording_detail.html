@@ -235,7 +235,11 @@
     var tag = document.createElement('span');
     tag.textContent = speaker;
     tag.style.cssText = 'flex-shrink:0;width:44px;font-family:var(--font-mono);font-size:10px;letter-spacing:0.08em;color:' +
-      (speaker === 'You' ? 'var(--color-accent)' : 'var(--color-paper-dim)');
+      // Mic-dominant lines are never labeled 'Other' -- "this is me" can
+      // relabel the mic side to an enrolled profile's display name, so
+      // comparing against the fixed 'Other' label (not 'You') is what
+      // actually distinguishes mic vs. system lines.
+      (speaker !== 'Other' ? 'var(--color-accent)' : 'var(--color-paper-dim)');
     var body = document.createElement('span');
     body.textContent = text;
     body.style.color = 'var(--color-paper)';

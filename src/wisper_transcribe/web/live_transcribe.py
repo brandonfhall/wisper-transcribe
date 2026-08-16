@@ -109,6 +109,13 @@ class LiveRingBuffer:
 # Chunk-cut decision
 # ---------------------------------------------------------------------------
 
+# How much of the buffer's tail actually needs scanning to make the
+# trailing-silence decision below -- see find_commit_boundary's docstring
+# for why a bounded window is sufficient (not just an optimization that
+# happens to usually work).
+_VAD_WINDOW_S = SILENCE_GAP_S + 2 * POLL_INTERVAL_S + 0.5
+
+
 def find_commit_boundary(mixed_i16: np.ndarray) -> Optional[int]:
     """Return the sample index to cut the buffer at, or None if not ready.
 
@@ -118,6 +125,19 @@ def find_commit_boundary(mixed_i16: np.ndarray) -> Optional[int]:
     state -- bounds worst-case latency and handles continuous speech that
     never pauses. A chunk with no speech detected at all is force-cut but
     the caller skips transcribing it (nothing to transcribe).
+
+    Only scans the last `_VAD_WINDOW_S` seconds of the buffer, not the
+    whole (up to FORCE_CUT_S-long) thing -- rescanning already-analyzed
+    early audio on every ~250ms poll would be an O(n^2) cost across a
+    session otherwise. This is sound, not just a shortcut that usually
+    works: `run_live_loop` calls this every POLL_INTERVAL_S, and trailing
+    silence measured against the (growing) buffer end only ever increases
+    between polls, so the buffer commits within about one poll interval of
+    crossing SILENCE_GAP_S -- it never accumulates more than
+    SILENCE_GAP_S + POLL_INTERVAL_S of trailing silence before being
+    cleared. The last speech region's END is therefore always within the
+    window; only its START (which this function never uses) could fall
+    outside it, e.g. for one long region that's still ongoing.
     """
     total_s = len(mixed_i16) / RATE
     if total_s < MIN_COMMIT_S:
@@ -127,13 +147,15 @@ def find_commit_boundary(mixed_i16: np.ndarray) -> Optional[int]:
 
     from faster_whisper.vad import VadOptions, get_speech_timestamps
 
-    mixed_f32 = mixed_i16.astype(np.float32) / 32768.0
+    window_samples = int(_VAD_WINDOW_S * RATE)
+    offset = max(0, len(mixed_i16) - window_samples)
+    tail_f32 = mixed_i16[offset:].astype(np.float32) / 32768.0
     timestamps = get_speech_timestamps(
-        mixed_f32, vad_options=VadOptions(min_silence_duration_ms=300)
+        tail_f32, vad_options=VadOptions(min_silence_duration_ms=300)
     )
     if not timestamps:
         return None
-    last_speech_end = timestamps[-1]["end"]
+    last_speech_end = offset + timestamps[-1]["end"]
     trailing_silence_s = (len(mixed_i16) - last_speech_end) / RATE
     if trailing_silence_s >= SILENCE_GAP_S:
         return last_speech_end

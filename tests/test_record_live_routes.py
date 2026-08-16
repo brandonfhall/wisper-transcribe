@@ -208,6 +208,37 @@ def test_recording_live_streams_committed_lines_then_ends(client):
     assert "event: end" in body
 
 
+def test_recording_live_catches_final_lines_committed_right_before_completion(client):
+    """A line committed in the same ~1s window as the job completing must
+    not be silently dropped -- find_live_job_for_recording only matches
+    PENDING/RUNNING, so it flips to None the instant the job finishes."""
+    from wisper_transcribe.recording_manager import create_recording
+
+    c, tmp_path = client
+    rec = create_recording("", "", data_dir=tmp_path, source="local")
+    job = _make_live_job(rec.id, [{"speaker": "You", "text": "first line", "start_s": 0.0, "end_s": 1.0}])
+
+    call_count = {"n": 0}
+
+    def fake_find(recording_id):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return job
+        # Simulate the job committing one more line and completing in the
+        # gap between this poll and the previous one.
+        job.live_lines.append({"speaker": "You", "text": "final line", "start_s": 1.0, "end_s": 2.0})
+        return None
+
+    queue = c.app.state.job_queue
+    with patch.object(queue, "find_live_job_for_recording", side_effect=fake_find):
+        with c.stream("GET", f"/recordings/{rec.id}/live") as resp:
+            body = "".join(resp.iter_text())
+
+    assert "first line" in body
+    assert "final line" in body
+    assert "event: end" in body
+
+
 def test_recording_live_translates_dropped_line_index(client):
     """job.live_lines_dropped (trimmed by append_live_line's _MAX_LIVE_LINES
     cap) doesn't break the slice math -- mirrors R14's log-line coverage."""
@@ -257,3 +288,82 @@ def test_recording_live_no_job_no_file_ends_with_no_snapshot(client):
 
     assert "event: end" in body
     assert '"type": "snapshot"' not in body
+
+
+# ---------------------------------------------------------------------------
+# App lifespan shutdown must stop a live job's thread (not just cancel the
+# asyncio task awaiting it) -- see JobQueue.stop_all_live()'s docstring.
+# ---------------------------------------------------------------------------
+
+def test_lifespan_shutdown_signals_active_live_job(tmp_path):
+    """Owns its own TestClient context (rather than the shared `client`
+    fixture) so the test controls exactly when lifespan shutdown runs."""
+    with patch("wisper_transcribe.config.get_data_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.web.routes.record.get_data_dir", return_value=tmp_path):
+        from wisper_transcribe.web.app import create_app
+        test_app = create_app()
+
+        job = _make_live_job("rec-shutdown-test", [])
+        job.status = RUNNING
+
+        with TestClient(test_app) as c:
+            c.app.state.job_queue._jobs[job.id] = job
+            assert not job.live_stop_event.is_set()
+        # Exiting the `with` block above runs lifespan shutdown.
+
+    assert job.live_stop_event.is_set()
+
+
+# ---------------------------------------------------------------------------
+# The generic dashboard "Stop job" button (POST /transcribe/jobs/{id}/cancel)
+# must properly tear down a JOB_LIVE session, not just no-op via the normal
+# _cancel_event mechanism (which run_live_loop never checks).
+# ---------------------------------------------------------------------------
+
+def test_generic_cancel_route_stops_live_job_and_clears_sink(client):
+    c, data_dir = client
+    job = _make_live_job("rec-cancel-test", [])
+    job.status = RUNNING
+    c.app.state.job_queue._jobs[job.id] = job
+    c.app.state.local_capture_manager.set_live_sink(job.live_ring_buffer.push)
+
+    resp = c.post(f"/transcribe/jobs/{job.id}/cancel", follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert job.live_stop_event.is_set()
+    assert c.app.state.local_capture_manager._live_sink is None
+    # Not routed through the generic cancel path -- status stays whatever
+    # run_live_loop itself would set (it isn't running here), not FAILED.
+    assert job.status == RUNNING
+
+
+def test_generic_cancel_route_stops_pending_live_job(client):
+    """A still-queued (PENDING) live job also gets torn down -- run_live_loop
+    checks live_stop_event as its very first loop condition, so setting it
+    ahead of time makes the job complete immediately once it's dequeued."""
+    c, data_dir = client
+    job = _make_live_job("rec-cancel-pending", [])
+    job.status = "pending"
+    c.app.state.job_queue._jobs[job.id] = job
+
+    resp = c.post(f"/transcribe/jobs/{job.id}/cancel", follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert job.live_stop_event.is_set()
+
+
+def test_generic_cancel_route_unaffected_for_non_live_jobs(client):
+    """Non-JOB_LIVE cancellation is untouched by this change."""
+    from datetime import datetime
+
+    from wisper_transcribe.web.jobs import PENDING, Job
+
+    c, data_dir = client
+    job = Job(id="txn-job", status=PENDING, created_at=datetime.now(), input_path="/tmp/a.mp3", kwargs={})
+    c.app.state.job_queue._jobs[job.id] = job
+
+    resp = c.post(f"/transcribe/jobs/{job.id}/cancel", follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert job.status == "failed"
+    assert job.error == "Cancelled"

@@ -183,6 +183,10 @@ def create_app() -> FastAPI:
         try:
             yield
         finally:
+            # Signal any active JOB_LIVE job to end BEFORE job_queue.stop()
+            # -- see stop_all_live()'s docstring for why job_queue.stop()
+            # alone can't stop it and would otherwise hang shutdown.
+            job_queue.stop_all_live()
             # LocalCaptureManager is synchronous/thread-based (soundcard
             # recorders are blocking pulls) -- stop() joins threads, so it
             # must run off the event loop like any other blocking call.

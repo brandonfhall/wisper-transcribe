@@ -284,6 +284,50 @@ def test_stop_lifecycle_method_noop_when_nothing_active(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Degraded status on capture-thread failure
+# ---------------------------------------------------------------------------
+
+def _raising_capture_factory(device_id, samplerate):
+    raise RuntimeError("device unplugged")
+
+
+def test_capture_thread_failure_marks_recording_degraded(tmp_path):
+    from wisper_transcribe.recording_manager import load_recordings
+
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path, capture_factory=_raising_capture_factory, ticker=instant_ticker(0),
+    )
+    rec = mgr.start_session(None, "mic-dev", "sys-dev")
+    for t in mgr._capture_threads:
+        t.join(timeout=5.0)
+
+    assert rec.status == "degraded"
+    assert load_recordings(tmp_path)[rec.id].status == "degraded"
+
+    mgr.stop_session()  # cleanup
+
+
+def test_mark_degraded_noop_when_no_active_recording(tmp_path):
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path, capture_factory=scripted_capture_factory({}), ticker=instant_ticker(0),
+    )
+    mgr._mark_degraded()  # must not raise
+
+
+def test_mark_degraded_does_not_override_terminal_status(tmp_path):
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path, capture_factory=scripted_capture_factory({}), ticker=instant_ticker(0),
+    )
+    rec = mgr.start_session(None, "mic-dev", "sys-dev")
+    mgr.stop_session()
+    assert rec.status == "completed"
+
+    mgr._mark_degraded()
+
+    assert rec.status == "completed"  # not overwritten by a late/spurious call
+
+
+# ---------------------------------------------------------------------------
 # _do_tick() direct unit tests -- deterministic, no threads
 # ---------------------------------------------------------------------------
 

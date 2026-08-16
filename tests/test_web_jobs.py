@@ -1290,6 +1290,41 @@ def test_stop_live_unknown_job_id_is_noop():
     q.stop_live("no-such-job")  # must not raise
 
 
+def test_stop_all_live_sets_stop_event_on_running_and_pending_jobs(tmp_path):
+    q = _make_queue()
+    running = q.submit_live("rec-1", str(tmp_path / "a.md"))
+    running.status = "running"
+    pending = q.submit_live("rec-2", str(tmp_path / "b.md"))  # stays pending
+
+    q.stop_all_live()
+
+    assert running.live_stop_event.is_set()
+    assert pending.live_stop_event.is_set()
+
+
+def test_stop_all_live_ignores_terminal_jobs(tmp_path):
+    from wisper_transcribe.web.jobs import COMPLETED
+
+    q = _make_queue()
+    job = q.submit_live("rec-1", str(tmp_path / "a.md"))
+    job.status = COMPLETED
+
+    q.stop_all_live()  # must not raise
+    assert not job.live_stop_event.is_set()  # already finished -- nothing to signal
+
+
+def test_stop_all_live_ignores_non_live_jobs(tmp_path):
+    q = _make_queue()
+    other = q.submit("/tmp/test.mp3")
+    q.stop_all_live()  # must not raise or touch unrelated job types
+    assert other.status == "pending"
+
+
+def test_stop_all_live_noop_with_no_jobs():
+    q = _make_queue()
+    q.stop_all_live()  # must not raise
+
+
 def test_run_live_job_calls_run_live_loop_and_completes(tmp_path):
     from wisper_transcribe.web.jobs import COMPLETED, JobQueue
 
