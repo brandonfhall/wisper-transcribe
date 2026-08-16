@@ -60,6 +60,21 @@ per `LIVE_AUDIO_TEST_PLAN.md`) — fixed same day:**
   `recordings.html`'s list view already used, added as a 7th status-strip
   cell on the detail page too.
 
+**Not yet fixed — found during the same smoke test:**
+
+- **`UnicodeEncodeError` crashed a transcription job.** `pipeline.py`
+  (lines 458, 468) calls `tqdm.write("─" * 60)` — a Unicode box-drawing
+  separator. `web/jobs.py`'s `capturing_write()` forwards that to the real
+  `tqdm.write` (default target stderr) before capturing it for the job log;
+  on this run that hit a `cp1252` codec that can't encode `─`, killing the
+  job with a traceback instead of a transcript. Unconfirmed whether this
+  reproduces when the server is launched normally (`wisper server --reload`
+  in the user's own PowerShell) rather than through a redirected background
+  process — needs a repro check first. If it does reproduce, the fix is
+  probably `errors="replace"` (or ASCII `"-"*60`) at the `tqdm.write` call
+  sites, or forcing UTF-8 stdio at server startup. Unrelated to the
+  live-audio branch — general pipeline Windows-console-Unicode gap.
+
 ---
 
 ## Senior review — closed 2026-07-16
