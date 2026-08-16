@@ -55,8 +55,16 @@
       <div style="font-family:var(--font-serif);font-size:22px;color:var(--color-paper);font-weight:300">{{ recording.segment_manifest | length }}</div>
     </div>
     <div style="padding:14px 16px;border-left:1px solid var(--color-rule)">
-      <div class="mono-kicker" style="margin-bottom:6px">Channel</div>
+      <div class="mono-kicker" style="margin-bottom:6px">{{ "Devices" if recording.source == "local" else "Channel" }}</div>
+      {% if recording.source == "local" %}
+      <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-dim);line-height:1.6">
+        <span class="pill pill-cyan" style="font-size:9.5px;margin-bottom:3px;display:inline-block">LOCAL</span>
+        {% if recording.devices.get('mic') %}<div>mic: {{ recording.devices.get('mic') }}</div>{% endif %}
+        {% if recording.devices.get('system') %}<div>sys: {{ recording.devices.get('system') }}</div>{% endif %}
+      </div>
+      {% else %}
       <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">{{ recording.voice_channel_id or "—" }}</div>
+      {% endif %}
     </div>
     <div style="padding:14px 16px;border-left:1px solid var(--color-rule)">
       <div class="mono-kicker" style="margin-bottom:6px">Started</div>

@@ -43,7 +43,7 @@ keys), managing speaker profiles, and starting/stopping Discord recordings.
 | Transcripts | `/transcripts` | Browse output files, view rendered markdown, download, delete; green notes icon on cards that have a campaign summary |
 | Speakers | `/speakers` | Enroll, rename, remove speaker profiles. Renaming uses the same semantics as `wisper speakers rename`: the profile is re-keyed (embedding and sample clip files move with it) and campaign rosters — including Discord ID bindings — follow automatically. A rename fails with a notice if the new name collides with an existing profile or contains unsupported characters. |
 | Campaigns | `/campaigns` | Create and manage campaigns; add/remove roster members; scope transcription to a campaign |
-| Record | `/record` | Start and stop live Discord voice channel recording sessions; shows active session with live speaker and segment counts via SSE; **Browse bot's channels** panel lists available guilds and voice channels so you can click-to-fill IDs without leaving the page |
+| Record | `/record` | Start and stop live Discord voice channel recording sessions, or a local mic + system-audio capture session; shows the active session (either kind) with live speaker/segment counts via SSE; **Browse bot's channels** panel lists available guilds and voice channels so you can click-to-fill IDs without leaving the page. The Local capture card only appears when the optional `[live]` extra is installed and at least one audio device is detected. |
 | Recordings | `/recordings` | Browse all recordings, grouped by campaign; view per-recording detail (status, speakers, segments); delete entries |
 | Config | `/config` | View and edit all settings |
 
@@ -66,6 +66,35 @@ For a web upload, the source audio file is kept alongside its transcript in the 
 ## Auto-Enrollment from Recordings
 
 When the Discord bot records a session, any speaker whose Discord user ID is **not** bound to a campaign member is added to the recording's "Unknown Speakers" list. After the session ends, open the recording's detail page (`/recordings/{id}`) to see the panel. Enter a display name next to each unknown Discord ID and click **Enroll** — wisper extracts a voice embedding from their per-user audio track and creates a new speaker profile. This runs as a background job (you're taken to a live progress page); when it completes, the Discord ID is bound to that profile in the campaign roster automatically, so future sessions tag them correctly without manual intervention.
+
+---
+
+## Local Recording (mic + system audio)
+
+Separate from the Discord bot: capture your microphone and the machine's
+system audio output (the other side of a call, a video, a game session) as
+two tracks, plus a mixed combined track, without needing a Discord bot at
+all. Requires the optional `[live]` extra (`pip install
+'wisper-transcribe[live]'`) — see [setup.md](setup.md) for per-OS device
+setup (including the macOS BlackHole requirement).
+
+On the Record page, a **Local capture** card appears beside the Discord
+card whenever the extra is installed and at least one microphone and one
+system-audio (loopback) device are detected — it's hidden entirely
+otherwise, no error shown. Pick a microphone and a system-audio device
+(and, optionally, a campaign) and click **Start local recording**. Only
+one capture session — Discord *or* local — can run at a time; starting
+one while the other is active is rejected.
+
+A local session's recording detail page shows a **LOCAL** badge and the
+chosen device names instead of a Discord channel. Recordings list the
+same way regardless of source, and the transcribe hand-off (**Transcribe**
+button → full diarization + speaker ID pass) works identically once the
+session is stopped.
+
+Phase 1 covers capture only — no live transcript preview while recording
+yet (that's a later phase); the mixed track behaves exactly like a
+Discord recording's combined track once the session ends.
 
 ---
 

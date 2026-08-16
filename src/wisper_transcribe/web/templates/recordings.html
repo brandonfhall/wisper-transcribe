@@ -68,7 +68,11 @@
         <div style="font-family:var(--font-serif);font-size:22px;color:var(--color-paper)">{{ r.id[:16] }}</div>
         <div style="display:flex;align-items:center;gap:12px;margin-top:6px;font-size:12px;color:var(--color-paper-dim)">
           {% if camp %}<span>{{ camp.display_name }}</span>{% endif %}
+          {% if r.source == 'local' %}
+          <span class="pill pill-cyan" style="font-size:9.5px">LOCAL</span>
+          {% else %}
           <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint)">{{ r.voice_channel_id or '—' }}</span>
+          {% endif %}
         </div>
       </div>
       <div>
@@ -123,7 +127,9 @@
           {{ camp.display_name }}
         </div>
         {% endif %}
-        <div style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint);margin-top:3px">{{ r.voice_channel_id or '—' }}</div>
+        <div style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint);margin-top:3px">
+          {% if r.source == 'local' %}<span class="pill pill-cyan" style="font-size:9.5px">LOCAL</span>{% else %}{{ r.voice_channel_id or '—' }}{% endif %}
+        </div>
       </div>
       <div style="font-family:var(--font-mono);font-size:12px;color:var(--color-paper-dim);text-align:right">{{ dur_str }}</div>
       <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint);text-align:right">{{ r.segment_manifest | length }}</div>

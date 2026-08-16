@@ -354,8 +354,63 @@ def test_record_page_shows_local_active_session(client):
             c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
             resp = c.get("/record")
         assert resp.status_code == 200
+        assert "Local capture" in resp.text
     finally:
         mgr.stop_session()
+
+
+def test_record_page_hides_local_section_when_unavailable(client):
+    """No Local card at all when soundcard isn't importable (the default
+    in this test environment, but pinned explicitly for determinism)."""
+    c, _ = client
+    fake_result = {"microphones": [], "loopbacks": [], "available": False}
+    with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+        resp = c.get("/record")
+    assert resp.status_code == 200
+    assert "Start local recording" not in resp.text
+
+
+def test_record_page_shows_local_section_with_device_options(client):
+    c, _ = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Built-in Microphone"}],
+        "loopbacks": [{"id": "loop1", "name": "Speakers (loopback)"}],
+        "available": True,
+    }
+    with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+        resp = c.get("/record")
+    assert resp.status_code == 200
+    assert "Start local recording" in resp.text
+    assert "Built-in Microphone" in resp.text
+    assert "Speakers (loopback)" in resp.text
+
+
+def test_recordings_list_shows_local_badge(client):
+    from wisper_transcribe.recording_manager import create_recording
+
+    c, data_dir = client
+    create_recording(
+        voice_channel_id="", guild_id="", data_dir=data_dir,
+        source="local", devices={"mic": "Mic", "system": "Speakers"},
+    )
+    resp = c.get("/recordings")
+    assert resp.status_code == 200
+    assert "LOCAL" in resp.text
+
+
+def test_recording_detail_shows_local_device_names(client):
+    from wisper_transcribe.recording_manager import create_recording
+
+    c, data_dir = client
+    rec = create_recording(
+        voice_channel_id="", guild_id="", data_dir=data_dir,
+        source="local", devices={"mic": "Built-in Microphone", "system": "Speakers (loopback)"},
+    )
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "Built-in Microphone" in resp.text
+    assert "Speakers (loopback)" in resp.text
+    assert "LOCAL" in resp.text
 
 
 def test_recording_detail_invalid_id_returns_400(client):

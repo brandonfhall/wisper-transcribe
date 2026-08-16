@@ -463,6 +463,55 @@ async def record_stop_html(request: Request) -> RedirectResponse:
     return RedirectResponse(url="/record", status_code=303)
 
 
+@router.post("/record/start-local", response_class=HTMLResponse)
+async def record_start_local_html(
+    request: Request,
+    mic_id: Annotated[str, Form()],
+    system_id: Annotated[str, Form()],
+    campaign_slug: Annotated[str, Form()] = "",
+) -> RedirectResponse:
+    """HTML form handler: start a local capture session and redirect back to /record."""
+    lcm = get_local_capture_manager(request)
+    if lcm is None:
+        return error_redirect("/record", "unavailable")
+    if not mic_id.strip() or not system_id.strip():
+        return error_redirect("/record", "missing_device")
+
+    devices = enumerate_devices()
+    if not devices["available"]:
+        return error_redirect("/record", "unavailable")
+    if _other_session_active(request, lcm):
+        return error_redirect("/record", "already_active")
+
+    mic_name = resolve_device_name(devices["microphones"], mic_id.strip())
+    system_name = resolve_device_name(devices["loopbacks"], system_id.strip())
+
+    try:
+        lcm.start_session(
+            campaign_slug.strip() or None,
+            mic_id.strip(),
+            system_id.strip(),
+            mic_name=mic_name,
+            system_name=system_name,
+        )
+    except RuntimeError:
+        return error_redirect("/record", "already_active")
+
+    return RedirectResponse(url="/record", status_code=303)
+
+
+@router.post("/record/stop-local", response_class=HTMLResponse)
+async def record_stop_local_html(request: Request) -> RedirectResponse:
+    """HTML form handler: stop the active local session and redirect back to /record."""
+    lcm = get_local_capture_manager(request)
+    if lcm is None or lcm.active_recording is None or lcm.active_recording.status not in ACTIVE_STATUSES:
+        return error_redirect("/record", "no_session")
+    # LocalCaptureManager.stop_session() joins threads -- blocking, so it
+    # must run off the event loop (see the module docstring).
+    await asyncio.to_thread(lcm.stop_session)
+    return RedirectResponse(url="/record", status_code=303)
+
+
 # ---------------------------------------------------------------------------
 # HTML — recordings list + detail
 # ---------------------------------------------------------------------------
