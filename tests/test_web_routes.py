@@ -398,7 +398,8 @@ def test_cancel_job_redirects(client, tmp_path):
 
 
 def test_transcripts_list_empty(client, tmp_path):
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.web.routes.transcripts.get_data_dir", return_value=tmp_path):
         resp = client.get("/transcripts")
     assert resp.status_code == 200
 
@@ -406,10 +407,115 @@ def test_transcripts_list_empty(client, tmp_path):
 def test_transcripts_list_shows_files(client, tmp_path):
     md = tmp_path / "session01.md"
     md.write_text("---\ntitle: Session 01\n---\n\n**Alice**: Hello.")
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.web.routes.transcripts.get_data_dir", return_value=tmp_path):
         resp = client.get("/transcripts")
     assert resp.status_code == 200
     assert b"session01" in resp.content
+
+
+# ---------------------------------------------------------------------------
+# Recordings awaiting transcription (surfaced at the top of /transcripts) --
+# status "completed" with audio on disk, never auto-queued for the full
+# diarized pass; see _submit_recording_transcription's docstring.
+# ---------------------------------------------------------------------------
+
+def _seed_completed_recording(tmp_path, **overrides):
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+
+    rec = create_recording(
+        voice_channel_id="", guild_id="", data_dir=tmp_path, source="local",
+        name=overrides.pop("name", None),
+    )
+    rec.status = "completed"
+    audio = tmp_path / "recordings" / rec.id / "combined.wav"
+    audio.parent.mkdir(parents=True, exist_ok=True)
+    audio.write_bytes(b"RIFF....")
+    rec.combined_path = audio
+    for k, v in overrides.items():
+        setattr(rec, k, v)
+    save_recording(rec, tmp_path)
+    return rec
+
+
+def test_pending_recordings_includes_completed_with_audio(tmp_path):
+    from wisper_transcribe.web.routes.transcripts import _pending_recordings
+
+    rec = _seed_completed_recording(tmp_path, name="Session 14")
+    pending, live_draft_ids = _pending_recordings(tmp_path)
+    assert [r.id for r in pending] == [rec.id]
+    assert live_draft_ids == set()
+
+
+def test_pending_recordings_excludes_non_completed_statuses(tmp_path):
+    from wisper_transcribe.recording_manager import save_recording
+
+    from wisper_transcribe.web.routes.transcripts import _pending_recordings
+
+    for status in ("recording", "transcribing", "transcribed", "failed", "degraded"):
+        rec = _seed_completed_recording(tmp_path, name=f"rec-{status}")
+        rec.status = status
+        save_recording(rec, tmp_path)
+
+    pending, _ = _pending_recordings(tmp_path)
+    assert pending == []
+
+
+def test_pending_recordings_excludes_completed_without_audio_file(tmp_path):
+    from wisper_transcribe.recording_manager import create_recording
+
+    from wisper_transcribe.web.routes.transcripts import _pending_recordings
+
+    create_recording(voice_channel_id="", guild_id="", data_dir=tmp_path, source="local")
+    # combined_path stays None -- capture ended with no audio at all
+    pending, _ = _pending_recordings(tmp_path)
+    assert pending == []
+
+
+def test_pending_recordings_detects_live_draft(tmp_path):
+    from wisper_transcribe.web.routes.transcripts import _pending_recordings
+
+    rec = _seed_completed_recording(tmp_path)
+    live_path = tmp_path / "recordings" / rec.id / "live_transcript.md"
+    live_path.write_text("# Live transcript\n", encoding="utf-8")
+
+    pending, live_draft_ids = _pending_recordings(tmp_path)
+    assert live_draft_ids == {rec.id}
+
+
+def test_pending_recordings_sorted_newest_first(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    from wisper_transcribe.recording_manager import save_recording
+    from wisper_transcribe.web.routes.transcripts import _pending_recordings
+
+    older = _seed_completed_recording(tmp_path, name="older")
+    newer = _seed_completed_recording(tmp_path, name="newer")
+    older.started_at = datetime.now(timezone.utc) - timedelta(hours=1)
+    newer.started_at = datetime.now(timezone.utc)
+    save_recording(older, tmp_path)
+    save_recording(newer, tmp_path)
+
+    pending, _ = _pending_recordings(tmp_path)
+    assert [r.id for r in pending] == [newer.id, older.id]
+
+
+def test_transcripts_page_shows_awaiting_transcription_section(client, tmp_path):
+    rec = _seed_completed_recording(tmp_path, name="Session 14 — the ambush")
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.web.routes.transcripts.get_data_dir", return_value=tmp_path):
+        resp = client.get("/transcripts")
+    assert resp.status_code == 200
+    assert "Awaiting transcription" in resp.text
+    assert "Session 14" in resp.text
+    assert f"/recordings/{rec.id}/transcribe" in resp.text
+
+
+def test_transcripts_page_omits_section_when_nothing_pending(client, tmp_path):
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.web.routes.transcripts.get_data_dir", return_value=tmp_path):
+        resp = client.get("/transcripts")
+    assert "Awaiting transcription" not in resp.text
 
 
 def test_transcript_detail_returns_200(client, tmp_path):
@@ -1396,7 +1502,8 @@ def test_transcripts_list_excludes_summary_files(client, tmp_path):
     """Summary sidecars must not appear as independent cards in the transcript list."""
     (tmp_path / "session01.md").write_text(_TRANSCRIPT_MD)
     (tmp_path / "session01.summary.md").write_text(_SUMMARY_MD)
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.web.routes.transcripts.get_data_dir", return_value=tmp_path):
         resp = client.get("/transcripts")
     assert resp.status_code == 200
     # The main transcript card should appear once

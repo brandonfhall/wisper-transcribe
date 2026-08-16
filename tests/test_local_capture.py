@@ -108,6 +108,24 @@ def test_start_session_creates_local_recording(tmp_path):
     mgr.stop_session()
 
 
+def test_start_session_passes_through_name(tmp_path):
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path, capture_factory=scripted_capture_factory({}), ticker=instant_ticker(0),
+    )
+    rec = mgr.start_session("campaign-1", "mic-dev", "sys-dev", name="Session 14 — the ambush")
+    assert rec.name == "Session 14 — the ambush"
+    mgr.stop_session()
+
+
+def test_start_session_defaults_name_to_none(tmp_path):
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path, capture_factory=scripted_capture_factory({}), ticker=instant_ticker(0),
+    )
+    rec = mgr.start_session("campaign-1", "mic-dev", "sys-dev")
+    assert rec.name is None
+    mgr.stop_session()
+
+
 def test_start_session_raises_if_already_active(tmp_path):
     mgr = LocalCaptureManager(
         data_dir=tmp_path,

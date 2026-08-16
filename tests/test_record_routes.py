@@ -257,6 +257,81 @@ def test_start_local_success_creates_local_recording(client):
         mgr.stop_session()
 
 
+def test_start_local_json_api_accepts_and_trims_name(client):
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            resp = c.post(
+                "/api/record/start-local",
+                json={"mic_id": "mic1", "system_id": "loop1", "name": "  Session 14 — the ambush  "},
+            )
+        assert resp.status_code == 201
+        assert resp.json()["name"] == "Session 14 — the ambush"
+    finally:
+        mgr.stop_session()
+
+
+def test_start_local_json_api_blank_name_stored_as_none(client):
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            resp = c.post(
+                "/api/record/start-local",
+                json={"mic_id": "mic1", "system_id": "loop1", "name": "   "},
+            )
+        assert resp.json()["name"] is None
+    finally:
+        mgr.stop_session()
+
+
+def test_start_local_html_form_accepts_name(client):
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            c.post(
+                "/record/start-local",
+                data={"mic_id": "mic1", "system_id": "loop1", "name": "Game night"},
+            )
+        assert mgr.active_recording.name == "Game night"
+    finally:
+        mgr.stop_session()
+
+
+def test_clean_session_name_caps_length():
+    from wisper_transcribe.web.routes.record import _MAX_SESSION_NAME_LEN, _clean_session_name
+
+    result = _clean_session_name("x" * 500)
+    assert len(result) == _MAX_SESSION_NAME_LEN
+
+
+def test_clean_session_name_blank_and_whitespace_only_is_none():
+    from wisper_transcribe.web.routes.record import _clean_session_name
+
+    assert _clean_session_name("") is None
+    assert _clean_session_name("   ") is None
+
+
 def test_stop_local_with_no_active_session_returns_400(client):
     c, data_dir = client
     c.app.state.local_capture_manager = _scripted_local_capture_manager(data_dir)

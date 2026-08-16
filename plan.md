@@ -234,6 +234,52 @@ when the user reports something not showing up after a change, verify
 with a live reproduction (browser or curl) before trusting a code read —
 this bug was invisible from reading the diff alone.
 
+**"Awaiting transcription" section on /transcripts + session naming —
+delivered (2026-08-16):** User: "let's add a section to transcripts that
+includes all the live recordings so I can easily transcribe them if I
+want. For the ones that have not been through the full transcribe option
+is the live transcribe kept?" Answer to the second question: yes,
+indefinitely — `live_transcript.md` is never cleaned up by anything;
+`delete_recording()` only pops the index entry, never touches files on
+disk. New `_pending_recordings(data_dir)` in `web/routes/transcripts.py`
+returns recordings with `status == "completed"` (finished capturing,
+never auto-queued — see the copy-fix entry above) and audio on disk,
+newest first, plus which of them still have a live-draft preview file;
+`/transcripts` renders this as a new "Awaiting transcription" section
+above the campaign archive, each row posting straight to the existing
+`POST /recordings/{id}/transcribe` hand-off.
+
+Mid-turn follow-up request: "i'd also like to be able to name the live
+recordings at the start of the session. that way it's easier to identify
+it." Added `Recording.name: Optional[str] = None` (display-only, never
+touches a file path — `id`, a server-generated uuid4, still backs the
+directory) threaded through `create_recording()` ->
+`LocalCaptureManager.start_session(name=)` -> a new "Session name
+(optional)" field on the Record page's local-capture start form ->
+`_clean_session_name()` in `record.py` (trim + cap at 200 chars, blank ->
+`None`). Shown wherever a recording appears: the active-session toolbar,
+the global recording-status banner (`app.js` — HTML-escaped before
+`innerHTML`, since that's client-supplied text and JS `innerHTML` isn't
+auto-escaped the way Jinja is), `recordings.html`'s rows, `recording_
+detail.html`'s header, and the new `/transcripts` section — falls back to
+a truncated id everywhere when unset.
+
+Bonus fix found while touching `recordings.html` for the name display:
+its captured-table status pill said "TRANSCRIBED" for `status ==
+"completed"`, which is backwards — "completed" means the capture
+finished but the full diarized pass hasn't run, "transcribed" is the
+separate post-pipeline status. The table also had no branch at all for
+the real "transcribed"/"transcribing" statuses (empty Action cell).
+Fixed: "completed" now shows "NEEDS TRANSCRIBE" + a direct Transcribe
+button; added the missing status branches.
+
+Tests: `test_create_recording_name_roundtrips` etc. in `test_recording_
+manager.py`; `test_start_session_passes_through_name` etc. in `test_
+local_capture.py`; `test_start_local_json_api_accepts_and_trims_name`,
+`test_clean_session_name_*` etc. in `test_record_routes.py`;
+`test_pending_recordings_*`, `test_transcripts_page_shows_awaiting_
+transcription_section` etc. in `test_web_routes.py`.
+
 **Feature requests (2026-08-16, from the same live smoke-test session):**
 
 - **Change mic/system input devices without stopping the recording.**

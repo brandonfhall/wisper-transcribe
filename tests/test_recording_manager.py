@@ -96,6 +96,35 @@ def test_create_recording_generates_uuid(tmp_path):
     assert len(r1.id) == 36   # uuid4 with dashes
 
 
+def test_create_recording_name_roundtrips(tmp_path):
+    rec = create_recording(
+        voice_channel_id="", guild_id="", data_dir=tmp_path, source="local",
+        name="Session 14 — the ambush",
+    )
+    loaded = load_recordings(tmp_path)
+    assert loaded[rec.id].name == "Session 14 — the ambush"
+
+
+def test_create_recording_defaults_name_to_none(tmp_path):
+    rec = _make_recording(tmp_path)
+    assert rec.name is None
+    loaded = load_recordings(tmp_path)
+    assert loaded[rec.id].name is None
+
+
+def test_load_legacy_json_without_name_defaults_to_none(tmp_path):
+    """A metadata.json written before `name` existed must still load."""
+    rec = _make_recording(tmp_path)
+    meta_path = get_metadata_path(rec.id, tmp_path)
+    data = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert "name" in data  # sanity: current writer includes it
+    del data["name"]
+    meta_path.write_text(json.dumps(data), encoding="utf-8")
+
+    loaded = load_recordings(tmp_path)
+    assert loaded[rec.id].name is None
+
+
 def test_load_returns_empty_when_no_file(tmp_path):
     assert load_recordings(tmp_path) == {}
 

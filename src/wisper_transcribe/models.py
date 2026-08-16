@@ -116,6 +116,7 @@ class Recording:
     job_id: Optional[str] = None  # JobQueue job.id when transcription is in progress or done
     source: str = "discord"        # "discord" | "local" — default keeps legacy JSON loading unchanged
     devices: dict = field(default_factory=dict)  # local: {"mic": "<device name>", "system": "<device name>"} — display-only, never used in a file path
+    name: Optional[str] = None     # user-supplied session name, set at start; display-only, never used in a file path
 
 
 # ---------------------------------------------------------------------------

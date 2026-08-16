@@ -170,6 +170,11 @@ document.addEventListener('DOMContentLoaded', function() {
   var startTs = null;
 
   function pad(n) { return String(n).padStart(2, '0'); }
+  function escapeHtml(s) {
+    var div = document.createElement('div');
+    div.textContent = s;
+    return div.innerHTML;
+  }
   function tickElapsed() {
     if (!startTs) return;
     var s = Math.floor(Date.now() / 1000 - startTs);
@@ -189,9 +194,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
     startTs = status.started_at ? new Date(status.started_at).getTime() / 1000 : null;
     var stopUrl = status.source === 'local' ? '/record/stop-local' : '/record/stop';
-    var label = status.source === 'local'
-      ? 'Local capture'
-      : ('#' + (status.voice_channel_id || '?'));
+    var label = status.name
+      ? escapeHtml(status.name)
+      : (status.source === 'local' ? 'Local capture' : ('#' + (status.voice_channel_id || '?')));
 
     banner.innerHTML =
       '<div style="display:flex;align-items:center;gap:18px;padding:10px 24px;' +

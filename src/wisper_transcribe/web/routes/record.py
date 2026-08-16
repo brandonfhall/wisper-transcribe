@@ -70,6 +70,7 @@ def _recording_to_dict(rec) -> dict:
         "has_transcript": bool(rec.transcript_path),
         "source": rec.source,
         "devices": dict(rec.devices),
+        "name": rec.name,
     }
 
 
@@ -303,6 +304,18 @@ async def record_live_noise_floor(request: Request):
     return JSONResponse({"noise_floor": noise_floor})
 
 
+_MAX_SESSION_NAME_LEN = 200
+
+
+def _clean_session_name(raw: str) -> Optional[str]:
+    """Normalize a client-supplied session name: trimmed, capped length,
+    blank collapses to None. Display-only -- never touches a file path
+    (`Recording.id`, a server-generated uuid4, backs the on-disk directory),
+    so no path-traversal-style sanitization is needed here."""
+    cleaned = raw.strip()[:_MAX_SESSION_NAME_LEN]
+    return cleaned or None
+
+
 @router.post("/api/record/start-local")
 async def record_start_local(request: Request):
     """Start a local mic + system-audio capture session."""
@@ -337,6 +350,7 @@ async def record_start_local(request: Request):
             system_id,
             mic_name=mic_name,
             system_name=system_name,
+            name=_clean_session_name(str(body.get("name", ""))),
         )
     except RuntimeError:
         return JSONResponse({"detail": "recording already in progress"}, status_code=409)
@@ -605,6 +619,7 @@ async def record_start_local_html(
     system_id: Annotated[str, Form()],
     campaign_slug: Annotated[str, Form()] = "",
     mic_profile_key: Annotated[str, Form()] = "",
+    name: Annotated[str, Form()] = "",
 ) -> RedirectResponse:
     """HTML form handler: start a local capture session and redirect back to /record."""
     lcm = get_local_capture_manager(request)
@@ -629,6 +644,7 @@ async def record_start_local_html(
             system_id.strip(),
             mic_name=mic_name,
             system_name=system_name,
+            name=_clean_session_name(name),
         )
     except RuntimeError:
         return error_redirect("/record", "already_active")

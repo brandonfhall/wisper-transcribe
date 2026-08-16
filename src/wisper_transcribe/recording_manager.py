@@ -141,6 +141,7 @@ def _recording_to_dict(r: Recording) -> dict:
         "job_id": r.job_id,
         "source": r.source,
         "devices": dict(r.devices),
+        "name": r.name,
     }
 
 
@@ -164,6 +165,7 @@ def _recording_from_dict(d: dict) -> Recording:
         job_id=d.get("job_id"),
         source=d.get("source", "discord"),
         devices=dict(d.get("devices", {})),
+        name=d.get("name"),
     )
 
 
@@ -246,12 +248,15 @@ def create_recording(
     data_dir: Optional[Path] = None,
     source: str = "discord",
     devices: Optional[dict] = None,
+    name: Optional[str] = None,
 ) -> Recording:
     """Create and persist a new Recording in 'recording' status.
 
     `source`/`devices` back local capture sessions (`web/local_capture.py`):
     `voice_channel_id`/`guild_id` are empty strings there, and `devices`
     carries the chosen mic/system device names for the detail page.
+    `name` is an optional user-supplied session title, set at session
+    start -- display-only, never used in a file path.
     """
     recording_id = str(uuid.uuid4())
     recordings_dir = get_recordings_dir(data_dir)
@@ -273,6 +278,7 @@ def create_recording(
         rejoin_log=[],
         source=source,
         devices=devices or {},
+        name=name,
     )
     save_recording(recording, data_dir)
     return recording

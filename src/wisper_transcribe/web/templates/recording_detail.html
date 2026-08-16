@@ -1,13 +1,18 @@
 {% extends "base.html" %}
 {% from "partials/icons.html" import icon %}
-{% block title %}Recording {{ recording.id[:8] }}{% endblock %}
+{% block title %}Recording {{ recording.name or recording.id[:8] }}{% endblock %}
 
 {% block toolbar %}
 <div class="toolbar">
   <div>
     <div class="toolbar-kicker">Recordings / <a href="/recordings" style="color:var(--color-paper-dim)">all</a></div>
     <div style="display:flex;align-items:baseline;gap:12px">
+      {% if recording.name %}
+      <span class="toolbar-title" style="font-size:18px">{{ recording.name }}</span>
+      <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint)">{{ recording.id }}</span>
+      {% else %}
       <span class="toolbar-title" style="font-size:16px;font-style:normal;font-family:var(--font-mono)">{{ recording.id }}</span>
+      {% endif %}
     </div>
   </div>
   <div style="display:flex;align-items:center;gap:8px">

@@ -33,7 +33,7 @@
       Live <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint)">{{ live_recs | length }}</span>
     </button>
     <button class="filter-pill" onclick="wisperFilter(this,'completed')">
-      Done <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint)">{{ done_recs | length }}</span>
+      Needs transcribe <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint)">{{ done_recs | length }}</span>
     </button>
     <button class="filter-pill" onclick="wisperFilter(this,'failed')">
       Failed <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint)">{{ failed_recs | length }}</span>
@@ -65,7 +65,7 @@
               border:1px solid #e88b8b40;text-decoration:none;margin-bottom:8px">
       <div>
         <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-signal-rose);letter-spacing:0.18em;font-weight:600;margin-bottom:6px">RECORDING</div>
-        <div style="font-family:var(--font-serif);font-size:22px;color:var(--color-paper)">{{ r.id[:16] }}</div>
+        <div style="font-family:var(--font-serif);font-size:22px;color:var(--color-paper)">{{ r.name or (r.id[:16] ~ '…') }}</div>
         <div style="display:flex;align-items:center;gap:12px;margin-top:6px;font-size:12px;color:var(--color-paper-dim)">
           {% if camp %}<span>{{ camp.display_name }}</span>{% endif %}
           {% if r.source == 'local' %}
@@ -117,7 +117,7 @@
          style="display:grid;grid-template-columns:12px 1.4fr 1fr 90px 70px 110px 130px;gap:16px;padding:14px 16px;border-bottom:1px solid var(--color-rule);align-items:center">
       {{ icon("waveform", 11, "var(--color-paper-faint)") }}
       <div>
-        <div style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper)">{{ r.id[:20] }}</div>
+        <a href="/recordings/{{ r.id }}" style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper);text-decoration:none">{{ r.name or (r.id[:20] ~ '…') }}</a>
         <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:3px">{{ r.id }} · {{ started }}</div>
       </div>
       <div>
@@ -135,7 +135,11 @@
       <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint);text-align:right">{{ r.segment_manifest | length }}</div>
       <div>
         {% if r.status == 'completed' %}
+          <span class="pill pill-cyan">NEEDS TRANSCRIBE</span>
+        {% elif r.status == 'transcribed' %}
           <span class="pill pill-green">TRANSCRIBED</span>
+        {% elif r.status == 'transcribing' %}
+          <span class="pill pill-cyan">TRANSCRIBING</span>
         {% elif r.status == 'recording' %}
           <span class="pill pill-rose">LIVE</span>
         {% elif r.status == 'failed' %}
@@ -146,6 +150,10 @@
       </div>
       <div style="text-align:right">
         {% if r.status == 'completed' %}
+          <form method="post" action="/recordings/{{ r.id }}/transcribe" style="display:inline">
+            <button type="submit" class="btn btn-primary btn-sm">Transcribe</button>
+          </form>
+        {% elif r.status == 'transcribed' %}
           <a href="/recordings/{{ r.id }}" style="font-size:12px;color:var(--color-paper)">Open →</a>
         {% elif r.status == 'failed' %}
           <form method="post" action="/recordings/{{ r.id }}/transcribe" style="display:inline">

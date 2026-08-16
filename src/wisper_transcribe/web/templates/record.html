@@ -17,8 +17,10 @@
     </div>
     <div style="width:1px;height:28px;background:var(--color-rule)"></div>
     <div>
-      <div class="mono-kicker">{{ "Source" if active_recording.source == "local" else "Channel" }}</div>
-      {% if active_recording.source == "local" %}
+      <div class="mono-kicker">{{ "Session" if active_recording.name else ("Source" if active_recording.source == "local" else "Channel") }}</div>
+      {% if active_recording.name %}
+      <div style="font-family:var(--font-serif);font-style:italic;font-size:16px;color:var(--color-paper);margin-top:2px">{{ active_recording.name }}</div>
+      {% elif active_recording.source == "local" %}
       <div style="font-family:var(--font-serif);font-style:italic;font-size:16px;color:var(--color-paper);margin-top:2px">Local capture</div>
       {% elif active_recording.voice_channel_id %}
       <div style="font-family:var(--font-serif);font-style:italic;font-size:16px;color:var(--color-paper);margin-top:2px">#{{ active_recording.voice_channel_id }}</div>
@@ -331,6 +333,15 @@
   <form method="post" action="/record/start-local">
     <div class="section-head"><div class="section-head-left"><span class="section-kicker">Local capture</span><h2 class="section-title">Mic + system audio</h2></div></div>
     <div style="border-top:1px solid var(--color-rule)">
+
+      <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
+        <div class="mono-kicker" style="margin-bottom:10px">Session name (optional)</div>
+        <input type="text" name="name" maxlength="200" placeholder="e.g. Session 14 — the ambush"
+               style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:8px 10px;border-radius:5px;font-size:13px;font-family:var(--font-sans)"/>
+        <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:6px">
+          Makes it easier to find later on the Recordings and Transcripts pages — defaults to the session ID if left blank.
+        </div>
+      </div>
 
       <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
         <div class="mono-kicker" style="margin-bottom:10px">Campaign (optional)</div>

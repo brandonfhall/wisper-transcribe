@@ -327,6 +327,7 @@ class LocalCaptureManager:
         system_device_id: str,
         mic_name: str = "",
         system_name: str = "",
+        name: Optional[str] = None,
     ) -> Recording:
         """Create a Recording and start the two capture threads + tick thread.
 
@@ -334,7 +335,10 @@ class LocalCaptureManager:
         (looked up by the caller via `enumerate_devices()` +
         `resolve_device_name()`), stored in `Recording.devices` for the
         detail page -- never a client-supplied free-text string. Falls back
-        to the raw device id if no name is given.
+        to the raw device id if no name is given. `name` is the opposite:
+        a client-supplied free-text session title, display-only (never used
+        in a file path -- `Recording.id`, a server-generated uuid4, is what
+        backs the on-disk directory), so no server-side resolution needed.
         """
         if self._active_recording is not None and self._active_recording.status in ACTIVE_STATUSES:
             raise RuntimeError(f"Session {self._active_recording.id} is already active")
@@ -349,6 +353,7 @@ class LocalCaptureManager:
                 "mic": mic_name or mic_device_id,
                 "system": system_name or system_device_id,
             },
+            name=name,
         )
 
         rec_dir = self._data_dir / "recordings" / recording.id
