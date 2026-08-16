@@ -950,6 +950,7 @@ def _submit_recording_transcription(recording, request: Request, data_dir: Path)
         original_stem=recording.id,
         output_dir=str(output_dir),
         campaign=recording.campaign_slug or "",
+        title=recording.name,
         on_complete=_on_complete,
         on_error=_on_error,
     )

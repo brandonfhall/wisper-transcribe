@@ -1121,6 +1121,62 @@ def test_transcribe_recording_handoff(client):
     mock_submit.assert_called_once()
 
 
+def test_transcribe_recording_passes_name_as_title(client):
+    """The session name set at recording start becomes the transcript's
+    title -- see pipeline.py's title= param, which overrides the default
+    filename-derived title without touching the actual output filename."""
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path, name="Session 14 — the ambush")
+    combined = tmp_path / "recordings" / rec.id / "final" / "combined.wav"
+    combined.parent.mkdir(parents=True, exist_ok=True)
+    combined.write_bytes(b"fake wav data")
+    rec.combined_path = combined
+    rec.status = "completed"
+    save_recording(rec, tmp_path)
+
+    from wisper_transcribe.web.jobs import Job as JobCls
+    import uuid as _uuid
+    fake_job = JobCls(
+        id=str(_uuid.uuid4()), status="pending", created_at=rec.started_at,
+        input_path=str(tmp_path / "output" / f"{rec.id}.wav"), kwargs={}, name=rec.id,
+    )
+    with patch.object(c.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
+        c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
+
+    _, kwargs = mock_submit.call_args
+    assert kwargs["title"] == "Session 14 — the ambush"
+
+
+def test_transcribe_recording_no_name_passes_none_title(client):
+    """An unnamed recording passes title=None -- process_file() falls back
+    to its usual filename-derived title, no behavior change from before
+    the name feature existed."""
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    combined = tmp_path / "recordings" / rec.id / "final" / "combined.wav"
+    combined.parent.mkdir(parents=True, exist_ok=True)
+    combined.write_bytes(b"fake wav data")
+    rec.combined_path = combined
+    rec.status = "completed"
+    save_recording(rec, tmp_path)
+
+    from wisper_transcribe.web.jobs import Job as JobCls
+    import uuid as _uuid
+    fake_job = JobCls(
+        id=str(_uuid.uuid4()), status="pending", created_at=rec.started_at,
+        input_path=str(tmp_path / "output" / f"{rec.id}.wav"), kwargs={}, name=rec.id,
+    )
+    with patch.object(c.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
+        c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
+
+    _, kwargs = mock_submit.call_args
+    assert kwargs["title"] is None
+
+
 def test_transcribe_recording_reverts_status_on_job_failure(client):
     """A failed transcription job (on_error callback) reverts the recording
     back to its pre-transcribe status instead of leaving it stuck at

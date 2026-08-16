@@ -404,6 +404,28 @@ comment). Re-verified live end-to-end this time: re-triggered
 transcription on the same previously-failing recording and it completed
 with a real transcript.
 
+**Recording name now persists to the finished transcript's title —
+delivered (2026-08-16).** User: "the name I set when I start the
+recording should persist to the actual finished transcript." Previously
+`_submit_recording_transcription()` always passed `original_stem=
+recording.id`, so `process_file()`'s default filename-derived title
+became the recording's UUID, title-cased — the session name was never
+used. Fixed by decoupling title from filename rather than reusing
+`original_stem` for both: new `title=` param on `pipeline.process_file()`
+overrides the default title, and `_submit_recording_transcription()`
+passes `title=recording.name` alongside the unchanged `original_stem=
+recording.id`. Deliberately kept the two separate — `original_stem`
+becomes a real filename via a raw rename with no sanitization
+(`tmp_path.with_name(original_stem + suffix)` in `JobQueue.submit()`),
+so a free-text name with filesystem-unsafe characters must never flow
+through it; `title` only ever reaches YAML frontmatter, no such
+constraint. "Only overwrite it if I do a full transcribe job" was
+already true structurally — nothing else sets `transcript_path`/title,
+so it's not touched again until the next explicit Transcribe/Re-transcribe
+click. Tests: `test_process_file_title_override` in `test_pipeline.py`;
+`test_transcribe_recording_passes_name_as_title`, `test_transcribe_
+recording_no_name_passes_none_title` in `test_record_routes.py`.
+
 ---
 
 ## Senior review — closed 2026-07-16
