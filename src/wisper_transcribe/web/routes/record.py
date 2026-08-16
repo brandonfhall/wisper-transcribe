@@ -44,11 +44,6 @@ log = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_NOT_IMPLEMENTED = JSONResponse(
-    {"detail": "not implemented"},
-    status_code=501,
-)
-
 
 def _recording_to_dict(rec) -> dict:
     """Serialize a Recording for the JSON API.
@@ -163,8 +158,20 @@ async def record_stop(request: Request):
 
 @router.get("/api/record/status")
 async def record_status(request: Request):
-    """Return current bot + recording status. (stub)"""
-    return _NOT_IMPLEMENTED
+    """Current active-recording status, any source (Discord or local).
+
+    Powers the global recording-status banner (`base.html` + `app.js`)
+    that keeps a live session's Stop control visible while navigating
+    away from `/record` -- not just this JSON API's own consumers.
+    `{"active": false}` when idle; otherwise `_recording_to_dict()` plus
+    `"active": true`.
+    """
+    rec = _current_active_recording(request)
+    if rec is None:
+        return JSONResponse({"active": False})
+    payload = _recording_to_dict(rec)
+    payload["active"] = True
+    return JSONResponse(payload)
 
 
 # ---------------------------------------------------------------------------

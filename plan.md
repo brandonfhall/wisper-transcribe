@@ -157,6 +157,25 @@ session`, `test_record_sse_idle_status_omits_level_gauge_fields` in
 `StreamingResponse.body_iterator` directly via `asyncio.run` rather than
 over a live TestClient HTTP stream, since the endpoint polls forever).
 
+**Global recording-status banner — delivered (2026-08-16):** User report:
+"I can navigate to other pages and the recording seems to keep going, but
+in the upper right corner it shows 'start' instead of 'stop recording'."
+`/record`'s own toolbar already reflected live state correctly, but every
+*other* page (Dashboard, Recordings, Transcripts, etc.) had no idea a
+session was active — Dashboard/Recordings still showed a static
+"Start session" CTA. Rather than editing every page's toolbar, filled in
+the long-dead `GET /api/record/status` 501 stub (`_current_active_
+recording()` -> `{"active": false}` or `_recording_to_dict()` + `"active":
+true`) and added an empty `#global-recording-banner` container to
+`base.html`, populated client-side by a new `app.js` poller (every 4s,
+skipped on `/record` itself since its own toolbar already covers this):
+a rose banner with a live elapsed timer and a real `Stop recording` form
+(routes to `/record/stop-local` or `/record/stop` per `source`) appears
+at the top of every other page while a session is active. No per-page
+template edits needed. Tests: `test_record_status_idle_when_no_active_
+session`, `test_record_status_reports_active_local_session` in
+`test_record_routes.py`.
+
 **Feature requests (2026-08-16, from the same live smoke-test session):**
 
 - **Change mic/system input devices without stopping the recording.**

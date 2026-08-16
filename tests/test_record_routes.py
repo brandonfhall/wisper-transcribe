@@ -60,10 +60,38 @@ def test_record_stop_with_no_active_session_returns_400(client):
     assert resp.status_code == 400
 
 
-def test_record_status_returns_501(client):
+def test_record_status_idle_when_no_active_session(client):
     c, _ = client
     resp = c.get("/api/record/status")
-    assert resp.status_code == 501
+    assert resp.status_code == 200
+    assert resp.json() == {"active": False}
+
+
+def test_record_status_reports_active_local_session(client):
+    """Powers the global recording-status banner (base.html + app.js) --
+    must reflect a session in progress on any page, not just /record."""
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            start = c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
+        rec_id = start.json()["id"]
+
+        resp = c.get("/api/record/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["active"] is True
+        assert data["id"] == rec_id
+        assert data["source"] == "local"
+        assert data["status"] == "recording"
+    finally:
+        mgr.stop_session()
 
 
 def test_channels_no_token_returns_no_token_error(client):

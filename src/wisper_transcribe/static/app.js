@@ -154,6 +154,78 @@ document.addEventListener('DOMContentLoaded', function() {
   if (terminal) terminal.scrollTop = terminal.scrollHeight;
 });
 
+// ── Global recording-status banner ──
+// Shown on every page except /record itself (which already has its own
+// full toolbar with an elapsed timer + Stop button) -- so a session
+// started on /record stays visible, with a working Stop control, while
+// navigating elsewhere. Polls the JSON status endpoint rather than SSE:
+// this banner needs to work correctly across full page navigations, where
+// an EventSource would just be torn down and reopened anyway.
+(function() {
+  var banner = document.getElementById('global-recording-banner');
+  if (!banner) return;
+  if (location.pathname === '/record') return;
+
+  var elapsedTimer = null;
+  var startTs = null;
+
+  function pad(n) { return String(n).padStart(2, '0'); }
+  function tickElapsed() {
+    if (!startTs) return;
+    var s = Math.floor(Date.now() / 1000 - startTs);
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+    var el = document.getElementById('global-elapsed-timer');
+    if (el) el.textContent = pad(h) + ':' + pad(m) + ':' + pad(ss);
+  }
+
+  function render(status) {
+    if (!status || !status.active) {
+      banner.style.display = 'none';
+      banner.innerHTML = '';
+      if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+      startTs = null;
+      return;
+    }
+
+    startTs = status.started_at ? new Date(status.started_at).getTime() / 1000 : null;
+    var stopUrl = status.source === 'local' ? '/record/stop-local' : '/record/stop';
+    var label = status.source === 'local'
+      ? 'Local capture'
+      : ('#' + (status.voice_channel_id || '?'));
+
+    banner.innerHTML =
+      '<div style="display:flex;align-items:center;gap:18px;padding:10px 24px;' +
+      'background:linear-gradient(180deg,#e88b8b10 0%,transparent 100%);' +
+      'border-bottom:1px solid var(--color-rule)">' +
+        '<div style="display:flex;align-items:center;gap:9px">' +
+          '<span class="dot-rose"></span>' +
+          '<span style="font-family:var(--font-mono);font-size:10px;color:var(--color-signal-rose);' +
+          'letter-spacing:0.14em;font-weight:600">RECORDING</span>' +
+        '</div>' +
+        '<span id="global-elapsed-timer" style="font-family:var(--font-mono);font-size:13px;color:var(--color-paper)">00:00:00</span>' +
+        '<a href="/record" style="margin-right:auto;font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">' +
+          label + ' — view →' +
+        '</a>' +
+        '<form method="post" action="' + stopUrl + '" style="margin:0">' +
+          '<button type="submit" class="btn btn-rose btn-sm">Stop recording</button>' +
+        '</form>' +
+      '</div>';
+    banner.style.display = 'block';
+    tickElapsed();
+    if (!elapsedTimer) elapsedTimer = setInterval(tickElapsed, 1000);
+  }
+
+  function poll() {
+    fetch('/api/record/status')
+      .then(function(r) { return r.json(); })
+      .then(render)
+      .catch(function() {});
+  }
+
+  poll();
+  setInterval(poll, 4000);
+})();
+
 // ── Sidebar status fallback ──
 // htmx handles this via hx-trigger="load, every 5s" when it's available.
 // If htmx.min.js is still the placeholder (local dev), this vanilla-JS
