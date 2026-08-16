@@ -155,14 +155,33 @@ def test_attribute_speaker_system_dominant_is_other():
     assert attribute_speaker(mic, system) == "Other"
 
 
-def test_attribute_speaker_both_silent_defaults_to_you():
+def test_attribute_speaker_both_silent_returns_none():
+    """Regression test: both tracks below the noise floor must NOT default
+    to mic_label -- that used to mislabel background noise / hallucinated
+    text as the mic owner's voice."""
     mic = np.zeros(100, dtype="<i2")
     system = np.zeros(100, dtype="<i2")
-    assert attribute_speaker(mic, system) == "You"
+    assert attribute_speaker(mic, system) is None
 
 
-def test_attribute_speaker_empty_spans():
-    assert attribute_speaker(np.array([], dtype="<i2"), np.array([], dtype="<i2")) == "You"
+def test_attribute_speaker_empty_spans_returns_none():
+    assert attribute_speaker(np.array([], dtype="<i2"), np.array([], dtype="<i2")) is None
+
+
+def test_attribute_speaker_both_below_noise_floor_returns_none():
+    """Quiet room tone / mic self-noise on both tracks (nonzero, but below
+    the floor) is dropped rather than attributed to either side."""
+    mic = np.full(100, 50, dtype="<i2")
+    system = np.full(100, 30, dtype="<i2")
+    assert attribute_speaker(mic, system, noise_floor=150.0) is None
+
+
+def test_attribute_speaker_quiet_but_above_floor_still_attributed():
+    """A quiet but real voice (above the floor) is still attributed
+    normally, not dropped -- the floor only catches noise below it."""
+    mic = np.full(100, 200, dtype="<i2")
+    system = np.full(100, 30, dtype="<i2")
+    assert attribute_speaker(mic, system, noise_floor=150.0) == "You"
 
 
 def test_attribute_speaker_custom_mic_label():
@@ -255,6 +274,25 @@ def test_commit_and_transcribe_no_segments_returns_no_lines(monkeypatch):
     n = int(0.5 * RATE)
     silence = np.zeros(n, dtype="<i2").tobytes()
     lines = commit_and_transcribe(silence, silence, silence, chunk_start_s=0.0, device="cpu")
+    assert lines == []
+
+
+def test_commit_and_transcribe_drops_hallucination_on_noise_floor(monkeypatch):
+    """Whisper can still return text for a chunk that's really just room
+    tone / mic self-noise (a VAD false positive, or the mixed track has
+    enough energy to look like "something" even though neither individual
+    track does) -- that hallucinated line must be dropped, not mislabeled
+    under mic_label."""
+    _install_fake_model(monkeypatch, [_fake_whisper_segment(0.0, 0.5, "thanks for watching")])
+    n = int(0.5 * RATE)
+    mic_bytes = np.full(n, 50, dtype="<i2").tobytes()      # below NOISE_FLOOR_RMS
+    system_bytes = np.full(n, 30, dtype="<i2").tobytes()   # below NOISE_FLOOR_RMS
+    mixed_bytes = np.full(n, 80, dtype="<i2").tobytes()
+
+    lines = commit_and_transcribe(
+        mic_bytes, system_bytes, mixed_bytes, chunk_start_s=0.0,
+        model_size="base", device="cpu",
+    )
     assert lines == []
 
 

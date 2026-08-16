@@ -88,13 +88,60 @@ per `LIVE_AUDIO_TEST_PLAN.md`) — fixed same day:**
   much quieter system signal (RMS ~200 vs mic RMS ~1440, so mic legitimately
   dominated every window, possibly with acoustic mic bleed from speaker
   output if headphones weren't used). `attribute_speaker()`'s RMS-compare
-  logic itself checked out correct — no code bug found. **Not code — a
-  design limitation** (this preview is an RMS heuristic, not real
-  diarization, and always resolves ties/silence to the mic label — see
-  `live_transcribe.py`'s module docstring) compounded by a likely test-setup
-  issue (loopback device selection / speaker vs. headphone use). No fix
-  applied; flagged for the user to retest with headphones and confirm the
-  OS default playback device matches the selected loopback device.
+  logic itself checked out correct at the time — no code bug found there.
+  Confirmed with the user (attribution itself is working); the real
+  follow-up request was a noise floor (below), not a change to the
+  attribution comparison.
+- **Noise floor added — mic/system self-noise was getting hallucinated as
+  real speech.** User report: "my mic with nothing going is getting random
+  audio transcribed, probably just background noise." Root cause: Silero
+  VAD's chunk-boundary pass can flag room tone / mic self-noise as
+  "speech," and faster-whisper tends to hallucinate plausible-looking text
+  for that kind of near-silent audio rather than returning nothing.
+  `attribute_speaker()` now takes a `noise_floor` (int16 RMS, default
+  `NOISE_FLOOR_RMS = 150.0` in `live_transcribe.py`) and returns `None`
+  when *neither* track clears it; `commit_and_transcribe()` drops that
+  segment instead of mislabeling it under `mic_label` by the old
+  both-silent tie-break. 150.0 is a coarse starting point (real speech
+  observed well above it on a USB condenser mic; true silence measures
+  exactly 0.0) — may need tuning per mic/gain, see the slider feature
+  request below. Tests: `test_attribute_speaker_*noise_floor*`,
+  `test_commit_and_transcribe_drops_hallucination_on_noise_floor` in
+  `tests/test_live_transcribe.py`.
+
+**Feature requests (2026-08-16, from the same live smoke-test session):**
+
+- **Noise-floor sensitivity slider on the Record page, adjustable live
+  during a session.** The `NOISE_FLOOR_RMS = 150.0` default above is a
+  guess — different mics/gain levels/rooms will want it higher or lower,
+  and the user wants to tune it without restarting the session. Needs:
+  (1) a `noise_floor` param threaded through `submit_live()` →
+  `run_live_loop()` → `commit_and_transcribe()` (currently hardcoded via
+  the `attribute_speaker` default), (2) for *live* adjustment specifically,
+  the value can't just be a fixed kwarg baked in at job-submit time — it
+  needs to live somewhere mutable the running `JOB_LIVE` job's loop reads
+  fresh each iteration (e.g. a `job.live_noise_floor` attribute, mirroring
+  how `live_stop_event` already lets the route layer signal a running
+  job), plus a small API route (`POST /api/record/live-settings` or
+  similar) for the slider to call. (3) UI: a slider control on `/record`'s
+  active-session view, live-updating via that route.
+- **Change mic/system input devices without stopping the recording.**
+  Today `LocalCaptureManager.start_session()` binds two capture threads to
+  fixed device IDs for the whole session; switching requires Stop then
+  Start (a new `Recording`, a new `combined.wav`, a gap in the transcript).
+  This is a bigger architectural change than the slider above — would need
+  the capture threads to be individually restartable against a new device
+  ID mid-session while the tick thread / segment writers / `Recording`
+  keep running continuously underneath (segment rotation already handles
+  a *track* going silent via FIFO starvation, but not swapping which
+  physical device feeds a track). Not scoped in detail yet — worth a
+  design pass before implementation given the size.
+- **Live transcript ticker on `/record` should never drop old lines within
+  a session ("stay and not roll over").** User's stated use case: running
+  this during a tabletop game so they can scroll back if they missed
+  something someone said. `wisperTickerAppend()` in `static/app.js`
+  currently hard-caps the DOM at 12 entries, deleting older ones — see the
+  fix below (implemented same session, not just a request).
 
 **Not yet fixed — found during the same smoke test:**
 

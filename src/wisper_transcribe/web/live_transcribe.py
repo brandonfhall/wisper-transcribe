@@ -36,6 +36,16 @@ FORCE_CUT_S = 15.0
 MIN_COMMIT_S = 0.3           # skip transcribing sub-300ms scraps
 POLL_INTERVAL_S = 0.25       # how often the live loop checks the ring buffer
 
+# int16 RMS floor below which a track counts as "nothing happening" rather
+# than a real (if quiet) voice. Silero VAD's speech/silence split (used to
+# decide chunk boundaries) can still flag room tone / mic self-noise as
+# "speech", and faster-whisper tends to hallucinate plausible-sounding text
+# on that kind of near-silent audio rather than returning nothing -- this
+# is a coarse starting point (real speech observed well above this on a
+# USB condenser mic; true silence measures exactly 0.0) and may need
+# tuning for a given mic's gain/self-noise level.
+NOISE_FLOOR_RMS = 150.0
+
 
 @dataclass
 class LiveLine:
@@ -177,19 +187,27 @@ def attribute_speaker(
     system_span: np.ndarray,
     mic_label: str = "You",
     other_label: str = "Other",
-) -> str:
+    noise_floor: float = NOISE_FLOOR_RMS,
+) -> Optional[str]:
     """`mic_label` (mic dominant) or `other_label` (system dominant) by RMS
-    energy. Defaults to "You"/"Other"; a session started with a "this is
-    me" enrolled-profile selection passes the profile's display_name as
-    `mic_label` instead (Phase 3) -- purely cosmetic, doesn't touch the
-    energy-comparison logic itself.
+    energy, or `None` when *neither* track clears `noise_floor` -- nothing
+    is really happening on either side, so the caller should drop the
+    segment rather than mislabel background noise as a real voice. Defaults
+    to "You"/"Other"; a session started with a "this is me" enrolled-profile
+    selection passes the profile's display_name as `mic_label` instead
+    (Phase 3) -- purely cosmetic, doesn't touch the energy-comparison logic
+    itself.
 
-    Ties (including both silent) resolve to `mic_label` -- a marginal call
-    either way, but false attribution to `other_label` would be more
-    misleading (words from your own mic showing up unlabeled as the other
-    party).
+    Ties among two tracks that both clear the floor resolve to `mic_label`
+    -- a marginal call either way, but false attribution to `other_label`
+    would be more misleading (words from your own mic showing up unlabeled
+    as the other party).
     """
-    return mic_label if _rms(mic_span) >= _rms(system_span) else other_label
+    mic_rms = _rms(mic_span)
+    system_rms = _rms(system_span)
+    if mic_rms < noise_floor and system_rms < noise_floor:
+        return None
+    return mic_label if mic_rms >= system_rms else other_label
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +298,11 @@ def commit_and_transcribe(
         mic_span = mic_i16[start_sample:end_sample]
         system_span = system_i16[start_sample:end_sample]
         speaker = attribute_speaker(mic_span, system_span, mic_label=mic_label, other_label=other_label)
+        if speaker is None:
+            # Neither track cleared the noise floor -- Whisper hallucinated
+            # text over what was actually just room tone / mic self-noise.
+            # Drop it rather than mislabeling it under mic_label.
+            continue
         lines.append(LiveLine(
             speaker=speaker,
             text=seg.text,

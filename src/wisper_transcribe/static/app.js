@@ -91,19 +91,16 @@ window.wisperTickerAppend = function(data) {
     '</span>' +
     '<span style="font-size:13.5px;color:var(--color-paper);line-height:1.5">' + (data.text || '') + '</span>';
 
-  // Prepend (newest at top) and fade older lines
+  // Prepend (newest at top), fade older lines for a recency cue -- but
+  // never delete them. This ticker doubles as an in-session scrollback log
+  // (e.g. rewinding to something missed during a game), so old lines must
+  // stay for the life of the page, not roll off after a fixed count.
   ticker.insertBefore(line, ticker.firstChild);
 
-  // Fade older entries
   var lines = ticker.querySelectorAll('div[style*="grid-template-columns"]');
   lines.forEach(function(l, i) {
     l.style.opacity = Math.max(0.45, 1 - i * 0.12);
   });
-
-  // Keep at most 12 lines
-  while (lines.length > 12) {
-    ticker.removeChild(ticker.lastChild);
-  }
 };
 
 // ── Inline audio excerpt player ──
