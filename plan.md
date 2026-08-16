@@ -39,6 +39,27 @@ session budget — ~$9 in credits when this note was written). If picking this
 back up, that duplication is the next-best cleanup target before the real-device
 smoke test above.
 
+**Manual smoke-test follow-ups (2026-08-16, real-device testing in progress
+per `LIVE_AUDIO_TEST_PLAN.md`) — fixed same day:**
+
+- **Default "this is me" mic profile — fixed.** `_remember_mic_profile_default()`
+  in `web/routes/record.py` now persists whatever profile (including blank)
+  was selected on local-session start as the `default_mic_profile_key` config
+  value, and `/record` pre-selects it on the dropdown next time — still
+  overridable per-session.
+- **`/record` page's "Heard so far" ticker never updated — fixed.** It was
+  listening for a `partial_transcript` SSE event on `/record/sse` that the
+  endpoint never emits (only `type: status` payloads on the default
+  `message` event). Live transcription itself was working the whole time —
+  confirmed via `live_transcript.md` on disk during the smoke test — just
+  invisible on this page. Now opens its own `EventSource` at the same
+  `GET /recordings/{id}/live` stream the recording detail page already used
+  correctly.
+- **Recording detail page now shows total duration** (`ended_at - started_at`,
+  dash while still recording) in the status strip — same computation
+  `recordings.html`'s list view already used, added as a 7th status-strip
+  cell on the detail page too.
+
 ---
 
 ## Senior review — closed 2026-07-16

@@ -25,7 +25,7 @@ from wisper_transcribe.campaign_manager import (
     load_campaigns,
     move_transcript_to_campaign,
 )
-from wisper_transcribe.config import get_data_dir, load_config
+from wisper_transcribe.config import get_data_dir, load_config, save_config
 from wisper_transcribe.recording_manager import (
     _validate_recording_id,
     delete_recording,
@@ -232,6 +232,21 @@ def _stop_live_transcription(request: Request, lcm, recording_id: str) -> None:
         )
 
 
+def _remember_mic_profile_default(mic_profile_key: str) -> None:
+    """Persist the most recently selected "this is me" profile so it's
+    pre-selected on the next local-capture session.
+
+    The local mic is the same person's voice the large majority of
+    sessions, so remembering the last choice (including "— Label my lines
+    'You' —", i.e. blank) saves reselecting it every time while still
+    letting a one-off different selection stick as the new default.
+    """
+    cfg = load_config()
+    if cfg.get("default_mic_profile_key", "") != mic_profile_key:
+        cfg["default_mic_profile_key"] = mic_profile_key
+        save_config(cfg)
+
+
 @router.get("/api/record/devices")
 async def record_devices(request: Request):
     """Enumerate local mic + system-audio (loopback) devices for the picker.
@@ -282,6 +297,7 @@ async def record_start_local(request: Request):
         return JSONResponse({"detail": "recording already in progress"}, status_code=409)
 
     mic_profile_key = str(body.get("mic_profile_key", ""))
+    _remember_mic_profile_default(mic_profile_key)
     _start_live_transcription(request, lcm, recording, get_data_dir(), mic_profile_key=mic_profile_key)
     return JSONResponse(_recording_to_dict(recording), status_code=201)
 
@@ -457,6 +473,7 @@ async def record_page(request: Request) -> HTMLResponse:
             "default_channel": cfg.get("discord_default_channel", ""),
             "local_devices": enumerate_devices(),
             "speaker_profiles": load_profiles(data_dir),
+            "default_mic_profile_key": cfg.get("default_mic_profile_key", ""),
         },
     )
 
@@ -565,6 +582,7 @@ async def record_start_local_html(
     except RuntimeError:
         return error_redirect("/record", "already_active")
 
+    _remember_mic_profile_default(mic_profile_key.strip())
     _start_live_transcription(
         request, lcm, recording, get_data_dir(), mic_profile_key=mic_profile_key.strip()
     )

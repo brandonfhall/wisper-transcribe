@@ -375,6 +375,30 @@ def test_record_page_shows_local_active_session(client):
         mgr.stop_session()
 
 
+def test_record_page_wires_live_ticker_to_recording_live_sse(client):
+    """The 'Heard so far' ticker on /record subscribes to the same working
+    SSE stream as the recording detail page, not the dead partial_transcript
+    event that /record/sse never emits."""
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            start_resp = c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
+            recording_id = start_resp.json()["id"]
+            resp = c.get("/record")
+        assert resp.status_code == 200
+        assert f"/recordings/{recording_id}/live" in resp.text
+        assert "partial_transcript" not in resp.text
+    finally:
+        mgr.stop_session()
+
+
 def test_record_page_hides_local_section_when_unavailable(client):
     """No Local card at all when soundcard isn't importable (the default
     in this test environment, but pinned explicitly for determinism)."""
@@ -426,6 +450,49 @@ def test_record_page_shows_this_is_me_dropdown_with_enrolled_profiles(client):
     assert 'name="mic_profile_key"' in resp.text
     assert "Brandon" in resp.text
     assert 'This is me' in resp.text
+
+
+def test_record_page_preselects_default_mic_profile(client):
+    """The mic-profile dropdown pre-selects `default_mic_profile_key` from config."""
+    from wisper_transcribe.models import SpeakerProfile
+
+    c, data_dir = client
+    fake_devices = {"microphones": [], "loopbacks": [], "available": True}
+    fake_profile = SpeakerProfile(
+        name="brandon", display_name="Brandon", role="player",
+        embedding_path=data_dir / "brandon.npy", enrolled_date="2026-01-01",
+        enrollment_source="test",
+    )
+    with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_devices), \
+         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={"brandon": fake_profile}), \
+         patch("wisper_transcribe.web.routes.record.load_config",
+               return_value={"default_mic_profile_key": "brandon"}):
+        resp = c.get("/record")
+    assert '<option value="brandon" selected>Brandon</option>' in resp.text
+
+
+def test_start_local_remembers_mic_profile_default(client):
+    """Starting a local session with a mic profile persists it as the next default."""
+    c, data_dir = client
+    fake_devices = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_devices):
+            resp = c.post(
+                "/api/record/start-local",
+                json={"mic_id": "mic1", "system_id": "loop1", "mic_profile_key": "brandon"},
+            )
+        assert resp.status_code == 201
+    finally:
+        mgr.stop_session()
+
+    from wisper_transcribe.config import load_config
+    assert load_config()["default_mic_profile_key"] == "brandon"
 
 
 def test_recordings_list_shows_local_badge(client):
@@ -608,6 +675,32 @@ def test_recording_detail_no_retranscribe_button_when_completed(client):
     resp = c.get(f"/recordings/{rec.id}")
     assert resp.status_code == 200
     assert "Re-transcribe" not in resp.text
+
+
+def test_recording_detail_shows_duration(client):
+    """The status strip shows elapsed duration between started_at and ended_at."""
+    from datetime import timedelta, timezone
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    rec.status = "completed"
+    rec.ended_at = rec.started_at.astimezone(timezone.utc) + timedelta(minutes=1, seconds=57)
+    save_recording(rec, tmp_path)
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "0:01:57" in resp.text
+
+
+def test_recording_detail_duration_dash_when_not_ended(client):
+    """No `ended_at` yet (still recording) shows a dash, not a bogus duration."""
+    from wisper_transcribe.recording_manager import create_recording
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "Duration" in resp.text
 
 
 def test_recording_detail_unknown_id_redirects(client):

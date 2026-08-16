@@ -23,7 +23,9 @@
 <div class="studio-page">
 
   <!-- Status + metadata strip -->
-  <div style="display:grid;grid-template-columns:repeat(6,1fr);border-top:1px solid var(--color-rule);border-bottom:1px solid var(--color-rule);margin-bottom:28px">
+  {%- set duration_s = ((recording.ended_at - recording.started_at).total_seconds() | int) if (recording.ended_at and recording.started_at) else 0 -%}
+  {%- set duration_str = "%d:%02d:%02d" | format(duration_s // 3600, (duration_s % 3600) // 60, duration_s % 60) if duration_s > 0 else "—" -%}
+  <div style="display:grid;grid-template-columns:repeat(7,1fr);border-top:1px solid var(--color-rule);border-bottom:1px solid var(--color-rule);margin-bottom:28px">
     <div style="padding:14px 16px">
       <div class="mono-kicker" style="margin-bottom:6px">Status</div>
       <div>
@@ -73,6 +75,10 @@
     <div style="padding:14px 16px;border-left:1px solid var(--color-rule)">
       <div class="mono-kicker" style="margin-bottom:6px">Ended</div>
       <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">{% if recording.ended_at %}{{ recording.ended_at.strftime('%H:%M') }}{% else %}—{% endif %}</div>
+    </div>
+    <div style="padding:14px 16px;border-left:1px solid var(--color-rule)">
+      <div class="mono-kicker" style="margin-bottom:6px">Duration</div>
+      <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">{{ duration_str }}</div>
     </div>
   </div>
 

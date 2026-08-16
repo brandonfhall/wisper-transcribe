@@ -341,9 +341,9 @@
       <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
         <div class="mono-kicker" style="margin-bottom:10px">This is me (optional)</div>
         <select name="mic_profile_key" style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:8px 10px;border-radius:5px;font-size:13px;font-family:var(--font-sans)">
-          <option value="">— Label my lines "You" —</option>
+          <option value="" {% if not default_mic_profile_key %}selected{% endif %}>— Label my lines "You" —</option>
           {% for key, profile in speaker_profiles.items() %}
-          <option value="{{ key }}">{{ profile.display_name }}</option>
+          <option value="{{ key }}" {% if key == default_mic_profile_key %}selected{% endif %}>{{ profile.display_name }}</option>
           {% endfor %}
         </select>
         <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:6px">
@@ -403,15 +403,10 @@
   }
   tick(); setInterval(tick, 1000);
 
-  // SSE
+  // Status SSE -- segment count only (voice_activity/segment_sealed meters
+  // have no producer yet -- Discord-path speaker meters are unbuilt).
   try {
     var src = new EventSource('/record/sse');
-    src.addEventListener('voice_activity', function(e) {
-      try { window.wisperUpdateMeters && window.wisperUpdateMeters(JSON.parse(e.data)); } catch(ex) {}
-    });
-    src.addEventListener('partial_transcript', function(e) {
-      try { window.wisperTickerAppend && window.wisperTickerAppend(JSON.parse(e.data)); } catch(ex) {}
-    });
     src.addEventListener('segment_sealed', function(e) {
       var c = document.getElementById('live-seg-count');
       if (c) c.textContent = parseInt(c.textContent||'0') + 1;
@@ -420,6 +415,37 @@
   } catch(ex) {}
 })();
 </script>
+{% if active_recording.source == 'local' %}
+<script>
+// Live-transcript ticker -- same SSE endpoint + payload shape as the
+// recording detail page (GET /recordings/{id}/live). Local capture is the
+// only source that runs a JOB_LIVE job today.
+(function(){
+  function fmtElapsed(s) {
+    s = Math.max(0, Math.floor(s || 0));
+    var m = Math.floor(s / 60), ss = s % 60;
+    return m + ':' + String(ss).padStart(2, '0');
+  }
+  try {
+    var liveSrc = new EventSource('/recordings/{{ active_recording.id }}/live');
+    liveSrc.onmessage = function(e) {
+      try {
+        var payload = JSON.parse(e.data);
+        if (payload.type === 'line') {
+          window.wisperTickerAppend && window.wisperTickerAppend({
+            timestamp: fmtElapsed(payload.start_s),
+            speaker: payload.speaker,
+            text: payload.text,
+          });
+        }
+      } catch (ex) {}
+    };
+    liveSrc.addEventListener('end', function() { liveSrc.close(); });
+    liveSrc.onerror = function() { liveSrc.close(); };
+  } catch (ex) {}
+})();
+</script>
+{% endif %}
 {% endblock %}
 {% endif %}
 {% endblock %}
