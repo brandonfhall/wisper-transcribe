@@ -54,6 +54,13 @@ JOB_TRANSCRIPTION = "transcription"
 JOB_REFINE = "refine"
 JOB_SUMMARIZE = "summarize"
 JOB_ENROLL = "enroll"
+# Phase 2 (live local recording): an open-ended job that holds the queue's
+# single worker slot for the duration of a local capture session, near-
+# real-time transcribing committed chunks off LocalCaptureManager's live
+# sink. See web/live_transcribe.py.
+JOB_LIVE = "live"
+
+_MAX_LIVE_LINES = 2000  # mirrors _MAX_LOG_LINES below -- bound a very long session's memory
 
 _EXCERPT_SECONDS = 12  # length of each speaker audio clip
 
@@ -449,6 +456,31 @@ class Job:
     # R6: mode-specific parameters for standalone/recording enroll jobs
     # (profile key, display name, etc. — all plain strings).
     enroll_params: dict[str, Any] = field(default_factory=dict)
+    # For JOB_LIVE jobs (Phase 2): the Recording.id this session is
+    # transcribing. `find_live_job_for_recording()` scans for a RUNNING
+    # JOB_LIVE job with this set rather than persisting the mapping onto
+    # Recording itself -- the mapping is meaningless after a restart since
+    # the (in-memory) queue is empty then anyway.
+    live_recording_id: Optional[str] = None
+    # The LiveRingBuffer instance LocalCaptureManager's tick thread feeds
+    # via `set_live_sink()`; never serialised, just a shared in-memory
+    # handoff between the capture manager and this job's worker thread.
+    live_ring_buffer: Any = None
+    # Set by JobQueue.stop_live() to end the live loop -- distinct from
+    # `_cancel_event`: ending a live session when the user clicks Stop is
+    # the job's NORMAL termination path (-> COMPLETED), not a cancellation
+    # (-> FAILED, error="Cancelled").
+    live_stop_event: threading.Event = field(
+        default_factory=threading.Event, repr=False, compare=False
+    )
+    # Path to recordings/<id>/live_transcript.md -- the crash-safety/
+    # post-session-review copy; job.live_lines is what the SSE stream reads
+    # from while the session is active.
+    live_output_path: Optional[str] = None
+    # Committed lines so far, as plain dicts (LiveLine.to_dict()) so the SSE
+    # route can json.dumps them directly -- see GET /recordings/{id}/live.
+    live_lines: list[dict] = field(default_factory=list)
+    live_lines_dropped: int = 0  # mirrors log_lines_dropped -- see append_live_line()
 
     def append_log(self, line: str) -> None:
         """Append a log line, trimming the oldest lines once _MAX_LOG_LINES
@@ -467,6 +499,18 @@ class Job:
         if overflow > 0:
             del self.log_lines[:overflow]
             self.log_lines_dropped += overflow
+
+    def append_live_line(self, line_dict: dict) -> None:
+        """Append one committed live-transcript line (JOB_LIVE), trimming
+        the oldest once _MAX_LIVE_LINES is exceeded -- same bounded-memory
+        pattern as append_log()/_MAX_LOG_LINES, sized for a multi-hour
+        session's line count rather than a transcription job's log chatter.
+        """
+        self.live_lines.append(line_dict)
+        overflow = len(self.live_lines) - _MAX_LIVE_LINES
+        if overflow > 0:
+            del self.live_lines[:overflow]
+            self.live_lines_dropped += overflow
 
     @property
     def needs_extraction(self) -> bool:
@@ -732,6 +776,66 @@ class JobQueue:
         self._queue.put_nowait(job.id)
         return job
 
+    def submit_live(
+        self,
+        recording_id: str,
+        output_path: str,
+        model_size: str = "base",
+        device: str = "auto",
+        compute_type: str = "auto",
+        language: Optional[str] = "en",
+    ) -> Job:
+        """Enqueue a JOB_LIVE job for a just-started local capture session
+        (Phase 2). Open-ended -- runs until `stop_live()` is called, holding
+        the queue's single worker slot for the whole session (consistent
+        with the one-job-at-a-time invariant; refine/summarize/enroll/
+        transcription jobs queue behind it, same as any other job).
+
+        The caller is responsible for wiring the returned job's
+        `live_ring_buffer.push` onto `LocalCaptureManager.set_live_sink()`
+        -- this method only creates the buffer and queues the job.
+        """
+        from wisper_transcribe.web.live_transcribe import LiveRingBuffer
+
+        # Model params ride on job.kwargs (already a plain dict field on
+        # every Job) rather than adding four more dataclass fields.
+        job = Job(
+            id=str(uuid.uuid4()),
+            status=PENDING,
+            created_at=datetime.now(),
+            input_path="",
+            kwargs={
+                "model_size": model_size, "device": device,
+                "compute_type": compute_type, "language": language,
+            },
+            name=f"Live: {recording_id[:8]}",
+            job_type=JOB_LIVE,
+            live_recording_id=recording_id,
+            live_ring_buffer=LiveRingBuffer(),
+            live_output_path=output_path,
+        )
+        self._jobs[job.id] = job
+        self._queue.put_nowait(job.id)
+        return job
+
+    def find_live_job_for_recording(self, recording_id: str) -> Optional[Job]:
+        """Return the (RUNNING or PENDING) JOB_LIVE job for a recording, if any."""
+        for job in self._jobs.values():
+            if (
+                job.job_type == JOB_LIVE
+                and job.live_recording_id == recording_id
+                and job.status in (PENDING, RUNNING)
+            ):
+                return job
+        return None
+
+    def stop_live(self, job_id: str) -> None:
+        """Signal a JOB_LIVE job's loop to end (normal termination, not a
+        cancellation -- the job still completes as COMPLETED)."""
+        job = self._jobs.get(job_id)
+        if job is not None:
+            job.live_stop_event.set()
+
     def get(self, job_id: str) -> Optional[Job]:
         return self._jobs.get(job_id)
 
@@ -832,6 +936,8 @@ class JobQueue:
             self._run_llm_job(job)
         elif job.job_type == JOB_ENROLL:
             self._run_enroll_job(job)
+        elif job.job_type == JOB_LIVE:
+            self._run_live_job(job)
         else:
             self._run_transcription_job(job)
 
@@ -1212,6 +1318,66 @@ class JobQueue:
         except Exception:
             job.status = FAILED
             job.error = "Enrollment failed"
+        finally:
+            job.finished_at = datetime.now()
+
+    def _run_live_job(self, job: Job) -> None:
+        """Run a JOB_LIVE session's live-transcription loop in a thread.
+
+        Open-ended -- `run_live_loop()` blocks here until
+        `job.live_stop_event` is set (via `stop_live()`, called by the
+        route that stops the local capture session), which is the job's
+        *normal* termination path -> COMPLETED, not a cancellation. Each
+        committed `LiveLine` is appended to `job.live_lines` (SSE reads
+        this) and to `recordings/<id>/live_transcript.md` (crash-safety /
+        post-session-review copy -- the authoritative transcript remains
+        the post-session full pipeline pass with real diarization).
+
+        Per-chunk transcription failures are handled inside
+        `run_live_loop()` itself (logged and skipped) so they never reach
+        here; this method only fails if setup itself is broken (e.g. no
+        `live_output_path`), in which case -- unlike the enroll-job
+        pattern -- it still does NOT re-raise, since a live session ending
+        early should read as "session ended", not surface a raw traceback
+        in the job detail page.
+        """
+        from pathlib import Path
+
+        from wisper_transcribe.web.live_transcribe import run_live_loop
+
+        def _on_line(line) -> None:
+            line_dict = line.to_dict()
+            job.append_live_line(line_dict)
+            if job.live_output_path:
+                try:
+                    speaker = line_dict["speaker"]
+                    ts = line_dict["start_s"]
+                    with open(job.live_output_path, "a", encoding="utf-8") as f:
+                        f.write(f"**{speaker}** *({ts:.1f}s)*: {line_dict['text']}\n\n")
+                except OSError:
+                    log.warning("Failed to append live transcript line to %s", job.live_output_path)
+
+        try:
+            if job.live_output_path:
+                Path(job.live_output_path).parent.mkdir(parents=True, exist_ok=True)
+                if not Path(job.live_output_path).exists():
+                    Path(job.live_output_path).write_text(
+                        "# Live transcript\n\n", encoding="utf-8"
+                    )
+
+            run_live_loop(
+                job.live_ring_buffer,
+                job.live_stop_event,
+                _on_line,
+                model_size=job.kwargs.get("model_size", "base"),
+                device=job.kwargs.get("device", "auto"),
+                compute_type=job.kwargs.get("compute_type", "auto"),
+                language=job.kwargs.get("language", "en"),
+            )
+            job.status = COMPLETED
+        except Exception:
+            log.error("Live transcription job %s failed", job.id, exc_info=True)
+            job.status = COMPLETED  # ended, not "failed" -- see docstring
         finally:
             job.finished_at = datetime.now()
 

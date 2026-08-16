@@ -1,4 +1,4 @@
-"""Tests for web/local_capture.py — Phase 1 (capture layer, no live transcription).
+"""Tests for web/local_capture.py — Phase 1 (capture layer) + Phase 2 (live-sink tap).
 
 Mirrors tests/test_discord_bot.py's structure but for LocalCaptureManager:
 a scripted capture_factory + instant ticker take the place of asyncio fake
@@ -358,6 +358,94 @@ def test_do_tick_overflow_drains_surplus_and_pads_other_track(tmp_path):
     _, _, _, sys_nframes, _ = _read_wav(sorted((tmp_path / "system").glob("*.wav"))[0])
     assert mic_nframes == sys_nframes == overflow_samples
     assert mic_nframes > 320  # confirms this tick drained more than the nominal 20ms
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: live-transcription sink tap
+# ---------------------------------------------------------------------------
+
+def test_do_tick_calls_live_sink_with_three_equal_length_tracks(tmp_path):
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path, capture_factory=scripted_capture_factory({}), ticker=instant_ticker(0)
+    )
+    _wire_manual_writers(mgr, tmp_path)
+    mgr._fifos["mic"].push(np.full(320, 1000, dtype="<i2").tobytes())
+    mgr._fifos["system"].push(np.full(320, 2000, dtype="<i2").tobytes())
+
+    calls = []
+    mgr.set_live_sink(lambda mic, system, mixed: calls.append((mic, system, mixed)))
+    mgr._do_tick()
+    _finalize_manual_writers(mgr)
+
+    assert len(calls) == 1
+    mic, system, mixed = calls[0]
+    assert len(mic) == len(system) == len(mixed) == 320 * 2
+    assert np.all(np.frombuffer(mic, dtype="<i2") == 1000)
+    assert np.all(np.frombuffer(system, dtype="<i2") == 2000)
+    assert np.all(np.frombuffer(mixed, dtype="<i2") == 3000)
+
+
+def test_do_tick_no_sink_registered_is_noop(tmp_path):
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path, capture_factory=scripted_capture_factory({}), ticker=instant_ticker(0)
+    )
+    _wire_manual_writers(mgr, tmp_path)
+    mgr._fifos["mic"].push(np.full(320, 1, dtype="<i2").tobytes())
+    mgr._fifos["system"].push(np.full(320, 1, dtype="<i2").tobytes())
+    mgr._do_tick()  # must not raise with no sink set
+    _finalize_manual_writers(mgr)
+
+
+def test_live_sink_exception_disables_sink_without_crashing_tick(tmp_path):
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path, capture_factory=scripted_capture_factory({}), ticker=instant_ticker(0)
+    )
+    _wire_manual_writers(mgr, tmp_path)
+    mgr._fifos["mic"].push(np.full(320, 1, dtype="<i2").tobytes())
+    mgr._fifos["system"].push(np.full(320, 1, dtype="<i2").tobytes())
+
+    calls = {"n": 0}
+
+    def bad_sink(mic, system, mixed):
+        calls["n"] += 1
+        raise RuntimeError("boom")
+
+    mgr.set_live_sink(bad_sink)
+    mgr._do_tick()  # must not raise
+    assert calls["n"] == 1
+    assert mgr._live_sink is None  # disabled after the exception
+
+    mgr._fifos["mic"].push(np.full(320, 1, dtype="<i2").tobytes())
+    mgr._fifos["system"].push(np.full(320, 1, dtype="<i2").tobytes())
+    mgr._do_tick()  # second tick proceeds fine with the sink cleared
+    assert calls["n"] == 1
+
+    _finalize_manual_writers(mgr)
+
+
+def test_set_live_sink_replaces_and_clears():
+    mgr = LocalCaptureManager(
+        data_dir=".", capture_factory=scripted_capture_factory({}), ticker=instant_ticker(0)
+    )
+    sink = lambda mic, system, mixed: None
+    mgr.set_live_sink(sink)
+    assert mgr._live_sink is sink
+    mgr.set_live_sink(None)
+    assert mgr._live_sink is None
+
+
+def test_finalise_clears_live_sink(tmp_path):
+    n_ticks = 2
+    blocks = {"mic-dev": [_block() for _ in range(n_ticks)]}
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path,
+        capture_factory=scripted_capture_factory(blocks),
+        ticker=instant_ticker(n_ticks),
+    )
+    mgr.set_live_sink(lambda mic, system, mixed: None)
+    mgr.start_session(None, "mic-dev", "sys-dev")
+    _run_session_to_completion(mgr)
+    assert mgr._live_sink is None
 
 
 # ---------------------------------------------------------------------------

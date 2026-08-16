@@ -264,6 +264,11 @@ class LocalCaptureManager:
         self._combined_dir: Optional[Path] = None
         self._capture_threads: list[threading.Thread] = []
         self._tick_thread: Optional[threading.Thread] = None
+        # Phase 2: optional live-transcription tap, called from the tick
+        # thread with (mic_bytes, system_bytes, mixed_bytes) once per tick,
+        # in addition to (never instead of) the disk writes above. Must be
+        # fast/non-blocking -- it runs on the hot tick-thread path.
+        self._live_sink: Optional[Callable[[bytes, bytes, bytes], None]] = None
 
     # ------------------------------------------------------------------
     # Lifecycle (mirrors BotManager/JobQueue)
@@ -286,6 +291,12 @@ class LocalCaptureManager:
     @property
     def active_recording(self) -> Optional[Recording]:
         return self._active_recording
+
+    def set_live_sink(self, sink: Optional[Callable[[bytes, bytes, bytes], None]]) -> None:
+        """Register (or clear, with `None`) the Phase 2 live-transcription
+        tap. Safe to call at any time -- reads of `self._live_sink` in the
+        tick thread just see whatever was last set."""
+        self._live_sink = sink
 
     def start_session(
         self,
@@ -436,13 +447,27 @@ class LocalCaptureManager:
         for name in _TRACKS:
             mixed += track_samples[name].astype(np.int32)
         mixed_clipped = np.clip(mixed, -32768, 32767).astype("<i2")
-        self._combined_writer.write(mixed_clipped.tobytes())
+        mixed_bytes = mixed_clipped.tobytes()
+        self._combined_writer.write(mixed_bytes)
+
+        sink = self._live_sink
+        if sink is not None:
+            try:
+                sink(track_samples["mic"].tobytes(), track_samples["system"].tobytes(), mixed_bytes)
+            except Exception:
+                log.warning("Live-transcription sink raised; disabling it", exc_info=True)
+                self._live_sink = None
 
     # ------------------------------------------------------------------
     # Finalise (BotManager._finalise, minus Discord specifics)
     # ------------------------------------------------------------------
 
     def _finalise(self, recording: Recording) -> None:
+        # Tick thread has already stopped by the time _finalise runs
+        # (stop_session() joins it first) -- clearing here is defensive
+        # tidiness, not a race guard.
+        self._live_sink = None
+
         for writer in self._writers.values():
             try:
                 writer.finalize()
