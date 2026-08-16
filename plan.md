@@ -2,6 +2,51 @@
 
 ---
 
+## Live local recording + live transcription (mic + system audio)
+
+**Context (2026-08-15):** New capture path, distinct from the Discord bot. Capture the local microphone *and* the system audio output (the other side of a call, a video, a game session) on the machine running the server, store them with the existing recording infrastructure, and show a near-real-time transcript while recording. The storage layer was explicitly designed for this — the five v1 file-format invariants in architecture.md ("Recording layer") and the stubbed `GET /recordings/{id}/live` route (currently 501) are the v2 hooks this feature cashes in.
+
+### Decisions (locked 2026-08-15)
+
+1. **Cross-platform from day one.** Windows (WASAPI loopback, native), Linux (PulseAudio/PipeWire monitor source, native), macOS (no OS-level loopback exists — user installs [BlackHole](https://github.com/ExistentialAudio/BlackHole) and routes output through a Multi-Output Device; BlackHole then appears as an ordinary input device and flows through the same code path). "Cross-platform" therefore means one abstraction — *system audio is just another input device* — plus per-OS setup docs, not three capture backends.
+2. **Two separate tracks** (`mic`, `system`), mirroring the Discord per-user model, plus a mixed combined track for the transcribe hand-off. Clean per-track separation makes you-vs-them attribution trivial and keeps the post-session diarization pass honest.
+3. **Rolling-window near-real-time transcription** reusing the existing faster-whisper pipeline — no new ML dependency. A few seconds of latency is accepted; true streaming ASR is out of scope.
+4. **Web UI surface.** Device pickers + start/stop on the Record page; live transcript lines pushed over SSE on the recording detail page via the existing `/recordings/{id}/live` stub.
+
+### Research findings
+
+- **Capture library: `soundcard` (bastibe/SoundCard).** CFFI-based, no C extension, and effectively the only Python library that does WASAPI loopback *and* PulseAudio monitor capture out of the box behind one API (`get_microphone(id, include_loopback=True)`). PyAudioWPatch does WASAPI loopback but is Windows-only; stock sounddevice/PortAudio has no loopback. Make it an **optional extra** (`pip install wisper-transcribe[live]`), import-guarded like `mlx-whisper` — it is useless inside Docker (no host audio devices) and on headless boxes. Known quirk to handle at implementation time: capture threads on Windows need COM init (`CoInitialize`) — soundcard has threading caveats documented in its issues.
+- **Resampling.** Devices deliver 44.1/48 kHz stereo float32. The existing `downsample_48k_stereo_to_16k_mono()` only handles the integer 48k→16k case; 44.1k→16k is non-integer. `scipy` is already a dependency (audio pre-loading bypass) — use `scipy.signal.resample_poly` in a generalized `resample_to_16k_mono()` helper alongside the existing one.
+- **Storage reuse is near-total.** `SegmentedWavWriter` per track (layout `recordings/<id>/per-user/mic/NNNN.wav`, `.../system/NNNN.wav` — track names in place of Discord IDs), combined track via a third writer, `concat_wav_segments()` at finalise, `recording_manager` manifest + crash recovery (`reconcile_on_startup` is already source-agnostic). Invariant 5 ("live ticker watches for new segments while status is `recording`/`degraded`") was written for exactly this.
+- **Mixing is our job this time.** Discord's JDA pre-mixes (`__mixed__`); locally we must mix mic+system ourselves. Apply the R12 lesson directly: drive the combined writer from a real-time tick (one mix per 20 ms of wall clock, pulling the latest frame from each track's buffer), never once-per-incoming-frame, and clip to int16 on sum. Mic and loopback devices run on different hardware clocks — for MVP, tolerate the drift (tracks are written independently; the tick-driven mixer absorbs it), no resync logic.
+- **VAD for chunk cutting: no new dependency.** faster-whisper bundles Silero VAD (`faster_whisper.vad.get_speech_timestamps`) — usable standalone on the ring buffer to find silence boundaries.
+- **One-job-at-a-time interaction.** `_model` is a module-level global; live transcription must own it. Run the live session's transcriber as a **`JOB_LIVE` job in the existing `JobQueue`** — the live session holds the queue slot for its duration, and refine/summarize/enroll jobs queue behind it. That is consistent with the invariant, not a violation of it; document it in the UI ("jobs will wait while live transcription is running").
+- **Docker exclusion.** Containers cannot reach host audio devices on Windows/macOS at all. Feature is native-install only; the Record page hides the Local section when `soundcard` is not importable.
+
+### Design sketch
+
+- **`live_capture.py`** — device enumeration (mics + loopback candidates) and `LocalCaptureManager`, mirroring `BotManager`'s shape (`start_session` / `stop_session` / `_route_frame` / `_finalise`) but thread-based (soundcard recorders are blocking). Registers recordings through `recording_manager` like the bot does.
+- **`Recording.source` field** — `"discord" | "local"` (default `"discord"` for legacy JSON). `voice_channel_id`/`guild_id` become empty strings for local recordings; add a `devices` metadata dict (chosen mic/system device names) for the detail page.
+- **Live transcriber loop (`JOB_LIVE`)** — in-memory ring buffer of the mixed 16 kHz mono stream. Commit policy: cut a chunk at a VAD silence ≥ ~0.6 s, or force-cut at 15 s. Transcribe the committed chunk with the existing transcriber; **attribution by per-track energy** — compare mic vs system RMS/VAD over the chunk's span, label the line `You` / `Other` (dominant track). No pyannote in the live path (too heavy per chunk). Backpressure rule: if transcription falls behind capture, merge/skip pending windows — never queue unboundedly.
+- **Live lines persistence** — append committed lines to `recordings/<id>/live_transcript.md` as they land (crash value), but the *authoritative* transcript remains the post-session full pipeline pass: the existing `POST /recordings/{id}/transcribe` hand-off already works unchanged because finalise produces `combined.wav`, and that pass gets real diarization + speaker ID.
+- **Routes** — `GET /api/record/devices` (enumeration for the pickers), `POST /api/record/start-local` (device ids + optional campaign), stop via the existing stop flow; implement `GET /recordings/{id}/live` as SSE of committed lines with index-based resume (same pattern as the R14 job log stream).
+- **Record page** — a "Local" section beside the Discord one: mic dropdown, system-output dropdown, Start/Stop, reusing the existing 1 Hz status SSE. Recording detail page shows the live transcript pane while status is `recording`/`degraded`.
+- **Latency/model guidance** — chunk length + inference must stay under real-time. GPU: any model fine. CPU: recommend `base`/`small` for live mode; document in docs/scenarios.md.
+
+### Open decisions (resolve during implementation)
+
+- Exact loopback-device presentation in the picker (soundcard exposes loopbacks as microphones with `isloopback`-ish naming — verify per-OS labels and filter sensibly).
+- Whether `You` lines auto-tag to an enrolled profile via a "this is me" selector at start (cheap win — mic track is single-speaker by construction). Leaning yes, Phase 3.
+- `initial_prompt` chaining of prior committed text between chunks for context continuity — try it, drop if it causes repetition artifacts.
+
+### Phases
+
+1. **Capture layer (recording only, no live transcription).** `[live]` extra + import guard, `resample_to_16k_mono()`, `LocalCaptureManager` + real-time tick mixer, `Recording.source`, device-enumeration + start-local routes, Record page Local section, per-OS setup docs (incl. BlackHole on macOS). Tests: fake device sources modeled on `tests/_discord_fakes.py`; `soundcard` mocked via `sys.modules` injection (same trick as the LLM client tests). Already valuable standalone — recordings flow into the existing transcribe hand-off.
+2. **Live transcription.** `JOB_LIVE`, ring buffer + Silero VAD chunker, energy attribution, `live_transcript.md`, SSE `/recordings/{id}/live`, live view pane, backpressure. Tests: mocked `WhisperModel`, scripted PCM buffers.
+3. **Polish.** "This is me" profile auto-tag, model-size guidance in docs, scenarios/web-ui/setup doc updates, Known Constraints row (native-install only, live session holds the job queue).
+
+---
+
 ## Senior review — closed 2026-07-16
 
 The full-codebase senior review (findings R1–R38, opened 2026-07-15) is **complete**: all 38 findings remediated across six phase commits on `docs/senior-review` (Phase A quick wins → B config/CLI coherence → C leaks/memory → D web correctness/security → E Discord audio rebuild → F nits/R7/docs/locking). Suite grew 872 → 1025 over the review. Details live in the six phase commit messages.
