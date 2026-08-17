@@ -58,6 +58,8 @@
       {% set steps = [("refine","R","Refine")] %}
     {% elif job.job_type == "enroll" %}
       {% set steps = [("enroll","E","Enroll")] %}
+    {% elif job.job_type == "campaign_journal" %}
+      {% set steps = [("journal","J","Journal")] %}
     {% else %}
       {% set steps = [("summarize","S","Summarize")] %}
     {% endif %}
@@ -117,7 +119,11 @@
   <!-- Actions -->
   <div id="job-actions" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
     {% if job.status == "completed" %}
-      {% if job.output_path %}
+      {% if job.job_type == "campaign_journal" %}
+        {% if job.kwargs.slug %}
+          <a href="/campaigns/{{ job.kwargs.slug }}/journal" class="btn btn-primary">View journal</a>
+        {% endif %}
+      {% elif job.output_path %}
         <a href="/transcripts/{{ job.output_path | stem | urlencode }}" class="btn btn-primary">View transcript</a>
         {% if job.job_type == "transcription" %}
           <a href="/transcribe/jobs/{{ job.id }}/enroll" class="btn btn-secondary">Name speakers</a>
@@ -155,6 +161,11 @@
   const progressEta  = document.getElementById('progress-eta');
   const progressRate = document.getElementById('progress-rate');
 
+  // Slug baked in at render time so the "View journal" link does not depend on
+  // the SSE payload (the stream endpoint is Python; the template reloads from
+  // disk per request, so this stays correct even if the server hasn't reloaded).
+  const JOURNAL_SLUG = {% if job.job_type == "campaign_journal" and job.kwargs.slug %}{{ job.kwargs.slug | tojson }}{% else %}null{% endif %};
+
   const STEPS = [
     {% if job.job_type == "transcription" %}
       {% if job.needs_extraction %}'extract',{% endif %}
@@ -165,6 +176,8 @@
       'refine',
     {% elif job.job_type == "enroll" %}
       'enroll',
+    {% elif job.job_type == "campaign_journal" %}
+      'journal',
     {% else %}
       'summarize',
     {% endif %}
@@ -298,7 +311,9 @@
       es.close();
       if (evt.status === 'completed') {
         allDone();
-        if (evt.output_path) {
+        if (JOURNAL_SLUG) {
+          actions.innerHTML = `<a href="/campaigns/${encodeURIComponent(JOURNAL_SLUG)}/journal" class="btn btn-primary">View journal</a><a href="/" class="btn btn-secondary">← Dashboard</a>`;
+        } else if (evt.output_path) {
           const stem = evt.output_path.replace(/\\/g, '/').split('/').pop().replace('.md', '');
           const enc  = encodeURIComponent(stem);
           const enrollBtn  = evt.job_type === 'transcription' ? `<a href="/transcribe/jobs/{{ job.id }}/enroll" class="btn btn-secondary">Name speakers</a>` : '';
