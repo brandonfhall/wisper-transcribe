@@ -34,6 +34,7 @@ from wisper_transcribe.recording_manager import (
     save_recording,
 )
 from wisper_transcribe.web._responses import error_redirect, invalid_input_response
+from wisper_transcribe.web.jobs import resume_slice
 from wisper_transcribe.web.local_capture import (
     ACTIVE_STATUSES,
     enumerate_devices,
@@ -759,11 +760,9 @@ async def recording_live(recording_id: str, request: Request):
                 # completion), so one more read off it here catches lines
                 # that would otherwise never reach an already-open stream.
                 if last_job is not None:
-                    retained_start = last_job.live_lines_dropped
-                    new_lines = last_job.live_lines[max(last_idx, retained_start) - retained_start:]
+                    new_lines, last_idx = resume_slice(last_job.live_lines, last_job.live_lines_dropped, last_idx)
                     for line in new_lines:
                         yield f"data: {json.dumps({'type': 'line', **line})}\n\n"
-                    last_idx = retained_start + len(last_job.live_lines)
                     last_job = None
 
                 if last_idx == 0:
@@ -773,11 +772,9 @@ async def recording_live(recording_id: str, request: Request):
                 yield "event: end\ndata: {}\n\n"
                 return
 
-            retained_start = job.live_lines_dropped
-            new_lines = job.live_lines[max(last_idx, retained_start) - retained_start:]
+            new_lines, last_idx = resume_slice(job.live_lines, job.live_lines_dropped, last_idx)
             for line in new_lines:
                 yield f"data: {json.dumps({'type': 'line', **line})}\n\n"
-            last_idx = retained_start + len(job.live_lines)
             last_job = job
 
             await asyncio.sleep(1.0)

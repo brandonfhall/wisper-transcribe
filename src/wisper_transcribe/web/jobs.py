@@ -105,6 +105,37 @@ _MAX_RETAINED_JOBS = 50   # cap on retained COMPLETED/FAILED jobs (never PENDING
 _MAX_LOG_LINES = 1000     # cap on Job.log_lines, oldest lines dropped first
 
 
+def _append_capped(items: list, item: Any, cap: int) -> int:
+    """Append ``item`` to ``items``, trimming the oldest entries once ``cap``
+    is exceeded. Returns how many entries this call dropped (0 if none).
+
+    Shared by ``Job.append_log()``/``Job.append_live_line()`` — same
+    bounded-memory pattern, different lists/caps.
+    """
+    items.append(item)
+    overflow = len(items) - cap
+    if overflow > 0:
+        del items[:overflow]
+        return overflow
+    return 0
+
+
+def resume_slice(items: list, dropped: int, last_idx: int) -> tuple[list, int]:
+    """Translate an absolute produced-so-far count (``last_idx``) into the
+    slice of ``items`` still retained after a ``_append_capped()`` trim, and
+    the updated absolute count to pass back in on the next call.
+
+    Shared by every SSE stream that resumes against a capped, append-only
+    job list (``job.log_lines`` in ``routes/transcribe.py``'s job-log
+    stream, ``job.live_lines`` in ``routes/record.py``'s live-transcript
+    stream) — a client that fell more than ``cap`` lines behind just
+    resumes from whatever's still retained instead of desyncing.
+    """
+    retained_start = dropped
+    new_items = items[max(last_idx, retained_start) - retained_start:]
+    return new_items, retained_start + len(items)
+
+
 # ---------------------------------------------------------------------------
 # Stderr capture — funnels LLM client status messages into job.log_lines
 # ---------------------------------------------------------------------------
@@ -494,11 +525,7 @@ class Job:
         still translate its absolute line index into a valid slice of
         whatever remains.
         """
-        self.log_lines.append(line)
-        overflow = len(self.log_lines) - _MAX_LOG_LINES
-        if overflow > 0:
-            del self.log_lines[:overflow]
-            self.log_lines_dropped += overflow
+        self.log_lines_dropped += _append_capped(self.log_lines, line, _MAX_LOG_LINES)
 
     def append_live_line(self, line_dict: dict) -> None:
         """Append one committed live-transcript line (JOB_LIVE), trimming
@@ -506,11 +533,7 @@ class Job:
         pattern as append_log()/_MAX_LOG_LINES, sized for a multi-hour
         session's line count rather than a transcription job's log chatter.
         """
-        self.live_lines.append(line_dict)
-        overflow = len(self.live_lines) - _MAX_LIVE_LINES
-        if overflow > 0:
-            del self.live_lines[:overflow]
-            self.live_lines_dropped += overflow
+        self.live_lines_dropped += _append_capped(self.live_lines, line_dict, _MAX_LIVE_LINES)
 
     @property
     def needs_extraction(self) -> bool:

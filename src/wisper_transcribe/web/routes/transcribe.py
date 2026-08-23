@@ -12,7 +12,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
 
-from ..jobs import COMPLETED, FAILED, JOB_LIVE
+from ..jobs import COMPLETED, FAILED, JOB_LIVE, resume_slice
 from . import get_local_capture_manager, get_queue as _get_queue, templates
 from wisper_transcribe.campaign_manager import _validate_campaign_slug as _validate_campaign_slug_cm, load_campaigns
 from wisper_transcribe.path_utils import get_output_dir, validate_path_component
@@ -226,19 +226,13 @@ async def job_stream(request: Request, job_id: str) -> StreamingResponse:
                 return
 
             # Send any new log lines. R14: job.log_lines can have its oldest
-            # entries trimmed once it exceeds jobs._MAX_LOG_LINES --
-            # job.log_lines_dropped counts how many, so last_line_idx (an
-            # absolute count of lines produced so far) has to be translated
-            # into an index into the currently-retained list rather than
-            # sliced directly. A client that fell more than the cap behind
-            # simply resumes from whatever's still retained instead of
-            # crashing or replaying stale data.
-            retained_start = job.log_lines_dropped
-            new_lines = job.log_lines[max(last_line_idx, retained_start) - retained_start:]
+            # entries trimmed once it exceeds jobs._MAX_LOG_LINES -- see
+            # resume_slice()'s docstring for why last_line_idx (an absolute
+            # count of lines produced so far) can't be sliced directly.
+            new_lines, last_line_idx = resume_slice(job.log_lines, job.log_lines_dropped, last_line_idx)
             for line in new_lines:
                 data = json.dumps({"type": "log", "message": line})
                 yield f"data: {data}\n\n"
-            last_line_idx = retained_start + len(job.log_lines)
 
             # Send overall progress update (sequential mode)
             if job.progress and job.progress != last_progress:

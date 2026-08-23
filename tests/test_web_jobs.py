@@ -268,6 +268,46 @@ def test_append_log_under_cap_does_not_trim():
     assert job.log_lines_dropped == 0
 
 
+def test_resume_slice_normal_case_no_drops():
+    """No trimming has happened yet (dropped=0) -- behaves like a plain slice."""
+    from wisper_transcribe.web.jobs import resume_slice
+
+    items = ["a", "b", "c"]
+    new_items, last_idx = resume_slice(items, dropped=0, last_idx=0)
+    assert new_items == ["a", "b", "c"]
+    assert last_idx == 3
+
+    new_items, last_idx = resume_slice(items, dropped=0, last_idx=last_idx)
+    assert new_items == []
+    assert last_idx == 3
+
+
+def test_resume_slice_translates_past_dropped_prefix():
+    """Once _append_capped has trimmed a prefix, an absolute last_idx from
+    before the trim must be translated into the retained list's own
+    indexing rather than sliced directly."""
+    from wisper_transcribe.web.jobs import resume_slice
+
+    # Absolute count says 5 produced so far; only the last 2 are retained
+    # (3 were dropped from the front).
+    retained = ["item3", "item4"]
+    new_items, last_idx = resume_slice(retained, dropped=3, last_idx=5)
+    assert new_items == []
+    assert last_idx == 5
+
+
+def test_resume_slice_client_fell_behind_the_cap_resumes_from_retained():
+    """A client that fell more than the cap behind (last_idx below the
+    dropped count) resumes from whatever's still retained instead of
+    crashing or re-slicing negative indices."""
+    from wisper_transcribe.web.jobs import resume_slice
+
+    retained = ["item3", "item4"]
+    new_items, last_idx = resume_slice(retained, dropped=3, last_idx=1)
+    assert new_items == ["item3", "item4"]
+    assert last_idx == 5
+
+
 def test_prune_finished_jobs_caps_terminal_jobs_only(monkeypatch):
     """R14: only COMPLETED/FAILED jobs count against _MAX_RETAINED_JOBS, and
     the OLDEST terminal jobs are dropped first. PENDING/RUNNING jobs are

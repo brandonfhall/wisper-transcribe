@@ -38,9 +38,21 @@ left as-is: `SegmentedWavWriter`'s per-write `flush()` (pre-existing, documented
 crash-safety tradeoff, not something this branch introduced) and the
 `append_log`/`append_live_line` + SSE-resume-math duplication across 4 call
 sites (real DRY violation, low risk, but a refactor wasn't worth the remaining
-session budget — ~$9 in credits when this note was written). If picking this
-back up, that duplication is the next-best cleanup target before the real-device
-smoke test above.
+session budget — ~$9 in credits when this note was written).
+
+**Duplication cleanup — delivered (2026-08-22).** Picked back up per the note
+above. `_append_capped(items, item, cap)` and `resume_slice(items, dropped,
+last_idx)` (both new, `jobs.py`) consolidate the trim-and-count-drops
+arithmetic (`append_log`/`append_live_line`) and the absolute-index-to-
+retained-slice arithmetic (previously hand-rolled identically in
+`transcribe.py`'s job-log stream and twice in `record.py`'s live-transcript
+stream) into one implementation each. Pure refactor, no behavior change — all
+1222 pre-existing tests still pass unmodified; added
+`test_resume_slice_normal_case_no_drops`, `test_resume_slice_translates_past_
+dropped_prefix`, `test_resume_slice_client_fell_behind_the_cap_resumes_from_
+retained` in `test_web_jobs.py` as direct coverage for the newly-public
+helper. Found while auditing this area for the reconnect-de-dupe fix above.
+Real-device smoke test is now the only remaining open item in this section.
 
 **Manual smoke-test follow-ups (2026-08-16, real-device testing in progress
 per `LIVE_AUDIO_TEST_PLAN.md`) — fixed same day:**
