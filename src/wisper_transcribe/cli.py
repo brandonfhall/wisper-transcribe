@@ -935,6 +935,64 @@ def campaigns_remove_member(slug: str, profile_key: str):
     click.echo(f"Removed {profile_key!r} from campaign {safe!r}.")
 
 
+@campaigns.command("reorder")
+@click.argument("slug")
+@click.argument("stem", required=False, default=None)
+@click.option("--up", "move_up", is_flag=True, default=False,
+              help="Move STEM one position earlier")
+@click.option("--down", "move_down", is_flag=True, default=False,
+              help="Move STEM one position later")
+@click.option("--set", "set_order_raw", default=None,
+              help="Replace the whole order in one shot: comma-separated list "
+                   "of every transcript stem in the campaign, in the desired order")
+def campaigns_reorder(slug: str, stem: Optional[str], move_up: bool, move_down: bool,
+                      set_order_raw: Optional[str]):
+    """Reorder a campaign's transcripts.
+
+    This is the order sessions get folded into the rolling journal in
+    (`wisper campaigns journal`) — not necessarily the order they were
+    recorded, since it tracks when a transcript was associated with the
+    campaign, not any date parsed from its filename.
+
+    \b
+    wisper campaigns reorder d-d-mondays s02 --up
+    wisper campaigns reorder d-d-mondays --set "s01,s02,s03"
+    """
+    from .campaign_manager import (
+        _validate_campaign_slug, get_transcripts_for_campaign, load_campaigns,
+        reorder_campaign_transcript, set_campaign_transcript_order,
+    )
+
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        raise click.ClickException(f"Invalid campaign slug: {slug!r}")
+    if safe not in load_campaigns():
+        raise click.ClickException(f"Campaign {safe!r} not found.")
+
+    if set_order_raw is not None:
+        if stem is not None or move_up or move_down:
+            raise click.ClickException("--set cannot be combined with STEM/--up/--down.")
+        order = [s.strip() for s in set_order_raw.split(",") if s.strip()]
+        try:
+            set_campaign_transcript_order(safe, order)
+        except ValueError as exc:
+            raise click.ClickException(str(exc))
+    else:
+        if move_up == move_down:
+            raise click.ClickException("Pass exactly one of --up or --down (or use --set).")
+        if not stem:
+            raise click.ClickException("STEM is required with --up/--down.")
+        try:
+            reorder_campaign_transcript(safe, stem, "up" if move_up else "down")
+        except ValueError as exc:
+            raise click.ClickException(str(exc))
+
+    click.echo(f"Transcript order for {safe!r}:")
+    for i, s in enumerate(get_transcripts_for_campaign(safe), 1):
+        marker = " <-" if s == stem else ""
+        click.echo(f"  {i}. {s}{marker}")
+
+
 @campaigns.command("journal")
 @click.argument("slug")
 @click.option("--session", default=None,

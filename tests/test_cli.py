@@ -1171,6 +1171,67 @@ def test_campaigns_list_empty(tmp_path, monkeypatch):
     assert "No campaigns" in result.output
 
 
+def test_campaigns_reorder_up(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import move_transcript_to_campaign
+    runner = CliRunner()
+    runner.invoke(main, ["campaigns", "create", "Test Campaign"])
+    for stem in ("s1", "s2", "s3"):
+        move_transcript_to_campaign(stem, "test-campaign", data_dir=tmp_path)
+
+    result = runner.invoke(main, ["campaigns", "reorder", "test-campaign", "s3", "--up"])
+    assert result.exit_code == 0, result.output
+    assert "1. s1" in result.output
+    assert "2. s3 <-" in result.output
+    assert "3. s2" in result.output
+
+
+def test_campaigns_reorder_set(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import move_transcript_to_campaign, get_transcripts_for_campaign
+    runner = CliRunner()
+    runner.invoke(main, ["campaigns", "create", "Test Campaign"])
+    for stem in ("s1", "s2", "s3"):
+        move_transcript_to_campaign(stem, "test-campaign", data_dir=tmp_path)
+
+    result = runner.invoke(main, ["campaigns", "reorder", "test-campaign", "--set", "s3,s1,s2"])
+    assert result.exit_code == 0, result.output
+    assert get_transcripts_for_campaign("test-campaign", data_dir=tmp_path) == ["s3", "s1", "s2"]
+
+
+def test_campaigns_reorder_set_rejects_non_permutation(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import move_transcript_to_campaign
+    runner = CliRunner()
+    runner.invoke(main, ["campaigns", "create", "Test Campaign"])
+    move_transcript_to_campaign("s1", "test-campaign", data_dir=tmp_path)
+
+    result = runner.invoke(main, ["campaigns", "reorder", "test-campaign", "--set", "s1,ghost"])
+    assert result.exit_code != 0
+
+
+def test_campaigns_reorder_requires_up_or_down(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import move_transcript_to_campaign
+    runner = CliRunner()
+    runner.invoke(main, ["campaigns", "create", "Test Campaign"])
+    move_transcript_to_campaign("s1", "test-campaign", data_dir=tmp_path)
+
+    result = runner.invoke(main, ["campaigns", "reorder", "test-campaign", "s1"])
+    assert result.exit_code != 0
+    assert "exactly one" in result.output
+
+    result = runner.invoke(main, ["campaigns", "reorder", "test-campaign", "s1", "--up", "--down"])
+    assert result.exit_code != 0
+
+
+def test_campaigns_reorder_unknown_campaign(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    result = CliRunner().invoke(main, ["campaigns", "reorder", "ghost", "s1", "--up"])
+    assert result.exit_code != 0
+    assert "not found" in result.output
+
+
 def test_campaigns_delete_requires_confirm(tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     runner = CliRunner()

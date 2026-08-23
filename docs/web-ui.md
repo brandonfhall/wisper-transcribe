@@ -128,6 +128,8 @@ The Campaign page shows a **Rolling journal** panel that aggregates session summ
 
 **Rebuild journal** (shown whenever the campaign has at least one transcript) redrives the whole campaign from scratch: every session transcript is re-summarized and the journal is regenerated from a clean start, folding every session back in in order. This is two LLM calls per session, so the button asks for confirmation (session count and total call count) before queuing the job. Use it after switching LLM models/providers, or to pick up prompt or summarize changes retroactively across a whole campaign's history.
 
+**Reordering episodes:** the Campaign page's "Episodes" list has ▲/▼ arrows on each row (hidden at the top/bottom of the list) to move a session earlier or later. This is the order sessions get folded into the journal in — it's the order a transcript was *associated* with the campaign, not a date parsed from the filename, so it can end up out of chronological order (e.g. an older recording transcribed and added to the campaign after a newer one already was). Reordering doesn't itself change the journal; rebuild or fold-forward after fixing the order to have it take effect.
+
 ---
 
 ## Job Management

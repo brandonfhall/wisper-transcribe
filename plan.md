@@ -667,6 +667,19 @@ The **rolling campaign journal** — the first of these — has shipped (`journa
   live run is still owed whenever wanted, and would also double as a real
   stress test of the `ollama.py` empty-response gap noted above (up to
   10 LLM calls for 5 sessions).
+- **Transcript reorder — shipped (2026-08-23), requested directly by the
+  user after noticing Hanataz's journal read out of order.** Traced to
+  `Campaign.transcripts` being insertion order, not chronological — the
+  interrupted-and-retried Hanataz transcription run appended session 2
+  last instead of 2nd. `campaign_manager.reorder_campaign_transcript()`
+  (single up/down swap) and `set_campaign_transcript_order()` (bulk
+  replace, validated as a permutation) plus a CLI `wisper campaigns
+  reorder <slug> <stem> --up/--down` / `--set` and ▲/▼ arrows on the
+  campaign page's Episodes list. Hanataz's own order was fixed live
+  through the new web buttons (07-11, 07-18, 07-25, 08-15, 08-22 —
+  correctly chronological now); the journal itself hasn't been rebuilt
+  against the corrected order yet (that's what "Rebuild journal" is for,
+  whenever wanted).
 
 The three remaining features all read the same `.summary.md` sidecars written by `wisper summarize`:
 

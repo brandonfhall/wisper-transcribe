@@ -19,6 +19,7 @@ from wisper_transcribe.campaign_manager import (
     load_campaigns,
     remove_member,
     remove_transcript_from_campaign,
+    reorder_campaign_transcript,
 )
 from wisper_transcribe.speaker_manager import load_profiles
 from wisper_transcribe.web._responses import error_redirect, invalid_input_response
@@ -240,6 +241,49 @@ async def campaign_remove_transcript(
 
     if stem in campaign.transcripts:
         remove_transcript_from_campaign(stem)
+
+    return RedirectResponse(url=f"/campaigns/{campaign.slug}", status_code=303)
+
+
+@router.post("/{slug}/transcripts/reorder", response_class=HTMLResponse)
+async def campaign_reorder_transcript(
+    request: Request,
+    slug: str,
+    stem: Annotated[str, Form()],
+    direction: Annotated[str, Form()],
+) -> RedirectResponse:
+    """Move one transcript one position up/down in the campaign's transcript
+    order — the order sessions get folded into the rolling journal in.
+    """
+    safe_slug = _validate_campaign_slug(slug)
+    if safe_slug is None:
+        return invalid_input_response("Invalid campaign slug")
+
+    # Same stem-validation as /transcripts/remove: never used in a file path
+    # (only list membership in campaigns.json), but still reject
+    # traversal-style payloads defensively.
+    if (
+        not stem
+        or "\x00" in stem
+        or os.sep in stem
+        or "/" in stem
+        or "\\" in stem
+        or stem.strip(".") == ""
+        or len(stem) > 512
+    ):
+        return invalid_input_response("Invalid transcript stem")
+
+    if direction not in ("up", "down"):
+        return invalid_input_response("Invalid direction")
+
+    campaign = load_campaigns().get(safe_slug)
+    if campaign is None:
+        return error_redirect("/campaigns", "not_found")
+
+    try:
+        reorder_campaign_transcript(safe_slug, stem, direction)
+    except ValueError:
+        pass  # stem not in this campaign (stale form) — no-op, just redirect back
 
     return RedirectResponse(url=f"/campaigns/{campaign.slug}", status_code=303)
 

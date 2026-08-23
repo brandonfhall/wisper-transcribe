@@ -20,7 +20,9 @@ from wisper_transcribe.campaign_manager import (
     move_transcript_to_campaign,
     remove_member,
     remove_transcript_from_campaign,
+    reorder_campaign_transcript,
     save_campaigns,
+    set_campaign_transcript_order,
 )
 from wisper_transcribe.models import Campaign, CampaignMember
 
@@ -263,6 +265,76 @@ def test_get_campaign_for_transcript_returns_slug(tmp_path):
     create_campaign("Alpha", data_dir=tmp_path)
     move_transcript_to_campaign("session01", "alpha", data_dir=tmp_path)
     assert get_campaign_for_transcript("session01", data_dir=tmp_path) == "alpha"
+
+
+# ---------------------------------------------------------------------------
+# reorder_campaign_transcript / set_campaign_transcript_order
+# ---------------------------------------------------------------------------
+
+def _seed_three(tmp_path):
+    create_campaign("Alpha", data_dir=tmp_path)
+    for stem in ("s1", "s2", "s3"):
+        move_transcript_to_campaign(stem, "alpha", data_dir=tmp_path)
+
+
+def test_reorder_up_swaps_with_previous(tmp_path):
+    _seed_three(tmp_path)
+    reorder_campaign_transcript("alpha", "s2", "up", data_dir=tmp_path)
+    assert get_transcripts_for_campaign("alpha", data_dir=tmp_path) == ["s2", "s1", "s3"]
+
+
+def test_reorder_down_swaps_with_next(tmp_path):
+    _seed_three(tmp_path)
+    reorder_campaign_transcript("alpha", "s2", "down", data_dir=tmp_path)
+    assert get_transcripts_for_campaign("alpha", data_dir=tmp_path) == ["s1", "s3", "s2"]
+
+
+def test_reorder_up_at_start_is_noop(tmp_path):
+    _seed_three(tmp_path)
+    reorder_campaign_transcript("alpha", "s1", "up", data_dir=tmp_path)
+    assert get_transcripts_for_campaign("alpha", data_dir=tmp_path) == ["s1", "s2", "s3"]
+
+
+def test_reorder_down_at_end_is_noop(tmp_path):
+    _seed_three(tmp_path)
+    reorder_campaign_transcript("alpha", "s3", "down", data_dir=tmp_path)
+    assert get_transcripts_for_campaign("alpha", data_dir=tmp_path) == ["s1", "s2", "s3"]
+
+
+def test_reorder_invalid_direction_raises(tmp_path):
+    _seed_three(tmp_path)
+    with pytest.raises(ValueError):
+        reorder_campaign_transcript("alpha", "s1", "sideways", data_dir=tmp_path)
+
+
+def test_reorder_unknown_stem_raises(tmp_path):
+    _seed_three(tmp_path)
+    with pytest.raises(ValueError):
+        reorder_campaign_transcript("alpha", "ghost", "up", data_dir=tmp_path)
+
+
+def test_reorder_unknown_campaign_raises(tmp_path):
+    with pytest.raises(KeyError):
+        reorder_campaign_transcript("no-such-slug", "s1", "up", data_dir=tmp_path)
+
+
+def test_set_transcript_order_replaces_whole_list(tmp_path):
+    _seed_three(tmp_path)
+    set_campaign_transcript_order("alpha", ["s3", "s1", "s2"], data_dir=tmp_path)
+    assert get_transcripts_for_campaign("alpha", data_dir=tmp_path) == ["s3", "s1", "s2"]
+
+
+def test_set_transcript_order_rejects_non_permutation(tmp_path):
+    _seed_three(tmp_path)
+    with pytest.raises(ValueError):
+        set_campaign_transcript_order("alpha", ["s1", "s2"], data_dir=tmp_path)  # missing s3
+    with pytest.raises(ValueError):
+        set_campaign_transcript_order("alpha", ["s1", "s2", "s3", "s4"], data_dir=tmp_path)  # extra
+
+
+def test_set_transcript_order_unknown_campaign_raises(tmp_path):
+    with pytest.raises(KeyError):
+        set_campaign_transcript_order("no-such-slug", [], data_dir=tmp_path)
 
 
 def test_get_campaign_for_transcript_returns_none_when_not_associated(tmp_path):

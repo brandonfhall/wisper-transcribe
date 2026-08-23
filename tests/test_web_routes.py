@@ -1904,6 +1904,22 @@ def test_campaign_detail_shows_rebuild_button_with_transcripts(client, tmp_path,
     assert 'value="rebuild"' in resp.text
 
 
+def test_campaign_detail_reorder_arrows_hidden_at_boundaries(client, tmp_path, monkeypatch):
+    """First row has no 'move up' arrow, last row has no 'move down' arrow."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+
+    create_campaign("My Game", data_dir=tmp_path)
+    for stem in ("s1", "s2", "s3"):
+        move_transcript_to_campaign(stem, "my-game", data_dir=tmp_path)
+
+    resp = client.get("/campaigns/my-game")
+    assert resp.status_code == 200
+    # Exactly 2 "up" forms (s2, s3) and 2 "down" forms (s1, s2) out of 3 rows.
+    assert resp.text.count('name="direction" value="up"') == 2
+    assert resp.text.count('name="direction" value="down"') == 2
+
+
 def test_campaign_detail_hides_rebuild_button_with_no_transcripts(client, tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     from wisper_transcribe.campaign_manager import create_campaign
@@ -2053,6 +2069,87 @@ def test_campaign_remove_transcript_rejects_traversal(client, tmp_path, monkeypa
             follow_redirects=False,
         )
         assert resp.status_code == 400, f"expected 400 for stem={bad_stem!r}, got {resp.status_code}"
+
+
+def test_campaign_reorder_transcript_moves_up(client, tmp_path, monkeypatch):
+    """POST /campaigns/{slug}/transcripts/reorder moves the stem one position up."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign, load_campaigns
+
+    create_campaign("Test Game", data_dir=tmp_path)
+    for stem in ("s1", "s2", "s3"):
+        move_transcript_to_campaign(stem, "test-game", data_dir=tmp_path)
+
+    resp = client.post(
+        "/campaigns/test-game/transcripts/reorder",
+        data={"stem": "s3", "direction": "up"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "/campaigns/test-game" in resp.headers.get("location", "")
+    assert load_campaigns(tmp_path)["test-game"].transcripts == ["s1", "s3", "s2"]
+
+
+def test_campaign_reorder_transcript_moves_down(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign, load_campaigns
+
+    create_campaign("Test Game", data_dir=tmp_path)
+    for stem in ("s1", "s2", "s3"):
+        move_transcript_to_campaign(stem, "test-game", data_dir=tmp_path)
+
+    resp = client.post(
+        "/campaigns/test-game/transcripts/reorder",
+        data={"stem": "s1", "direction": "down"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert load_campaigns(tmp_path)["test-game"].transcripts == ["s2", "s1", "s3"]
+
+
+def test_campaign_reorder_transcript_invalid_direction_rejected(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+
+    create_campaign("Test Game", data_dir=tmp_path)
+    move_transcript_to_campaign("s1", "test-game", data_dir=tmp_path)
+
+    resp = client.post(
+        "/campaigns/test-game/transcripts/reorder",
+        data={"stem": "s1", "direction": "sideways"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 400
+
+
+def test_campaign_reorder_transcript_rejects_traversal(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    create_campaign("Test Game", data_dir=tmp_path)
+
+    for bad_stem in ["../etc/passwd", "foo/bar", "stem\x00bad"]:
+        resp = client.post(
+            "/campaigns/test-game/transcripts/reorder",
+            data={"stem": bad_stem, "direction": "up"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 400, f"expected 400 for stem={bad_stem!r}, got {resp.status_code}"
+
+
+def test_campaign_reorder_transcript_stale_stem_is_noop(client, tmp_path, monkeypatch):
+    """A stem not currently in the campaign (stale form submit) redirects cleanly, no 500."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    create_campaign("Test Game", data_dir=tmp_path)
+
+    resp = client.post(
+        "/campaigns/test-game/transcripts/reorder",
+        data={"stem": "ghost", "direction": "up"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
 
 
 def test_campaign_journal_post_submits_job_and_redirects(client, tmp_path, monkeypatch):

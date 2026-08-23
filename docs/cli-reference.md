@@ -201,7 +201,12 @@ wisper campaigns add-member d-d-mondays alice --role DM # add a player (must be 
 wisper campaigns add-member d-d-mondays bob --role Player --character "Theron"
 wisper campaigns remove-member d-d-mondays charlie      # remove from roster only (keeps voice profile)
 wisper campaigns delete d-d-mondays                     # delete campaign (with confirmation)
+wisper campaigns reorder d-d-mondays s02 --up           # move a session one position earlier
+wisper campaigns reorder d-d-mondays s02 --down         # move a session one position later
+wisper campaigns reorder d-d-mondays --set "s01,s02,s03" # replace the whole order in one shot
 ```
+
+`reorder` changes a campaign's transcript order — the order sessions get folded into the rolling journal in (`wisper campaigns journal`), and the episode numbering on the campaign page. It's insertion order (when a transcript was associated with the campaign), not a date parsed from the filename, so it can drift out of chronological order — e.g. a session transcribed and associated with the campaign later than a newer session ends up out of place. `--set` takes every transcript stem in the campaign as one comma-separated list in the desired order and errors if it isn't an exact permutation of what's currently there.
 
 #### `wisper campaigns journal`
 
