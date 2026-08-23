@@ -201,7 +201,13 @@ def test_devices_endpoint_unavailable_when_soundcard_not_installed(client):
     with patch.dict(sys.modules, {"soundcard": None}):
         resp = c.get("/api/record/devices")
     assert resp.status_code == 200
-    assert resp.json() == {"microphones": [], "loopbacks": [], "available": False}
+    assert resp.json() == {
+        "microphones": [],
+        "loopbacks": [],
+        "available": False,
+        "default_microphone_id": "",
+        "default_loopback_id": "",
+    }
 
 
 def test_devices_endpoint_returns_enumerated_devices_when_available(client):
@@ -650,6 +656,31 @@ def test_record_page_shows_local_section_with_device_options(client):
     assert "Start local recording" in resp.text
     assert "Built-in Microphone" in resp.text
     assert "Speakers (loopback)" in resp.text
+
+
+def test_record_page_preselects_default_mic_and_loopback_device(client):
+    """The mic/system dropdowns pre-select the OS's current default devices,
+    not just the first option in enumeration order."""
+    c, _ = client
+    fake_result = {
+        "microphones": [
+            {"id": "mic1", "name": "Built-in Microphone"},
+            {"id": "mic2", "name": "USB Microphone"},
+        ],
+        "loopbacks": [
+            {"id": "loop1", "name": "Speakers A (loopback)"},
+            {"id": "loop2", "name": "Speakers B (loopback)"},
+        ],
+        "available": True,
+        "default_microphone_id": "mic2",
+        "default_loopback_id": "loop2",
+    }
+    with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+        resp = c.get("/record")
+    assert '<option value="mic2" selected>USB Microphone</option>' in resp.text
+    assert '<option value="mic1" >Built-in Microphone</option>' in resp.text
+    assert '<option value="loop2" selected>Speakers B (loopback)</option>' in resp.text
+    assert '<option value="loop1" >Speakers A (loopback)</option>' in resp.text
 
 
 def test_record_page_hides_this_is_me_when_no_profiles(client):

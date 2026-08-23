@@ -676,7 +676,13 @@ def test_byte_fifo_push_empty_is_noop():
 def test_enumerate_devices_unavailable_when_soundcard_not_installed(monkeypatch):
     monkeypatch.setitem(sys.modules, "soundcard", None)
     result = enumerate_devices()
-    assert result == {"microphones": [], "loopbacks": [], "available": False}
+    assert result == {
+        "microphones": [],
+        "loopbacks": [],
+        "available": False,
+        "default_microphone_id": "",
+        "default_loopback_id": "",
+    }
 
 
 def _fake_device(id_: str, name: str, isloopback: bool = False):
@@ -693,12 +699,31 @@ def test_enumerate_devices_splits_mics_and_loopbacks(monkeypatch):
         _fake_device("mic1", "Built-in Microphone", isloopback=False),
         _fake_device("loop1", "Speakers (loopback)", isloopback=True),
     ])
+    fake_sc.default_microphone = MagicMock(return_value=_fake_device("mic1", "Built-in Microphone"))
+    fake_sc.default_speaker = MagicMock(return_value=_fake_device("loop1", "Speakers (loopback)"))
     monkeypatch.setitem(sys.modules, "soundcard", fake_sc)
 
     result = enumerate_devices()
     assert result["available"] is True
     assert result["microphones"] == [{"id": "mic1", "name": "Built-in Microphone"}]
     assert result["loopbacks"] == [{"id": "loop1", "name": "Speakers (loopback)"}]
+    assert result["default_microphone_id"] == "mic1"
+    assert result["default_loopback_id"] == "loop1"
+
+
+def test_enumerate_devices_default_ids_blank_when_lookup_fails(monkeypatch):
+    fake_sc = types.ModuleType("soundcard")
+    fake_sc.all_microphones = MagicMock(return_value=[
+        _fake_device("mic1", "Built-in Microphone", isloopback=False),
+    ])
+    fake_sc.default_microphone = MagicMock(side_effect=RuntimeError("no default"))
+    fake_sc.default_speaker = MagicMock(side_effect=RuntimeError("no default"))
+    monkeypatch.setitem(sys.modules, "soundcard", fake_sc)
+
+    result = enumerate_devices()
+    assert result["available"] is True
+    assert result["default_microphone_id"] == ""
+    assert result["default_loopback_id"] == ""
 
 
 def test_enumerate_devices_degrades_to_unavailable_on_exception(monkeypatch):
@@ -707,7 +732,13 @@ def test_enumerate_devices_degrades_to_unavailable_on_exception(monkeypatch):
     monkeypatch.setitem(sys.modules, "soundcard", fake_sc)
 
     result = enumerate_devices()
-    assert result == {"microphones": [], "loopbacks": [], "available": False}
+    assert result == {
+        "microphones": [],
+        "loopbacks": [],
+        "available": False,
+        "default_microphone_id": "",
+        "default_loopback_id": "",
+    }
 
 
 def test_resolve_device_name_found_and_fallback():

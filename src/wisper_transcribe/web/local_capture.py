@@ -187,25 +187,38 @@ def _wall_clock_ticker() -> Iterator:
 # Device enumeration
 # ---------------------------------------------------------------------------
 
+_UNAVAILABLE_DEVICES = {
+    "microphones": [],
+    "loopbacks": [],
+    "available": False,
+    "default_microphone_id": "",
+    "default_loopback_id": "",
+}
+
+
 def enumerate_devices() -> dict:
-    """Return `{"microphones": [...], "loopbacks": [...], "available": bool}`.
+    """Return `{"microphones": [...], "loopbacks": [...], "available": bool,
+    "default_microphone_id": str, "default_loopback_id": str}`.
 
     Each device entry is `{"id": str, "name": str}`. `available: False`
     (never an exception) whenever `soundcard` is not importable or
     enumeration otherwise fails -- callers (`GET /api/record/devices`, the
     Record page) use this to hide the Local section entirely rather than
-    surfacing a 500.
+    surfacing a 500. The two `default_*_id` fields echo the OS's current
+    default recording / playback device (empty string if unavailable or the
+    lookup itself fails) so the picker can pre-select them instead of
+    defaulting to the first device in an arbitrary enumeration order.
     """
     try:
         import soundcard as sc
     except Exception:
-        return {"microphones": [], "loopbacks": [], "available": False}
+        return dict(_UNAVAILABLE_DEVICES)
 
     try:
         all_mics = sc.all_microphones(include_loopback=True)
     except Exception:
         log.warning("soundcard device enumeration failed", exc_info=True)
-        return {"microphones": [], "loopbacks": [], "available": False}
+        return dict(_UNAVAILABLE_DEVICES)
 
     microphones: list = []
     loopbacks: list = []
@@ -216,7 +229,27 @@ def enumerate_devices() -> dict:
             continue
         (loopbacks if getattr(m, "isloopback", False) else microphones).append(entry)
 
-    return {"microphones": microphones, "loopbacks": loopbacks, "available": True}
+    default_microphone_id = ""
+    try:
+        default_microphone_id = str(sc.default_microphone().id)
+    except Exception:
+        pass
+
+    default_loopback_id = ""
+    try:
+        # soundcard's Windows loopback mic for a render endpoint shares that
+        # endpoint's speaker id -- this is the same id space as `loopbacks`.
+        default_loopback_id = str(sc.default_speaker().id)
+    except Exception:
+        pass
+
+    return {
+        "microphones": microphones,
+        "loopbacks": loopbacks,
+        "available": True,
+        "default_microphone_id": default_microphone_id,
+        "default_loopback_id": default_loopback_id,
+    }
 
 
 def resolve_device_name(devices: list, device_id: str) -> str:

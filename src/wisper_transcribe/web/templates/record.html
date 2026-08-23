@@ -360,7 +360,7 @@
           <option value="" disabled selected>No microphones found</option>
           {% endif %}
           {% for d in local_devices.microphones %}
-          <option value="{{ d.id }}">{{ d.name }}</option>
+          <option value="{{ d.id }}" {% if d.id == local_devices.default_microphone_id %}selected{% endif %}>{{ d.name }}</option>
           {% endfor %}
         </select>
       </div>
@@ -375,7 +375,7 @@
           <option value="" disabled selected>No loopback devices found</option>
           {% endif %}
           {% for d in local_devices.loopbacks %}
-          <option value="{{ d.id }}">{{ d.name }}</option>
+          <option value="{{ d.id }}" {% if d.id == local_devices.default_loopback_id %}selected{% endif %}>{{ d.name }}</option>
           {% endfor %}
         </select>
       </div>
