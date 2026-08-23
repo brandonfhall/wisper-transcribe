@@ -59,6 +59,7 @@ JOB_ENROLL = "enroll"
 # real-time transcribing committed chunks off LocalCaptureManager's live
 # sink. See web/live_transcribe.py.
 JOB_LIVE = "live"
+JOB_CAMPAIGN_JOURNAL = "campaign_journal"
 
 _MAX_LIVE_LINES = 2000  # mirrors _MAX_LOG_LINES below -- bound a very long session's memory
 
@@ -866,6 +867,27 @@ class JobQueue:
         self._queue.put_nowait(job.id)
         return job
 
+    def submit_journal(
+        self,
+        slug: str,
+        name: str = "",
+        session_stem: Optional[str] = None,
+        fold_all: bool = False,
+    ) -> Job:
+        """Enqueue a rolling-campaign-journal job for a campaign slug."""
+        job = Job(
+            id=str(uuid.uuid4()),
+            status=PENDING,
+            created_at=datetime.now(),
+            input_path="",
+            kwargs={"slug": slug, "session_stem": session_stem, "fold_all": fold_all},
+            name=name or f"Journal: {slug}",
+            job_type=JOB_CAMPAIGN_JOURNAL,
+        )
+        self._jobs[job.id] = job
+        self._queue.put_nowait(job.id)
+        return job
+
     def set_live_noise_floor(self, job_id: str, noise_floor: float) -> bool:
         """Live-update a running JOB_LIVE job's noise floor. Returns False
         if the job doesn't exist (route layer turns that into a 404)."""
@@ -892,7 +914,6 @@ class JobQueue:
         job = self._jobs.get(job_id)
         if job is not None:
             job.live_stop_event.set()
-
     def get(self, job_id: str) -> Optional[Job]:
         return self._jobs.get(job_id)
 
@@ -1026,7 +1047,9 @@ class JobQueue:
 
     def _run_job(self, job: Job) -> None:
         """Dispatch to the appropriate worker based on job_type."""
-        if job.job_type in (JOB_REFINE, JOB_SUMMARIZE):
+        if job.job_type == JOB_CAMPAIGN_JOURNAL:
+            self._run_journal_job(job)
+        elif job.job_type in (JOB_REFINE, JOB_SUMMARIZE):
             self._run_llm_job(job)
         elif job.job_type == JOB_ENROLL:
             self._run_enroll_job(job)
@@ -1034,6 +1057,59 @@ class JobQueue:
             self._run_live_job(job)
         else:
             self._run_transcription_job(job)
+
+    def _run_journal_job(self, job: Job) -> None:
+        """Fold session summaries into a campaign's rolling journal.
+
+        Runs in a thread; sys.stderr is redirected to capture the LLM client's
+        streaming status messages into job.log_lines (same pattern as the
+        refine/summarize LLM jobs — safe because the queue is single-worker).
+        """
+        from wisper_transcribe.config import load_config
+        from wisper_transcribe.journal import unjournalled_sessions, update_journal
+        from wisper_transcribe.llm import get_client
+        from wisper_transcribe.speaker_manager import load_profiles
+
+        slug = job.kwargs["slug"]
+        session_stem = job.kwargs.get("session_stem")
+        fold_all = bool(job.kwargs.get("fold_all", False))
+
+        old_stderr = _sys.stderr
+        _sys.stderr = _StderrCapture(job)
+        try:
+            cfg = load_config()
+            client = get_client(cfg.get("llm_provider", "ollama"), config=cfg)
+            job.append_log(f"LLM: {client.provider} / {client.model}")
+            profiles = load_profiles()
+
+            if session_stem:
+                targets = [session_stem]
+            else:
+                targets = unjournalled_sessions(slug)
+                if not targets:
+                    job.append_log("Journal already up to date — nothing to fold.")
+                elif not fold_all:
+                    targets = targets[:1]
+
+            result = None
+            for stem in targets:
+                job.append_log(f"Folding in: {stem} ...")
+                result = update_journal(slug, client, profiles, session_stem=stem)
+
+            if result is not None:
+                job.output_path = str(result.path)
+                job.append_log(
+                    f"Journal written: {result.path.name} "
+                    f"({len(result.journaled_sessions)} session(s) folded)"
+                )
+            job.status = COMPLETED
+        except Exception as exc:
+            job.status = FAILED
+            job.error = str(exc)
+            raise
+        finally:
+            _sys.stderr = old_stderr
+            job.finished_at = datetime.now()
 
     def _run_transcription_job(self, job: Job) -> None:
         """Runs in a thread.  Patches tqdm.write to capture progress logs."""
