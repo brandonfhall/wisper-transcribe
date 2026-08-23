@@ -514,3 +514,9 @@ async def test_finalise_leaves_combined_path_none_when_no_audio(tmp_path):
 
     loaded = load_recordings(tmp_path)[rec.id]
     assert loaded.combined_path is None
+    # Regression: SegmentedWavWriter.finalize() still closes and returns a
+    # path for the empty (0-frame) segment even with no audio ever
+    # received -- record_completed_wav_segment() must skip it, or the
+    # manifest would show a phantom "Segments: 1" contradicting the
+    # combined_path-is-None / ?error=no_audio state above.
+    assert loaded.segment_manifest == []

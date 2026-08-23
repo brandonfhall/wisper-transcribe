@@ -13,6 +13,7 @@ import logging
 import tempfile
 import threading
 import uuid
+import wave
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -385,10 +386,25 @@ def record_completed_wav_segment(
     duration display, not anything media-critical (the authoritative
     audio is the concatenated `combined.wav`, unaffected by this).
 
+    Skips zero-frame segments (a session that starts and stops with no
+    audio ever received still gets one empty segment out of
+    `SegmentedWavWriter.finalize()`) — `concat_wav_segments()` already
+    skips these the same way when building `combined.wav`, so without this
+    check a no-audio session would show a contradictory "Segments: 1" in
+    the manifest next to `combined_path` correctly staying `None` /
+    `?error=no_audio`.
+
     Never raises: a bookkeeping failure here must not interrupt the hot
     capture write path that calls it.
     """
     now = datetime.now(timezone.utc)
+    try:
+        with wave.open(str(path), "rb") as wf:
+            if wf.getnframes() == 0:
+                return now
+    except (wave.Error, EOFError, OSError):
+        return now
+
     segment = SegmentRecord(
         index=int(Path(path).stem),
         stream="mixed",

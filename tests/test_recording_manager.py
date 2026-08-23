@@ -267,6 +267,21 @@ def test_append_segment_atomic_under_concurrent_calls(tmp_path):
     assert len(loaded[rec.id].segment_manifest) == n
 
 
+def _write_wav(path: Path, n_frames: int = 320) -> None:
+    """Write a minimal real 16 kHz mono 16-bit WAV file with `n_frames`
+    samples of silence (or a 0-byte-data file when n_frames == 0), so
+    record_completed_wav_segment()'s frame-count check has a real file to
+    inspect instead of a fabricated path."""
+    import wave
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(b"\x00\x00" * n_frames)
+
+
 def test_record_completed_wav_segment_appends_and_returns_new_started_at(tmp_path):
     """record_completed_wav_segment() is the shared helper BotManager/
     LocalCaptureManager call whenever their combined-track writer rotates
@@ -275,6 +290,7 @@ def test_record_completed_wav_segment_appends_and_returns_new_started_at(tmp_pat
     rec = _make_recording(tmp_path)
     started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
     path = tmp_path / "recordings" / rec.id / "combined" / "0000.wav"
+    _write_wav(path)
 
     new_started_at = record_completed_wav_segment(
         rec.id, path, started_at, finalized=True, data_dir=tmp_path
@@ -297,6 +313,7 @@ def test_record_completed_wav_segment_appends_and_returns_new_started_at(tmp_pat
 def test_record_completed_wav_segment_parses_index_from_filename(tmp_path):
     rec = _make_recording(tmp_path)
     path = tmp_path / "recordings" / rec.id / "combined" / "0042.wav"
+    _write_wav(path)
 
     record_completed_wav_segment(
         rec.id, path, datetime.now(timezone.utc), finalized=False, data_dir=tmp_path
@@ -305,6 +322,41 @@ def test_record_completed_wav_segment_parses_index_from_filename(tmp_path):
     manifest = load_recordings(tmp_path)[rec.id].segment_manifest
     assert manifest[0].index == 42
     assert manifest[0].finalized is False
+
+
+def test_record_completed_wav_segment_skips_zero_frame_segment(tmp_path):
+    """A session that starts and stops with no audio ever received still
+    gets one empty (0-frame) segment out of SegmentedWavWriter.finalize().
+    Without this skip, segment_manifest would show a phantom entry while
+    combined_path correctly stays None / ?error=no_audio -- a
+    contradictory UI state."""
+    rec = _make_recording(tmp_path)
+    path = tmp_path / "recordings" / rec.id / "combined" / "0000.wav"
+    _write_wav(path, n_frames=0)
+
+    record_completed_wav_segment(
+        rec.id, path, datetime.now(timezone.utc), finalized=True, data_dir=tmp_path
+    )
+
+    manifest = load_recordings(tmp_path)[rec.id].segment_manifest
+    assert manifest == []
+
+
+def test_record_completed_wav_segment_skips_unreadable_file(tmp_path):
+    """A corrupt/unreadable segment file (matches concat_wav_segments'
+    own tolerance for this) is skipped rather than raising."""
+    rec = _make_recording(tmp_path)
+    path = tmp_path / "recordings" / rec.id / "combined" / "0000.wav"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"not a real wav file")
+
+    new_started_at = record_completed_wav_segment(
+        rec.id, path, datetime.now(timezone.utc), finalized=True, data_dir=tmp_path
+    )
+
+    assert new_started_at is not None
+    manifest = load_recordings(tmp_path)[rec.id].segment_manifest
+    assert manifest == []
 
 
 def test_record_completed_wav_segment_swallows_errors_for_unknown_recording(tmp_path):

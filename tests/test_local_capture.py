@@ -248,6 +248,12 @@ def test_no_frames_session_leaves_combined_path_none(tmp_path):
 
     assert rec.status == "completed"
     assert rec.combined_path is None
+    # Regression: SegmentedWavWriter.finalize() still closes and returns a
+    # path for the empty (0-frame) segment even with no ticks ever run --
+    # record_completed_wav_segment() must skip it, or the manifest would
+    # show a phantom "Segments: 1" contradicting combined_path being None.
+    loaded = load_recordings(tmp_path)[rec.id]
+    assert loaded.segment_manifest == []
 
 
 def test_stop_session_persists_recording_to_disk(tmp_path):
