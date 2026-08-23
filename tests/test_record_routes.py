@@ -628,8 +628,26 @@ def test_record_page_wires_live_ticker_to_recording_live_sse(client):
         assert resp.status_code == 200
         assert f"/recordings/{recording_id}/live" in resp.text
         assert "partial_transcript" not in resp.text
+        # Regression: extra_scripts was briefly nested inside the `page`
+        # block, which Jinja renders once inline (as part of page's own
+        # content) AND again at base.html's separate extra_scripts slot --
+        # two live EventSource connections fighting over the same DOM.
+        assert resp.text.count("new EventSource('/record/sse')") == 1
+        assert resp.text.count(f"/recordings/{recording_id}/live") == 1
     finally:
         mgr.stop_session()
+
+
+def test_record_page_extra_scripts_absent_when_idle(client):
+    """No active session -- extra_scripts must not render at all (not even
+    once), since active_recording is None. Guards against the `{% if %}`
+    living outside `{% block extra_scripts %}` in record.html, which Jinja
+    ignores for extends-based rendering (the block would render
+    unconditionally regardless of the outer if)."""
+    c, _ = client
+    resp = c.get("/record")
+    assert resp.status_code == 200
+    assert "new EventSource('/record/sse')" not in resp.text
 
 
 def test_record_page_hides_local_section_when_unavailable(client):
@@ -790,6 +808,11 @@ def test_recording_detail_shows_live_pane_for_active_local_session(client):
     assert resp.status_code == 200
     assert "live-transcript" in resp.text
     assert f"/recordings/{rec.id}/live" in resp.text
+    # Regression: extra_scripts was nested inside the `page` block, which
+    # Jinja renders once inline (as part of page's own content) AND again
+    # at base.html's separate extra_scripts slot -- two competing
+    # EventSource connections to the same live-transcript endpoint.
+    assert resp.text.count(f"/recordings/{rec.id}/live") == 1
 
 
 def test_recording_detail_hides_live_pane_when_completed(client):

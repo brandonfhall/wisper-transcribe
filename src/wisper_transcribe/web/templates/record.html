@@ -427,9 +427,10 @@
   sync();
 })();
 </script>
+{% endblock %}
 
-{% if active_recording %}
 {% block extra_scripts %}
+{% if active_recording %}
 <script>
 // ── Record live UI ──
 // SSE stream binds speaker meters + ticker.
@@ -513,22 +514,30 @@
 // app.js) handles the SSE + reconnect de-dupe; same endpoint + payload
 // shape as the recording detail page. Local capture is the only source
 // that runs a JOB_LIVE job today.
+//
+// app.js is loaded with `defer`, so it always finishes running strictly
+// after every inline <script> in the body (including this one) and right
+// before DOMContentLoaded -- calling wisperConnectLiveStream synchronously
+// here would silently no-op (window.wisperConnectLiveStream is still
+// undefined at this point), so the connection has to wait for that event.
 (function(){
   function fmtElapsed(s) {
     s = Math.max(0, Math.floor(s || 0));
     var m = Math.floor(s / 60), ss = s % 60;
     return m + ':' + String(ss).padStart(2, '0');
   }
-  window.wisperConnectLiveStream && window.wisperConnectLiveStream(
-    '/recordings/{{ active_recording.id }}/live',
-    function(payload) {
-      window.wisperTickerAppend && window.wisperTickerAppend({
-        timestamp: fmtElapsed(payload.start_s),
-        speaker: payload.speaker,
-        text: payload.text,
-      });
-    }
-  );
+  document.addEventListener('DOMContentLoaded', function() {
+    window.wisperConnectLiveStream && window.wisperConnectLiveStream(
+      '/recordings/{{ active_recording.id }}/live',
+      function(payload) {
+        window.wisperTickerAppend && window.wisperTickerAppend({
+          timestamp: fmtElapsed(payload.start_s),
+          speaker: payload.speaker,
+          text: payload.text,
+        });
+      }
+    );
+  });
 })();
 
 // Noise-floor slider -- debounced POST to /api/record/live-noise-floor,
@@ -563,6 +572,5 @@
 })();
 </script>
 {% endif %}
-{% endblock %}
 {% endif %}
 {% endblock %}

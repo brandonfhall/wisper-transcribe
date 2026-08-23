@@ -263,6 +263,7 @@
 
   </div>
 </div>
+{% endblock %}
 
 {% block extra_scripts %}
 {% if recording.source == 'local' and recording.status in ('recording', 'degraded') %}
@@ -270,6 +271,12 @@
 // Live transcript pane -- shared connector (wisperConnectLiveStream in
 // app.js) handles the SSE + reconnect de-dupe; same endpoint + payload
 // shape as the /record page's ticker (Phase 2).
+//
+// app.js is loaded with `defer`, so it always finishes running strictly
+// after every inline <script> in the body (including this one) and right
+// before DOMContentLoaded -- calling wisperConnectLiveStream synchronously
+// here would silently no-op (window.wisperConnectLiveStream is still
+// undefined at this point), so the connection has to wait for that event.
 (function(){
   var container = document.getElementById('live-transcript');
   var empty = document.getElementById('live-transcript-empty');
@@ -296,13 +303,14 @@
     container.scrollTop = container.scrollHeight;
   }
 
-  window.wisperConnectLiveStream && window.wisperConnectLiveStream(
-    '/recordings/{{ recording.id }}/live',
-    function(payload) { appendLine(payload.speaker, payload.text); },
-    function() { if (empty) empty.textContent = 'Session ended.'; }
-  );
+  document.addEventListener('DOMContentLoaded', function() {
+    window.wisperConnectLiveStream && window.wisperConnectLiveStream(
+      '/recordings/{{ recording.id }}/live',
+      function(payload) { appendLine(payload.speaker, payload.text); },
+      function() { if (empty) empty.textContent = 'Session ended.'; }
+    );
+  });
 })();
 </script>
 {% endif %}
-{% endblock %}
 {% endblock %}
