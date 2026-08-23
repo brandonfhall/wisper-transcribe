@@ -455,17 +455,33 @@ transcribed`, `test_recording_detail_omits_draft_when_no_file_on_disk`,
 detail_active_session_uses_live_pane_not_static_draft` in `test_record_
 routes.py`.
 
-**Known minor gap, not fixed:** the live SSE pane's `type: "snapshot"`
-handler (`recording_detail.html`'s inline script) still discards
-`payload.markdown` and shows a static "Session ended." string instead of
-rendering it, for the narrow race where a session ends while the page is
-still open with an active `EventSource`. Low impact now — a page reload
-immediately shows the correct content via the new static-draft path
-above — but the message is misleading until that reload happens. Fixing
-it properly means either parsing the markdown in JS (no
-`parse_transcript_blocks()` equivalent client-side) or just triggering
-`location.reload()` on that branch; not scoped, since the reload
-workaround already exists.
+**Follow-up cleanup (2026-08-22): reconnect de-dupe gap fixed + snapshot
+dead code removed.** Auditing this area turned up a real bug the
+"minor gap" note above missed: `recording_detail.html`'s live pane had
+its own hand-rolled `EventSource` + parsing, separate from
+`record.html`'s ticker — and unlike the ticker, it never got the
+reconnect-replay de-dupe fix from the "stay and not roll over" entry
+above. A reload/reconnect mid-session (dev-server restart, network blip,
+tab wake) would have doubled every line in the detail-page pane, silently.
+
+Fixed by extracting the shared connection+parsing+de-dupe logic into
+`window.wisperConnectLiveStream(url, onLine, onSnapshot)` in `app.js`
+(keyed on raw `start_s|speaker|text`, not a caller's display-formatted
+fields, since the two callers format differently); both `record.html`
+and `recording_detail.html` now call it instead of duplicating the
+connection logic. `wisperTickerAppend()` no longer does its own de-dupe.
+
+Separately resolved the "minor gap" itself, but by deletion rather than
+implementation: `payload.markdown` was dead code — grepped and confirmed
+no client anywhere ever read it (only the bare `type === 'snapshot'`
+check mattered, to flip the placeholder to "Session ended."). Rather than
+add markdown parsing in JS just to satisfy an unused payload, the server
+route (`GET /recordings/{id}/live` in `record.py`) now sends a bare
+`{"type": "snapshot"}` signal and no longer reads `live_transcript.md`
+into the response at all — the recording-detail page's own
+server-rendered static-draft fallback (above) is what actually shows the
+draft's content, so the SSE snapshot never needed to carry it. Updated
+`test_recording_live_snapshot_from_disk_when_no_active_job` accordingly.
 
 ---
 

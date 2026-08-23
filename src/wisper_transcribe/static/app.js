@@ -68,23 +68,49 @@ window.wisperUpdateMeters = function(data) {
   });
 };
 
+// ── Record: live-transcript SSE connector ──
+// Shared by record.html's ticker and recording_detail.html's pane -- both
+// hit the same GET /recordings/{id}/live endpoint and need the same
+// reconnect-replay de-dupe, so the connection + parsing logic lives here
+// once instead of being hand-rolled per template.
+//
+// De-dupe against a reconnect replay: the SSE resume cursor (`last_idx` in
+// that route) lives server-side per connection, starting at 0 -- there's
+// no client "I've already seen up to X" signal, so any reconnect
+// (dev-server restart, a network blip, tab wake from sleep) looks
+// identical to a brand-new stream and replays the entire line history
+// from the start. Keyed on raw `start_s|speaker|text` rather than a
+// caller's display-formatted fields, since callers format timestamps
+// differently.
+window.wisperConnectLiveStream = function(url, onLine, onSnapshot) {
+  var seen = new Set();
+  try {
+    var src = new EventSource(url);
+    src.onmessage = function(e) {
+      try {
+        var payload = JSON.parse(e.data);
+        if (payload.type === 'line') {
+          var key = payload.start_s + '|' + payload.speaker + '|' + payload.text;
+          if (seen.has(key)) return;
+          seen.add(key);
+          onLine(payload);
+        } else if (payload.type === 'snapshot' && onSnapshot) {
+          onSnapshot(payload);
+        }
+      } catch (ex) {}
+    };
+    src.addEventListener('end', function() { src.close(); });
+    src.onerror = function() { src.close(); };
+    return src;
+  } catch (ex) {}
+};
+
 // ── Record: live transcript ticker ──
-// Called by the SSE handler in record.html with partial_transcript event data.
+// Called via wisperConnectLiveStream's onLine callback in record.html.
 // data: { timestamp: "01:24:09", speaker: "Alice", text: "..." }
 window.wisperTickerAppend = function(data) {
   var ticker = document.getElementById('live-ticker');
   if (!ticker) return;
-
-  // De-dupe against a reconnect replay. The SSE resume cursor
-  // (`last_idx` in GET /recordings/{id}/live) lives server-side per
-  // connection, starting at 0 -- there's no client "I've already seen up
-  // to X" signal, so any reconnect (dev-server restart, a network blip,
-  // tab wake from sleep) looks identical to a brand-new stream and
-  // replays the entire line history from the start.
-  var key = (data.timestamp || '') + '|' + (data.speaker || '') + '|' + (data.text || '');
-  ticker._seenKeys = ticker._seenKeys || new Set();
-  if (ticker._seenKeys.has(key)) return;
-  ticker._seenKeys.add(key);
 
   // Remove placeholder if present
   var placeholder = ticker.querySelector('div[style*="font-style"]');

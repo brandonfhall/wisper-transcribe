@@ -509,32 +509,26 @@
 </script>
 {% if active_recording.source == 'local' %}
 <script>
-// Live-transcript ticker -- same SSE endpoint + payload shape as the
-// recording detail page (GET /recordings/{id}/live). Local capture is the
-// only source that runs a JOB_LIVE job today.
+// Live-transcript ticker -- shared connector (wisperConnectLiveStream in
+// app.js) handles the SSE + reconnect de-dupe; same endpoint + payload
+// shape as the recording detail page. Local capture is the only source
+// that runs a JOB_LIVE job today.
 (function(){
   function fmtElapsed(s) {
     s = Math.max(0, Math.floor(s || 0));
     var m = Math.floor(s / 60), ss = s % 60;
     return m + ':' + String(ss).padStart(2, '0');
   }
-  try {
-    var liveSrc = new EventSource('/recordings/{{ active_recording.id }}/live');
-    liveSrc.onmessage = function(e) {
-      try {
-        var payload = JSON.parse(e.data);
-        if (payload.type === 'line') {
-          window.wisperTickerAppend && window.wisperTickerAppend({
-            timestamp: fmtElapsed(payload.start_s),
-            speaker: payload.speaker,
-            text: payload.text,
-          });
-        }
-      } catch (ex) {}
-    };
-    liveSrc.addEventListener('end', function() { liveSrc.close(); });
-    liveSrc.onerror = function() { liveSrc.close(); };
-  } catch (ex) {}
+  window.wisperConnectLiveStream && window.wisperConnectLiveStream(
+    '/recordings/{{ active_recording.id }}/live',
+    function(payload) {
+      window.wisperTickerAppend && window.wisperTickerAppend({
+        timestamp: fmtElapsed(payload.start_s),
+        speaker: payload.speaker,
+        text: payload.text,
+      });
+    }
+  );
 })();
 
 // Noise-floor slider -- debounced POST to /api/record/live-noise-floor,

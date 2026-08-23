@@ -279,7 +279,11 @@ def test_recording_live_snapshot_from_disk_when_no_active_job(client):
         assert resp.status_code == 200
         body = "".join(resp.iter_text())
 
-    assert "hello from disk" in body
+    # The snapshot is a bare signal, not the file's content -- the
+    # recording-detail page's own server-rendered fallback (once status
+    # leaves recording/degraded) is what shows the draft itself.
+    assert '"type": "snapshot"' in body
+    assert "hello from disk" not in body
     assert "event: end" in body
 
 

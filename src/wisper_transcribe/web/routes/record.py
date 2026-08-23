@@ -724,10 +724,15 @@ async def recording_live(recording_id: str, request: Request):
     is still retained after the `_MAX_LIVE_LINES` cap trims the oldest.
 
     Once no active `JOB_LIVE` job exists for this recording (never
-    started, or the session already ended), this sends one snapshot of
-    whatever landed in `live_transcript.md` on disk and closes -- there is
-    nothing further to stream. The authoritative transcript is always the
-    post-session full pipeline pass via `POST /recordings/{id}/transcribe`.
+    started, or the session already ended), this sends a `snapshot` signal
+    (only if `live_transcript.md` exists on disk -- lets the client
+    distinguish "session ended with a draft on disk" from "nothing was ever
+    recorded") and closes -- there is nothing further to stream. The
+    authoritative transcript is always the post-session full pipeline pass
+    via `POST /recordings/{id}/transcribe`; the recording-detail page's own
+    server-rendered fallback (once `status` leaves `recording`/`degraded`)
+    is what actually shows the draft's content, so this signal doesn't
+    carry the markdown itself.
     """
     safe_id = _validate_recording_id(recording_id)
     if safe_id is None:
@@ -764,8 +769,7 @@ async def recording_live(recording_id: str, request: Request):
                 if last_idx == 0:
                     live_path = data_dir / "recordings" / safe_id / "live_transcript.md"
                     if live_path.exists():
-                        payload = {"type": "snapshot", "markdown": live_path.read_text(encoding="utf-8")}
-                        yield f"data: {json.dumps(payload)}\n\n"
+                        yield f"data: {json.dumps({'type': 'snapshot'})}\n\n"
                 yield "event: end\ndata: {}\n\n"
                 return
 

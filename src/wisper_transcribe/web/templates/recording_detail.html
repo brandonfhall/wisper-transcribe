@@ -267,7 +267,9 @@
 {% block extra_scripts %}
 {% if recording.source == 'local' and recording.status in ('recording', 'degraded') %}
 <script>
-// Live transcript pane -- SSE from GET /recordings/{id}/live (Phase 2).
+// Live transcript pane -- shared connector (wisperConnectLiveStream in
+// app.js) handles the SSE + reconnect de-dupe; same endpoint + payload
+// shape as the /record page's ticker (Phase 2).
 (function(){
   var container = document.getElementById('live-transcript');
   var empty = document.getElementById('live-transcript-empty');
@@ -294,21 +296,11 @@
     container.scrollTop = container.scrollHeight;
   }
 
-  try {
-    var src = new EventSource('/recordings/{{ recording.id }}/live');
-    src.onmessage = function(e) {
-      try {
-        var payload = JSON.parse(e.data);
-        if (payload.type === 'line') {
-          appendLine(payload.speaker, payload.text);
-        } else if (payload.type === 'snapshot' && empty) {
-          empty.textContent = 'Session ended.';
-        }
-      } catch (ex) {}
-    };
-    src.addEventListener('end', function() { src.close(); });
-    src.onerror = function() { src.close(); };
-  } catch (ex) {}
+  window.wisperConnectLiveStream && window.wisperConnectLiveStream(
+    '/recordings/{{ recording.id }}/live',
+    function(payload) { appendLine(payload.speaker, payload.text); },
+    function() { if (empty) empty.textContent = 'Session ended.'; }
+  );
 })();
 </script>
 {% endif %}
