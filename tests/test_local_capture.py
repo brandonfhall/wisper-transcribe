@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
+from wisper_transcribe.recording_manager import append_marker, load_recordings
 from wisper_transcribe.web.audio_writer import SegmentedWavWriter
 from wisper_transcribe.web.local_capture import (
     FIFO_CAP_BYTES,
@@ -579,6 +580,70 @@ def test_finalise_clears_live_sink(tmp_path):
     mgr.start_session(None, "mic-dev", "sys-dev")
     _run_session_to_completion(mgr)
     assert mgr._live_sink is None
+
+
+# ---------------------------------------------------------------------------
+# Segment manifest + concurrent-append preservation
+# ---------------------------------------------------------------------------
+
+def test_combined_track_rotation_and_finalize_populate_segment_manifest(tmp_path, monkeypatch):
+    """segment_manifest was previously always empty -- append_segment()
+    existed but nothing ever called it for local sessions either. Each
+    combined-track rotation during _do_tick, plus the final segment closed
+    by _finalise, should land in Recording.segment_manifest as
+    stream == "mixed" entries."""
+    import functools
+
+    import wisper_transcribe.web.local_capture as local_capture_module
+
+    monkeypatch.setattr(
+        local_capture_module,
+        "SegmentedWavWriter",
+        functools.partial(SegmentedWavWriter, segment_duration_s=0.1),
+    )
+
+    n_ticks = 13
+    blocks = {"mic-dev": [_block() for _ in range(n_ticks)]}
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path,
+        capture_factory=scripted_capture_factory(blocks),
+        ticker=instant_ticker(n_ticks),
+    )
+    rec = mgr.start_session(None, "mic-dev", "sys-dev")
+    _run_session_to_completion(mgr)
+
+    combined_dir = tmp_path / "recordings" / rec.id / "combined"
+    segments_on_disk = sorted(combined_dir.glob("*.wav"))
+
+    manifest = load_recordings(tmp_path)[rec.id].segment_manifest
+    assert len(manifest) == len(segments_on_disk)
+    assert all(seg.stream == "mixed" for seg in manifest)
+    assert [seg.index for seg in manifest] == list(range(len(segments_on_disk)))
+
+
+def test_marker_added_mid_session_survives_finalise(tmp_path):
+    """Regression: BotManager/LocalCaptureManager hold one long-lived
+    Recording object for the whole session and periodically call
+    save_recording() with it directly (per-track writer setup, disconnect
+    handling, finalise). append_marker() mutates Recording.markers through
+    an independent load-fresh + mutex-protected save from a different call
+    site (the marker route) -- a plain save_recording(recording, ...) using
+    the stale long-lived object would silently overwrite that marker.
+    Confirmed reproducible before the save_recording_merged() fix: this
+    test failed (0 markers) against the unfixed code."""
+    n_ticks = 5
+    blocks = {"mic-dev": [_block() for _ in range(n_ticks)]}
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path,
+        capture_factory=scripted_capture_factory(blocks),
+        ticker=instant_ticker(n_ticks),
+    )
+    rec = mgr.start_session(None, "mic-dev", "sys-dev")
+    append_marker(rec.id, data_dir=tmp_path)
+    _run_session_to_completion(mgr)
+
+    loaded = load_recordings(tmp_path)[rec.id]
+    assert len(loaded.markers) == 1
 
 
 # ---------------------------------------------------------------------------

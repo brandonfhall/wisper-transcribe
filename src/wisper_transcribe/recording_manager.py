@@ -228,6 +228,36 @@ def save_recording(recording: Recording, data_dir: Optional[Path] = None) -> Non
     _update_index(recording.id, data_dir)
 
 
+def save_recording_merged(recording: Recording, data_dir: Optional[Path] = None) -> None:
+    """Save `recording`, first refreshing its `markers`/`segment_manifest`
+    from whatever is currently on disk.
+
+    `BotManager`/`LocalCaptureManager` hold one long-lived `Recording`
+    object for the whole session and call this whenever they persist a
+    change to a field they own directly (`status`, `combined_path`,
+    `discord_speakers`, `rejoin_log`, ...) — several times per session
+    (per-user speaker discovery, disconnect handling, session finalise).
+    Meanwhile `append_marker()` (the "Add marker" button) and
+    `append_segment()`/`record_completed_wav_segment()` (combined-track
+    rotation) mutate `markers`/`segment_manifest` through their own
+    independent load-fresh + mutex-protected save, from a different call
+    site (a route handler, the tick/frame loop) that can run at any point
+    during the session. A plain `save_recording(recording, ...)` here would
+    silently overwrite whatever those functions already committed, because
+    the long-lived object never picked up their change — confirmed
+    reproducible: add a marker mid-session, let the session end normally,
+    and `Recording.markers` comes back empty. Refreshing under the same
+    per-recording lock those functions use makes this atomic with respect
+    to them, so a concurrent append can never be lost to this save.
+    """
+    with _get_recording_lock(recording.id):
+        current = load_recordings(data_dir).get(recording.id)
+        if current is not None:
+            recording.markers = current.markers
+            recording.segment_manifest = current.segment_manifest
+        save_recording(recording, data_dir)
+
+
 def _update_index(recording_id: str, data_dir: Optional[Path] = None) -> None:
     index_path = get_recordings_index_path(data_dir)
     index_path.parent.mkdir(parents=True, exist_ok=True)
@@ -326,6 +356,52 @@ def append_segment(
             raise KeyError(f"Recording {recording_id!r} not found")
         recordings[recording_id].segment_manifest.append(segment)
         save_recording(recordings[recording_id], data_dir)
+
+
+def record_completed_wav_segment(
+    recording_id: str,
+    path: Path,
+    started_at: datetime,
+    *,
+    finalized: bool,
+    data_dir: Optional[Path] = None,
+) -> datetime:
+    """Append a `SegmentRecord` for a just-rotated/finalized "mixed"
+    combined-track WAV segment, and return the timestamp to use as the
+    *next* segment's `started_at`.
+
+    Shared by `BotManager._route_frame`/`_finalise` (discord_bot.py) and
+    `LocalCaptureManager._do_tick`/`_finalise` (local_capture.py) — both
+    call `SegmentedWavWriter.write()`/`.finalize()` on their combined
+    writer and get a completed segment's `Path` back exactly when a
+    `SegmentRecord` should be appended. `segment_manifest` was previously
+    never populated at all (nothing called `append_segment()`), leaving
+    the recording-detail page's "Segments" manifest permanently empty.
+
+    Duration is approximated from wall-clock elapsed since `started_at`
+    rather than the writer's own sample count — the writer only tracks
+    media time internally and doesn't expose it per-segment, and wall
+    time is accurate enough for a manifest that only drives a UI counter/
+    duration display, not anything media-critical (the authoritative
+    audio is the concatenated `combined.wav`, unaffected by this).
+
+    Never raises: a bookkeeping failure here must not interrupt the hot
+    capture write path that calls it.
+    """
+    now = datetime.now(timezone.utc)
+    segment = SegmentRecord(
+        index=int(Path(path).stem),
+        stream="mixed",
+        started_at=started_at,
+        duration_s=(now - started_at).total_seconds(),
+        path=Path(path),
+        finalized=finalized,
+    )
+    try:
+        append_segment(recording_id, segment, data_dir=data_dir)
+    except Exception:
+        log.warning("Failed to append segment record for recording %s", recording_id, exc_info=True)
+    return now
 
 
 def append_marker(recording_id: str, data_dir: Optional[Path] = None) -> Marker:

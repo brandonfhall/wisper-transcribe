@@ -19,6 +19,7 @@ from wisper_transcribe.recording_manager import (
     get_recordings_index_path,
     load_recordings,
     reconcile_on_startup,
+    record_completed_wav_segment,
     save_recording,
     update_recording_status,
 )
@@ -264,6 +265,59 @@ def test_append_segment_atomic_under_concurrent_calls(tmp_path):
 
     loaded = load_recordings(tmp_path)
     assert len(loaded[rec.id].segment_manifest) == n
+
+
+def test_record_completed_wav_segment_appends_and_returns_new_started_at(tmp_path):
+    """record_completed_wav_segment() is the shared helper BotManager/
+    LocalCaptureManager call whenever their combined-track writer rotates
+    or finalizes -- this is what actually populates segment_manifest,
+    which previously had append_segment() defined but never called."""
+    rec = _make_recording(tmp_path)
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    path = tmp_path / "recordings" / rec.id / "combined" / "0000.wav"
+
+    new_started_at = record_completed_wav_segment(
+        rec.id, path, started_at, finalized=True, data_dir=tmp_path
+    )
+
+    loaded = load_recordings(tmp_path)
+    manifest = loaded[rec.id].segment_manifest
+    assert len(manifest) == 1
+    seg = manifest[0]
+    assert seg.index == 0
+    assert seg.stream == "mixed"
+    assert seg.started_at == started_at
+    assert seg.duration_s > 0
+    assert seg.path == path
+    assert seg.finalized is True
+    # Returned timestamp is the next segment's start, strictly after this one.
+    assert new_started_at > started_at
+
+
+def test_record_completed_wav_segment_parses_index_from_filename(tmp_path):
+    rec = _make_recording(tmp_path)
+    path = tmp_path / "recordings" / rec.id / "combined" / "0042.wav"
+
+    record_completed_wav_segment(
+        rec.id, path, datetime.now(timezone.utc), finalized=False, data_dir=tmp_path
+    )
+
+    manifest = load_recordings(tmp_path)[rec.id].segment_manifest
+    assert manifest[0].index == 42
+    assert manifest[0].finalized is False
+
+
+def test_record_completed_wav_segment_swallows_errors_for_unknown_recording(tmp_path):
+    """Never raises -- a bookkeeping failure must not interrupt the hot
+    capture write path that calls this."""
+    new_started_at = record_completed_wav_segment(
+        "no-such-recording",
+        tmp_path / "0000.wav",
+        datetime.now(timezone.utc),
+        finalized=True,
+        data_dir=tmp_path,
+    )
+    assert new_started_at is not None
 
 
 # ---------------------------------------------------------------------------

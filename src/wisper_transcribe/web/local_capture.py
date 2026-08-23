@@ -53,7 +53,11 @@ from typing import Callable, Iterator, Optional
 import numpy as np
 
 from wisper_transcribe.models import Recording
-from wisper_transcribe.recording_manager import create_recording, save_recording
+from wisper_transcribe.recording_manager import (
+    create_recording,
+    record_completed_wav_segment,
+    save_recording_merged,
+)
 from wisper_transcribe.web.audio_writer import (
     SegmentedWavWriter,
     concat_wav_segments,
@@ -263,6 +267,10 @@ class LocalCaptureManager:
         self._writers: dict[str, SegmentedWavWriter] = {}
         self._combined_writer: Optional[SegmentedWavWriter] = None
         self._combined_dir: Optional[Path] = None
+        # Wall-clock start of the combined writer's *current* segment, used
+        # by record_completed_wav_segment() to approximate segment
+        # duration -- see that function's docstring.
+        self._combined_segment_started_at: Optional[datetime] = None
         self._capture_threads: list[threading.Thread] = []
         self._tick_thread: Optional[threading.Thread] = None
         # Phase 2: optional live-transcription tap, called from the tick
@@ -364,6 +372,7 @@ class LocalCaptureManager:
         }
         self._combined_dir = rec_dir / "combined"
         self._combined_writer = SegmentedWavWriter(stream_dir=self._combined_dir)
+        self._combined_segment_started_at = datetime.now(timezone.utc)
 
         with self._level_lock:
             self._level_peaks = {"mic": 0.0, "system": 0.0}
@@ -450,7 +459,7 @@ class LocalCaptureManager:
             return
         try:
             recording.status = "degraded"
-            save_recording(recording, self._data_dir)
+            save_recording_merged(recording, self._data_dir)
         except Exception:
             log.warning("Failed to mark recording %s degraded", recording.id, exc_info=True)
 
@@ -505,7 +514,15 @@ class LocalCaptureManager:
             mixed += track_samples[name].astype(np.int32)
         mixed_clipped = np.clip(mixed, -32768, 32767).astype("<i2")
         mixed_bytes = mixed_clipped.tobytes()
-        self._combined_writer.write(mixed_bytes)
+        completed_path = self._combined_writer.write(mixed_bytes)
+        if completed_path is not None:
+            self._combined_segment_started_at = record_completed_wav_segment(
+                self._active_recording.id,
+                completed_path,
+                self._combined_segment_started_at,
+                finalized=True,
+                data_dir=self._data_dir,
+            )
 
         sink = self._live_sink
         if sink is not None:
@@ -534,11 +551,21 @@ class LocalCaptureManager:
 
         combined_dir = self._combined_dir
         if self._combined_writer is not None:
+            final_path: Optional[Path] = None
             try:
-                self._combined_writer.finalize()
+                final_path = self._combined_writer.finalize()
             except Exception:
                 log.warning("Failed to finalise local capture combined writer", exc_info=True)
+            if final_path is not None:
+                record_completed_wav_segment(
+                    recording.id,
+                    final_path,
+                    self._combined_segment_started_at,
+                    finalized=True,
+                    data_dir=self._data_dir,
+                )
             self._combined_writer = None
+            self._combined_segment_started_at = None
 
             combined_out = self._data_dir / "recordings" / recording.id / "combined.wav"
             try:
@@ -555,6 +582,6 @@ class LocalCaptureManager:
             recording.status = "completed"
             recording.ended_at = datetime.now(timezone.utc)
 
-        save_recording(recording, self._data_dir)
+        save_recording_merged(recording, self._data_dir)
         if became_completed:
             log.info("Local recording %s finalised as completed", recording.id)
