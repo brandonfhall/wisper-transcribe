@@ -12,12 +12,32 @@ has been trimmed per this file's own doc rule now that the work is done).
 
 **Remaining open items:**
 
-- **Real-device smoke test still owed.** No test in the suite touches real
-  `soundcard` devices or a real Whisper model. `enumerate_devices()`'s
-  `isloopback`-based mic/loopback split and `_soundcard_capture_factory`'s
-  `mic.recorder(samplerate=...)`/`record(numframes=None)` calls are unverified
-  against the real package. `LIVE_AUDIO_TEST_PLAN.md` (repo root, untracked) has
-  the manual walkthrough.
+- **Real-device smoke test — Section 1 (fast pass) done 2026-08-23; Sections
+  2-4 still owed.** `LIVE_AUDIO_TEST_PLAN.md` (repo root, untracked) has the
+  full manual walkthrough. Section 1 was run live in Chrome against real mic
+  (Yeti) + real loopback (K5 DAC) hardware and found two real bugs, both
+  fixed same day (see `architecture.md`'s Known Constraints and the
+  `record.py`/`local_capture.py` module entries for detail):
+  1. The mic/system-audio pickers had no default-selection logic at all —
+     silently defaulted to the first device in enumeration order rather
+     than the OS's actual default, so a session recorded with defaults
+     captured genuine silence on the system-audio track.
+  2. `{% block extra_scripts %}` was nested inside `{% block page %}` in
+     both `record.html` and `recording_detail.html` (Jinja renders a
+     nested child block twice under `{% extends %}`), and separately the
+     live-ticker's `wisperConnectLiveStream()` call ran before `app.js`
+     (loaded `defer`) had defined it — between the two, the live ticker
+     never rendered a single line on a fresh page load and the level
+     gauges pulsed erratically. Both fixed; verified live afterward
+     (smooth gauges, ticker renders correctly, F5 reconnect shows each
+     line exactly once, markers survive stop).
+  Sections 2-4 (real-device audio-quality listening, "This is me"
+  attribution with real simultaneous mic+system speech, campaign-journal
+  browser click-through) still need a human — see the "how much can you
+  test on your own" breakdown from that session for what's left.
+  `enumerate_devices()`'s `isloopback`-based mic/loopback split itself
+  checked out correct against the real `soundcard` package (Stereo Mix
+  correctly bucketed as a microphone, not a loopback).
 - **`initial_prompt` chaining — field-tested 2026-08-16, misbehaved, dropped.**
   Confirmed on real speech to send faster-whisper into repetition loops
   ("column column column column...", worsening chunk over chunk as each
@@ -600,6 +620,39 @@ Nothing else changes — the Unix-socket wire protocol (length-prefixed user_id 
 The **rolling campaign journal** — the first of these — has shipped (`journal.py`, `wisper campaigns journal`, the web Campaign-page journal panel). It established the shared infrastructure the remaining features reuse: slug-scoped storage under `campaigns/<slug>/`, `.summary.md` discovery (`unjournalled_sessions()`), and `JobQueue` `JOB_CAMPAIGN_*` types with the standard SSE progress page. See `architecture.md` / `docs/web-ui.md` for its as-built shape; mirror it when building the three below.
 
 **Merged into `feat/live-audio-recording` (2026-08-23).** `feat/campaign-journal` (developed independently, based on an older `main`) merged cleanly into the live-audio branch's much-evolved `jobs.py`/`cli.py` — both branches added purely additive job types/CLI commands, so conflicts were mechanical (interleaved insertions, not logical clashes). One real bug caught during resolution: `cli.py` had two competing `_LLM_PROVIDER_CHOICE` definitions after the merge — campaign-journal's own hardcoded `click.Choice(["ollama", "anthropic", "openai", "google"])` (predating the R20 fix that made this dynamic) plus live-audio-recording's `_llm_provider_choice()` deriving from `config.LLM_PROVIDERS`. Since Click decorators evaluate top-to-bottom at import time, `wisper campaigns journal --provider` would have silently kept using the stale hardcoded list (missing `ollama-cloud`) while every other LLM command used the dynamic one. Fixed by consolidating to one definition, moved above its first use. Also found `_run_journal_job()` used raw `job.log_lines.append(...)` in 4 places instead of `job.append_log()`, bypassing the R14 line-count cap every other job type goes through — low real-world impact (a journal fold's log is tiny) but inconsistent with the established pattern; fixed to match. Full suite green post-merge (1260 tests).
+
+**Real-content pipeline test (2026-08-23).** Ran `wisper transcribe` →
+`wisper summarize` → `wisper campaigns journal` end-to-end against 5 real
+`GooeyCube-Hanataz` session recordings (2026-07-11 through 2026-08-22,
+~13.7h of audio total) on real GPU hardware (RTX 3090, `large-v3-turbo`,
+~25-60x realtime). All 5 now fully transcribed, summarized, and journaled;
+`campaigns/gooeycube-hanataz/journal.md` reads coherently across sessions.
+
+- **Found: `ollama.py`'s `complete_json`/`_post_chat` has no retry on an
+  empty final response, and a reasoning/"thinking" model can burn its
+  whole generation budget on the `thinking` stream field (silently
+  discarded, correctly) and never reach `content` at all** — happened
+  3 of 5 attempts summarizing one ~152k-char transcript against
+  `ollama-cloud`/`deepseek-v4-flash:0731` with the strict `_SUMMARY_SCHEMA`
+  format constraint; a bare retry of the same CLI command succeeded both
+  times it was retried. A different model (local `gemma4:26b`, non-thinking)
+  failed the same transcript a different way — ignored the `format`
+  constraint entirely and returned prose instead of JSON. Root cause not
+  fully isolated: `_post_chat` never checks a streamed chunk for an
+  `"error"` field (only `message.content`), so a genuine swallowed API
+  error and a clean `done:true` with zero content tokens both surface
+  identically as `Ollama JSON response did not parse: ... Raw: ''`,
+  misdirecting the error at the parse layer. Two follow-up diagnostic
+  replays (same transcript, same model) both succeeded, so this is
+  intermittent/content-dependent, not deterministic. Not fixed —
+  flagged for a decision on whether to add retry-on-empty-content and/or
+  surface the swallowed-error case distinctly before touching the shared
+  client code (touches every provider).
+- Not yet run: Section 3b of `LIVE_AUDIO_TEST_PLAN.md` (the web
+  browser click-through — "Update journal" button, live job progress page,
+  "View journal" not "View transcript", sanitized HTML rendering, "Fold
+  all", nothing-pending empty state). The campaign is fully populated and
+  the server is up, so this is ready to run whenever wanted.
 
 The three remaining features all read the same `.summary.md` sidecars written by `wisper summarize`:
 
