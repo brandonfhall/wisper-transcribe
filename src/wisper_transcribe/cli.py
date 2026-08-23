@@ -941,11 +941,19 @@ def campaigns_remove_member(slug: str, profile_key: str):
               help="Specific session stem to fold (default: next unjournalled)")
 @click.option("--all", "fold_all", is_flag=True, default=False,
               help="Fold every pending session in one run (oldest first)")
+@click.option("--rebuild", is_flag=True, default=False,
+              help="Redrive the whole campaign: re-summarize every session "
+                   "transcript from scratch and rebuild the journal from a "
+                   "clean start. A lot of LLM calls -- asks for confirmation "
+                   "unless --yes is also passed.")
+@click.option("--yes", is_flag=True, default=False,
+              help="Skip the --rebuild confirmation prompt")
 @click.option("--provider", default=None, type=_LLM_PROVIDER_CHOICE,
               help="LLM provider (default: llm_provider from config)")
 @click.option("--model", default=None, help="Model override (default: llm_model from config)")
 @click.option("--endpoint", default=None, help="Ollama endpoint override")
 def campaigns_journal(slug: str, session: Optional[str], fold_all: bool,
+                      rebuild: bool, yes: bool,
                       provider: Optional[str], model: Optional[str],
                       endpoint: Optional[str]):
     """Fold session summaries into a rolling campaign journal.
@@ -954,10 +962,11 @@ def campaigns_journal(slug: str, session: Optional[str], fold_all: bool,
     ``campaigns/<slug>/journal.md`` that the LLM rewrites as each new session
     is folded in. With no flags it folds the next unjournalled session (one
     that has a ``.summary.md`` from `wisper summarize`). Pass ``--all`` to fold
-    every pending session, or ``--session <stem>`` to fold a specific one.
+    every pending session, ``--session <stem>`` to fold a specific one, or
+    ``--rebuild`` to redrive the entire campaign from its transcripts.
     """
-    from .campaign_manager import _validate_campaign_slug, load_campaigns
-    from .journal import unjournalled_sessions, update_journal
+    from .campaign_manager import _validate_campaign_slug, get_transcripts_for_campaign, load_campaigns
+    from .journal import rebuild_campaign, unjournalled_sessions, update_journal
     from .llm.errors import LLMResponseError, LLMUnavailableError
     from .speaker_manager import load_profiles
 
@@ -967,8 +976,38 @@ def campaigns_journal(slug: str, session: Optional[str], fold_all: bool,
     if safe not in load_campaigns():
         raise click.ClickException(f"Campaign {safe!r} not found.")
 
-    if session and fold_all:
-        raise click.ClickException("--session and --all are mutually exclusive.")
+    exclusive = [session is not None, fold_all, rebuild]
+    if sum(exclusive) > 1:
+        raise click.ClickException("--session, --all, and --rebuild are mutually exclusive.")
+
+    if rebuild:
+        transcript_count = len(get_transcripts_for_campaign(safe))
+        if transcript_count == 0:
+            click.echo(f"Campaign {safe!r} has no transcripts to rebuild from.")
+            return
+        if not yes:
+            click.confirm(
+                f"Rebuild {safe!r}: re-summarize all {transcript_count} session "
+                f"transcript(s) and regenerate the journal from scratch? "
+                f"This is {transcript_count * 2} LLM calls.",
+                abort=True,
+            )
+        client = _get_llm_client(provider, model, endpoint)
+        click.echo(f"Rebuilding {safe!r} with {client.provider} / {client.model} "
+                   f"({transcript_count} session(s)) ...", err=True)
+        result = rebuild_campaign(
+            safe, client, load_profiles(), data_dir=None,
+            on_progress=lambda msg: click.echo(f"  {msg}", err=True),
+        )
+        click.echo(f"Re-summarized: {len(result.resummarized)}")
+        if result.skipped:
+            click.echo(f"Skipped: {len(result.skipped)}")
+            for stem, reason in result.skipped:
+                click.echo(f"  {stem}: {reason}")
+        if result.journal is not None:
+            click.echo(f"Wrote {result.journal.path}")
+            click.echo(f"  journaled sessions: {len(result.journal.journaled_sessions)}")
+        return
 
     # Decide the work list up front so we can report 'nothing to do' cleanly.
     if session:

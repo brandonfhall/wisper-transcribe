@@ -20,9 +20,9 @@ from __future__ import annotations
 
 import datetime as _dt
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import yaml
 
@@ -94,6 +94,11 @@ def journal_path(slug: str, data_dir: Optional[Path] = None) -> Optional[Path]:
 def _summary_path(stem: str) -> Path:
     """Return the ``<stem>.summary.md`` sidecar path in the output dir."""
     return get_output_dir() / f"{stem}.summary.md"
+
+
+def _transcript_path(stem: str) -> Path:
+    """Return the ``<stem>.md`` transcript path in the output dir."""
+    return get_output_dir() / f"{stem}.md"
 
 
 # ---------------------------------------------------------------------------
@@ -257,3 +262,104 @@ def update_journal(slug: str, client: LLMClient,
         provider=getattr(client, "provider", ""),
         model=getattr(client, "model", ""),
     )
+
+
+# ---------------------------------------------------------------------------
+# Full rebuild — redrive every session transcript through summarize + fold
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RebuildResult:
+    """Outcome of a full ``rebuild_campaign`` redrive."""
+    resummarized: list[str] = field(default_factory=list)
+    skipped: list[tuple[str, str]] = field(default_factory=list)  # (stem, reason)
+    journal: Optional[JournalResult] = None
+
+
+def rebuild_campaign(slug: str, client: LLMClient,
+                     profiles: dict[str, SpeakerProfile], *,
+                     sections: Optional[list[str]] = None,
+                     data_dir: Optional[Path] = None,
+                     on_progress: Optional[Callable[[str], None]] = None
+                     ) -> RebuildResult:
+    """Redrive a campaign from scratch: re-summarize every session transcript
+    and fold them all into a freshly-reset journal, in campaign order.
+
+    This is a lot of LLM calls (two per session — one summarize, one fold) —
+    callers are expected to have already gotten explicit confirmation from
+    the user before invoking this (the CLI requires ``--yes`` or an
+    interactive confirm; the web route requires a confirmed POST).
+
+    A transcript stem with no ``<stem>.md`` on disk is skipped (recorded in
+    ``RebuildResult.skipped``) rather than aborting the whole redrive — same
+    resilience as a single missing summary already gets in the normal fold
+    path. An LLM failure summarizing one session is likewise skipped so one
+    bad session doesn't waste every other already-completed call; a session
+    is only folded into the journal if it was just successfully
+    (re-)summarized.
+
+    Raises:
+        ValueError: invalid slug.
+        KeyError: campaign not found.
+    """
+    from .summarize import default_summary_path, render_markdown, summarize_transcript
+    from .llm.errors import LLMResponseError, LLMUnavailableError
+
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        raise ValueError(f"Invalid campaign slug: {slug!r}")
+    if safe not in load_campaigns(data_dir):
+        raise KeyError(f"Campaign {safe!r} not found")
+
+    def _report(msg: str) -> None:
+        if on_progress:
+            on_progress(msg)
+
+    stems = get_transcripts_for_campaign(safe, data_dir)
+    result = RebuildResult()
+
+    resummarized: list[str] = []
+    for stem in stems:
+        transcript_path = _transcript_path(stem)
+        if not transcript_path.exists():
+            result.skipped.append((stem, "transcript .md not found"))
+            _report(f"Skipping {stem}: transcript .md not found")
+            continue
+
+        _report(f"Summarizing {stem} ...")
+        try:
+            md = transcript_path.read_text(encoding="utf-8")
+            note = summarize_transcript(
+                md, profiles, client,
+                sections=sections,
+                source_transcript=transcript_path.name,
+            )
+        except (LLMUnavailableError, LLMResponseError) as exc:
+            result.skipped.append((stem, str(exc)))
+            _report(f"Skipping {stem}: summarize failed ({exc})")
+            continue
+
+        body = render_markdown(note, profiles=profiles, sections=sections)
+        default_summary_path(transcript_path).write_text(body, encoding="utf-8")
+        resummarized.append(stem)
+        result.resummarized.append(stem)
+
+    # Reset the journal so the fold pass below starts clean rather than
+    # building on top of stale content from before the redrive.
+    jpath = journal_path(safe, data_dir)
+    if jpath is not None and jpath.exists():
+        jpath.unlink()
+
+    fold_result = None
+    for stem in resummarized:
+        _report(f"Folding {stem} ...")
+        try:
+            fold_result = update_journal(safe, client, profiles,
+                                         session_stem=stem, data_dir=data_dir)
+        except (LLMUnavailableError, LLMResponseError, FileNotFoundError) as exc:
+            result.skipped.append((stem, f"fold failed: {exc}"))
+            _report(f"Fold failed for {stem}: {exc}")
+            continue
+
+    result.journal = fold_result
+    return result

@@ -126,6 +126,13 @@
         </form>
         {% endif %}
         {% endif %}
+        {% if active_campaign.transcripts %}
+        <form method="post" action="/campaigns/{{ slug }}/journal" style="display:inline">
+          <input type="hidden" name="mode" value="rebuild"/>
+          <button type="submit" class="btn btn-secondary btn-sm"
+                  onclick="return confirm('Rebuild the whole journal? This re-summarizes all {{ active_campaign.transcripts|length }} session transcripts and regenerates the journal from scratch — {{ (active_campaign.transcripts|length) * 2 }} LLM calls.')">Rebuild journal</button>
+        </form>
+        {% endif %}
       </div>
     </div>
 

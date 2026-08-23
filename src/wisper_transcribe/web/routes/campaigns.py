@@ -252,7 +252,9 @@ async def campaign_journal_update(
 ) -> RedirectResponse:
     """Submit a rolling-journal job and redirect to its progress page.
 
-    `mode="all"` folds every pending session; anything else folds the next one.
+    `mode="all"` folds every pending session, `mode="rebuild"` redrives the
+    whole campaign from its transcripts (confirmed client-side before this
+    POST — same pattern as "Fold all"); anything else folds the next one.
     """
     safe = _validate_campaign_slug(slug)
     if safe is None:
@@ -263,9 +265,14 @@ async def campaign_journal_update(
         return error_redirect("/campaigns", "not_found")
 
     queue = get_queue(request)
-    job = queue.submit_journal(
-        safe, name=f"Journal: {campaign.display_name}", fold_all=(mode == "all")
-    )
+    if mode == "rebuild":
+        job = queue.submit_journal(
+            safe, name=f"Rebuild journal: {campaign.display_name}", rebuild=True
+        )
+    else:
+        job = queue.submit_journal(
+            safe, name=f"Journal: {campaign.display_name}", fold_all=(mode == "all")
+        )
     # job.id is a server-generated uuid4 — never user input (CodeQL-safe redirect).
     return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
 

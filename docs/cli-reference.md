@@ -212,9 +212,13 @@ wisper campaigns journal d-d-mondays                  # fold the next unjournall
 wisper campaigns journal d-d-mondays --all            # fold every pending session (oldest first)
 wisper campaigns journal d-d-mondays --session s05    # fold a specific session stem
 wisper campaigns journal d-d-mondays --provider openai --model gpt-4o-mini
+wisper campaigns journal d-d-mondays --rebuild        # redrive the whole campaign (asks to confirm)
+wisper campaigns journal d-d-mondays --rebuild --yes  # same, skip the confirmation prompt
 ```
 
 A session is "pending" once it has a `.summary.md`. With no flags the command folds the single oldest unjournalled session; re-run (or use `--all`) to catch up the rest. Sessions already folded are tracked in the journal's `journaled_sessions:` frontmatter and skipped.
+
+`--rebuild` redrives the *entire* campaign from its transcripts: every session transcript is re-summarized from scratch (overwriting its `.summary.md`) and the journal is regenerated from a clean start, folding every session back in in order — two LLM calls per session, so it asks for confirmation first unless `--yes` is also passed. `--session`, `--all`, and `--rebuild` are mutually exclusive. A transcript missing its `.md` file, or a session whose re-summarize call fails, is skipped and reported rather than aborting the whole run — only sessions that were freshly re-summarized get folded into the rebuilt journal.
 
 **Scoping transcription to a campaign:**
 

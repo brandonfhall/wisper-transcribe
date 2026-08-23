@@ -653,6 +653,20 @@ The **rolling campaign journal** — the first of these — has shipped (`journa
   "View journal" not "View transcript", sanitized HTML rendering, "Fold
   all", nothing-pending empty state). The campaign is fully populated and
   the server is up, so this is ready to run whenever wanted.
+- **`rebuild_campaign()` / "Rebuild journal" — shipped (2026-08-23),
+  requested directly by the user after the Hanataz real-content test.**
+  Redrives a whole campaign: re-summarizes every session transcript from
+  scratch and rebuilds the journal from a clean start (two LLM calls per
+  session), gated by a confirmation (CLI `--rebuild`/`--yes`; web button's
+  client-side `confirm()`, same pattern as the existing "Fold all"
+  button). `wisper campaigns journal <slug> --rebuild` / the campaign
+  page's "Rebuild journal" button. Solid unit coverage (journal.py, CLI,
+  job runner, web route, template) — full suite green. Deliberately NOT
+  yet run live against the real `gooeycube-hanataz` campaign (would
+  overwrite its already-good summaries/journal with real LLM cost) — that
+  live run is still owed whenever wanted, and would also double as a real
+  stress test of the `ollama.py` empty-response gap noted above (up to
+  10 LLM calls for 5 sessions).
 
 The three remaining features all read the same `.summary.md` sidecars written by `wisper summarize`:
 

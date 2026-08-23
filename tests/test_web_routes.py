@@ -1891,6 +1891,30 @@ def test_campaigns_create_empty_name_rejected(client, tmp_path, monkeypatch):
     assert "error=invalid_name" in resp.headers.get("location", "")
 
 
+def test_campaign_detail_shows_rebuild_button_with_transcripts(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+
+    create_campaign("My Game", data_dir=tmp_path)
+    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
+
+    resp = client.get("/campaigns/my-game")
+    assert resp.status_code == 200
+    assert "Rebuild journal" in resp.text
+    assert 'value="rebuild"' in resp.text
+
+
+def test_campaign_detail_hides_rebuild_button_with_no_transcripts(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    create_campaign("My Game", data_dir=tmp_path)
+
+    resp = client.get("/campaigns/my-game")
+    assert resp.status_code == 200
+    assert "Rebuild journal" not in resp.text
+
+
 def test_campaign_detail_unknown_slug(client, tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     with patch("wisper_transcribe.web.routes.campaigns.load_campaigns", return_value={}):
@@ -2071,6 +2095,27 @@ def test_campaign_journal_post_fold_all(client, tmp_path, monkeypatch):
 
     assert resp.status_code == 303
     assert mock_submit.call_args.kwargs.get("fold_all") is True
+
+
+def test_campaign_journal_post_rebuild(client, tmp_path, monkeypatch):
+    """mode=rebuild submits rebuild=True and does not set fold_all/session_stem."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.web.jobs import Job
+    from wisper_transcribe.campaign_manager import create_campaign
+    import uuid
+
+    create_campaign("My Game", data_dir=tmp_path)
+    fake_job = MagicMock(spec=Job)
+    fake_job.id = str(uuid.uuid4())
+
+    with patch.object(client.app.state.job_queue, "submit_journal",
+                      return_value=fake_job) as mock_submit:
+        resp = client.post("/campaigns/my-game/journal",
+                           data={"mode": "rebuild"}, follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/transcribe/jobs/{fake_job.id}"
+    assert mock_submit.call_args.kwargs.get("rebuild") is True
 
 
 def test_campaign_journal_post_unknown_campaign(client, tmp_path, monkeypatch):

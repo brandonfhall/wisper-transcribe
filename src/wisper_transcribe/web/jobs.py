@@ -873,15 +873,25 @@ class JobQueue:
         name: str = "",
         session_stem: Optional[str] = None,
         fold_all: bool = False,
+        rebuild: bool = False,
     ) -> Job:
-        """Enqueue a rolling-campaign-journal job for a campaign slug."""
+        """Enqueue a rolling-campaign-journal job for a campaign slug.
+
+        `rebuild=True` redrives the whole campaign (re-summarize every
+        session transcript + rebuild the journal from scratch) instead of
+        folding in the next/all pending session(s) — mutually exclusive
+        with `session_stem`/`fold_all` at the route layer, which is
+        responsible for getting the user's confirmation first (this is a
+        lot of LLM calls).
+        """
         job = Job(
             id=str(uuid.uuid4()),
             status=PENDING,
             created_at=datetime.now(),
             input_path="",
-            kwargs={"slug": slug, "session_stem": session_stem, "fold_all": fold_all},
-            name=name or f"Journal: {slug}",
+            kwargs={"slug": slug, "session_stem": session_stem,
+                    "fold_all": fold_all, "rebuild": rebuild},
+            name=name or (f"Rebuild journal: {slug}" if rebuild else f"Journal: {slug}"),
             job_type=JOB_CAMPAIGN_JOURNAL,
         )
         self._jobs[job.id] = job
@@ -1066,13 +1076,14 @@ class JobQueue:
         refine/summarize LLM jobs — safe because the queue is single-worker).
         """
         from wisper_transcribe.config import load_config
-        from wisper_transcribe.journal import unjournalled_sessions, update_journal
+        from wisper_transcribe.journal import rebuild_campaign, unjournalled_sessions, update_journal
         from wisper_transcribe.llm import get_client
         from wisper_transcribe.speaker_manager import load_profiles
 
         slug = job.kwargs["slug"]
         session_stem = job.kwargs.get("session_stem")
         fold_all = bool(job.kwargs.get("fold_all", False))
+        rebuild = bool(job.kwargs.get("rebuild", False))
 
         old_stderr = _sys.stderr
         _sys.stderr = _StderrCapture(job)
@@ -1081,6 +1092,23 @@ class JobQueue:
             client = get_client(cfg.get("llm_provider", "ollama"), config=cfg)
             job.append_log(f"LLM: {client.provider} / {client.model}")
             profiles = load_profiles()
+
+            if rebuild:
+                result = rebuild_campaign(slug, client, profiles,
+                                          on_progress=job.append_log)
+                job.append_log(f"Re-summarized: {len(result.resummarized)}")
+                if result.skipped:
+                    job.append_log(f"Skipped: {len(result.skipped)}")
+                    for stem, reason in result.skipped:
+                        job.append_log(f"  {stem}: {reason}")
+                if result.journal is not None:
+                    job.output_path = str(result.journal.path)
+                    job.append_log(
+                        f"Journal written: {result.journal.path.name} "
+                        f"({len(result.journal.journaled_sessions)} session(s) folded)"
+                    )
+                job.status = COMPLETED
+                return
 
             if session_stem:
                 targets = [session_stem]

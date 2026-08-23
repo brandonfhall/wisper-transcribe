@@ -126,6 +126,8 @@ When a `.summary.md` sidecar exists, the transcript detail page shows a green "C
 **Campaign Journal (DM tool):**
 The Campaign page shows a **Rolling journal** panel that aggregates session summaries into one living document per campaign. Once a session has a `.summary.md`, it becomes "ready to fold in". Click **Update journal** to fold the next session, or **Fold all** to catch up every pending session. Each fold queues a job (redirecting to the live progress page) where the LLM rewrites the journal to incorporate the new session — tracking story arcs, open plot threads, NPCs, party decisions, and a running loot ledger. Context stays bounded (current journal + one new summary per fold), so it scales to long campaigns. Click **View journal** to read the rendered result; already-folded sessions are skipped on subsequent runs.
 
+**Rebuild journal** (shown whenever the campaign has at least one transcript) redrives the whole campaign from scratch: every session transcript is re-summarized and the journal is regenerated from a clean start, folding every session back in in order. This is two LLM calls per session, so the button asks for confirmation (session count and total call count) before queuing the job. Use it after switching LLM models/providers, or to pick up prompt or summarize changes retroactively across a whole campaign's history.
+
 ---
 
 ## Job Management
