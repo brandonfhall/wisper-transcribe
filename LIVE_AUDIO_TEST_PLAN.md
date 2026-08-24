@@ -1,16 +1,19 @@
 # Manual Test Plan — PR #58 (live local recording + campaign journal)
 
-Covers everything on `feat/live-audio-recording` as of the merge with
-`feat/campaign-journal` (2026-08-23). All of it is unit-tested (1260 passing,
-one pre-existing unrelated Windows-only failure — see PR #58's description).
-**No real audio device or real Whisper model has touched the live-capture
-code yet**, and neither feature has had a real browser click-through this
-session — that's what this checklist is for.
+Covers everything on `feat/live-audio-recording` as of 2026-08-24. All of it
+is unit-tested (1315 passing, one pre-existing unrelated Windows-only
+failure — see PR #58's description).
 
 Work through it top to bottom. Section 1 is the fast pass — it specifically
-exercises the 6 bugs found and fixed today, and shouldn't take more than a
-few minutes. Sections 2–4 are the fuller walkthroughs (live-audio hardware,
-campaign journal, cross-feature sanity) for whenever you have more time.
+exercises 6 bugs found and fixed on 2026-08-22/23. **Section 1 is DONE** —
+run live against real hardware (Yeti mic + K5 DAC loopback) on 2026-08-23;
+see `plan.md`'s "Live local recording" section for what was found and fixed
+along the way (default-device selection, duplicate SSE connections). Section
+1a-1e all confirmed working live. Sections 2–4 are the fuller walkthroughs
+(live-audio hardware, campaign journal, cross-feature sanity) and are still
+owed. **Section 5 (new, 2026-08-24) covers today's work and is also still
+owed** — none of it has had a real browser click-through yet, only
+automated `pytest` coverage.
 
 ---
 
@@ -48,51 +51,51 @@ it may need a filter tweak.
 Each of these is unit-tested, but none has been clicked through in a real
 browser. All 6 came out of one review session on 2026-08-22/23.
 
-### 1a. Live pane no longer doubles lines on reconnect
+### 1a. Live pane no longer doubles lines on reconnect ✅ VERIFIED 2026-08-23
 *(fixes: recording-detail page had its own hand-rolled SSE handler missing
 the reconnect de-dupe the `/record` ticker already had)*
 
-- [ ] Start a local session, open the recording detail page
+- [x] Start a local session, open the recording detail page
       (`/recordings/<id>`), let 3-4 lines come in.
-- [ ] Reload the page (F5) while still recording.
-- [ ] Confirm every line appears **exactly once** — not doubled. (Before the
+- [x] Reload the page (F5) while still recording.
+- [x] Confirm every line appears **exactly once** — not doubled. (Before the
       fix, a reload would replay the full history on top of what was
       already there.)
 
-### 1b. Segments manifest is populated
+### 1b. Segments manifest is populated ✅ VERIFIED 2026-08-23
 *(fixes: `append_segment()` existed but nothing ever called it — the
 Segments section was always empty for every recording, ever)*
 
-- [ ] After a session with **real audio** (local or Discord), open the
+- [x] After a session with **real audio** (local or Discord), open the
       recording detail page and check the **"Segments"** panel — it should
       list actual rows (index, timestamp, duration, sealed/open), not be
       empty.
 
-### 1c. Markers survive to the end of the session
+### 1c. Markers survive to the end of the session ✅ VERIFIED 2026-08-23
 *(fixes: `BotManager`/`LocalCaptureManager` held a long-lived `Recording`
 object that silently overwrote markers/segments appended concurrently from
 a different call site — confirmed reproducible: a marker added mid-session
 came back empty after the session ended)*
 
-- [ ] Start a session, click **"Add marker"** once or twice while it's
+- [x] Start a session, click **"Add marker"** once or twice while it's
       running.
-- [ ] Stop the recording.
-- [ ] Reload the recording detail page — confirm the marker(s) are **still
+- [x] Stop the recording.
+- [x] Reload the recording detail page — confirm the marker(s) are **still
       there** under "Markers" (elapsed-time pills). This is the one most
       worth double-checking; it was a real, silent data-loss bug.
 
-### 1d. No-audio session doesn't show a phantom segment
+### 1d. No-audio session doesn't show a phantom segment ✅ VERIFIED 2026-08-23
 *(fixes: `SegmentedWavWriter.finalize()` always returns a path even for an
 empty 0-frame segment — the first version of the fix above appended a
 manifest entry for it unconditionally)*
 
-- [ ] Start a local (or Discord) session and stop it **immediately**, before
+- [x] Start a local (or Discord) session and stop it **immediately**, before
       any audio is captured.
-- [ ] Recording detail page should show **"No combined audio file found"**
+- [x] Recording detail page should show **"No combined audio file found"**
       *and* an empty/absent Segments panel — not a contradictory
       "Segments: 1" next to the no-audio error.
 
-### 1e. `ollama-cloud` shows up everywhere it should (merge fix)
+### 1e. `ollama-cloud` shows up everywhere it should (merge fix) ✅ VERIFIED 2026-08-23
 *(fixes: after merging in the campaign-journal branch, `cli.py` had two
 competing provider-choice lists — the journal command would have silently
 kept using a stale one missing `ollama-cloud`)*
@@ -102,7 +105,7 @@ kept using a stale one missing `ollama-cloud`)*
 .venv\Scripts\wisper summarize --help
 ```
 
-- [ ] Both `--provider` option lists include `ollama-cloud` and match each
+- [x] Both `--provider` option lists include `ollama-cloud` and match each
       other exactly.
 
 ### 1f. Journal job log line count is capped like every other job
@@ -253,12 +256,96 @@ but has never been clicked through in a browser either.*
 - [ ] `/campaigns` and `/record` both still load correctly and don't step
       on each other — the merge touched `jobs.py`/`cli.py` fairly deeply on
       both sides.
-- [ ] Start a local recording *and* fold a campaign journal around the same
-      time — since `JobQueue` is single-worker, the journal job should
-      simply queue behind (or ahead of) the live job rather than causing
-      any crash or mixed-up state.
+- [ ] Start a local recording *and* fold/rebuild a campaign journal around
+      the same time — since `JobQueue` is single-worker, the journal job
+      should simply queue behind (or ahead of) the live job rather than
+      causing any crash or mixed-up state. **This is exactly the scenario
+      that produced a real bug on 2026-08-24**: a local session started
+      while a journal rebuild was running got a completely silent, empty
+      `live_transcript.md` with no error shown anywhere (root-caused and
+      fixed — see Section 5b below for the checklist covering the fix).
 - [ ] `wisper --help` — confirm both `campaigns journal` and the live-audio
       CLI surface (if any) show up with no import errors.
+
+---
+
+## 5. Today's work (2026-08-24) — not yet clicked through
+
+Everything below is unit-tested (pytest) but has never run in a real
+browser or against real audio this session — all of today's investigation
+was direct code reproduction, not browser automation.
+
+### 5a. Missing transcript file — still unresolved, watch for it
+
+While investigating 5b, a second, separate bug turned up: a local
+recording's full **Transcribe** job reported success (diarization ran,
+"Wrote `<id>.md`" logged) but the output `.md` file did not exist anywhere
+on disk afterward. **Could not be root-caused** — the job queue has no
+persistence across restarts and no debug log was running that night, so
+the evidence was gone by the time it was investigated.
+
+- [ ] Before doing anything else in this section, run the server with
+      `$env:WISPER_DEBUG=1; wisper server --reload` instead of the normal
+      command, so a debug log is captured if this recurs.
+- [ ] Do a normal local-recording → Transcribe pass (Section 2d covers this
+      too — no need to repeat if you're doing both). Confirm the transcript
+      `.md` actually exists at the path the job page / `/transcripts` link
+      to, not just that the job says COMPLETED.
+- [ ] If it happens again: **don't restart the server** — the job's log
+      (visible on its job detail page) and the new debug log are the only
+      evidence that would explain it. Save both before doing anything else.
+
+### 5b. Live-transcript queue-busy warning (fix for the bug above)
+
+*(fixes: `JOB_LIVE` shares the single-worker job queue with every other job
+type; if something else — a campaign journal rebuild, a refine/summarize
+job, another transcription — is already running when a local session
+starts, the live-transcript job could sit `PENDING` for the session's
+entire length and silently produce nothing. Now it fails visibly instead,
+and the Record page warns up front.)*
+
+- [ ] Start something long-running first — e.g. **Rebuild journal** on a
+      campaign with a few sessions (Campaigns page), or just kick off a
+      transcription job on a longer file.
+- [ ] While that's still running, start a local recording session.
+- [ ] Confirm the Record page shows an amber notice: *"Recording started,
+      but another job is already running — the live transcript preview
+      won't start until it finishes..."*
+- [ ] Stop the local session before the other job finishes. Open its
+      recording detail page — the live-transcript job (visible in the Jobs
+      list) should show **FAILED** with a clear reason ("Live transcript
+      never started — the job queue was busy for the whole session"), not
+      a misleading clean COMPLETED with nothing in it.
+- [ ] Sanity check the non-starved path still works: start a local session
+      with **nothing else running** — no warning banner, live pane fills in
+      normally (same as Section 2b).
+
+### 5c. Bulk-select delete + disk cleanup on delete (new feature)
+
+*(previously, deleting a recording only removed it from the list — audio
+and transcript files stayed on disk forever. Delete now actually removes
+them, for both the single-item button and a new bulk-select flow.)*
+
+- [ ] `/recordings` — the "Captured" table now has a checkbox per row (a
+      still-recording or degraded session has no checkbox) and a
+      **select-all** checkbox in the header.
+- [ ] Check 2-3 recordings (mix of transcribed and not-yet-transcribed if
+      you have both). A **"Delete selected"** bar should appear showing the
+      count.
+- [ ] Click **Delete selected** — confirm dialog should mention this is
+      permanent. Confirm it.
+- [ ] Verify the selected recordings are gone from the list, and their
+      files are actually gone from disk:
+      ```powershell
+      dir $env:APPDATA\wisper-transcribe\recordings\<deleted-id>   # should not exist
+      dir $env:APPDATA\wisper-transcribe\output\<deleted-id>.md    # should not exist, if it was transcribed
+      ```
+- [ ] Single-item delete: open a recording's detail page, click **Delete**
+      (previously said "Remove... Audio files are kept on disk" — should
+      now say the files will be deleted). Confirm the same disk cleanup.
+- [ ] `wisper record delete <id> --yes` (CLI) — same result: index entry and
+      files both gone. (Needs the server running; `wisper record list` to
+      find an id.)
 
 ---
 
@@ -270,16 +357,24 @@ For each unchecked/failed box, note:
 3. OS + whether GPU or CPU transcription.
 
 Ranked by how much guesswork was involved (most likely trouble spots first):
-1. `enumerate_devices()`'s mic-vs-loopback split (Section 0) — never
+1. **Section 5a** (missing transcript file) — an actual unresolved bug that
+   was directly observed once already; highest value to catch a repeat
+   with `WISPER_DEBUG=1` on.
+2. **Section 5c** (bulk delete + disk purge) — new, destructive, and only
+   pytest-verified so far; worth confirming the confirm-dialog and disk
+   cleanup both behave before trusting it on real data.
+3. **Section 5b** (live-transcript queue-busy fix) — root-caused and fixed
+   from a direct repro, but never clicked through live; confirm the warning
+   banner and the FAILED-job behavior both show up as expected.
+4. `enumerate_devices()`'s mic-vs-loopback split (Section 0) — never
    verified against the real `soundcard` API.
-2. `_soundcard_capture_factory`'s `mic.recorder(samplerate=...)` /
+5. `_soundcard_capture_factory`'s `mic.recorder(samplerate=...)` /
    `record(numframes=None)` calls (Section 2a) — if broken, per-track WAVs
    will be empty or capture threads will silently die.
-3. Live transcript timing/lag on CPU (Section 2b).
-4. Section 1c (marker persistence) — highest-value regression check from
-   today's fixes; worth confirming even if you skip everything else.
+6. Live transcript timing/lag on CPU (Section 2b).
 
-Everything else (mixing math, silence substitution, chunk-cutting logic,
-JOB_LIVE lifecycle, cross-manager exclusion, SSE resume, segment-manifest
-bookkeeping, journal folding logic) is unit-tested against synthetic data
-and should just work.
+Section 1 is fully verified (2026-08-23) — see the ✅ marks above. Everything
+else not called out above (mixing math, silence substitution, chunk-cutting
+logic, JOB_LIVE lifecycle, cross-manager exclusion, SSE resume,
+segment-manifest bookkeeping, journal folding logic) is unit-tested against
+synthetic data and should just work.
