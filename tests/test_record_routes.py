@@ -324,6 +324,44 @@ def test_start_local_html_form_accepts_name(client):
         mgr.stop_session()
 
 
+def test_start_local_html_form_warns_when_queue_already_busy(client, monkeypatch):
+    """Regression test for the 2026-08-23 silent-empty-live-transcript bug:
+    when `_start_live_transcription` reports the (single-worker) queue was
+    already busy, the route must redirect with a notice instead of silently
+    dropping it -- an empty live pane for the whole session otherwise looks
+    identical to a broken microphone.
+
+    `_start_live_transcription` itself (real queue-busy detection) is
+    covered directly in tests/test_record_live_routes.py; this test only
+    checks the route's handling of its return value, so it stubs that
+    function rather than fighting this file's autouse
+    `_no_live_transcription` fixture (which exists to keep the real
+    background worker from loading an actual Whisper model in these tests).
+    """
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    monkeypatch.setattr(
+        "wisper_transcribe.web.routes.record._start_live_transcription", lambda *a, **kw: True
+    )
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            resp = c.post(
+                "/record/start-local",
+                data={"mic_id": "mic1", "system_id": "loop1"},
+                follow_redirects=False,
+            )
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/record?error=live_delayed"
+    finally:
+        mgr.stop_session()
+
+
 def test_clean_session_name_caps_length():
     from wisper_transcribe.web.routes.record import _MAX_SESSION_NAME_LEN, _clean_session_name
 

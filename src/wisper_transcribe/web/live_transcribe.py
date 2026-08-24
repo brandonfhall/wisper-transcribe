@@ -334,6 +334,7 @@ def run_live_loop(
     poll_interval_s: float = POLL_INTERVAL_S,
     sleep_fn: Callable[[float], None] = time.sleep,
     get_noise_floor: Callable[[], float] = lambda: NOISE_FLOOR_RMS,
+    on_warning: Optional[Callable[[str], None]] = None,
 ) -> None:
     """Poll the ring buffer, commit + transcribe chunks, call `on_line` for
     each resulting line, until `stop_event` is set.
@@ -389,6 +390,11 @@ def run_live_loop(
             )
         except Exception:
             log.warning("Live transcription chunk failed; skipping", exc_info=True)
+            if on_warning is not None:
+                # R13: no raw exception text in a callback that renders into
+                # job log / SSE -- the server log (exc_info=True above) has
+                # the detail; this just tells the user something was skipped.
+                on_warning("Live transcription chunk failed; skipping (see server log)")
             lines = []
 
         for line in lines:
@@ -396,6 +402,8 @@ def run_live_loop(
                 on_line(line)
             except Exception:
                 log.warning("Live transcription on_line callback failed", exc_info=True)
+                if on_warning is not None:
+                    on_warning("Live transcription on_line callback failed (see server log)")
         if not lines:
             # A force-cut with no speech at all consumes the buffer below
             # but produces nothing to hand to on_line -- yield briefly so a

@@ -47,6 +47,42 @@ has been trimmed per this file's own doc rule now that the work is done).
   `test_run_live_loop_does_not_chain_initial_prompt` in
   `tests/test_live_transcribe.py`.
 
+**`JOB_LIVE` starvation by the single-worker queue — fixed (2026-08-24).**
+Real-world hit during Section 1 follow-up testing: user reported "I did not
+see any audio come through the live transcription side" on a session
+recorded while a campaign-journal rebuild (also LLM-only, but submitted
+through the same `JobQueue`) was running. Root-caused by direct repro
+against the session's own archived audio — `commit_and_transcribe()` on the
+real per-track WAVs produced correct transcript lines, ruling out the
+transcription/attribution path — down to `stop_live()` only setting
+`live_stop_event` on a job that was still `PENDING` behind the rebuild job;
+`run_live_loop`'s `while not stop_event.is_set()` then exits on its first
+check once the worker eventually dequeues it, "completing" with zero lines
+under a misleadingly clean `COMPLETED` status. Fixed in `jobs.py`/`record.py`
+(see `architecture.md`'s Record page section for the full mechanism and both
+fixes); not a concurrency-model change — `JOB_LIVE` still deliberately holds
+the queue's one worker slot for its own duration, a job queued *before* a
+live session starts can still delay it for the whole session, it's just no
+longer silent (explicit `FAILED` job + an upfront Record-page notice).
+
+**Missing transcript file — found, NOT yet root-caused (2026-08-24).**
+Same investigation surfaced a second, separate bug: a full post-session
+`JOB_TRANSCRIPTION` job for the same recording reported `COMPLETED` with a
+log showing successful diarization and "Wrote `<id>.md`", and the
+recording's metadata/API say `has_transcript: true` pointing at that path —
+but the file does not exist anywhere on disk. Ruled out: CWD-relative write
+(no `./output/` exists in the repo checkout), `WISPER_DATA_DIR` mismatch
+(unset), every deletion code path in `jobs.py` (`_move_upload_to_output`/
+`_delete_temp_upload` are gated on `job.is_web_upload`, which a local
+recording's copied `<recording.id>.wav` source never sets), and a recursive
+search of the entire user profile + repo (nothing named `4a4af921*` exists
+except the recording's own directory). Could not be root-caused further:
+`JobQueue` has zero persistence between restarts (by design — see
+`jobs.py`'s own docstring) and no debug log was enabled at the time, so the
+job history that would show what actually happened is gone. Next occurrence
+is the only way forward — enable `WISPER_DEBUG=1` before the next local
+recording + Transcribe pass so a repeat is capturable.
+
 **Session note (2026-08-15):** the post-implementation review pass (code-review
 skill, high effort, full branch diff) found and fixed 6 real bugs — JOB_LIVE
 threads surviving server shutdown, the generic job-cancel button being a no-op

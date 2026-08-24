@@ -1036,6 +1036,21 @@ class JobQueue:
                 # the asyncio queue -- do not revive it (R3).
                 self._queue.task_done()
                 continue
+            if job.job_type == JOB_LIVE and job.live_stop_event.is_set():
+                # The session was stopped (recording ended) before this job
+                # ever reached the front of the single-worker queue -- e.g. a
+                # long-running LLM/journal job was occupying the worker for
+                # the whole session. run_live_loop's `while not
+                # stop_event.is_set()` would exit on its first check, so
+                # running it now would just be a zero-iteration no-op that
+                # produces an empty live_transcript.md under a misleadingly
+                # clean COMPLETED status. Surface that explicitly instead.
+                job.status = FAILED
+                job.error = "Live transcript never started -- the job queue was busy for the whole session"
+                job.finished_at = datetime.now()
+                self._prune_finished_jobs()
+                self._queue.task_done()
+                continue
             job.status = RUNNING
             try:
                 await asyncio.to_thread(self._run_job, job)
@@ -1575,6 +1590,7 @@ class JobQueue:
                 language=job.kwargs.get("language", "en"),
                 mic_label=job.kwargs.get("mic_label", "You"),
                 get_noise_floor=lambda: job.kwargs.get("noise_floor", NOISE_FLOOR_RMS),
+                on_warning=job.append_log,
             )
             job.status = COMPLETED
         except Exception:

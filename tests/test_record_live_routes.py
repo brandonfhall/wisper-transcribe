@@ -82,6 +82,41 @@ def test_start_live_transcription_submits_job_and_wires_sink(tmp_path):
     assert lcm.live_sink == job.live_ring_buffer.push
 
 
+def test_start_live_transcription_returns_false_when_queue_idle(tmp_path):
+    queue = JobQueue()
+    request = _FakeRequest(queue)
+    lcm = _FakeLocalCaptureManager()
+    recording = _fake_recording()
+
+    with patch("wisper_transcribe.web.routes.record.load_config", return_value={}):
+        result = _start_live_transcription(request, lcm, recording, tmp_path)
+
+    assert result is False
+
+
+def test_start_live_transcription_returns_true_when_another_job_already_active(tmp_path):
+    """Regression test for the 2026-08-23 silent-empty-live-transcript bug:
+    if the (single-worker) queue is already occupied by another job -- e.g.
+    a campaign journal rebuild -- when a local session starts, the caller
+    needs to know so it can warn the user the live preview won't start
+    right away, rather than leaving them looking at an empty pane."""
+    queue = JobQueue()
+    other = queue.submit("/tmp/other.mp3")
+    other.status = RUNNING
+    request = _FakeRequest(queue)
+    lcm = _FakeLocalCaptureManager()
+    recording = _fake_recording()
+
+    with patch("wisper_transcribe.web.routes.record.load_config", return_value={}):
+        result = _start_live_transcription(request, lcm, recording, tmp_path)
+
+    assert result is True
+    # The job still gets queued and wired -- it just won't run right away.
+    job = queue.find_live_job_for_recording("rec-123")
+    assert job is not None
+    assert lcm.live_sink == job.live_ring_buffer.push
+
+
 def test_start_live_transcription_resolves_profile_to_display_name(tmp_path):
     """Phase 3 'this is me': a valid mic_profile_key resolves to the
     enrolled profile's display_name for mic-dominant live lines."""

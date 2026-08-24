@@ -1528,6 +1528,53 @@ def test_run_live_job_exception_still_completes_not_failed(tmp_path):
     assert job.finished_at is not None
 
 
+@pytest.mark.anyio
+async def test_worker_fails_live_job_stopped_before_it_reached_front_of_queue(tmp_path):
+    """Root cause of the 2026-08-23 silent-empty-live-transcript bug:
+    JOB_LIVE shares the single-worker queue with every other job type. If a
+    long-running job (e.g. a campaign journal rebuild) is already running
+    when a local session starts and finishes, `stop_live()` sets
+    `live_stop_event` on a JOB_LIVE job that is still PENDING -- and
+    `run_live_loop`'s `while not stop_event.is_set()` would then exit on its
+    first check, "completing" with zero lines processed and no error shown
+    anywhere. `_worker` must instead recognize this case before ever
+    calling `run_live_loop` and fail the job with an explicit reason.
+    """
+    from wisper_transcribe.web.jobs import FAILED, JobQueue
+
+    q = JobQueue()
+    with patch("wisper_transcribe.web.live_transcribe.run_live_loop") as mock_loop:
+        job = q.submit_live("rec-123", str(tmp_path / "live.md"))
+        q.stop_live(job.id)  # session ended while job still sat PENDING
+        assert job.status == "pending"
+
+        try:
+            await asyncio.wait_for(q._worker(), timeout=0.2)
+        except asyncio.TimeoutError:
+            pass
+
+    assert job.status == FAILED
+    assert job.error
+    assert "queue was busy" in job.error
+    mock_loop.assert_not_called()
+
+
+def test_worker_runs_live_job_normally_when_stop_event_not_yet_set(tmp_path):
+    """Sanity check for the fix above: a JOB_LIVE job that reaches the front
+    of the queue before its session is stopped must still run normally."""
+    from wisper_transcribe.web.jobs import COMPLETED, JobQueue
+
+    q = JobQueue()
+    job = q.submit_live("rec-123", str(tmp_path / "live.md"))
+    assert not job.live_stop_event.is_set()
+
+    with patch("wisper_transcribe.web.live_transcribe.run_live_loop") as mock_loop:
+        q._run_job(job)
+
+    mock_loop.assert_called_once()
+    assert job.status == COMPLETED
+
+
 def test_append_live_line_caps_and_tracks_dropped():
     from datetime import datetime
 

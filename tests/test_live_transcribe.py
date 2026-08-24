@@ -398,6 +398,32 @@ def test_run_live_loop_skips_flaky_chunk_without_ending_loop(monkeypatch):
     assert call_count["n"] == 1  # ran once, didn't crash the loop
 
 
+def test_run_live_loop_reports_flaky_chunk_via_on_warning(monkeypatch):
+    """A per-chunk failure must reach the caller's on_warning callback (wired
+    to job.append_log in production) so it shows up in the job's log/SSE
+    stream instead of only the server console -- see the 2026-08-23
+    silent-live-transcription investigation, where a failing session left no
+    trace anywhere the user could see."""
+    buf = LiveRingBuffer()
+    buf.push(_tone_i16(15.0, 1000), _tone_i16(15.0, 1000), _tone_i16(15.0, 1000))
+
+    stop_event = threading.Event()
+
+    def failing_commit(*a, **kw):
+        stop_event.set()
+        raise RuntimeError("boom")
+
+    warnings = []
+    with patch("wisper_transcribe.web.live_transcribe.commit_and_transcribe", side_effect=failing_commit):
+        run_live_loop(
+            buf, stop_event, lambda line: None,
+            sleep_fn=lambda s: None, on_warning=warnings.append,
+        )
+
+    assert len(warnings) == 1
+    assert "failed" in warnings[0].lower()
+
+
 def test_run_live_loop_does_not_chain_initial_prompt():
     """Regression test: a committed chunk's text must NOT be chained into
     the next chunk's initial_prompt. Confirmed on real speech to send

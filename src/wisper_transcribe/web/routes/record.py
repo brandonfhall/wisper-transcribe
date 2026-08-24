@@ -184,7 +184,7 @@ async def record_status(request: Request):
 
 def _start_live_transcription(
     request: Request, lcm, recording, data_dir: Path, mic_profile_key: str = ""
-) -> None:
+) -> bool:
     """Submit a Phase 2 JOB_LIVE job for a just-started local session and
     wire its ring buffer onto the capture manager's live sink.
 
@@ -196,9 +196,20 @@ def _start_live_transcription(
     Best-effort: a failure here must not fail the already-started capture
     session -- logged and swallowed. The recording still records fine
     without a live preview; only the near-real-time transcript is missing.
+
+    Returns ``True`` when another job was already occupying the (single-
+    worker) queue at submit time -- the JOB_LIVE job still gets queued and
+    the ring buffer still gets wired, but `run_live_loop` won't actually
+    start pulling from it until that other job finishes. For a short local
+    session that can mean the live preview never produces anything before
+    the session ends (see jobs.py's `_worker`, which now fails such a job
+    outright rather than silently "completing" with zero lines) -- callers
+    use this to warn the user up front instead of leaving them looking at
+    an empty pane that reads like a broken microphone.
     """
     try:
         queue = get_queue(request)
+        queue_busy = queue.active_count() > 0
         cfg = load_config()
 
         mic_label = "You"
@@ -220,10 +231,12 @@ def _start_live_transcription(
             mic_label=mic_label,
         )
         lcm.set_live_sink(job.live_ring_buffer.push)
+        return queue_busy
     except Exception:
         log.warning(
             "Failed to start live transcription for recording %s", recording.id, exc_info=True
         )
+        return False
 
 
 def _stop_live_transcription(request: Request, lcm, recording_id: str) -> None:
@@ -377,8 +390,12 @@ async def record_start_local(request: Request):
 
     mic_profile_key = str(body.get("mic_profile_key", ""))
     _remember_mic_profile_default(mic_profile_key)
-    _start_live_transcription(request, lcm, recording, get_data_dir(), mic_profile_key=mic_profile_key)
-    return JSONResponse(_recording_to_dict(recording), status_code=201)
+    queue_busy = _start_live_transcription(
+        request, lcm, recording, get_data_dir(), mic_profile_key=mic_profile_key
+    )
+    payload = _recording_to_dict(recording)
+    payload["live_transcript_delayed"] = queue_busy
+    return JSONResponse(payload, status_code=201)
 
 
 @router.post("/api/record/stop-local")
@@ -670,9 +687,11 @@ async def record_start_local_html(
         return error_redirect("/record", "already_active")
 
     _remember_mic_profile_default(mic_profile_key.strip())
-    _start_live_transcription(
+    queue_busy = _start_live_transcription(
         request, lcm, recording, get_data_dir(), mic_profile_key=mic_profile_key.strip()
     )
+    if queue_busy:
+        return RedirectResponse(url="/record?error=live_delayed", status_code=303)
     return RedirectResponse(url="/record", status_code=303)
 
 

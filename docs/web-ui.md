@@ -110,6 +110,15 @@ capture for CPU cycles — `base` or `small` (set in `wisper config` or the
 Config page) keeps up more reliably than a larger model. GPU machines can
 use any model size.
 
+Live transcription shares the same one-job-at-a-time queue as every other
+background job (transcription, LLM refine/summarize, campaign journal
+folds and rebuilds). If another job is already running when you start a
+local session, the Record page shows a notice: the recording still starts
+fine, but the live preview won't begin filling in until that other job
+finishes — for a short session, that can mean it never shows anything
+before you stop. The full diarized transcript from **Transcribe** is
+unaffected either way.
+
 ---
 
 ## LLM Post-Processing
