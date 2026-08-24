@@ -44,7 +44,7 @@ keys), managing speaker profiles, and starting/stopping Discord recordings.
 | Speakers | `/speakers` | Enroll, rename, remove speaker profiles. Renaming uses the same semantics as `wisper speakers rename`: the profile is re-keyed (embedding and sample clip files move with it) and campaign rosters — including Discord ID bindings — follow automatically. A rename fails with a notice if the new name collides with an existing profile or contains unsupported characters. |
 | Campaigns | `/campaigns` | Create and manage campaigns; add/remove roster members; scope transcription to a campaign; maintain a rolling **campaign journal** |
 | Record | `/record` | Start and stop live Discord voice channel recording sessions, or a local mic + system-audio capture session; shows the active session (either kind) with live speaker/segment counts via SSE; **Browse bot's channels** panel lists available guilds and voice channels so you can click-to-fill IDs without leaving the page. The Local capture card only appears when the optional `[live]` extra is installed and at least one audio device is detected. |
-| Recordings | `/recordings` | Browse all recordings, grouped by campaign; view per-recording detail (status, speakers, segments); delete entries |
+| Recordings | `/recordings` | Browse all recordings, grouped by campaign; view per-recording detail (status, speakers, segments); delete one at a time or select several with the checkboxes and **Delete selected** |
 | Config | `/config` | View and edit all settings |
 
 ---
@@ -91,6 +91,13 @@ chosen device names instead of a Discord channel. Recordings list the
 same way regardless of source, and the transcribe hand-off (**Transcribe**
 button → full diarization + speaker ID pass) works identically once the
 session is stopped.
+
+**Deleting a recording is permanent.** Whether from the detail page's
+**Delete** button or the Recordings list's checkboxes + **Delete
+selected**, deletion removes the recording's audio (raw and per-track)
+and, if it was transcribed, the transcript and its campaign-notes sidecar
+from disk — not just the entry in the list. There's no recovery once
+confirmed.
 
 **Live transcript preview.** While a local session is recording, the
 detail page shows a draft transcript that fills in within a few seconds

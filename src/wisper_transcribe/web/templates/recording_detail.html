@@ -17,8 +17,8 @@
   </div>
   <div style="display:flex;align-items:center;gap:8px">
     <form method="post" action="/recordings/{{ recording.id }}/delete"
-          onsubmit="return confirm('Remove from list? Audio files are kept on disk.')">
-      <button type="submit" class="btn btn-secondary btn-sm" style="color:var(--color-signal-rose)">Remove</button>
+          onsubmit="return confirm('Delete this recording? This removes its audio, transcript, and any campaign notes from disk permanently.')">
+      <button type="submit" class="btn btn-secondary btn-sm" style="color:var(--color-signal-rose)">Delete</button>
     </form>
   </div>
 </div>

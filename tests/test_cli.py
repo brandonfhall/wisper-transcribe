@@ -863,6 +863,28 @@ def test_get_lmstudio_models_parses_response():
     assert models == [("lmstudio-community/gemma-3-12b", ""), ("mistral-7b-instruct", "")]
 
 
+def test_record_delete_passes_purge_true(monkeypatch):
+    """Regression test: `wisper record delete`'s confirmation prompt and
+    docstring promise files are deleted (updated 2026-08-24 when
+    /api/recordings/{id}/delete stopped purging by default) -- the CLI must
+    actually opt in via ?purge=true or that promise is false."""
+    import uuid
+
+    monkeypatch.setenv("WISPER_SERVER_URL", "http://127.0.0.1:8080")
+    fake_response = MagicMock()
+    fake_response.raise_for_status = MagicMock()
+    fake_response.json.return_value = {"id": "x", "deleted": True, "purged": True}
+    rec_id = str(uuid.uuid4())
+
+    with patch("httpx.request", return_value=fake_response) as mock_request:
+        result = CliRunner().invoke(main, ["record", "delete", rec_id, "--yes"])
+
+    assert result.exit_code == 0
+    mock_request.assert_called_once()
+    called_url = mock_request.call_args.args[1]
+    assert called_url.endswith(f"/api/recordings/{rec_id}/delete?purge=true")
+
+
 def test_get_lmstudio_models_returns_empty_on_failure():
     """_get_lmstudio_models returns [] when LM Studio is unreachable."""
     with patch("httpx.get", side_effect=Exception("connection refused")):

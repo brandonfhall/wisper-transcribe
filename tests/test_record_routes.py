@@ -1154,6 +1154,178 @@ def test_recording_delete_removes_entry(client):
     assert load_recordings(tmp_path).get(rec.id) is None
 
 
+def _make_transcribed_recording_with_files(tmp_path):
+    """Build a "transcribed" local Recording with a full real-looking file
+    footprint on disk: the recordings/<id>/ directory (audio) plus the
+    output/ files a transcription job produces (.md, .summary.md, the
+    _diar.json enrollment sidecar + the audio copy it references, and an
+    excerpt clip). Used to verify delete actually purges all of it."""
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+
+    rec = create_recording("", "", data_dir=tmp_path, source="local")
+    rec.status = "transcribed"
+
+    rec_dir = tmp_path / "recordings" / rec.id
+    rec_dir.mkdir(parents=True, exist_ok=True)
+    (rec_dir / "combined.wav").write_bytes(b"fake")
+    (rec_dir / "metadata.json").write_text("{}", encoding="utf-8")
+
+    out_dir = tmp_path / "output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    md_path = out_dir / f"{rec.id}.md"
+    md_path.write_text("# transcript", encoding="utf-8")
+    summary_path = out_dir / f"{rec.id}.summary.md"
+    summary_path.write_text("# summary", encoding="utf-8")
+    audio_path = out_dir / f"{rec.id}.wav"
+    audio_path.write_bytes(b"fake")
+    diar_path = out_dir / f"{rec.id}_diar.json"
+    diar_path.write_text(json.dumps({"input_path": str(audio_path)}), encoding="utf-8")
+    excerpt_path = out_dir / f"{rec.id}_excerpt_1.mp3"
+    excerpt_path.write_bytes(b"fake")
+
+    rec.transcript_path = md_path
+    save_recording(rec, tmp_path)
+
+    return rec, {
+        "rec_dir": rec_dir, "md_path": md_path, "summary_path": summary_path,
+        "audio_path": audio_path, "diar_path": diar_path, "excerpt_path": excerpt_path,
+    }
+
+
+def test_purge_recording_files_refuses_active_session(client):
+    """Regression test: shutil.rmtree()-ing recordings/<id>/ while the
+    capture thread still holds file handles open into it (status
+    "recording"/"degraded") is a different, worse failure than the old
+    index-only delete ever risked -- _purge_recording_files must no-op for
+    an active session rather than touch its files."""
+    from wisper_transcribe.web.routes.record import _purge_recording_files
+
+    c, tmp_path = client
+    rec, paths = _make_transcribed_recording_with_files(tmp_path)
+    rec.status = "recording"
+
+    _purge_recording_files(rec, tmp_path)
+
+    assert paths["rec_dir"].exists()
+    assert paths["md_path"].exists()
+
+
+def test_recording_delete_purges_files_from_disk(client):
+    """Regression test: delete_recording() itself only ever removed the
+    index entry (see its docstring) -- the delete route must now also
+    purge the recording's files, both the recordings/<id>/ directory and
+    the output/ files a full transcribe produced."""
+    c, tmp_path = client
+    rec, paths = _make_transcribed_recording_with_files(tmp_path)
+
+    resp = c.post(f"/recordings/{rec.id}/delete", follow_redirects=False)
+    assert resp.status_code == 303
+
+    assert not paths["rec_dir"].exists()
+    assert not paths["md_path"].exists()
+    assert not paths["summary_path"].exists()
+    assert not paths["audio_path"].exists()
+    assert not paths["diar_path"].exists()
+    assert not paths["excerpt_path"].exists()
+
+
+def test_api_recording_delete_purges_files_from_disk(client):
+    """The bare API defaults to index-only (no confirm() dialog sits in
+    front of it) -- `?purge=true` is required to also delete files, and is
+    what `wisper record delete` (CLI) passes explicitly."""
+    c, tmp_path = client
+    rec, paths = _make_transcribed_recording_with_files(tmp_path)
+
+    resp = c.post(f"/api/recordings/{rec.id}/delete?purge=true")
+    assert resp.status_code == 200
+    assert resp.json() == {"id": rec.id, "deleted": True, "purged": True}
+
+    assert not paths["rec_dir"].exists()
+    assert not paths["md_path"].exists()
+
+
+def test_api_recording_delete_defaults_to_index_only_without_purge_param(client):
+    c, tmp_path = client
+    rec, paths = _make_transcribed_recording_with_files(tmp_path)
+
+    resp = c.post(f"/api/recordings/{rec.id}/delete")
+    assert resp.status_code == 200
+    assert resp.json()["purged"] is False
+
+    assert paths["rec_dir"].exists()
+    assert paths["md_path"].exists()
+
+
+def test_recordings_bulk_delete_removes_multiple_and_purges_files(client):
+    c, tmp_path = client
+    from wisper_transcribe.recording_manager import load_recordings
+
+    rec1, paths1 = _make_transcribed_recording_with_files(tmp_path)
+    rec2, paths2 = _make_transcribed_recording_with_files(tmp_path)
+
+    resp = c.post(
+        "/recordings/bulk-delete",
+        data={"recording_ids": [rec1.id, rec2.id]},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/recordings"
+
+    loaded = load_recordings(tmp_path)
+    assert rec1.id not in loaded
+    assert rec2.id not in loaded
+    assert not paths1["rec_dir"].exists()
+    assert not paths2["rec_dir"].exists()
+    assert not paths1["md_path"].exists()
+    assert not paths2["md_path"].exists()
+
+
+def test_recordings_bulk_delete_skips_invalid_and_unknown_ids(client):
+    """A path-traversal-shaped id or an id for a recording that no longer
+    exists must not abort the rest of the batch."""
+    c, tmp_path = client
+    import uuid
+
+    from wisper_transcribe.recording_manager import create_recording, load_recordings, save_recording
+
+    rec = create_recording("", "", data_dir=tmp_path, source="local")
+    save_recording(rec, tmp_path)
+
+    resp = c.post(
+        "/recordings/bulk-delete",
+        data={"recording_ids": [rec.id, "../evil", str(uuid.uuid4())]},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert rec.id not in load_recordings(tmp_path)
+
+
+def test_recordings_bulk_delete_empty_selection_is_noop(client):
+    c, tmp_path = client
+    from wisper_transcribe.recording_manager import create_recording, load_recordings, save_recording
+
+    rec = create_recording("", "", data_dir=tmp_path, source="local")
+    save_recording(rec, tmp_path)
+
+    resp = c.post("/recordings/bulk-delete", data={}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert rec.id in load_recordings(tmp_path)
+
+
+def test_recordings_list_renders_bulk_select_checkboxes(client):
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+
+    c, tmp_path = client
+    rec = create_recording("", "", data_dir=tmp_path, source="local")
+    rec.status = "completed"
+    save_recording(rec, tmp_path)
+    resp = c.get("/recordings")
+    assert resp.status_code == 200
+    assert 'class="recording-select"' in resp.text
+    assert 'id="select-all-recordings"' in resp.text
+    assert 'action="/recordings/bulk-delete"' in resp.text
+
+
 def test_recording_live_streams_end_event_when_no_live_job(client):
     """Phase 2: GET /recordings/{id}/live is now a real SSE endpoint. A
     recording with no active JOB_LIVE session (never started local live
@@ -1598,7 +1770,7 @@ def test_api_recording_delete_removes_entry(client):
     rec = create_recording("VC1", "G1", data_dir=tmp_path)
     resp = c.post(f"/api/recordings/{rec.id}/delete")
     assert resp.status_code == 200
-    assert resp.json() == {"id": rec.id, "deleted": True}
+    assert resp.json() == {"id": rec.id, "deleted": True, "purged": False}
     assert load_recordings(tmp_path).get(rec.id) is None
 
 

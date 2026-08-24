@@ -442,7 +442,14 @@ def append_marker(recording_id: str, data_dir: Optional[Path] = None) -> Marker:
 
 
 def delete_recording(recording_id: str, data_dir: Optional[Path] = None) -> None:
-    """Remove recording from index. Does NOT delete audio files."""
+    """Remove recording from index. Does NOT delete audio files.
+
+    The web routes that expose deletion (``web/routes/record.py``) call
+    ``_purge_recording_files()`` first to remove the files themselves --
+    that's a route-layer concern (it reuses ``transcripts.py``'s sidecar/
+    excerpt-clip cleanup) kept separate from this function on purpose, so
+    callers that only want the index entry gone still have that option.
+    """
     index_path = get_recordings_index_path(data_dir)
     try:
         with open(index_path, encoding="utf-8") as f:

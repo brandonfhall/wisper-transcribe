@@ -376,7 +376,7 @@ wisper record stop                                              # stop the activ
 wisper record list                                              # list all recordings
 wisper record show <recording_id>                               # show metadata for a recording
 wisper record transcribe <recording_id>                         # re-queue transcription
-wisper record delete <recording_id>                             # remove recording entry (files kept)
+wisper record delete <recording_id>                             # delete recording + its files on disk (permanent)
 ```
 
 `record start` resolves `--guild`/`--voice-channel` in this order: explicit flag → `--preset <name>` → `discord_default_guild`/`discord_default_channel` from config (set via `wisper config discord`) — the same defaults the web Record page uses. It only errors if none of those resolve a value.

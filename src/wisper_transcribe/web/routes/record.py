@@ -473,6 +473,14 @@ async def record_channels(request: Request):
 # already use, via `_submit_recording_transcription()` below for the
 # transcribe hand-off. Responses are generic error codes (never `str(exc)`
 # or a filesystem path) per CLAUDE.md's web route security rules.
+#
+# One deliberate divergence: `delete` only purges files from disk when
+# called with `?purge=true` -- the HTML routes always purge (they sit
+# behind a confirm() dialog), but this bare JSON endpoint doesn't, and
+# defaulting it to destructive would mean any caller with an id (e.g. one
+# printed by `record list`) could wipe files with a single POST. `wisper
+# record delete` passes `purge=true` explicitly, matching its own
+# confirmation prompt.
 
 @router.get("/api/recordings")
 async def recordings_list(request: Request):
@@ -528,8 +536,63 @@ async def recording_transcribe(recording_id: str, request: Request):
     return JSONResponse({"id": recording.id, "job_id": job.id, "status": "transcribing"}, status_code=202)
 
 
+def _purge_recording_files(recording, data_dir: Path) -> None:
+    """Delete a recording's files from disk: the `recordings/<id>/` directory
+    (raw audio, per-user tracks, live-transcript draft, `metadata.json`) and,
+    if it was transcribed, the associated output-dir files -- reusing the
+    exact same cleanup `transcripts.py`'s own delete routes use, since a
+    locally-recorded transcription is written through the identical
+    `_write_enrollment_sidecar()` path and so has the same `_diar.json` +
+    excerpt-clip footprint as any other transcript.
+
+    Best-effort: called right before `delete_recording()` removes the index
+    entry, so by the time any failure here could matter the recording
+    already reads as gone to the user -- a stray leftover file is a much
+    smaller problem than a delete action that silently does nothing.
+
+    Refuses to touch a still-active (`recording`/`degraded`) session: the
+    capture thread's `SegmentedWavWriter` holds open file handles into
+    `rec_dir` and keeps appending to `metadata.json` for as long as
+    `status in ACTIVE_STATUSES` -- `shutil.rmtree()`-ing that directory out
+    from under it mid-session is a different failure than the old
+    index-only delete ever risked (a partial rmtree on Windows leaves the
+    session writing into a half-deleted tree). Callers should stop the
+    session first.
+    """
+    if recording.status in ACTIVE_STATUSES:
+        return
+
+    from wisper_transcribe.web.routes.transcripts import (
+        _delete_diar_sidecar_and_audio,
+        _delete_excerpt_clips,
+    )
+
+    rec_dir = data_dir / "recordings" / recording.id
+    shutil.rmtree(rec_dir, ignore_errors=True)
+
+    if recording.transcript_path is not None:
+        stem = recording.transcript_path.stem
+        try:
+            if recording.transcript_path.exists():
+                recording.transcript_path.unlink()
+            summary_path = recording.transcript_path.with_name(f"{stem}.summary.md")
+            if summary_path.exists():
+                summary_path.unlink()
+        except OSError:
+            pass
+        _delete_diar_sidecar_and_audio(stem)
+        _delete_excerpt_clips(stem)
+
+
 @router.post("/api/recordings/{recording_id}/delete")
 async def recording_delete_api(recording_id: str, request: Request):
+    """`?purge=true` also deletes the recording's files from disk (audio,
+    transcript, campaign notes) -- defaults to the original index-only
+    behavior otherwise, since this endpoint has no confirm() dialog in
+    front of it and any caller that already has an id (e.g. from `record
+    list`) can reach it directly. The HTML routes (which do have a confirm
+    dialog) always purge; `wisper record delete` (CLI) passes `purge=true`
+    explicitly, matching its own confirmation prompt."""
     safe_id = _validate_recording_id(recording_id)
     if safe_id is None:
         return JSONResponse({"error": "invalid_id"}, status_code=400)
@@ -539,10 +602,11 @@ async def recording_delete_api(recording_id: str, request: Request):
     if recording is None:
         return JSONResponse({"error": "not_found"}, status_code=404)
 
-    # Same removal semantics as the HTML delete route: index entry only,
-    # audio/transcript files on disk are left in place.
+    purge = request.query_params.get("purge", "").lower() == "true"
+    if purge:
+        _purge_recording_files(recording, data_dir)
     delete_recording(recording.id, data_dir)
-    return JSONResponse({"id": recording.id, "deleted": True})
+    return JSONResponse({"id": recording.id, "deleted": True, "purged": purge})
 
 
 # ---------------------------------------------------------------------------
@@ -821,14 +885,14 @@ async def recording_detail_html(recording_id: str, request: Request) -> HTMLResp
 
     # Persisted live-transcript draft (Phase 2 near-real-time preview):
     # shown whenever recordings/<id>/live_transcript.md exists on disk and
-    # the recording hasn't been through a full Transcribe yet -- never
-    # cleaned up by anything (delete_recording() only pops the index
-    # entry), so it survives indefinitely and would otherwise vanish from
-    # the page the instant the session stopped, even though the file was
-    # still right there. Only overwritten in the user's sense once a real
-    # Transcribe job sets transcript_path -- this block never runs then.
-    # While still actively recording, the existing SSE-driven pane
-    # (below) owns the live view instead of this static one.
+    # the recording hasn't been through a full Transcribe yet -- nothing
+    # cleans it up short of deleting the recording itself (see
+    # _purge_recording_files), so it survives indefinitely and would
+    # otherwise vanish from the page the instant the session stopped, even
+    # though the file was still right there. Only overwritten in the user's
+    # sense once a real Transcribe job sets transcript_path -- this block
+    # never runs then. While still actively recording, the existing
+    # SSE-driven pane (below) owns the live view instead of this static one.
     live_draft_blocks = None
     if (
         recording.source == "local"
@@ -859,7 +923,30 @@ async def recording_delete_html(recording_id: str, request: Request) -> Redirect
     if safe_id is None:
         return invalid_input_response("Invalid recording ID")
 
-    delete_recording(safe_id, get_data_dir())
+    data_dir = get_data_dir()
+    recording = load_recordings(data_dir).get(safe_id)
+    if recording is not None:
+        _purge_recording_files(recording, data_dir)
+    delete_recording(safe_id, data_dir)
+    return RedirectResponse(url="/recordings", status_code=303)
+
+
+@router.post("/recordings/bulk-delete", response_class=HTMLResponse)
+async def recordings_bulk_delete_html(request: Request) -> RedirectResponse:
+    """Delete multiple recordings (index entry + files on disk) in one
+    request -- the Recordings page's bulk-select checkboxes."""
+    form = await request.form()
+    data_dir = get_data_dir()
+    recordings = load_recordings(data_dir)
+    for recording_id in form.getlist("recording_ids"):
+        safe_id = _validate_recording_id(str(recording_id))
+        if safe_id is None:
+            continue
+        recording = recordings.get(safe_id)
+        if recording is None:
+            continue
+        _purge_recording_files(recording, data_dir)
+        delete_recording(safe_id, data_dir)
     return RedirectResponse(url="/recordings", status_code=303)
 
 

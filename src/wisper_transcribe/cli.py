@@ -1615,13 +1615,15 @@ def record_transcribe(recording_id: str):
 
 @record.command("delete")
 @click.argument("recording_id")
-@click.confirmation_option(prompt="This will remove the recording from the index. Continue?")
+@click.confirmation_option(
+    prompt="This permanently deletes the recording's audio (and transcript, if any) from disk. Continue?"
+)
 def record_delete(recording_id: str):
-    """Remove a recording entry (files on disk are not deleted)."""
+    """Delete a recording and its files on disk (audio, transcript, campaign notes)."""
     from .recording_manager import _validate_recording_id
     if not _validate_recording_id(recording_id):
         raise click.ClickException(f"Invalid recording ID: {recording_id!r}")
-    result = _record_request("POST", f"/api/recordings/{recording_id}/delete")
+    result = _record_request("POST", f"/api/recordings/{recording_id}/delete?purge=true")
     click.echo(result)
 
 

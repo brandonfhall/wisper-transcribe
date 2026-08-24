@@ -83,6 +83,42 @@ job history that would show what actually happened is gone. Next occurrence
 is the only way forward — enable `WISPER_DEBUG=1` before the next local
 recording + Transcribe pass so a repeat is capturable.
 
+**Bulk-select delete + disk cleanup on delete — shipped (2026-08-24).**
+User request, both parts: "let's have you run with section 1..." session
+surfaced that deleting a recording (`delete_recording()`) only ever removed
+the `recordings.json` index entry, never the files -- `recording_detail.html`'s
+own delete button said so explicitly ("Audio files are kept on disk").
+Added `_purge_recording_files()` in `record.py` (route layer, not
+`recording_manager.py` -- it needs `transcripts.py`'s sidecar/excerpt-clip
+helpers, and `recording_manager.py` can't import from there without a
+circular import since `transcripts.py` already imports `load_recordings`
+from it) and wired it into both existing delete routes plus a new
+`POST /recordings/bulk-delete` (mirrors `transcripts.py`'s own
+`bulk_delete_transcripts`, which turned out to have no UI wired to it at
+all). Recordings list gained checkboxes + a "Delete selected" bar
+(JS-driven submit into a separate hidden form, since each row's own
+Transcribe/Retry button is already its own `<form>` and forms can't nest).
+`delete_recording()` itself deliberately still only pops the index entry
+(docstring updated to point at `_purge_recording_files()` rather than
+changed) -- keeping deletion's two concerns (index vs. files) separable
+seemed better than folding disk I/O into a function whose whole contract
+was "just the index." Also caught and fixed in the same pass: `wisper
+record delete` (CLI) hits the same `/api/recordings/{id}/delete` route, so
+its confirmation prompt and docstring ("files on disk are not deleted")
+would have started lying to users the moment this shipped -- updated to
+match. Pre-commit review pass caught two more real gaps, both fixed before
+shipping: (1) `_purge_recording_files()` now refuses on an active
+(`recording`/`degraded`) session -- `shutil.rmtree()` on a directory the
+capture thread still holds file handles into is a materially worse failure
+than the old index-only delete ever risked, and `degraded` rows were
+reachable through the bulk-select checkboxes even though the table already
+excludes plain `recording` rows; (2) the bare JSON API
+(`/api/recordings/{id}/delete`) defaults to index-only now -- it has no
+confirm() dialog in front of it, so making it destructive by default would
+let any caller holding an id wipe files with one POST; `?purge=true` opts
+in, and the CLI passes it explicitly. 12 new tests across
+`test_record_routes.py`/`test_cli.py`, full suite green.
+
 **Session note (2026-08-15):** the post-implementation review pass (code-review
 skill, high effort, full branch diff) found and fixed 6 real bugs — JOB_LIVE
 threads surviving server shutdown, the generic job-cancel button being a no-op
