@@ -201,7 +201,29 @@ wisper campaigns add-member d-d-mondays alice --role DM # add a player (must be 
 wisper campaigns add-member d-d-mondays bob --role Player --character "Theron"
 wisper campaigns remove-member d-d-mondays charlie      # remove from roster only (keeps voice profile)
 wisper campaigns delete d-d-mondays                     # delete campaign (with confirmation)
+wisper campaigns reorder d-d-mondays s02 --up           # move a session one position earlier
+wisper campaigns reorder d-d-mondays s02 --down         # move a session one position later
+wisper campaigns reorder d-d-mondays --set "s01,s02,s03" # replace the whole order in one shot
 ```
+
+`reorder` changes a campaign's transcript order — the order sessions get folded into the rolling journal in (`wisper campaigns journal`), and the episode numbering on the campaign page. It's insertion order (when a transcript was associated with the campaign), not a date parsed from the filename, so it can drift out of chronological order — e.g. a session transcribed and associated with the campaign later than a newer session ends up out of place. `--set` takes every transcript stem in the campaign as one comma-separated list in the desired order and errors if it isn't an exact permutation of what's currently there.
+
+#### `wisper campaigns journal`
+
+Maintains a **rolling campaign journal** — a single living document the LLM rewrites as each new session is folded in. It reads the per-session `.summary.md` sidecars (from `wisper summarize`) and accumulates them into `campaigns/<slug>/journal.md`, tracking story arcs, open plot threads, NPCs, party decisions, and a running loot ledger. Context stays bounded: each fold sends only the current journal plus one new session summary.
+
+```bash
+wisper campaigns journal d-d-mondays                  # fold the next unjournalled session
+wisper campaigns journal d-d-mondays --all            # fold every pending session (oldest first)
+wisper campaigns journal d-d-mondays --session s05    # fold a specific session stem
+wisper campaigns journal d-d-mondays --provider openai --model gpt-4o-mini
+wisper campaigns journal d-d-mondays --rebuild        # redrive the whole campaign (asks to confirm)
+wisper campaigns journal d-d-mondays --rebuild --yes  # same, skip the confirmation prompt
+```
+
+A session is "pending" once it has a `.summary.md`. With no flags the command folds the single oldest unjournalled session; re-run (or use `--all`) to catch up the rest. Sessions already folded are tracked in the journal's `journaled_sessions:` frontmatter and skipped.
+
+`--rebuild` redrives the *entire* campaign from its transcripts: every session transcript is re-summarized from scratch (overwriting its `.summary.md`) and the journal is regenerated from a clean start, folding every session back in in order — two LLM calls per session, so it asks for confirmation first unless `--yes` is also passed. `--session`, `--all`, and `--rebuild` are mutually exclusive. A transcript missing its `.md` file, or a session whose re-summarize call fails, is skipped and reported rather than aborting the whole run — only sessions that were freshly re-summarized get folded into the rebuilt journal.
 
 **Scoping transcription to a campaign:**
 
@@ -354,7 +376,7 @@ wisper record stop                                              # stop the activ
 wisper record list                                              # list all recordings
 wisper record show <recording_id>                               # show metadata for a recording
 wisper record transcribe <recording_id>                         # re-queue transcription
-wisper record delete <recording_id>                             # remove recording entry (files kept)
+wisper record delete <recording_id>                             # delete recording + its files on disk (permanent)
 ```
 
 `record start` resolves `--guild`/`--voice-channel` in this order: explicit flag → `--preset <name>` → `discord_default_guild`/`discord_default_channel` from config (set via `wisper config discord`) — the same defaults the web Record page uses. It only errors if none of those resolve a value.

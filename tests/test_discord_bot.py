@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from wisper_transcribe.campaign_manager import add_member, bind_discord_id, create_campaign
-from wisper_transcribe.recording_manager import load_recordings
+from wisper_transcribe.recording_manager import append_marker, load_recordings
 from wisper_transcribe.web.discord_bot import BotManager
 from tests._discord_fakes import (
     blocking_source,
@@ -444,6 +444,65 @@ async def test_finalise_concatenates_combined_segments_and_sets_combined_path(
     assert merged_frames == 13 * 320
 
 
+async def test_combined_track_rotation_and_finalize_populate_segment_manifest(
+    tmp_path, monkeypatch
+):
+    """segment_manifest was previously always empty -- append_segment()
+    existed but nothing ever called it. Each combined-track rotation
+    during the session, plus the final (possibly partial) segment closed
+    by _finalise, should now land in Recording.segment_manifest as
+    stream == "mixed" entries."""
+    import functools
+
+    import wisper_transcribe.web.discord_bot as discord_bot_module
+    from wisper_transcribe.web.audio_writer import SegmentedWavWriter
+
+    monkeypatch.setattr(
+        discord_bot_module,
+        "SegmentedWavWriter",
+        functools.partial(SegmentedWavWriter, segment_duration_s=0.1),
+    )
+
+    frames = [("__mixed__", make_pcm_frame())] * 13
+    factory = scripted_source(frames)
+    bm = BotManager(data_dir=tmp_path, audio_source_factory=factory)
+    bm.start()
+    rec = await bm.start_session(None, "VC1", "G1")
+    await asyncio.wait_for(bm._task, timeout=5)
+
+    combined_dir = tmp_path / "recordings" / rec.id / "combined"
+    segments_on_disk = sorted(combined_dir.glob("*.wav"))
+
+    manifest = load_recordings(tmp_path)[rec.id].segment_manifest
+    assert len(manifest) == len(segments_on_disk)
+    assert all(seg.stream == "mixed" for seg in manifest)
+    assert all(seg.finalized for seg in manifest)
+    # Indices are contiguous and match the on-disk filenames.
+    assert [seg.index for seg in manifest] == list(range(len(segments_on_disk)))
+
+
+async def test_marker_added_mid_session_survives_finalise(tmp_path):
+    """Regression: BotManager holds one long-lived Recording object for the
+    whole session and periodically calls save_recording() with it directly
+    (per-user writer setup, disconnect handling, finalise). append_marker()
+    mutates Recording.markers through an independent load-fresh + mutex-
+    protected save from a different call site (the marker route) -- a
+    plain save_recording(recording, ...) using the stale long-lived object
+    would silently overwrite that marker. Confirmed reproducible before the
+    save_recording_merged() fix: this test failed (0 markers) against the
+    unfixed code."""
+    frames = [("__mixed__", make_pcm_frame())] * 5
+    factory = scripted_source(frames)
+    bm = BotManager(data_dir=tmp_path, audio_source_factory=factory)
+    bm.start()
+    rec = await bm.start_session(None, "VC1", "G1")
+    append_marker(rec.id, data_dir=tmp_path)
+    await asyncio.wait_for(bm._task, timeout=5)
+
+    loaded = load_recordings(tmp_path)[rec.id]
+    assert len(loaded.markers) == 1
+
+
 async def test_finalise_leaves_combined_path_none_when_no_audio(tmp_path):
     """A session with no frames at all (e.g. bot joined and immediately
     stopped) must leave combined_path unset so ?error=no_audio still works."""
@@ -455,3 +514,9 @@ async def test_finalise_leaves_combined_path_none_when_no_audio(tmp_path):
 
     loaded = load_recordings(tmp_path)[rec.id]
     assert loaded.combined_path is None
+    # Regression: SegmentedWavWriter.finalize() still closes and returns a
+    # path for the empty (0-frame) segment even with no audio ever
+    # received -- record_completed_wav_segment() must skip it, or the
+    # manifest would show a phantom "Segments: 1" contradicting the
+    # combined_path-is-None / ?error=no_audio state above.
+    assert loaded.segment_manifest == []

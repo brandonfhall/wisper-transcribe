@@ -135,11 +135,46 @@ pip install -e '.[llm-google]'      # Google (Gemini)
 pip install -e '.[llm-all]'         # all three
 ```
 
+**Optional local-recording extra** (mic + system-audio capture, native install only — see below):
+
+```bash
+pip install -e '.[live]'
+```
+
 > **Windows CUDA:** `pip install` gives CPU-only PyTorch by default. After setup, run:
 > ```powershell
 > pip install "torch>=2.8.0" "torchaudio>=2.8.0" --index-url https://download.pytorch.org/whl/cu126 --force-reinstall
 > ```
 > `setup.ps1` handles this automatically.
+
+---
+
+## Local Recording (mic + system audio)
+
+Optional — captures your microphone and the machine's system audio output
+(the other side of a call, a video, a game session) directly on the machine
+running `wisper server`, without a Discord bot. Requires the `[live]` extra
+(`pip install 'wisper-transcribe[live]'`), which installs
+[`soundcard`](https://github.com/bastibe/SoundCard). **Native install only —
+not available in Docker**, since a container has no access to host audio
+devices; the Record page's Local capture card is hidden automatically
+whenever `soundcard` isn't importable or no devices are detected, on any
+platform.
+
+"System audio" means capturing what the machine is currently playing
+(loopback capture) — treated as just another input device, the same way
+[OBS Studio](https://obsproject.com/) treats its Desktop Audio source:
+
+| Platform | Setup |
+|----------|-------|
+| **Windows** | Nothing extra needed — WASAPI loopback devices show up automatically in the system-audio dropdown. |
+| **Linux** | Nothing extra needed on PulseAudio/PipeWire — the monitor source for your output device shows up automatically. |
+| **macOS** | macOS has no built-in loopback capture. Install [BlackHole](https://github.com/ExistentialAudio/BlackHole) (free, 2ch is enough), then create a **Multi-Output Device** in Audio MIDI Setup routing your normal output *and* BlackHole together, and set that Multi-Output Device as your system output. BlackHole then appears as an ordinary input device in the system-audio dropdown. |
+
+Recordings show up on the Recordings page the same as Discord sessions
+(a **LOCAL** badge in place of the channel column) and hand off to the
+same transcribe pipeline once stopped. See [web-ui.md](web-ui.md#local-recording-mic--system-audio)
+for how to start a session from the Record page.
 
 ---
 

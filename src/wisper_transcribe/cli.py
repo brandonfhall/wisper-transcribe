@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import warnings
 from pathlib import Path
 from typing import Optional
@@ -11,6 +12,35 @@ import click
 # Set WISPER_DEBUG=1 to disable all warning suppression for debugging.
 if not os.environ.get("WISPER_DEBUG"):
     warnings.filterwarnings("ignore", module="pyannote.audio.core.io")
+
+
+def _ensure_utf8_stdio() -> None:
+    """Reconfigure stdout/stderr to UTF-8, unconditionally (every command,
+    not just --debug).
+
+    A Windows console or a redirected pipe/file often defaults to a legacy
+    codepage (cp1252, cp437) rather than UTF-8. `pipeline.py` writes
+    Unicode box-drawing/arrow characters (`tqdm.write("─" * 60)`,
+    `→` in the speaker-match log line) as decorative log output --
+    under a legacy codepage that raises `UnicodeEncodeError` and crashes
+    the whole transcription job, even though transcription itself
+    succeeded. `errors="replace"` is a defensive fallback (moot for a
+    UTF-8 target, which can represent any codepoint, but cheap insurance
+    against a stray unencodable byte from elsewhere). Swallows
+    `AttributeError`/`ValueError` for a stream that isn't a real
+    `TextIOWrapper` (e.g. a test harness's capture object) -- reconfiguring
+    stdio is a nice-to-have, never worth failing startup over.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
+_ensure_utf8_stdio()
 
 from . import __version__
 from . import config as _config
@@ -754,6 +784,19 @@ def speakers_reset(yes: bool):
 # wisper campaigns
 # ---------------------------------------------------------------------------
 
+# Provider choice for LLM-backed commands (summarize, refine, campaigns
+# journal). Defined here (above its first use in a command decorator, since
+# decorators evaluate top-to-bottom at import time) and derived from
+# config.LLM_PROVIDERS (R20) rather than hardcoded, so it stays in sync with
+# whatever providers config.py knows about (e.g. ollama-cloud).
+def _llm_provider_choice() -> click.Choice:
+    from .config import LLM_PROVIDERS
+    return click.Choice(LLM_PROVIDERS)
+
+
+_LLM_PROVIDER_CHOICE = _llm_provider_choice()
+
+
 @main.group()
 def campaigns():
     """Manage campaigns (per-show speaker rosters)."""
@@ -892,6 +935,169 @@ def campaigns_remove_member(slug: str, profile_key: str):
     click.echo(f"Removed {profile_key!r} from campaign {safe!r}.")
 
 
+@campaigns.command("reorder")
+@click.argument("slug")
+@click.argument("stem", required=False, default=None)
+@click.option("--up", "move_up", is_flag=True, default=False,
+              help="Move STEM one position earlier")
+@click.option("--down", "move_down", is_flag=True, default=False,
+              help="Move STEM one position later")
+@click.option("--set", "set_order_raw", default=None,
+              help="Replace the whole order in one shot: comma-separated list "
+                   "of every transcript stem in the campaign, in the desired order")
+def campaigns_reorder(slug: str, stem: Optional[str], move_up: bool, move_down: bool,
+                      set_order_raw: Optional[str]):
+    """Reorder a campaign's transcripts.
+
+    This is the order sessions get folded into the rolling journal in
+    (`wisper campaigns journal`) — not necessarily the order they were
+    recorded, since it tracks when a transcript was associated with the
+    campaign, not any date parsed from its filename.
+
+    \b
+    wisper campaigns reorder d-d-mondays s02 --up
+    wisper campaigns reorder d-d-mondays --set "s01,s02,s03"
+    """
+    from .campaign_manager import (
+        _validate_campaign_slug, get_transcripts_for_campaign, load_campaigns,
+        reorder_campaign_transcript, set_campaign_transcript_order,
+    )
+
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        raise click.ClickException(f"Invalid campaign slug: {slug!r}")
+    if safe not in load_campaigns():
+        raise click.ClickException(f"Campaign {safe!r} not found.")
+
+    if set_order_raw is not None:
+        if stem is not None or move_up or move_down:
+            raise click.ClickException("--set cannot be combined with STEM/--up/--down.")
+        order = [s.strip() for s in set_order_raw.split(",") if s.strip()]
+        try:
+            set_campaign_transcript_order(safe, order)
+        except ValueError as exc:
+            raise click.ClickException(str(exc))
+    else:
+        if move_up == move_down:
+            raise click.ClickException("Pass exactly one of --up or --down (or use --set).")
+        if not stem:
+            raise click.ClickException("STEM is required with --up/--down.")
+        try:
+            reorder_campaign_transcript(safe, stem, "up" if move_up else "down")
+        except ValueError as exc:
+            raise click.ClickException(str(exc))
+
+    click.echo(f"Transcript order for {safe!r}:")
+    for i, s in enumerate(get_transcripts_for_campaign(safe), 1):
+        marker = " <-" if s == stem else ""
+        click.echo(f"  {i}. {s}{marker}")
+
+
+@campaigns.command("journal")
+@click.argument("slug")
+@click.option("--session", default=None,
+              help="Specific session stem to fold (default: next unjournalled)")
+@click.option("--all", "fold_all", is_flag=True, default=False,
+              help="Fold every pending session in one run (oldest first)")
+@click.option("--rebuild", is_flag=True, default=False,
+              help="Redrive the whole campaign: re-summarize every session "
+                   "transcript from scratch and rebuild the journal from a "
+                   "clean start. A lot of LLM calls -- asks for confirmation "
+                   "unless --yes is also passed.")
+@click.option("--yes", is_flag=True, default=False,
+              help="Skip the --rebuild confirmation prompt")
+@click.option("--provider", default=None, type=_LLM_PROVIDER_CHOICE,
+              help="LLM provider (default: llm_provider from config)")
+@click.option("--model", default=None, help="Model override (default: llm_model from config)")
+@click.option("--endpoint", default=None, help="Ollama endpoint override")
+def campaigns_journal(slug: str, session: Optional[str], fold_all: bool,
+                      rebuild: bool, yes: bool,
+                      provider: Optional[str], model: Optional[str],
+                      endpoint: Optional[str]):
+    """Fold session summaries into a rolling campaign journal.
+
+    The journal is a single living document at
+    ``campaigns/<slug>/journal.md`` that the LLM rewrites as each new session
+    is folded in. With no flags it folds the next unjournalled session (one
+    that has a ``.summary.md`` from `wisper summarize`). Pass ``--all`` to fold
+    every pending session, ``--session <stem>`` to fold a specific one, or
+    ``--rebuild`` to redrive the entire campaign from its transcripts.
+    """
+    from .campaign_manager import _validate_campaign_slug, get_transcripts_for_campaign, load_campaigns
+    from .journal import rebuild_campaign, unjournalled_sessions, update_journal
+    from .llm.errors import LLMResponseError, LLMUnavailableError
+    from .speaker_manager import load_profiles
+
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        raise click.ClickException(f"Invalid campaign slug: {slug!r}")
+    if safe not in load_campaigns():
+        raise click.ClickException(f"Campaign {safe!r} not found.")
+
+    exclusive = [session is not None, fold_all, rebuild]
+    if sum(exclusive) > 1:
+        raise click.ClickException("--session, --all, and --rebuild are mutually exclusive.")
+
+    if rebuild:
+        transcript_count = len(get_transcripts_for_campaign(safe))
+        if transcript_count == 0:
+            click.echo(f"Campaign {safe!r} has no transcripts to rebuild from.")
+            return
+        if not yes:
+            click.confirm(
+                f"Rebuild {safe!r}: re-summarize all {transcript_count} session "
+                f"transcript(s) and regenerate the journal from scratch? "
+                f"This is {transcript_count * 2} LLM calls.",
+                abort=True,
+            )
+        client = _get_llm_client(provider, model, endpoint)
+        click.echo(f"Rebuilding {safe!r} with {client.provider} / {client.model} "
+                   f"({transcript_count} session(s)) ...", err=True)
+        result = rebuild_campaign(
+            safe, client, load_profiles(), data_dir=None,
+            on_progress=lambda msg: click.echo(f"  {msg}", err=True),
+        )
+        click.echo(f"Re-summarized: {len(result.resummarized)}")
+        if result.skipped:
+            click.echo(f"Skipped: {len(result.skipped)}")
+            for stem, reason in result.skipped:
+                click.echo(f"  {stem}: {reason}")
+        if result.journal is not None:
+            click.echo(f"Wrote {result.journal.path}")
+            click.echo(f"  journaled sessions: {len(result.journal.journaled_sessions)}")
+        return
+
+    # Decide the work list up front so we can report 'nothing to do' cleanly.
+    if session:
+        targets = [session]
+    else:
+        targets = unjournalled_sessions(safe)
+        if not targets:
+            click.echo("Journal is already up to date — no sessions to fold.")
+            click.echo("  (Sessions need a .summary.md first: run `wisper summarize`.)")
+            return
+        if not fold_all:
+            targets = targets[:1]
+
+    client = _get_llm_client(provider, model, endpoint)
+    click.echo(f"Folding {len(targets)} session(s) with "
+               f"{client.provider} / {client.model} ...", err=True)
+
+    result = None
+    for stem in targets:
+        click.echo(f"  Folding in: {stem}", err=True)
+        try:
+            result = update_journal(safe, client, load_profiles(), session_stem=stem)
+        except FileNotFoundError as exc:
+            raise click.ClickException(str(exc))
+        except (LLMUnavailableError, LLMResponseError) as exc:
+            raise click.ClickException(str(exc))
+
+    if result is not None:
+        click.echo(f"Wrote {result.path}")
+        click.echo(f"  journaled sessions: {len(result.journaled_sessions)}")
+
+
 # ---------------------------------------------------------------------------
 # wisper transcripts
 # ---------------------------------------------------------------------------
@@ -1014,15 +1220,6 @@ def fix(transcript: Path, speaker: str, new_name: str, re_enroll: bool):
 # ---------------------------------------------------------------------------
 # wisper refine  /  wisper summarize
 # ---------------------------------------------------------------------------
-
-def _llm_provider_choice() -> click.Choice:
-    """Derive the CLI --provider choice list from config.LLM_PROVIDERS (R20)."""
-    from .config import LLM_PROVIDERS
-    return click.Choice(LLM_PROVIDERS)
-
-
-_LLM_PROVIDER_CHOICE = _llm_provider_choice()
-
 
 def _get_llm_client(provider: Optional[str], model: Optional[str],
                     endpoint: Optional[str]):
@@ -1418,13 +1615,15 @@ def record_transcribe(recording_id: str):
 
 @record.command("delete")
 @click.argument("recording_id")
-@click.confirmation_option(prompt="This will remove the recording from the index. Continue?")
+@click.confirmation_option(
+    prompt="This permanently deletes the recording's audio (and transcript, if any) from disk. Continue?"
+)
 def record_delete(recording_id: str):
-    """Remove a recording entry (files on disk are not deleted)."""
+    """Delete a recording and its files on disk (audio, transcript, campaign notes)."""
     from .recording_manager import _validate_recording_id
     if not _validate_recording_id(recording_id):
         raise click.ClickException(f"Invalid recording ID: {recording_id!r}")
-    result = _record_request("POST", f"/api/recordings/{recording_id}/delete")
+    result = _record_request("POST", f"/api/recordings/{recording_id}/delete?purge=true")
     click.echo(result)
 
 

@@ -30,7 +30,8 @@ from wisper_transcribe.models import Recording, RejoinAttempt
 from wisper_transcribe.recording_manager import (
     create_recording,
     load_recordings,
-    save_recording,
+    record_completed_wav_segment,
+    save_recording_merged,
 )
 from wisper_transcribe.web.audio_writer import (
     SegmentedWavWriter,
@@ -252,6 +253,10 @@ class BotManager:
         self._writers: dict[str, SegmentedWavWriter] = {}
         self._combined_writer: Optional[SegmentedWavWriter] = None
         self._combined_dir: Optional[Path] = None
+        # Wall-clock start of the combined writer's *current* segment, used
+        # by record_completed_wav_segment() to approximate segment
+        # duration -- see that function's docstring.
+        self._combined_segment_started_at: Optional[datetime] = None
         self._stop_event = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
 
@@ -360,7 +365,7 @@ class BotManager:
                 )
                 recording.status = "failed"
                 recording.ended_at = datetime.now(timezone.utc)
-                save_recording(recording, self._data_dir)
+                save_recording_merged(recording, self._data_dir)
                 return None
             return "__test_token__"  # non-production source factory; token unused by sidecar
         return token
@@ -390,6 +395,7 @@ class BotManager:
                 self._data_dir / "recordings" / recording.id / "combined"
             )
             self._combined_writer = SegmentedWavWriter(stream_dir=self._combined_dir)
+            self._combined_segment_started_at = datetime.now(timezone.utc)
 
     def _route_frame(
         self, user_id: str, pcm: bytes, recording: Recording
@@ -404,7 +410,15 @@ class BotManager:
         mono_16k = downsample_48k_stereo_to_16k_mono(pcm)
 
         if user_id == MIXED_USER_ID:
-            self._combined_writer.write(mono_16k)
+            completed_path = self._combined_writer.write(mono_16k)
+            if completed_path is not None:
+                self._combined_segment_started_at = record_completed_wav_segment(
+                    recording.id,
+                    completed_path,
+                    self._combined_segment_started_at,
+                    finalized=True,
+                    data_dir=self._data_dir,
+                )
             return
 
         if user_id not in self._writers:
@@ -427,7 +441,7 @@ class BotManager:
                 recording.discord_speakers[user_id] = profile_key
                 if not profile_key and user_id not in recording.unbound_speakers:
                     recording.unbound_speakers.append(user_id)
-                save_recording(recording, self._data_dir)
+                save_recording_merged(recording, self._data_dir)
 
         self._writers[user_id].write(mono_16k)
 
@@ -442,7 +456,7 @@ class BotManager:
             )
             recording.status = "failed"
             recording.ended_at = datetime.now(timezone.utc)
-            save_recording(recording, self._data_dir)
+            save_recording_merged(recording, self._data_dir)
             return False
 
         if attempt >= len(self._backoff):
@@ -451,7 +465,7 @@ class BotManager:
                 len(self._backoff), recording.id,
             )
             recording.status = "degraded"
-            save_recording(recording, self._data_dir)
+            save_recording_merged(recording, self._data_dir)
             return False
 
         delay = self._backoff[attempt]
@@ -465,7 +479,7 @@ class BotManager:
             attempt_number=attempt + 1,
         )
         recording.rejoin_log.append(rejoin)
-        save_recording(recording, self._data_dir)
+        save_recording_merged(recording, self._data_dir)
 
         if delay > 0:
             await asyncio.sleep(delay)
@@ -490,14 +504,24 @@ class BotManager:
         self._writers.clear()
 
         if self._combined_writer:
+            final_path: Optional[Path] = None
             try:
-                self._combined_writer.finalize()
+                final_path = self._combined_writer.finalize()
             except Exception as exc:
                 log.warning("Failed to finalise combined writer: %s", exc)
+            if final_path is not None:
+                record_completed_wav_segment(
+                    recording.id,
+                    final_path,
+                    self._combined_segment_started_at,
+                    finalized=True,
+                    data_dir=self._data_dir,
+                )
 
             combined_dir = self._combined_dir
             self._combined_writer = None
             self._combined_dir = None
+            self._combined_segment_started_at = None
 
             combined_out = self._data_dir / "recordings" / recording.id / "combined.wav"
             try:
@@ -517,6 +541,6 @@ class BotManager:
         # Always persist — combined_path (and, when applicable, the
         # completed-status transition) must survive even if an earlier
         # disconnect handler already saved a terminal status (failed/degraded).
-        save_recording(recording, self._data_dir)
+        save_recording_merged(recording, self._data_dir)
         if became_completed:
             log.info("Recording %s finalised as completed", recording.id)

@@ -8,7 +8,7 @@ from typing import Annotated, Optional
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from . import templates
+from . import get_queue, templates
 from wisper_transcribe.campaign_manager import (
     _validate_campaign_slug,
     _validate_profile_key,
@@ -19,6 +19,7 @@ from wisper_transcribe.campaign_manager import (
     load_campaigns,
     remove_member,
     remove_transcript_from_campaign,
+    reorder_campaign_transcript,
 )
 from wisper_transcribe.speaker_manager import load_profiles
 from wisper_transcribe.web._responses import error_redirect, invalid_input_response
@@ -73,6 +74,11 @@ async def campaign_detail(request: Request, slug: str) -> HTMLResponse:
     # Profiles not yet in this campaign (for the add-member dropdown)
     unenrolled = {k: v for k, v in profiles.items() if k not in campaign.members}
 
+    from wisper_transcribe.journal import journal_path, unjournalled_sessions
+    jpath = journal_path(safe)
+    journal_exists = bool(jpath and jpath.exists())
+    journal_pending = len(unjournalled_sessions(safe))
+
     return templates.TemplateResponse(
         request,
         "campaigns.html",
@@ -82,6 +88,8 @@ async def campaign_detail(request: Request, slug: str) -> HTMLResponse:
             "profiles": profiles,
             "active_campaign": campaign,
             "unenrolled": unenrolled,
+            "journal_exists": journal_exists,
+            "journal_pending": journal_pending,
         },
     )
 
@@ -235,3 +243,120 @@ async def campaign_remove_transcript(
         remove_transcript_from_campaign(stem)
 
     return RedirectResponse(url=f"/campaigns/{campaign.slug}", status_code=303)
+
+
+@router.post("/{slug}/transcripts/reorder", response_class=HTMLResponse)
+async def campaign_reorder_transcript(
+    request: Request,
+    slug: str,
+    stem: Annotated[str, Form()],
+    direction: Annotated[str, Form()],
+) -> RedirectResponse:
+    """Move one transcript one position up/down in the campaign's transcript
+    order — the order sessions get folded into the rolling journal in.
+    """
+    safe_slug = _validate_campaign_slug(slug)
+    if safe_slug is None:
+        return invalid_input_response("Invalid campaign slug")
+
+    # Same stem-validation as /transcripts/remove: never used in a file path
+    # (only list membership in campaigns.json), but still reject
+    # traversal-style payloads defensively.
+    if (
+        not stem
+        or "\x00" in stem
+        or os.sep in stem
+        or "/" in stem
+        or "\\" in stem
+        or stem.strip(".") == ""
+        or len(stem) > 512
+    ):
+        return invalid_input_response("Invalid transcript stem")
+
+    if direction not in ("up", "down"):
+        return invalid_input_response("Invalid direction")
+
+    campaign = load_campaigns().get(safe_slug)
+    if campaign is None:
+        return error_redirect("/campaigns", "not_found")
+
+    try:
+        reorder_campaign_transcript(safe_slug, stem, direction)
+    except ValueError:
+        pass  # stem not in this campaign (stale form) — no-op, just redirect back
+
+    return RedirectResponse(url=f"/campaigns/{campaign.slug}", status_code=303)
+
+
+@router.post("/{slug}/journal", response_class=HTMLResponse)
+async def campaign_journal_update(
+    request: Request,
+    slug: str,
+    mode: Annotated[str, Form()] = "next",
+) -> RedirectResponse:
+    """Submit a rolling-journal job and redirect to its progress page.
+
+    `mode="all"` folds every pending session, `mode="rebuild"` redrives the
+    whole campaign from its transcripts (confirmed client-side before this
+    POST — same pattern as "Fold all"); anything else folds the next one.
+    """
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        return invalid_input_response("Invalid campaign slug")
+
+    campaign = load_campaigns().get(safe)
+    if campaign is None:
+        return error_redirect("/campaigns", "not_found")
+
+    queue = get_queue(request)
+    if mode == "rebuild":
+        job = queue.submit_journal(
+            safe, name=f"Rebuild journal: {campaign.display_name}", rebuild=True
+        )
+    else:
+        job = queue.submit_journal(
+            safe, name=f"Journal: {campaign.display_name}", fold_all=(mode == "all")
+        )
+    # job.id is a server-generated uuid4 — never user input (CodeQL-safe redirect).
+    return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
+
+
+@router.get("/{slug}/journal", response_class=HTMLResponse)
+async def campaign_journal_view(request: Request, slug: str) -> HTMLResponse:
+    """Render the campaign's rolling journal, or an empty-state page."""
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        return invalid_input_response("Invalid campaign slug")
+
+    campaign = load_campaigns().get(safe)
+    if campaign is None:
+        return error_redirect("/campaigns", "not_found")
+
+    from wisper_transcribe.journal import journal_path, unjournalled_sessions, parse_journal
+    from .transcripts import _sanitize_html
+
+    jpath = journal_path(safe)
+    meta: dict = {}
+    html_body = ""
+    has_journal = bool(jpath and jpath.exists())
+    if has_journal:
+        meta, body = parse_journal(jpath.read_text(encoding="utf-8"))
+        import markdown as _md
+        html_body = _sanitize_html(_md.markdown(body, extensions=["nl2br"]))
+
+    pending = unjournalled_sessions(safe)
+
+    return templates.TemplateResponse(
+        request,
+        "campaign_journal.html",
+        {
+            "request": request,
+            "campaign": campaign,
+            "slug": safe,
+            "meta": meta,
+            "html_body": html_body,
+            "has_journal": has_journal,
+            "pending": pending,
+            "journaled_count": len(meta.get("journaled_sessions") or []),
+        },
+    )

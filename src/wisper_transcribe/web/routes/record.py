@@ -25,24 +25,26 @@ from wisper_transcribe.campaign_manager import (
     load_campaigns,
     move_transcript_to_campaign,
 )
-from wisper_transcribe.config import get_data_dir, load_config
+from wisper_transcribe.config import get_data_dir, load_config, save_config
 from wisper_transcribe.recording_manager import (
     _validate_recording_id,
+    append_marker,
     delete_recording,
     load_recordings,
     save_recording,
 )
 from wisper_transcribe.web._responses import error_redirect, invalid_input_response
-from wisper_transcribe.web.routes import get_bot_manager, templates
+from wisper_transcribe.web.jobs import resume_slice
+from wisper_transcribe.web.local_capture import (
+    ACTIVE_STATUSES,
+    enumerate_devices,
+    resolve_device_name,
+)
+from wisper_transcribe.web.routes import get_bot_manager, get_local_capture_manager, get_queue, templates
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
-
-_NOT_IMPLEMENTED = JSONResponse(
-    {"detail": "not implemented"},
-    status_code=501,
-)
 
 
 def _recording_to_dict(rec) -> dict:
@@ -68,7 +70,45 @@ def _recording_to_dict(rec) -> dict:
         "notes": rec.notes,
         "has_audio": bool(rec.combined_path),
         "has_transcript": bool(rec.transcript_path),
+        "source": rec.source,
+        "devices": dict(rec.devices),
+        "name": rec.name,
+        "markers": [{"elapsed_s": m.elapsed_s} for m in rec.markers],
     }
+
+
+def _current_active_recording(request: Request):
+    """Return whichever manager's Recording is currently active, or None.
+
+    "Active" means `.status in ACTIVE_STATUSES` -- never `is not None`.
+    Neither manager clears `active_recording` back to None once a session
+    finishes (both mirror BotManager's original behaviour here), so a
+    status check is required regardless of which manager is asked. Used by
+    every place that needs "is a recording live right now" without caring
+    which manager owns it (the Record page, the status SSE stream).
+    """
+    for mgr in (get_bot_manager(request), get_local_capture_manager(request)):
+        if mgr is None:
+            continue
+        rec = mgr.active_recording
+        if rec is not None and rec.status in ACTIVE_STATUSES:
+            return rec
+    return None
+
+
+def _other_session_active(request: Request, this_manager) -> bool:
+    """True if a manager other than `this_manager` has an active session.
+
+    Mutual exclusion: only one capture session (Discord or local) may run
+    at a time across both managers.
+    """
+    for mgr in (get_bot_manager(request), get_local_capture_manager(request)):
+        if mgr is None or mgr is this_manager:
+            continue
+        rec = mgr.active_recording
+        if rec is not None and rec.status in ACTIVE_STATUSES:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +130,9 @@ async def record_start(request: Request):
     voice_channel_id = body.get("voice_channel_id", "")
     if not voice_channel_id:
         return JSONResponse({"detail": "voice_channel_id is required"}, status_code=400)
+
+    if _other_session_active(request, bm):
+        return JSONResponse({"detail": "recording already in progress"}, status_code=409)
 
     try:
         recording = await bm.start_session(
@@ -119,8 +162,257 @@ async def record_stop(request: Request):
 
 @router.get("/api/record/status")
 async def record_status(request: Request):
-    """Return current bot + recording status. (stub)"""
-    return _NOT_IMPLEMENTED
+    """Current active-recording status, any source (Discord or local).
+
+    Powers the global recording-status banner (`base.html` + `app.js`)
+    that keeps a live session's Stop control visible while navigating
+    away from `/record` -- not just this JSON API's own consumers.
+    `{"active": false}` when idle; otherwise `_recording_to_dict()` plus
+    `"active": true`.
+    """
+    rec = _current_active_recording(request)
+    if rec is None:
+        return JSONResponse({"active": False})
+    payload = _recording_to_dict(rec)
+    payload["active"] = True
+    return JSONResponse(payload)
+
+
+# ---------------------------------------------------------------------------
+# JSON API — local capture control
+# ---------------------------------------------------------------------------
+
+def _start_live_transcription(
+    request: Request, lcm, recording, data_dir: Path, mic_profile_key: str = ""
+) -> bool:
+    """Submit a Phase 2 JOB_LIVE job for a just-started local session and
+    wire its ring buffer onto the capture manager's live sink.
+
+    `mic_profile_key` (Phase 3, "this is me") looks up an enrolled
+    profile's display_name to use for mic-dominant lines instead of the
+    generic "You" -- an unknown/blank key just falls back to "You"; never
+    lets a bad profile key fail the live-job submission.
+
+    Best-effort: a failure here must not fail the already-started capture
+    session -- logged and swallowed. The recording still records fine
+    without a live preview; only the near-real-time transcript is missing.
+
+    Returns ``True`` when another job was already occupying the (single-
+    worker) queue at submit time -- the JOB_LIVE job still gets queued and
+    the ring buffer still gets wired, but `run_live_loop` won't actually
+    start pulling from it until that other job finishes. For a short local
+    session that can mean the live preview never produces anything before
+    the session ends (see jobs.py's `_worker`, which now fails such a job
+    outright rather than silently "completing" with zero lines) -- callers
+    use this to warn the user up front instead of leaving them looking at
+    an empty pane that reads like a broken microphone.
+    """
+    try:
+        queue = get_queue(request)
+        queue_busy = queue.active_count() > 0
+        cfg = load_config()
+
+        mic_label = "You"
+        if mic_profile_key:
+            from wisper_transcribe.speaker_manager import load_profiles
+
+            profile = load_profiles().get(mic_profile_key)
+            if profile is not None:
+                mic_label = profile.display_name
+
+        live_output_path = data_dir / "recordings" / recording.id / "live_transcript.md"
+        job = queue.submit_live(
+            recording_id=recording.id,
+            output_path=str(live_output_path),
+            model_size=cfg.get("model", "large-v3-turbo"),
+            device=cfg.get("device", "auto"),
+            compute_type=cfg.get("compute_type", "auto"),
+            language=cfg.get("language", "en"),
+            mic_label=mic_label,
+        )
+        lcm.set_live_sink(job.live_ring_buffer.push)
+        return queue_busy
+    except Exception:
+        log.warning(
+            "Failed to start live transcription for recording %s", recording.id, exc_info=True
+        )
+        return False
+
+
+def _stop_live_transcription(request: Request, lcm, recording_id: str) -> None:
+    """Detach the live sink and signal the JOB_LIVE job (if any) to end."""
+    try:
+        lcm.set_live_sink(None)
+    except Exception:
+        pass
+    try:
+        queue = get_queue(request)
+        job = queue.find_live_job_for_recording(recording_id)
+        if job is not None:
+            queue.stop_live(job.id)
+    except Exception:
+        log.warning(
+            "Failed to stop live transcription job for recording %s", recording_id, exc_info=True
+        )
+
+
+def _remember_mic_profile_default(mic_profile_key: str) -> None:
+    """Persist the most recently selected "this is me" profile so it's
+    pre-selected on the next local-capture session.
+
+    The local mic is the same person's voice the large majority of
+    sessions, so remembering the last choice (including "— Label my lines
+    'You' —", i.e. blank) saves reselecting it every time while still
+    letting a one-off different selection stick as the new default.
+    """
+    cfg = load_config()
+    if cfg.get("default_mic_profile_key", "") != mic_profile_key:
+        cfg["default_mic_profile_key"] = mic_profile_key
+        save_config(cfg)
+
+
+@router.get("/api/record/devices")
+async def record_devices(request: Request):
+    """Enumerate local mic + system-audio (loopback) devices for the picker.
+
+    Always 200 -- `available: false` when `soundcard` is not importable or
+    enumeration otherwise fails, so the Record page can hide the Local
+    section rather than the caller having to handle a 5xx.
+    """
+    return JSONResponse(enumerate_devices())
+
+
+# int16 RMS -- generous headroom above real speech levels observed in
+# testing (~250-1440), just to keep a fat-fingered slider value sane.
+_MAX_NOISE_FLOOR_RMS = 5000.0
+
+
+@router.post("/api/record/live-noise-floor")
+async def record_live_noise_floor(request: Request):
+    """Live-update the noise floor of the running local session's JOB_LIVE
+    job (Record page slider). No effect on a Discord session -- those
+    don't run JOB_LIVE at all.
+    """
+    lcm = get_local_capture_manager(request)
+    if lcm is None or lcm.active_recording is None or lcm.active_recording.status not in ACTIVE_STATUSES:
+        return JSONResponse({"detail": "no active local session"}, status_code=400)
+
+    try:
+        body = await request.json()
+        noise_floor = float(body.get("noise_floor"))
+    except (TypeError, ValueError):
+        return JSONResponse({"detail": "noise_floor must be a number"}, status_code=400)
+    except Exception:
+        return JSONResponse({"detail": "invalid JSON body"}, status_code=400)
+
+    if not (0.0 <= noise_floor <= _MAX_NOISE_FLOOR_RMS):
+        return JSONResponse(
+            {"detail": f"noise_floor must be between 0 and {_MAX_NOISE_FLOOR_RMS:.0f}"},
+            status_code=400,
+        )
+
+    queue = get_queue(request)
+    job = queue.find_live_job_for_recording(lcm.active_recording.id)
+    if job is None:
+        return JSONResponse({"detail": "no active live transcription job"}, status_code=404)
+
+    queue.set_live_noise_floor(job.id, noise_floor)
+    return JSONResponse({"noise_floor": noise_floor})
+
+
+@router.post("/record/marker")
+async def record_marker(request: Request):
+    """Flag the current moment of the active recording (Record page's "Add
+    marker" button) -- any source, not local-only. No label, just a
+    timestamp: `append_marker()` persists it to `Recording.markers`, and
+    the client drops a matching flagged line straight into the live ticker
+    on a successful response (see wisperTickerAppendMarker in app.js) --
+    no page reload, since that would disrupt mid-session use.
+    """
+    rec = _current_active_recording(request)
+    if rec is None:
+        return JSONResponse({"detail": "no active recording"}, status_code=400)
+
+    marker = append_marker(rec.id, get_data_dir())
+    return JSONResponse({"elapsed_s": marker.elapsed_s})
+
+
+_MAX_SESSION_NAME_LEN = 200
+
+
+def _clean_session_name(raw: str) -> Optional[str]:
+    """Normalize a client-supplied session name: trimmed, capped length,
+    blank collapses to None. Display-only -- never touches a file path
+    (`Recording.id`, a server-generated uuid4, backs the on-disk directory),
+    so no path-traversal-style sanitization is needed here."""
+    cleaned = raw.strip()[:_MAX_SESSION_NAME_LEN]
+    return cleaned or None
+
+
+@router.post("/api/record/start-local")
+async def record_start_local(request: Request):
+    """Start a local mic + system-audio capture session."""
+    lcm = get_local_capture_manager(request)
+    if lcm is None:
+        return JSONResponse({"detail": "local capture unavailable"}, status_code=503)
+
+    devices = enumerate_devices()
+    if not devices["available"]:
+        return JSONResponse({"detail": "local capture unavailable"}, status_code=503)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"detail": "invalid JSON body"}, status_code=400)
+
+    mic_id = str(body.get("mic_id", ""))
+    system_id = str(body.get("system_id", ""))
+    if not mic_id or not system_id:
+        return JSONResponse({"detail": "mic_id and system_id are required"}, status_code=400)
+
+    if _other_session_active(request, lcm):
+        return JSONResponse({"detail": "recording already in progress"}, status_code=409)
+
+    mic_name = resolve_device_name(devices["microphones"], mic_id)
+    system_name = resolve_device_name(devices["loopbacks"], system_id)
+
+    try:
+        recording = lcm.start_session(
+            body.get("campaign_slug"),
+            mic_id,
+            system_id,
+            mic_name=mic_name,
+            system_name=system_name,
+            name=_clean_session_name(str(body.get("name", ""))),
+        )
+    except RuntimeError:
+        return JSONResponse({"detail": "recording already in progress"}, status_code=409)
+
+    mic_profile_key = str(body.get("mic_profile_key", ""))
+    _remember_mic_profile_default(mic_profile_key)
+    queue_busy = _start_live_transcription(
+        request, lcm, recording, get_data_dir(), mic_profile_key=mic_profile_key
+    )
+    payload = _recording_to_dict(recording)
+    payload["live_transcript_delayed"] = queue_busy
+    return JSONResponse(payload, status_code=201)
+
+
+@router.post("/api/record/stop-local")
+async def record_stop_local(request: Request):
+    """Stop the active local capture session. Mirrors `/api/record/stop`."""
+    lcm = get_local_capture_manager(request)
+    if lcm is None:
+        return JSONResponse({"detail": "local capture unavailable"}, status_code=503)
+    if lcm.active_recording is None or lcm.active_recording.status not in ACTIVE_STATUSES:
+        return JSONResponse({"detail": "no active recording"}, status_code=400)
+
+    recording = lcm.active_recording
+    # LocalCaptureManager.stop_session() joins threads -- blocking, so it
+    # must run off the event loop (see the module docstring).
+    await asyncio.to_thread(lcm.stop_session)
+    _stop_live_transcription(request, lcm, recording.id)
+    return JSONResponse(_recording_to_dict(recording))
 
 
 _DISCORD_API = "https://discord.com/api/v10"
@@ -181,6 +473,14 @@ async def record_channels(request: Request):
 # already use, via `_submit_recording_transcription()` below for the
 # transcribe hand-off. Responses are generic error codes (never `str(exc)`
 # or a filesystem path) per CLAUDE.md's web route security rules.
+#
+# One deliberate divergence: `delete` only purges files from disk when
+# called with `?purge=true` -- the HTML routes always purge (they sit
+# behind a confirm() dialog), but this bare JSON endpoint doesn't, and
+# defaulting it to destructive would mean any caller with an id (e.g. one
+# printed by `record list`) could wipe files with a single POST. `wisper
+# record delete` passes `purge=true` explicitly, matching its own
+# confirmation prompt.
 
 @router.get("/api/recordings")
 async def recordings_list(request: Request):
@@ -236,8 +536,63 @@ async def recording_transcribe(recording_id: str, request: Request):
     return JSONResponse({"id": recording.id, "job_id": job.id, "status": "transcribing"}, status_code=202)
 
 
+def _purge_recording_files(recording, data_dir: Path) -> None:
+    """Delete a recording's files from disk: the `recordings/<id>/` directory
+    (raw audio, per-user tracks, live-transcript draft, `metadata.json`) and,
+    if it was transcribed, the associated output-dir files -- reusing the
+    exact same cleanup `transcripts.py`'s own delete routes use, since a
+    locally-recorded transcription is written through the identical
+    `_write_enrollment_sidecar()` path and so has the same `_diar.json` +
+    excerpt-clip footprint as any other transcript.
+
+    Best-effort: called right before `delete_recording()` removes the index
+    entry, so by the time any failure here could matter the recording
+    already reads as gone to the user -- a stray leftover file is a much
+    smaller problem than a delete action that silently does nothing.
+
+    Refuses to touch a still-active (`recording`/`degraded`) session: the
+    capture thread's `SegmentedWavWriter` holds open file handles into
+    `rec_dir` and keeps appending to `metadata.json` for as long as
+    `status in ACTIVE_STATUSES` -- `shutil.rmtree()`-ing that directory out
+    from under it mid-session is a different failure than the old
+    index-only delete ever risked (a partial rmtree on Windows leaves the
+    session writing into a half-deleted tree). Callers should stop the
+    session first.
+    """
+    if recording.status in ACTIVE_STATUSES:
+        return
+
+    from wisper_transcribe.web.routes.transcripts import (
+        _delete_diar_sidecar_and_audio,
+        _delete_excerpt_clips,
+    )
+
+    rec_dir = data_dir / "recordings" / recording.id
+    shutil.rmtree(rec_dir, ignore_errors=True)
+
+    if recording.transcript_path is not None:
+        stem = recording.transcript_path.stem
+        try:
+            if recording.transcript_path.exists():
+                recording.transcript_path.unlink()
+            summary_path = recording.transcript_path.with_name(f"{stem}.summary.md")
+            if summary_path.exists():
+                summary_path.unlink()
+        except OSError:
+            pass
+        _delete_diar_sidecar_and_audio(stem)
+        _delete_excerpt_clips(stem)
+
+
 @router.post("/api/recordings/{recording_id}/delete")
 async def recording_delete_api(recording_id: str, request: Request):
+    """`?purge=true` also deletes the recording's files from disk (audio,
+    transcript, campaign notes) -- defaults to the original index-only
+    behavior otherwise, since this endpoint has no confirm() dialog in
+    front of it and any caller that already has an id (e.g. from `record
+    list`) can reach it directly. The HTML routes (which do have a confirm
+    dialog) always purge; `wisper record delete` (CLI) passes `purge=true`
+    explicitly, matching its own confirmation prompt."""
     safe_id = _validate_recording_id(recording_id)
     if safe_id is None:
         return JSONResponse({"error": "invalid_id"}, status_code=400)
@@ -247,10 +602,11 @@ async def recording_delete_api(recording_id: str, request: Request):
     if recording is None:
         return JSONResponse({"error": "not_found"}, status_code=404)
 
-    # Same removal semantics as the HTML delete route: index entry only,
-    # audio/transcript files on disk are left in place.
+    purge = request.query_params.get("purge", "").lower() == "true"
+    if purge:
+        _purge_recording_files(recording, data_dir)
     delete_recording(recording.id, data_dir)
-    return JSONResponse({"id": recording.id, "deleted": True})
+    return JSONResponse({"id": recording.id, "deleted": True, "purged": purge})
 
 
 # ---------------------------------------------------------------------------
@@ -259,11 +615,12 @@ async def recording_delete_api(recording_id: str, request: Request):
 
 @router.get("/record", response_class=HTMLResponse)
 async def record_page(request: Request) -> HTMLResponse:
-    bm = get_bot_manager(request)
+    from wisper_transcribe.speaker_manager import load_profiles
+
     data_dir = get_data_dir()
     campaigns = load_campaigns(data_dir)
     cfg = load_config()
-    active_recording = bm.active_recording if bm else None
+    active_recording = _current_active_recording(request)
     return templates.TemplateResponse(
         request,
         "record.html",
@@ -274,6 +631,9 @@ async def record_page(request: Request) -> HTMLResponse:
             "discord_presets": cfg.get("discord_presets", []),
             "default_guild": cfg.get("discord_default_guild", ""),
             "default_channel": cfg.get("discord_default_channel", ""),
+            "local_devices": enumerate_devices(),
+            "speaker_profiles": load_profiles(data_dir),
+            "default_mic_profile_key": cfg.get("default_mic_profile_key", ""),
         },
     )
 
@@ -281,24 +641,30 @@ async def record_page(request: Request) -> HTMLResponse:
 @router.get("/record/sse")
 async def record_sse(request: Request) -> StreamingResponse:
     """SSE stream of live recording session status (Pattern 6)."""
-    bm = get_bot_manager(request)
 
     async def event_generator():
         while True:
             if await request.is_disconnected():
                 break
-            if bm is None or bm.active_recording is None:
+            rec = _current_active_recording(request)
+            if rec is None:
                 payload = {"type": "status", "status": "idle"}
             else:
-                rec = bm.active_recording
                 payload = {
                     "type": "status",
                     "status": rec.status,
                     "recording_id": rec.id,
+                    "source": rec.source,
                     "segment_count": len(rec.segment_manifest),
                     "speakers": list(rec.discord_speakers.keys()),
                     "started_at": rec.started_at.isoformat() if rec.started_at else None,
                 }
+                if rec.source == "local":
+                    lcm = get_local_capture_manager(request)
+                    if lcm is not None:
+                        levels = lcm.get_and_reset_levels()
+                        payload["mic_rms"] = levels["mic"]
+                        payload["system_rms"] = levels["system"]
             yield f"data: {json.dumps(payload)}\n\n"
             await asyncio.sleep(1.0)
 
@@ -322,6 +688,8 @@ async def record_start_html(
         return error_redirect("/record", "unavailable")
     if not voice_channel_id.strip():
         return error_redirect("/record", "missing_channel")
+    if _other_session_active(request, bm):
+        return error_redirect("/record", "already_active")
 
     try:
         await bm.start_session(
@@ -342,6 +710,66 @@ async def record_stop_html(request: Request) -> RedirectResponse:
     if bm is None or bm.active_recording is None:
         return error_redirect("/record", "no_session")
     await bm.stop_session()
+    return RedirectResponse(url="/record", status_code=303)
+
+
+@router.post("/record/start-local", response_class=HTMLResponse)
+async def record_start_local_html(
+    request: Request,
+    mic_id: Annotated[str, Form()],
+    system_id: Annotated[str, Form()],
+    campaign_slug: Annotated[str, Form()] = "",
+    mic_profile_key: Annotated[str, Form()] = "",
+    name: Annotated[str, Form()] = "",
+) -> RedirectResponse:
+    """HTML form handler: start a local capture session and redirect back to /record."""
+    lcm = get_local_capture_manager(request)
+    if lcm is None:
+        return error_redirect("/record", "unavailable")
+    if not mic_id.strip() or not system_id.strip():
+        return error_redirect("/record", "missing_device")
+
+    devices = enumerate_devices()
+    if not devices["available"]:
+        return error_redirect("/record", "unavailable")
+    if _other_session_active(request, lcm):
+        return error_redirect("/record", "already_active")
+
+    mic_name = resolve_device_name(devices["microphones"], mic_id.strip())
+    system_name = resolve_device_name(devices["loopbacks"], system_id.strip())
+
+    try:
+        recording = lcm.start_session(
+            campaign_slug.strip() or None,
+            mic_id.strip(),
+            system_id.strip(),
+            mic_name=mic_name,
+            system_name=system_name,
+            name=_clean_session_name(name),
+        )
+    except RuntimeError:
+        return error_redirect("/record", "already_active")
+
+    _remember_mic_profile_default(mic_profile_key.strip())
+    queue_busy = _start_live_transcription(
+        request, lcm, recording, get_data_dir(), mic_profile_key=mic_profile_key.strip()
+    )
+    if queue_busy:
+        return RedirectResponse(url="/record?error=live_delayed", status_code=303)
+    return RedirectResponse(url="/record", status_code=303)
+
+
+@router.post("/record/stop-local", response_class=HTMLResponse)
+async def record_stop_local_html(request: Request) -> RedirectResponse:
+    """HTML form handler: stop the active local session and redirect back to /record."""
+    lcm = get_local_capture_manager(request)
+    if lcm is None or lcm.active_recording is None or lcm.active_recording.status not in ACTIVE_STATUSES:
+        return error_redirect("/record", "no_session")
+    recording_id = lcm.active_recording.id
+    # LocalCaptureManager.stop_session() joins threads -- blocking, so it
+    # must run off the event loop (see the module docstring).
+    await asyncio.to_thread(lcm.stop_session)
+    _stop_live_transcription(request, lcm, recording_id)
     return RedirectResponse(url="/record", status_code=303)
 
 
@@ -371,11 +799,74 @@ async def recordings_list_html(request: Request) -> HTMLResponse:
 
 
 @router.get("/recordings/{recording_id}/live")
-async def recording_live(recording_id: str, request: Request) -> JSONResponse:
+async def recording_live(recording_id: str, request: Request):
+    """SSE stream of committed live-transcript lines (Phase 2).
+
+    Index-based resume, same pattern as the R14 job-log stream
+    (`GET /jobs/{id}/stream`): `job.live_lines_dropped` translates the
+    absolute count of lines produced so far into a valid slice of whatever
+    is still retained after the `_MAX_LIVE_LINES` cap trims the oldest.
+
+    Once no active `JOB_LIVE` job exists for this recording (never
+    started, or the session already ended), this sends a `snapshot` signal
+    (only if `live_transcript.md` exists on disk -- lets the client
+    distinguish "session ended with a draft on disk" from "nothing was ever
+    recorded") and closes -- there is nothing further to stream. The
+    authoritative transcript is always the post-session full pipeline pass
+    via `POST /recordings/{id}/transcribe`; the recording-detail page's own
+    server-rendered fallback (once `status` leaves `recording`/`degraded`)
+    is what actually shows the draft's content, so this signal doesn't
+    carry the markdown itself.
+    """
     safe_id = _validate_recording_id(recording_id)
     if safe_id is None:
         return JSONResponse({"detail": "invalid recording id"}, status_code=400)
-    return JSONResponse({"detail": "not implemented in v1"}, status_code=501)
+
+    queue = get_queue(request)
+    data_dir = get_data_dir()
+
+    async def event_generator():
+        last_idx = 0
+        last_job = None  # last job object seen -- see the None-branch below
+        while True:
+            if await request.is_disconnected():
+                break
+
+            job = queue.find_live_job_for_recording(safe_id)
+            if job is None:
+                # find_live_job_for_recording only matches PENDING/RUNNING
+                # (see its docstring), so this fires the instant the job
+                # completes -- which can land in the same ~1s window as a
+                # final chunk committed right before the user hit Stop.
+                # `last_job` is still the same Job object the worker thread
+                # was mutating (Job instances aren't replaced on
+                # completion), so one more read off it here catches lines
+                # that would otherwise never reach an already-open stream.
+                if last_job is not None:
+                    new_lines, last_idx = resume_slice(last_job.live_lines, last_job.live_lines_dropped, last_idx)
+                    for line in new_lines:
+                        yield f"data: {json.dumps({'type': 'line', **line})}\n\n"
+                    last_job = None
+
+                if last_idx == 0:
+                    live_path = data_dir / "recordings" / safe_id / "live_transcript.md"
+                    if live_path.exists():
+                        yield f"data: {json.dumps({'type': 'snapshot'})}\n\n"
+                yield "event: end\ndata: {}\n\n"
+                return
+
+            new_lines, last_idx = resume_slice(job.live_lines, job.live_lines_dropped, last_idx)
+            for line in new_lines:
+                yield f"data: {json.dumps({'type': 'line', **line})}\n\n"
+            last_job = job
+
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/recordings/{recording_id}", response_class=HTMLResponse)
@@ -391,6 +882,29 @@ async def recording_detail_html(recording_id: str, request: Request) -> HTMLResp
         return error_redirect("/recordings", "not_found")
 
     campaigns = load_campaigns(data_dir)
+
+    # Persisted live-transcript draft (Phase 2 near-real-time preview):
+    # shown whenever recordings/<id>/live_transcript.md exists on disk and
+    # the recording hasn't been through a full Transcribe yet -- nothing
+    # cleans it up short of deleting the recording itself (see
+    # _purge_recording_files), so it survives indefinitely and would
+    # otherwise vanish from the page the instant the session stopped, even
+    # though the file was still right there. Only overwritten in the user's
+    # sense once a real Transcribe job sets transcript_path -- this block
+    # never runs then. While still actively recording, the existing
+    # SSE-driven pane (below) owns the live view instead of this static one.
+    live_draft_blocks = None
+    if (
+        recording.source == "local"
+        and recording.transcript_path is None
+        and recording.status not in ("recording", "degraded")
+    ):
+        live_path = data_dir / "recordings" / safe_id / "live_transcript.md"
+        if live_path.exists():
+            from wisper_transcribe.formatter import parse_transcript_blocks
+
+            live_draft_blocks = parse_transcript_blocks(live_path.read_text(encoding="utf-8"))
+
     return templates.TemplateResponse(
         request,
         "recording_detail.html",
@@ -398,6 +912,7 @@ async def recording_detail_html(recording_id: str, request: Request) -> HTMLResp
             "request": request,
             "recording": recording,
             "campaigns": campaigns,
+            "live_draft_blocks": live_draft_blocks,
         },
     )
 
@@ -408,7 +923,30 @@ async def recording_delete_html(recording_id: str, request: Request) -> Redirect
     if safe_id is None:
         return invalid_input_response("Invalid recording ID")
 
-    delete_recording(safe_id, get_data_dir())
+    data_dir = get_data_dir()
+    recording = load_recordings(data_dir).get(safe_id)
+    if recording is not None:
+        _purge_recording_files(recording, data_dir)
+    delete_recording(safe_id, data_dir)
+    return RedirectResponse(url="/recordings", status_code=303)
+
+
+@router.post("/recordings/bulk-delete", response_class=HTMLResponse)
+async def recordings_bulk_delete_html(request: Request) -> RedirectResponse:
+    """Delete multiple recordings (index entry + files on disk) in one
+    request -- the Recordings page's bulk-select checkboxes."""
+    form = await request.form()
+    data_dir = get_data_dir()
+    recordings = load_recordings(data_dir)
+    for recording_id in form.getlist("recording_ids"):
+        safe_id = _validate_recording_id(str(recording_id))
+        if safe_id is None:
+            continue
+        recording = recordings.get(safe_id)
+        if recording is None:
+            continue
+        _purge_recording_files(recording, data_dir)
+        delete_recording(safe_id, data_dir)
     return RedirectResponse(url="/recordings", status_code=303)
 
 
@@ -502,6 +1040,12 @@ def _submit_recording_transcription(recording, request: Request, data_dir: Path)
     dest = output_dir / f"{recording.id}.wav"
     shutil.copy2(str(recording.combined_path), str(dest))
 
+    # Preserved so a failed job can put the recording back where it started
+    # (e.g. "transcribed" on a failed re-transcribe keeps the old transcript's
+    # View/Re-transcribe actions available, rather than falling back to a
+    # bare "completed" that hides them even though the old file is still there).
+    previous_status = recording.status
+
     # Build the post-completion callback: auto-associate transcript with campaign
     def _on_complete(job):
         _recordings = load_recordings(data_dir)
@@ -519,13 +1063,27 @@ def _submit_recording_transcription(recording, request: Request, data_dir: Path)
                     log.warning("Failed to move transcript to campaign in on_complete", exc_info=True)
         save_recording(rec, data_dir)
 
+    # Symmetric failure callback: without this, a failed job left the
+    # recording stuck at "transcribing" forever with no retry path in the
+    # UI (recording_detail.html only offers Transcribe/Re-transcribe
+    # buttons for "completed"/"transcribed").
+    def _on_error(job):
+        _recordings = load_recordings(data_dir)
+        rec = _recordings.get(recording.id)
+        if rec is None:
+            return
+        rec.status = previous_status
+        save_recording(rec, data_dir)
+
     queue = request.app.state.job_queue
     job = queue.submit(
         str(dest),
         original_stem=recording.id,
         output_dir=str(output_dir),
         campaign=recording.campaign_slug or "",
+        title=recording.name,
         on_complete=_on_complete,
+        on_error=_on_error,
     )
 
     recording.job_id = job.id

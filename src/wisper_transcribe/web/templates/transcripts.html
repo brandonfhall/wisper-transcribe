@@ -26,6 +26,51 @@
 {% block page %}
 <div class="studio-page">
 
+  <!-- Recordings awaiting transcription -->
+  {% if pending_recordings %}
+  <div style="margin-bottom:28px">
+    <div style="display:flex;align-items:baseline;gap:14px;margin-bottom:12px">
+      <span style="display:inline-flex;align-items:center;gap:9px">
+        <span class="dot-rose" style="width:7px;height:7px"></span>
+        <span style="font-family:var(--font-serif);font-style:italic;font-size:20px;color:var(--color-paper);letter-spacing:-0.01em">Awaiting transcription</span>
+      </span>
+      <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint);letter-spacing:0.1em">{{ pending_recordings | length }} RECORDING{{ 'S' if pending_recordings | length != 1 else '' }}</span>
+      <div style="flex:1;height:1px;background:var(--color-rule)"></div>
+      <a href="/recordings" style="font-family:var(--font-mono);font-size:11px;color:var(--color-accent)">all recordings →</a>
+    </div>
+
+    <div style="display:grid;grid-template-columns:14px 2fr 90px 90px 130px 100px;gap:16px;padding:8px 16px;border-top:1px solid var(--color-rule);border-bottom:1px solid var(--color-rule);font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);letter-spacing:0.12em">
+      <div></div><div>SESSION</div>
+      <div style="text-align:right">DURATION</div><div>SOURCE</div><div>RECORDED</div><div style="text-align:right"></div>
+    </div>
+
+    {% for r in pending_recordings %}
+    {%- set duration_s = ((r.ended_at - r.started_at).total_seconds() | int) if (r.ended_at and r.started_at) else 0 -%}
+    {%- set duration_str = "%d:%02d:%02d" | format(duration_s // 3600, (duration_s % 3600) // 60, duration_s % 60) if duration_s > 0 else "—" -%}
+    {%- set recorded = (r.started_at.strftime('%b ') ~ r.started_at.day ~ r.started_at.strftime(' · %H:%M')) if r.started_at else '—' -%}
+    <div style="display:grid;grid-template-columns:14px 2fr 90px 90px 130px 100px;gap:16px;padding:14px 16px;border-bottom:1px solid var(--color-rule);align-items:center;{% if loop.last %}border-bottom:none;{% endif %}">
+      {{ icon("waveform", 11, "var(--color-signal-rose)") }}
+      <div>
+        <a href="/recordings/{{ r.id }}" style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper);text-decoration:none">{{ r.name or (r.id[:20] ~ '…') }}</a>
+        {% if r.id in live_draft_ids %}
+        <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:3px">draft preview saved</div>
+        {% endif %}
+      </div>
+      <div style="font-family:var(--font-mono);font-size:11.5px;color:var(--color-paper-dim);text-align:right">{{ duration_str }}</div>
+      <div style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint)">
+        {% if r.source == 'local' %}<span class="pill pill-cyan" style="font-size:9.5px">LOCAL</span>{% else %}DISCORD{% endif %}
+      </div>
+      <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint)">{{ recorded }}</div>
+      <div style="text-align:right">
+        <form method="post" action="/recordings/{{ r.id }}/transcribe">
+          <button type="submit" class="btn btn-primary btn-sm">Transcribe</button>
+        </form>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
   <!-- Campaign filter pills -->
   <div style="display:flex;align-items:center;gap:4px;margin-bottom:24px;flex-wrap:wrap">
     <button class="filter-pill active" onclick="wisperCampaignFilter(this,'')">

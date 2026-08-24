@@ -17,8 +17,12 @@
     </div>
     <div style="width:1px;height:28px;background:var(--color-rule)"></div>
     <div>
-      <div class="mono-kicker">Channel</div>
-      {% if active_recording.voice_channel_id %}
+      <div class="mono-kicker">{{ "Session" if active_recording.name else ("Source" if active_recording.source == "local" else "Channel") }}</div>
+      {% if active_recording.name %}
+      <div style="font-family:var(--font-serif);font-style:italic;font-size:16px;color:var(--color-paper);margin-top:2px">{{ active_recording.name }}</div>
+      {% elif active_recording.source == "local" %}
+      <div style="font-family:var(--font-serif);font-style:italic;font-size:16px;color:var(--color-paper);margin-top:2px">Local capture</div>
+      {% elif active_recording.voice_channel_id %}
       <div style="font-family:var(--font-serif);font-style:italic;font-size:16px;color:var(--color-paper);margin-top:2px">#{{ active_recording.voice_channel_id }}</div>
       {% else %}
       <div style="font-family:var(--font-serif);font-style:italic;font-size:16px;color:var(--color-paper);margin-top:2px">—</div>
@@ -26,10 +30,8 @@
     </div>
   </div>
   <div style="display:flex;align-items:center;gap:8px">
-    <form method="post" action="/record/marker" style="display:inline">
-      <button type="submit" class="btn btn-secondary">{{ icon("spark", 12) }} Add marker</button>
-    </form>
-    <form method="post" action="/record/stop">
+    <button type="button" id="add-marker-btn" class="btn btn-secondary">{{ icon("spark", 12) }} Add marker</button>
+    <form method="post" action="{{ '/record/stop-local' if active_recording.source == 'local' else '/record/stop' }}">
       <button type="submit" class="btn btn-rose">
         <span style="width:9px;height:9px;background:#1a0a0a;display:inline-block;flex-shrink:0"></span>
         Stop recording
@@ -60,6 +62,18 @@
 {% elif request.query_params.get('error') == 'no_session' %}
 <div style="padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber);margin-bottom:20px">
   No active recording session found.
+</div>
+{% elif request.query_params.get('error') == 'missing_device' %}
+<div style="padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber);margin-bottom:20px">
+  Choose a microphone and a system-audio device to start local capture.
+</div>
+{% elif request.query_params.get('error') == 'unavailable' %}
+<div style="padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber);margin-bottom:20px">
+  That capture mode isn't available right now.
+</div>
+{% elif request.query_params.get('error') == 'live_delayed' %}
+<div style="padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber);margin-bottom:20px">
+  Recording started, but another job is already running — the live transcript preview won't start until it finishes. If the session ends first, the preview may show nothing; the full diarized transcript from Transcribe is unaffected.
 </div>
 {% endif %}
 
@@ -97,6 +111,7 @@
       </div>
     </div>
 
+    {% if active_recording.source != 'local' %}
     <!-- Speaker meters -->
     <div class="section-head">
       <div class="section-head-left">
@@ -137,6 +152,7 @@
       </div>
       {% endfor %}
     </div>
+    {% endif %}
 
     <!-- Live ticker -->
     <div style="margin-top:28px">
@@ -146,7 +162,7 @@
           <h2 class="section-title">The thread</h2>
         </div>
       </div>
-      <div id="live-ticker" style="background:var(--color-ink-700);border:1px solid var(--color-rule);padding:14px 18px;border-radius:4px;min-height:80px">
+      <div id="live-ticker" style="background:var(--color-ink-700);border:1px solid var(--color-rule);padding:14px 18px;border-radius:4px;min-height:80px;max-height:480px;overflow-y:auto">
         <div style="color:var(--color-paper-faint);font-size:12px;font-style:italic">Waiting for transcription stream…</div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;padding:10px 0 4px;font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint);letter-spacing:0.1em;margin-top:4px">
@@ -170,6 +186,38 @@
         <div>id <span style="color:var(--color-accent)">{{ active_recording.id[:12] }}…</span></div>
       </div>
     </div>
+
+    {% if active_recording.source == 'local' %}
+    <div>
+      <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:8px">
+        <div class="mono-kicker">Noise floor</div>
+        <div id="noise-floor-value" style="font-family:var(--font-mono);font-size:11px;color:var(--color-accent)">300</div>
+      </div>
+      <input type="range" id="noise-floor-slider" min="0" max="1000" step="10" value="300"
+             style="width:100%;accent-color:var(--color-accent)"/>
+      <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:6px;margin-bottom:14px;line-height:1.5">
+        Higher filters out more background noise before it reaches the live transcript — but can also cut quiet speech. Adjusts live.
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:12px">
+        {% for track, label in [("mic", "Mic"), ("system", "System")] %}
+        <div>
+          <div style="display:flex;justify-content:space-between;font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-bottom:4px">
+            <span>{{ label }}</span>
+            <span id="level-value-{{ track }}">0</span>
+          </div>
+          <div id="level-meter-{{ track }}" style="position:relative;height:8px;background:var(--color-ink-700);border:1px solid var(--color-rule);border-radius:3px;overflow:hidden">
+            <div id="level-fill-{{ track }}" style="position:absolute;left:0;top:0;bottom:0;width:0%;background:var(--color-rule-strong)"></div>
+            <div id="level-threshold-{{ track }}" style="position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--color-signal-rose);left:7.5%"></div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:8px;line-height:1.5">
+        Bar shows the live signal on each track; the rose line marks the noise floor. Green means it's clearing the floor and reaching the transcript.
+      </div>
+    </div>
+    {% endif %}
 
     <div>
       <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:10px">
@@ -198,7 +246,7 @@
       <ol style="margin:0;padding:0 0 0 18px;font-size:12px;color:var(--color-paper-dim);line-height:1.6">
         <li>Final segment sealed</li>
         <li>Recording saved</li>
-        <li>Transcription queued automatically</li>
+        <li>Click Transcribe on the recording to run the full, diarized pass</li>
       </ol>
     </div>
   </div>
@@ -206,7 +254,8 @@
 
 {% else %}
 {# ── Idle / start new session ── #}
-<div style="max-width:640px">
+<div style="display:flex;gap:32px;flex-wrap:wrap;align-items:flex-start">
+<div style="max-width:640px;flex:1;min-width:320px">
   <form method="post" action="/record/start-form" style="margin-bottom:32px">
     <div class="section-head"><div class="section-head-left"><span class="section-kicker">Discord voice</span><h2 class="section-title">Connect and record</h2></div></div>
     <div style="border-top:1px solid var(--color-rule)">
@@ -282,6 +331,88 @@
     <a href="/recordings" style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">View all recordings →</a>
   </div>
 </div>
+
+{% if local_devices.available %}
+<div style="max-width:420px;flex:1;min-width:280px">
+  <form method="post" action="/record/start-local">
+    <div class="section-head"><div class="section-head-left"><span class="section-kicker">Local capture</span><h2 class="section-title">Mic + system audio</h2></div></div>
+    <div style="border-top:1px solid var(--color-rule)">
+
+      <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
+        <div class="mono-kicker" style="margin-bottom:10px">Session name (optional)</div>
+        <input type="text" name="name" maxlength="200" placeholder="e.g. Session 14 — the ambush"
+               style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:8px 10px;border-radius:5px;font-size:13px;font-family:var(--font-sans)"/>
+        <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:6px">
+          Makes it easier to find later on the Recordings and Transcripts pages — defaults to the session ID if left blank.
+        </div>
+      </div>
+
+      <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
+        <div class="mono-kicker" style="margin-bottom:10px">Campaign (optional)</div>
+        <select name="campaign_slug" style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:8px 10px;border-radius:5px;font-size:13px;font-family:var(--font-sans)">
+          <option value="">— None —</option>
+          {% for slug, c in campaigns.items() %}
+          <option value="{{ slug }}">{{ c.display_name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
+        <div class="mono-kicker" style="margin-bottom:10px">Microphone</div>
+        <select name="mic_id" required style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:8px 10px;border-radius:5px;font-size:13px;font-family:var(--font-sans)">
+          {% if not local_devices.microphones %}
+          <option value="" disabled selected>No microphones found</option>
+          {% endif %}
+          {% for d in local_devices.microphones %}
+          <option value="{{ d.id }}" {% if d.id == local_devices.default_microphone_id %}selected{% endif %}>{{ d.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px">
+          <div class="mono-kicker">System audio</div>
+          <span style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint)">loopback</span>
+        </div>
+        <select name="system_id" required style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:8px 10px;border-radius:5px;font-size:13px;font-family:var(--font-sans)">
+          {% if not local_devices.loopbacks %}
+          <option value="" disabled selected>No loopback devices found</option>
+          {% endif %}
+          {% for d in local_devices.loopbacks %}
+          <option value="{{ d.id }}" {% if d.id == local_devices.default_loopback_id %}selected{% endif %}>{{ d.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      {% if speaker_profiles %}
+      <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
+        <div class="mono-kicker" style="margin-bottom:10px">This is me (optional)</div>
+        <select name="mic_profile_key" style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:8px 10px;border-radius:5px;font-size:13px;font-family:var(--font-sans)">
+          <option value="" {% if not default_mic_profile_key %}selected{% endif %}>— Label my lines "You" —</option>
+          {% for key, profile in speaker_profiles.items() %}
+          <option value="{{ key }}" {% if key == default_mic_profile_key %}selected{% endif %}>{{ profile.display_name }}</option>
+          {% endfor %}
+        </select>
+        <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:6px">
+          Labels the live-preview mic lines with your name instead of "You" — cosmetic only, doesn't affect the real post-session transcript.
+        </div>
+      </div>
+      {% endif %}
+
+      <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
+        <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center;font-size:14px;padding:10px">
+          {{ icon("record", 10, "var(--color-ink-800)") }} Start local recording
+        </button>
+      </div>
+    </div>
+  </form>
+  <div style="padding:8px 0;font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint);line-height:1.6">
+    Records your mic and the machine's system audio (e.g. the other side of a call) as separate tracks, plus a mixed track for transcription. See docs/setup.md for per-OS setup.
+  </div>
+</div>
+{% endif %}
+
+</div>
 {% endif %}
 </div>
 
@@ -300,9 +431,10 @@
   sync();
 })();
 </script>
+{% endblock %}
 
-{% if active_recording %}
 {% block extra_scripts %}
+{% if active_recording %}
 <script>
 // ── Record live UI ──
 // SSE stream binds speaker meters + ticker.
@@ -319,23 +451,130 @@
   }
   tick(); setInterval(tick, 1000);
 
-  // SSE
+  // Level gauge -- shares the mic/system RMS peaks the noise-floor slider
+  // script (below) reads/writes `currentNoiseFloor` from, so both live in
+  // window scope rather than duplicating a threshold value in two closures.
+  var LEVEL_METER_MAX = 2000; // headroom above the slider's 0-1000 range so speech peaks don't constantly pin the bar
+  function levelPct(v) { return Math.max(0, Math.min(100, (v / LEVEL_METER_MAX) * 100)); }
+  function updateThresholdMarkers(v) {
+    ['mic', 'system'].forEach(function(track) {
+      var m = document.getElementById('level-threshold-' + track);
+      if (m) m.style.left = levelPct(v) + '%';
+    });
+  }
+  function updateLevelGauge(track, rms) {
+    var fill = document.getElementById('level-fill-' + track);
+    var val = document.getElementById('level-value-' + track);
+    if (fill) {
+      fill.style.width = levelPct(rms) + '%';
+      fill.style.background = rms >= (window.currentNoiseFloor || 0)
+        ? 'var(--color-signal-green)' : 'var(--color-rule-strong)';
+    }
+    if (val) val.textContent = Math.round(rms);
+  }
+  window.updateThresholdMarkers = updateThresholdMarkers;
+
+  // Status SSE -- segment count only (voice_activity/segment_sealed meters
+  // have no producer yet -- Discord-path speaker meters are unbuilt).
   try {
     var src = new EventSource('/record/sse');
-    src.addEventListener('voice_activity', function(e) {
-      try { window.wisperUpdateMeters && window.wisperUpdateMeters(JSON.parse(e.data)); } catch(ex) {}
-    });
-    src.addEventListener('partial_transcript', function(e) {
-      try { window.wisperTickerAppend && window.wisperTickerAppend(JSON.parse(e.data)); } catch(ex) {}
-    });
     src.addEventListener('segment_sealed', function(e) {
       var c = document.getElementById('live-seg-count');
       if (c) c.textContent = parseInt(c.textContent||'0') + 1;
     });
+    src.onmessage = function(e) {
+      try {
+        var payload = JSON.parse(e.data);
+        if (payload.type === 'status' && 'mic_rms' in payload) {
+          updateLevelGauge('mic', payload.mic_rms);
+          updateLevelGauge('system', payload.system_rms);
+        }
+      } catch (ex) {}
+    };
     src.onerror = function() { src.close(); };
   } catch(ex) {}
+
+  // Add marker -- any source (not local-only). No page reload: a form
+  // POST would reset scroll position in the ticker mid-session, so this
+  // is a plain fetch with the result dropped straight into the ticker.
+  var markerBtn = document.getElementById('add-marker-btn');
+  if (markerBtn) {
+    markerBtn.addEventListener('click', function() {
+      markerBtn.disabled = true;
+      fetch('/record/marker', {method: 'POST'})
+        .then(function(r) { return r.ok ? r.json() : Promise.reject(r); })
+        .then(function(data) {
+          window.wisperTickerAppendMarker && window.wisperTickerAppendMarker(data.elapsed_s);
+        })
+        .catch(function() {})
+        .finally(function() { markerBtn.disabled = false; });
+    });
+  }
 })();
 </script>
-{% endblock %}
+{% if active_recording.source == 'local' %}
+<script>
+// Live-transcript ticker -- shared connector (wisperConnectLiveStream in
+// app.js) handles the SSE + reconnect de-dupe; same endpoint + payload
+// shape as the recording detail page. Local capture is the only source
+// that runs a JOB_LIVE job today.
+//
+// app.js is loaded with `defer`, so it always finishes running strictly
+// after every inline <script> in the body (including this one) and right
+// before DOMContentLoaded -- calling wisperConnectLiveStream synchronously
+// here would silently no-op (window.wisperConnectLiveStream is still
+// undefined at this point), so the connection has to wait for that event.
+(function(){
+  function fmtElapsed(s) {
+    s = Math.max(0, Math.floor(s || 0));
+    var m = Math.floor(s / 60), ss = s % 60;
+    return m + ':' + String(ss).padStart(2, '0');
+  }
+  document.addEventListener('DOMContentLoaded', function() {
+    window.wisperConnectLiveStream && window.wisperConnectLiveStream(
+      '/recordings/{{ active_recording.id }}/live',
+      function(payload) {
+        window.wisperTickerAppend && window.wisperTickerAppend({
+          timestamp: fmtElapsed(payload.start_s),
+          speaker: payload.speaker,
+          text: payload.text,
+        });
+      }
+    );
+  });
+})();
+
+// Noise-floor slider -- debounced POST to /api/record/live-noise-floor,
+// which mutates the running JOB_LIVE job's kwargs directly (see
+// run_live_loop's get_noise_floor docstring in live_transcribe.py).
+// Resets to the library default on page load/reload -- not persisted.
+(function(){
+  var slider = document.getElementById('noise-floor-slider');
+  var valueEl = document.getElementById('noise-floor-value');
+  if (!slider) return;
+
+  window.currentNoiseFloor = parseFloat(slider.value);
+  window.updateThresholdMarkers && window.updateThresholdMarkers(window.currentNoiseFloor);
+
+  var debounceTimer = null;
+  function send(v) {
+    fetch('/api/record/live-noise-floor', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({noise_floor: v}),
+    }).catch(function() {});
+  }
+
+  slider.addEventListener('input', function() {
+    var v = parseFloat(slider.value);
+    if (valueEl) valueEl.textContent = v;
+    window.currentNoiseFloor = v;
+    window.updateThresholdMarkers && window.updateThresholdMarkers(v);
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(function() { send(v); }, 200);
+  });
+})();
+</script>
+{% endif %}
 {% endif %}
 {% endblock %}

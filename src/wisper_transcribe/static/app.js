@@ -68,8 +68,45 @@ window.wisperUpdateMeters = function(data) {
   });
 };
 
+// ── Record: live-transcript SSE connector ──
+// Shared by record.html's ticker and recording_detail.html's pane -- both
+// hit the same GET /recordings/{id}/live endpoint and need the same
+// reconnect-replay de-dupe, so the connection + parsing logic lives here
+// once instead of being hand-rolled per template.
+//
+// De-dupe against a reconnect replay: the SSE resume cursor (`last_idx` in
+// that route) lives server-side per connection, starting at 0 -- there's
+// no client "I've already seen up to X" signal, so any reconnect
+// (dev-server restart, a network blip, tab wake from sleep) looks
+// identical to a brand-new stream and replays the entire line history
+// from the start. Keyed on raw `start_s|speaker|text` rather than a
+// caller's display-formatted fields, since callers format timestamps
+// differently.
+window.wisperConnectLiveStream = function(url, onLine, onSnapshot) {
+  var seen = new Set();
+  try {
+    var src = new EventSource(url);
+    src.onmessage = function(e) {
+      try {
+        var payload = JSON.parse(e.data);
+        if (payload.type === 'line') {
+          var key = payload.start_s + '|' + payload.speaker + '|' + payload.text;
+          if (seen.has(key)) return;
+          seen.add(key);
+          onLine(payload);
+        } else if (payload.type === 'snapshot' && onSnapshot) {
+          onSnapshot(payload);
+        }
+      } catch (ex) {}
+    };
+    src.addEventListener('end', function() { src.close(); });
+    src.onerror = function() { src.close(); };
+    return src;
+  } catch (ex) {}
+};
+
 // ── Record: live transcript ticker ──
-// Called by the SSE handler in record.html with partial_transcript event data.
+// Called via wisperConnectLiveStream's onLine callback in record.html.
 // data: { timestamp: "01:24:09", speaker: "Alice", text: "..." }
 window.wisperTickerAppend = function(data) {
   var ticker = document.getElementById('live-ticker');
@@ -91,19 +128,49 @@ window.wisperTickerAppend = function(data) {
     '</span>' +
     '<span style="font-size:13.5px;color:var(--color-paper);line-height:1.5">' + (data.text || '') + '</span>';
 
-  // Prepend (newest at top) and fade older lines
+  // Prepend (newest at top), fade older lines for a recency cue -- but
+  // never delete them. This ticker doubles as an in-session scrollback log
+  // (e.g. rewinding to something missed during a game), so old lines must
+  // stay for the life of the page, not roll off after a fixed count.
   ticker.insertBefore(line, ticker.firstChild);
 
-  // Fade older entries
   var lines = ticker.querySelectorAll('div[style*="grid-template-columns"]');
   lines.forEach(function(l, i) {
     l.style.opacity = Math.max(0.45, 1 - i * 0.12);
   });
+};
 
-  // Keep at most 12 lines
-  while (lines.length > 12) {
-    ticker.removeChild(ticker.lastChild);
-  }
+// ── Record: "Add marker" flagged line ──
+// Called on a successful POST /record/marker response with the server's
+// computed elapsed_s. Visually distinct from a real transcript line (rose,
+// italic, no speaker) so it can't be mistaken for something Whisper said.
+window.wisperTickerAppendMarker = function(elapsedS) {
+  var ticker = document.getElementById('live-ticker');
+  if (!ticker) return;
+
+  var placeholder = ticker.querySelector('div[style*="font-style"]');
+  if (placeholder) placeholder.remove();
+
+  var s = Math.max(0, Math.floor(elapsedS || 0));
+  var m = Math.floor(s / 60), ss = s % 60;
+  var label = m + ':' + String(ss).padStart(2, '0');
+
+  var line = document.createElement('div');
+  line.style.cssText = 'display:grid;grid-template-columns:60px 90px 1fr;gap:14px;padding:6px 0;align-items:baseline;opacity:1';
+  line.innerHTML =
+    '<span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-signal-rose)">' + label + '</span>' +
+    '<span style="display:flex;align-items:center;gap:7px">' +
+      '<span class="dot-rose" style="width:6px;height:6px"></span>' +
+      '<span style="font-family:var(--font-serif);font-size:13px;color:var(--color-signal-rose);font-style:italic">Marker</span>' +
+    '</span>' +
+    '<span style="font-size:13.5px;color:var(--color-paper-faint);font-style:italic">flagged moment</span>';
+
+  ticker.insertBefore(line, ticker.firstChild);
+
+  var lines = ticker.querySelectorAll('div[style*="grid-template-columns"]');
+  lines.forEach(function(l, i) {
+    l.style.opacity = Math.max(0.45, 1 - i * 0.12);
+  });
 };
 
 // ── Inline audio excerpt player ──
@@ -156,6 +223,83 @@ document.addEventListener('DOMContentLoaded', function() {
   var terminal = document.getElementById('log-terminal');
   if (terminal) terminal.scrollTop = terminal.scrollHeight;
 });
+
+// ── Global recording-status banner ──
+// Shown on every page except /record itself (which already has its own
+// full toolbar with an elapsed timer + Stop button) -- so a session
+// started on /record stays visible, with a working Stop control, while
+// navigating elsewhere. Polls the JSON status endpoint rather than SSE:
+// this banner needs to work correctly across full page navigations, where
+// an EventSource would just be torn down and reopened anyway.
+(function() {
+  var banner = document.getElementById('global-recording-banner');
+  if (!banner) return;
+  if (location.pathname === '/record') return;
+
+  var elapsedTimer = null;
+  var startTs = null;
+
+  function pad(n) { return String(n).padStart(2, '0'); }
+  function escapeHtml(s) {
+    var div = document.createElement('div');
+    div.textContent = s;
+    return div.innerHTML;
+  }
+  function tickElapsed() {
+    if (!startTs) return;
+    var s = Math.floor(Date.now() / 1000 - startTs);
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+    var el = document.getElementById('global-elapsed-timer');
+    if (el) el.textContent = pad(h) + ':' + pad(m) + ':' + pad(ss);
+  }
+
+  function render(status) {
+    if (!status || !status.active) {
+      banner.style.display = 'none';
+      banner.innerHTML = '';
+      if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+      startTs = null;
+      return;
+    }
+
+    startTs = status.started_at ? new Date(status.started_at).getTime() / 1000 : null;
+    var stopUrl = status.source === 'local' ? '/record/stop-local' : '/record/stop';
+    var label = status.name
+      ? escapeHtml(status.name)
+      : (status.source === 'local' ? 'Local capture' : ('#' + (status.voice_channel_id || '?')));
+
+    banner.innerHTML =
+      '<div style="display:flex;align-items:center;gap:18px;padding:10px 24px;' +
+      'background:linear-gradient(180deg,#e88b8b10 0%,transparent 100%);' +
+      'border-bottom:1px solid var(--color-rule)">' +
+        '<div style="display:flex;align-items:center;gap:9px">' +
+          '<span class="dot-rose"></span>' +
+          '<span style="font-family:var(--font-mono);font-size:10px;color:var(--color-signal-rose);' +
+          'letter-spacing:0.14em;font-weight:600">RECORDING</span>' +
+        '</div>' +
+        '<span id="global-elapsed-timer" style="font-family:var(--font-mono);font-size:13px;color:var(--color-paper)">00:00:00</span>' +
+        '<a href="/record" style="margin-right:auto;font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">' +
+          label + ' — view →' +
+        '</a>' +
+        '<form method="post" action="' + stopUrl + '" style="margin:0">' +
+          '<button type="submit" class="btn btn-rose btn-sm">Stop recording</button>' +
+        '</form>' +
+      '</div>';
+    banner.style.display = 'block';
+    tickElapsed();
+    if (!elapsedTimer) elapsedTimer = setInterval(tickElapsed, 1000);
+  }
+
+  function poll() {
+    fetch('/api/record/status')
+      .then(function(r) { return r.json(); })
+      .then(render)
+      .catch(function() {});
+  }
+
+  poll();
+  setInterval(poll, 4000);
+})();
 
 // ── Sidebar status fallback ──
 // htmx handles this via hx-trigger="load, every 5s" when it's available.

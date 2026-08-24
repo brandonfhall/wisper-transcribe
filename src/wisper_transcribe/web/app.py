@@ -1,6 +1,7 @@
 """FastAPI application factory for the wisper-transcribe web UI."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -24,6 +25,22 @@ from .jobs import JobQueue
 # TMonitor only helps detect stalled bars in interactive terminals; it's useless
 # in a web server context.
 _tqdm_module.tqdm.monitor_interval = 0
+
+# Reconfigure stdout/stderr to UTF-8, independently of cli.py's own
+# _ensure_utf8_stdio() -- `uvicorn.run(..., reload=True)` spawns a fresh
+# subprocess that imports this module string ("wisper_transcribe.web.app:app")
+# directly, never re-running cli.py's module-level code, so that fix alone
+# doesn't reach the actual worker process transcription jobs run in. Same
+# per-entrypoint duplication as the tqdm.monitor_interval line above and
+# jobs.py's own copy of it -- see CLAUDE.md's tqdm-patching gotcha. Confirmed
+# live: pipeline.py's tqdm.write("─" * 60) crashed every transcription job
+# with UnicodeEncodeError on this process's inherited cp1252 console codepage.
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None:
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
 _STATIC_DIR = Path(__file__).parent.parent / "static"
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -174,9 +191,22 @@ def create_app() -> FastAPI:
         bot_manager.start()
         app.state.bot_manager = bot_manager
 
+        from .local_capture import LocalCaptureManager
+        local_capture_manager = LocalCaptureManager(data_dir=data_dir)
+        local_capture_manager.start()
+        app.state.local_capture_manager = local_capture_manager
+
         try:
             yield
         finally:
+            # Signal any active JOB_LIVE job to end BEFORE job_queue.stop()
+            # -- see stop_all_live()'s docstring for why job_queue.stop()
+            # alone can't stop it and would otherwise hang shutdown.
+            job_queue.stop_all_live()
+            # LocalCaptureManager is synchronous/thread-based (soundcard
+            # recorders are blocking pulls) -- stop() joins threads, so it
+            # must run off the event loop like any other blocking call.
+            await asyncio.to_thread(local_capture_manager.stop)
             await bot_manager.stop()
             await job_queue.stop()
             try:

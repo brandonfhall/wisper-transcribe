@@ -61,6 +61,11 @@ llm-all = [
     "openai>=1.50.0",
     "google-genai>=0.3.0",
 ]
+# Local mic + system-audio capture (live local recording, Phase 1). Optional:
+# useless inside Docker (no host audio devices) and on headless boxes.
+live = [
+    "SoundCard>=0.4.3",
+]
 
 [project.scripts]
 wisper = "wisper_transcribe.cli:main"

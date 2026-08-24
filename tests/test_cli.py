@@ -69,6 +69,42 @@ def _make_fake_profile(tmp_path: Path, name: str, display_name: str = "", role: 
 
 
 # ---------------------------------------------------------------------------
+# UTF-8 stdio (crashed transcription jobs writing Unicode via tqdm.write()
+# on a legacy-codepage Windows console -- see pipeline.py's box-drawing
+# separator line)
+# ---------------------------------------------------------------------------
+
+def test_ensure_utf8_stdio_reconfigures_both_streams():
+    from wisper_transcribe.cli import _ensure_utf8_stdio
+
+    fake_out, fake_err = MagicMock(), MagicMock()
+    with patch("sys.stdout", fake_out), patch("sys.stderr", fake_err):
+        _ensure_utf8_stdio()
+
+    fake_out.reconfigure.assert_called_once_with(encoding="utf-8", errors="replace")
+    fake_err.reconfigure.assert_called_once_with(encoding="utf-8", errors="replace")
+
+
+def test_ensure_utf8_stdio_swallows_missing_reconfigure():
+    """A stream without .reconfigure() (e.g. a test harness's capture
+    object) must not crash startup."""
+    from wisper_transcribe.cli import _ensure_utf8_stdio
+
+    class _NoReconfigure:
+        pass
+
+    with patch("sys.stdout", _NoReconfigure()), patch("sys.stderr", _NoReconfigure()):
+        _ensure_utf8_stdio()  # must not raise
+
+
+def test_ensure_utf8_stdio_handles_none_streams():
+    from wisper_transcribe.cli import _ensure_utf8_stdio
+
+    with patch("sys.stdout", None), patch("sys.stderr", None):
+        _ensure_utf8_stdio()  # must not raise
+
+
+# ---------------------------------------------------------------------------
 # wisper config
 # ---------------------------------------------------------------------------
 
@@ -827,6 +863,28 @@ def test_get_lmstudio_models_parses_response():
     assert models == [("lmstudio-community/gemma-3-12b", ""), ("mistral-7b-instruct", "")]
 
 
+def test_record_delete_passes_purge_true(monkeypatch):
+    """Regression test: `wisper record delete`'s confirmation prompt and
+    docstring promise files are deleted (updated 2026-08-24 when
+    /api/recordings/{id}/delete stopped purging by default) -- the CLI must
+    actually opt in via ?purge=true or that promise is false."""
+    import uuid
+
+    monkeypatch.setenv("WISPER_SERVER_URL", "http://127.0.0.1:8080")
+    fake_response = MagicMock()
+    fake_response.raise_for_status = MagicMock()
+    fake_response.json.return_value = {"id": "x", "deleted": True, "purged": True}
+    rec_id = str(uuid.uuid4())
+
+    with patch("httpx.request", return_value=fake_response) as mock_request:
+        result = CliRunner().invoke(main, ["record", "delete", rec_id, "--yes"])
+
+    assert result.exit_code == 0
+    mock_request.assert_called_once()
+    called_url = mock_request.call_args.args[1]
+    assert called_url.endswith(f"/api/recordings/{rec_id}/delete?purge=true")
+
+
 def test_get_lmstudio_models_returns_empty_on_failure():
     """_get_lmstudio_models returns [] when LM Studio is unreachable."""
     with patch("httpx.get", side_effect=Exception("connection refused")):
@@ -1133,6 +1191,67 @@ def test_campaigns_list_empty(tmp_path, monkeypatch):
     result = CliRunner().invoke(main, ["campaigns", "list"])
     assert result.exit_code == 0
     assert "No campaigns" in result.output
+
+
+def test_campaigns_reorder_up(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import move_transcript_to_campaign
+    runner = CliRunner()
+    runner.invoke(main, ["campaigns", "create", "Test Campaign"])
+    for stem in ("s1", "s2", "s3"):
+        move_transcript_to_campaign(stem, "test-campaign", data_dir=tmp_path)
+
+    result = runner.invoke(main, ["campaigns", "reorder", "test-campaign", "s3", "--up"])
+    assert result.exit_code == 0, result.output
+    assert "1. s1" in result.output
+    assert "2. s3 <-" in result.output
+    assert "3. s2" in result.output
+
+
+def test_campaigns_reorder_set(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import move_transcript_to_campaign, get_transcripts_for_campaign
+    runner = CliRunner()
+    runner.invoke(main, ["campaigns", "create", "Test Campaign"])
+    for stem in ("s1", "s2", "s3"):
+        move_transcript_to_campaign(stem, "test-campaign", data_dir=tmp_path)
+
+    result = runner.invoke(main, ["campaigns", "reorder", "test-campaign", "--set", "s3,s1,s2"])
+    assert result.exit_code == 0, result.output
+    assert get_transcripts_for_campaign("test-campaign", data_dir=tmp_path) == ["s3", "s1", "s2"]
+
+
+def test_campaigns_reorder_set_rejects_non_permutation(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import move_transcript_to_campaign
+    runner = CliRunner()
+    runner.invoke(main, ["campaigns", "create", "Test Campaign"])
+    move_transcript_to_campaign("s1", "test-campaign", data_dir=tmp_path)
+
+    result = runner.invoke(main, ["campaigns", "reorder", "test-campaign", "--set", "s1,ghost"])
+    assert result.exit_code != 0
+
+
+def test_campaigns_reorder_requires_up_or_down(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import move_transcript_to_campaign
+    runner = CliRunner()
+    runner.invoke(main, ["campaigns", "create", "Test Campaign"])
+    move_transcript_to_campaign("s1", "test-campaign", data_dir=tmp_path)
+
+    result = runner.invoke(main, ["campaigns", "reorder", "test-campaign", "s1"])
+    assert result.exit_code != 0
+    assert "exactly one" in result.output
+
+    result = runner.invoke(main, ["campaigns", "reorder", "test-campaign", "s1", "--up", "--down"])
+    assert result.exit_code != 0
+
+
+def test_campaigns_reorder_unknown_campaign(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    result = CliRunner().invoke(main, ["campaigns", "reorder", "ghost", "s1", "--up"])
+    assert result.exit_code != 0
+    assert "not found" in result.output
 
 
 def test_campaigns_delete_requires_confirm(tmp_path, monkeypatch):

@@ -13,12 +13,13 @@ import logging
 import tempfile
 import threading
 import uuid
+import wave
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from .config import get_data_dir
-from .models import Recording, RejoinAttempt, SegmentRecord
+from .models import Marker, Recording, RejoinAttempt, SegmentRecord
 from .path_utils import validate_path_component
 
 log = logging.getLogger(__name__)
@@ -121,6 +122,14 @@ def _rejoin_from_dict(d: dict) -> RejoinAttempt:
     )
 
 
+def _marker_to_dict(m: Marker) -> dict:
+    return {"timestamp": _dt_to_str(m.timestamp), "elapsed_s": m.elapsed_s}
+
+
+def _marker_from_dict(d: dict) -> Marker:
+    return Marker(timestamp=_str_to_dt(d["timestamp"]), elapsed_s=d.get("elapsed_s", 0.0))
+
+
 def _recording_to_dict(r: Recording) -> dict:
     return {
         "id": r.id,
@@ -139,6 +148,10 @@ def _recording_to_dict(r: Recording) -> dict:
         "notes": r.notes,
         "unbound_speakers": list(r.unbound_speakers),
         "job_id": r.job_id,
+        "source": r.source,
+        "devices": dict(r.devices),
+        "name": r.name,
+        "markers": [_marker_to_dict(m) for m in r.markers],
     }
 
 
@@ -160,6 +173,10 @@ def _recording_from_dict(d: dict) -> Recording:
         notes=d.get("notes"),
         unbound_speakers=list(d.get("unbound_speakers", [])),
         job_id=d.get("job_id"),
+        source=d.get("source", "discord"),
+        devices=dict(d.get("devices", {})),
+        name=d.get("name"),
+        markers=[_marker_from_dict(m) for m in d.get("markers", [])],
     )
 
 
@@ -212,6 +229,36 @@ def save_recording(recording: Recording, data_dir: Optional[Path] = None) -> Non
     _update_index(recording.id, data_dir)
 
 
+def save_recording_merged(recording: Recording, data_dir: Optional[Path] = None) -> None:
+    """Save `recording`, first refreshing its `markers`/`segment_manifest`
+    from whatever is currently on disk.
+
+    `BotManager`/`LocalCaptureManager` hold one long-lived `Recording`
+    object for the whole session and call this whenever they persist a
+    change to a field they own directly (`status`, `combined_path`,
+    `discord_speakers`, `rejoin_log`, ...) — several times per session
+    (per-user speaker discovery, disconnect handling, session finalise).
+    Meanwhile `append_marker()` (the "Add marker" button) and
+    `append_segment()`/`record_completed_wav_segment()` (combined-track
+    rotation) mutate `markers`/`segment_manifest` through their own
+    independent load-fresh + mutex-protected save, from a different call
+    site (a route handler, the tick/frame loop) that can run at any point
+    during the session. A plain `save_recording(recording, ...)` here would
+    silently overwrite whatever those functions already committed, because
+    the long-lived object never picked up their change — confirmed
+    reproducible: add a marker mid-session, let the session end normally,
+    and `Recording.markers` comes back empty. Refreshing under the same
+    per-recording lock those functions use makes this atomic with respect
+    to them, so a concurrent append can never be lost to this save.
+    """
+    with _get_recording_lock(recording.id):
+        current = load_recordings(data_dir).get(recording.id)
+        if current is not None:
+            recording.markers = current.markers
+            recording.segment_manifest = current.segment_manifest
+        save_recording(recording, data_dir)
+
+
 def _update_index(recording_id: str, data_dir: Optional[Path] = None) -> None:
     index_path = get_recordings_index_path(data_dir)
     index_path.parent.mkdir(parents=True, exist_ok=True)
@@ -240,8 +287,18 @@ def create_recording(
     guild_id: str,
     campaign_slug: Optional[str] = None,
     data_dir: Optional[Path] = None,
+    source: str = "discord",
+    devices: Optional[dict] = None,
+    name: Optional[str] = None,
 ) -> Recording:
-    """Create and persist a new Recording in 'recording' status."""
+    """Create and persist a new Recording in 'recording' status.
+
+    `source`/`devices` back local capture sessions (`web/local_capture.py`):
+    `voice_channel_id`/`guild_id` are empty strings there, and `devices`
+    carries the chosen mic/system device names for the detail page.
+    `name` is an optional user-supplied session title, set at session
+    start -- display-only, never used in a file path.
+    """
     recording_id = str(uuid.uuid4())
     recordings_dir = get_recordings_dir(data_dir)
     rec_dir = recordings_dir / recording_id
@@ -260,6 +317,9 @@ def create_recording(
         per_user_dir=rec_dir / "per-user",
         transcript_path=None,
         rejoin_log=[],
+        source=source,
+        devices=devices or {},
+        name=name,
     )
     save_recording(recording, data_dir)
     return recording
@@ -299,8 +359,97 @@ def append_segment(
         save_recording(recordings[recording_id], data_dir)
 
 
+def record_completed_wav_segment(
+    recording_id: str,
+    path: Path,
+    started_at: datetime,
+    *,
+    finalized: bool,
+    data_dir: Optional[Path] = None,
+) -> datetime:
+    """Append a `SegmentRecord` for a just-rotated/finalized "mixed"
+    combined-track WAV segment, and return the timestamp to use as the
+    *next* segment's `started_at`.
+
+    Shared by `BotManager._route_frame`/`_finalise` (discord_bot.py) and
+    `LocalCaptureManager._do_tick`/`_finalise` (local_capture.py) — both
+    call `SegmentedWavWriter.write()`/`.finalize()` on their combined
+    writer and get a completed segment's `Path` back exactly when a
+    `SegmentRecord` should be appended. `segment_manifest` was previously
+    never populated at all (nothing called `append_segment()`), leaving
+    the recording-detail page's "Segments" manifest permanently empty.
+
+    Duration is approximated from wall-clock elapsed since `started_at`
+    rather than the writer's own sample count — the writer only tracks
+    media time internally and doesn't expose it per-segment, and wall
+    time is accurate enough for a manifest that only drives a UI counter/
+    duration display, not anything media-critical (the authoritative
+    audio is the concatenated `combined.wav`, unaffected by this).
+
+    Skips zero-frame segments (a session that starts and stops with no
+    audio ever received still gets one empty segment out of
+    `SegmentedWavWriter.finalize()`) — `concat_wav_segments()` already
+    skips these the same way when building `combined.wav`, so without this
+    check a no-audio session would show a contradictory "Segments: 1" in
+    the manifest next to `combined_path` correctly staying `None` /
+    `?error=no_audio`.
+
+    Never raises: a bookkeeping failure here must not interrupt the hot
+    capture write path that calls it.
+    """
+    now = datetime.now(timezone.utc)
+    try:
+        with wave.open(str(path), "rb") as wf:
+            if wf.getnframes() == 0:
+                return now
+    except (wave.Error, EOFError, OSError):
+        return now
+
+    segment = SegmentRecord(
+        index=int(Path(path).stem),
+        stream="mixed",
+        started_at=started_at,
+        duration_s=(now - started_at).total_seconds(),
+        path=Path(path),
+        finalized=finalized,
+    )
+    try:
+        append_segment(recording_id, segment, data_dir=data_dir)
+    except Exception:
+        log.warning("Failed to append segment record for recording %s", recording_id, exc_info=True)
+    return now
+
+
+def append_marker(recording_id: str, data_dir: Optional[Path] = None) -> Marker:
+    """Atomically append a marker (current elapsed time, no label) to a
+    recording's `markers` list -- the "Add marker" button on `/record`.
+
+    Per-recording mutex mirrors `append_segment()`'s lost-update protection.
+    `elapsed_s` is computed once here, at creation time, rather than derived
+    later from `timestamp` - `started_at` on every read.
+    """
+    with _get_recording_lock(recording_id):
+        recordings = load_recordings(data_dir)
+        if recording_id not in recordings:
+            raise KeyError(f"Recording {recording_id!r} not found")
+        rec = recordings[recording_id]
+        now = datetime.now(timezone.utc)
+        elapsed_s = (now - rec.started_at).total_seconds() if rec.started_at else 0.0
+        marker = Marker(timestamp=now, elapsed_s=elapsed_s)
+        rec.markers.append(marker)
+        save_recording(rec, data_dir)
+        return marker
+
+
 def delete_recording(recording_id: str, data_dir: Optional[Path] = None) -> None:
-    """Remove recording from index. Does NOT delete audio files."""
+    """Remove recording from index. Does NOT delete audio files.
+
+    The web routes that expose deletion (``web/routes/record.py``) call
+    ``_purge_recording_files()`` first to remove the files themselves --
+    that's a route-layer concern (it reuses ``transcripts.py``'s sidecar/
+    excerpt-clip cleanup) kept separate from this function on purpose, so
+    callers that only want the index entry gone still have that option.
+    """
     index_path = get_recordings_index_path(data_dir)
     try:
         with open(index_path, encoding="utf-8") as f:

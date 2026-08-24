@@ -11,6 +11,7 @@ import pytest
 from wisper_transcribe.models import Recording, SegmentRecord
 from wisper_transcribe.recording_manager import (
     _validate_recording_id,
+    append_marker,
     append_segment,
     create_recording,
     delete_recording,
@@ -18,6 +19,7 @@ from wisper_transcribe.recording_manager import (
     get_recordings_index_path,
     load_recordings,
     reconcile_on_startup,
+    record_completed_wav_segment,
     save_recording,
     update_recording_status,
 )
@@ -51,11 +53,150 @@ def test_load_save_roundtrip(tmp_path):
     assert isinstance(r.started_at, datetime)
 
 
+def test_create_recording_defaults_to_discord_source(tmp_path):
+    rec = _make_recording(tmp_path)
+    assert rec.source == "discord"
+    assert rec.devices == {}
+
+
+def test_create_recording_local_source_and_devices_roundtrip(tmp_path):
+    rec = create_recording(
+        voice_channel_id="",
+        guild_id="",
+        data_dir=tmp_path,
+        source="local",
+        devices={"mic": "Built-in Microphone", "system": "Speakers (loopback)"},
+    )
+    loaded = load_recordings(tmp_path)
+    r = loaded[rec.id]
+    assert r.source == "local"
+    assert r.devices == {"mic": "Built-in Microphone", "system": "Speakers (loopback)"}
+    assert r.voice_channel_id == ""
+    assert r.guild_id == ""
+
+
+def test_load_legacy_json_without_source_defaults_to_discord(tmp_path):
+    """A metadata.json written before source/devices existed must still load."""
+    rec = _make_recording(tmp_path)
+    meta_path = get_metadata_path(rec.id, tmp_path)
+    data = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert "source" in data and "devices" in data  # sanity: current writer includes them
+    del data["source"]
+    del data["devices"]
+    meta_path.write_text(json.dumps(data), encoding="utf-8")
+
+    loaded = load_recordings(tmp_path)
+    r = loaded[rec.id]
+    assert r.source == "discord"
+    assert r.devices == {}
+
+
 def test_create_recording_generates_uuid(tmp_path):
     r1 = _make_recording(tmp_path)
     r2 = _make_recording(tmp_path)
     assert r1.id != r2.id
     assert len(r1.id) == 36   # uuid4 with dashes
+
+
+def test_create_recording_name_roundtrips(tmp_path):
+    rec = create_recording(
+        voice_channel_id="", guild_id="", data_dir=tmp_path, source="local",
+        name="Session 14 — the ambush",
+    )
+    loaded = load_recordings(tmp_path)
+    assert loaded[rec.id].name == "Session 14 — the ambush"
+
+
+def test_create_recording_defaults_name_to_none(tmp_path):
+    rec = _make_recording(tmp_path)
+    assert rec.name is None
+    loaded = load_recordings(tmp_path)
+    assert loaded[rec.id].name is None
+
+
+def test_load_legacy_json_without_name_defaults_to_none(tmp_path):
+    """A metadata.json written before `name` existed must still load."""
+    rec = _make_recording(tmp_path)
+    meta_path = get_metadata_path(rec.id, tmp_path)
+    data = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert "name" in data  # sanity: current writer includes it
+    del data["name"]
+    meta_path.write_text(json.dumps(data), encoding="utf-8")
+
+    loaded = load_recordings(tmp_path)
+    assert loaded[rec.id].name is None
+
+
+# ---------------------------------------------------------------------------
+# Markers ("Add marker" button on /record)
+# ---------------------------------------------------------------------------
+
+def test_append_marker_roundtrips(tmp_path):
+    rec = _make_recording(tmp_path)
+    marker = append_marker(rec.id, tmp_path)
+
+    assert marker.elapsed_s >= 0.0
+    loaded = load_recordings(tmp_path)
+    assert len(loaded[rec.id].markers) == 1
+    assert loaded[rec.id].markers[0].elapsed_s == marker.elapsed_s
+
+
+def test_append_marker_computes_elapsed_since_started_at(tmp_path):
+    from datetime import timedelta
+
+    rec = _make_recording(tmp_path)
+    rec.started_at = datetime.now(timezone.utc) - timedelta(seconds=90)
+    save_recording(rec, tmp_path)
+
+    marker = append_marker(rec.id, tmp_path)
+    assert 89.0 <= marker.elapsed_s <= 91.0
+
+
+def test_append_marker_multiple_calls_accumulate(tmp_path):
+    rec = _make_recording(tmp_path)
+    append_marker(rec.id, tmp_path)
+    append_marker(rec.id, tmp_path)
+    append_marker(rec.id, tmp_path)
+
+    loaded = load_recordings(tmp_path)
+    assert len(loaded[rec.id].markers) == 3
+
+
+def test_append_marker_unknown_id_raises(tmp_path):
+    with pytest.raises(KeyError):
+        append_marker("does-not-exist", tmp_path)
+
+
+def test_append_marker_atomic_under_concurrent_calls(tmp_path):
+    rec = _make_recording(tmp_path)
+    n = 20
+
+    threads = [threading.Thread(target=append_marker, args=(rec.id, tmp_path)) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    loaded = load_recordings(tmp_path)
+    assert len(loaded[rec.id].markers) == n
+
+
+def test_create_recording_defaults_markers_to_empty_list(tmp_path):
+    rec = _make_recording(tmp_path)
+    assert rec.markers == []
+
+
+def test_load_legacy_json_without_markers_defaults_to_empty_list(tmp_path):
+    """A metadata.json written before `markers` existed must still load."""
+    rec = _make_recording(tmp_path)
+    meta_path = get_metadata_path(rec.id, tmp_path)
+    data = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert "markers" in data  # sanity: current writer includes it
+    del data["markers"]
+    meta_path.write_text(json.dumps(data), encoding="utf-8")
+
+    loaded = load_recordings(tmp_path)
+    assert loaded[rec.id].markers == []
 
 
 def test_load_returns_empty_when_no_file(tmp_path):
@@ -124,6 +265,111 @@ def test_append_segment_atomic_under_concurrent_calls(tmp_path):
 
     loaded = load_recordings(tmp_path)
     assert len(loaded[rec.id].segment_manifest) == n
+
+
+def _write_wav(path: Path, n_frames: int = 320) -> None:
+    """Write a minimal real 16 kHz mono 16-bit WAV file with `n_frames`
+    samples of silence (or a 0-byte-data file when n_frames == 0), so
+    record_completed_wav_segment()'s frame-count check has a real file to
+    inspect instead of a fabricated path."""
+    import wave
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(b"\x00\x00" * n_frames)
+
+
+def test_record_completed_wav_segment_appends_and_returns_new_started_at(tmp_path):
+    """record_completed_wav_segment() is the shared helper BotManager/
+    LocalCaptureManager call whenever their combined-track writer rotates
+    or finalizes -- this is what actually populates segment_manifest,
+    which previously had append_segment() defined but never called."""
+    rec = _make_recording(tmp_path)
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    path = tmp_path / "recordings" / rec.id / "combined" / "0000.wav"
+    _write_wav(path)
+
+    new_started_at = record_completed_wav_segment(
+        rec.id, path, started_at, finalized=True, data_dir=tmp_path
+    )
+
+    loaded = load_recordings(tmp_path)
+    manifest = loaded[rec.id].segment_manifest
+    assert len(manifest) == 1
+    seg = manifest[0]
+    assert seg.index == 0
+    assert seg.stream == "mixed"
+    assert seg.started_at == started_at
+    assert seg.duration_s > 0
+    assert seg.path == path
+    assert seg.finalized is True
+    # Returned timestamp is the next segment's start, strictly after this one.
+    assert new_started_at > started_at
+
+
+def test_record_completed_wav_segment_parses_index_from_filename(tmp_path):
+    rec = _make_recording(tmp_path)
+    path = tmp_path / "recordings" / rec.id / "combined" / "0042.wav"
+    _write_wav(path)
+
+    record_completed_wav_segment(
+        rec.id, path, datetime.now(timezone.utc), finalized=False, data_dir=tmp_path
+    )
+
+    manifest = load_recordings(tmp_path)[rec.id].segment_manifest
+    assert manifest[0].index == 42
+    assert manifest[0].finalized is False
+
+
+def test_record_completed_wav_segment_skips_zero_frame_segment(tmp_path):
+    """A session that starts and stops with no audio ever received still
+    gets one empty (0-frame) segment out of SegmentedWavWriter.finalize().
+    Without this skip, segment_manifest would show a phantom entry while
+    combined_path correctly stays None / ?error=no_audio -- a
+    contradictory UI state."""
+    rec = _make_recording(tmp_path)
+    path = tmp_path / "recordings" / rec.id / "combined" / "0000.wav"
+    _write_wav(path, n_frames=0)
+
+    record_completed_wav_segment(
+        rec.id, path, datetime.now(timezone.utc), finalized=True, data_dir=tmp_path
+    )
+
+    manifest = load_recordings(tmp_path)[rec.id].segment_manifest
+    assert manifest == []
+
+
+def test_record_completed_wav_segment_skips_unreadable_file(tmp_path):
+    """A corrupt/unreadable segment file (matches concat_wav_segments'
+    own tolerance for this) is skipped rather than raising."""
+    rec = _make_recording(tmp_path)
+    path = tmp_path / "recordings" / rec.id / "combined" / "0000.wav"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"not a real wav file")
+
+    new_started_at = record_completed_wav_segment(
+        rec.id, path, datetime.now(timezone.utc), finalized=True, data_dir=tmp_path
+    )
+
+    assert new_started_at is not None
+    manifest = load_recordings(tmp_path)[rec.id].segment_manifest
+    assert manifest == []
+
+
+def test_record_completed_wav_segment_swallows_errors_for_unknown_recording(tmp_path):
+    """Never raises -- a bookkeeping failure must not interrupt the hot
+    capture write path that calls this."""
+    new_started_at = record_completed_wav_segment(
+        "no-such-recording",
+        tmp_path / "0000.wav",
+        datetime.now(timezone.utc),
+        finalized=True,
+        data_dir=tmp_path,
+    )
+    assert new_started_at is not None
 
 
 # ---------------------------------------------------------------------------
