@@ -146,6 +146,27 @@ def _com_uninit() -> None:
 # Default (production) capture factory -- soundcard, lazily imported
 # ---------------------------------------------------------------------------
 
+def _get_microphone_by_id(sc, device_id: str):
+    """`sc.get_microphone()`, tolerant of macOS's id type round-trip.
+
+    `enumerate_devices()` stringifies every device id for the HTML <select>
+    (`str(getattr(m, "id", m))`), and the browser only ever gives it back as
+    a string. On Windows/Linux that's a no-op -- `soundcard`'s WASAPI/Pulse
+    ids are already strings (a device path/GUID) -- but on macOS `.id` is
+    the raw CoreAudio `AudioObjectID` (an int), and `soundcard`'s internal
+    `_match_device()` keys its lookup dict by that raw int, so the
+    stringified id never matches and raises `IndexError` (surfacing as the
+    capture thread immediately dying and the session going "degraded" with
+    no audio ever captured). Retry with the numeric type before giving up.
+    """
+    try:
+        return sc.get_microphone(id=device_id, include_loopback=True)
+    except IndexError:
+        if not device_id.isdigit():
+            raise
+        return sc.get_microphone(id=int(device_id), include_loopback=True)
+
+
 def _soundcard_capture_factory(device_id: str, samplerate: int) -> Iterator:
     """Default `capture_factory`: opens a soundcard device and blocks on `record()`.
 
@@ -161,7 +182,7 @@ def _soundcard_capture_factory(device_id: str, samplerate: int) -> Iterator:
 
     _com_init()
     try:
-        mic = sc.get_microphone(id=device_id, include_loopback=True)
+        mic = _get_microphone_by_id(sc, device_id)
         with mic.recorder(samplerate=samplerate) as recorder:
             while True:
                 block = recorder.record(numframes=None)
@@ -196,6 +217,22 @@ _UNAVAILABLE_DEVICES = {
 }
 
 
+# `soundcard`'s `isloopback` flag only ever fires for a true OS-level loopback
+# device (WASAPI on Windows, a PulseAudio/PipeWire monitor source on Linux).
+# macOS has no such concept -- CoreAudio can't tap system output directly --
+# so the documented macOS answer is a virtual-driver input device (BlackHole,
+# Soundflower, Rogue Amoeba's Loopback) that `isloopback` never flags. Without
+# this fallback those devices silently land in the microphones bucket and the
+# System Audio dropdown is permanently stuck on "No loopback devices found",
+# even with the driver correctly installed and routed.
+_VIRTUAL_LOOPBACK_NAME_HINTS = ("blackhole", "soundflower", "loopback audio")
+
+
+def _looks_like_virtual_loopback(name: str) -> bool:
+    lower = name.lower()
+    return any(hint in lower for hint in _VIRTUAL_LOOPBACK_NAME_HINTS)
+
+
 def enumerate_devices() -> dict:
     """Return `{"microphones": [...], "loopbacks": [...], "available": bool,
     "default_microphone_id": str, "default_loopback_id": str}`.
@@ -227,7 +264,8 @@ def enumerate_devices() -> dict:
             entry = {"id": str(getattr(m, "id", m)), "name": str(getattr(m, "name", m))}
         except Exception:
             continue
-        (loopbacks if getattr(m, "isloopback", False) else microphones).append(entry)
+        is_loopback = getattr(m, "isloopback", False) or _looks_like_virtual_loopback(entry["name"])
+        (loopbacks if is_loopback else microphones).append(entry)
 
     default_microphone_id = ""
     try:

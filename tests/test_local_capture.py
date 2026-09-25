@@ -726,6 +726,27 @@ def test_enumerate_devices_default_ids_blank_when_lookup_fails(monkeypatch):
     assert result["default_loopback_id"] == ""
 
 
+def test_enumerate_devices_recognizes_virtual_loopback_drivers_by_name(monkeypatch):
+    # macOS: soundcard's isloopback flag never fires (CoreAudio has no true
+    # loopback), so a virtual driver like BlackHole must be recognized by name.
+    fake_sc = types.ModuleType("soundcard")
+    fake_sc.all_microphones = MagicMock(return_value=[
+        _fake_device("mic1", "MacBook Pro Microphone", isloopback=False),
+        _fake_device("bh1", "BlackHole 16ch", isloopback=False),
+        _fake_device("sf1", "Soundflower (2ch)", isloopback=False),
+        _fake_device("la1", "Loopback Audio", isloopback=False),
+    ])
+    monkeypatch.setitem(sys.modules, "soundcard", fake_sc)
+
+    result = enumerate_devices()
+    assert result["microphones"] == [{"id": "mic1", "name": "MacBook Pro Microphone"}]
+    assert result["loopbacks"] == [
+        {"id": "bh1", "name": "BlackHole 16ch"},
+        {"id": "sf1", "name": "Soundflower (2ch)"},
+        {"id": "la1", "name": "Loopback Audio"},
+    ]
+
+
 def test_enumerate_devices_degrades_to_unavailable_on_exception(monkeypatch):
     fake_sc = types.ModuleType("soundcard")
     fake_sc.all_microphones = MagicMock(side_effect=RuntimeError("boom"))
@@ -745,3 +766,25 @@ def test_resolve_device_name_found_and_fallback():
     devices = [{"id": "a", "name": "Device A"}]
     assert resolve_device_name(devices, "a") == "Device A"
     assert resolve_device_name(devices, "unknown-id") == "unknown-id"
+
+
+def test_get_microphone_by_id_retries_numeric_id_for_macos():
+    # macOS CoreAudio ids are ints; the <select> round-trips them as strings.
+    from wisper_transcribe.web.local_capture import _get_microphone_by_id
+
+    device = object()
+    sc = MagicMock()
+    sc.get_microphone.side_effect = lambda id, include_loopback: (
+        device if id == 73 else (_ for _ in ()).throw(IndexError(id))
+    )
+    assert _get_microphone_by_id(sc, "73") is device
+
+
+def test_get_microphone_by_id_reraises_for_non_numeric_id():
+    from wisper_transcribe.web.local_capture import _get_microphone_by_id
+
+    sc = MagicMock()
+    sc.get_microphone.side_effect = IndexError("nope")
+    with pytest.raises(IndexError):
+        _get_microphone_by_id(sc, "{0.0.1.00000000}.{abc}")
+    assert sc.get_microphone.call_count == 1
