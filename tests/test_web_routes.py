@@ -32,6 +32,63 @@ def client(app):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Static-asset cache-busting -- keyed to file mtime, not app_version, so a
+# dev-mode edit to app.js/tailwind.min.css busts the browser's cache
+# immediately (no process restart happens for a static-file-only edit; a
+# static app_version query string would otherwise be reused unchanged
+# across every edit in a session).
+# ---------------------------------------------------------------------------
+
+
+def test_static_mtime_matches_real_file_mtime():
+    from wisper_transcribe.web.routes import _STATIC_DIR, _static_mtime
+
+    expected = str(int((_STATIC_DIR / "app.js").stat().st_mtime))
+    assert _static_mtime("app.js") == expected
+
+
+def test_static_mtime_falls_back_to_app_version_for_missing_file():
+    from wisper_transcribe.web.routes import _app_version, _static_mtime
+
+    assert _static_mtime("does-not-exist.js") == _app_version
+
+
+def test_static_mtime_changes_when_file_is_touched(tmp_path, monkeypatch):
+    from wisper_transcribe.web import routes as routes_module
+
+    fake_static = tmp_path
+    fake_file = fake_static / "app.js"
+    fake_file.write_text("// v1", encoding="utf-8")
+    monkeypatch.setattr(routes_module, "_STATIC_DIR", fake_static)
+
+    first = routes_module._static_mtime("app.js")
+
+    import os
+    import time
+    time.sleep(0.01)
+    fake_file.write_text("// v2", encoding="utf-8")
+    os.utime(fake_file, (time.time() + 5, time.time() + 5))
+
+    second = routes_module._static_mtime("app.js")
+    assert first != second
+
+
+def test_dashboard_html_includes_mtime_cache_buster(client, tmp_path):
+    from wisper_transcribe.web.routes import _static_mtime
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
+         patch("wisper_transcribe.web.routes.dashboard.load_config", return_value={}), \
+         patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
+         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)), \
+         patch("wisper_transcribe.web.routes.dashboard.get_output_dir", return_value=tmp_path / "output"):
+        resp = client.get("/")
+
+    body = resp.text
+    assert f"/static/app.js?v={_static_mtime('app.js')}" in body
+    assert f"/static/tailwind.min.css?v={_static_mtime('tailwind.min.css')}" in body
+
+
 def test_dashboard_returns_200(client, tmp_path):
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.load_config", return_value={}), \
@@ -341,7 +398,8 @@ def test_cancel_job_redirects(client, tmp_path):
 
 
 def test_transcripts_list_empty(client, tmp_path):
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.web.routes.transcripts.get_data_dir", return_value=tmp_path):
         resp = client.get("/transcripts")
     assert resp.status_code == 200
 
@@ -349,10 +407,115 @@ def test_transcripts_list_empty(client, tmp_path):
 def test_transcripts_list_shows_files(client, tmp_path):
     md = tmp_path / "session01.md"
     md.write_text("---\ntitle: Session 01\n---\n\n**Alice**: Hello.")
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.web.routes.transcripts.get_data_dir", return_value=tmp_path):
         resp = client.get("/transcripts")
     assert resp.status_code == 200
     assert b"session01" in resp.content
+
+
+# ---------------------------------------------------------------------------
+# Recordings awaiting transcription (surfaced at the top of /transcripts) --
+# status "completed" with audio on disk, never auto-queued for the full
+# diarized pass; see _submit_recording_transcription's docstring.
+# ---------------------------------------------------------------------------
+
+def _seed_completed_recording(tmp_path, **overrides):
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+
+    rec = create_recording(
+        voice_channel_id="", guild_id="", data_dir=tmp_path, source="local",
+        name=overrides.pop("name", None),
+    )
+    rec.status = "completed"
+    audio = tmp_path / "recordings" / rec.id / "combined.wav"
+    audio.parent.mkdir(parents=True, exist_ok=True)
+    audio.write_bytes(b"RIFF....")
+    rec.combined_path = audio
+    for k, v in overrides.items():
+        setattr(rec, k, v)
+    save_recording(rec, tmp_path)
+    return rec
+
+
+def test_pending_recordings_includes_completed_with_audio(tmp_path):
+    from wisper_transcribe.web.routes.transcripts import _pending_recordings
+
+    rec = _seed_completed_recording(tmp_path, name="Session 14")
+    pending, live_draft_ids = _pending_recordings(tmp_path)
+    assert [r.id for r in pending] == [rec.id]
+    assert live_draft_ids == set()
+
+
+def test_pending_recordings_excludes_non_completed_statuses(tmp_path):
+    from wisper_transcribe.recording_manager import save_recording
+
+    from wisper_transcribe.web.routes.transcripts import _pending_recordings
+
+    for status in ("recording", "transcribing", "transcribed", "failed", "degraded"):
+        rec = _seed_completed_recording(tmp_path, name=f"rec-{status}")
+        rec.status = status
+        save_recording(rec, tmp_path)
+
+    pending, _ = _pending_recordings(tmp_path)
+    assert pending == []
+
+
+def test_pending_recordings_excludes_completed_without_audio_file(tmp_path):
+    from wisper_transcribe.recording_manager import create_recording
+
+    from wisper_transcribe.web.routes.transcripts import _pending_recordings
+
+    create_recording(voice_channel_id="", guild_id="", data_dir=tmp_path, source="local")
+    # combined_path stays None -- capture ended with no audio at all
+    pending, _ = _pending_recordings(tmp_path)
+    assert pending == []
+
+
+def test_pending_recordings_detects_live_draft(tmp_path):
+    from wisper_transcribe.web.routes.transcripts import _pending_recordings
+
+    rec = _seed_completed_recording(tmp_path)
+    live_path = tmp_path / "recordings" / rec.id / "live_transcript.md"
+    live_path.write_text("# Live transcript\n", encoding="utf-8")
+
+    pending, live_draft_ids = _pending_recordings(tmp_path)
+    assert live_draft_ids == {rec.id}
+
+
+def test_pending_recordings_sorted_newest_first(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    from wisper_transcribe.recording_manager import save_recording
+    from wisper_transcribe.web.routes.transcripts import _pending_recordings
+
+    older = _seed_completed_recording(tmp_path, name="older")
+    newer = _seed_completed_recording(tmp_path, name="newer")
+    older.started_at = datetime.now(timezone.utc) - timedelta(hours=1)
+    newer.started_at = datetime.now(timezone.utc)
+    save_recording(older, tmp_path)
+    save_recording(newer, tmp_path)
+
+    pending, _ = _pending_recordings(tmp_path)
+    assert [r.id for r in pending] == [newer.id, older.id]
+
+
+def test_transcripts_page_shows_awaiting_transcription_section(client, tmp_path):
+    rec = _seed_completed_recording(tmp_path, name="Session 14 — the ambush")
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.web.routes.transcripts.get_data_dir", return_value=tmp_path):
+        resp = client.get("/transcripts")
+    assert resp.status_code == 200
+    assert "Awaiting transcription" in resp.text
+    assert "Session 14" in resp.text
+    assert f"/recordings/{rec.id}/transcribe" in resp.text
+
+
+def test_transcripts_page_omits_section_when_nothing_pending(client, tmp_path):
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.web.routes.transcripts.get_data_dir", return_value=tmp_path):
+        resp = client.get("/transcripts")
+    assert "Awaiting transcription" not in resp.text
 
 
 def test_transcript_detail_returns_200(client, tmp_path):
@@ -1339,7 +1502,8 @@ def test_transcripts_list_excludes_summary_files(client, tmp_path):
     """Summary sidecars must not appear as independent cards in the transcript list."""
     (tmp_path / "session01.md").write_text(_TRANSCRIPT_MD)
     (tmp_path / "session01.summary.md").write_text(_SUMMARY_MD)
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path), \
+         patch("wisper_transcribe.web.routes.transcripts.get_data_dir", return_value=tmp_path):
         resp = client.get("/transcripts")
     assert resp.status_code == 200
     # The main transcript card should appear once
@@ -1727,6 +1891,46 @@ def test_campaigns_create_empty_name_rejected(client, tmp_path, monkeypatch):
     assert "error=invalid_name" in resp.headers.get("location", "")
 
 
+def test_campaign_detail_shows_rebuild_button_with_transcripts(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+
+    create_campaign("My Game", data_dir=tmp_path)
+    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
+
+    resp = client.get("/campaigns/my-game")
+    assert resp.status_code == 200
+    assert "Rebuild journal" in resp.text
+    assert 'value="rebuild"' in resp.text
+
+
+def test_campaign_detail_reorder_arrows_hidden_at_boundaries(client, tmp_path, monkeypatch):
+    """First row has no 'move up' arrow, last row has no 'move down' arrow."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+
+    create_campaign("My Game", data_dir=tmp_path)
+    for stem in ("s1", "s2", "s3"):
+        move_transcript_to_campaign(stem, "my-game", data_dir=tmp_path)
+
+    resp = client.get("/campaigns/my-game")
+    assert resp.status_code == 200
+    # Exactly 2 "up" forms (s2, s3) and 2 "down" forms (s1, s2) out of 3 rows.
+    assert resp.text.count('name="direction" value="up"') == 2
+    assert resp.text.count('name="direction" value="down"') == 2
+
+
+def test_campaign_detail_hides_rebuild_button_with_no_transcripts(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    create_campaign("My Game", data_dir=tmp_path)
+
+    resp = client.get("/campaigns/my-game")
+    assert resp.status_code == 200
+    assert "Rebuild journal" not in resp.text
+
+
 def test_campaign_detail_unknown_slug(client, tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     with patch("wisper_transcribe.web.routes.campaigns.load_campaigns", return_value={}):
@@ -1865,6 +2069,247 @@ def test_campaign_remove_transcript_rejects_traversal(client, tmp_path, monkeypa
             follow_redirects=False,
         )
         assert resp.status_code == 400, f"expected 400 for stem={bad_stem!r}, got {resp.status_code}"
+
+
+def test_campaign_reorder_transcript_moves_up(client, tmp_path, monkeypatch):
+    """POST /campaigns/{slug}/transcripts/reorder moves the stem one position up."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign, load_campaigns
+
+    create_campaign("Test Game", data_dir=tmp_path)
+    for stem in ("s1", "s2", "s3"):
+        move_transcript_to_campaign(stem, "test-game", data_dir=tmp_path)
+
+    resp = client.post(
+        "/campaigns/test-game/transcripts/reorder",
+        data={"stem": "s3", "direction": "up"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "/campaigns/test-game" in resp.headers.get("location", "")
+    assert load_campaigns(tmp_path)["test-game"].transcripts == ["s1", "s3", "s2"]
+
+
+def test_campaign_reorder_transcript_moves_down(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign, load_campaigns
+
+    create_campaign("Test Game", data_dir=tmp_path)
+    for stem in ("s1", "s2", "s3"):
+        move_transcript_to_campaign(stem, "test-game", data_dir=tmp_path)
+
+    resp = client.post(
+        "/campaigns/test-game/transcripts/reorder",
+        data={"stem": "s1", "direction": "down"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert load_campaigns(tmp_path)["test-game"].transcripts == ["s2", "s1", "s3"]
+
+
+def test_campaign_reorder_transcript_invalid_direction_rejected(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+
+    create_campaign("Test Game", data_dir=tmp_path)
+    move_transcript_to_campaign("s1", "test-game", data_dir=tmp_path)
+
+    resp = client.post(
+        "/campaigns/test-game/transcripts/reorder",
+        data={"stem": "s1", "direction": "sideways"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 400
+
+
+def test_campaign_reorder_transcript_rejects_traversal(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    create_campaign("Test Game", data_dir=tmp_path)
+
+    for bad_stem in ["../etc/passwd", "foo/bar", "stem\x00bad"]:
+        resp = client.post(
+            "/campaigns/test-game/transcripts/reorder",
+            data={"stem": bad_stem, "direction": "up"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 400, f"expected 400 for stem={bad_stem!r}, got {resp.status_code}"
+
+
+def test_campaign_reorder_transcript_stale_stem_is_noop(client, tmp_path, monkeypatch):
+    """A stem not currently in the campaign (stale form submit) redirects cleanly, no 500."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    create_campaign("Test Game", data_dir=tmp_path)
+
+    resp = client.post(
+        "/campaigns/test-game/transcripts/reorder",
+        data={"stem": "ghost", "direction": "up"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+
+def test_campaign_journal_post_submits_job_and_redirects(client, tmp_path, monkeypatch):
+    """POST /campaigns/{slug}/journal queues a journal job and redirects to it."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.web.jobs import Job
+    from wisper_transcribe.campaign_manager import create_campaign
+    import uuid
+
+    create_campaign("My Game", data_dir=tmp_path)
+    fake_job = MagicMock(spec=Job)
+    fake_job.id = str(uuid.uuid4())
+
+    with patch.object(client.app.state.job_queue, "submit_journal",
+                      return_value=fake_job) as mock_submit:
+        resp = client.post("/campaigns/my-game/journal",
+                           data={"mode": "next"}, follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/transcribe/jobs/{fake_job.id}"
+    assert mock_submit.call_args.args[0] == "my-game"
+    assert mock_submit.call_args.kwargs.get("fold_all") is False
+
+
+def test_campaign_journal_post_fold_all(client, tmp_path, monkeypatch):
+    """mode=all sets fold_all=True on the submitted job."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.web.jobs import Job
+    from wisper_transcribe.campaign_manager import create_campaign
+    import uuid
+
+    create_campaign("My Game", data_dir=tmp_path)
+    fake_job = MagicMock(spec=Job)
+    fake_job.id = str(uuid.uuid4())
+
+    with patch.object(client.app.state.job_queue, "submit_journal",
+                      return_value=fake_job) as mock_submit:
+        resp = client.post("/campaigns/my-game/journal",
+                           data={"mode": "all"}, follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert mock_submit.call_args.kwargs.get("fold_all") is True
+
+
+def test_campaign_journal_post_rebuild(client, tmp_path, monkeypatch):
+    """mode=rebuild submits rebuild=True and does not set fold_all/session_stem."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.web.jobs import Job
+    from wisper_transcribe.campaign_manager import create_campaign
+    import uuid
+
+    create_campaign("My Game", data_dir=tmp_path)
+    fake_job = MagicMock(spec=Job)
+    fake_job.id = str(uuid.uuid4())
+
+    with patch.object(client.app.state.job_queue, "submit_journal",
+                      return_value=fake_job) as mock_submit:
+        resp = client.post("/campaigns/my-game/journal",
+                           data={"mode": "rebuild"}, follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/transcribe/jobs/{fake_job.id}"
+    assert mock_submit.call_args.kwargs.get("rebuild") is True
+
+
+def test_campaign_journal_post_unknown_campaign(client, tmp_path, monkeypatch):
+    """POST to a nonexistent campaign redirects to /campaigns with not_found."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    resp = client.post("/campaigns/ghost/journal",
+                       data={"mode": "next"}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert "error=not_found" in resp.headers.get("location", "")
+
+
+def test_campaign_journal_view_empty_state(client, tmp_path, monkeypatch):
+    """GET the journal page before any journal exists shows the empty state."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+    from wisper_transcribe import journal as journal_mod
+
+    create_campaign("My Game", data_dir=tmp_path)
+    monkeypatch.setattr(journal_mod, "get_output_dir", lambda: tmp_path / "out")
+
+    resp = client.get("/campaigns/my-game/journal")
+    assert resp.status_code == 200
+    assert "No journal yet" in resp.text
+
+
+def test_campaign_journal_view_renders_body(client, tmp_path, monkeypatch):
+    """GET renders an existing journal.md as HTML."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+    from wisper_transcribe import journal as journal_mod
+
+    create_campaign("My Game", data_dir=tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setattr(journal_mod, "get_output_dir", lambda: out)
+
+    jpath = journal_mod.journal_path("my-game", data_dir=tmp_path)
+    jpath.parent.mkdir(parents=True, exist_ok=True)
+    jpath.write_text(journal_mod.render_journal(
+        "my-game", "## Story So Far\n\nThe heroes gathered.", ["s1"], "ollama", "llama3.1:8b"
+    ), encoding="utf-8")
+
+    resp = client.get("/campaigns/my-game/journal")
+    assert resp.status_code == 200
+    assert "Story So Far" in resp.text
+    assert "The heroes gathered." in resp.text
+
+
+def test_job_detail_journal_shows_view_journal_not_transcript(client, tmp_path, monkeypatch):
+    """A completed campaign_journal job links to the journal, never a transcript."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.web.jobs import Job, JOB_CAMPAIGN_JOURNAL, COMPLETED
+    import uuid
+    from datetime import datetime
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path="",
+        kwargs={"slug": "my-game"},
+        name="Journal: My Game",
+        job_type=JOB_CAMPAIGN_JOURNAL,
+        output_path=str(tmp_path / "campaigns" / "my-game" / "journal.md"),
+        finished_at=datetime.now(),
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    resp = client.get(f"/transcribe/jobs/{job.id}")
+    assert resp.status_code == 200
+    assert "/campaigns/my-game/journal" in resp.text
+    assert "View journal" in resp.text
+    assert "View transcript" not in resp.text
+
+
+def test_job_detail_journal_pending_bakes_slug_into_js(client, tmp_path, monkeypatch):
+    """A pending journal job bakes the slug into the page JS so the live
+    'View journal' link does not depend on the SSE payload."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.web.jobs import Job, JOB_CAMPAIGN_JOURNAL, PENDING
+    import uuid
+    from datetime import datetime
+
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=PENDING,
+        created_at=datetime.now(),
+        input_path="",
+        kwargs={"slug": "my-game"},
+        name="Journal: My Game",
+        job_type=JOB_CAMPAIGN_JOURNAL,
+    )
+    client.app.state.job_queue._jobs[job.id] = job
+
+    resp = client.get(f"/transcribe/jobs/{job.id}")
+    assert resp.status_code == 200
+    assert 'JOURNAL_SLUG = "my-game"' in resp.text
 
 
 def test_transcribe_form_includes_campaign_select(client, tmp_path, monkeypatch):

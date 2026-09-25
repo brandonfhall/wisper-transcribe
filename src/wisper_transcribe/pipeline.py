@@ -382,6 +382,7 @@ def process_file(
     hotwords: Optional[list[str]] = None,
     campaign: Optional[str] = None,
     job_id: Optional[str] = None,
+    title: Optional[str] = None,
     _result_store: Optional[dict] = None,
 ) -> Path:
     """Run the full pipeline on a single audio file. Returns path to output .md.
@@ -402,6 +403,12 @@ def process_file(
     ``device="auto"`` and ``compute_type="auto"`` keep their pre-existing
     sentinel semantics (unrelated to this refactor) — ``"auto"`` triggers
     device autodetection / compute-type resolution, not a config lookup.
+
+    ``title`` overrides the default title-cased-filename-stem metadata
+    title (e.g. a recording's user-supplied session name) without touching
+    the actual output filename/stem, which stays derived from ``path`` --
+    the two are deliberately decoupled so a free-text title with
+    filesystem-unsafe characters never has to flow through a rename.
     ``vad_filter=None`` also keeps its existing "use config" semantics.
 
     When diarization is enabled and the caller passes neither ``num_speakers``
@@ -595,7 +602,7 @@ def process_file(
                             speaker_metadata.append({"name": label, "role": ""})
 
         metadata = {
-            "title": path.stem.replace("_", " ").replace("-", " ").title(),
+            "title": title or path.stem.replace("_", " ").replace("-", " ").title(),
             "source_file": path.name,
             "date_processed": datetime.date.today().isoformat(),
             "duration": format_duration(duration),

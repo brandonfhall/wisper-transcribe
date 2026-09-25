@@ -42,9 +42,9 @@ keys), managing speaker profiles, and starting/stopping Discord recordings.
 | Transcribe | `/transcribe` | Drag-and-drop upload with a byte-level progress bar (XHR-based, so large files don't leave the browser looking frozen — shows "Uploading… N%" then "Processing…" while the server spools the file and creates the job, then navigates to the job page), all transcription options, live progress stream; **Detect speakers** toggle (on by default — turn off for audiobooks/lectures to skip diarization entirely) reveals a count selector with **?** (auto-detect, default) or pinned **1–10**; the **Whisper model** radio preselects whichever model is set in `wisper config` (falling back to `large-v3-turbo` if the configured model isn't one of the three offered); optional "Refine vocabulary" and "Generate campaign summary" post-processing checkboxes. Submitting an unrecognized model/device/compute-type value (not reachable through the UI itself) redirects back with a generic `?error=invalid_option` rather than queuing a job. |
 | Transcripts | `/transcripts` | Browse output files, view rendered markdown, download, delete; green notes icon on cards that have a campaign summary |
 | Speakers | `/speakers` | Enroll, rename, remove speaker profiles. Renaming uses the same semantics as `wisper speakers rename`: the profile is re-keyed (embedding and sample clip files move with it) and campaign rosters — including Discord ID bindings — follow automatically. A rename fails with a notice if the new name collides with an existing profile or contains unsupported characters. |
-| Campaigns | `/campaigns` | Create and manage campaigns; add/remove roster members; scope transcription to a campaign |
-| Record | `/record` | Start and stop live Discord voice channel recording sessions; shows active session with live speaker and segment counts via SSE; **Browse bot's channels** panel lists available guilds and voice channels so you can click-to-fill IDs without leaving the page |
-| Recordings | `/recordings` | Browse all recordings, grouped by campaign; view per-recording detail (status, speakers, segments); delete entries |
+| Campaigns | `/campaigns` | Create and manage campaigns; add/remove roster members; scope transcription to a campaign; maintain a rolling **campaign journal** |
+| Record | `/record` | Start and stop live Discord voice channel recording sessions, or a local mic + system-audio capture session; shows the active session (either kind) with live speaker/segment counts via SSE; **Browse bot's channels** panel lists available guilds and voice channels so you can click-to-fill IDs without leaving the page. The Local capture card only appears when the optional `[live]` extra is installed and at least one audio device is detected. |
+| Recordings | `/recordings` | Browse all recordings, grouped by campaign; view per-recording detail (status, speakers, segments); delete one at a time or select several with the checkboxes and **Delete selected** |
 | Config | `/config` | View and edit all settings |
 
 ---
@@ -69,6 +69,65 @@ When the Discord bot records a session, any speaker whose Discord user ID is **n
 
 ---
 
+## Local Recording (mic + system audio)
+
+Separate from the Discord bot: capture your microphone and the machine's
+system audio output (the other side of a call, a video, a game session) as
+two tracks, plus a mixed combined track, without needing a Discord bot at
+all. Requires the optional `[live]` extra (`pip install
+'wisper-transcribe[live]'`) — see [setup.md](setup.md) for per-OS device
+setup (including the macOS BlackHole requirement).
+
+On the Record page, a **Local capture** card appears beside the Discord
+card whenever the extra is installed and at least one microphone and one
+system-audio (loopback) device are detected — it's hidden entirely
+otherwise, no error shown. Pick a microphone and a system-audio device
+(and, optionally, a campaign) and click **Start local recording**. Only
+one capture session — Discord *or* local — can run at a time; starting
+one while the other is active is rejected.
+
+A local session's recording detail page shows a **LOCAL** badge and the
+chosen device names instead of a Discord channel. Recordings list the
+same way regardless of source, and the transcribe hand-off (**Transcribe**
+button → full diarization + speaker ID pass) works identically once the
+session is stopped.
+
+**Deleting a recording is permanent.** Whether from the detail page's
+**Delete** button or the Recordings list's checkboxes + **Delete
+selected**, deletion removes the recording's audio (raw and per-track)
+and, if it was transcribed, the transcript and its campaign-notes sidecar
+from disk — not just the entry in the list. There's no recovery once
+confirmed.
+
+**Live transcript preview.** While a local session is recording, the
+detail page shows a draft transcript that fills in within a few seconds
+of each pause in speech — a rolling-window pass over the mixed audio,
+labeling each line **You** (your mic) or **Other** (system audio) by
+comparing which track is louder. This is a fast preview, not the final
+transcript: there's no real speaker diarization (too heavy to run
+per-chunk), so multiple people talking on the system-audio side all show
+up as "Other." Stop the session and click **Transcribe** to get the real
+thing — full diarization, speaker identification, and a transcript
+matching the quality of every other recording. The draft never overwrites
+or gets used as the real transcript; it's purely a crash-safety/at-a-
+glance copy (`recordings/<id>/live_transcript.md`).
+
+For CPU-only machines, live transcription competes with real-time audio
+capture for CPU cycles — `base` or `small` (set in `wisper config` or the
+Config page) keeps up more reliably than a larger model. GPU machines can
+use any model size.
+
+Live transcription shares the same one-job-at-a-time queue as every other
+background job (transcription, LLM refine/summarize, campaign journal
+folds and rebuilds). If another job is already running when you start a
+local session, the Record page shows a notice: the recording still starts
+fine, but the live preview won't begin filling in until that other job
+finishes — for a short session, that can mean it never shows anything
+before you stop. The full diarized transcript from **Transcribe** is
+unaffected either way.
+
+---
+
 ## LLM Post-Processing
 
 **Option 1 — at transcription time:**
@@ -79,6 +138,13 @@ Open any transcript and expand "LLM Post-processing". Click **Refine Vocabulary*
 
 **Campaign Notes:**
 When a `.summary.md` sidecar exists, the transcript detail page shows a green "Campaign Notes available" panel with **View Notes** and **Download** buttons. Campaign notes are also accessible via the transcript list card (green notes icon). The notes page shows the session recap, loot, NPCs, and follow-up items rendered as HTML.
+
+**Campaign Journal (DM tool):**
+The Campaign page shows a **Rolling journal** panel that aggregates session summaries into one living document per campaign. Once a session has a `.summary.md`, it becomes "ready to fold in". Click **Update journal** to fold the next session, or **Fold all** to catch up every pending session. Each fold queues a job (redirecting to the live progress page) where the LLM rewrites the journal to incorporate the new session — tracking story arcs, open plot threads, NPCs, party decisions, and a running loot ledger. Context stays bounded (current journal + one new summary per fold), so it scales to long campaigns. Click **View journal** to read the rendered result; already-folded sessions are skipped on subsequent runs.
+
+**Rebuild journal** (shown whenever the campaign has at least one transcript) redrives the whole campaign from scratch: every session transcript is re-summarized and the journal is regenerated from a clean start, folding every session back in in order. This is two LLM calls per session, so the button asks for confirmation (session count and total call count) before queuing the job. Use it after switching LLM models/providers, or to pick up prompt or summarize changes retroactively across a whole campaign's history.
+
+**Reordering episodes:** the Campaign page's "Episodes" list has ▲/▼ arrows on each row (hidden at the top/bottom of the list) to move a session earlier or later. This is the order sessions get folded into the journal in — it's the order a transcript was *associated* with the campaign, not a date parsed from the filename, so it can end up out of chronological order (e.g. an older recording transcribed and added to the campaign after a newer one already was). Reordering doesn't itself change the journal; rebuild or fold-forward after fixing the order to have it take effect.
 
 ---
 

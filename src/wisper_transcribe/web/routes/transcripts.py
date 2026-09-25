@@ -5,6 +5,7 @@ import html as _html_module
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import quote
@@ -21,6 +22,8 @@ from wisper_transcribe.campaign_manager import (
     move_transcript_to_campaign,
     remove_transcript_from_campaign,
 )
+from wisper_transcribe.config import get_data_dir
+from wisper_transcribe.recording_manager import load_recordings
 
 from . import templates
 from wisper_transcribe.path_utils import get_output_dir
@@ -259,6 +262,32 @@ async def recent_transcripts_partial(request: Request) -> HTMLResponse:
     )
 
 
+def _pending_recordings(data_dir: Path) -> tuple[list, set[str]]:
+    """Recordings that finished capturing but haven't been through the full
+    diarized transcribe pass yet -- status "completed" (never auto-queued;
+    only an explicit Transcribe click moves it to "transcribing"/
+    "transcribed", see `_submit_recording_transcription`) with audio ready.
+
+    Surfaced at the top of /transcripts so a live/local session doesn't
+    require remembering to go find it on /recordings to kick off Transcribe.
+    Returns `(recordings, live_draft_ids)` -- the second is the subset with
+    a still-on-disk `live_transcript.md` draft preview, checked separately
+    since that's a filesystem fact, not a `Recording` field.
+    """
+    recordings = load_recordings(data_dir)
+    pending = [
+        r for r in recordings.values()
+        if r.status == "completed" and r.combined_path and r.combined_path.exists()
+    ]
+    pending.sort(key=lambda r: r.started_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+
+    live_draft_ids = {
+        r.id for r in pending
+        if (data_dir / "recordings" / r.id / "live_transcript.md").exists()
+    }
+    return pending, live_draft_ids
+
+
 @router.get("", response_class=HTMLResponse)
 async def transcripts_list(request: Request) -> HTMLResponse:
     out_dir = get_output_dir()
@@ -292,6 +321,8 @@ async def transcripts_list(request: Request) -> HTMLResponse:
             "campaign_slug": stem_to_campaign.get(f.stem),
         })
 
+    pending_recordings, live_draft_ids = _pending_recordings(get_data_dir())
+
     return templates.TemplateResponse(
         request,
         "transcripts.html",
@@ -300,6 +331,8 @@ async def transcripts_list(request: Request) -> HTMLResponse:
             "transcripts": items,
             "campaigns": campaigns,
             "stem_to_campaign": stem_to_campaign,
+            "pending_recordings": pending_recordings,
+            "live_draft_ids": live_draft_ids,
         },
     )
 

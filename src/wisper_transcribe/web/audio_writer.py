@@ -1,8 +1,11 @@
-"""Segmented WAV audio writer + PCM downsampling for Discord recordings.
+"""Segmented WAV audio writer + PCM downsampling for Discord + local recordings.
 
 Writes 16 kHz mono 16-bit PCM as a sequence of self-contained WAV files,
 each capped at `segment_duration_s` seconds (default 60), using the stdlib
-`wave` module.
+`wave` module. `downsample_48k_stereo_to_16k_mono()` handles Discord's fixed
+48 kHz int16 stereo wire format; `resample_to_16k_mono()` handles the
+arbitrary-samplerate float32 blocks the local capture path (`local_capture.py`)
+gets from `soundcard`.
 
 Crash safety: `wave.Wave_write.writeframes()` patches the RIFF/`data` chunk
 sizes in the file's header on every call after the first (see cpython's
@@ -22,6 +25,7 @@ no Opus decoder could read (see senior-review finding R12).
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import wave
@@ -72,6 +76,42 @@ def downsample_48k_stereo_to_16k_mono(pcm: bytes) -> bytes:
 
     decimated = np.clip(np.round(filtered[::3]), -32768, 32767).astype("<i2")
     return decimated.tobytes()
+
+
+def resample_to_16k_mono(data: np.ndarray, samplerate: int) -> bytes:
+    """Convert float32 PCM at an arbitrary samplerate to 16 kHz mono 16-bit PCM.
+
+    Local capture devices (`soundcard`) deliver float32 samples in [-1.0, 1.0]
+    at the device's native rate -- typically 44100 or 48000 Hz, but not
+    guaranteed to be an integer multiple of 16000 the way Discord's fixed
+    48 kHz is. `downsample_48k_stereo_to_16k_mono()` above only handles that
+    integer 48k->16k case; this is the general-ratio counterpart used by the
+    local capture path, via `scipy.signal.resample_poly` (already a project
+    dependency for the torchcodec bypass in diarizer.py).
+
+    `data` may be shape (n_frames, n_channels) for a multi-channel block or
+    (n_frames,) for mono; channels are averaged down to mono first. Output
+    samples are scaled from the [-1.0, 1.0] float range to int16 range before
+    clipping -- omitting this scale factor would round everything to silence.
+    """
+    if data is None or len(data) == 0:
+        return b""
+
+    mono = data.astype(np.float64).mean(axis=1) if data.ndim == 2 else data.astype(np.float64)
+    if len(mono) == 0:
+        return b""
+
+    if samplerate == 16000:
+        resampled = mono
+    else:
+        import scipy.signal
+
+        g = math.gcd(16000, samplerate)
+        up, down = 16000 // g, samplerate // g
+        resampled = scipy.signal.resample_poly(mono, up, down)
+
+    scaled = np.clip(np.round(resampled * 32767.0), -32768, 32767).astype("<i2")
+    return scaled.tobytes()
 
 
 # ---------------------------------------------------------------------------

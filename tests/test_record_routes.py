@@ -23,6 +23,22 @@ def client(tmp_path):
             yield c, tmp_path
 
 
+@pytest.fixture(autouse=True)
+def _no_live_transcription(monkeypatch):
+    """Starting a local session (via the route) submits a real Phase 2
+    JOB_LIVE job. The `client` fixture's app runs a REAL JobQueue background
+    worker (started by app lifespan), which would pick that job up and try
+    to load an actual Whisper model -- exactly what CLAUDE.md's "no GPU, no
+    network, no real audio in tests" rule forbids, and it hangs the test
+    besides. Every test in this file gets JOB_LIVE submission suppressed by
+    default; tests/test_record_live_routes.py exercises the live-job wiring
+    itself with `queue.submit_live`/`run_live_loop` explicitly mocked.
+    """
+    monkeypatch.setattr(
+        "wisper_transcribe.web.routes.record._start_live_transcription", lambda *a, **kw: None
+    )
+
+
 def test_record_start_creates_recording(client):
     c, _ = client
     resp = c.post("/api/record/start", json={"voice_channel_id": "123", "guild_id": "G1"})
@@ -44,10 +60,38 @@ def test_record_stop_with_no_active_session_returns_400(client):
     assert resp.status_code == 400
 
 
-def test_record_status_returns_501(client):
+def test_record_status_idle_when_no_active_session(client):
     c, _ = client
     resp = c.get("/api/record/status")
-    assert resp.status_code == 501
+    assert resp.status_code == 200
+    assert resp.json() == {"active": False}
+
+
+def test_record_status_reports_active_local_session(client):
+    """Powers the global recording-status banner (base.html + app.js) --
+    must reflect a session in progress on any page, not just /record."""
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            start = c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
+        rec_id = start.json()["id"]
+
+        resp = c.get("/api/record/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["active"] is True
+        assert data["id"] == rec_id
+        assert data["source"] == "local"
+        assert data["status"] == "recording"
+    finally:
+        mgr.stop_session()
 
 
 def test_channels_no_token_returns_no_token_error(client):
@@ -129,6 +173,706 @@ def test_channels_invalid_token_returns_error(client):
     assert resp.status_code == 200
     assert resp.json()["error"] == "invalid_token"
     assert resp.json()["guilds"] == []
+
+
+# ---------------------------------------------------------------------------
+# Live local recording Phase 1 — device enumeration, start/stop-local,
+# cross-manager (Discord vs local) mutual exclusion
+# ---------------------------------------------------------------------------
+
+def _scripted_local_capture_manager(tmp_path, n_ticks=0):
+    """A LocalCaptureManager wired with a scripted, finite (no real audio
+    devices, no soundcard import) capture_factory + instant ticker, for
+    swapping onto `app.state.local_capture_manager` in tests."""
+    from wisper_transcribe.web.local_capture import LocalCaptureManager
+
+    def capture_factory(device_id, samplerate):
+        return iter(())  # no blocks -- fine for lifecycle/route tests
+
+    def ticker():
+        return iter([None] * n_ticks)
+
+    return LocalCaptureManager(data_dir=tmp_path, capture_factory=capture_factory, ticker=ticker)
+
+
+def test_devices_endpoint_unavailable_when_soundcard_not_installed(client):
+    import sys
+    c, _ = client
+    with patch.dict(sys.modules, {"soundcard": None}):
+        resp = c.get("/api/record/devices")
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "microphones": [],
+        "loopbacks": [],
+        "available": False,
+        "default_microphone_id": "",
+        "default_loopback_id": "",
+    }
+
+
+def test_devices_endpoint_returns_enumerated_devices_when_available(client):
+    c, _ = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Built-in Microphone"}],
+        "loopbacks": [{"id": "loop1", "name": "Speakers (loopback)"}],
+        "available": True,
+    }
+    with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+        resp = c.get("/api/record/devices")
+    assert resp.status_code == 200
+    assert resp.json() == fake_result
+
+
+def test_start_local_unavailable_when_soundcard_not_installed(client):
+    import sys
+    c, _ = client
+    with patch.dict(sys.modules, {"soundcard": None}):
+        resp = c.post("/api/record/start-local", json={"mic_id": "m", "system_id": "s"})
+    assert resp.status_code == 503
+
+
+def test_start_local_missing_ids_returns_400(client):
+    c, _ = client
+    fake_result = {"microphones": [], "loopbacks": [], "available": True}
+    with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+        resp = c.post("/api/record/start-local", json={"mic_id": "", "system_id": "s"})
+    assert resp.status_code == 400
+
+
+def test_start_local_success_creates_local_recording(client):
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Built-in Microphone"}],
+        "loopbacks": [{"id": "loop1", "name": "Speakers (loopback)"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            resp = c.post(
+                "/api/record/start-local",
+                json={"mic_id": "mic1", "system_id": "loop1", "campaign_slug": None},
+            )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["status"] == "recording"
+        assert data["source"] == "local"
+        assert data["devices"] == {"mic": "Built-in Microphone", "system": "Speakers (loopback)"}
+    finally:
+        mgr.stop_session()
+
+
+def test_start_local_json_api_accepts_and_trims_name(client):
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            resp = c.post(
+                "/api/record/start-local",
+                json={"mic_id": "mic1", "system_id": "loop1", "name": "  Session 14 — the ambush  "},
+            )
+        assert resp.status_code == 201
+        assert resp.json()["name"] == "Session 14 — the ambush"
+    finally:
+        mgr.stop_session()
+
+
+def test_start_local_json_api_blank_name_stored_as_none(client):
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            resp = c.post(
+                "/api/record/start-local",
+                json={"mic_id": "mic1", "system_id": "loop1", "name": "   "},
+            )
+        assert resp.json()["name"] is None
+    finally:
+        mgr.stop_session()
+
+
+def test_start_local_html_form_accepts_name(client):
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            c.post(
+                "/record/start-local",
+                data={"mic_id": "mic1", "system_id": "loop1", "name": "Game night"},
+            )
+        assert mgr.active_recording.name == "Game night"
+    finally:
+        mgr.stop_session()
+
+
+def test_start_local_html_form_warns_when_queue_already_busy(client, monkeypatch):
+    """Regression test for the 2026-08-23 silent-empty-live-transcript bug:
+    when `_start_live_transcription` reports the (single-worker) queue was
+    already busy, the route must redirect with a notice instead of silently
+    dropping it -- an empty live pane for the whole session otherwise looks
+    identical to a broken microphone.
+
+    `_start_live_transcription` itself (real queue-busy detection) is
+    covered directly in tests/test_record_live_routes.py; this test only
+    checks the route's handling of its return value, so it stubs that
+    function rather than fighting this file's autouse
+    `_no_live_transcription` fixture (which exists to keep the real
+    background worker from loading an actual Whisper model in these tests).
+    """
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    monkeypatch.setattr(
+        "wisper_transcribe.web.routes.record._start_live_transcription", lambda *a, **kw: True
+    )
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            resp = c.post(
+                "/record/start-local",
+                data={"mic_id": "mic1", "system_id": "loop1"},
+                follow_redirects=False,
+            )
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/record?error=live_delayed"
+    finally:
+        mgr.stop_session()
+
+
+def test_clean_session_name_caps_length():
+    from wisper_transcribe.web.routes.record import _MAX_SESSION_NAME_LEN, _clean_session_name
+
+    result = _clean_session_name("x" * 500)
+    assert len(result) == _MAX_SESSION_NAME_LEN
+
+
+def test_clean_session_name_blank_and_whitespace_only_is_none():
+    from wisper_transcribe.web.routes.record import _clean_session_name
+
+    assert _clean_session_name("") is None
+    assert _clean_session_name("   ") is None
+
+
+# ---------------------------------------------------------------------------
+# POST /record/marker -- "Add marker" button, any active source
+# ---------------------------------------------------------------------------
+
+def test_record_marker_no_active_session_returns_400(client):
+    c, _ = client
+    resp = c.post("/record/marker")
+    assert resp.status_code == 400
+
+
+def test_record_marker_appends_to_active_local_session(client):
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
+
+        resp = c.post("/record/marker")
+        assert resp.status_code == 200
+        assert resp.json()["elapsed_s"] >= 0.0
+
+        from wisper_transcribe.recording_manager import load_recordings
+        rec_id = mgr.active_recording.id
+        loaded = load_recordings(data_dir)
+        assert len(loaded[rec_id].markers) == 1
+    finally:
+        mgr.stop_session()
+
+
+def test_record_marker_appends_to_active_discord_session(client):
+    """Markers aren't local-only -- _current_active_recording resolves
+    whichever manager has an active session, so a Discord recording gets
+    the same behavior."""
+    c, data_dir = client
+    from wisper_transcribe.recording_manager import create_recording, load_recordings
+
+    rec = create_recording("VC1", "G1", data_dir=data_dir, source="discord")
+
+    class _FakeBotManager:
+        active_recording = rec
+
+    c.app.state.bot_manager = _FakeBotManager()
+
+    resp = c.post("/record/marker")
+    assert resp.status_code == 200
+    loaded = load_recordings(data_dir)
+    assert len(loaded[rec.id].markers) == 1
+
+
+def test_record_marker_multiple_clicks_each_append(client):
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
+
+        c.post("/record/marker")
+        c.post("/record/marker")
+        resp = c.post("/record/marker")
+        assert resp.status_code == 200
+
+        from wisper_transcribe.recording_manager import load_recordings
+        rec_id = mgr.active_recording.id
+        loaded = load_recordings(data_dir)
+        assert len(loaded[rec_id].markers) == 3
+    finally:
+        mgr.stop_session()
+
+
+def test_stop_local_with_no_active_session_returns_400(client):
+    c, data_dir = client
+    c.app.state.local_capture_manager = _scripted_local_capture_manager(data_dir)
+    resp = c.post("/api/record/stop-local")
+    assert resp.status_code == 400
+
+
+def test_stop_local_stops_active_session(client):
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+        start_resp = c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
+    assert start_resp.status_code == 201
+
+    stop_resp = c.post("/api/record/stop-local")
+    assert stop_resp.status_code == 200
+    data = stop_resp.json()
+    assert data["status"] == "completed"
+
+
+def test_start_local_unavailable_when_manager_not_wired(client):
+    c, _ = client
+    c.app.state.local_capture_manager = None
+    resp = c.post("/api/record/start-local", json={"mic_id": "m", "system_id": "s"})
+    assert resp.status_code == 503
+
+
+def test_devices_endpoint_missing_id_field_returns_400(client):
+    c, _ = client
+    fake_result = {"microphones": [], "loopbacks": [], "available": True}
+    with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+        resp = c.post("/api/record/start-local", json={})
+    assert resp.status_code == 400
+
+
+def test_cross_manager_local_active_blocks_discord_start(client):
+    """A live local session must 409 an attempt to start a Discord session,
+    and vice versa (mutual exclusion across managers)."""
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            start_resp = c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
+        assert start_resp.status_code == 201
+
+        resp = c.post("/api/record/start", json={"voice_channel_id": "123", "guild_id": "G1"})
+        assert resp.status_code == 409
+    finally:
+        mgr.stop_session()
+
+
+def test_cross_manager_discord_active_blocks_local_start(client):
+    """A fake "already active" BotManager stands in for the real one here:
+    the real BotManager.start_session() launches an async session loop that,
+    with no Discord token configured in the test environment, races to
+    mark the recording 'failed' almost immediately -- flaky as a setup
+    precondition for a check that only cares about `.active_recording`."""
+    from wisper_transcribe.recording_manager import create_recording
+
+    c, data_dir = client
+    fake_discord_rec = create_recording(voice_channel_id="123", guild_id="G1", data_dir=data_dir)
+
+    class _FakeBotManager:
+        active_recording = fake_discord_rec
+
+    c.app.state.bot_manager = _FakeBotManager()
+
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+        resp = c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
+    assert resp.status_code == 409
+
+
+def test_current_active_recording_reports_active_local_session(client):
+    """R: /record/sse and the /record page used to read bm.active_recording
+    only, so a live local session reported 'idle' -- the shared
+    _current_active_recording() resolver (used by both) fixes that.
+
+    Exercised directly against the resolver rather than over a live
+    `/record/sse` HTTP stream: that endpoint polls forever
+    (`while True: ... await asyncio.sleep(1.0)`), and TestClient's
+    synchronous streaming wrapper has no clean way to read "just the first
+    event" without risking a hang.
+    """
+    from wisper_transcribe.web.routes.record import _current_active_recording
+
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
+
+        class _FakeRequest:
+            app = c.app
+
+        rec = _current_active_recording(_FakeRequest())
+        assert rec is not None
+        assert rec.status == "recording"
+        assert rec.source == "local"
+    finally:
+        mgr.stop_session()
+
+
+def test_record_page_shows_local_active_session(client):
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
+            resp = c.get("/record")
+        assert resp.status_code == 200
+        assert "Local capture" in resp.text
+    finally:
+        mgr.stop_session()
+
+
+class _FakeBotManagerWithActiveRecording:
+    def __init__(self, recording):
+        self.active_recording = recording
+
+
+def test_record_page_hides_speaker_meters_for_local_session(client):
+    """A local session's `discord_speakers` dict is never populated (that's
+    a Discord-bot-only auto-tag mechanism) -- the 'Voices · live' / 'At the
+    table' section, and its 'Participants will appear as they join' promise,
+    must not render at all for source == 'local', since it can never have
+    anything to show."""
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
+            resp = c.get("/record")
+        assert resp.status_code == 200
+        assert "At the table" not in resp.text
+        assert "No speakers mapped yet" not in resp.text
+    finally:
+        mgr.stop_session()
+
+
+def test_record_page_shows_speaker_meters_for_discord_session(client):
+    c, data_dir = client
+    from wisper_transcribe.recording_manager import create_recording
+
+    rec = create_recording("VC1", "G1", data_dir=data_dir, source="discord")
+    c.app.state.bot_manager = _FakeBotManagerWithActiveRecording(rec)
+
+    resp = c.get("/record")
+    assert resp.status_code == 200
+    assert "At the table" in resp.text
+    assert "No speakers mapped yet" in resp.text
+
+
+def test_record_page_wires_live_ticker_to_recording_live_sse(client):
+    """The 'Heard so far' ticker on /record subscribes to the same working
+    SSE stream as the recording detail page, not the dead partial_transcript
+    event that /record/sse never emits."""
+    c, data_dir = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            start_resp = c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
+            recording_id = start_resp.json()["id"]
+            resp = c.get("/record")
+        assert resp.status_code == 200
+        assert f"/recordings/{recording_id}/live" in resp.text
+        assert "partial_transcript" not in resp.text
+        # Regression: extra_scripts was briefly nested inside the `page`
+        # block, which Jinja renders once inline (as part of page's own
+        # content) AND again at base.html's separate extra_scripts slot --
+        # two live EventSource connections fighting over the same DOM.
+        assert resp.text.count("new EventSource('/record/sse')") == 1
+        assert resp.text.count(f"/recordings/{recording_id}/live") == 1
+    finally:
+        mgr.stop_session()
+
+
+def test_record_page_extra_scripts_absent_when_idle(client):
+    """No active session -- extra_scripts must not render at all (not even
+    once), since active_recording is None. Guards against the `{% if %}`
+    living outside `{% block extra_scripts %}` in record.html, which Jinja
+    ignores for extends-based rendering (the block would render
+    unconditionally regardless of the outer if)."""
+    c, _ = client
+    resp = c.get("/record")
+    assert resp.status_code == 200
+    assert "new EventSource('/record/sse')" not in resp.text
+
+
+def test_record_page_hides_local_section_when_unavailable(client):
+    """No Local card at all when soundcard isn't importable (the default
+    in this test environment, but pinned explicitly for determinism)."""
+    c, _ = client
+    fake_result = {"microphones": [], "loopbacks": [], "available": False}
+    with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+        resp = c.get("/record")
+    assert resp.status_code == 200
+    assert "Start local recording" not in resp.text
+
+
+def test_record_page_shows_local_section_with_device_options(client):
+    c, _ = client
+    fake_result = {
+        "microphones": [{"id": "mic1", "name": "Built-in Microphone"}],
+        "loopbacks": [{"id": "loop1", "name": "Speakers (loopback)"}],
+        "available": True,
+    }
+    with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+        resp = c.get("/record")
+    assert resp.status_code == 200
+    assert "Start local recording" in resp.text
+    assert "Built-in Microphone" in resp.text
+    assert "Speakers (loopback)" in resp.text
+
+
+def test_record_page_preselects_default_mic_and_loopback_device(client):
+    """The mic/system dropdowns pre-select the OS's current default devices,
+    not just the first option in enumeration order."""
+    c, _ = client
+    fake_result = {
+        "microphones": [
+            {"id": "mic1", "name": "Built-in Microphone"},
+            {"id": "mic2", "name": "USB Microphone"},
+        ],
+        "loopbacks": [
+            {"id": "loop1", "name": "Speakers A (loopback)"},
+            {"id": "loop2", "name": "Speakers B (loopback)"},
+        ],
+        "available": True,
+        "default_microphone_id": "mic2",
+        "default_loopback_id": "loop2",
+    }
+    with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+        resp = c.get("/record")
+    assert '<option value="mic2" selected>USB Microphone</option>' in resp.text
+    assert '<option value="mic1" >Built-in Microphone</option>' in resp.text
+    assert '<option value="loop2" selected>Speakers B (loopback)</option>' in resp.text
+    assert '<option value="loop1" >Speakers A (loopback)</option>' in resp.text
+
+
+def test_record_page_hides_this_is_me_when_no_profiles(client):
+    c, _ = client
+    fake_result = {"microphones": [], "loopbacks": [], "available": True}
+    with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result), \
+         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        resp = c.get("/record")
+    assert 'name="mic_profile_key"' not in resp.text
+
+
+def test_record_page_shows_this_is_me_dropdown_with_enrolled_profiles(client):
+    from wisper_transcribe.models import SpeakerProfile
+
+    c, data_dir = client
+    fake_devices = {"microphones": [], "loopbacks": [], "available": True}
+    fake_profile = SpeakerProfile(
+        name="brandon", display_name="Brandon", role="player",
+        embedding_path=data_dir / "brandon.npy", enrolled_date="2026-01-01",
+        enrollment_source="test",
+    )
+    with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_devices), \
+         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={"brandon": fake_profile}):
+        resp = c.get("/record")
+    assert 'name="mic_profile_key"' in resp.text
+    assert "Brandon" in resp.text
+    assert 'This is me' in resp.text
+
+
+def test_record_page_preselects_default_mic_profile(client):
+    """The mic-profile dropdown pre-selects `default_mic_profile_key` from config."""
+    from wisper_transcribe.models import SpeakerProfile
+
+    c, data_dir = client
+    fake_devices = {"microphones": [], "loopbacks": [], "available": True}
+    fake_profile = SpeakerProfile(
+        name="brandon", display_name="Brandon", role="player",
+        embedding_path=data_dir / "brandon.npy", enrolled_date="2026-01-01",
+        enrollment_source="test",
+    )
+    with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_devices), \
+         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={"brandon": fake_profile}), \
+         patch("wisper_transcribe.web.routes.record.load_config",
+               return_value={"default_mic_profile_key": "brandon"}):
+        resp = c.get("/record")
+    assert '<option value="brandon" selected>Brandon</option>' in resp.text
+
+
+def test_start_local_remembers_mic_profile_default(client):
+    """Starting a local session with a mic profile persists it as the next default."""
+    c, data_dir = client
+    fake_devices = {
+        "microphones": [{"id": "mic1", "name": "Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}],
+        "available": True,
+    }
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_devices):
+            resp = c.post(
+                "/api/record/start-local",
+                json={"mic_id": "mic1", "system_id": "loop1", "mic_profile_key": "brandon"},
+            )
+        assert resp.status_code == 201
+    finally:
+        mgr.stop_session()
+
+    from wisper_transcribe.config import load_config
+    assert load_config()["default_mic_profile_key"] == "brandon"
+
+
+def test_recordings_list_shows_local_badge(client):
+    from wisper_transcribe.recording_manager import create_recording
+
+    c, data_dir = client
+    create_recording(
+        voice_channel_id="", guild_id="", data_dir=data_dir,
+        source="local", devices={"mic": "Mic", "system": "Speakers"},
+    )
+    resp = c.get("/recordings")
+    assert resp.status_code == 200
+    assert "LOCAL" in resp.text
+
+
+def test_recording_detail_shows_local_device_names(client):
+    from wisper_transcribe.recording_manager import create_recording
+
+    c, data_dir = client
+    rec = create_recording(
+        voice_channel_id="", guild_id="", data_dir=data_dir,
+        source="local", devices={"mic": "Built-in Microphone", "system": "Speakers (loopback)"},
+    )
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "Built-in Microphone" in resp.text
+    assert "Speakers (loopback)" in resp.text
+    assert "LOCAL" in resp.text
+
+
+def test_recording_detail_shows_live_pane_for_active_local_session(client):
+    from wisper_transcribe.recording_manager import create_recording
+
+    c, data_dir = client
+    rec = create_recording(voice_channel_id="", guild_id="", data_dir=data_dir, source="local")
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "live-transcript" in resp.text
+    assert f"/recordings/{rec.id}/live" in resp.text
+    # Regression: extra_scripts was nested inside the `page` block, which
+    # Jinja renders once inline (as part of page's own content) AND again
+    # at base.html's separate extra_scripts slot -- two competing
+    # EventSource connections to the same live-transcript endpoint.
+    assert resp.text.count(f"/recordings/{rec.id}/live") == 1
+
+
+def test_recording_detail_hides_live_pane_when_completed(client):
+    from wisper_transcribe.recording_manager import create_recording, update_recording_status
+
+    c, data_dir = client
+    rec = create_recording(voice_channel_id="", guild_id="", data_dir=data_dir, source="local")
+    update_recording_status(rec.id, "completed", data_dir)
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "live-transcript" not in resp.text
+
+
+def test_recording_detail_hides_live_pane_for_discord_source(client):
+    from wisper_transcribe.recording_manager import create_recording
+
+    c, data_dir = client
+    rec = create_recording(voice_channel_id="VC1", guild_id="G1", data_dir=data_dir)
+    assert rec.source == "discord"
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "live-transcript" not in resp.text
 
 
 def test_recording_detail_invalid_id_returns_400(client):
@@ -252,6 +996,146 @@ def test_recording_detail_no_retranscribe_button_when_completed(client):
     assert "Re-transcribe" not in resp.text
 
 
+def test_recording_detail_shows_duration(client):
+    """The status strip shows elapsed duration between started_at and ended_at."""
+    from datetime import timedelta, timezone
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    rec.status = "completed"
+    rec.ended_at = rec.started_at.astimezone(timezone.utc) + timedelta(minutes=1, seconds=57)
+    save_recording(rec, tmp_path)
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "0:01:57" in resp.text
+
+
+def test_recording_detail_duration_dash_when_not_ended(client):
+    """No `ended_at` yet (still recording) shows a dash, not a bogus duration."""
+    from wisper_transcribe.recording_manager import create_recording
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "Duration" in resp.text
+
+
+def test_recording_detail_shows_markers(client):
+    from wisper_transcribe.recording_manager import append_marker, create_recording
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    append_marker(rec.id, tmp_path)
+
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "Flagged" in resp.text  # section-kicker, only rendered inside the {% if recording.markers %} block
+
+
+def test_recording_detail_omits_markers_section_when_none(client):
+    from wisper_transcribe.recording_manager import create_recording
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "Flagged" not in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Persisted live-transcript draft on the recording detail page -- survives
+# past the session ending (live_transcript.md is never cleaned up), shown
+# until an actual Transcribe job sets transcript_path.
+# ---------------------------------------------------------------------------
+
+def _write_live_transcript(tmp_path, rec_id, body):
+    live_dir = tmp_path / "recordings" / rec_id
+    live_dir.mkdir(parents=True, exist_ok=True)
+    (live_dir / "live_transcript.md").write_text(body, encoding="utf-8")
+
+
+def test_recording_detail_shows_persisted_live_draft_after_stop(client):
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+
+    c, tmp_path = client
+    rec = create_recording("", "", data_dir=tmp_path, source="local")
+    rec.status = "completed"
+    save_recording(rec, tmp_path)
+    _write_live_transcript(
+        tmp_path, rec.id,
+        "# Live transcript\n\n**You** *(1.0s)*: hello from disk\n\n**Other** *(3.0s)*: hi there\n\n",
+    )
+
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "hello from disk" in resp.text
+    assert "hi there" in resp.text
+    assert "Saved" in resp.text  # section-kicker for the static-draft branch
+
+
+def test_recording_detail_omits_draft_once_transcribed(client):
+    """Once a real transcript exists, the draft must not still show --
+    "only overwrite it if I do a full transcribe job" means the real
+    transcript wins, not that both coexist."""
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+
+    c, tmp_path = client
+    rec = create_recording("", "", data_dir=tmp_path, source="local")
+    rec.status = "transcribed"
+    rec.transcript_path = tmp_path / "output" / f"{rec.id}.md"
+    save_recording(rec, tmp_path)
+    _write_live_transcript(tmp_path, rec.id, "# Live transcript\n\n**You** *(1.0s)*: hello from disk\n\n")
+
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "hello from disk" not in resp.text
+
+
+def test_recording_detail_omits_draft_when_no_file_on_disk(client):
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+
+    c, tmp_path = client
+    rec = create_recording("", "", data_dir=tmp_path, source="local")
+    rec.status = "completed"
+    save_recording(rec, tmp_path)
+
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "Saved" not in resp.text
+
+
+def test_recording_detail_omits_draft_for_discord_source(client):
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path, source="discord")
+    rec.status = "completed"
+    save_recording(rec, tmp_path)
+    _write_live_transcript(tmp_path, rec.id, "# Live transcript\n\n**You** *(1.0s)*: hello from disk\n\n")
+
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "hello from disk" not in resp.text
+
+
+def test_recording_detail_active_session_uses_live_pane_not_static_draft(client):
+    """While still recording/degraded, the SSE-driven pane owns the view
+    -- the static server-rendered draft must not also appear."""
+    from wisper_transcribe.recording_manager import create_recording
+
+    c, tmp_path = client
+    rec = create_recording("", "", data_dir=tmp_path, source="local")  # status defaults to "recording"
+    _write_live_transcript(tmp_path, rec.id, "# Live transcript\n\n**You** *(1.0s)*: hello from disk\n\n")
+
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+    assert "hello from disk" not in resp.text
+    assert "Waiting for speech" in resp.text  # the SSE pane's placeholder
+
+
 def test_recording_detail_unknown_id_redirects(client):
     c, _ = client
     import uuid
@@ -270,13 +1154,197 @@ def test_recording_delete_removes_entry(client):
     assert load_recordings(tmp_path).get(rec.id) is None
 
 
-def test_recording_live_returns_501(client):
+def _make_transcribed_recording_with_files(tmp_path):
+    """Build a "transcribed" local Recording with a full real-looking file
+    footprint on disk: the recordings/<id>/ directory (audio) plus the
+    output/ files a transcription job produces (.md, .summary.md, the
+    _diar.json enrollment sidecar + the audio copy it references, and an
+    excerpt clip). Used to verify delete actually purges all of it."""
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+
+    rec = create_recording("", "", data_dir=tmp_path, source="local")
+    rec.status = "transcribed"
+
+    rec_dir = tmp_path / "recordings" / rec.id
+    rec_dir.mkdir(parents=True, exist_ok=True)
+    (rec_dir / "combined.wav").write_bytes(b"fake")
+    (rec_dir / "metadata.json").write_text("{}", encoding="utf-8")
+
+    out_dir = tmp_path / "output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    md_path = out_dir / f"{rec.id}.md"
+    md_path.write_text("# transcript", encoding="utf-8")
+    summary_path = out_dir / f"{rec.id}.summary.md"
+    summary_path.write_text("# summary", encoding="utf-8")
+    audio_path = out_dir / f"{rec.id}.wav"
+    audio_path.write_bytes(b"fake")
+    diar_path = out_dir / f"{rec.id}_diar.json"
+    diar_path.write_text(json.dumps({"input_path": str(audio_path)}), encoding="utf-8")
+    excerpt_path = out_dir / f"{rec.id}_excerpt_1.mp3"
+    excerpt_path.write_bytes(b"fake")
+
+    rec.transcript_path = md_path
+    save_recording(rec, tmp_path)
+
+    return rec, {
+        "rec_dir": rec_dir, "md_path": md_path, "summary_path": summary_path,
+        "audio_path": audio_path, "diar_path": diar_path, "excerpt_path": excerpt_path,
+    }
+
+
+def test_purge_recording_files_refuses_active_session(client):
+    """Regression test: shutil.rmtree()-ing recordings/<id>/ while the
+    capture thread still holds file handles open into it (status
+    "recording"/"degraded") is a different, worse failure than the old
+    index-only delete ever risked -- _purge_recording_files must no-op for
+    an active session rather than touch its files."""
+    from wisper_transcribe.web.routes.record import _purge_recording_files
+
+    c, tmp_path = client
+    rec, paths = _make_transcribed_recording_with_files(tmp_path)
+    rec.status = "recording"
+
+    _purge_recording_files(rec, tmp_path)
+
+    assert paths["rec_dir"].exists()
+    assert paths["md_path"].exists()
+
+
+def test_recording_delete_purges_files_from_disk(client):
+    """Regression test: delete_recording() itself only ever removed the
+    index entry (see its docstring) -- the delete route must now also
+    purge the recording's files, both the recordings/<id>/ directory and
+    the output/ files a full transcribe produced."""
+    c, tmp_path = client
+    rec, paths = _make_transcribed_recording_with_files(tmp_path)
+
+    resp = c.post(f"/recordings/{rec.id}/delete", follow_redirects=False)
+    assert resp.status_code == 303
+
+    assert not paths["rec_dir"].exists()
+    assert not paths["md_path"].exists()
+    assert not paths["summary_path"].exists()
+    assert not paths["audio_path"].exists()
+    assert not paths["diar_path"].exists()
+    assert not paths["excerpt_path"].exists()
+
+
+def test_api_recording_delete_purges_files_from_disk(client):
+    """The bare API defaults to index-only (no confirm() dialog sits in
+    front of it) -- `?purge=true` is required to also delete files, and is
+    what `wisper record delete` (CLI) passes explicitly."""
+    c, tmp_path = client
+    rec, paths = _make_transcribed_recording_with_files(tmp_path)
+
+    resp = c.post(f"/api/recordings/{rec.id}/delete?purge=true")
+    assert resp.status_code == 200
+    assert resp.json() == {"id": rec.id, "deleted": True, "purged": True}
+
+    assert not paths["rec_dir"].exists()
+    assert not paths["md_path"].exists()
+
+
+def test_api_recording_delete_defaults_to_index_only_without_purge_param(client):
+    c, tmp_path = client
+    rec, paths = _make_transcribed_recording_with_files(tmp_path)
+
+    resp = c.post(f"/api/recordings/{rec.id}/delete")
+    assert resp.status_code == 200
+    assert resp.json()["purged"] is False
+
+    assert paths["rec_dir"].exists()
+    assert paths["md_path"].exists()
+
+
+def test_recordings_bulk_delete_removes_multiple_and_purges_files(client):
+    c, tmp_path = client
+    from wisper_transcribe.recording_manager import load_recordings
+
+    rec1, paths1 = _make_transcribed_recording_with_files(tmp_path)
+    rec2, paths2 = _make_transcribed_recording_with_files(tmp_path)
+
+    resp = c.post(
+        "/recordings/bulk-delete",
+        data={"recording_ids": [rec1.id, rec2.id]},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/recordings"
+
+    loaded = load_recordings(tmp_path)
+    assert rec1.id not in loaded
+    assert rec2.id not in loaded
+    assert not paths1["rec_dir"].exists()
+    assert not paths2["rec_dir"].exists()
+    assert not paths1["md_path"].exists()
+    assert not paths2["md_path"].exists()
+
+
+def test_recordings_bulk_delete_skips_invalid_and_unknown_ids(client):
+    """A path-traversal-shaped id or an id for a recording that no longer
+    exists must not abort the rest of the batch."""
+    c, tmp_path = client
+    import uuid
+
+    from wisper_transcribe.recording_manager import create_recording, load_recordings, save_recording
+
+    rec = create_recording("", "", data_dir=tmp_path, source="local")
+    save_recording(rec, tmp_path)
+
+    resp = c.post(
+        "/recordings/bulk-delete",
+        data={"recording_ids": [rec.id, "../evil", str(uuid.uuid4())]},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert rec.id not in load_recordings(tmp_path)
+
+
+def test_recordings_bulk_delete_empty_selection_is_noop(client):
+    c, tmp_path = client
+    from wisper_transcribe.recording_manager import create_recording, load_recordings, save_recording
+
+    rec = create_recording("", "", data_dir=tmp_path, source="local")
+    save_recording(rec, tmp_path)
+
+    resp = c.post("/recordings/bulk-delete", data={}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert rec.id in load_recordings(tmp_path)
+
+
+def test_recordings_list_renders_bulk_select_checkboxes(client):
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+
+    c, tmp_path = client
+    rec = create_recording("", "", data_dir=tmp_path, source="local")
+    rec.status = "completed"
+    save_recording(rec, tmp_path)
+    resp = c.get("/recordings")
+    assert resp.status_code == 200
+    assert 'class="recording-select"' in resp.text
+    assert 'id="select-all-recordings"' in resp.text
+    assert 'action="/recordings/bulk-delete"' in resp.text
+
+
+def test_recording_live_streams_end_event_when_no_live_job(client):
+    """Phase 2: GET /recordings/{id}/live is now a real SSE endpoint. A
+    recording with no active JOB_LIVE session (never started local live
+    transcription) just gets an immediate 'end' event and no snapshot
+    (no live_transcript.md on disk) -- see tests/test_record_live_routes.py
+    for the live-job-wired cases."""
     c, tmp_path = client
     from wisper_transcribe.recording_manager import create_recording
     rec = create_recording("VC1", "G1", data_dir=tmp_path)
-    resp = c.get(f"/recordings/{rec.id}/live")
-    assert resp.status_code == 501
-    assert resp.json().get("detail") == "not implemented in v1"
+    with c.stream("GET", f"/recordings/{rec.id}/live") as resp:
+        assert resp.status_code == 200
+        body = "".join(resp.iter_text())
+    assert "event: end" in body
+
+
+def test_recording_live_invalid_id_returns_400(client):
+    c, _ = client
+    resp = c.get("/recordings/../evil/live")
+    assert resp.status_code in (400, 404)
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +1474,133 @@ def test_transcribe_recording_handoff(client):
     dest = tmp_path / "output" / f"{rec.id}.wav"
     assert dest.exists()
     mock_submit.assert_called_once()
+
+
+def test_transcribe_recording_passes_name_as_title(client):
+    """The session name set at recording start becomes the transcript's
+    title -- see pipeline.py's title= param, which overrides the default
+    filename-derived title without touching the actual output filename."""
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path, name="Session 14 — the ambush")
+    combined = tmp_path / "recordings" / rec.id / "final" / "combined.wav"
+    combined.parent.mkdir(parents=True, exist_ok=True)
+    combined.write_bytes(b"fake wav data")
+    rec.combined_path = combined
+    rec.status = "completed"
+    save_recording(rec, tmp_path)
+
+    from wisper_transcribe.web.jobs import Job as JobCls
+    import uuid as _uuid
+    fake_job = JobCls(
+        id=str(_uuid.uuid4()), status="pending", created_at=rec.started_at,
+        input_path=str(tmp_path / "output" / f"{rec.id}.wav"), kwargs={}, name=rec.id,
+    )
+    with patch.object(c.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
+        c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
+
+    _, kwargs = mock_submit.call_args
+    assert kwargs["title"] == "Session 14 — the ambush"
+
+
+def test_transcribe_recording_no_name_passes_none_title(client):
+    """An unnamed recording passes title=None -- process_file() falls back
+    to its usual filename-derived title, no behavior change from before
+    the name feature existed."""
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    combined = tmp_path / "recordings" / rec.id / "final" / "combined.wav"
+    combined.parent.mkdir(parents=True, exist_ok=True)
+    combined.write_bytes(b"fake wav data")
+    rec.combined_path = combined
+    rec.status = "completed"
+    save_recording(rec, tmp_path)
+
+    from wisper_transcribe.web.jobs import Job as JobCls
+    import uuid as _uuid
+    fake_job = JobCls(
+        id=str(_uuid.uuid4()), status="pending", created_at=rec.started_at,
+        input_path=str(tmp_path / "output" / f"{rec.id}.wav"), kwargs={}, name=rec.id,
+    )
+    with patch.object(c.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
+        c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
+
+    _, kwargs = mock_submit.call_args
+    assert kwargs["title"] is None
+
+
+def test_transcribe_recording_reverts_status_on_job_failure(client):
+    """A failed transcription job (on_error callback) reverts the recording
+    back to its pre-transcribe status instead of leaving it stuck at
+    'transcribing' forever with no retry path in the UI."""
+    from wisper_transcribe.recording_manager import create_recording, load_recordings, save_recording
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    combined = tmp_path / "recordings" / rec.id / "final" / "combined.wav"
+    combined.parent.mkdir(parents=True, exist_ok=True)
+    combined.write_bytes(b"fake wav data")
+    rec.combined_path = combined
+    rec.status = "completed"
+    save_recording(rec, tmp_path)
+
+    from wisper_transcribe.web.jobs import Job as JobCls, FAILED
+    import uuid as _uuid
+    fake_job = JobCls(
+        id=str(_uuid.uuid4()), status="pending", created_at=rec.started_at,
+        input_path=str(tmp_path / "output" / f"{rec.id}.wav"), kwargs={}, name=rec.id,
+    )
+
+    with patch.object(c.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
+        resp = c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
+    assert resp.status_code == 303
+
+    loaded = load_recordings(tmp_path)[rec.id]
+    assert loaded.status == "transcribing"
+
+    # Simulate the job failing: invoke the on_error callback the route wired up.
+    on_error = mock_submit.call_args.kwargs["on_error"]
+    fake_job.status = FAILED
+    on_error(fake_job)
+
+    reverted = load_recordings(tmp_path)[rec.id]
+    assert reverted.status == "completed"
+
+
+def test_retranscribe_recording_reverts_to_transcribed_on_job_failure(client):
+    """A failed re-transcribe (starting from 'transcribed', not 'completed')
+    reverts back to 'transcribed' -- keeping the old transcript's
+    View/Re-transcribe actions available -- not to a bare 'completed'."""
+    from wisper_transcribe.recording_manager import create_recording, load_recordings, save_recording
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    combined = tmp_path / "recordings" / rec.id / "final" / "combined.wav"
+    combined.parent.mkdir(parents=True, exist_ok=True)
+    combined.write_bytes(b"fake wav data")
+    rec.combined_path = combined
+    rec.status = "transcribed"
+    save_recording(rec, tmp_path)
+
+    from wisper_transcribe.web.jobs import Job as JobCls, FAILED
+    import uuid as _uuid
+    fake_job = JobCls(
+        id=str(_uuid.uuid4()), status="pending", created_at=rec.started_at,
+        input_path=str(tmp_path / "output" / f"{rec.id}.wav"), kwargs={}, name=rec.id,
+    )
+
+    with patch.object(c.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
+        c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
+
+    on_error = mock_submit.call_args.kwargs["on_error"]
+    fake_job.status = FAILED
+    on_error(fake_job)
+
+    reverted = load_recordings(tmp_path)[rec.id]
+    assert reverted.status == "transcribed"
 
 
 def test_transcribe_recording_not_completed_rejects(client):
@@ -575,7 +1770,7 @@ def test_api_recording_delete_removes_entry(client):
     rec = create_recording("VC1", "G1", data_dir=tmp_path)
     resp = c.post(f"/api/recordings/{rec.id}/delete")
     assert resp.status_code == 200
-    assert resp.json() == {"id": rec.id, "deleted": True}
+    assert resp.json() == {"id": rec.id, "deleted": True, "purged": False}
     assert load_recordings(tmp_path).get(rec.id) is None
 
 

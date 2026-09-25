@@ -268,6 +268,46 @@ def test_append_log_under_cap_does_not_trim():
     assert job.log_lines_dropped == 0
 
 
+def test_resume_slice_normal_case_no_drops():
+    """No trimming has happened yet (dropped=0) -- behaves like a plain slice."""
+    from wisper_transcribe.web.jobs import resume_slice
+
+    items = ["a", "b", "c"]
+    new_items, last_idx = resume_slice(items, dropped=0, last_idx=0)
+    assert new_items == ["a", "b", "c"]
+    assert last_idx == 3
+
+    new_items, last_idx = resume_slice(items, dropped=0, last_idx=last_idx)
+    assert new_items == []
+    assert last_idx == 3
+
+
+def test_resume_slice_translates_past_dropped_prefix():
+    """Once _append_capped has trimmed a prefix, an absolute last_idx from
+    before the trim must be translated into the retained list's own
+    indexing rather than sliced directly."""
+    from wisper_transcribe.web.jobs import resume_slice
+
+    # Absolute count says 5 produced so far; only the last 2 are retained
+    # (3 were dropped from the front).
+    retained = ["item3", "item4"]
+    new_items, last_idx = resume_slice(retained, dropped=3, last_idx=5)
+    assert new_items == []
+    assert last_idx == 5
+
+
+def test_resume_slice_client_fell_behind_the_cap_resumes_from_retained():
+    """A client that fell more than the cap behind (last_idx below the
+    dropped count) resumes from whatever's still retained instead of
+    crashing or re-slicing negative indices."""
+    from wisper_transcribe.web.jobs import resume_slice
+
+    retained = ["item3", "item4"]
+    new_items, last_idx = resume_slice(retained, dropped=3, last_idx=1)
+    assert new_items == ["item3", "item4"]
+    assert last_idx == 5
+
+
 def test_prune_finished_jobs_caps_terminal_jobs_only(monkeypatch):
     """R14: only COMPLETED/FAILED jobs count against _MAX_RETAINED_JOBS, and
     the OLDEST terminal jobs are dropped first. PENDING/RUNNING jobs are
@@ -390,6 +430,66 @@ def test_on_complete_callback_not_invoked_on_failure(tmp_path):
 
     assert calls == []
     assert job.status == FAILED
+
+
+def test_on_error_callback_invoked_after_failure(tmp_path):
+    """on_error fires exactly once when the job fails, and on_complete
+    (never going to fire now) is discarded too rather than leaking."""
+    from wisper_transcribe.web.jobs import Job, JobQueue, FAILED
+    from datetime import datetime
+
+    calls: list[Job] = []
+    complete_calls: list[Job] = []
+
+    q = JobQueue()
+    job = Job(
+        id="err-test",
+        status="running",
+        created_at=datetime.now(),
+        input_path="/tmp/bad.mp3",
+        kwargs={},
+    )
+    q._on_error_callbacks[job.id] = lambda j: calls.append(j)
+    q._on_complete_callbacks[job.id] = lambda j: complete_calls.append(j)
+
+    with patch("wisper_transcribe.web.jobs.process_file", side_effect=RuntimeError("oops")):
+        try:
+            q._run_job(job)
+        except RuntimeError:
+            pass
+
+    assert len(calls) == 1
+    assert calls[0].status == FAILED
+    assert complete_calls == []
+    # Both callbacks are consumed -- neither leaks or fires a second time
+    assert job.id not in q._on_error_callbacks
+    assert job.id not in q._on_complete_callbacks
+
+
+def test_on_error_callback_invoked_on_cancellation(tmp_path):
+    """Cancellation (InterruptedError) is also a failure path for on_error."""
+    from wisper_transcribe.web.jobs import Job, JobQueue, FAILED
+    from datetime import datetime
+
+    calls: list[Job] = []
+
+    q = JobQueue()
+    job = Job(
+        id="err-cancel-test",
+        status="running",
+        created_at=datetime.now(),
+        input_path="/tmp/bad.mp3",
+        kwargs={},
+    )
+    job._cancel_event.set()
+    q._on_error_callbacks[job.id] = lambda j: calls.append(j)
+
+    with patch("wisper_transcribe.web.jobs.process_file", side_effect=InterruptedError("Job cancelled by user")):
+        q._run_job(job)
+
+    assert len(calls) == 1
+    assert calls[0].status == FAILED
+    assert calls[0].error == "Cancelled"
 
 
 def test_run_job_tqdm_patch_restores_original(tmp_path):
@@ -1214,3 +1314,289 @@ def test_recording_enroll_job_failure_is_generic(tmp_path):
 
     loaded = load_recordings(tmp_path)[rec.id]
     assert loaded.unbound_speakers == ["999999999999999999"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 (live local recording): JOB_LIVE
+# ---------------------------------------------------------------------------
+
+def test_submit_live_creates_pending_job_with_ring_buffer(tmp_path):
+    from wisper_transcribe.web.jobs import JOB_LIVE, JobQueue
+    from wisper_transcribe.web.live_transcribe import NOISE_FLOOR_RMS, LiveRingBuffer
+
+    q = _make_queue()
+    out = tmp_path / "live_transcript.md"
+    job = q.submit_live(
+        recording_id="rec-123", output_path=str(out),
+        model_size="tiny", device="cpu", compute_type="int8", language="en",
+    )
+
+    assert job.status == "pending"
+    assert job.job_type == JOB_LIVE
+    assert job.live_recording_id == "rec-123"
+    assert isinstance(job.live_ring_buffer, LiveRingBuffer)
+    assert job.live_output_path == str(out)
+    assert job.kwargs == {
+        "model_size": "tiny", "device": "cpu", "compute_type": "int8", "language": "en",
+        "mic_label": "You", "noise_floor": NOISE_FLOOR_RMS,
+    }
+    assert job.live_lines == []
+
+
+def test_submit_live_stores_custom_mic_label(tmp_path):
+    q = _make_queue()
+    job = q.submit_live("rec-123", str(tmp_path / "live.md"), mic_label="Brandon")
+    assert job.kwargs["mic_label"] == "Brandon"
+
+
+def test_find_live_job_for_recording_returns_running_job(tmp_path):
+    q = _make_queue()
+    job = q.submit_live("rec-123", str(tmp_path / "live.md"))
+    job.status = "running"
+    assert q.find_live_job_for_recording("rec-123") is job
+
+
+def test_find_live_job_for_recording_ignores_other_recordings(tmp_path):
+    q = _make_queue()
+    job = q.submit_live("rec-123", str(tmp_path / "live.md"))
+    job.status = "running"
+    assert q.find_live_job_for_recording("rec-999") is None
+
+
+def test_find_live_job_for_recording_ignores_terminal_jobs(tmp_path):
+    from wisper_transcribe.web.jobs import COMPLETED
+
+    q = _make_queue()
+    job = q.submit_live("rec-123", str(tmp_path / "live.md"))
+    job.status = COMPLETED
+    assert q.find_live_job_for_recording("rec-123") is None
+
+
+def test_find_live_job_for_recording_none_when_no_jobs():
+    q = _make_queue()
+    assert q.find_live_job_for_recording("rec-123") is None
+
+
+def test_stop_live_sets_stop_event(tmp_path):
+    q = _make_queue()
+    job = q.submit_live("rec-123", str(tmp_path / "live.md"))
+    assert not job.live_stop_event.is_set()
+    q.stop_live(job.id)
+    assert job.live_stop_event.is_set()
+
+
+def test_stop_live_unknown_job_id_is_noop():
+    q = _make_queue()
+    q.stop_live("no-such-job")  # must not raise
+
+
+def test_stop_all_live_sets_stop_event_on_running_and_pending_jobs(tmp_path):
+    q = _make_queue()
+    running = q.submit_live("rec-1", str(tmp_path / "a.md"))
+    running.status = "running"
+    pending = q.submit_live("rec-2", str(tmp_path / "b.md"))  # stays pending
+
+    q.stop_all_live()
+
+    assert running.live_stop_event.is_set()
+    assert pending.live_stop_event.is_set()
+
+
+def test_stop_all_live_ignores_terminal_jobs(tmp_path):
+    from wisper_transcribe.web.jobs import COMPLETED
+
+    q = _make_queue()
+    job = q.submit_live("rec-1", str(tmp_path / "a.md"))
+    job.status = COMPLETED
+
+    q.stop_all_live()  # must not raise
+    assert not job.live_stop_event.is_set()  # already finished -- nothing to signal
+
+
+def test_stop_all_live_ignores_non_live_jobs(tmp_path):
+    q = _make_queue()
+    other = q.submit("/tmp/test.mp3")
+    q.stop_all_live()  # must not raise or touch unrelated job types
+    assert other.status == "pending"
+
+
+def test_stop_all_live_noop_with_no_jobs():
+    q = _make_queue()
+    q.stop_all_live()  # must not raise
+
+
+def test_run_live_job_calls_run_live_loop_and_completes(tmp_path):
+    from wisper_transcribe.web.jobs import COMPLETED, JobQueue
+
+    q = JobQueue()
+    out = tmp_path / "live_transcript.md"
+    job = q.submit_live("rec-123", str(out), model_size="tiny", device="cpu", mic_label="Brandon")
+
+    with patch("wisper_transcribe.web.live_transcribe.run_live_loop") as mock_loop:
+        q._run_live_job(job)
+
+    mock_loop.assert_called_once()
+    call_kwargs = mock_loop.call_args
+    assert call_kwargs.kwargs["model_size"] == "tiny"
+    assert call_kwargs.kwargs["device"] == "cpu"
+    assert call_kwargs.kwargs["mic_label"] == "Brandon"
+    assert job.status == COMPLETED
+    assert job.finished_at is not None
+    assert out.exists()  # header written up front
+
+
+def test_submit_live_seeds_noise_floor_kwarg(tmp_path):
+    from wisper_transcribe.web.jobs import JobQueue
+    from wisper_transcribe.web.live_transcribe import NOISE_FLOOR_RMS
+
+    q = JobQueue()
+    default_job = q.submit_live("rec-1", str(tmp_path / "a.md"))
+    assert default_job.kwargs["noise_floor"] == NOISE_FLOOR_RMS
+
+    custom_job = q.submit_live("rec-2", str(tmp_path / "b.md"), noise_floor=42.0)
+    assert custom_job.kwargs["noise_floor"] == 42.0
+
+
+def test_set_live_noise_floor_updates_running_job_kwargs(tmp_path):
+    from wisper_transcribe.web.jobs import JobQueue
+
+    q = JobQueue()
+    job = q.submit_live("rec-1", str(tmp_path / "a.md"))
+
+    assert q.set_live_noise_floor(job.id, 300.0) is True
+    assert job.kwargs["noise_floor"] == 300.0
+    assert q.set_live_noise_floor("no-such-job", 999.0) is False
+
+
+def test_run_live_job_wires_get_noise_floor_reading_job_kwargs_live(tmp_path):
+    """The getter passed into run_live_loop must read job.kwargs fresh on
+    each call -- not capture the value once at job start -- so a live
+    slider update (set_live_noise_floor) takes effect on a job already
+    running."""
+    from wisper_transcribe.web.jobs import JobQueue
+
+    q = JobQueue()
+    job = q.submit_live("rec-123", str(tmp_path / "live_transcript.md"), noise_floor=150.0)
+    captured = {}
+
+    def fake_run_live_loop(ring_buffer, stop_event, on_line, **kwargs):
+        captured["get_noise_floor"] = kwargs["get_noise_floor"]
+
+    with patch("wisper_transcribe.web.live_transcribe.run_live_loop", side_effect=fake_run_live_loop):
+        q._run_live_job(job)
+
+    assert captured["get_noise_floor"]() == 150.0
+    q.set_live_noise_floor(job.id, 500.0)
+    assert captured["get_noise_floor"]() == 500.0
+
+
+def test_run_live_job_on_line_appends_job_live_lines_and_markdown(tmp_path):
+    from wisper_transcribe.web.jobs import JobQueue
+    from wisper_transcribe.web.live_transcribe import LiveLine
+
+    q = JobQueue()
+    out = tmp_path / "live_transcript.md"
+    job = q.submit_live("rec-123", str(out))
+
+    def fake_run_live_loop(ring_buffer, stop_event, on_line, **kwargs):
+        on_line(LiveLine(speaker="You", text="hello world", start_s=1.0, end_s=2.5))
+
+    with patch("wisper_transcribe.web.live_transcribe.run_live_loop", side_effect=fake_run_live_loop):
+        q._run_live_job(job)
+
+    assert len(job.live_lines) == 1
+    assert job.live_lines[0]["speaker"] == "You"
+    assert job.live_lines[0]["text"] == "hello world"
+    body = out.read_text(encoding="utf-8")
+    assert "hello world" in body
+    assert "You" in body
+
+
+def test_run_live_job_exception_still_completes_not_failed(tmp_path):
+    """A live session ending abnormally reads as 'session ended', not a
+    raw failure -- see _run_live_job's docstring."""
+    from wisper_transcribe.web.jobs import COMPLETED, JobQueue
+
+    q = JobQueue()
+    out = tmp_path / "live_transcript.md"
+    job = q.submit_live("rec-123", str(out))
+
+    with patch("wisper_transcribe.web.live_transcribe.run_live_loop", side_effect=RuntimeError("boom")):
+        q._run_live_job(job)  # must not raise
+
+    assert job.status == COMPLETED
+    assert job.finished_at is not None
+
+
+@pytest.mark.anyio
+async def test_worker_fails_live_job_stopped_before_it_reached_front_of_queue(tmp_path):
+    """Root cause of the 2026-08-23 silent-empty-live-transcript bug:
+    JOB_LIVE shares the single-worker queue with every other job type. If a
+    long-running job (e.g. a campaign journal rebuild) is already running
+    when a local session starts and finishes, `stop_live()` sets
+    `live_stop_event` on a JOB_LIVE job that is still PENDING -- and
+    `run_live_loop`'s `while not stop_event.is_set()` would then exit on its
+    first check, "completing" with zero lines processed and no error shown
+    anywhere. `_worker` must instead recognize this case before ever
+    calling `run_live_loop` and fail the job with an explicit reason.
+    """
+    from wisper_transcribe.web.jobs import FAILED, JobQueue
+
+    q = JobQueue()
+    with patch("wisper_transcribe.web.live_transcribe.run_live_loop") as mock_loop:
+        job = q.submit_live("rec-123", str(tmp_path / "live.md"))
+        q.stop_live(job.id)  # session ended while job still sat PENDING
+        assert job.status == "pending"
+
+        try:
+            await asyncio.wait_for(q._worker(), timeout=0.2)
+        except asyncio.TimeoutError:
+            pass
+
+    assert job.status == FAILED
+    assert job.error
+    assert "queue was busy" in job.error
+    mock_loop.assert_not_called()
+
+
+def test_worker_runs_live_job_normally_when_stop_event_not_yet_set(tmp_path):
+    """Sanity check for the fix above: a JOB_LIVE job that reaches the front
+    of the queue before its session is stopped must still run normally."""
+    from wisper_transcribe.web.jobs import COMPLETED, JobQueue
+
+    q = JobQueue()
+    job = q.submit_live("rec-123", str(tmp_path / "live.md"))
+    assert not job.live_stop_event.is_set()
+
+    with patch("wisper_transcribe.web.live_transcribe.run_live_loop") as mock_loop:
+        q._run_job(job)
+
+    mock_loop.assert_called_once()
+    assert job.status == COMPLETED
+
+
+def test_append_live_line_caps_and_tracks_dropped():
+    from datetime import datetime
+
+    from wisper_transcribe.web.jobs import Job, _MAX_LIVE_LINES
+
+    job = Job(id="live-cap-test", status="running", created_at=datetime.now(), input_path="", kwargs={})
+    total = _MAX_LIVE_LINES + 100
+    for i in range(total):
+        job.append_live_line({"speaker": "You", "text": f"line {i}", "start_s": i, "end_s": i + 1})
+
+    assert len(job.live_lines) == _MAX_LIVE_LINES
+    assert job.live_lines_dropped == total - _MAX_LIVE_LINES
+    assert job.live_lines[0]["text"] == f"line {job.live_lines_dropped}"
+    assert job.live_lines[-1]["text"] == f"line {total - 1}"
+
+
+def test_append_live_line_under_cap_does_not_trim():
+    from datetime import datetime
+
+    from wisper_transcribe.web.jobs import Job
+
+    job = Job(id="live-nocap-test", status="running", created_at=datetime.now(), input_path="", kwargs={})
+    job.append_live_line({"speaker": "You", "text": "hi", "start_s": 0, "end_s": 1})
+    assert len(job.live_lines) == 1
+    assert job.live_lines_dropped == 0

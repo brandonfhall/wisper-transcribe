@@ -17,6 +17,7 @@ from wisper_transcribe.web.audio_writer import (
     SegmentedWavWriter,
     concat_wav_segments,
     downsample_48k_stereo_to_16k_mono,
+    resample_to_16k_mono,
 )
 
 # ---------------------------------------------------------------------------
@@ -218,6 +219,72 @@ def test_downsample_clips_to_int16_range():
     samples = struct.unpack(f"<{len(out)//2}h", out)
     assert max(samples) <= 32767
     assert min(samples) >= -32768
+
+
+# ---------------------------------------------------------------------------
+# resample_to_16k_mono (local capture: arbitrary samplerate, float32)
+# ---------------------------------------------------------------------------
+
+def test_resample_48k_stereo_produces_320_samples_per_20ms_block():
+    """A 20 ms block at 48 kHz (960 frames) resamples to exactly 320 samples."""
+    n = 960
+    data = np.full((n, 2), 0.5, dtype=np.float32)
+    out = resample_to_16k_mono(data, 48000)
+    samples = np.frombuffer(out, dtype="<i2")
+    assert len(samples) == 320
+
+
+def test_resample_scales_float_amplitude_to_int16_range():
+    """A constant 0.5 float32 input must scale to ~16383, not round to silence."""
+    n = 4800  # 100 ms @ 48k, well past filter transients
+    data = np.full((n, 2), 0.5, dtype=np.float32)
+    out = resample_to_16k_mono(data, 48000)
+    samples = np.frombuffer(out, dtype="<i2")
+    # Ignore edge samples affected by resample_poly's boundary transients.
+    steady = samples[10:-10]
+    assert np.all(np.abs(steady.astype(np.int32) - 16383) < 200)
+
+
+def test_resample_44100_non_integer_ratio_produces_320_samples_per_20ms_block():
+    """44.1kHz -> 16kHz is a non-integer ratio (up=160, down=441)."""
+    n = 882  # 20 ms @ 44100
+    data = np.full((n, 2), 0.3, dtype=np.float32)
+    out = resample_to_16k_mono(data, 44100)
+    samples = np.frombuffer(out, dtype="<i2")
+    assert len(samples) == 320
+
+
+def test_resample_mono_passthrough_1d_input():
+    """1-D (n_frames,) mono input is accepted without a channel-average step."""
+    n = 4800
+    data = np.full(n, 0.25, dtype=np.float32)
+    out = resample_to_16k_mono(data, 48000)
+    samples = np.frombuffer(out, dtype="<i2")
+    steady = samples[10:-10]
+    assert np.all(np.abs(steady.astype(np.int32) - 8192) < 200)
+
+
+def test_resample_empty_input_returns_empty():
+    assert resample_to_16k_mono(np.zeros((0, 2), dtype=np.float32), 48000) == b""
+    assert resample_to_16k_mono(np.zeros(0, dtype=np.float32), 48000) == b""
+
+
+def test_resample_already_16k_is_passthrough_no_scipy_call():
+    n = 320
+    data = np.full((n, 2), -0.5, dtype=np.float32)
+    out = resample_to_16k_mono(data, 16000)
+    samples = np.frombuffer(out, dtype="<i2")
+    assert len(samples) == 320
+    assert np.all(np.abs(samples.astype(np.int32) - (-16384)) < 5)
+
+
+def test_resample_clips_to_int16_range():
+    n = 960
+    data = np.full((n, 2), 1.5, dtype=np.float32)  # out-of-range input
+    out = resample_to_16k_mono(data, 48000)
+    samples = np.frombuffer(out, dtype="<i2")
+    assert samples.max() <= 32767
+    assert samples.min() >= -32768
 
 
 # ---------------------------------------------------------------------------

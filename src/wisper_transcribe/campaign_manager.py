@@ -316,6 +316,70 @@ def remove_transcript_from_campaign(stem: str, data_dir: Optional[Path] = None) 
             save_campaigns(campaigns, data_dir)
 
 
+def reorder_campaign_transcript(
+    slug: str, stem: str, direction: str, data_dir: Optional[Path] = None
+) -> None:
+    """Move one transcript one position up or down in a campaign's transcript
+    order.
+
+    This order is the campaign's source of truth for session sequence —
+    ``get_transcripts_for_campaign()`` (and so ``unjournalled_sessions()``/
+    ``rebuild_campaign()`` in journal.py) fold sessions into the journal in
+    this order, not by any date parsed from the filename. A no-op if the
+    transcript is already at that end of the list.
+
+    Raises:
+        KeyError: campaign not found.
+        ValueError: invalid direction, or stem not in the campaign.
+    """
+    if direction not in ("up", "down"):
+        raise ValueError(f"Invalid direction: {direction!r} (must be 'up' or 'down')")
+
+    with _campaigns_lock:
+        campaigns = load_campaigns(data_dir)
+        if slug not in campaigns:
+            raise KeyError(f"Campaign {slug!r} not found")
+        transcripts = campaigns[slug].transcripts
+        if stem not in transcripts:
+            raise ValueError(f"Transcript {stem!r} is not in campaign {slug!r}")
+
+        idx = transcripts.index(stem)
+        swap_idx = idx - 1 if direction == "up" else idx + 1
+        if 0 <= swap_idx < len(transcripts):
+            transcripts[idx], transcripts[swap_idx] = transcripts[swap_idx], transcripts[idx]
+            save_campaigns(campaigns, data_dir)
+
+
+def set_campaign_transcript_order(
+    slug: str, order: list[str], data_dir: Optional[Path] = None
+) -> None:
+    """Replace a campaign's whole transcript order in one call.
+
+    ``order`` must be exactly a permutation of the campaign's current
+    transcripts (same set, no additions/removals) — use
+    ``move_transcript_to_campaign``/``remove_transcript_from_campaign`` to
+    change membership. Bulk counterpart to ``reorder_campaign_transcript``'s
+    single-step move, for fixing a badly-out-of-order campaign (e.g. from
+    the CLI) without many individual up/down calls.
+
+    Raises:
+        KeyError: campaign not found.
+        ValueError: ``order`` is not a permutation of the current transcripts.
+    """
+    with _campaigns_lock:
+        campaigns = load_campaigns(data_dir)
+        if slug not in campaigns:
+            raise KeyError(f"Campaign {slug!r} not found")
+        current = campaigns[slug].transcripts
+        if sorted(order) != sorted(current):
+            raise ValueError(
+                "order must be a permutation of the campaign's current transcripts "
+                f"(got {sorted(order)!r}, expected {sorted(current)!r})"
+            )
+        campaigns[slug].transcripts = list(order)
+        save_campaigns(campaigns, data_dir)
+
+
 def get_campaign_for_transcript(stem: str, data_dir: Optional[Path] = None) -> Optional[str]:
     """Return the slug of the campaign that owns this transcript stem, or None."""
     for slug, c in load_campaigns(data_dir).items():

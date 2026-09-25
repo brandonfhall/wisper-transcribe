@@ -1,19 +1,24 @@
 {% extends "base.html" %}
 {% from "partials/icons.html" import icon %}
-{% block title %}Recording {{ recording.id[:8] }}{% endblock %}
+{% block title %}Recording {{ recording.name or recording.id[:8] }}{% endblock %}
 
 {% block toolbar %}
 <div class="toolbar">
   <div>
     <div class="toolbar-kicker">Recordings / <a href="/recordings" style="color:var(--color-paper-dim)">all</a></div>
     <div style="display:flex;align-items:baseline;gap:12px">
+      {% if recording.name %}
+      <span class="toolbar-title" style="font-size:18px">{{ recording.name }}</span>
+      <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint)">{{ recording.id }}</span>
+      {% else %}
       <span class="toolbar-title" style="font-size:16px;font-style:normal;font-family:var(--font-mono)">{{ recording.id }}</span>
+      {% endif %}
     </div>
   </div>
   <div style="display:flex;align-items:center;gap:8px">
     <form method="post" action="/recordings/{{ recording.id }}/delete"
-          onsubmit="return confirm('Remove from list? Audio files are kept on disk.')">
-      <button type="submit" class="btn btn-secondary btn-sm" style="color:var(--color-signal-rose)">Remove</button>
+          onsubmit="return confirm('Delete this recording? This removes its audio, transcript, and any campaign notes from disk permanently.')">
+      <button type="submit" class="btn btn-secondary btn-sm" style="color:var(--color-signal-rose)">Delete</button>
     </form>
   </div>
 </div>
@@ -23,7 +28,9 @@
 <div class="studio-page">
 
   <!-- Status + metadata strip -->
-  <div style="display:grid;grid-template-columns:repeat(6,1fr);border-top:1px solid var(--color-rule);border-bottom:1px solid var(--color-rule);margin-bottom:28px">
+  {%- set duration_s = ((recording.ended_at - recording.started_at).total_seconds() | int) if (recording.ended_at and recording.started_at) else 0 -%}
+  {%- set duration_str = "%d:%02d:%02d" | format(duration_s // 3600, (duration_s % 3600) // 60, duration_s % 60) if duration_s > 0 else "—" -%}
+  <div style="display:grid;grid-template-columns:repeat(7,1fr);border-top:1px solid var(--color-rule);border-bottom:1px solid var(--color-rule);margin-bottom:28px">
     <div style="padding:14px 16px">
       <div class="mono-kicker" style="margin-bottom:6px">Status</div>
       <div>
@@ -55,8 +62,16 @@
       <div style="font-family:var(--font-serif);font-size:22px;color:var(--color-paper);font-weight:300">{{ recording.segment_manifest | length }}</div>
     </div>
     <div style="padding:14px 16px;border-left:1px solid var(--color-rule)">
-      <div class="mono-kicker" style="margin-bottom:6px">Channel</div>
+      <div class="mono-kicker" style="margin-bottom:6px">{{ "Devices" if recording.source == "local" else "Channel" }}</div>
+      {% if recording.source == "local" %}
+      <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-dim);line-height:1.6">
+        <span class="pill pill-cyan" style="font-size:9.5px;margin-bottom:3px;display:inline-block">LOCAL</span>
+        {% if recording.devices.get('mic') %}<div>mic: {{ recording.devices.get('mic') }}</div>{% endif %}
+        {% if recording.devices.get('system') %}<div>sys: {{ recording.devices.get('system') }}</div>{% endif %}
+      </div>
+      {% else %}
       <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">{{ recording.voice_channel_id or "—" }}</div>
+      {% endif %}
     </div>
     <div style="padding:14px 16px;border-left:1px solid var(--color-rule)">
       <div class="mono-kicker" style="margin-bottom:6px">Started</div>
@@ -65,6 +80,10 @@
     <div style="padding:14px 16px;border-left:1px solid var(--color-rule)">
       <div class="mono-kicker" style="margin-bottom:6px">Ended</div>
       <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">{% if recording.ended_at %}{{ recording.ended_at.strftime('%H:%M') }}{% else %}—{% endif %}</div>
+    </div>
+    <div style="padding:14px 16px;border-left:1px solid var(--color-rule)">
+      <div class="mono-kicker" style="margin-bottom:6px">Duration</div>
+      <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">{{ duration_str }}</div>
     </div>
   </div>
 
@@ -113,6 +132,46 @@
         {% endif %}
       </div>
 
+      <!-- Live transcript (Phase 2). Two forms: SSE-driven while the
+           session is still recording/degraded, or a static server-render
+           of the persisted live_transcript.md draft once it has stopped
+           but hasn't been through a full Transcribe yet. -->
+      {% if recording.source == 'local' and recording.status in ('recording', 'degraded') %}
+      <div style="margin-bottom:28px">
+        <div class="section-head">
+          <div class="section-head-left"><span class="section-kicker">Live · near-real-time</span><h2 class="section-title">Transcript</h2></div>
+          <div style="display:flex;align-items:center;gap:8px;font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint);letter-spacing:0.1em">
+            <span class="dot-live" style="width:6px;height:6px"></span>
+            DRAFT · NOT DIARIZED
+          </div>
+        </div>
+        <div id="live-transcript" style="background:var(--color-ink-700);border:1px solid var(--color-rule);padding:14px 18px;border-radius:4px;min-height:80px;max-height:360px;overflow-y:auto">
+          <div id="live-transcript-empty" style="color:var(--color-paper-faint);font-size:12px;font-style:italic">Waiting for speech…</div>
+        </div>
+        <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:6px">
+          Draft preview only — the full transcript with real speaker diarization is generated after you stop and click Transcribe.
+        </div>
+      </div>
+      {% elif live_draft_blocks %}
+      <div style="margin-bottom:28px">
+        <div class="section-head">
+          <div class="section-head-left"><span class="section-kicker">Saved · near-real-time</span><h2 class="section-title">Transcript</h2></div>
+          <div style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint);letter-spacing:0.1em">DRAFT · NOT DIARIZED</div>
+        </div>
+        <div style="background:var(--color-ink-700);border:1px solid var(--color-rule);padding:14px 18px;border-radius:4px;max-height:360px;overflow-y:auto">
+          {% for block in live_draft_blocks %}
+          <div style="display:flex;gap:10px;padding:6px 0;border-bottom:1px solid var(--color-rule);font-size:12.5px;line-height:1.5">
+            <span style="flex-shrink:0;width:44px;font-family:var(--font-mono);font-size:10px;letter-spacing:0.08em;color:{{ 'var(--color-paper-dim)' if block.speaker == 'Other' else 'var(--color-accent)' }}">{{ block.speaker }}</span>
+            <span style="color:var(--color-paper)">{{ block.text }}</span>
+          </div>
+          {% endfor %}
+        </div>
+        <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:6px">
+          Draft saved from the live session — will be replaced by the full diarized transcript once you click Transcribe.
+        </div>
+      </div>
+      {% endif %}
+
       <!-- Speakers -->
       {% if recording.discord_speakers %}
       <div class="section-head"><div class="section-head-left"><span class="section-kicker">Speakers</span><h2 class="section-title">At the table</h2></div></div>
@@ -156,6 +215,19 @@
 
     <!-- Right: segments + rejoin log -->
     <div>
+      <!-- Markers -->
+      {% if recording.markers %}
+      <div style="margin-bottom:24px">
+        <div class="section-head"><div class="section-head-left"><span class="section-kicker">Flagged</span><h2 class="section-title">Markers</h2></div></div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px">
+          {% for marker in recording.markers %}
+          {%- set m_s = marker.elapsed_s | int -%}
+          <span class="pill pill-rose" style="font-family:var(--font-mono)">{{ "%d:%02d:%02d" | format(m_s // 3600, (m_s % 3600) // 60, m_s % 60) }}</span>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
       <!-- Segment manifest -->
       {%- set mixed_segs = recording.segment_manifest | selectattr("stream", "equalto", "mixed") | list -%}
       {% if mixed_segs %}
@@ -191,4 +263,54 @@
 
   </div>
 </div>
+{% endblock %}
+
+{% block extra_scripts %}
+{% if recording.source == 'local' and recording.status in ('recording', 'degraded') %}
+<script>
+// Live transcript pane -- shared connector (wisperConnectLiveStream in
+// app.js) handles the SSE + reconnect de-dupe; same endpoint + payload
+// shape as the /record page's ticker (Phase 2).
+//
+// app.js is loaded with `defer`, so it always finishes running strictly
+// after every inline <script> in the body (including this one) and right
+// before DOMContentLoaded -- calling wisperConnectLiveStream synchronously
+// here would silently no-op (window.wisperConnectLiveStream is still
+// undefined at this point), so the connection has to wait for that event.
+(function(){
+  var container = document.getElementById('live-transcript');
+  var empty = document.getElementById('live-transcript-empty');
+  if (!container) return;
+
+  function appendLine(speaker, text) {
+    if (empty) { empty.remove(); empty = null; }
+    var row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:10px;padding:6px 0;border-bottom:1px solid var(--color-rule);font-size:12.5px;line-height:1.5';
+    var tag = document.createElement('span');
+    tag.textContent = speaker;
+    tag.style.cssText = 'flex-shrink:0;width:44px;font-family:var(--font-mono);font-size:10px;letter-spacing:0.08em;color:' +
+      // Mic-dominant lines are never labeled 'Other' -- "this is me" can
+      // relabel the mic side to an enrolled profile's display name, so
+      // comparing against the fixed 'Other' label (not 'You') is what
+      // actually distinguishes mic vs. system lines.
+      (speaker !== 'Other' ? 'var(--color-accent)' : 'var(--color-paper-dim)');
+    var body = document.createElement('span');
+    body.textContent = text;
+    body.style.color = 'var(--color-paper)';
+    row.appendChild(tag);
+    row.appendChild(body);
+    container.appendChild(row);
+    container.scrollTop = container.scrollHeight;
+  }
+
+  document.addEventListener('DOMContentLoaded', function() {
+    window.wisperConnectLiveStream && window.wisperConnectLiveStream(
+      '/recordings/{{ recording.id }}/live',
+      function(payload) { appendLine(payload.speaker, payload.text); },
+      function() { if (empty) empty.textContent = 'Session ended.'; }
+    );
+  });
+})();
+</script>
+{% endif %}
 {% endblock %}

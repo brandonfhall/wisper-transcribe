@@ -202,6 +202,34 @@ def test_process_file_frontmatter_metadata(
 @patch("wisper_transcribe.pipeline.check_ffmpeg")
 @patch("wisper_transcribe.pipeline.validate_audio")
 @patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=3725.0)
+@patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
+def test_process_file_title_override(
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg, tmp_path
+):
+    """title= overrides the default filename-derived title without
+    touching the output filename/stem -- a recording's free-text session
+    name (which may contain filesystem-unsafe characters) never has to
+    flow through a rename to reach the transcript's displayed title."""
+    audio = tmp_path / "8acff998-e1f2-45cb-a254-556a726ccbb1.mp3"
+    audio.write_bytes(b"fake audio")
+    mock_convert.return_value = audio
+
+    from wisper_transcribe.pipeline import process_file
+
+    out = process_file(
+        audio, output_dir=tmp_path, device="cpu", no_diarize=True,
+        title="Session 14 — the ambush",
+    )
+    content = out.read_text(encoding="utf-8")
+
+    assert "title: Session 14 — the ambush" in content
+    assert out.stem == "8acff998-e1f2-45cb-a254-556a726ccbb1"  # filename unaffected
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
 @patch("wisper_transcribe.pipeline.get_duration", return_value=600.0)
 @patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
 def test_process_file_video_input(
