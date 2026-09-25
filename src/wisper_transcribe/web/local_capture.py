@@ -126,6 +126,21 @@ def _com_uninit() -> None:
 # Default (production) capture factory -- soundcard, lazily imported
 # ---------------------------------------------------------------------------
 
+def _get_microphone_by_id(sc, device_id: str):
+    """``sc.get_microphone()``, retrying all-digit ids as ints.
+
+    Ids reach us as strings from the ``<select>``. That's fine for WASAPI and
+    PulseAudio ids, but macOS ids are CoreAudio integers, so the string lookup
+    raises ``IndexError`` and the capture thread would die.
+    """
+    try:
+        return sc.get_microphone(id=device_id, include_loopback=True)
+    except IndexError:
+        if not device_id.isdigit():
+            raise
+        return sc.get_microphone(id=int(device_id), include_loopback=True)
+
+
 def _soundcard_capture_factory(device_id: str, samplerate: int) -> Iterator:
     """Default ``capture_factory``: open a soundcard device and block on ``record()``.
 
@@ -137,7 +152,7 @@ def _soundcard_capture_factory(device_id: str, samplerate: int) -> Iterator:
 
     _com_init()
     try:
-        mic = sc.get_microphone(id=device_id, include_loopback=True)
+        mic = _get_microphone_by_id(sc, device_id)
         with mic.recorder(samplerate=samplerate) as recorder:
             while True:
                 block = recorder.record(numframes=None)
@@ -172,6 +187,16 @@ _UNAVAILABLE_DEVICES = {
 }
 
 
+# Name hints for virtual loopback drivers. macOS has no OS-level loopback, so
+# soundcard's `isloopback` never fires there and these would be listed as mics.
+_VIRTUAL_LOOPBACK_NAME_HINTS = ("blackhole", "soundflower", "loopback audio")
+
+
+def _looks_like_virtual_loopback(name: str) -> bool:
+    lower = name.lower()
+    return any(hint in lower for hint in _VIRTUAL_LOOPBACK_NAME_HINTS)
+
+
 def enumerate_devices() -> dict:
     """Return ``{"microphones", "loopbacks", "available", "default_microphone_id",
     "default_loopback_id"}``.
@@ -199,7 +224,8 @@ def enumerate_devices() -> dict:
             entry = {"id": str(getattr(m, "id", m)), "name": str(getattr(m, "name", m))}
         except Exception:
             continue
-        (loopbacks if getattr(m, "isloopback", False) else microphones).append(entry)
+        is_loopback = getattr(m, "isloopback", False) or _looks_like_virtual_loopback(entry["name"])
+        (loopbacks if is_loopback else microphones).append(entry)
 
     default_microphone_id = ""
     try:
