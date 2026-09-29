@@ -131,14 +131,9 @@ def _fetch_fonts(dry_run: bool) -> None:
 
 def _rebuild_tailwind() -> None:
     print("\nTailwind CSS")
-    input_css  = STATIC / "input.css"
-    output_css = STATIC / "tailwind.min.css"
-    import subprocess
-    result = subprocess.run(
-        [sys.executable, "-m", "pytailwindcss",
-         "-i", str(input_css), "-o", str(output_css), "--minify"],
-        capture_output=True, text=True
-    )
+    sys.path.insert(0, str(ROOT / "src"))
+    from wisper_transcribe.tailwind import OUTPUT_CSS as output_css, build_css
+    result = build_css()
     if result.returncode == 0:
         print(f"  ✓ tailwind.min.css rebuilt → {_size_str(output_css)}")
     else:

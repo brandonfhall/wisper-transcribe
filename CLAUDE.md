@@ -6,7 +6,7 @@
 
 ## Documentation Rules (always apply)
 
-Keeping docs in sync with code is **non-optional** — treat it as part of the definition of done for every task.
+Keep docs in sync with code as part of every task; it's step 2 of the Definition of Done.
 
 | Doc | Update when |
 |-----|-------------|
@@ -20,7 +20,7 @@ Keeping docs in sync with code is **non-optional** — treat it as part of the d
 | `docs/scenarios.md` | New common scenario, known limitation added or resolved. |
 | `plan.md` | All active plans, research findings, and open design decisions live here. When work is completed, remove it from `plan.md` — unless the context directly informs a remaining action item, in which case keep only the relevant excerpt. |
 
-Both files must be updated **in the same commit** as the code change, not as a follow-up.
+Doc updates go **in the same commit** as the code change, not as a follow-up.
 
 ---
 
@@ -28,14 +28,16 @@ Both files must be updated **in the same commit** as the code change, not as a f
 
 A task is not complete until all four are true — in this order:
 
-1. **Tests pass** — run `.venv/bin/pytest tests/ -v` and confirm green
-2. **Docs updated** — `architecture.md` updated; `README.md` updated if user-facing (per Documentation Rules above)
-3. **Tailwind rebuilt** — rebuild before every commit that changes any text file (Tailwind v4 scans the whole repo, including Markdown and docstrings, not just templates): `.venv/bin/python -m pytailwindcss -i src/wisper_transcribe/static/input.css -o src/wisper_transcribe/static/tailwind.min.css --minify`. Commit the rebuilt `tailwind.min.css` if it changed.
+1. **Tests pass** — the full suite is green (see Commands for the per-OS invocation)
+2. **Docs updated** — every doc the Documentation Rules table above calls for
+3. **Tailwind rebuilt** — `tailwind.min.css` is rebuilt and committed if it changed. Any text-file change can alter it, because Tailwind v4 scans the whole repo, including Markdown and docstrings.
 4. **Committed** — all changed files in a single `git commit`
 
-When a todo list reaches 100% completed, execute steps 1–3 immediately without waiting to be asked.
+A Claude Code pre-commit hook (`.claude/hooks/pre_commit.py`) runs steps 1 and 3 on every `git commit`. It blocks the commit if tests fail (~1 min) or if the rebuilt `tailwind.min.css` differs and isn't staged. It warns when `src/` changes have no doc changes. While iterating, run only the tests you need; the hook runs the full suite at commit. A blocked commit means fix and retry — never bypass it.
 
-Commits are authorized as part of completing any task per the Definition of Done — no separate permission required.
+When a todo list reaches 100% completed, do steps 2–4 immediately without waiting to be asked.
+
+Commits (and pushing the feature branch) are authorized as part of completing any task per the Definition of Done — no separate permission required. Opening or merging a PR is not: ask the user first.
 
 ---
 
@@ -56,10 +58,9 @@ Commits are authorized as part of completing any task per the Definition of Done
 # Run web server
 wisper server --reload                # dev mode; http://localhost:8080
 
-# Rebuild Tailwind CSS (required after any template class changes)
-.venv/bin/python -m pytailwindcss -i src/wisper_transcribe/static/input.css \
-    -o src/wisper_transcribe/static/tailwind.min.css --minify
-# Commit tailwind.min.css alongside template changes
+# Rebuild Tailwind CSS (the pre-commit hook also does this)
+.venv/bin/python -m wisper_transcribe.tailwind        # Mac/Linux
+.venv\Scripts\python -m wisper_transcribe.tailwind    # Windows
 
 # Manage vendored web assets (htmx, fonts, Tailwind)
 python scripts/vendor.py --check    # audit current state
@@ -76,14 +77,15 @@ python scripts/vendor.py            # re-download + rebuild all assets
 - **After committing a phase, pause for user review before starting the next.**
 - **Branch naming:** `feat/...` or `fix/...`
 - **CI matrix:** Python 3.13 and 3.14 — the versions the project ships on (Docker `python:3.14-slim`; local-`.venv` floor 3.13). Both are blocking. We deliberately do not test versions we don't ship; `requires-python = ">=3.13"` and the `setup.sh`/`setup.ps1` floor checks must stay in sync with the lowest matrix entry.
-- **CI Tailwind staleness check:** CI rebuilds `tailwind.min.css` and runs `git diff --exit-code` on it. If the committed CSS is stale (templates changed without rebuilding), the check fails and blocks merge. Run the rebuild command above and commit before pushing.
+- **CI Tailwind staleness check:** CI rebuilds `tailwind.min.css` and fails on `git diff --exit-code` if the committed CSS is stale.
+- **Tailwind version is pinned** in `wisper_transcribe/tailwind.py` (`TAILWIND_VERSION`). Different releases emit different CSS, so always build through `python -m wisper_transcribe.tailwind`, never `python -m pytailwindcss` directly. To upgrade, bump the constant and commit the rebuilt CSS.
 
 ---
 
 ## Testing Rules
 
 - No GPU, no network, no real audio in tests — mock everything ML-related.
-- Mock targets: `wisper_transcribe.transcriber.WhisperModel`, `wisper_transcribe.diarizer.Pipeline`, `wisper_transcribe.speaker_manager.load_profiles`.
+- Mock targets: `faster_whisper.WhisperModel` (imported lazily inside `transcriber`, so patching `wisper_transcribe.transcriber.WhisperModel` needs `create=True`), `wisper_transcribe.diarizer.Pipeline`, `wisper_transcribe.speaker_manager.load_profiles`.
 - Web tests use `fastapi.testclient.TestClient` with all ML calls mocked.
 - Every new module needs a `tests/test_<module>.py`.
 
@@ -95,45 +97,7 @@ python scripts/vendor.py            # re-download + rebuild all assets
 - **No real audio files committed.** `example-file/` is gitignored.
 - **No personal data in tests.** Synthetic/fake data only.
 - If a secret is accidentally committed, treat it as compromised immediately.
-
-### Web Route Security Standards
-
-These rules apply to every web route handler. CodeQL scans all PRs — violations block merge.
-
-#### User input in file paths (CWE-22 Path Traversal)
-Use the two-layer pattern for any URL parameter or form field used in a file path:
-1. `os.path.basename()` strips leading path components.
-2. `os.path.abspath(os.path.join(base, safe_name)).startswith(base + os.sep)` confirms the result stays inside the intended directory.
-
-`Path.resolve()` on tainted input is **not** sufficient — CodeQL does not recognise it as a sanitiser. Use `os.path.abspath` + `startswith`.
-
-#### User input in redirect URLs (CWE-601 Open Redirect)
-Use `_validate_job_id()` (defined in `transcribe.py`) for every job ID that appears in a `RedirectResponse` or `Location` header. For other ID types, apply the same two-layer pattern:
-1. Strict regex guard `re.match(r"^[\w\-]+$", value)` — rejects everything except alphanumerics and hyphens.
-2. `os.path` dummy-guard round-trip — `os.path.basename(os.path.abspath(os.path.join(base, value)))` — to produce a string that CodeQL's taint tracker recognises as clean.
-
-`re.match().group(1)` is **still considered tainted** by CodeQL even after a format check. The `os.path` round-trip is required to break the taint chain.
-
-**Prefer server-generated IDs in redirect URLs.** Even after `_validate_job_id()`, CodeQL may still track the validated value as tainted. The cleanest solution is to look up the server object (e.g. a `Job`) using the validated ID and then use the object's own `id` field (set from `uuid.uuid4()` at creation — never from user input) in the redirect URL. This removes user-controlled data from the taint sink entirely:
-```python
-safe_id = _validate_job_id(job_id)
-job = queue.get(safe_id)
-if job is None:
-    return RedirectResponse(url="/transcribe", status_code=303)
-return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)  # job.id is UUID, not tainted
-```
-
-#### Never reflect user input into error messages or redirect parameters
-Exception messages, file paths, and internal state must not appear in redirect `Location` headers or in HTML error responses. Use a generic error code (e.g. `?error=enroll_failed`) instead of `?error={str(exc)}`.
-
-#### Never accept arbitrary file paths from form data
-Do not accept `output_dir`, `base_path`, or similar path parameters from form POST data. Always use the internally-resolved default (e.g. `_default_output_dir()`).
-
-#### Test coverage requirement
-Every security control must have a corresponding test in `tests/test_path_traversal.py` covering:
-- Null-byte payloads (`\x00`)
-- Regex-busting payloads (`invalid*name`, `id/with/slashes`)
-- Open-redirect / CRLF payloads for any endpoint that redirects
+- **Web route security** (path traversal, open redirect, CodeQL taint rules) lives in `.claude/rules/web-security.md` and loads when you work under `src/wisper_transcribe/web/`. Read it before adding a route.
 
 ---
 
@@ -153,23 +117,18 @@ Every security control must have a corresponding test in `tests/test_path_traver
 
 ## Environment Variables
 
-| Variable | Purpose |
-|----------|---------|
-| `WISPER_DATA_DIR` | Override data dir (Docker bind mount) |
-| `WISPER_DEBUG` | Set `1` to disable warning suppression |
-| `HUGGINGFACE_TOKEN` | HF token alternative to `config.toml`; `HF_TOKEN` is also accepted (alias) — both are propagated to `os.environ` once resolved |
-| `HF_TOKEN` | Alias for `HUGGINGFACE_TOKEN`; accepted by `get_hf_token()` and propagated to both vars |
+Full list in `docs/configuration.md`. The ones that affect code: `WISPER_DATA_DIR` overrides the data dir (always go through `get_data_dir()`), and `get_hf_token()` accepts `HF_TOKEN` or `HUGGINGFACE_TOKEN` and propagates the value to both in `os.environ`.
 
 ---
 
 ## Non-Obvious Gotchas
 
 - **All web assets are fully committed** — `static/htmx.min.js` (HTMX 1.9.12), `static/fonts/*.woff2` (Newsreader, Geist, JetBrains Mono, Instrument Serif), and `static/tailwind.min.css`. No download step needed. Use `python scripts/vendor.py` to refresh them when upgrading.
-- **Tailwind auto-rebuilds on startup** only when `input.css` is newer than the output (mtime check in `app.py`). Tailwind v4 scans every tracked text file — docs, docstrings, and tests included — so even a prose change can add or drop a class (e.g. the word "invisible" in a docstring). Rebuild and commit `tailwind.min.css` whenever it changes; CI catches a stale file via `git diff --exit-code`.
+- **Tailwind auto-rebuilds on startup** only when `input.css` is newer than the output (mtime check in `app.py`). Tailwind v4 scans every tracked text file — docs, docstrings, and tests included — so even a prose change can add or drop a class (e.g. the word "invisible" in a docstring). Rebuild and commit `tailwind.min.css` whenever it changes.
 - **Startup cleanup** — `app._cleanup_orphaned_uploads()` runs on every startup and deletes `wisper_upload_*`, `wisper_enroll_*`, and `wisper_enrollsrc_*` temp files. It is only the crash-window safety net: `JobQueue.submit()` renames the transcribe upload to a friendly name immediately (so running jobs never match the glob), `submit_standalone_enroll()` renames enroll uploads to `wisper_enrollsrc_<job-id>` at submit time and the job deletes them in a `finally`, and completed transcription jobs either move the audio next to the transcript (durable, backs the enrollment wizard) or delete it. Never point anything long-lived at any of these temp paths.
 - **Web-upload audio lives next to its transcript** — `<stem><suffix>` in the output dir, referenced by `<stem>_diar.json`'s `input_path`. Deleted together with the transcript. The `_diar.json` sidecar also carries the authoritative `speaker_map` (raw label → display name), updated on every wizard rename — never reconstruct that mapping from the rendered markdown when the sidecar has it.
 - **`tqdm.monitor_interval = 0`** is set globally at app startup (`app.py`) and per-job (`jobs.py`) to prevent `TMonitor` from spawning a daemon thread that hangs `Ctrl+C` on Python 3.14.
 - **`tqdm.write`/`tqdm.__init__` are patched in three unrelated layers** — `debug_log.Logger` (permanent tee), `jobs._run_transcription_job` (per-job capture for the SSE log stream — also where job cancellation is checked, so cancellation only fires when tqdm writes), and `pipeline._patch_tqdm_for_queue` (per-subprocess, `parallel_stages=True`). They only coexist safely because of the one-job-at-a-time invariant below. See architecture.md's "tqdm patching is load-bearing in three layers" before touching any of the three.
 - **One job at a time.** `_model`, `_pipeline`, and `_embedding_model` are module-level globals — not thread-safe. `JobQueue` runs one job at a time intentionally; this covers every job type, including `JOB_LIVE`, which holds the slot for a whole live-recording session.
-- **Transcript output dir:** Web uploads go to `./output/` (or `data_dir/output/`) — not `input_path.parent`. This is enforced in `transcribe.py`'s `_default_output_dir()`.
+- **Transcript output dir:** Web uploads go to `./output/` (or `data_dir/output/`) — not `input_path.parent`. This is enforced by `path_utils.get_output_dir()`.
 - **Speaker profile keys** are `name.lower().replace(" ", "_")` — used as both filesystem filename and URL slug.

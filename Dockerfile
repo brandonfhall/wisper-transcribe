@@ -61,12 +61,6 @@ COPY src/ ./src/
 # speaker profiles (overrides the platformdirs default of ~/.local/share/...).
 ENV WISPER_DATA_DIR=/data
 
-# Pin the tailwindcss binary tag so the download URL is
-# /releases/download/v4.2.4/... (cached on the GitHub CDN) instead of
-# /releases/latest/download/... which is redirect-prone and has hit
-# transient HTTP 503/504 in CI builds.
-ENV TAILWINDCSS_VERSION=v4.2.4
-
 # ── cpu target ────────────────────────────────────────────────────────────────
 FROM base AS cpu
 
@@ -75,10 +69,7 @@ RUN pip install --no-cache-dir -e . \
  && curl -sL "https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js" \
          -o /app/src/wisper_transcribe/static/htmx.min.js \
  # Build Tailwind CSS so the web UI is fully self-contained in the image
- && python -m pytailwindcss \
-         -i /app/src/wisper_transcribe/static/input.css \
-         -o /app/src/wisper_transcribe/static/tailwind.min.css \
-         --minify
+ && python -m wisper_transcribe.tailwind
 
 ENTRYPOINT ["wisper"]
 CMD ["--help"]
@@ -98,10 +89,7 @@ RUN pip install --no-cache-dir -e . \
  && curl -sL "https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js" \
          -o /app/src/wisper_transcribe/static/htmx.min.js \
  # Build Tailwind CSS so the web UI is fully self-contained in the image
- && python -m pytailwindcss \
-         -i /app/src/wisper_transcribe/static/input.css \
-         -o /app/src/wisper_transcribe/static/tailwind.min.css \
-         --minify
+ && python -m wisper_transcribe.tailwind
 
 ENTRYPOINT ["wisper"]
 CMD ["--help"]
