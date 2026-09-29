@@ -134,11 +134,11 @@ def test_load_pipeline_called_when_none(mock_load):
 
 
 # ---------------------------------------------------------------------------
-# R4: pipeline cache — no poisoned cache on failed load, keyed by device
+# Pipeline cache — no poisoned cache on failed load, keyed by device
 # ---------------------------------------------------------------------------
 
 def test_load_pipeline_failure_does_not_poison_cache():
-    """R4: a device-check failure after Pipeline.from_pretrained must NOT
+    """A device-check failure after Pipeline.from_pretrained must NOT
     leave the half-initialised pipeline in the module-level cache."""
     import wisper_transcribe.diarizer as d
 
@@ -160,7 +160,7 @@ def test_load_pipeline_failure_does_not_poison_cache():
 
 @patch("wisper_transcribe.audio_utils.load_wav_as_tensor")
 def test_diarize_reloads_on_device_change(mock_load):
-    """R4: the pipeline cache is keyed by device — a cached CPU pipeline is
+    """The pipeline cache is keyed by device — a cached CPU pipeline is
     not reused when a later call asks for a different device."""
     mock_load.return_value = _make_fake_audio_dict()
     import wisper_transcribe.diarizer as d
@@ -189,7 +189,7 @@ def test_diarize_reloads_on_device_change(mock_load):
 
 
 def test_load_pipeline_success_sets_device_key():
-    """R4: a successful load records the device the pipeline was moved to."""
+    """A successful load records the device the pipeline was moved to."""
     import wisper_transcribe.diarizer as d
 
     d._pipeline = None

@@ -85,8 +85,7 @@ LLM_SECRET_KEYS = frozenset({
 
 COMPUTE_TYPES = ("auto", "float16", "int8_float16", "int8", "float32")
 
-# Canonical enum tuples shared by the CLI's click.Choice lists and the web
-# form's server-side validation (R33) — one source of truth for both.
+# Allowed values, shared by CLI click.Choice lists and web-form validation.
 MODEL_SIZES = ("tiny", "base", "small", "medium", "large-v3", "large-v3-turbo")
 DEVICES = ("auto", "cpu", "cuda", "mps")
 

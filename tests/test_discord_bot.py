@@ -1,4 +1,4 @@
-"""Tests for BotManager — Phase 3 bot core."""
+"""Tests for BotManager."""
 from __future__ import annotations
 
 import asyncio
@@ -170,7 +170,7 @@ async def test_stop_session_sets_completed_status(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 8. Phase 4 — Discord ID auto-tagging
+# 8. Discord ID auto-tagging
 # ---------------------------------------------------------------------------
 
 async def test_known_discord_id_tagged_automatically_in_manifest(tmp_path):
@@ -327,7 +327,7 @@ async def test_simultaneous_known_and_unknown_speakers(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 10. R12 — __mixed__ track handling + end-to-end WAV decode
+# 10. __mixed__ track handling + end-to-end WAV decode
 # ---------------------------------------------------------------------------
 
 async def test_mixed_track_frames_do_not_create_per_user_state(tmp_path):
@@ -351,7 +351,7 @@ async def test_mixed_track_frames_do_not_create_per_user_state(tmp_path):
 
 
 async def test_combined_track_duration_matches_wall_clock_not_speaker_count(tmp_path):
-    """R12 regression: the old RealtimePCMMixer advanced the combined track
+    """The old RealtimePCMMixer advanced the combined track
     once per *any* incoming frame, so N concurrent speakers made the
     combined track N x 20ms per real 20ms. Now `__mixed__` (JDA's already-
     mixed track) is written 1:1 with real time, independent of how many
@@ -394,13 +394,9 @@ async def test_combined_track_duration_matches_wall_clock_not_speaker_count(tmp_
 async def test_finalise_concatenates_combined_segments_and_sets_combined_path(
     tmp_path, monkeypatch
 ):
-    """R2 regression: `Recording.combined_path` used to be assigned exactly
-    once, to None, and never populated — the transcribe hand-off always
-    redirected with ?error=no_audio. This drives BotManager through
-    multiple combined-track segment rotations and verifies `_finalise`
-    merges them into recordings/<id>/combined.wav with `combined_path`
-    pointing at the merged file, whose duration equals the sum of the
-    individual segments'."""
+    """After several combined-track rotations, `_finalise` merges them into
+    recordings/<id>/combined.wav, sets `combined_path`, and the merged
+    duration equals the sum of the segments'."""
     import functools
 
     import wisper_transcribe.web.discord_bot as discord_bot_module
@@ -447,11 +443,8 @@ async def test_finalise_concatenates_combined_segments_and_sets_combined_path(
 async def test_combined_track_rotation_and_finalize_populate_segment_manifest(
     tmp_path, monkeypatch
 ):
-    """segment_manifest was previously always empty -- append_segment()
-    existed but nothing ever called it. Each combined-track rotation
-    during the session, plus the final (possibly partial) segment closed
-    by _finalise, should now land in Recording.segment_manifest as
-    stream == "mixed" entries."""
+    """Each combined-track rotation, plus the final segment closed by
+    _finalise, lands in Recording.segment_manifest as stream == "mixed"."""
     import functools
 
     import wisper_transcribe.web.discord_bot as discord_bot_module
@@ -482,15 +475,8 @@ async def test_combined_track_rotation_and_finalize_populate_segment_manifest(
 
 
 async def test_marker_added_mid_session_survives_finalise(tmp_path):
-    """Regression: BotManager holds one long-lived Recording object for the
-    whole session and periodically calls save_recording() with it directly
-    (per-user writer setup, disconnect handling, finalise). append_marker()
-    mutates Recording.markers through an independent load-fresh + mutex-
-    protected save from a different call site (the marker route) -- a
-    plain save_recording(recording, ...) using the stale long-lived object
-    would silently overwrite that marker. Confirmed reproducible before the
-    save_recording_merged() fix: this test failed (0 markers) against the
-    unfixed code."""
+    """A marker appended mid-session (from the route) survives the
+    manager's own saves of its long-lived Recording object."""
     frames = [("__mixed__", make_pcm_frame())] * 5
     factory = scripted_source(frames)
     bm = BotManager(data_dir=tmp_path, audio_source_factory=factory)
@@ -514,9 +500,6 @@ async def test_finalise_leaves_combined_path_none_when_no_audio(tmp_path):
 
     loaded = load_recordings(tmp_path)[rec.id]
     assert loaded.combined_path is None
-    # Regression: SegmentedWavWriter.finalize() still closes and returns a
-    # path for the empty (0-frame) segment even with no audio ever
-    # received -- record_completed_wav_segment() must skip it, or the
-    # manifest would show a phantom "Segments: 1" contradicting the
-    # combined_path-is-None / ?error=no_audio state above.
+    # finalize() returns a path even for the empty 0-frame segment;
+    # record_completed_wav_segment() must skip it.
     assert loaded.segment_manifest == []

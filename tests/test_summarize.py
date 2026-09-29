@@ -210,11 +210,8 @@ def test_linkify_idempotent():
 
 
 def test_linkify_does_not_double_wrap_interior_word_of_existing_link():
-    """R32-11: a shorter term that is an interior word of a longer term's
-    link (e.g. "the" inside "[[Bob the Guard]]") must not be re-wrapped --
-    the old (?<!\\[)/(?!\\]) lookaround only checked the character
-    immediately touching a bracket, which never applies to an interior
-    word."""
+    """A shorter term that is an interior word of a longer term's
+    link (e.g. "the" inside "[[Bob the Guard]]") must not be re-wrapped."""
     out = _linkify("Bob the Guard walked in.", {"Bob the Guard", "the"})
     assert out.count("[[") == 1
     assert out.count("]]") == 1

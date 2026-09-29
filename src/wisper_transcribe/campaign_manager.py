@@ -20,16 +20,9 @@ from .config import get_data_dir
 from .models import Campaign, CampaignMember
 from .path_utils import validate_path_component
 
-# R37: campaigns.json is a single shared JSON store (unlike recording_manager,
-# which is per-record and already locked). Every mutating CRUD function below
-# does an unlocked load -> modify -> save; two concurrent web requests (e.g.
-# two campaign-editor tabs, or a wizard submit racing a roster edit) can lose
-# one write. Mirrors recording_manager's lock pattern: a module-level lock
-# held around each function's load/modify/save, not around the pure readers
-# (load_campaigns, get_campaign_profile_keys, lookup_profile_by_discord_id,
-# get_transcripts_for_campaign, get_campaign_for_transcript) or the low-level
-# save_campaigns() primitive itself -- locking save_campaigns() too would
-# deadlock the CRUD functions that call it while already holding the lock.
+# Guards every load-modify-save of campaigns.json against lost updates from
+# concurrent requests. Readers and save_campaigns() itself don't take it:
+# callers already hold it and would deadlock.
 _campaigns_lock = threading.Lock()
 
 
@@ -182,16 +175,11 @@ def add_member(
 
 
 def rekey_member(old_key: str, new_key: str, data_dir: Optional[Path] = None) -> int:
-    """Rekey a profile across every campaign roster it appears in (R31).
+    """Rekey a profile in every campaign roster it appears in.
 
-    Called by ``speaker_manager.rename_profile()`` when a profile's key
-    changes — campaign membership is keyed by profile key, so a rekey
-    without this would leave every roster entry (including its Discord ID
-    binding and role/character overrides) dangling. The full
-    ``CampaignMember`` record is preserved under the new key; only
-    ``profile_key`` is rewritten. If a member already exists under
-    ``new_key`` (shouldn't happen — ``rename_profile`` refuses key
-    collisions), the existing entry wins and the old one is dropped.
+    Called by ``speaker_manager.rename_profile()`` so roster entries (Discord
+    binding, role, character) follow the profile. If an entry already exists
+    under ``new_key``, it wins and the old one is dropped.
 
     Returns the number of campaigns updated.
     """

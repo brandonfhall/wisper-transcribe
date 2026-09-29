@@ -316,23 +316,10 @@ def _linkify(text: str, terms: set[str]) -> str:
 
     Idempotent: if a term is already inside [[...]], it is not double-wrapped.
 
-    R32-11: before EACH term's substitution, text is split on any ``[[...]]``
-    spans that exist at that point -- spans already present when ``_linkify``
-    was called (an earlier call, or a literal wiki-link that arrived
-    verbatim in the LLM's own output) as well as spans this same call just
-    created for a longer term processed earlier (terms are applied
-    longest-first). Substitution runs only on the segments OUTSIDE those
-    spans; the spans themselves are left completely untouched. A previous
-    version used a per-match ``(?<!\\[)`` / ``(?!\\])`` lookaround that only
-    checked the single character immediately adjacent to a candidate match
-    -- that protects a term sitting exactly at a link's edge (e.g. "Bob" in
-    "[[Bob]]"), but a *different*, shorter term that is an interior word of
-    an already-wrapped multi-word term (e.g. term="the" inside a
-    just-wrapped "[[Bob the Guard]]") is nowhere near a bracket and was not
-    protected at all, producing a nested double-wrap
-    "[[Bob [[the]] Guard]]". Re-splitting before every term closes that gap
-    regardless of where in the span the term falls or when the span was
-    created.
+    Terms are applied longest-first, and before each one the text is split on
+    existing ``[[...]]`` spans (including ones this call just created), so
+    substitution only touches text outside links. That prevents nesting such
+    as "[[Bob [[the]] Guard]]" when "the" is also a term.
     """
     if not text or not terms:
         return text

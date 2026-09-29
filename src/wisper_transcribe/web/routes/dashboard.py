@@ -30,10 +30,7 @@ async def dashboard(request: Request) -> HTMLResponse:
         or os.environ.get("HF_TOKEN")
     )
 
-    # Count transcripts in the output dir (R21: shared with the CLI/upload
-    # path via path_utils.get_output_dir). Exclude .summary.md sidecars —
-    # those are LLM-generated notes, not transcripts, and the Transcripts
-    # page already excludes them; this count must agree with that page.
+    # Exclude .summary.md sidecars so this matches the Transcripts page.
     output_dir = get_output_dir()
     transcript_count = len(
         [p for p in output_dir.glob("*.md") if not p.stem.endswith(".summary")]

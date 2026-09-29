@@ -1,10 +1,7 @@
-"""Record routes — Phase 3 implements JSON start/stop API;
-Phase 5 adds HTML control panel + recordings list/detail pages.
+"""Record routes: recording JSON API, Record page, recordings list/detail, transcribe hand-off.
 
-Path-traversal guards on recording_id follow the CodeQL four-step pattern.
-
-Security: recording control endpoints assume local/trusted network access — see
-architecture.md Known Constraints for details.
+Recording ids are path-guarded with the CodeQL four-step pattern. Endpoints
+assume localhost or a trusted network (no auth).
 """
 from __future__ import annotations
 
@@ -50,10 +47,9 @@ router = APIRouter()
 def _recording_to_dict(rec) -> dict:
     """Serialize a Recording for the JSON API.
 
-    R7: IDs, names, status, timestamps, and derived booleans only -- never a
-    raw filesystem path (CLAUDE.md web-route security rules). ``has_audio``
-    / ``has_transcript`` let a CLI/API caller know whether ``transcribe`` is
-    likely to succeed without exposing where the files actually live.
+    IDs, names, status, timestamps, and derived booleans only — never a
+    filesystem path. ``has_audio``/``has_transcript`` tell callers whether
+    ``transcribe`` can succeed.
     """
     return {
         "id": rec.id,
@@ -78,14 +74,10 @@ def _recording_to_dict(rec) -> dict:
 
 
 def _current_active_recording(request: Request):
-    """Return whichever manager's Recording is currently active, or None.
+    """Return the active Recording from either manager, or None.
 
-    "Active" means `.status in ACTIVE_STATUSES` -- never `is not None`.
-    Neither manager clears `active_recording` back to None once a session
-    finishes (both mirror BotManager's original behaviour here), so a
-    status check is required regardless of which manager is asked. Used by
-    every place that needs "is a recording live right now" without caring
-    which manager owns it (the Record page, the status SSE stream).
+    Checks ``.status in ACTIVE_STATUSES``: neither manager clears
+    ``active_recording`` after a session ends.
     """
     for mgr in (get_bot_manager(request), get_local_capture_manager(request)):
         if mgr is None:
@@ -162,13 +154,9 @@ async def record_stop(request: Request):
 
 @router.get("/api/record/status")
 async def record_status(request: Request):
-    """Current active-recording status, any source (Discord or local).
+    """Active recording status for any source; backs the global banner.
 
-    Powers the global recording-status banner (`base.html` + `app.js`)
-    that keeps a live session's Stop control visible while navigating
-    away from `/record` -- not just this JSON API's own consumers.
-    `{"active": false}` when idle; otherwise `_recording_to_dict()` plus
-    `"active": true`.
+    ``{"active": false}`` when idle, else ``_recording_to_dict()`` + ``"active": true``.
     """
     rec = _current_active_recording(request)
     if rec is None:
@@ -185,27 +173,15 @@ async def record_status(request: Request):
 def _start_live_transcription(
     request: Request, lcm, recording, data_dir: Path, mic_profile_key: str = ""
 ) -> bool:
-    """Submit a Phase 2 JOB_LIVE job for a just-started local session and
-    wire its ring buffer onto the capture manager's live sink.
+    """Submit a JOB_LIVE job for a just-started local session and wire its sink.
 
-    `mic_profile_key` (Phase 3, "this is me") looks up an enrolled
-    profile's display_name to use for mic-dominant lines instead of the
-    generic "You" -- an unknown/blank key just falls back to "You"; never
-    lets a bad profile key fail the live-job submission.
+    ``mic_profile_key`` ("This is me") names mic-dominant lines; an unknown or
+    blank key falls back to "You".
 
-    Best-effort: a failure here must not fail the already-started capture
-    session -- logged and swallowed. The recording still records fine
-    without a live preview; only the near-real-time transcript is missing.
+    Best-effort: failures are logged and never fail the capture session.
 
-    Returns ``True`` when another job was already occupying the (single-
-    worker) queue at submit time -- the JOB_LIVE job still gets queued and
-    the ring buffer still gets wired, but `run_live_loop` won't actually
-    start pulling from it until that other job finishes. For a short local
-    session that can mean the live preview never produces anything before
-    the session ends (see jobs.py's `_worker`, which now fails such a job
-    outright rather than silently "completing" with zero lines) -- callers
-    use this to warn the user up front instead of leaving them looking at
-    an empty pane that reads like a broken microphone.
+    Returns True when another job already holds the queue, so the live preview
+    won't start until it finishes; callers warn the user.
     """
     try:
         queue = get_queue(request)
@@ -257,14 +233,7 @@ def _stop_live_transcription(request: Request, lcm, recording_id: str) -> None:
 
 
 def _remember_mic_profile_default(mic_profile_key: str) -> None:
-    """Persist the most recently selected "this is me" profile so it's
-    pre-selected on the next local-capture session.
-
-    The local mic is the same person's voice the large majority of
-    sessions, so remembering the last choice (including "— Label my lines
-    'You' —", i.e. blank) saves reselecting it every time while still
-    letting a one-off different selection stick as the new default.
-    """
+    """Remember the last "This is me" choice (including blank) as the next default."""
     cfg = load_config()
     if cfg.get("default_mic_profile_key", "") != mic_profile_key:
         cfg["default_mic_profile_key"] = mic_profile_key
@@ -273,11 +242,9 @@ def _remember_mic_profile_default(mic_profile_key: str) -> None:
 
 @router.get("/api/record/devices")
 async def record_devices(request: Request):
-    """Enumerate local mic + system-audio (loopback) devices for the picker.
+    """Enumerate local mic and loopback devices for the picker.
 
-    Always 200 -- `available: false` when `soundcard` is not importable or
-    enumeration otherwise fails, so the Record page can hide the Local
-    section rather than the caller having to handle a 5xx.
+    Always 200; ``available: false`` when ``soundcard`` is missing or fails.
     """
     return JSONResponse(enumerate_devices())
 
@@ -322,12 +289,10 @@ async def record_live_noise_floor(request: Request):
 
 @router.post("/record/marker")
 async def record_marker(request: Request):
-    """Flag the current moment of the active recording (Record page's "Add
-    marker" button) -- any source, not local-only. No label, just a
-    timestamp: `append_marker()` persists it to `Recording.markers`, and
-    the client drops a matching flagged line straight into the live ticker
-    on a successful response (see wisperTickerAppendMarker in app.js) --
-    no page reload, since that would disrupt mid-session use.
+    """Add a marker to the active recording (any source).
+
+    Called via ``fetch()`` so the page (and ticker scroll position) isn't
+    reloaded; the client renders the marker into the ticker itself.
     """
     rec = _current_active_recording(request)
     if rec is None:
@@ -465,22 +430,10 @@ async def record_channels(request: Request):
 # JSON API — recordings CRUD
 # ---------------------------------------------------------------------------
 #
-# R7: these four endpoints back `wisper record list/show/transcribe/delete`
-# (cli.py) -- they used to be 501 stubs, so every documented `record`
-# subcommand except start/stop always failed. Each delegates to the exact
-# same manager functions / job-submission path the working HTML routes
-# (`/recordings`, `/recordings/{id}/transcribe`, `/recordings/{id}/delete`)
-# already use, via `_submit_recording_transcription()` below for the
-# transcribe hand-off. Responses are generic error codes (never `str(exc)`
-# or a filesystem path) per CLAUDE.md's web route security rules.
-#
-# One deliberate divergence: `delete` only purges files from disk when
-# called with `?purge=true` -- the HTML routes always purge (they sit
-# behind a confirm() dialog), but this bare JSON endpoint doesn't, and
-# defaulting it to destructive would mean any caller with an id (e.g. one
-# printed by `record list`) could wipe files with a single POST. `wisper
-# record delete` passes `purge=true` explicitly, matching its own
-# confirmation prompt.
+# Back `wisper record list/show/transcribe/delete`, reusing the HTML routes'
+# manager calls and `_submit_recording_transcription()`. Errors are generic
+# codes. `delete` purges files only with `?purge=true`: unlike the HTML
+# routes it has no confirm() dialog.
 
 @router.get("/api/recordings")
 async def recordings_list(request: Request):
@@ -537,27 +490,14 @@ async def recording_transcribe(recording_id: str, request: Request):
 
 
 def _purge_recording_files(recording, data_dir: Path) -> None:
-    """Delete a recording's files from disk: the `recordings/<id>/` directory
-    (raw audio, per-user tracks, live-transcript draft, `metadata.json`) and,
-    if it was transcribed, the associated output-dir files -- reusing the
-    exact same cleanup `transcripts.py`'s own delete routes use, since a
-    locally-recorded transcription is written through the identical
-    `_write_enrollment_sidecar()` path and so has the same `_diar.json` +
-    excerpt-clip footprint as any other transcript.
+    """Delete a recording's files: ``recordings/<id>/`` and, if transcribed,
+    the transcript and its sidecars (via ``transcripts.py``'s own helpers).
 
-    Best-effort: called right before `delete_recording()` removes the index
-    entry, so by the time any failure here could matter the recording
-    already reads as gone to the user -- a stray leftover file is a much
-    smaller problem than a delete action that silently does nothing.
+    Best-effort: runs just before ``delete_recording()`` removes the index
+    entry, and a leftover file is better than a delete that does nothing.
 
-    Refuses to touch a still-active (`recording`/`degraded`) session: the
-    capture thread's `SegmentedWavWriter` holds open file handles into
-    `rec_dir` and keeps appending to `metadata.json` for as long as
-    `status in ACTIVE_STATUSES` -- `shutil.rmtree()`-ing that directory out
-    from under it mid-session is a different failure than the old
-    index-only delete ever risked (a partial rmtree on Windows leaves the
-    session writing into a half-deleted tree). Callers should stop the
-    session first.
+    Refuses while the session is active: the capture writers still hold file
+    handles in ``recordings/<id>/``.
     """
     if recording.status in ACTIVE_STATUSES:
         return
@@ -586,13 +526,11 @@ def _purge_recording_files(recording, data_dir: Path) -> None:
 
 @router.post("/api/recordings/{recording_id}/delete")
 async def recording_delete_api(recording_id: str, request: Request):
-    """`?purge=true` also deletes the recording's files from disk (audio,
-    transcript, campaign notes) -- defaults to the original index-only
-    behavior otherwise, since this endpoint has no confirm() dialog in
-    front of it and any caller that already has an id (e.g. from `record
-    list`) can reach it directly. The HTML routes (which do have a confirm
-    dialog) always purge; `wisper record delete` (CLI) passes `purge=true`
-    explicitly, matching its own confirmation prompt."""
+    """Delete a recording's index entry; ``?purge=true`` also deletes its files.
+
+    Index-only by default because this endpoint has no confirmation step. The
+    CLI passes ``purge=true`` after its own prompt.
+    """
     safe_id = _validate_recording_id(recording_id)
     if safe_id is None:
         return JSONResponse({"error": "invalid_id"}, status_code=400)
@@ -800,23 +738,12 @@ async def recordings_list_html(request: Request) -> HTMLResponse:
 
 @router.get("/recordings/{recording_id}/live")
 async def recording_live(recording_id: str, request: Request):
-    """SSE stream of committed live-transcript lines (Phase 2).
+    """SSE stream of committed live-transcript lines.
 
-    Index-based resume, same pattern as the R14 job-log stream
-    (`GET /jobs/{id}/stream`): `job.live_lines_dropped` translates the
-    absolute count of lines produced so far into a valid slice of whatever
-    is still retained after the `_MAX_LIVE_LINES` cap trims the oldest.
-
-    Once no active `JOB_LIVE` job exists for this recording (never
-    started, or the session already ended), this sends a `snapshot` signal
-    (only if `live_transcript.md` exists on disk -- lets the client
-    distinguish "session ended with a draft on disk" from "nothing was ever
-    recorded") and closes -- there is nothing further to stream. The
-    authoritative transcript is always the post-session full pipeline pass
-    via `POST /recordings/{id}/transcribe`; the recording-detail page's own
-    server-rendered fallback (once `status` leaves `recording`/`degraded`)
-    is what actually shows the draft's content, so this signal doesn't
-    carry the markdown itself.
+    Index-based resume against the capped ``job.live_lines`` (see
+    ``resume_slice``). When no live job remains, sends a bare ``snapshot``
+    event if ``live_transcript.md`` exists, then closes; the detail page
+    renders the draft itself.
     """
     safe_id = _validate_recording_id(recording_id)
     if safe_id is None:
@@ -834,14 +761,8 @@ async def recording_live(recording_id: str, request: Request):
 
             job = queue.find_live_job_for_recording(safe_id)
             if job is None:
-                # find_live_job_for_recording only matches PENDING/RUNNING
-                # (see its docstring), so this fires the instant the job
-                # completes -- which can land in the same ~1s window as a
-                # final chunk committed right before the user hit Stop.
-                # `last_job` is still the same Job object the worker thread
-                # was mutating (Job instances aren't replaced on
-                # completion), so one more read off it here catches lines
-                # that would otherwise never reach an already-open stream.
+                # The job just finished; read it once more so a line committed
+                # right before Stop still reaches the stream.
                 if last_job is not None:
                     new_lines, last_idx = resume_slice(last_job.live_lines, last_job.live_lines_dropped, last_idx)
                     for line in new_lines:
@@ -883,16 +804,8 @@ async def recording_detail_html(recording_id: str, request: Request) -> HTMLResp
 
     campaigns = load_campaigns(data_dir)
 
-    # Persisted live-transcript draft (Phase 2 near-real-time preview):
-    # shown whenever recordings/<id>/live_transcript.md exists on disk and
-    # the recording hasn't been through a full Transcribe yet -- nothing
-    # cleans it up short of deleting the recording itself (see
-    # _purge_recording_files), so it survives indefinitely and would
-    # otherwise vanish from the page the instant the session stopped, even
-    # though the file was still right there. Only overwritten in the user's
-    # sense once a real Transcribe job sets transcript_path -- this block
-    # never runs then. While still actively recording, the existing
-    # SSE-driven pane (below) owns the live view instead of this static one.
+    # Static live-transcript draft for a stopped local session that hasn't
+    # been transcribed yet. While recording, the SSE pane owns the view.
     live_draft_blocks = None
     if (
         recording.source == "local"
@@ -988,14 +901,8 @@ async def recording_enroll_html(
 
     per_user_dir = data_dir / "recordings" / recording.id / "per-user" / safe_uid
 
-    # R6: the pydub decode + embedding extraction used to run synchronously
-    # here, blocking the event loop and touching the module-level ML caches
-    # concurrently with the job worker thread. It now runs as a JOB_ENROLL
-    # job (one job at a time); the runner also applies the recording-state
-    # updates (unbound list, discord_speakers binding, campaign membership)
-    # that used to happen inline after the enroll. Redirect to the job
-    # detail page — job.id is server-generated (uuid4), no user-controlled
-    # data in the URL.
+    # Enrollment runs as a JOB_ENROLL job; redirect via the server-generated
+    # job.id.
     queue = request.app.state.job_queue
     job = queue.submit_recording_enroll(
         recording_id=recording.id,
@@ -1016,15 +923,8 @@ async def recording_enroll_html(
 def _submit_recording_transcription(recording, request: Request, data_dir: Path):
     """Validate a recording and submit its transcription job.
 
-    Shared by the HTML hand-off route (``POST /recordings/{id}/transcribe``)
-    and the JSON API (``POST /api/recordings/{id}/transcribe``, R7) so both
-    entry points run the identical checks and ``JobQueue.submit`` call
-    instead of two copies drifting apart.
-
-    Returns ``(job, None)`` on success, or ``(None, error_code)`` where
-    ``error_code`` is ``"not_ready"`` or ``"no_audio"`` -- generic codes
-    only, never ``str(exc)`` or a filesystem path, per CLAUDE.md's web
-    route security rules.
+    Shared by the HTML and JSON transcribe routes. Returns ``(job, None)`` or
+    ``(None, "not_ready" | "no_audio")``.
     """
     if recording.status not in ("completed", "transcribed"):
         return None, "not_ready"
@@ -1040,10 +940,8 @@ def _submit_recording_transcription(recording, request: Request, data_dir: Path)
     dest = output_dir / f"{recording.id}.wav"
     shutil.copy2(str(recording.combined_path), str(dest))
 
-    # Preserved so a failed job can put the recording back where it started
-    # (e.g. "transcribed" on a failed re-transcribe keeps the old transcript's
-    # View/Re-transcribe actions available, rather than falling back to a
-    # bare "completed" that hides them even though the old file is still there).
+    # Restored on failure, so a failed re-transcribe keeps "transcribed" and
+    # its actions.
     previous_status = recording.status
 
     # Build the post-completion callback: auto-associate transcript with campaign
@@ -1063,10 +961,7 @@ def _submit_recording_transcription(recording, request: Request, data_dir: Path)
                     log.warning("Failed to move transcript to campaign in on_complete", exc_info=True)
         save_recording(rec, data_dir)
 
-    # Symmetric failure callback: without this, a failed job left the
-    # recording stuck at "transcribing" forever with no retry path in the
-    # UI (recording_detail.html only offers Transcribe/Re-transcribe
-    # buttons for "completed"/"transcribed").
+    # Revert the status on failure so the Transcribe button reappears.
     def _on_error(job):
         _recordings = load_recordings(data_dir)
         rec = _recordings.get(recording.id)

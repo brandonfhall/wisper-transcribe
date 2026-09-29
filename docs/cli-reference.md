@@ -16,7 +16,7 @@ wisper will transcribe, detect speakers, then prompt you for each one:
 ────────────────────────────────────────────────────────────
   Input  : session01.mp3
   Output : session01.md
-  Model  : medium (cuda, float16)
+  Model  : large-v3-turbo (cuda, float16)
 ────────────────────────────────────────────────────────────
   Transcribing: 100%|████████| 4823/4823s
 
@@ -66,7 +66,7 @@ wisper transcribe session02.mp3 --num-speakers 6
 ────────────────────────────────────────────────────────────
   Input  : session02.mp3
   Output : session02.md
-  Model  : medium (cuda, float16)
+  Model  : large-v3-turbo (cuda, float16)
 ────────────────────────────────────────────────────────────
   Transcribing: 100%|████████| 4901/4901s
   Speaker matches:
@@ -172,6 +172,15 @@ Add a speaker from a clean reference clip (e.g. an interview or isolated recordi
 wisper enroll "Alice" --audio alice_intro.mp3
 wisper enroll "Alice" --audio session01.mp3 --segment "0:30-1:15"
 wisper enroll "Alice" --audio session08.mp3 --update   # blend with existing profile
+wisper enroll "Alice" --audio alice_intro.mp3 --notes "DM, usually on mic 2"
+```
+
+```
+Options:
+  --audio PATH       Audio file to extract the voice from (required)
+  --segment TEXT     Time range to use, e.g. "0:30-1:15"
+  --notes TEXT       Free-text notes stored with the speaker profile
+  --update           Average with the existing embedding instead of replacing it
 ```
 
 ---
@@ -206,7 +215,7 @@ wisper campaigns reorder d-d-mondays s02 --down         # move a session one pos
 wisper campaigns reorder d-d-mondays --set "s01,s02,s03" # replace the whole order in one shot
 ```
 
-`reorder` changes a campaign's transcript order — the order sessions get folded into the rolling journal in (`wisper campaigns journal`), and the episode numbering on the campaign page. It's insertion order (when a transcript was associated with the campaign), not a date parsed from the filename, so it can drift out of chronological order — e.g. a session transcribed and associated with the campaign later than a newer session ends up out of place. `--set` takes every transcript stem in the campaign as one comma-separated list in the desired order and errors if it isn't an exact permutation of what's currently there.
+`reorder` sets the order sessions are folded into the journal and numbered on the campaign page. The order is when each transcript was added to the campaign, not its date, so a late-added session can land out of place. `--set` takes every transcript stem in the campaign, comma-separated, and errors unless it is an exact permutation of the current list.
 
 #### `wisper campaigns journal`
 
@@ -223,7 +232,7 @@ wisper campaigns journal d-d-mondays --rebuild --yes  # same, skip the confirmat
 
 A session is "pending" once it has a `.summary.md`. With no flags the command folds the single oldest unjournalled session; re-run (or use `--all`) to catch up the rest. Sessions already folded are tracked in the journal's `journaled_sessions:` frontmatter and skipped.
 
-`--rebuild` redrives the *entire* campaign from its transcripts: every session transcript is re-summarized from scratch (overwriting its `.summary.md`) and the journal is regenerated from a clean start, folding every session back in in order — two LLM calls per session, so it asks for confirmation first unless `--yes` is also passed. `--session`, `--all`, and `--rebuild` are mutually exclusive. A transcript missing its `.md` file, or a session whose re-summarize call fails, is skipped and reported rather than aborting the whole run — only sessions that were freshly re-summarized get folded into the rebuilt journal.
+`--rebuild` re-summarizes every session transcript (overwriting its `.summary.md`) and rebuilds the journal from scratch, in order — two LLM calls per session, so it asks for confirmation unless `--yes` is passed. Sessions whose transcript is missing or whose summary fails are skipped and reported. `--session`, `--all`, and `--rebuild` are mutually exclusive.
 
 **Scoping transcription to a campaign:**
 
@@ -350,7 +359,7 @@ wisper config path                        # show where config.toml lives
 wisper config llm                         # interactive wizard: provider + model + key/endpoint
 ```
 
-`wisper config set <key> <value>` rejects keys that aren't a recognized config key (`Unknown config key ...; run wisper config show to list keys`) instead of silently writing junk config. The value is coerced to match the existing default's type — bool, int, float, or a comma-split list (`hotwords`) — falling back to a plain string otherwise.
+`wisper config set` rejects unknown keys and converts the value to the key's type (bool, int, float, or a comma-separated list such as `hotwords`). See [configuration.md](configuration.md#config-keys) for every key.
 
 **`wisper config llm`** is the recommended way to configure `refine` / `summarize`. It walks you through the provider (Ollama / Ollama Cloud / LM Studio / Anthropic / OpenAI / Google), endpoint (local providers), model name, and API key (cloud providers) in one flow. For Ollama and LM Studio the wizard lists installed/loaded models so you can pick by number.
 
@@ -364,7 +373,7 @@ Relevant keys: `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `
 
 ### `wisper record`
 
-Control the Discord recording bot from the command line. The wisper server must be running first.
+Control recordings from the command line. A `wisper server` must be running: the CLI finds it via `server.json` in the data dir, or `WISPER_SERVER_URL` if set. `start`/`stop` control the Discord bot; `list`/`show`/`transcribe`/`delete` cover Discord and local recordings.
 
 ```bash
 wisper record start --voice-channel <ID> --guild <ID>           # join a channel and start recording
@@ -379,7 +388,7 @@ wisper record transcribe <recording_id>                         # re-queue trans
 wisper record delete <recording_id>                             # delete recording + its files on disk (permanent)
 ```
 
-`record start` resolves `--guild`/`--voice-channel` in this order: explicit flag → `--preset <name>` → `discord_default_guild`/`discord_default_channel` from config (set via `wisper config discord`) — the same defaults the web Record page uses. It only errors if none of those resolve a value.
+`record start` resolves the guild and channel from: explicit flags → `--preset` → the `discord_default_guild`/`discord_default_channel` config keys (set via `wisper config discord`, also used by the web Record page).
 
 **Managing channel presets:**
 

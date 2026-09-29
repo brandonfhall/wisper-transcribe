@@ -161,9 +161,7 @@
   const progressEta  = document.getElementById('progress-eta');
   const progressRate = document.getElementById('progress-rate');
 
-  // Slug baked in at render time so the "View journal" link does not depend on
-  // the SSE payload (the stream endpoint is Python; the template reloads from
-  // disk per request, so this stays correct even if the server hasn't reloaded).
+  // Rendered server-side so the "View journal" link doesn't depend on the SSE payload.
   const JOURNAL_SLUG = {% if job.job_type == "campaign_journal" and job.kwargs.slug %}{{ job.kwargs.slug | tojson }}{% else %}null{% endif %};
 
   const STEPS = [

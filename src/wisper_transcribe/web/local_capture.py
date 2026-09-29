@@ -1,43 +1,25 @@
 """LocalCaptureManager — local mic + system-audio capture, mirroring BotManager.
 
-Simpler than BotManager: no reconnect/backoff/close-code machinery, no token
-resolution. Thread-based, not asyncio, because soundcard recorders are
-blocking pulls (`recorder.record(numframes)` blocks until audio exists).
+Thread-based rather than asyncio because soundcard recorders are blocking
+pulls. No reconnect or token handling.
 
-Threading/data-flow model (pinned in plan.md's Phase 1 implementation
-notes): capture threads only fill FIFOs; the tick thread does ALL writing.
-Two capture threads (mic, system) resample each block to 16 kHz mono int16
-and push it onto per-track byte FIFOs. The tick thread wakes once per
-`ticker()` tick (~20 ms of wall clock in production), drains one 20 ms
-chunk from each FIFO -- substituting silence for a starved track -- writes
-each track's chunk to that track's own `SegmentedWavWriter`, sums the two
-(int32 accumulate, clip to int16) and writes the mix to the combined
-writer. Silence substitution keeps all three tracks wall-clock continuous
-and mutually aligned even when a track (e.g. WASAPI loopback with nothing
-playing) delivers no frames for a while -- which Phase 2's timestamp-based
-energy attribution depends on.
+Data flow: two capture threads (mic, system) resample each block to 16 kHz
+mono int16 and push it onto per-track byte FIFOs. A single tick thread wakes
+every ~20 ms, drains one chunk from each FIFO (silence for a starved track),
+writes each track to its own SegmentedWavWriter, and writes their int32 sum
+(clipped to int16) to the combined writer. Silence substitution keeps all
+three tracks wall-clock aligned, which live speaker attribution relies on.
 
-Injection seams for tests (the BotManager `audio_source_factory` pattern,
-adapted):
-  - `capture_factory(device_id, samplerate) -> iterator of (np.ndarray shape
-    (n, ch) float32, samplerate)`, blocking. Default wraps `soundcard`
-    (imported lazily -- never at module level, so this module stays
-    importable and testable without the optional `[live]` extra installed).
-  - `ticker() -> iterator`, yielding once per tick. Default is a real
-    20 ms wall-clock ticker; tests inject a finite instant generator so the
-    manager can be exercised without any real-time delay ("media time not
-    wall time" -- same lesson as the R12 combined-track mixer fix in
-    discord_bot.py).
+Test seams:
+  - ``capture_factory(device_id, samplerate)`` -> blocking iterator of
+    ``(float32 array (n, ch), samplerate)``. The default wraps ``soundcard``,
+    imported lazily so this module works without the ``[live]`` extra.
+  - ``ticker()`` -> iterator yielding once per tick. Tests pass a finite,
+    instant generator.
 
-One capture *session* at a time, enforced the same way BotManager does:
-`start_session` raises `RuntimeError` if the current `active_recording` is
-still `"recording"`/`"degraded"`. Cross-manager (Discord vs local)
-exclusion is enforced at the route layer (web/routes/record.py), not here.
-
-`_active_recording` is deliberately never reset to `None` after a session
-finishes -- it stays set to the now-`"completed"` Recording, exactly like
-BotManager. Callers that need "is a session currently active" must check
-`.status in {"recording", "degraded"}`, not `is not None`.
+``start_session`` raises if a session is still active; Discord-vs-local
+exclusion is enforced in routes/record.py. ``_active_recording`` is never reset
+to None after a session, so check ``.status``, not ``is not None``.
 """
 from __future__ import annotations
 
@@ -77,10 +59,8 @@ FIFO_CAP_BYTES = int(FIFO_CAP_S * RATE) * BYTES_PER_SAMPLE
 _DEFAULT_CAPTURE_SAMPLERATE = 48000
 
 _TRACKS = ("mic", "system")
-# Public: web/routes/record.py imports this for the cross-manager (Discord vs
-# local) mutual-exclusion check -- "is a session actually active" is
-# `.status in ACTIVE_STATUSES`, never `active_recording is not None` (see the
-# module docstring above).
+# Used by routes/record.py for cross-manager exclusion. "Active" means
+# `.status in ACTIVE_STATUSES`, never `active_recording is not None`.
 ACTIVE_STATUSES = frozenset({"recording", "degraded"})
 
 
@@ -147,15 +127,11 @@ def _com_uninit() -> None:
 # ---------------------------------------------------------------------------
 
 def _soundcard_capture_factory(device_id: str, samplerate: int) -> Iterator:
-    """Default `capture_factory`: opens a soundcard device and blocks on `record()`.
+    """Default ``capture_factory``: open a soundcard device and block on ``record()``.
 
-    Never imported at module level -- `soundcard` is an optional `[live]`
-    extra and this module must stay importable (and, for tests, fully
-    exercisable via an injected `capture_factory`) without it installed.
-    Applies the documented Windows COM-init threading caveat: this runs
-    inside the calling capture thread (it's a generator, so its body -
-    including CoInitialize - executes on whatever thread iterates it), and
-    uninitializes on exit.
+    Imports ``soundcard`` lazily (optional extra). Being a generator, its body —
+    including Windows COM initialisation — runs on the capture thread that
+    iterates it, and uninitialises on exit.
     """
     import soundcard as sc
 
@@ -197,17 +173,13 @@ _UNAVAILABLE_DEVICES = {
 
 
 def enumerate_devices() -> dict:
-    """Return `{"microphones": [...], "loopbacks": [...], "available": bool,
-    "default_microphone_id": str, "default_loopback_id": str}`.
+    """Return ``{"microphones", "loopbacks", "available", "default_microphone_id",
+    "default_loopback_id"}``.
 
-    Each device entry is `{"id": str, "name": str}`. `available: False`
-    (never an exception) whenever `soundcard` is not importable or
-    enumeration otherwise fails -- callers (`GET /api/record/devices`, the
-    Record page) use this to hide the Local section entirely rather than
-    surfacing a 500. The two `default_*_id` fields echo the OS's current
-    default recording / playback device (empty string if unavailable or the
-    lookup itself fails) so the picker can pre-select them instead of
-    defaulting to the first device in an arbitrary enumeration order.
+    Devices are ``{"id", "name"}``. ``available`` is False (never an exception)
+    when ``soundcard`` is missing or enumeration fails, so the Record page can
+    hide the Local card. The default ids are the OS defaults ("" if unknown) so
+    the picker can preselect them.
     """
     try:
         import soundcard as sc
@@ -267,13 +239,10 @@ def resolve_device_name(devices: list, device_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 class LocalCaptureManager:
-    """Manages one local mic+system-audio capture session at a time.
+    """Manages one local mic + system-audio capture session at a time.
 
-    Mirrors `BotManager`'s start()/stop()/start_session()/stop_session()
-    shape for `app.py` lifespan wiring, but every method here is
-    synchronous -- capture is thread-based, not asyncio. Callers on an
-    asyncio event loop (routes, lifespan) must wrap the blocking calls
-    (`stop_session()`, `stop()`) in `asyncio.to_thread()`.
+    Same lifecycle shape as ``BotManager`` but synchronous; async callers
+    must wrap ``stop_session()`` and ``stop()`` in ``asyncio.to_thread()``.
     """
 
     def __init__(
@@ -306,20 +275,11 @@ class LocalCaptureManager:
         self._combined_segment_started_at: Optional[datetime] = None
         self._capture_threads: list[threading.Thread] = []
         self._tick_thread: Optional[threading.Thread] = None
-        # Phase 2: optional live-transcription tap, called from the tick
-        # thread with (mic_bytes, system_bytes, mixed_bytes) once per tick,
-        # in addition to (never instead of) the disk writes above. Must be
-        # fast/non-blocking -- it runs on the hot tick-thread path.
+        # Optional live-transcription tap, called from the tick thread with
+        # (mic, system, mixed) bytes each tick. Must not block.
         self._live_sink: Optional[Callable[[bytes, bytes, bytes], None]] = None
-        # Live level meter (Record page noise-floor gauge): peak per-track
-        # RMS observed since the last `get_and_reset_levels()` read, not an
-        # instantaneous snapshot -- the reader (an ~1s SSE poll) would
-        # otherwise miss short transients between polls. Plain dict +
-        # lock, read from the asyncio event loop thread while written from
-        # the tick thread; no producer/consumer ordering requirement beyond
-        # "don't tear the dict read", so a simple lock is enough (mirrors
-        # `_live_sink`'s read-without-lock tolerance for a single float
-        # would be fine too, but two related values need to stay in sync).
+        # Per-track peak RMS since the last get_and_reset_levels(), so ~1 s
+        # polls don't miss transients. Locked so both values read together.
         self._level_lock = threading.Lock()
         self._level_peaks: dict[str, float] = {"mic": 0.0, "system": 0.0}
 
@@ -346,9 +306,7 @@ class LocalCaptureManager:
         return self._active_recording
 
     def set_live_sink(self, sink: Optional[Callable[[bytes, bytes, bytes], None]]) -> None:
-        """Register (or clear, with `None`) the Phase 2 live-transcription
-        tap. Safe to call at any time -- reads of `self._live_sink` in the
-        tick thread just see whatever was last set."""
+        """Register (or clear with ``None``) the live-transcription tap. Safe at any time."""
         self._live_sink = sink
 
     def get_and_reset_levels(self) -> dict[str, float]:
@@ -370,16 +328,11 @@ class LocalCaptureManager:
         system_name: str = "",
         name: Optional[str] = None,
     ) -> Recording:
-        """Create a Recording and start the two capture threads + tick thread.
+        """Create a Recording and start both capture threads and the tick thread.
 
-        `mic_name`/`system_name` are the *resolved* device display names
-        (looked up by the caller via `enumerate_devices()` +
-        `resolve_device_name()`), stored in `Recording.devices` for the
-        detail page -- never a client-supplied free-text string. Falls back
-        to the raw device id if no name is given. `name` is the opposite:
-        a client-supplied free-text session title, display-only (never used
-        in a file path -- `Recording.id`, a server-generated uuid4, is what
-        backs the on-disk directory), so no server-side resolution needed.
+        ``mic_name``/``system_name`` are server-resolved device names (falling
+        back to the raw id). ``name`` is a free-text, display-only session
+        title; it never becomes a path.
         """
         if self._active_recording is not None and self._active_recording.status in ACTIVE_STATUSES:
             raise RuntimeError(f"Session {self._active_recording.id} is already active")
@@ -440,14 +393,11 @@ class LocalCaptureManager:
         return recording
 
     def stop_session(self) -> None:
-        """Signal capture/tick threads to stop, join them, and finalise. Blocking.
+        """Stop and join the threads, then finalise. Blocking.
 
-        The tick thread is the sole owner of writing; this method is the
-        sole owner of finalising (closing writers + concatenating the
-        combined track) -- the tick thread itself only ever exits its loop,
-        it never finalises, so there is exactly one finalise per session
-        regardless of whether the ticker is finite (tests) or infinite
-        (production, where only `stop_event` ends it).
+        The only finaliser: the tick thread never finalises, so there is
+        exactly one finalise per session whether the ticker ends on its own
+        (tests) or via ``stop_event``.
         """
         if self._active_recording is None:
             return
@@ -477,15 +427,10 @@ class LocalCaptureManager:
             self._mark_degraded()
 
     def _mark_degraded(self) -> None:
-        """Flag the active recording as degraded when a capture thread dies
-        unexpectedly (e.g. a USB mic/loopback device unplugged mid-session).
+        """Mark the session degraded when a capture thread dies (e.g. device unplugged).
 
-        Without this, ACTIVE_STATUSES's inclusion of "degraded" is
-        misleading -- nothing ever set it for local capture -- and a dead
-        track silently keeps recording silence-substituted audio with no
-        visible signal until the user reviews the resulting file. Never
-        raises: a bookkeeping failure here must not take down the tick
-        thread, which keeps writing (silence for the dead track) regardless.
+        Otherwise the dead track silently records silence. Never raises: the
+        tick thread keeps running regardless.
         """
         recording = self._active_recording
         if recording is None or recording.status != "recording":

@@ -94,18 +94,12 @@ def to_markdown(
 
 
 def parse_transcript_blocks(body: str) -> list[dict]:
-    """Parse a markdown transcript body into structured speaker blocks.
+    """Parse a transcript body into speaker blocks.
 
-    Returns a list of dicts with keys: index, speaker, timestamp, text, has_speaker.
-    Lines that are headings, horizontal rules, or the footer are skipped.
-
-    The inline ``*(HH:MM:SS)*`` timestamp is optional -- ``to_markdown()``
-    omits it entirely when called with ``include_timestamps=False`` (the web
-    upload form's "Include timestamps" checkbox), producing ``**Speaker**:
-    text`` instead of ``**Speaker** *(ts)*: text``. ``timestamp`` is ``''``
-    for those blocks; callers that need per-block timing (e.g.
-    ``enroll_shared.apply_renames``'s raw-label attribution) must handle an
-    empty timestamp themselves -- there is no timing signal to fall back on.
+    Returns dicts with index, speaker, timestamp, text, has_speaker. Headings,
+    rules, and the footer are skipped. ``timestamp`` is ``''`` for blocks
+    rendered without timestamps (``**Speaker**: text``); callers needing timing
+    must handle that.
     """
     import re
 
@@ -140,15 +134,11 @@ def parse_transcript_blocks(body: str) -> list[dict]:
 
 
 def rewrite_transcript_blocks(content: str, updated_speakers: dict) -> str:
-    """Apply per-block speaker name changes to a full markdown transcript.
+    """Apply per-block speaker renames to a full transcript.
 
-    updated_speakers maps block_index (int) to the new speaker name (str).
-    Only lines matching the speaker-block pattern are counted; all other lines
-    are passed through unchanged. Returns the full updated markdown string.
-
-    Matches both the timestamped (``**Speaker** *(ts)*: text``) and
-    timestamp-free (``**Speaker**: text``, ``include_timestamps=False``)
-    formats -- see ``parse_transcript_blocks``.
+    ``updated_speakers`` maps block index to new name. Handles both the
+    timestamped and timestamp-free block formats; all other lines pass through.
+    Returns the updated markdown.
     """
     import re
 
@@ -172,36 +162,15 @@ def rewrite_transcript_blocks(content: str, updated_speakers: dict) -> str:
 
 
 def rewrite_frontmatter_speakers(content: str, old_to_new: dict[str, str]) -> str:
-    """Rewrite ``speakers:`` frontmatter entries by parsing and re-dumping YAML.
+    """Rename ``speakers:`` frontmatter entries via a YAML round-trip.
 
-    F11: two previous regex-based approaches (this function replaces both)
-    shared the same defects -- an un-anchored ``- name: Dan`` pattern
-    corrupts ``- name: Dan Smith`` (prefix collision), and ``yaml.dump``
-    quotes names with special characters (e.g. ``- name: 'O''Brien'``) which
-    an unquoted regex never matches, silently leaving the frontmatter stale.
+    Names are matched as exact values, so ``Dan`` never matches ``Dan Smith``
+    and quoted names (``'O''Brien'``) work. All renames apply in one pass
+    against the parsed values, so swaps (Alice<->Bob) are correct.
 
-    This function instead parses the frontmatter as YAML and matches names
-    as whole values: for every entry in ``speakers`` that is a dict with a
-    ``name`` key, if that name is an EXACT key in ``old_to_new`` it is
-    replaced. Exact-value matching means no prefix collision is possible,
-    and going through ``yaml.safe_load``/``yaml.dump`` means quoting is
-    handled correctly regardless of what characters the name contains.
-
-    All renames in ``old_to_new`` are applied in one pass against the
-    parsed (not re-serialized) values, so a same-submit swap (Alice<->Bob)
-    or any other set of simultaneous renames comes out correct -- same
-    property the F6 fix established for the per-block body rewrite.
-
-    Returns ``content`` unchanged if it doesn't start with a ``---``
-    frontmatter block, if the closing ``---`` is missing, if the
-    frontmatter fails to parse as YAML, or if there is no ``speakers`` list
-    in it. The document body (everything after the closing ``---``) is
-    preserved byte-for-byte.
-
-    Note: re-dumping via ``yaml.dump`` may normalize unrelated frontmatter
-    formatting (key order, quoting style) even for keys that weren't
-    renamed -- that's an accepted side effect of round-tripping through the
-    YAML parser instead of doing surgical text edits.
+    Returns ``content`` unchanged when there is no frontmatter, it doesn't
+    parse, or it has no ``speakers`` list. The body is preserved byte-for-byte;
+    re-dumping may normalise unrelated frontmatter formatting.
     """
     if not content.startswith("---"):
         return content
@@ -240,16 +209,10 @@ def rewrite_frontmatter_speakers(content: str, old_to_new: dict[str, str]) -> st
 
 
 def update_speaker_names(content: str, old_name: str, new_name: str) -> str:
-    """Replace all occurrences of a speaker name in an existing markdown transcript.
+    """Replace every ``**old_name**`` in a transcript.
 
-    R32-7 warning: the `**OldName**` regex matches ANY bold text equal to
-    `old_name`, not just genuine `**Speaker**` block headers -- if `old_name`
-    also happens to appear as bold body text elsewhere in the transcript
-    (coincidentally, not as a speaker label), that occurrence is rewritten
-    too. This is a known, accepted limitation (not fixed here); callers that
-    need header-only precision should go through
-    `rewrite_transcript_blocks()` instead, which operates on parsed
-    per-block indices rather than a body-wide regex.
+    Also matches bold body text equal to ``old_name``, not just speaker
+    headers. Use ``rewrite_transcript_blocks()`` for header-only precision.
     """
     import re
 
@@ -259,8 +222,6 @@ def update_speaker_names(content: str, old_name: str, new_name: str) -> str:
         f"**{new_name}**",
         content,
     )
-    # Replace in YAML frontmatter speaker list (F11: parse/re-dump YAML
-    # instead of a regex, so a rename target name isn't corrupted by a
-    # prefix collision and quoted names are matched correctly).
+    # Frontmatter speaker list via YAML round-trip (exact, quote-safe).
     content = rewrite_frontmatter_speakers(content, {old_name: new_name})
     return content

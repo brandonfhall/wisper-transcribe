@@ -80,7 +80,7 @@ def test_transcribe_filters_empty_segments():
 
 
 def test_transcribe_non_monotonic_segments_do_not_crash_progress_bar():
-    """R32-4: pbar.update(seg.end - pbar.n) goes negative when a later
+    """pbar.update(seg.end - pbar.n) goes negative when a later
     segment ends before an earlier one (non-monotonic segment stream) --
     must clamp to >= 0 instead of passing a negative delta to tqdm."""
     mock_model = MagicMock()
@@ -101,7 +101,7 @@ def test_transcribe_non_monotonic_segments_do_not_crash_progress_bar():
 
 
 def test_transcribe_passes_word_timestamps():
-    """word_timestamps=True is forwarded to model.transcribe() (F8)."""
+    """word_timestamps=True is forwarded to model.transcribe()."""
     mock_model = MagicMock()
     mock_model.transcribe.return_value = (iter([]), _make_mock_info(1.0))
 
@@ -387,7 +387,7 @@ def test_transcribe_mlx_injects_hotwords_into_prompt():
 
 
 def test_transcribe_mlx_unmapped_model_size_raises_clear_error():
-    """R32-3: an unmapped model size must raise a clear ValueError instead of
+    """An unmapped model size must raise a clear ValueError instead of
     falling back to a guessed `mlx-community/whisper-{size}-mlx` repo name
     that would 404 against the Hub."""
     import wisper_transcribe.transcriber as t
@@ -417,7 +417,7 @@ def test_transcribe_mlx_not_dispatched_on_non_mps():
 
 
 # ---------------------------------------------------------------------------
-# R4: model cache keyed by (model_size, device, compute_type)
+# Model cache keyed by (model_size, device, compute_type)
 # ---------------------------------------------------------------------------
 
 def test_load_model_sets_cache_key():
@@ -434,7 +434,7 @@ def test_load_model_sets_cache_key():
 
 
 def test_transcribe_reloads_on_parameter_change():
-    """R4: a cached model loaded with different parameters is NOT reused —
+    """A cached model loaded with different parameters is NOT reused —
     transcribe() reloads when (model_size, device, compute_type) changes."""
     import wisper_transcribe.transcriber as t
 
@@ -462,7 +462,7 @@ def test_transcribe_reloads_on_parameter_change():
 
 
 def test_transcribe_reuses_model_on_matching_key():
-    """R4: a cached model whose key matches the requested params is reused."""
+    """A cached model whose key matches the requested params is reused."""
     import wisper_transcribe.transcriber as t
 
     cached = MagicMock()

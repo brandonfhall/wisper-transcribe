@@ -119,21 +119,19 @@ def test_update_speaker_names_in_frontmatter():
 
 
 # ---------------------------------------------------------------------------
-# F11 — rewrite_frontmatter_speakers (parse/re-dump YAML, not regex)
+# rewrite_frontmatter_speakers (parse/re-dump YAML, not regex)
 # ---------------------------------------------------------------------------
 
 def _speaker_names(content: str) -> list[str]:
-    """Parse the frontmatter's `speakers:` list and return the `name` values,
-    in order -- used to make assertions independent of yaml.dump's exact
-    formatting/quoting/key-ordering choices."""
+    """Return the frontmatter `speakers:` names in order, independent of
+    yaml.dump formatting."""
     _prefix, raw, _body = content.split("---", 2)
     frontmatter = yaml.safe_load(raw)
     return [e["name"] for e in frontmatter["speakers"]]
 
 
 def test_rewrite_frontmatter_speakers_no_prefix_collision():
-    """A rename of 'Dan' must not corrupt an unrelated 'Dan Smith' entry --
-    the old regex (`- name: Dan` with no end anchor) matched as a prefix."""
+    """A rename of 'Dan' must not corrupt an unrelated 'Dan Smith' entry."""
     content = (
         "---\nspeakers:\n- name: Dan\n- name: Dan Smith\n---\n\n"
         "**Dan** *(00:00)*: hi\n**Dan Smith** *(00:05)*: hello\n"
@@ -143,9 +141,8 @@ def test_rewrite_frontmatter_speakers_no_prefix_collision():
 
 
 def test_rewrite_frontmatter_speakers_quoted_name_renamed():
-    """A name that was previously yaml.dump-quoted (e.g. because it contains
-    an apostrophe) must still be matched and renamed -- the old unquoted
-    regex pattern never matched this and silently left it stale."""
+    """A yaml.dump-quoted name (e.g. containing an apostrophe) is still
+    matched and renamed."""
     content = "---\nspeakers:\n- name: 'O''Brien'\n---\n\n**O'Brien** *(00:00)*: hi\n"
     result = rewrite_frontmatter_speakers(content, {"O'Brien": "Sean"})
     assert _speaker_names(result) == ["Sean"]

@@ -285,18 +285,10 @@ def rebuild_campaign(slug: str, client: LLMClient,
     """Redrive a campaign from scratch: re-summarize every session transcript
     and fold them all into a freshly-reset journal, in campaign order.
 
-    This is a lot of LLM calls (two per session — one summarize, one fold) —
-    callers are expected to have already gotten explicit confirmation from
-    the user before invoking this (the CLI requires ``--yes`` or an
-    interactive confirm; the web route requires a confirmed POST).
-
-    A transcript stem with no ``<stem>.md`` on disk is skipped (recorded in
-    ``RebuildResult.skipped``) rather than aborting the whole redrive — same
-    resilience as a single missing summary already gets in the normal fold
-    path. An LLM failure summarizing one session is likewise skipped so one
-    bad session doesn't waste every other already-completed call; a session
-    is only folded into the journal if it was just successfully
-    (re-)summarized.
+    Two LLM calls per session, so callers must get the user's confirmation
+    first. A missing transcript or a failed summary skips that session
+    (``RebuildResult.skipped``) instead of aborting; only freshly summarized
+    sessions are folded.
 
     Raises:
         ValueError: invalid slug.

@@ -1,29 +1,14 @@
-"""In-process job queue for background transcription and LLM post-processing.
+"""In-process job queue for transcription, LLM, enrollment, journal, and live jobs.
 
-Design:
-- Jobs are stored in-memory (dict keyed by UUID).  Single-user tool — no
-  persistence needed between restarts.
-- One background asyncio task drains a FIFO queue.  Each job runs
-  process_file() (transcription) or the LLM pipeline (refine/summarize) in a
-  thread via asyncio.to_thread() so the event loop stays responsive.
-- Thread safety: the module-level _model / _pipeline globals in transcriber /
-  diarizer are NOT thread-safe.  We run exactly ONE job at a time (max_workers=1
-  thread pool semantics).  Future: use ProcessPoolExecutor for CPU multi-worker
-  web deployments, same guard logic as Phase 10.
-- Progress: process_file() uses tqdm.write() for status messages.  We
-  monkey-patch tqdm.write per-job so messages are captured into job.log_lines
-  and streamed to the browser via Server-Sent Events.
-- LLM jobs: sys.stderr is redirected per-job so Ollama's streaming status
-  messages ("Connecting…", "Generating: ·····") are captured the same way.
-  Safe because the queue is single-worker — only one job runs at a time.
-- Enroll jobs (JOB_ENROLL): the speaker-enrollment wizard's slow half (WAV
-  conversion + pyannote embedding extraction, formerly synchronous in the
-  HTTP request) runs here too. The wizard route applies renames to the
-  transcript synchronously, then enqueues a JOB_ENROLL job carrying only the
-  transcript path and the validated rename groups; the runner re-reads the
-  transcript's _diar.json sidecar for segments/input_path/campaign. Progress
-  is pushed via a plain callback straight into job.log_lines (no tqdm/stderr
-  capture needed — enroll_profiles() calls back directly).
+- Jobs live in memory (dict keyed by UUID); nothing persists across restarts.
+- One asyncio task drains a FIFO queue and runs each job in a thread via
+  asyncio.to_thread(), so the event loop stays responsive.
+- Exactly one job runs at a time: the transcriber/diarizer/embedding model
+  globals are not thread-safe.
+- Progress: tqdm.write is patched per job to capture status lines into
+  job.log_lines for SSE. LLM jobs redirect sys.stderr the same way (safe only
+  because a single job runs at a time).
+- Enroll jobs report progress through a plain callback into job.log_lines.
 """
 from __future__ import annotations
 
@@ -54,10 +39,8 @@ JOB_TRANSCRIPTION = "transcription"
 JOB_REFINE = "refine"
 JOB_SUMMARIZE = "summarize"
 JOB_ENROLL = "enroll"
-# Phase 2 (live local recording): an open-ended job that holds the queue's
-# single worker slot for the duration of a local capture session, near-
-# real-time transcribing committed chunks off LocalCaptureManager's live
-# sink. See web/live_transcribe.py.
+# Open-ended job that holds the single worker slot for a whole local capture
+# session, transcribing chunks from LocalCaptureManager's live sink.
 JOB_LIVE = "live"
 JOB_CAMPAIGN_JOURNAL = "campaign_journal"
 
@@ -65,13 +48,9 @@ _MAX_LIVE_LINES = 2000  # mirrors _MAX_LOG_LINES below -- bound a very long sess
 
 _EXCERPT_SECONDS = 12  # length of each speaker audio clip
 
-# R13: user-facing error strings per job type. job.error is rendered directly
-# into the job-detail page and SSE stream, and raw exception text routinely
-# carries filesystem paths (WAV-conversion failures, ffmpeg command lines,
-# HF cache paths) — so EVERY failure path maps to one of these generic
-# messages and the real exception is logged server-side with its traceback
-# (see _set_job_error). _run_enroll_job already followed this policy; this
-# extends it to transcription and LLM jobs.
+# job.error renders into HTML and SSE, and exception text often contains
+# filesystem paths, so every failure maps to one of these generic messages
+# and the real exception is logged (see _set_job_error).
 _GENERIC_JOB_ERRORS = {
     JOB_TRANSCRIPTION: "Transcription failed — see server logs",
     JOB_REFINE: "Post-processing failed — see server logs",
@@ -81,11 +60,9 @@ _GENERIC_JOB_ERRORS = {
 
 
 def _set_job_error(job: "Job", exc: BaseException) -> None:
-    """Record a generic, path-free error message on *job* and log the real
-    exception (with traceback) server-side (R13).
+    """Set a generic, path-free error on *job* and log the real exception.
 
-    The literal ``"Cancelled"`` string is preserved for cancellation — other
-    code and the job-detail template check for it.
+    ``"Cancelled"`` is kept verbatim; the job-detail template checks for it.
     """
     if isinstance(exc, InterruptedError):
         job.error = "Cancelled"
@@ -97,21 +74,15 @@ def _set_job_error(job: "Job", exc: BaseException) -> None:
         return
     job.error = _GENERIC_JOB_ERRORS.get(job.job_type, "Job failed — see server logs")
 
-# R14: unbounded memory growth guards. _jobs is an in-memory dict that is
-# never otherwise pruned, and a single verbose job (e.g. an LLM job whose
-# stderr capture runs long) can append log lines forever -- both caps are
-# constants rather than config keys since they're internal resource limits,
-# not something a user needs to tune.
+# In-memory growth caps. Internal resource limits, not user config.
 _MAX_RETAINED_JOBS = 50   # cap on retained COMPLETED/FAILED jobs (never PENDING/RUNNING)
 _MAX_LOG_LINES = 1000     # cap on Job.log_lines, oldest lines dropped first
 
 
 def _append_capped(items: list, item: Any, cap: int) -> int:
-    """Append ``item`` to ``items``, trimming the oldest entries once ``cap``
-    is exceeded. Returns how many entries this call dropped (0 if none).
+    """Append ``item``, trimming the oldest entries past ``cap``.
 
-    Shared by ``Job.append_log()``/``Job.append_live_line()`` — same
-    bounded-memory pattern, different lists/caps.
+    Returns how many entries were dropped.
     """
     items.append(item)
     overflow = len(items) - cap
@@ -122,15 +93,11 @@ def _append_capped(items: list, item: Any, cap: int) -> int:
 
 
 def resume_slice(items: list, dropped: int, last_idx: int) -> tuple[list, int]:
-    """Translate an absolute produced-so-far count (``last_idx``) into the
-    slice of ``items`` still retained after a ``_append_capped()`` trim, and
-    the updated absolute count to pass back in on the next call.
+    """Map an absolute produced-so-far index onto the entries still retained.
 
-    Shared by every SSE stream that resumes against a capped, append-only
-    job list (``job.log_lines`` in ``routes/transcribe.py``'s job-log
-    stream, ``job.live_lines`` in ``routes/record.py``'s live-transcript
-    stream) — a client that fell more than ``cap`` lines behind just
-    resumes from whatever's still retained instead of desyncing.
+    Returns the retained slice from ``last_idx`` on and the new absolute index.
+    Used by the SSE streams that resume against capped job lists; a client that
+    fell more than ``cap`` behind resumes from the oldest retained entry.
     """
     retained_start = dropped
     new_items = items[max(last_idx, retained_start) - retained_start:]
@@ -170,12 +137,10 @@ class _StderrCapture:
 
 
 def _write_enrollment_sidecar(job: "Job", output_path: "Path") -> None:  # type: ignore[name-defined]
-    """Persist enrollment data alongside the transcript as <stem>_diar.json.
+    """Write <stem>_diar.json next to the transcript.
 
-    Stores the diarization segments and source audio path so the enrollment
-    wizard can function after a server restart without requiring the in-memory
-    job to still exist.  Failures are silently swallowed — the transcript is
-    already written and enrollment can still fall back to the in-memory job.
+    Lets the enrollment wizard work after a restart. Failures are swallowed:
+    the transcript is already written.
     """
     import json as _json
     from pathlib import Path as _Path
@@ -192,10 +157,7 @@ def _write_enrollment_sidecar(job: "Job", output_path: "Path") -> None:  # type:
                 {"start": s.start, "end": s.end, "speaker": s.speaker}
                 for s in job.diarization_segments
             ],
-            # F7: authoritative raw_label -> display_name map. Present on
-            # every new transcript; absent on sidecars written before this
-            # key existed, which is exactly the legacy fallback
-            # resolve_current_names() handles.
+            # Authoritative raw label -> display name map; absent in old sidecars.
             "speaker_map": dict(job.speaker_map) if job.speaker_map else {},
         }
         sidecar_path = out.with_name(out.stem + "_diar.json")
@@ -207,21 +169,12 @@ def _write_enrollment_sidecar(job: "Job", output_path: "Path") -> None:  # type:
 def _move_upload_to_output(input_path: str, output_path: "Path") -> str:  # type: ignore[name-defined]
     """Move a temp web-upload file next to its finished transcript.
 
-    F5 fix: web uploads land in a ``wisper_upload_*`` NamedTemporaryFile in the
-    OS tempdir (renamed to a friendly ``<original_stem><suffix>`` name by
-    ``JobQueue.submit`` before the job even starts — see ``Job.is_web_upload``
-    for why the *original* prefix is captured at submit time rather than
-    re-derived from the current basename here).  That file is never cleaned
-    up when a job completes, and the startup orphan sweep only recognises the
-    unrenamed ``wisper_upload_*`` prefix, so it leaks until a lucky restart
-    happens to catch it mid-flight.  Moving it next to the transcript makes it
-    durable (the enrollment sidecar's ``input_path`` then survives restarts)
-    and removes it from the tempdir, closing the leak.
+    The upload was renamed to ``<original_stem><suffix>`` in the tempdir at
+    submit time, so the startup sweep can't reclaim it. Moving it makes the
+    sidecar's ``input_path`` durable and empties the tempdir.
 
-    Returns the new durable path as a string, or the original ``input_path``
-    unchanged if the source is missing or the move fails for any reason —
-    callers should treat that as "enrollment audio may be unavailable" rather
-    than a hard failure, since the transcript itself is already written.
+    Returns the new path, or ``input_path`` unchanged if the move fails
+    (enrollment audio may then be unavailable; the transcript is unaffected).
     """
     import shutil
     from pathlib import Path as _Path
@@ -249,13 +202,10 @@ def _move_upload_to_output(input_path: str, output_path: "Path") -> str:  # type
 
 
 def _delete_temp_upload(job: "Job") -> None:  # type: ignore[name-defined]
-    """Delete the job's temp web-upload file on failure/cancel.
+    """Delete the job's temp web upload after failure or cancellation.
 
-    Only ever acts on files ``Job.is_web_upload`` marks as originating from a
-    ``wisper_upload_*`` temp file — recording-sourced or other durable inputs
-    are never touched.  A failed/cancelled job never reaches
-    ``_move_upload_to_output``, so the temp file would otherwise sit in the
-    tempdir leaking disk until the next server restart.
+    Acts only when ``Job.is_web_upload`` is set, so recording audio and other
+    durable inputs are never touched.
     """
     if not job.is_web_upload:
         return
@@ -270,14 +220,11 @@ def _delete_temp_upload(job: "Job") -> None:  # type: ignore[name-defined]
 
 
 def _longest_aligned_segment(aligned_segments: list, label: str) -> Optional[tuple]:
-    """Return (start, duration, text) of the LONGEST aligned segment for a raw
-    label (by ``end - start``), or None if the label has no segments.
+    """Return (start, duration, text) of the label's longest aligned segment, or None.
 
-    Used as the fallback excerpt window when no diarization turn is available
-    for a label -- the pre-F12 behavior. A short interjection ("mm-hmm", a
-    cross-talk aside) is often misattributed and plays mostly someone else's
-    voice, while the longest block for a label is far more likely to actually
-    be that speaker talking.
+    Fallback excerpt window when no diarization turn is available. The longest
+    block is far more likely to be the speaker than a short, often
+    misattributed interjection.
     """
     best = None
     best_duration = -1.0
@@ -296,40 +243,19 @@ def _longest_aligned_segment(aligned_segments: list, label: str) -> Optional[tup
 def _extract_speaker_excerpts(job: "Job", output_path: "Path",  # type: ignore[name-defined]
                               aligned_segments: list | None = None,
                               diarization_segments: list | None = None) -> None:
-    """Extract a short audio clip per speaker from the transcribed file.
+    """Save a short clip + text per raw speaker label for the enrollment wizard.
 
-    F12: for each *raw* speaker label (e.g. ``SPEAKER_00``), the clip window
-    is chosen from the speaker's longest **solo diarization turn** --
-    ``speaker_manager._select_embedding_segments(diarization_segments, label,
-    max_count=1)``, the same solo-preferred / 2-20s-band / graceful-fallback
-    policy F10b uses to pick embedding source audio, so the clip is (as much
-    as diarization allows) audio of ONLY that speaker. The clip duration is
-    strictly clamped to ``min(_EXCERPT_SECONDS, turn length)`` -- no padding
-    floor when the turn is shorter than 12s: a short clip of only the target
-    speaker beats 12s that runs into someone else's turn (decision
-    2026-07-13). The persisted ``.txt`` snippet is built from ALL of that
-    label's aligned word-runs (post-F8, a whisper segment can split into
-    several word-run AlignedSegments) that overlap the clip window, joined in
-    time order -- so the displayed text matches exactly what the listener
-    hears, instead of one word-run that can be a mid-sentence fragment.
+    The clip comes from the label's longest solo diarization turn (same
+    selection as embedding extraction) and is clamped to
+    ``min(_EXCERPT_SECONDS, turn length)``, so it never runs into another
+    speaker's turn. The ``.txt`` holds every aligned word run overlapping the
+    clip, in time order, so the text matches what is audible.
 
-    A label with no diarization segments (or a `diarization_segments` list
-    without any turn for that label -- `_select_embedding_segments` raises
-    `ValueError`) falls back to the pre-F12 behavior: the clip is cut at the
-    label's longest ALIGNED segment, with the full fixed `_EXCERPT_SECONDS`
-    window and that single segment's text. This keeps the function robust for
-    legacy callers/tests that only pass `aligned_segments`, and means one
-    label's lookup failure never affects any other label.
+    A label with no usable diarization turn falls back to its longest aligned
+    segment with the full window; one label's fallback never affects another.
 
-    Clips are saved alongside the transcript as
-    ``<stem>_excerpt_<raw_label>.mp3`` so the enrollment wizard -- which keys
-    off the raw labels stored in ``_diar.json`` -- can find them.
-
-    Earlier versions parsed the rendered markdown and so keyed files by the
-    *display* name ("Unknown Speaker 1", etc.), which never matched the
-    wizard lookup. The wizard route has a backfill for those legacy files.
-
-    Failures are silently swallowed — playback is a nice-to-have, not critical.
+    Files are ``<stem>_excerpt_<raw_label>.mp3``/``.txt`` next to the
+    transcript. Failures are swallowed; playback is optional.
     """
     import re
     from pathlib import Path as _Path
@@ -427,11 +353,8 @@ class Job:
     output_path: Optional[str] = None
     error: Optional[str] = None
     log_lines: list[str] = field(default_factory=list)
-    # R14: total count of log lines ever dropped from the front of
-    # log_lines once _MAX_LOG_LINES was exceeded. The SSE stream
-    # (job_stream in routes/transcribe.py) uses this to keep its
-    # absolute line-index bookkeeping correct even after older lines
-    # have been trimmed away -- see append_log().
+    # Lines trimmed from the front of log_lines; lets the SSE stream keep
+    # absolute indices valid (see resume_slice).
     log_lines_dropped: int = 0
     progress: Optional[str] = None
     # Parallel mode: per-channel progress strings keyed by channel name
@@ -441,11 +364,7 @@ class Job:
     diarization_labels: list[str] = field(default_factory=list)
     # Full diarization segments retained for post-job enrollment (enroll_submit uses these)
     diarization_segments: list = field(default_factory=list)
-    # F7: authoritative raw_label -> display_name map the formatter used when
-    # writing the transcript (pipeline.process_file()'s speaker_map local).
-    # Persisted into the _diar.json sidecar so the enrollment wizard can
-    # resolve current names without reconstructing them from rendered
-    # markdown timestamps -- see enroll_shared.resolve_current_names.
+    # Raw label -> display name map the formatter used; persisted to _diar.json.
     speaker_map: dict[str, str] = field(default_factory=dict)
     # speaker_label -> path to a short audio excerpt (for enrollment wizard)
     speaker_excerpts: dict[str, str] = field(default_factory=dict)
@@ -460,54 +379,33 @@ class Job:
     llm_transcript_path: Optional[str] = None
     # For summarize jobs: path to the generated .summary.md file
     summary_path: Optional[str] = None
-    # True when input_path originated from a wisper_upload_* temp file (set by
-    # JobQueue.submit from the *original* basename before the friendly-name
-    # rename below strips that prefix).  Drives the F5 move-to-output and
-    # failure-path cleanup — recording-sourced or other durable inputs must
-    # never be moved or deleted.
+    # True when input_path came from a wisper_upload_* temp file. Captured
+    # from the original basename at submit, before the friendly-name rename.
+    # Only these files are ever moved or deleted by the job.
     is_web_upload: bool = False
-    # For JOB_ENROLL jobs: path to the transcript markdown.  The runner
-    # re-reads the transcript's <stem>_diar.json sidecar for segments,
-    # input_path, and campaign at run time (restart-irrelevant since the
-    # queue is in-memory anyway, but it keeps this payload small and avoids
-    # serialising DiarizationSegment objects onto the job).
+    # JOB_ENROLL: transcript path. The runner re-reads its _diar.json sidecar
+    # rather than carrying segments on the job.
     enroll_md_path: Optional[str] = None
-    # For JOB_ENROLL jobs: the validated rename groups from apply_renames()
-    # -- display_name -> [raw_label, ...] -- carried on the job because they
-    # came from the form and can't be reconstructed from the sidecar alone.
+    # JOB_ENROLL: validated rename groups (display_name -> [raw_label, ...]).
     enroll_groups: dict[str, list[str]] = field(default_factory=dict)
     # For JOB_ENROLL jobs: device to run embedding extraction on.
     enroll_device: str = "cpu"
-    # R6: JOB_ENROLL flavor. "wizard" is the original post-transcription
-    # wizard job (sidecar-driven); "standalone" is the /speakers/enroll
-    # upload flow; "recording" enrolls from a Discord recording's per-user
-    # audio dir. The latter two used to run minutes of ML work synchronously
-    # inside their route handlers, blocking the event loop and mutating the
-    # module-level ML caches concurrently with the worker thread.
+    # JOB_ENROLL mode: "wizard" (post-transcription wizard), "standalone"
+    # (/speakers/enroll upload), or "recording" (Discord per-user track).
     enroll_mode: str = "wizard"
-    # R6: mode-specific parameters for standalone/recording enroll jobs
-    # (profile key, display name, etc. — all plain strings).
+    # Mode-specific string parameters for standalone/recording enroll jobs.
     enroll_params: dict[str, Any] = field(default_factory=dict)
-    # For JOB_LIVE jobs (Phase 2): the Recording.id this session is
-    # transcribing. `find_live_job_for_recording()` scans for a RUNNING
-    # JOB_LIVE job with this set rather than persisting the mapping onto
-    # Recording itself -- the mapping is meaningless after a restart since
-    # the (in-memory) queue is empty then anyway.
+    # JOB_LIVE: the Recording.id being transcribed. Looked up by scanning
+    # jobs (find_live_job_for_recording) rather than stored on the Recording.
     live_recording_id: Optional[str] = None
-    # The LiveRingBuffer instance LocalCaptureManager's tick thread feeds
-    # via `set_live_sink()`; never serialised, just a shared in-memory
-    # handoff between the capture manager and this job's worker thread.
+    # Fed by LocalCaptureManager's tick thread via set_live_sink().
     live_ring_buffer: Any = None
-    # Set by JobQueue.stop_live() to end the live loop -- distinct from
-    # `_cancel_event`: ending a live session when the user clicks Stop is
-    # the job's NORMAL termination path (-> COMPLETED), not a cancellation
-    # (-> FAILED, error="Cancelled").
+    # Set by stop_live(). Ending a session is normal completion, distinct from
+    # _cancel_event (which fails the job as "Cancelled").
     live_stop_event: threading.Event = field(
         default_factory=threading.Event, repr=False, compare=False
     )
-    # Path to recordings/<id>/live_transcript.md -- the crash-safety/
-    # post-session-review copy; job.live_lines is what the SSE stream reads
-    # from while the session is active.
+    # recordings/<id>/live_transcript.md; SSE reads job.live_lines instead.
     live_output_path: Optional[str] = None
     # Committed lines so far, as plain dicts (LiveLine.to_dict()) so the SSE
     # route can json.dumps them directly -- see GET /recordings/{id}/live.
@@ -515,16 +413,9 @@ class Job:
     live_lines_dropped: int = 0  # mirrors log_lines_dropped -- see append_live_line()
 
     def append_log(self, line: str) -> None:
-        """Append a log line, trimming the oldest lines once _MAX_LOG_LINES
-        is exceeded (R14).
+        """Append a log line, trimming the oldest past _MAX_LOG_LINES.
 
-        Every call site that used to do ``job.log_lines.append(...)``
-        directly now goes through this method so a single verbose job (e.g.
-        a large LLM stderr capture) can't grow log_lines without bound.
-        Trimmed lines are counted in ``log_lines_dropped`` rather than just
-        discarded silently, so the SSE stream in routes/transcribe.py can
-        still translate its absolute line index into a valid slice of
-        whatever remains.
+        Drops are counted in ``log_lines_dropped`` so SSE indices stay valid.
         """
         self.log_lines_dropped += _append_capped(self.log_lines, line, _MAX_LOG_LINES)
 
@@ -588,24 +479,16 @@ class JobQueue:
         on_error: Optional[Callable[["Job"], None]] = None,
         **kwargs: Any,
     ) -> Job:
-        """Enqueue a transcription job.  Returns the Job immediately.
+        """Enqueue a transcription job and return it.
 
-        If ``original_stem`` is provided in kwargs it is used as the job's
-        human-readable name and to rename the temp upload file so the output
-        .md inherits the original filename.  It is stripped from kwargs before
-        being forwarded to process_file.
+        Recognized kwargs (stripped before forwarding to process_file):
+        ``original_stem`` names the job and renames the temp upload so the
+        transcript inherits the original filename; ``post_refine`` /
+        ``post_summarize`` chain LLM post-processing.
 
-        ``post_refine`` and ``post_summarize`` booleans trigger LLM
-        post-processing after transcription completes; they are also stripped
-        from kwargs before forwarding to process_file.
-
-        ``on_complete`` is an optional callback invoked after the job
-        transitions to COMPLETED. ``on_error`` is the symmetric counterpart,
-        invoked after the job transitions to FAILED (including cancellation)
-        -- without it, a caller with external state keyed off "this job is
-        running" (e.g. a Recording's status) has no way to hear about a
-        failure and can be left stuck showing a stale in-progress state
-        forever. Both run in the worker thread.
+        ``on_complete`` / ``on_error`` run in the worker thread when the job
+        completes or fails (including cancellation), so callers with external
+        state (e.g. a Recording's status) can update it.
         """
         from pathlib import Path
         import shutil
@@ -617,10 +500,8 @@ class JobQueue:
         if not original_stem:
             original_stem = Path(input_path).stem
 
-        # Capture the web-upload marker from the *original* basename before
-        # the friendly-name rename below strips the "wisper_upload_" prefix
-        # (F5: the renamed file still lives in the tempdir and must still be
-        # recognised as a temp upload at job-completion/failure time).
+        # Capture the web-upload marker before the rename strips the
+        # "wisper_upload_" prefix; the renamed file is still a temp upload.
         is_web_upload = Path(input_path).name.startswith("wisper_upload_")
 
         # Rename temp file so process_file writes <stem>.md instead of a UUID
@@ -682,18 +563,10 @@ class JobQueue:
         groups: dict[str, list[str]],
         device: str = "cpu",
     ) -> Job:
-        """Enqueue the slow half of a speaker-enrollment wizard submission.
+        """Enqueue embedding extraction for a wizard submission.
 
-        The fast half (renaming the transcript body) has already happened
-        synchronously in the route via ``enroll_shared.apply_renames()`` --
-        this job only runs WAV conversion + embedding extraction
-        (``enroll_shared.enroll_profiles()``), which is what used to block
-        the browser tab for 30-120s.
-
-        ``output_path`` is set to ``md_path`` immediately (not just on
-        completion, unlike the LLM jobs) so the job detail page's "View
-        transcript" link works even while the job is still running -- the
-        rename already happened, only enrollment is pending.
+        Renames were already applied in the route (``apply_renames()``).
+        ``output_path`` is set now so "View transcript" works while the job runs.
         """
         job = Job(
             id=str(uuid.uuid4()),
@@ -722,22 +595,11 @@ class JobQueue:
         notes: str = "",
         update: bool = False,
     ) -> Job:
-        """Enqueue a standalone speaker enrollment from an uploaded file (R6).
+        """Enqueue a standalone enrollment from an uploaded file.
 
-        The /speakers/enroll route used to run WAV conversion, diarization,
-        and embedding extraction synchronously inside the request — blocking
-        the event loop for minutes and touching the module-level ML caches
-        concurrently with any running job's worker thread. It now saves the
-        upload and hands off here.
-
-        Temp-file ownership moves to the job with it (R9-1 interplay): the
-        ``wisper_enroll_*`` upload is renamed to ``wisper_enrollsrc_<id>``
-        at submit time — the same immediate-rename pattern as ``submit()``
-        (F5) — so the startup sweep's ``wisper_enroll_*`` glob can never
-        match a file a pending job needs. The sweep also clears
-        ``wisper_enrollsrc_*`` orphans, which is safe because it only runs
-        at startup, when the (in-memory) queue is necessarily empty.
-        ``_run_standalone_enroll`` deletes the file in a ``finally``.
+        The ``wisper_enroll_*`` upload is renamed to ``wisper_enrollsrc_<id>``
+        now so the startup sweep's ``wisper_enroll_*`` glob never matches a file
+        a pending job needs. ``_run_standalone_enroll`` deletes it in a ``finally``.
         """
         from pathlib import Path
         import shutil
@@ -779,14 +641,10 @@ class JobQueue:
         profile_key: str,
         display_name: str,
     ) -> Job:
-        """Enqueue enrollment of an unbound speaker from a Discord recording's
-        per-user audio directory (R6 — was synchronous pydub decode +
-        embedding extraction inside the /recordings/{id}/enroll route).
+        """Enqueue enrollment of an unbound Discord speaker from their per-user track.
 
-        The per-user audio dir is durable recording storage — never deleted
-        by the job. On success the runner also updates the recording's
-        speaker bindings and campaign membership (the state changes the
-        route used to apply inline after the synchronous enroll).
+        The recording's audio is never deleted. On success the runner also binds
+        the speaker in the recording and its campaign.
         """
         job = Job(
             id=str(uuid.uuid4()),
@@ -820,27 +678,18 @@ class JobQueue:
         mic_label: str = "You",
         noise_floor: Optional[float] = None,
     ) -> Job:
-        """Enqueue a JOB_LIVE job for a just-started local capture session
-        (Phase 2). Open-ended -- runs until `stop_live()` is called, holding
-        the queue's single worker slot for the whole session (consistent
-        with the one-job-at-a-time invariant; refine/summarize/enroll/
-        transcription jobs queue behind it, same as any other job).
+        """Enqueue a JOB_LIVE job for a just-started local capture session.
 
-        `mic_label` (Phase 3, "this is me") is the display name used for
-        mic-dominant lines instead of the generic "You" -- purely cosmetic,
-        set by the caller from an enrolled profile's `display_name` when
-        the user picks one on the Record page.
+        Runs until ``stop_live()``, holding the only worker slot for the whole
+        session.
 
-        `noise_floor` (defaults to `live_transcribe.NOISE_FLOOR_RMS` when
-        `None`) seeds `job.kwargs["noise_floor"]` -- unlike the other
-        params above, this one is *live*-mutable for the running job:
-        `set_live_noise_floor()` updates the same dict key, and
-        `_run_live_job` wires a getter that reads it back out fresh on
-        every chunk (see `run_live_loop`'s `get_noise_floor` docstring).
+        ``mic_label`` replaces "You" on mic-dominant lines ("This is me").
+        ``noise_floor`` (default ``NOISE_FLOOR_RMS``) seeds
+        ``job.kwargs["noise_floor"]``, which ``set_live_noise_floor()`` can change
+        while the job runs; the loop re-reads it every chunk.
 
-        The caller is responsible for wiring the returned job's
-        `live_ring_buffer.push` onto `LocalCaptureManager.set_live_sink()`
-        -- this method only creates the buffer and queues the job.
+        The caller wires ``job.live_ring_buffer.push`` onto
+        ``LocalCaptureManager.set_live_sink()``.
         """
         from wisper_transcribe.web.live_transcribe import NOISE_FLOOR_RMS, LiveRingBuffer
 
@@ -875,14 +724,10 @@ class JobQueue:
         fold_all: bool = False,
         rebuild: bool = False,
     ) -> Job:
-        """Enqueue a rolling-campaign-journal job for a campaign slug.
+        """Enqueue a rolling-journal job for a campaign.
 
-        `rebuild=True` redrives the whole campaign (re-summarize every
-        session transcript + rebuild the journal from scratch) instead of
-        folding in the next/all pending session(s) — mutually exclusive
-        with `session_stem`/`fold_all` at the route layer, which is
-        responsible for getting the user's confirmation first (this is a
-        lot of LLM calls).
+        ``rebuild=True`` re-summarizes every session and rebuilds the journal
+        from scratch. The route must get the user's confirmation first.
         """
         job = Job(
             id=str(uuid.uuid4()),
@@ -928,14 +773,7 @@ class JobQueue:
         return self._jobs.get(job_id)
 
     def list_all(self) -> list[Job]:
-        # R32-9: sort newest-first by created_at; ties (two jobs submitted
-        # within the same clock tick share a `datetime.now()` value) break by
-        # insertion order, most-recently-submitted first. `self._jobs` is a
-        # plain dict (insertion-ordered since Python 3.7), so its enumerate
-        # index is used as an explicit tiebreaker in the sort key instead of
-        # the previous "reverse the list, then stable-sort with reverse=True"
-        # trick, which relied on sort-stability semantics to get the same
-        # result less legibly.
+        # Newest first; ties (same created_at) break by insertion order.
         indexed = enumerate(self._jobs.values())
         return [
             job
@@ -949,19 +787,12 @@ class JobQueue:
         return sum(1 for j in self._jobs.values() if j.status in (PENDING, RUNNING))
 
     def stop_all_live(self) -> None:
-        """Signal every active JOB_LIVE job to end (Phase 2).
+        """Signal every active JOB_LIVE job to end.
 
-        `job_queue.stop()` only cancels the asyncio task awaiting
-        `asyncio.to_thread(self._run_job, job)` -- cancelling that awaiting
-        task does NOT stop the underlying executor thread once it's
-        actually running (a `concurrent.futures.Future` that's already
-        executing can't be cancelled), so `run_live_loop`'s blocking
-        `while not stop_event.is_set()` loop would otherwise keep running
-        after shutdown "completes": server restart/--reload can hang
-        (ThreadPoolExecutor joins non-daemon worker threads at interpreter
-        exit) and leaks a loaded Whisper model per incident. Call this
-        BEFORE `job_queue.stop()` (see app.py's lifespan) so the thread
-        notices `live_stop_event` and exits on its own.
+        Call before ``job_queue.stop()``: cancelling the task awaiting
+        ``asyncio.to_thread`` doesn't stop a thread that is already running, so
+        an unsignalled live loop would block interpreter exit and keep its
+        Whisper model loaded.
         """
         for job in self._jobs.values():
             if job.job_type == JOB_LIVE and job.status in (PENDING, RUNNING):
@@ -984,14 +815,9 @@ class JobQueue:
         return False
 
     def _prune_finished_jobs(self) -> None:
-        """Cap retained terminal (COMPLETED/FAILED) jobs at
-        _MAX_RETAINED_JOBS (R14), dropping the oldest first.
+        """Keep at most _MAX_RETAINED_JOBS COMPLETED/FAILED jobs, dropping the oldest.
 
-        PENDING/RUNNING jobs are never candidates -- only jobs that have
-        already reached a terminal state count against the cap. A pruned
-        job simply disappears from the dashboard/jobs list, which is
-        acceptable per the review finding (this is a single-user, in-memory
-        tool with no persistence expectation between restarts anyway).
+        PENDING/RUNNING jobs are never pruned.
         """
         terminal = [j for j in self._jobs.values() if j.status in (COMPLETED, FAILED)]
         if len(terminal) <= _MAX_RETAINED_JOBS:
@@ -1004,13 +830,10 @@ class JobQueue:
             self._on_error_callbacks.pop(job.id, None)
 
     def _run_on_error_callback(self, job: "Job") -> None:
-        """Invoke and discard the job's `on_error` callback, if any.
+        """Invoke and discard the job's ``on_error`` callback, if any.
 
-        Also discards any `on_complete` registered for this job -- it will
-        never fire now that the job is terminal-failed, so leaving it
-        around would just leak until the next `_prune_finished_jobs` pass.
-        Best-effort like `on_complete`: a callback failure must not mask
-        the job's own error.
+        Also discards ``on_complete``, which can no longer fire. A callback
+        failure never masks the job's own error.
         """
         self._on_complete_callbacks.pop(job.id, None)
         cb = self._on_error_callbacks.pop(job.id, None)
@@ -1032,19 +855,13 @@ class JobQueue:
                 self._queue.task_done()
                 continue
             if job.status != PENDING:
-                # Job was cancelled (or otherwise moved on) while it sat in
-                # the asyncio queue -- do not revive it (R3).
+                # Cancelled while queued; don't revive it.
                 self._queue.task_done()
                 continue
             if job.job_type == JOB_LIVE and job.live_stop_event.is_set():
-                # The session was stopped (recording ended) before this job
-                # ever reached the front of the single-worker queue -- e.g. a
-                # long-running LLM/journal job was occupying the worker for
-                # the whole session. run_live_loop's `while not
-                # stop_event.is_set()` would exit on its first check, so
-                # running it now would just be a zero-iteration no-op that
-                # produces an empty live_transcript.md under a misleadingly
-                # clean COMPLETED status. Surface that explicitly instead.
+                # The session ended while this job waited behind another. The
+                # live loop would exit immediately and report an empty
+                # COMPLETED run, so fail it explicitly instead.
                 job.status = FAILED
                 job.error = "Live transcript never started -- the job queue was busy for the whole session"
                 job.finished_at = datetime.now()
@@ -1056,17 +873,12 @@ class JobQueue:
                 await asyncio.to_thread(self._run_job, job)
             except Exception as exc:
                 job.status = FAILED
-                # R13: never put raw exception text (paths, ffmpeg command
-                # lines) into job.error — it renders into HTML/SSE. The job
-                # runner usually already set a generic message before
-                # re-raising; keep it if so.
+                # Keep the runner's generic message; never use exception text.
                 if not job.error:
                     _set_job_error(job, exc)
                 job.finished_at = datetime.now()
             finally:
-                # R14: runs after every job that leaves RUNNING, however it
-                # got there (success, failure inside _run_job, or an
-                # uncaught exception here) -- exactly once per processed job.
+                # Runs exactly once per processed job, however it ended.
                 self._prune_finished_jobs()
                 self._queue.task_done()
 
@@ -1211,26 +1023,16 @@ class JobQueue:
             job.speaker_map = _result_store.get("speaker_map", {})
             job.output_path = str(output_path)
 
-            # F5: move the temp web upload next to the transcript so the
-            # enrollment sidecar's input_path is durable across restarts and
-            # the tempdir copy doesn't leak. Must happen before excerpt
-            # extraction and the sidecar write so both use the durable path.
-            #
-            # Only move it when there's diarization data: no segments means
-            # _write_enrollment_sidecar (below) never writes a _diar.json, so
-            # a moved copy would sit in the output dir with nothing recording
-            # its path -- an unreclaimable leak in exactly the spot F5 is
-            # fixing. With no enrollment wizard possible, just delete the temp
-            # file, same as the failure path.
+            # Move the temp upload next to the transcript (before excerpts and
+            # the sidecar, so both record the durable path). Without
+            # diarization data there's no sidecar to reference it, so delete
+            # it instead.
             if job.is_web_upload:
                 if job.diarization_segments:
                     job.input_path = _move_upload_to_output(job.input_path, output_path)
                 else:
                     _delete_temp_upload(job)
-                # Either way the temp-upload obligation is discharged: never
-                # let a later failure (e.g. in post-processing) fall into the
-                # except-block cleanup and delete what is now either the
-                # user's durable transcript-adjacent audio or already gone.
+                # Clear the flag so a later failure can't delete the durable copy.
                 job.is_web_upload = False
 
             _extract_speaker_excerpts(job, output_path,
@@ -1257,7 +1059,7 @@ class JobQueue:
             self._run_on_error_callback(job)
         except Exception as exc:
             job.status = FAILED
-            _set_job_error(job, exc)  # R13: generic message, real exc logged
+            _set_job_error(job, exc)
             _delete_temp_upload(job)
             self._run_on_error_callback(job)
             raise
@@ -1285,8 +1087,7 @@ class JobQueue:
                 do_summarize=job.post_summarize,
             )
         except Exception as exc:
-            # R13: log_lines render into the job page too — keep the line
-            # generic and put the real exception in the server log.
+            # log_lines render in the UI too: keep this line generic.
             log.error("Post-processing for job %s failed", job.id, exc_info=exc)
             job.append_log("Post-processing failed — see server logs")
         finally:
@@ -1310,23 +1111,17 @@ class JobQueue:
             job.status = COMPLETED
         except Exception as exc:
             job.status = FAILED
-            _set_job_error(job, exc)  # R13: generic message, real exc logged
+            _set_job_error(job, exc)
             raise
         finally:
             _sys.stderr = old_stderr
             job.finished_at = datetime.now()
 
     def _run_enroll_job(self, job: Job) -> None:
-        """Dispatch a JOB_ENROLL job to its mode-specific runner (R6).
+        """Dispatch a JOB_ENROLL job to its mode-specific runner.
 
-        All three runners share the enroll-job error policy: exceptions are
-        never re-raised after being recorded on ``job.error``. ``_worker()``
-        would otherwise handle the exception again, and exception text for
-        this job type can contain a filesystem path (e.g. a WAV-conversion
-        failure message) that the job detail page renders directly into
-        HTML. Per the security rules (never reflect paths/exception text
-        into a response), every failure path sets a generic message instead
-        and swallows the exception locally (logging it server-side).
+        Runners set a generic ``job.error`` and never re-raise: exception text
+        can contain paths, and the job page renders it into HTML.
         """
         if job.enroll_mode == "standalone":
             self._run_standalone_enroll(job)
@@ -1337,12 +1132,9 @@ class JobQueue:
         self._run_wizard_enroll(job)
 
     def _run_standalone_enroll(self, job: Job) -> None:
-        """Run a standalone /speakers/enroll upload job in a thread (R6).
+        """Run a standalone /speakers/enroll job.
 
-        Owns the renamed temp upload (``wisper_enrollsrc_*``): it is deleted
-        in the ``finally`` — success or failure — along with the converted
-        WAV, the cleanup that lived in the route's ``finally`` before the
-        hand-off (R9-1).
+        Deletes the ``wisper_enrollsrc_*`` upload and converted WAV in ``finally``.
         """
         from collections import defaultdict
         from pathlib import Path
@@ -1414,13 +1206,11 @@ class JobQueue:
             job.finished_at = datetime.now()
 
     def _run_recording_enroll(self, job: Job) -> None:
-        """Enroll an unbound Discord speaker from a recording dir (R6).
+        """Enroll an unbound Discord speaker from a recording's per-user track.
 
-        On success, applies the recording-state updates the route used to do
-        inline: drop the uid from ``unbound_speakers``, bind it in
-        ``discord_speakers``, and add/bind the profile in the recording's
-        campaign. Those follow-up updates are best-effort — a failure there
-        is logged but doesn't fail the (already successful) enrollment.
+        On success, removes the uid from ``unbound_speakers``, binds it in
+        ``discord_speakers``, and adds/binds the profile in the recording's
+        campaign. Those follow-ups are best-effort and never fail the job.
         """
         from pathlib import Path
 
@@ -1482,11 +1272,10 @@ class JobQueue:
         job.finished_at = datetime.now()
 
     def _run_wizard_enroll(self, job: Job) -> None:
-        """Run the slow half of a wizard submission (WAV convert + embedding
-        extraction) in a thread.
+        """Run embedding extraction for a wizard submission.
 
-        Mirrors ``_run_llm_job``'s status-transition structure, minus the
-        re-raise — see ``_run_enroll_job`` for the error policy.
+        Same status transitions as ``_run_llm_job`` without the re-raise; see
+        ``_run_enroll_job``.
         """
         from pathlib import Path
 
@@ -1537,24 +1326,15 @@ class JobQueue:
             job.finished_at = datetime.now()
 
     def _run_live_job(self, job: Job) -> None:
-        """Run a JOB_LIVE session's live-transcription loop in a thread.
+        """Run a live-transcription session until ``live_stop_event`` is set.
 
-        Open-ended -- `run_live_loop()` blocks here until
-        `job.live_stop_event` is set (via `stop_live()`, called by the
-        route that stops the local capture session), which is the job's
-        *normal* termination path -> COMPLETED, not a cancellation. Each
-        committed `LiveLine` is appended to `job.live_lines` (SSE reads
-        this) and to `recordings/<id>/live_transcript.md` (crash-safety /
-        post-session-review copy -- the authoritative transcript remains
-        the post-session full pipeline pass with real diarization).
+        Stopping is normal completion (COMPLETED), not cancellation. Each line
+        goes to ``job.live_lines`` (for SSE) and ``live_transcript.md``; the
+        post-session Transcribe pass remains the authoritative transcript.
 
-        Per-chunk transcription failures are handled inside
-        `run_live_loop()` itself (logged and skipped) so they never reach
-        here; this method only fails if setup itself is broken (e.g. no
-        `live_output_path`), in which case -- unlike the enroll-job
-        pattern -- it still does NOT re-raise, since a live session ending
-        early should read as "session ended", not surface a raw traceback
-        in the job detail page.
+        Per-chunk failures are handled inside ``run_live_loop()``. A setup
+        failure fails the job but is not re-raised, so the page shows "session
+        ended" rather than a traceback.
         """
         from pathlib import Path
 

@@ -4,14 +4,9 @@ from typing import Optional
 
 from .models import AlignedSegment, DiarizationSegment, TranscriptionSegment, Word
 
-# F13: thresholds for the micro-run smoothing pass in `_smooth_word_speakers()`.
-# Diarization turn boundaries jitter by a word or two, so a run this short (or
-# this brief) sandwiched between two same-speaker runs is far more likely to be
-# misattributed boundary noise than a genuine interjection. Set too high and a
-# real short interjection ("yeah", "mm-hmm") gets swallowed into the other
-# speaker's turn; set too low and sentence-splitting jitter survives. 2 words /
-# 1.0s was chosen as the point where a run reads as "part of the sentence"
-# rather than "someone else spoke here" in manual review.
+# Micro-run smoothing thresholds (see _smooth_word_speakers). Higher values
+# swallow real short interjections ("yeah"); lower values let boundary jitter
+# split sentences. 2 words / 1.0 s read as "part of the sentence" in review.
 _MICRO_RUN_MAX_WORDS = 2
 _MICRO_RUN_MAX_SECONDS = 1.0
 
@@ -88,39 +83,16 @@ def _assign_word_speakers(
 ) -> list[str]:
     """Assign a speaker label to each word.
 
-    Each word is assigned the diarization turn with max time overlap. A word
-    overlapping no turn inherits the nearest turn's speaker by word-midpoint
-    distance. If there is no diarization at all, a word falls back to the
-    previous word's assigned speaker, or "UNKNOWN" for the first word.
+    Each word takes the turn with the greatest overlap, else the nearest turn
+    by midpoint, else the previous word's speaker ("UNKNOWN" for the first).
 
-    R27: a 3-hour session can carry ~30k words and ~2k diarization turns; a
-    brute-force per-word scan of every turn (`_best_overlap_speaker`) is
-    ~60M overlap computations. This assigns turns once by `start` and walks
-    words with a sweep (two-pointer) over that ordering, keeping only the
-    turns that can still overlap the current word ("active" set) instead of
-    rescanning all of them -- amortized O(words + turns) in the common case
-    where turns don't all overlap each other, vs. O(words * turns) before.
+    Sweeps words against turns sorted by start, keeping only turns that can
+    still overlap, instead of scanning every turn per word (~60M checks for a
+    3-hour session). The sweep is only valid for time-ordered words, so
+    unordered input goes to ``_assign_word_speakers_bruteforce()``.
 
-    The sweep's expiry step drops a turn once its `end` falls behind the
-    *current* word's `start`, on the assumption that no later word could
-    need it back -- true only when `words` is time-ordered (non-decreasing
-    `start`), which always holds for whisper/faster-whisper output but
-    isn't a guarantee this function should silently rely on. So identity
-    with `_assign_word_speakers_bruteforce()` is made unconditional instead
-    of assumed: a single ascending-order check up front routes any
-    unsorted input straight to the brute-force reference rather than
-    running the sweep on an input it isn't valid for.
-
-    Tie-breaking is bit-identical to the old brute-force scan: for the
-    max-overlap turn, `_best_overlap_speaker`'s `if overlap > best_overlap`
-    is strict, so among turns tied for the max overlap value, the one
-    appearing EARLIEST in the original (caller-supplied) `diarization` list
-    order wins -- not the one found first during the sweep. This is
-    reproduced here by comparing original list indices among ties rather
-    than relying on visit order. The nearest-turn fallback (no word overlaps
-    any turn) reuses `_nearest_speaker` unchanged -- it triggers only for
-    words diarization doesn't cover at all, which is rare, so it stays
-    brute-force without hurting the common-case complexity.
+    Ties for max overlap go to the turn earliest in the caller's
+    ``diarization`` list, matching the brute-force result exactly.
     """
     if not diarization:
         speakers: list[str] = []
@@ -192,28 +164,18 @@ def _find_runs(speakers: list[str]) -> list[tuple[int, int, str]]:
 
 
 def _smooth_word_speakers(words: list[Word], speakers: list[str]) -> list[str]:
-    """Absorb sandwiched micro-runs into the surrounding speaker (F13).
+    """Absorb sandwiched micro-runs into the surrounding speaker.
 
-    Word-level alignment has no smoothing on its own: a diarization boundary
-    that jitters by a word or two produces a short run misattributed to the
-    "wrong" speaker mid-sentence, e.g. A("The quick brown") B("fox")
-    A("jumps over the lazy dog") -- three rendered blocks where the middle
-    one is boundary noise, not a real speaker change.
+    Diarization boundaries jitter by a word or two, e.g. A("The quick brown")
+    B("fox") A("jumps over"). A run is absorbed when:
+    - it has runs on both sides (edge runs always survive),
+    - both neighbours are the same speaker, different from this run's
+      (an interjection between two different speakers is kept), and
+    - it is at most ``_MICRO_RUN_MAX_WORDS`` words OR shorter than
+      ``_MICRO_RUN_MAX_SECONDS``.
 
-    A run is absorbed into its neighbors' speaker when ALL of:
-    - it has a run on both sides (never the first or last run -- no sandwich
-      is possible at the edges, so edge runs always survive untouched)
-    - both neighboring runs share the SAME speaker, which differs from this
-      run's speaker (a genuine interjection between two *different* speakers
-      is never absorbed)
-    - the run is short: at most `_MICRO_RUN_MAX_WORDS` words, OR its time
-      span is under `_MICRO_RUN_MAX_SECONDS` (either condition is enough --
-      the OR catches both "few long words" and "many short words" jitter)
-
-    Runs until no more absorptions happen (fixpoint): absorbing one run can
-    make its two neighbors adjacent and therefore mergeable, which can expose
-    a further sandwich (e.g. `A B A B A` with tiny B runs collapses to one A
-    run). Each absorption strictly reduces the run count, so this terminates.
+    Repeats to a fixpoint, since one absorption can expose another
+    (``A B A B A`` collapses to one A run).
     """
     speakers = list(speakers)
 
@@ -280,23 +242,15 @@ def align(
     transcription: list[TranscriptionSegment],
     diarization: list[DiarizationSegment],
 ) -> list[AlignedSegment]:
-    """Assign speaker label(s) to each transcription segment.
+    """Assign speakers to transcription segments.
 
-    When a segment carries word-level timestamps, each word is assigned to
-    the diarization turn with max time overlap (falling back to the nearest
-    turn by midpoint distance when no turn overlaps). The per-word speaker
-    list is then smoothed (F13, `_smooth_word_speakers()`) to absorb sandwiched
-    micro-runs caused by diarization boundary jitter, before consecutive
-    same-speaker words are grouped into one AlignedSegment per run — so a
-    segment spanning multiple speaker turns splits at the word boundary
-    instead of being attributed wholesale to the majority speaker, without
-    fragmenting mid-sentence on a one- or two-word jitter.
+    With word timestamps, each word gets a speaker (``_assign_word_speakers``),
+    micro-runs are smoothed, and consecutive same-speaker words become one
+    AlignedSegment, so a segment spanning a speaker change splits at the word
+    boundary.
 
-    Segments without word data (None or empty `words` — e.g. older callers
-    or mocked tests) fall back to the original whole-segment max-overlap
-    behavior: the diarization turn with the most time overlap over the
-    segment's [start, end], or "UNKNOWN" if none overlaps. The smoothing pass
-    only operates on per-word speaker lists, so this fallback is unaffected.
+    Segments without word data use the turn with the most overlap over the
+    whole segment, or "UNKNOWN".
     """
     aligned: list[AlignedSegment] = []
 

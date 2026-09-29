@@ -155,7 +155,7 @@ def test_suppress_sets_torch_logger_to_error(monkeypatch):
 def test_torch_child_logger_blocked_after_suppress(monkeypatch):
     """torch.utils.flop_counter WARNING is blocked after suppress.
 
-    Regression test: _silence_logger must call setLevel(ERROR) so child
+    _silence_logger must call setLevel(ERROR) so child
     loggers inherit a high effective level.  A _SilenceFilter on the parent
     alone does NOT block records from child loggers — Python's callHandlers()
     bypasses parent logger filters for propagated records.
@@ -176,7 +176,7 @@ def test_torch_child_logger_blocked_after_suppress(monkeypatch):
 def test_suppress_called_before_speechbrain_import_in_diarizer():
     """_suppress() must run before the speechbrain shim in diarizer.py.
 
-    Regression test for the timing bug: speechbrain imports torch, which
+    Speechbrain imports torch, which
     imports torch.utils.flop_counter, which fires a WARNING.  If suppress
     runs after that import, the warning leaks.  Verify that after importing
     diarizer, the torch logger is already silenced (meaning suppress ran
@@ -198,7 +198,7 @@ def test_suppress_called_before_speechbrain_import_in_diarizer():
 def test_suppress_called_at_module_level_in_speaker_manager():
     """_suppress() must run at module level in speaker_manager.py.
 
-    Regression test: wisper enroll bypasses diarizer.py entirely and loads
+    wisper enroll bypasses diarizer.py entirely and loads
     pyannote.audio (embedding model + Lightning) directly through
     speaker_manager._load_embedding_model().  If suppress() is not called
     before that import path, Lightning checkpoint-upgrade, migration-shim,

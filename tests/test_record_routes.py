@@ -25,7 +25,7 @@ def client(tmp_path):
 
 @pytest.fixture(autouse=True)
 def _no_live_transcription(monkeypatch):
-    """Starting a local session (via the route) submits a real Phase 2
+    """Starting a local session (via the route) submits a real
     JOB_LIVE job. The `client` fixture's app runs a REAL JobQueue background
     worker (started by app lifespan), which would pick that job up and try
     to load an actual Whisper model -- exactly what CLAUDE.md's "no GPU, no
@@ -176,7 +176,7 @@ def test_channels_invalid_token_returns_error(client):
 
 
 # ---------------------------------------------------------------------------
-# Live local recording Phase 1 — device enumeration, start/stop-local,
+# Live local recording — device enumeration, start/stop-local,
 # cross-manager (Discord vs local) mutual exclusion
 # ---------------------------------------------------------------------------
 
@@ -325,8 +325,7 @@ def test_start_local_html_form_accepts_name(client):
 
 
 def test_start_local_html_form_warns_when_queue_already_busy(client, monkeypatch):
-    """Regression test for the 2026-08-23 silent-empty-live-transcript bug:
-    when `_start_live_transcription` reports the (single-worker) queue was
+    """When `_start_live_transcription` reports the (single-worker) queue was
     already busy, the route must redirect with a notice instead of silently
     dropping it -- an empty live pane for the whole session otherwise looks
     identical to a broken microphone.
@@ -549,9 +548,7 @@ def test_cross_manager_discord_active_blocks_local_start(client):
 
 
 def test_current_active_recording_reports_active_local_session(client):
-    """R: /record/sse and the /record page used to read bm.active_recording
-    only, so a live local session reported 'idle' -- the shared
-    _current_active_recording() resolver (used by both) fixes that.
+    """_current_active_recording() reports a live local session, not 'idle'.
 
     Exercised directly against the resolver rather than over a live
     `/record/sse` HTTP stream: that endpoint polls forever
@@ -666,10 +663,8 @@ def test_record_page_wires_live_ticker_to_recording_live_sse(client):
         assert resp.status_code == 200
         assert f"/recordings/{recording_id}/live" in resp.text
         assert "partial_transcript" not in resp.text
-        # Regression: extra_scripts was briefly nested inside the `page`
-        # block, which Jinja renders once inline (as part of page's own
-        # content) AND again at base.html's separate extra_scripts slot --
-        # two live EventSource connections fighting over the same DOM.
+        # extra_scripts nested inside `page` renders twice under extends,
+        # opening two EventSource connections.
         assert resp.text.count("new EventSource('/record/sse')") == 1
         assert resp.text.count(f"/recordings/{recording_id}/live") == 1
     finally:
@@ -846,10 +841,8 @@ def test_recording_detail_shows_live_pane_for_active_local_session(client):
     assert resp.status_code == 200
     assert "live-transcript" in resp.text
     assert f"/recordings/{rec.id}/live" in resp.text
-    # Regression: extra_scripts was nested inside the `page` block, which
-    # Jinja renders once inline (as part of page's own content) AND again
-    # at base.html's separate extra_scripts slot -- two competing
-    # EventSource connections to the same live-transcript endpoint.
+    # extra_scripts nested inside `page` renders twice under extends,
+    # opening two EventSource connections.
     assert resp.text.count(f"/recordings/{rec.id}/live") == 1
 
 
@@ -914,7 +907,7 @@ def test_server_json_deleted_on_lifespan_shutdown(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Phase 5 — HTML routes
+# HTML routes
 # ---------------------------------------------------------------------------
 
 def test_record_page_returns_200(client):
@@ -946,7 +939,7 @@ def test_recordings_list_groups_by_campaign(client):
 
 
 def test_recordings_list_handles_null_started_at(client):
-    """R8 regression: sorting used `r.started_at or r.started_at`, a no-op
+    """Sorting used `r.started_at or r.started_at`, a no-op
     that raises TypeError (None vs datetime comparison) as soon as any
     recording has started_at=None, 500ing the whole /recordings page."""
     c, tmp_path = client
@@ -1193,11 +1186,8 @@ def _make_transcribed_recording_with_files(tmp_path):
 
 
 def test_purge_recording_files_refuses_active_session(client):
-    """Regression test: shutil.rmtree()-ing recordings/<id>/ while the
-    capture thread still holds file handles open into it (status
-    "recording"/"degraded") is a different, worse failure than the old
-    index-only delete ever risked -- _purge_recording_files must no-op for
-    an active session rather than touch its files."""
+    """_purge_recording_files no-ops for an active session: the capture
+    thread still holds file handles in recordings/<id>/."""
     from wisper_transcribe.web.routes.record import _purge_recording_files
 
     c, tmp_path = client
@@ -1211,10 +1201,8 @@ def test_purge_recording_files_refuses_active_session(client):
 
 
 def test_recording_delete_purges_files_from_disk(client):
-    """Regression test: delete_recording() itself only ever removed the
-    index entry (see its docstring) -- the delete route must now also
-    purge the recording's files, both the recordings/<id>/ directory and
-    the output/ files a full transcribe produced."""
+    """The delete route purges the recording's files — recordings/<id>/ and
+    the transcript's output files — not just the index entry."""
     c, tmp_path = client
     rec, paths = _make_transcribed_recording_with_files(tmp_path)
 
@@ -1327,7 +1315,7 @@ def test_recordings_list_renders_bulk_select_checkboxes(client):
 
 
 def test_recording_live_streams_end_event_when_no_live_job(client):
-    """Phase 2: GET /recordings/{id}/live is now a real SSE endpoint. A
+    """GET /recordings/{id}/live is now a real SSE endpoint. A
     recording with no active JOB_LIVE session (never started local live
     transcription) just gets an immediate 'end' event and no snapshot
     (no live_transcript.md on disk) -- see tests/test_record_live_routes.py
@@ -1348,15 +1336,13 @@ def test_recording_live_invalid_id_returns_400(client):
 
 
 # ---------------------------------------------------------------------------
-# Phase 6 — enrollment routes
+# Enrollment routes
 # ---------------------------------------------------------------------------
 
 def test_enroll_unknown_speaker_enqueues_job(client):
-    """R6: POST /recordings/{id}/enroll no longer runs the pydub decode +
-    embedding extraction synchronously in the request — it enqueues a
-    JOB_ENROLL job (mode "recording") carrying the validated parameters and
-    redirects to the job detail page. The recording-state updates now happen
-    in the job runner (covered in tests/test_web_jobs.py)."""
+    """POST /recordings/{id}/enroll enqueues a JOB_ENROLL job (mode
+    "recording") with the validated parameters and redirects to the job
+    page. The runner itself is tested in test_web_jobs.py."""
     from unittest.mock import patch
 
     from wisper_transcribe.recording_manager import create_recording, save_recording
@@ -1421,7 +1407,7 @@ def test_enroll_already_bound_speaker_returns_409(client):
 
 
 # ---------------------------------------------------------------------------
-# Phase 7 — transcribe hand-off
+# Transcribe hand-off
 # ---------------------------------------------------------------------------
 
 
@@ -1572,7 +1558,7 @@ def test_transcribe_recording_reverts_status_on_job_failure(client):
 
 def test_retranscribe_recording_reverts_to_transcribed_on_job_failure(client):
     """A failed re-transcribe (starting from 'transcribed', not 'completed')
-    reverts back to 'transcribed' -- keeping the old transcript's
+    reverts back to 'transcribed' -- keeping the existing transcript's
     View/Re-transcribe actions available -- not to a bare 'completed'."""
     from wisper_transcribe.recording_manager import create_recording, load_recordings, save_recording
 
@@ -1632,11 +1618,7 @@ def test_transcribe_recording_no_audio_rejects(client):
 
 
 def test_transcribe_recording_no_audio_regression_after_real_bot_session(client):
-    """R2 end-to-end regression: before the fix, `Recording.combined_path`
-    was assigned exactly once, to None, and never populated by a real
-    BotManager session, so this hand-off ALWAYS redirected with
-    ?error=no_audio — even for a session that actually captured audio.
-    Runs a real BotManager session (fake audio source, no JDA/socket) that
+    """End to end: a real BotManager session (fake audio source, no JDA/socket) that
     captures a `__mixed__` combined track, then verifies the hand-off route
     accepts it."""
     from wisper_transcribe.recording_manager import load_recordings
@@ -1661,7 +1643,7 @@ def test_transcribe_recording_no_audio_regression_after_real_bot_session(client)
 
     loaded = load_recordings(tmp_path)[rec.id]
     assert loaded.status == "completed"
-    assert loaded.combined_path is not None, "R2: combined_path should be populated"
+    assert loaded.combined_path is not None, "combined_path should be populated"
     assert loaded.combined_path.exists()
 
     fake_job = JobCls(
@@ -1696,7 +1678,7 @@ def test_transcribe_recording_invalid_id_blocked(client):
 
 
 # ---------------------------------------------------------------------------
-# R7 — JSON API: /api/recordings (list/detail/transcribe/delete)
+# JSON API: /api/recordings (list/detail/transcribe/delete)
 #
 # These back `wisper record list/show/transcribe/delete` (cli.py); they used
 # to be 501 stubs so every documented subcommand except start/stop always

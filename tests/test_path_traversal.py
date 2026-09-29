@@ -126,7 +126,7 @@ def test_transcribe_excerpt_path_traversal_blocked(client: TestClient, payload: 
 def test_transcribe_excerpt_job_present_path_traversal_blocked(
     client: TestClient, payload: str, tmp_path
 ):
-    """F9's on-disk fallback (job present, in-memory clip_path missing/stale)
+    """The on-disk excerpt fallback (job present, in-memory clip_path missing/stale)
     builds a path from the sanitised speaker label -- confirm a malicious or
     regex-busting speaker_name never results in a served file, even with a
     real job (and a same-stem excerpt clip) present, not just the
@@ -249,10 +249,8 @@ def test_validate_job_id_rejects_invalid_inputs(bad_id: str):
 
 def test_speakers_enroll_error_does_not_leak_exception(client: TestClient):
     """A failed enrollment hand-off must redirect with a generic code, not
-    exception details. (R6: the ML work itself now runs in a background
-    JOB_ENROLL job whose generic job.error is covered in
-    tests/test_web_jobs.py; the route's remaining failure surface is the
-    job submission itself.)"""
+    exception details. The route's only failure surface is job submission;
+    the job's own generic errors are tested in test_web_jobs.py."""
     from wisper_transcribe.web.jobs import JobQueue
 
     with patch.object(
@@ -424,7 +422,7 @@ def test_recordings_html_path_traversal_blocked(client, payload):
 
 
 # ---------------------------------------------------------------------------
-# R24: shared excerpt-clip lookup helper (enroll_shared.find_excerpt_clip)
+# Shared excerpt-clip lookup helper (enroll_shared.find_excerpt_clip)
 # ---------------------------------------------------------------------------
 
 def test_find_excerpt_clip_traversal_payloads_stay_inside_out_dir(tmp_path):
@@ -476,7 +474,7 @@ def test_find_excerpt_clip_missing_returns_none(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R31: rename target name (form field) flows into file paths via the profile
+# Rename target name (form field) flows into file paths via the profile
 # key — must be guarded like any other path component
 # ---------------------------------------------------------------------------
 
@@ -484,7 +482,7 @@ def test_find_excerpt_clip_missing_returns_none(tmp_path):
     "../escape", "a/b", "..", "with space/../x",
 ])
 def test_speakers_rename_new_name_path_guard(client: TestClient, payload: str, tmp_path):
-    """R31: the web rename rekeys the profile (moves .npy/.mp3 files), so the
+    """The web rename rekeys the profile (moves .npy/.mp3 files), so the
     submitted new name must pass the path-component guard; hostile names are
     refused with a generic error code and never reflected."""
     import numpy as np

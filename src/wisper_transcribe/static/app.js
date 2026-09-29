@@ -69,19 +69,9 @@ window.wisperUpdateMeters = function(data) {
 };
 
 // ── Record: live-transcript SSE connector ──
-// Shared by record.html's ticker and recording_detail.html's pane -- both
-// hit the same GET /recordings/{id}/live endpoint and need the same
-// reconnect-replay de-dupe, so the connection + parsing logic lives here
-// once instead of being hand-rolled per template.
-//
-// De-dupe against a reconnect replay: the SSE resume cursor (`last_idx` in
-// that route) lives server-side per connection, starting at 0 -- there's
-// no client "I've already seen up to X" signal, so any reconnect
-// (dev-server restart, a network blip, tab wake from sleep) looks
-// identical to a brand-new stream and replays the entire line history
-// from the start. Keyed on raw `start_s|speaker|text` rather than a
-// caller's display-formatted fields, since callers format timestamps
-// differently.
+// Shared by record.html's ticker and recording_detail.html's pane.
+// The server's resume cursor is per connection, so any reconnect replays the
+// full history; lines are de-duped on raw `start_s|speaker|text`.
 window.wisperConnectLiveStream = function(url, onLine, onSnapshot) {
   var seen = new Set();
   try {
@@ -128,10 +118,7 @@ window.wisperTickerAppend = function(data) {
     '</span>' +
     '<span style="font-size:13.5px;color:var(--color-paper);line-height:1.5">' + (data.text || '') + '</span>';
 
-  // Prepend (newest at top), fade older lines for a recency cue -- but
-  // never delete them. This ticker doubles as an in-session scrollback log
-  // (e.g. rewinding to something missed during a game), so old lines must
-  // stay for the life of the page, not roll off after a fixed count.
+  // Newest on top; older lines fade but are never removed (session scrollback).
   ticker.insertBefore(line, ticker.firstChild);
 
   var lines = ticker.querySelectorAll('div[style*="grid-template-columns"]');
@@ -141,9 +128,8 @@ window.wisperTickerAppend = function(data) {
 };
 
 // ── Record: "Add marker" flagged line ──
-// Called on a successful POST /record/marker response with the server's
-// computed elapsed_s. Visually distinct from a real transcript line (rose,
-// italic, no speaker) so it can't be mistaken for something Whisper said.
+// Called after a successful POST /record/marker. Rose, italic, and
+// speaker-less so it can't be mistaken for transcript.
 window.wisperTickerAppendMarker = function(elapsedS) {
   var ticker = document.getElementById('live-ticker');
   if (!ticker) return;
@@ -225,12 +211,8 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 // ── Global recording-status banner ──
-// Shown on every page except /record itself (which already has its own
-// full toolbar with an elapsed timer + Stop button) -- so a session
-// started on /record stays visible, with a working Stop control, while
-// navigating elsewhere. Polls the JSON status endpoint rather than SSE:
-// this banner needs to work correctly across full page navigations, where
-// an EventSource would just be torn down and reopened anyway.
+// Every page except /record (which has its own toolbar). Polls the JSON
+// status endpoint; an EventSource would be reopened on every navigation.
 (function() {
   var banner = document.getElementById('global-recording-banner');
   if (!banner) return;
@@ -302,9 +284,8 @@ document.addEventListener('DOMContentLoaded', function() {
 })();
 
 // ── Sidebar status fallback ──
-// htmx handles this via hx-trigger="load, every 5s" when it's available.
-// If htmx.min.js is still the placeholder (local dev), this vanilla-JS
-// fallback fires instead so the Device / Jobs cells are never blank.
+// htmx polls this via hx-trigger="load, every 5s"; this fallback runs only
+// when htmx isn't loaded, so the Device / Jobs cells are never blank.
 (function() {
   var wrap = document.getElementById('sidebar-status-wrap');
   if (!wrap) return;

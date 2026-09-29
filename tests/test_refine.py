@@ -95,7 +95,7 @@ def test_apply_edits_idempotent():
 
 
 # ---------------------------------------------------------------------------
-# R11 — apply_edits word-boundary + speaker-label regressions
+# apply_edits: word boundaries and speaker labels
 # ---------------------------------------------------------------------------
 
 def test_apply_edits_does_not_corrupt_longer_word():

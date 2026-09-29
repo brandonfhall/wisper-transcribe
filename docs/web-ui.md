@@ -1,171 +1,155 @@
 # Web UI Guide
 
-A full-featured browser interface for wisper. No separate install — included in the same package.
-
-## Starting the UI
+A browser interface for everything the CLI does, plus recording. It ships in the same package.
 
 ```bash
 wisper server
-# → Open http://localhost:8080
+# → http://localhost:8080
 ```
 
 ---
 
 ## Trust Model
 
-The web UI is a **single-user tool with no authentication and no CSRF
-protection** — anyone who can reach the port has full read-write control:
-uploading and deleting files, changing configuration (including stored API
-keys), managing speaker profiles, and starting/stopping Discord recordings.
+The web UI is a **single-user tool with no authentication and no CSRF protection**. Anyone who can reach the port can upload and delete files, change configuration (including stored API keys), manage speaker profiles, and start or stop recordings.
 
-- By default `wisper server` binds **`127.0.0.1`** (localhost only), so
-  nothing on your network can reach it.
-- Use `wisper server --host 0.0.0.0` **only on trusted networks** (e.g. a
-  home LAN you control). Do not expose the port to the internet.
-- The Docker services pass `--host 0.0.0.0` explicitly inside the container;
-  access from outside the machine is then governed by Docker's port
-  publishing — the default `"8080:8080"` in `docker-compose.yml` publishes on
-  **all host interfaces**; change it to `"127.0.0.1:8080:8080"` to keep the UI
-  host-local (see [docker.md](docker.md)).
-- Adding full CSRF tokens is an explicit non-goal for this single-user tool;
-  state-changing endpoints use POST and responses carry defensive headers
-  (CSP, `X-Frame-Options: DENY`, `nosniff`), but that is not a substitute
-  for network-level trust.
+- `wisper server` binds **`127.0.0.1`** by default, so nothing else on your network can reach it.
+- Use `--host 0.0.0.0` **only on trusted networks** (e.g. a home LAN you control). Never expose the port to the internet.
+- Docker passes `--host 0.0.0.0` inside the container. Reachability is then set by Docker's port mapping: the default `"8080:8080"` publishes on all host interfaces; use `"127.0.0.1:8080:8080"` to keep it local (see [docker.md](docker.md)).
+- State-changing endpoints are POST-only and responses carry defensive headers (CSP, `X-Frame-Options: DENY`, `nosniff`), but that doesn't replace network-level trust.
 
 ---
 
 ## Pages
 
-| Page | URL | Description |
-|------|-----|-------------|
-| Dashboard | `/` | Job queue, system status (device, model, HF token), quick upload |
-| Transcribe | `/transcribe` | Drag-and-drop upload with a byte-level progress bar (XHR-based, so large files don't leave the browser looking frozen — shows "Uploading… N%" then "Processing…" while the server spools the file and creates the job, then navigates to the job page), all transcription options, live progress stream; **Detect speakers** toggle (on by default — turn off for audiobooks/lectures to skip diarization entirely) reveals a count selector with **?** (auto-detect, default) or pinned **1–10**; the **Whisper model** radio preselects whichever model is set in `wisper config` (falling back to `large-v3-turbo` if the configured model isn't one of the three offered); optional "Refine vocabulary" and "Generate campaign summary" post-processing checkboxes. Submitting an unrecognized model/device/compute-type value (not reachable through the UI itself) redirects back with a generic `?error=invalid_option` rather than queuing a job. |
-| Transcripts | `/transcripts` | Browse output files, view rendered markdown, download, delete; green notes icon on cards that have a campaign summary |
-| Speakers | `/speakers` | Enroll, rename, remove speaker profiles. Renaming uses the same semantics as `wisper speakers rename`: the profile is re-keyed (embedding and sample clip files move with it) and campaign rosters — including Discord ID bindings — follow automatically. A rename fails with a notice if the new name collides with an existing profile or contains unsupported characters. |
-| Campaigns | `/campaigns` | Create and manage campaigns; add/remove roster members; scope transcription to a campaign; maintain a rolling **campaign journal** |
-| Record | `/record` | Start and stop live Discord voice channel recording sessions, or a local mic + system-audio capture session; shows the active session (either kind) with live speaker/segment counts via SSE; **Browse bot's channels** panel lists available guilds and voice channels so you can click-to-fill IDs without leaving the page. The Local capture card only appears when the optional `[live]` extra is installed and at least one audio device is detected. |
-| Recordings | `/recordings` | Browse all recordings, grouped by campaign; view per-recording detail (status, speakers, segments); delete one at a time or select several with the checkboxes and **Delete selected** |
-| Config | `/config` | View and edit all settings |
+| Page | URL | What it does |
+|------|-----|--------------|
+| Dashboard | `/` | Job queue, system status (device, model, HF token, LLM provider), quick upload |
+| Transcribe | `/transcribe` | Upload and transcribe (see below) |
+| Transcripts | `/transcripts` | Recordings awaiting transcription; browse, read, download, edit, and delete transcripts |
+| Speakers | `/speakers` | Enroll, rename, and remove speaker profiles; play reference clips |
+| Campaigns | `/campaigns` | Campaigns, rosters, episode order, and the rolling journal |
+| Record | `/record` | Start and stop Discord or local recording sessions |
+| Recordings | `/recordings` | Browse recordings by campaign; detail, transcribe, and delete |
+| Config | `/config` | All settings, including LLM provider and Discord bot |
+
+While a recording is active, every page shows a banner with the elapsed time and a **Stop recording** button.
 
 ---
 
-## Speaker Enrollment
+## Transcribing
 
-The interactive CLI enrollment prompt is replaced by a post-job wizard. After transcription completes, click **Name Speakers** on the job detail page. Each detected speaker has a **Play sample** button so you can hear the voice before assigning a name. Existing profiles are shown as click-to-fill options ranked by voice similarity.
+Drag a file onto `/transcribe` and choose options:
 
-If you reopen the wizard later from the transcript detail page (**Name speakers** in the sidebar), the input fields are pre-filled with the names you applied previously — so you can fix a typo or change an assignment without re-typing every speaker.
+- **Whisper model** — preselected from your config (`large-v3-turbo` if the configured model isn't one of the options shown).
+- **Detect speakers** — on by default. Turn it off for audiobooks or lectures to skip diarization. When on, pick **?** (auto-detect) or pin a count of 1–10.
+- **Campaign** — restricts speaker matching to that campaign's roster.
+- **Refine** / **Summarize** — LLM post-processing that runs after transcription in the same job.
 
-Submitting the wizard renames the transcript immediately, then takes you to a live job progress page instead of leaving the tab hanging — extracting a voice embedding per speaker (and, on the first enrollment after a restart, loading the embedding model) used to block the browser for 30–120 seconds with no feedback. The job page streams a log line per speaker being processed and links back to the transcript once enrollment finishes.
+Large uploads show a byte-level progress bar ("Uploading… N%", then "Processing…") before the job page opens.
 
-For a web upload, the source audio file is kept alongside its transcript in the output folder (instead of being deleted from the temp folder) so the wizard keeps working even after a server restart; it's removed automatically when you delete the transcript. If that audio file is ever missing, the wizard still lets you rename speakers — you'll just see a notice that voice enrollment was skipped (no enrollment job is created in that case).
+### Job page
 
-**Standalone enrollment** (`/speakers/enroll`) — uploading a clean reference clip for a single speaker — also runs as a background job now: submitting the form takes you to a live job progress page (Converting audio → Detecting speech → Extracting embedding) instead of blocking the browser tab while the ML work runs. The new profile appears on the Speakers page once the job completes.
+- A progress bar with per-step pills: **T**ranscribe → **D**iarize → **F**ormat, plus **R**efine / **S**ummarize when requested. Enrollment jobs show **E**, journal jobs **J**.
+- A live log, ETA, and speed.
+- **Stop Job** cancels a pending or running job. A running transcription stops at its next progress update; the GPU may finish its current batch first.
+- Failed jobs show a generic message ("Transcription failed — see server logs"). The full error is in the server log (the terminal running `wisper server`, or the `--debug` log file).
+- The job list keeps the 50 most recently finished jobs. Transcripts themselves are never pruned.
+
+Transcripts are written to `./output/` (or `<data dir>/output`) and appear on the Transcripts page as soon as the job finishes.
 
 ---
 
-## Auto-Enrollment from Recordings
+## Naming Speakers (Enrollment)
 
-When the Discord bot records a session, any speaker whose Discord user ID is **not** bound to a campaign member is added to the recording's "Unknown Speakers" list. After the session ends, open the recording's detail page (`/recordings/{id}`) to see the panel. Enter a display name next to each unknown Discord ID and click **Enroll** — wisper extracts a voice embedding from their per-user audio track and creates a new speaker profile. This runs as a background job (you're taken to a live progress page); when it completes, the Discord ID is bound to that profile in the campaign roster automatically, so future sessions tag them correctly without manual intervention.
+After a transcription, click **Name Speakers** on the job page, or **Name speakers** in a transcript's sidebar.
+
+- Each detected speaker has a **Play sample** button and the words heard in that clip.
+- Existing profiles appear as click-to-fill options, ranked by voice similarity.
+- Reopening the wizard later pre-fills the names you already applied, so you can fix one without retyping the rest.
+- Submitting renames the transcript immediately, then opens a job page while voice embeddings are extracted.
+
+For web uploads, the source audio is kept next to its transcript in the output folder so the wizard works after a server restart; it's deleted with the transcript. If that audio is missing, renames still apply and a notice says voice enrollment was skipped.
+
+**Standalone enrollment** (`/speakers` → Enroll) takes a clean reference clip for one speaker and runs as a background job.
+
+**Per-line edits:** `/transcripts/{name}/edit` reassigns individual lines to a different speaker.
 
 ---
 
-## Local Recording (mic + system audio)
+## Recording
 
-Separate from the Discord bot: capture your microphone and the machine's
-system audio output (the other side of a call, a video, a game session) as
-two tracks, plus a mixed combined track, without needing a Discord bot at
-all. Requires the optional `[live]` extra (`pip install
-'wisper-transcribe[live]'`) — see [setup.md](setup.md) for per-OS device
-setup (including the macOS BlackHole requirement).
+Only one recording — Discord or local — can run at a time.
 
-On the Record page, a **Local capture** card appears beside the Discord
-card whenever the extra is installed and at least one microphone and one
-system-audio (loopback) device are detected — it's hidden entirely
-otherwise, no error shown. Pick a microphone and a system-audio device
-(and, optionally, a campaign) and click **Start local recording**. Only
-one capture session — Discord *or* local — can run at a time; starting
-one while the other is active is rejected.
+### Discord
 
-A local session's recording detail page shows a **LOCAL** badge and the
-chosen device names instead of a Discord channel. Recordings list the
-same way regardless of source, and the transcribe hand-off (**Transcribe**
-button → full diarization + speaker ID pass) works identically once the
-session is stopped.
+The bot joins a voice channel, records each participant on their own track plus a mixed track, and hands the result to the normal transcription pipeline. Setup (bot token, invite, Java 25) is in [docker.md](docker.md#discord-recording-bot).
 
-**Deleting a recording is permanent.** Whether from the detail page's
-**Delete** button or the Recordings list's checkboxes + **Delete
-selected**, deletion removes the recording's audio (raw and per-track)
-and, if it was transcribed, the transcript and its campaign-notes sidecar
-from disk — not just the entry in the list. There's no recovery once
-confirmed.
+- Save a guild/channel pair as a preset from the Record page.
+- The Record page shows who is talking in real time.
 
-**Live transcript preview.** While a local session is recording, the
-detail page shows a draft transcript that fills in within a few seconds
-of each pause in speech — a rolling-window pass over the mixed audio,
-labeling each line **You** (your mic) or **Other** (system audio) by
-comparing which track is louder. This is a fast preview, not the final
-transcript: there's no real speaker diarization (too heavy to run
-per-chunk), so multiple people talking on the system-audio side all show
-up as "Other." Stop the session and click **Transcribe** to get the real
-thing — full diarization, speaker identification, and a transcript
-matching the quality of every other recording. The draft never overwrites
-or gets used as the real transcript; it's purely a crash-safety/at-a-
-glance copy (`recordings/<id>/live_transcript.md`).
+**Auto-enrollment:** Discord users not yet bound to a campaign member are listed under "Unknown Speakers" on the recording's detail page. Enter a name and click **Enroll** to create a profile from their track; the Discord ID is then bound in the campaign roster, so future sessions tag them automatically.
 
-For CPU-only machines, live transcription competes with real-time audio
-capture for CPU cycles — `base` or `small` (set in `wisper config` or the
-Config page) keeps up more reliably than a larger model. GPU machines can
-use any model size.
+### Local (mic + system audio)
 
-Live transcription shares the same one-job-at-a-time queue as every other
-background job (transcription, LLM refine/summarize, campaign journal
-folds and rebuilds). If another job is already running when you start a
-local session, the Record page shows a notice: the recording still starts
-fine, but the live preview won't begin filling in until that other job
-finishes — for a short session, that can mean it never shows anything
-before you stop. The full diarized transcript from **Transcribe** is
-unaffected either way.
+Records your microphone and the machine's system audio (the other side of a call, a video, a game) as two tracks plus a mix, with a live transcript preview. Requires the `[live]` extra and a native install — see [setup.md](setup.md#local-recording-mic--system-audio) for per-OS setup, including BlackHole on macOS.
+
+The **Local capture** card appears only when the extra is installed and devices are detected. To start:
+
+1. Pick a microphone and a system-audio device (your OS defaults are preselected).
+2. Optionally set a **session name** (used as the transcript title) and a campaign.
+3. Optionally pick yourself under **This is me** so your lines show your name instead of "You". The choice is remembered.
+4. Click **Start local recording**.
+
+While recording:
+
+- **Live preview** — lines appear a few seconds after each pause, labelled **You** (mic) or **Other** (system audio) by whichever track is louder. It is a draft, not diarization: several people on the system side all appear as "Other".
+- **Noise floor** slider and **level gauges** — audio below the floor is ignored, so room noise isn't transcribed as speech. A gauge turns green when its level clears the floor. Changes apply immediately.
+- **Add marker** — bookmarks the current moment; markers are listed on the recording's detail page.
+
+On CPU-only machines, use `base` or `small` so the preview keeps up.
+
+If another job is already running when you start, the Record page warns that the live preview won't begin until that job finishes. The recording itself is unaffected.
+
+### After recording
+
+- Stopping never starts transcription automatically. Click **Transcribe** on the recording (or from **Transcripts → Awaiting transcription**) to run the full diarized pass. The live draft stays on the recording's detail page until then.
+- **Deleting a recording is permanent.** Single delete and **Delete selected** both remove the audio and, if it was transcribed, the transcript and its sidecars. Active sessions can't be deleted.
 
 ---
 
 ## LLM Post-Processing
 
-**Option 1 — at transcription time:**
-In the Transcribe form, expand the Options panel and tick "Refine vocabulary" and/or "Generate campaign summary" under LLM Post-processing. Both run automatically after transcription completes as part of the same job, with Ollama status messages streamed to the progress log.
+Configure a provider on the Config page first (or run `wisper config llm`).
 
-**Option 2 — from the Transcript detail page:**
-Open any transcript and expand "LLM Post-processing". Click **Refine Vocabulary** or **Generate Campaign Summary** to queue a standalone LLM job. You are redirected to the job progress page, which streams status messages in real time.
+**At transcription time:** tick **Refine** and/or **Summarize** on the Transcribe form.
 
-**Campaign Notes:**
-When a `.summary.md` sidecar exists, the transcript detail page shows a green "Campaign Notes available" panel with **View Notes** and **Download** buttons. Campaign notes are also accessible via the transcript list card (green notes icon). The notes page shows the session recap, loot, NPCs, and follow-up items rendered as HTML.
+**Afterwards:** open a transcript and click **Refine** or **Summarize**. Each queues a job.
 
-**Campaign Journal (DM tool):**
-The Campaign page shows a **Rolling journal** panel that aggregates session summaries into one living document per campaign. Once a session has a `.summary.md`, it becomes "ready to fold in". Click **Update journal** to fold the next session, or **Fold all** to catch up every pending session. Each fold queues a job (redirecting to the live progress page) where the LLM rewrites the journal to incorporate the new session — tracking story arcs, open plot threads, NPCs, party decisions, and a running loot ledger. Context stays bounded (current journal + one new summary per fold), so it scales to long campaigns. Click **View journal** to read the rendered result; already-folded sessions are skipped on subsequent runs.
+**Campaign notes:** when a `.summary.md` exists, the transcript card shows a notes icon and the detail page offers **View Summary** (recap, loot, NPCs, follow-ups) and a download.
 
-**Rebuild journal** (shown whenever the campaign has at least one transcript) redrives the whole campaign from scratch: every session transcript is re-summarized and the journal is regenerated from a clean start, folding every session back in in order. This is two LLM calls per session, so the button asks for confirmation (session count and total call count) before queuing the job. Use it after switching LLM models/providers, or to pick up prompt or summarize changes retroactively across a whole campaign's history.
+### Campaign journal
 
-**Reordering episodes:** the Campaign page's "Episodes" list has ▲/▼ arrows on each row (hidden at the top/bottom of the list) to move a session earlier or later. This is the order sessions get folded into the journal in — it's the order a transcript was *associated* with the campaign, not a date parsed from the filename, so it can end up out of chronological order (e.g. an older recording transcribed and added to the campaign after a newer one already was). Reordering doesn't itself change the journal; rebuild or fold-forward after fixing the order to have it take effect.
+The Campaign page's **Rolling journal** panel combines session summaries into one living document per campaign: story so far, open threads, NPCs, party decisions, and a loot ledger.
 
----
+- A session is ready to fold in once it has a `.summary.md`.
+- **Update journal** folds the next session; **Fold all** folds every pending one. Each fold is a job.
+- **View journal** shows the rendered result.
+- **Rebuild journal** re-summarizes every session and rebuilds the journal from scratch — two LLM calls per session, so it asks for confirmation. Use it after changing model or provider.
 
-## Job Management
-
-- The job detail page shows a **real-time progress bar** with per-phase step indicators. For transcription jobs: Transcribing → Diarizing → Formatting with ETA and speed counter. For LLM jobs: a single step indicator (R for Refine, S for Summarize) with Ollama streaming messages in the log.
-- A **Stop Job** button lets you cancel any pending or running job.
-- Transcripts are saved to `./output/` (or `data_dir/output`) and are immediately visible on the Transcripts page after the job completes.
-- Transcripts can be **deleted** from the Transcripts page (trash icon with confirmation). Deleting a transcript also removes its `.summary.md` sidecar and any per-speaker preview clips (`<stem>_excerpt_*.mp3`/`.txt`) generated for the enrollment wizard.
-- The job list keeps at most the 50 most recently finished jobs (completed or failed) — older ones are dropped to bound server memory, oldest first. Pending and running jobs are never affected by this limit. Transcripts themselves are unaffected; this only prunes entries from the in-memory job list.
-- When a job fails, the page shows a **generic error message** ("Transcription failed — see server logs", "Enrollment failed", …) rather than the raw exception — exception text can contain server file paths. The full exception and traceback are written to the server log (the terminal running `wisper server`, or the debug log with `--debug`).
+**Episode order:** the ▲/▼ arrows on the Episodes list set the order sessions are folded in. Order is when a transcript was added to the campaign, not its date, so check it before rebuilding.
 
 ---
 
-## Assets & Fonts
+## Settings (Config page)
 
-All web UI assets (HTMX, Tailwind CSS, fonts) are served from local files — the page itself loads without any external network requests.
+- All `config.toml` settings, including the LLM provider, model, and API keys. A blank API-key field keeps the stored key; env vars take precedence.
+- The model field lists installed models for Ollama and LM Studio, the Ollama Cloud catalog, and (once a key is entered) Anthropic, OpenAI, and Google models.
+- Discord bot token, default guild/channel, and presets.
+- **Open data folder** opens the data directory in your file manager.
 
-The UI uses three self-hosted fonts (all SIL OFL licensed, committed to the repository):
-- **Newsreader** — serif display font for titles and long-form reading
-- **Geist** — sans-serif body font
-- **JetBrains Mono** — monospace font for IDs, timestamps, and CLI flags
+---
 
-HTMX, the fonts, and Tailwind CSS are all committed directly — no download step needed for local dev or Docker builds.
+## Assets
+
+All assets — HTMX, Tailwind CSS, and self-hosted fonts (Newsreader, Geist, JetBrains Mono, Instrument Serif; SIL OFL) — are committed and served locally. The UI makes no external network requests.

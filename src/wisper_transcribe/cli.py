@@ -15,21 +15,12 @@ if not os.environ.get("WISPER_DEBUG"):
 
 
 def _ensure_utf8_stdio() -> None:
-    """Reconfigure stdout/stderr to UTF-8, unconditionally (every command,
-    not just --debug).
+    """Reconfigure stdout/stderr to UTF-8 for every command.
 
-    A Windows console or a redirected pipe/file often defaults to a legacy
-    codepage (cp1252, cp437) rather than UTF-8. `pipeline.py` writes
-    Unicode box-drawing/arrow characters (`tqdm.write("─" * 60)`,
-    `→` in the speaker-match log line) as decorative log output --
-    under a legacy codepage that raises `UnicodeEncodeError` and crashes
-    the whole transcription job, even though transcription itself
-    succeeded. `errors="replace"` is a defensive fallback (moot for a
-    UTF-8 target, which can represent any codepoint, but cheap insurance
-    against a stray unencodable byte from elsewhere). Swallows
-    `AttributeError`/`ValueError` for a stream that isn't a real
-    `TextIOWrapper` (e.g. a test harness's capture object) -- reconfiguring
-    stdio is a nice-to-have, never worth failing startup over.
+    Legacy console code pages (cp1252, cp437) can't encode the box-drawing and
+    arrow characters written via tqdm.write(), which would crash a job that
+    otherwise succeeded. Streams that can't be reconfigured (e.g. test
+    capture objects) are left alone.
     """
     for stream in (sys.stdout, sys.stderr):
         if stream is None:
@@ -107,12 +98,9 @@ def transcribe(
 ):
     """Transcribe an audio file (or folder of files) to markdown.
 
-    ``--model``/``--language``/``--timestamps`` default to None, meaning
-    "use the value from config" (see process_file's sentinel docstring for
-    the full resolution order). Passing ``--language auto`` is a distinct
-    explicit marker for auto-detection — it is forwarded as the literal
-    string ``"auto"`` and resolved to ``None`` inside process_file, so it
-    is never confused with the "unset, use config" None sentinel.
+    ``--model``/``--language``/``--timestamps`` default to None ("use config").
+    ``--language auto`` is forwarded as the literal ``"auto"`` to request
+    auto-detection.
     """
     if debug or verbose:
         from .debug_log import setup_logging
@@ -167,10 +155,8 @@ def _audio_extensions():
 
 
 @main.command()
-# R16: default to loopback — the web UI has no authentication or CSRF
-# protection, so binding all interfaces by default exposed full read-write
-# control to anyone on the network. Pass --host 0.0.0.0 explicitly to serve
-# a trusted network (Docker does this in docker-compose.yml).
+# Default to loopback: the web UI has no auth or CSRF protection. Use
+# --host 0.0.0.0 only on trusted networks (Docker passes it explicitly).
 @click.option("--host", default="127.0.0.1", show_default=True,
               help="Bind host (use 0.0.0.0 to expose on the network — no auth, trusted networks only)")
 @click.option("--port", default=8080, show_default=True, type=int, help="Bind port")
@@ -426,15 +412,8 @@ def config_set(key: str, value: str):
         )
 
     cfg = load_config()
-    # Coerce against the schema's default type, not cfg[key]'s current
-    # runtime type — if a value was previously stored as the wrong type
-    # (e.g. an old bug wrote min_speakers as a string), cfg[key] would
-    # reflect that wrong type and every isinstance check below would miss,
-    # silently re-storing the bad type forever. DEFAULTS[key] is always the
-    # canonical schema type since `key` was already validated above.
-    # bool is checked before int/float since bool is a subclass of int in
-    # Python — isinstance(True, int) is True, so an int check first would
-    # silently coerce booleans wrong.
+    # Coerce to DEFAULTS[key]'s type (not the stored value's, which may be
+    # wrong). bool first: bool is a subclass of int.
     schema_value = DEFAULTS[key]
     coerced: object
     if isinstance(schema_value, bool):
@@ -637,10 +616,7 @@ def enroll(name: str, audio: Path, segment: Optional[str], notes: str, update: b
             )
             click.echo(f"Enrolled {profile.display_name!r}.")
     finally:
-        # R9-2: convert_to_wav() writes to the OS tempdir when the input
-        # isn't already a 16kHz mono WAV -- clean it up here, mirroring
-        # enroll_shared.enroll_profiles(). No-op when `audio` was already a
-        # correct WAV (convert_to_wav returns it unchanged).
+        # Delete the converted temp WAV (no-op when `audio` was already one).
         if wav_path != audio:
             wav_path.unlink(missing_ok=True)
 
@@ -674,9 +650,7 @@ def speakers_list():
 @click.argument("name")
 def speakers_remove(name: str):
     """Remove an enrolled speaker profile."""
-    # R37: goes through speaker_manager.remove_profile() (locked
-    # load-modify-save, R9-5's .npy + .mp3 cleanup) -- shared with the web
-    # /speakers/{name}/remove route instead of duplicating the sequence here.
+    # Shared with the web remove route (locked; removes .npy and .mp3).
     from .speaker_manager import remove_profile
 
     key = name.lower().replace(" ", "_")
@@ -692,9 +666,7 @@ def speakers_remove(name: str):
 @click.argument("new_name")
 def speakers_rename(old_name: str, new_name: str):
     """Rename an enrolled speaker."""
-    # R31: the rekey semantic (profile dict entry, .npy/.mp3 files, campaign
-    # membership) lives in speaker_manager.rename_profile — shared with the
-    # web rename route so both entry points do the same thing.
+    # Shared with the web rename route (rekeys files and campaign rosters).
     from .speaker_manager import rename_profile
 
     old_key = old_name.lower().replace(" ", "_")
@@ -753,7 +725,7 @@ def speakers_test(audio: Path, num_speakers: Optional[int], campaign: Optional[s
         for label, name in sorted(matches.items()):
             click.echo(f"  {label} → {name}")
     finally:
-        # R9-2: see the `enroll` command above for why this cleanup exists.
+        # Delete the converted temp WAV, as in `enroll`.
         if wav_path != audio:
             wav_path.unlink(missing_ok=True)
 
@@ -784,11 +756,8 @@ def speakers_reset(yes: bool):
 # wisper campaigns
 # ---------------------------------------------------------------------------
 
-# Provider choice for LLM-backed commands (summarize, refine, campaigns
-# journal). Defined here (above its first use in a command decorator, since
-# decorators evaluate top-to-bottom at import time) and derived from
-# config.LLM_PROVIDERS (R20) rather than hardcoded, so it stays in sync with
-# whatever providers config.py knows about (e.g. ollama-cloud).
+# --provider choices for LLM commands, derived from config.LLM_PROVIDERS.
+# Must be defined above its first use: decorators run at import time.
 def _llm_provider_choice() -> click.Choice:
     from .config import LLM_PROVIDERS
     return click.Choice(LLM_PROVIDERS)
@@ -1550,8 +1519,8 @@ def record_start(campaign: Optional[str], voice_channel: Optional[str], guild: O
             voice_channel = match["channel_id"]
         click.echo(f"Using preset {preset!r}: guild={guild}, channel={voice_channel}")
 
-    # Fall back to the saved defaults from `wisper config discord` before
-    # erroring — the web form already relies on these same keys (R30).
+    # Fall back to the `wisper config discord` defaults (the web form uses
+    # the same keys).
     if guild is None or voice_channel is None:
         cfg = load_config()
         if guild is None:

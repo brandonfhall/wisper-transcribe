@@ -1,26 +1,14 @@
-"""Segmented WAV audio writer + PCM downsampling for Discord + local recordings.
+"""Segmented WAV writer and PCM resampling for Discord and local recordings.
 
-Writes 16 kHz mono 16-bit PCM as a sequence of self-contained WAV files,
-each capped at `segment_duration_s` seconds (default 60), using the stdlib
-`wave` module. `downsample_48k_stereo_to_16k_mono()` handles Discord's fixed
-48 kHz int16 stereo wire format; `resample_to_16k_mono()` handles the
-arbitrary-samplerate float32 blocks the local capture path (`local_capture.py`)
-gets from `soundcard`.
+Writes 16 kHz mono 16-bit PCM as self-contained WAV segments of at most
+``segment_duration_s`` (default 60) via the stdlib ``wave`` module.
+``downsample_48k_stereo_to_16k_mono()`` handles Discord's fixed 48 kHz stereo;
+``resample_to_16k_mono()`` handles local capture's arbitrary-rate float32.
 
-Crash safety: `wave.Wave_write.writeframes()` patches the RIFF/`data` chunk
-sizes in the file's header on every call after the first (see cpython's
-`wave.py` — `_patchheader()`), so a segment's header always reflects
-whatever has actually been written through Python's file buffer. We also
-`flush()` after every `write()` call to push that header patch + PCM data
-out of the Python-level buffer, and `fsync()` on segment close/finalize.
-A hard process crash mid-segment can therefore leave the *current* segment
-mildly short of the last few frames, but its header and data length always
-agree, so `wave`/anything else can open and play it — no corruption, only
-a possibly-truncated tail. All previously-rotated segments are already
-closed and fully valid. This replaces the old hand-rolled Ogg/Opus muxer
-(`SegmentedOggWriter`), which wrote raw 48 kHz stereo PCM frames into Ogg
-pages as though they were pre-encoded Opus packets — producing files that
-no Opus decoder could read (see senior-review finding R12).
+Crash safety: ``writeframes()`` rewrites the header sizes on every call, and
+``write()`` flushes after each call (``fsync`` on close). A crash can lose the
+last few frames of the current segment, but its header always matches its
+data, so it stays playable. Rotated segments are complete.
 """
 from __future__ import annotations
 
@@ -44,20 +32,13 @@ log = logging.getLogger(__name__)
 def downsample_48k_stereo_to_16k_mono(pcm: bytes) -> bytes:
     """Convert 48 kHz stereo 16-bit PCM to 16 kHz mono 16-bit PCM.
 
-    JDA delivers raw 48 kHz stereo 16-bit PCM (both per-user and the
-    pre-mixed `__mixed__` track); everything downstream (embedding
-    extraction, `convert_to_wav`) wants 16 kHz mono, so we downsample at
-    write time rather than storing ~6x more data than needed.
+    Done at write time so recordings store ~6x less data. Averages L+R, applies
+    a 3-tap moving-average low-pass, and decimates by 3 — pure NumPy (``audioop``
+    is gone in 3.13) and adequate for speech that Whisper/pyannote resample to
+    16 kHz anyway.
 
-    Pure NumPy/stdlib (Python 3.13 removed `audioop`): average L+R to mono,
-    apply a cheap 3-tap moving-average low-pass as anti-aliasing, then
-    decimate by 3 (48000 / 16000 = 3). This is not broadcast-quality
-    resampling, but it's more than adequate for speech destined for
-    Whisper/pyannote, both of which resample to 16 kHz internally anyway.
-
-    A full 20 ms frame at 48 kHz (960 stereo samples) downsamples to
-    exactly 320 mono samples (20 ms at 16 kHz) — one incoming frame maps to
-    one 20 ms chunk of output, preserving wall-clock duration exactly.
+    A 20 ms frame (960 stereo samples) becomes exactly 320 mono samples, so
+    duration is preserved.
     """
     if not pcm:
         return b""
@@ -79,20 +60,13 @@ def downsample_48k_stereo_to_16k_mono(pcm: bytes) -> bytes:
 
 
 def resample_to_16k_mono(data: np.ndarray, samplerate: int) -> bytes:
-    """Convert float32 PCM at an arbitrary samplerate to 16 kHz mono 16-bit PCM.
+    """Convert float32 PCM at any sample rate to 16 kHz mono 16-bit PCM.
 
-    Local capture devices (`soundcard`) deliver float32 samples in [-1.0, 1.0]
-    at the device's native rate -- typically 44100 or 48000 Hz, but not
-    guaranteed to be an integer multiple of 16000 the way Discord's fixed
-    48 kHz is. `downsample_48k_stereo_to_16k_mono()` above only handles that
-    integer 48k->16k case; this is the general-ratio counterpart used by the
-    local capture path, via `scipy.signal.resample_poly` (already a project
-    dependency for the torchcodec bypass in diarizer.py).
-
-    `data` may be shape (n_frames, n_channels) for a multi-channel block or
-    (n_frames,) for mono; channels are averaged down to mono first. Output
-    samples are scaled from the [-1.0, 1.0] float range to int16 range before
-    clipping -- omitting this scale factor would round everything to silence.
+    Local devices deliver [-1.0, 1.0] floats at their native rate (often
+    44.1 kHz, not an integer multiple of 16 kHz), so this uses
+    ``scipy.signal.resample_poly``. ``data`` may be (n, channels) or (n,);
+    channels are averaged. Samples are scaled to int16 range before clipping;
+    without that everything rounds to silence.
     """
     if data is None or len(data) == 0:
         return b""
@@ -183,13 +157,10 @@ class SegmentedWavWriter:
     # ------------------------------------------------------------------
 
     def write(self, pcm_16k_mono: bytes) -> Optional[Path]:
-        """Write one chunk of 16 kHz mono 16-bit PCM. Rotates if the current
-        segment has reached its media-time duration cap.
+        """Write one chunk of 16 kHz mono 16-bit PCM, rotating at the duration cap.
 
-        Rotation is based on sample count (media time), not wall-clock
-        time, so tests that feed frames faster than real-time work
-        correctly. Returns the path of the completed segment if rotation
-        occurred, else None.
+        Rotation counts samples (media time), not wall-clock time. Returns the
+        completed segment's path when a rotation happened, else None.
         """
         if not pcm_16k_mono:
             return None
@@ -225,24 +196,16 @@ class SegmentedWavWriter:
 
 
 # ---------------------------------------------------------------------------
-# Segment concatenation (R2: combined-track finalisation)
+# Segment concatenation
 # ---------------------------------------------------------------------------
 
 def concat_wav_segments(segments_dir: Path, out_path: Path) -> Optional[Path]:
-    """Concatenate rotated WAV segments in `segments_dir` into one WAV file.
+    """Concatenate the WAV segments in ``segments_dir`` into one file.
 
-    All segments share the same params (written by the same
-    `SegmentedWavWriter`), so this is a plain frame-concatenation via the
-    stdlib `wave` module — no re-encoding needed.
-
-    Unreadable/corrupt segments (e.g. a zero-byte segment left behind by a
-    crash before any frame was written) are skipped with a warning rather
-    than aborting the whole merge, so a crash loses at most its own
-    segment's tail.
-
-    Returns `out_path` on success, or `None` if there were no segments (or
-    none were readable) — callers should leave `Recording.combined_path`
-    unset in that case so the existing "no audio" state stays reportable.
+    Segments share params, so frames are concatenated without re-encoding.
+    Unreadable or empty segments (e.g. left by a crash) are skipped with a
+    warning. Returns ``out_path``, or None if nothing was readable — callers
+    then leave ``Recording.combined_path`` unset.
     """
     segments_dir = Path(segments_dir)
     segments = sorted(segments_dir.glob("*.wav"))

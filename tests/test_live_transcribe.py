@@ -1,4 +1,4 @@
-"""Tests for web/live_transcribe.py — Phase 2 (live local transcription).
+"""Tests for web/live_transcribe.py — Live local transcription.
 
 WhisperModel is mocked throughout (CLAUDE.md: no GPU/network/real audio in
 tests). faster_whisper's Silero VAD ONNX model ships bundled with the
@@ -157,9 +157,8 @@ def test_attribute_speaker_system_dominant_is_other():
 
 
 def test_attribute_speaker_both_silent_returns_none():
-    """Regression test: both tracks below the noise floor must NOT default
-    to mic_label -- that used to mislabel background noise / hallucinated
-    text as the mic owner's voice."""
+    """Both tracks below the noise floor return None rather than mic_label,
+    so background noise isn't attributed to the mic owner."""
     mic = np.zeros(100, dtype="<i2")
     system = np.zeros(100, dtype="<i2")
     assert attribute_speaker(mic, system) is None
@@ -186,7 +185,7 @@ def test_attribute_speaker_quiet_but_above_floor_still_attributed():
 
 
 def test_attribute_speaker_custom_mic_label():
-    """Phase 3 'this is me': mic-dominant lines use the given label instead
+    """'This is me': mic-dominant lines use the given label instead
     of the generic 'You'."""
     mic = np.full(100, 5000, dtype="<i2")
     system = np.full(100, 100, dtype="<i2")
@@ -401,9 +400,7 @@ def test_run_live_loop_skips_flaky_chunk_without_ending_loop(monkeypatch):
 def test_run_live_loop_reports_flaky_chunk_via_on_warning(monkeypatch):
     """A per-chunk failure must reach the caller's on_warning callback (wired
     to job.append_log in production) so it shows up in the job's log/SSE
-    stream instead of only the server console -- see the 2026-08-23
-    silent-live-transcription investigation, where a failing session left no
-    trace anywhere the user could see."""
+    stream instead of only the server console."""
     buf = LiveRingBuffer()
     buf.push(_tone_i16(15.0, 1000), _tone_i16(15.0, 1000), _tone_i16(15.0, 1000))
 
@@ -425,11 +422,8 @@ def test_run_live_loop_reports_flaky_chunk_via_on_warning(monkeypatch):
 
 
 def test_run_live_loop_does_not_chain_initial_prompt():
-    """Regression test: a committed chunk's text must NOT be chained into
-    the next chunk's initial_prompt. Confirmed on real speech to send
-    faster-whisper into repetition loops ("column column column...") that
-    got worse chunk over chunk as each hallucinated repeat re-primed the
-    next prompt -- see run_live_loop's docstring."""
+    """A committed chunk's text is never chained into the next chunk's
+    initial_prompt (chaining causes repetition loops)."""
     buf = LiveRingBuffer()
     # 15s+ force-cuts (find_commit_boundary short-circuits past real VAD
     # once total_s >= FORCE_CUT_S), so no VAD mocking is needed here.

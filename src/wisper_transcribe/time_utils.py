@@ -1,8 +1,4 @@
-"""Shared time formatting helpers.
-
-Centralises the two flavours of seconds→string conversion that were
-previously duplicated in formatter.py and pipeline.py.
-"""
+"""Shared seconds-to-string formatting helpers."""
 from __future__ import annotations
 
 

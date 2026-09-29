@@ -88,7 +88,7 @@ def test_process_file_creates_markdown(
 def test_process_file_deletes_converted_wav_on_success(
     mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg, tmp_path
 ):
-    """R9-2: a WAV produced by convert_to_wav (different from the original
+    """A WAV produced by convert_to_wav (different from the original
     input) is deleted once process_file no longer needs it. The original
     input file itself must never be touched."""
     audio = tmp_path / "session01.mp3"
@@ -115,7 +115,7 @@ def test_process_file_deletes_converted_wav_on_success(
 def test_process_file_deletes_converted_wav_on_failure(
     mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg, tmp_path
 ):
-    """R9-2: the converted WAV is cleaned up even when a later stage raises."""
+    """The converted WAV is cleaned up even when a later stage raises."""
     audio = tmp_path / "session01.mp3"
     audio.write_bytes(b"fake audio")
 
@@ -463,7 +463,7 @@ def test_enroll_pick_existing_speaker_confirm_yes_updates_embedding(
     tmp_path,
 ):
     """Confirming yes on an existing speaker reuses the ranking-step embedding
-    (R28: cached per label) and blends it into the profile via EMA."""
+    (cached per label) and blends it into the profile via EMA."""
     from wisper_transcribe.models import SpeakerProfile
 
     audio = tmp_path / "session01.mp3"
@@ -493,7 +493,7 @@ def test_enroll_pick_existing_speaker_confirm_yes_updates_embedding(
                         from wisper_transcribe.pipeline import process_file
                         process_file(audio, output_dir=tmp_path, device="cpu", enroll_speakers=True)
 
-    # R28: extract_embedding is called once (for ranking display) and the
+    # extract_embedding is called once (for ranking display) and the
     # same result is reused for the EMA update instead of re-extracting.
     assert mock_extract.call_count == 1
     mock_update.assert_called_once_with("alice", fake_emb)
@@ -552,7 +552,7 @@ def test_enroll_existing_speakers_ranked_by_similarity(
 
 
 # ---------------------------------------------------------------------------
-# Regression: newly enrolled speaker must appear for subsequent speakers
+# Newly enrolled speaker must appear for subsequent speakers
 # ---------------------------------------------------------------------------
 @patch("wisper_transcribe.pipeline.check_ffmpeg")
 @patch("wisper_transcribe.pipeline.validate_audio")
@@ -569,9 +569,8 @@ def test_newly_enrolled_speaker_appears_for_subsequent_speakers(
 ):
     """A speaker enrolled for SPEAKER_00 must appear in the candidates list for SPEAKER_01.
 
-    Regression for: _interactive_enroll() loaded existing_profiles / enrolled_embeddings
-    once and never refreshed them mid-loop, so a speaker just enrolled in iteration N
-    was invisible to iteration N+1.
+    _interactive_enroll() must refresh profiles within the loop so a speaker
+    enrolled in iteration N is a candidate in iteration N+1.
     """
     import numpy as np
     from wisper_transcribe.models import SpeakerProfile
@@ -1000,11 +999,8 @@ def test_parallel_stages_passes_use_mlx_to_worker(
 # ---------------------------------------------------------------------------
 # Parallel drain thread — progress bar rendering format
 # ---------------------------------------------------------------------------
-# These tests guard the specific contract that bar renders are written to
-# sys.stderr with \r (in-place overwrite) rather than \n (newline-terminated).
-# A regression to newline format would produce a scrolling wall of bar text
-# instead of a single updating line — exactly the bug that was introduced when
-# _SilentFile swallowed bars and then later reversed incorrectly.
+# Bar renders must go to sys.stderr with \r (in-place overwrite), not \n;
+# newlines would produce a scrolling wall of bars instead of one line.
 # ---------------------------------------------------------------------------
 
 def _run_drain_with_messages(messages: list) -> str:
@@ -1275,7 +1271,7 @@ def test_process_file_no_campaign_passes_none_filter(
     call_kwargs = mock_match.call_args.kwargs
     assert call_kwargs.get("profile_filter") is None
     # num_speakers was not pinned (default None) — many-to-one matching
-    # should be enabled so over-segmented labels can share a profile (F4).
+    # should be enabled so over-segmented labels can share a profile.
     assert call_kwargs.get("allow_many_to_one") is True
 
 
@@ -1295,7 +1291,7 @@ def test_process_file_pinned_num_speakers_disables_many_to_one(
 ):
     """When num_speakers is pinned by the user, match_speakers receives
     allow_many_to_one=False — the user's explicit count implies one label
-    per person, so exclusivity should hold (F4)."""
+    per person, so exclusivity should hold."""
     from wisper_transcribe.models import DiarizationSegment, AlignedSegment
     from wisper_transcribe.pipeline import process_file
 
@@ -1315,7 +1311,7 @@ def test_process_file_pinned_num_speakers_disables_many_to_one(
 
 
 # ---------------------------------------------------------------------------
-# F7 — process_file exports the formatter's speaker_map into _result_store
+# process_file exports the formatter's speaker_map into _result_store
 # ---------------------------------------------------------------------------
 
 @patch("wisper_transcribe.pipeline.check_ffmpeg")
@@ -1332,7 +1328,7 @@ def test_process_file_exports_speaker_map_to_result_store(
     mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg,
     tmp_path,
 ):
-    """The web enrollment wizard (F7) needs the exact raw_label -> display_name
+    """The web enrollment wizard needs the exact raw_label -> display_name
     map the formatter used, persisted into the _diar.json sidecar at write
     time instead of being reconstructed later from rendered markdown. That
     starts here: process_file must hand the resolved speaker_map back to the
@@ -1383,7 +1379,7 @@ def test_process_file_no_diarize_exports_empty_speaker_map(
 
 
 # ---------------------------------------------------------------------------
-# R5 — sentinel-default refactor: None (not "medium"/"en") is the only
+# Sentinel-default refactor: None (not "medium"/"en") is the only
 # "use config" marker for model_size/language/include_timestamps.
 # ---------------------------------------------------------------------------
 
@@ -1419,7 +1415,7 @@ def test_process_file_model_none_applies_config(
 def test_process_file_explicit_medium_not_overridden_by_config(
     mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg, tmp_path
 ):
-    """R5 regression: a caller who explicitly asks for 'medium' must get
+    """A caller who explicitly asks for 'medium' must get
     'medium', even though config specifies a different model. Before the
     fix, 'medium' was itself the sentinel and got silently overridden."""
     audio = tmp_path / "ep.mp3"
@@ -1473,7 +1469,7 @@ def test_process_file_config_min_max_speakers_reach_diarize(
     mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg,
     tmp_path,
 ):
-    """R5: when the caller pins neither num_speakers nor min/max, config's
+    """When the caller pins neither num_speakers nor min/max, config's
     min_speakers/max_speakers reach the diarize() call."""
     from wisper_transcribe.models import DiarizationSegment, AlignedSegment
     from wisper_transcribe.pipeline import process_file
@@ -1510,7 +1506,7 @@ def test_process_file_explicit_num_speakers_suppresses_config_min_max(
     mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg,
     tmp_path,
 ):
-    """R5: an explicit num_speakers from the caller suppresses the
+    """An explicit num_speakers from the caller suppresses the
     config-driven min/max-speakers fallback entirely."""
     from wisper_transcribe.models import DiarizationSegment, AlignedSegment
     from wisper_transcribe.pipeline import process_file

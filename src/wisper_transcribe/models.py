@@ -59,7 +59,7 @@ class CampaignMember:
     profile_key: str
     role: str = ""
     character: str = ""
-    discord_user_id: Optional[str] = None  # Phase 4: Discord ID binding
+    discord_user_id: Optional[str] = None
 
 
 @dataclass

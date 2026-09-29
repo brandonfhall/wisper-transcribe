@@ -1,18 +1,14 @@
 """BotManager — manages the JDA recording sidecar subprocess.
 
-Architecture (modular stop-gap — see plan.md "Sidecar modularity"):
-  - Python opens a Unix socket server; JDA sidecar connects as a client
-    and writes length-prefixed PCM frames.
-  - Wire format: [u32 user_id_len][user_id bytes][u32 pcm_len][pcm bytes]
-  - Control frame: user_id == "__ctrl__", pcm == struct.pack("<I", close_code)
-  - BotManager is injectable: pass audio_source_factory= in tests to avoid
-    real JDA subprocess and socket overhead.
+- Python opens a Unix socket server; the JDA sidecar connects and writes
+  length-prefixed 48 kHz stereo PCM frames.
+- Wire format: [u32 user_id_len][user_id bytes][u32 pcm_len][pcm bytes]
+- ``user_id == "__mixed__"`` is JDA's pre-mixed all-speakers track.
+- Control frame: ``user_id == "__ctrl__"``, pcm = ``struct.pack("<I", close_code)``.
+- Tests inject ``audio_source_factory=`` instead of a real sidecar.
 
-When Pycord ships working DAVE receive (PR #3159), swap the sidecar:
-  1. Delete discord-bot/ (the Gradle/Java project)
-  2. Write a ~100-line Python replacement that emits the same wire format
-  3. Point sidecar_command config key at the Python script
-  Nothing else changes.
+The wire format is the stable interface: a Python sidecar emitting the same
+frames can replace the Java one (see plan.md, "DAVE sidecar → Python").
 """
 from __future__ import annotations
 
@@ -488,13 +484,9 @@ class BotManager:
     async def _finalise(self, recording: Recording) -> None:
         """Close all writers, merge the combined track, mark recording completed.
 
-        R2: `Recording.combined_path` used to be assigned exactly once, to
-        `None`, and never populated — the segmented combined-track WAV
-        files were closed but never merged into a single file, so the
-        transcribe hand-off (`recording_transcribe_html`) always redirected
-        with `?error=no_audio`. This concatenates the combined writer's
-        segments into `recordings/<id>/combined.wav` and sets
-        `combined_path` when there was any audio to merge.
+        Concatenates the combined-track segments into
+        ``recordings/<id>/combined.wav`` and sets ``combined_path`` when any
+        audio was captured; otherwise it stays None.
         """
         for writer in self._writers.values():
             try:
