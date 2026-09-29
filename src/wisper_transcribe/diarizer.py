@@ -9,13 +9,11 @@ from typing import Optional
 from ._noise_suppress import suppress_third_party_noise as _suppress
 _suppress()
 
-# speechbrain 1.0 lazy-loads optional integrations (k2, transformers, spacy,
-# numba, …) whenever something calls inspect.getmembers() on the speechbrain
-# package.  Any integration whose optional dependency is not installed raises
-# instead of silently no-oping.  This is a bug in speechbrain itself (Windows
-# path check uses forward slash so never matches on Windows).  Patch
-# LazyModule.ensure_module before speechbrain is imported by pyannote so that
-# a failed import returns an empty stub module rather than crashing.
+# speechbrain 1.0's guard against lazy-loading optional integrations (k2,
+# transformers, spacy, numba, ...) checks for a forward-slash path, which never
+# matches on Windows, so each missing integration raises. Patch
+# LazyModule.ensure_module before pyannote imports speechbrain so a failed
+# import returns an empty stub instead.
 import sys as _sys
 import types as _types
 try:
@@ -43,13 +41,8 @@ from pyannote.audio import Pipeline
 
 from .models import DiarizationSegment
 
-# Module-level pipeline cache. _pipeline_device records the device the cached
-# pipeline was moved to — the cache key. R4: load_pipeline() previously
-# assigned the global BEFORE the CUDA/MPS availability checks, so a failed
-# load left a half-initialised CPU-placed pipeline cached and the next
-# diarize() silently ran on the wrong device. The pipeline is now built into
-# a local and the globals are assigned only after every check (including the
-# .to(device) move) has succeeded.
+# Pipeline cache. _pipeline_device is the device it was moved to; a different
+# device reloads it.
 _pipeline = None
 _pipeline_device: Optional[str] = None
 
@@ -97,13 +90,10 @@ class _DiarizationProgressHook:
 
 
 def load_pipeline(hf_token: str, device: str):
-    """Load pyannote speaker-diarization-3.1, cache module-level.
+    """Load pyannote speaker-diarization-3.1 and cache it.
 
-    R4: the pipeline is built into a local variable and the module-level
-    cache (`_pipeline` / `_pipeline_device`) is only assigned after the
-    device checks AND the `.to(device)` move have all succeeded — a failure
-    anywhere leaves the previous cache state untouched (never a
-    half-initialised pipeline on the wrong device).
+    Built into a local and published only after the device checks and
+    ``.to(device)`` succeed, so a failure leaves the previous cache intact.
     """
     global _pipeline, _pipeline_device
 
@@ -154,9 +144,7 @@ def diarize(
     """Run speaker diarization and return labeled time segments."""
     global _pipeline
 
-    # R4: the cache is keyed by device — in a long-running web server a later
-    # job can request a different device than the one the cached pipeline was
-    # moved to (e.g. a job-form device override), so reload on mismatch.
+    # Reload when a job asks for a different device than the cached one.
     if _pipeline is None or _pipeline_device != device:
         load_pipeline(hf_token, device)
 
@@ -169,10 +157,8 @@ def diarize(
         if max_speakers is not None:
             kwargs["max_speakers"] = max_speakers
 
-    # Pre-load audio via scipy and pass as a waveform tensor dict.
-    # torchcodec (pyannote 4.x's default audio decoder) requires FFmpeg
-    # shared DLLs on Windows (Gyan.FFmpeg.Shared).  The scipy bypass works
-    # on all platforms and the input is always a WAV file from convert_to_wav().
+    # Pass a preloaded waveform so pyannote skips torchcodec, which needs
+    # FFmpeg's shared build on Windows.
     from .audio_utils import load_wav_as_tensor
 
     audio_dict = load_wav_as_tensor(audio_path)

@@ -230,26 +230,12 @@ def save_recording(recording: Recording, data_dir: Optional[Path] = None) -> Non
 
 
 def save_recording_merged(recording: Recording, data_dir: Optional[Path] = None) -> None:
-    """Save `recording`, first refreshing its `markers`/`segment_manifest`
-    from whatever is currently on disk.
+    """Save ``recording`` after refreshing ``markers``/``segment_manifest`` from disk.
 
-    `BotManager`/`LocalCaptureManager` hold one long-lived `Recording`
-    object for the whole session and call this whenever they persist a
-    change to a field they own directly (`status`, `combined_path`,
-    `discord_speakers`, `rejoin_log`, ...) — several times per session
-    (per-user speaker discovery, disconnect handling, session finalise).
-    Meanwhile `append_marker()` (the "Add marker" button) and
-    `append_segment()`/`record_completed_wav_segment()` (combined-track
-    rotation) mutate `markers`/`segment_manifest` through their own
-    independent load-fresh + mutex-protected save, from a different call
-    site (a route handler, the tick/frame loop) that can run at any point
-    during the session. A plain `save_recording(recording, ...)` here would
-    silently overwrite whatever those functions already committed, because
-    the long-lived object never picked up their change — confirmed
-    reproducible: add a marker mid-session, let the session end normally,
-    and `Recording.markers` comes back empty. Refreshing under the same
-    per-recording lock those functions use makes this atomic with respect
-    to them, so a concurrent append can never be lost to this save.
+    The recording managers hold one long-lived ``Recording`` per session,
+    while ``append_marker()`` and ``append_segment()`` write those two fields
+    from other call sites. Refreshing them under the same per-recording lock
+    before saving keeps a concurrent append from being overwritten.
     """
     with _get_recording_lock(recording.id):
         current = load_recordings(data_dir).get(recording.id)
@@ -367,35 +353,16 @@ def record_completed_wav_segment(
     finalized: bool,
     data_dir: Optional[Path] = None,
 ) -> datetime:
-    """Append a `SegmentRecord` for a just-rotated/finalized "mixed"
-    combined-track WAV segment, and return the timestamp to use as the
-    *next* segment's `started_at`.
+    """Record a completed "mixed" combined-track segment; return the next segment's start.
 
-    Shared by `BotManager._route_frame`/`_finalise` (discord_bot.py) and
-    `LocalCaptureManager._do_tick`/`_finalise` (local_capture.py) — both
-    call `SegmentedWavWriter.write()`/`.finalize()` on their combined
-    writer and get a completed segment's `Path` back exactly when a
-    `SegmentRecord` should be appended. `segment_manifest` was previously
-    never populated at all (nothing called `append_segment()`), leaving
-    the recording-detail page's "Segments" manifest permanently empty.
+    Called by both recording managers whenever the combined writer rotates or
+    finalises. Duration is wall-clock since ``started_at`` (the writer doesn't
+    expose per-segment media time); good enough for the UI.
 
-    Duration is approximated from wall-clock elapsed since `started_at`
-    rather than the writer's own sample count — the writer only tracks
-    media time internally and doesn't expose it per-segment, and wall
-    time is accurate enough for a manifest that only drives a UI counter/
-    duration display, not anything media-critical (the authoritative
-    audio is the concatenated `combined.wav`, unaffected by this).
+    Zero-frame or unreadable segments are skipped, matching
+    ``concat_wav_segments()``, so a no-audio session shows no segments.
 
-    Skips zero-frame segments (a session that starts and stops with no
-    audio ever received still gets one empty segment out of
-    `SegmentedWavWriter.finalize()`) — `concat_wav_segments()` already
-    skips these the same way when building `combined.wav`, so without this
-    check a no-audio session would show a contradictory "Segments: 1" in
-    the manifest next to `combined_path` correctly staying `None` /
-    `?error=no_audio`.
-
-    Never raises: a bookkeeping failure here must not interrupt the hot
-    capture write path that calls it.
+    Never raises: it runs on the capture hot path.
     """
     now = datetime.now(timezone.utc)
     try:

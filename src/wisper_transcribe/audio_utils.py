@@ -143,8 +143,7 @@ def _extract_first_audio_track(source_path: Path) -> Path:
     drain_thread.join(timeout=5)
 
     if proc.returncode != 0:
-        # R9-3: ffmpeg may have written a partial/empty file before failing —
-        # don't leave it behind in the OS tempdir.
+        # Remove any partial output ffmpeg left before failing.
         out_path.unlink(missing_ok=True)
         stderr_tail = "\n".join(stderr_lines[-10:])
         raise ValueError(
@@ -184,13 +183,8 @@ def convert_to_wav(path: Path) -> Path:
 def get_duration(path: Path) -> float:
     """Return audio duration in seconds.
 
-    R26: prefers ffprobe (``_probe_duration``, already used for video before
-    extraction) since it only reads the container header, never the full
-    decoded PCM. For a ``.wav`` where ffprobe is unavailable/fails, the
-    stdlib ``wave`` module gives the same header-only guarantee. pydub
-    (which decodes the entire file into memory) is only a last resort, and
-    is also what makes this function agree with ``convert_to_wav``'s own
-    ``Unable to process >4GB files`` avoidance for long-form audio.
+    Tries ffprobe (header only), then the stdlib ``wave`` header for ``.wav``,
+    and only then pydub, which decodes the whole file into memory.
     """
     path = Path(path)
 

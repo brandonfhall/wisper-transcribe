@@ -4,12 +4,9 @@ from typing import Optional
 
 from .models import TranscriptionSegment, Word
 
-# Module-level model cache. _model_key records the parameters the cached
-# model was loaded with — (model_size, device, compute_type) as passed by the
-# caller (pre-resolution; "auto" resolves deterministically per device, so
-# raw params are a stable key). R4: without the key, a long-running web
-# server would silently reuse the first job's model for every later job
-# regardless of the model size chosen in the upload form or config.
+# Model cache. _model_key is the (model_size, device, compute_type) the model
+# was loaded with, as passed by the caller; a mismatch reloads, so the web
+# server doesn't reuse the first job's model forever.
 _model = None
 _model_key: Optional[tuple] = None
 
@@ -26,12 +23,11 @@ _MLX_MODEL_MAP = {
 
 
 def _is_mlx_available() -> bool:
-    """Return True if mlx_whisper is installed and importable on Apple Silicon.
+    """Return True if mlx_whisper is installed.
 
-    Uses importlib.util.find_spec for the presence check so this is safe to
-    call from the main process (e.g. uvicorn) where a full Metal-initialising
-    import may conflict with the async event loop.  The actual import happens
-    only inside _transcribe_mlx(), which runs in a subprocess.
+    Uses find_spec rather than importing, because a Metal-initialising import
+    can conflict with the uvicorn event loop. The real import happens inside
+    _transcribe_mlx().
     """
     if platform.system() != "Darwin":
         return False
@@ -60,12 +56,8 @@ def _transcribe_mlx(
     # a "Fetching N files" verification bar on every call. Suppress it.
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
-    # R32-3: this used to fall back to an f-string-built repo name
-    # (`mlx-community/whisper-{model_size}-mlx`) for any size not in the
-    # map -- a plausible-looking guess that 404s against the Hub for any
-    # size config.MODEL_SIZES doesn't happen to also carry an MLX build
-    # for, surfacing as an opaque download error deep in mlx_whisper instead
-    # of a clear message here.
+    # Unknown sizes have no guaranteed MLX build; fail clearly here instead of
+    # with an opaque Hub download error.
     repo = _MLX_MODEL_MAP.get(model_size)
     if repo is None:
         raise ValueError(
@@ -109,11 +101,10 @@ def _transcribe_mlx(
 
 
 def load_model(model_size: str, device: str, compute_type: str = "auto"):
-    """Load faster-whisper model, caching it module-level.
+    """Load the faster-whisper model, cached by ``_model_key``.
 
-    The cache is keyed by (model_size, device, compute_type) — see _model_key.
-    The old model reference is dropped BEFORE the new one is constructed so
-    peak memory never holds two multi-GB models at once (R4).
+    The old model is dropped before the new one loads so two multi-GB models
+    are never resident at once.
     """
     global _model, _model_key
 
@@ -172,9 +163,8 @@ def load_model(model_size: str, device: str, compute_type: str = "auto"):
     from .config import resolve_compute_type
 
     ct2_compute = resolve_compute_type(compute_type, ct2_device)
-    # Free the old model reference before loading the new one so peak memory
-    # doesn't hold two models; clear the key too so a failed load leaves the
-    # cache empty rather than mismatched (R4).
+    # Drop the old model first (peak memory) and clear the key so a failed
+    # load leaves the cache empty, not mismatched.
     _model = None
     _model_key = None
     _model = WhisperModel(model_size, device=ct2_device, compute_type=ct2_compute)
@@ -226,9 +216,7 @@ def transcribe(
             )
         # mlx not available → fall through to CPU path below
 
-    # R4: reload when the requested parameters differ from what the cached
-    # model was loaded with — the web server is long-running, so a later job
-    # may legitimately ask for a different model size/device/compute type.
+    # Reload when the parameters differ from the cached model's.
     if _model is None or _model_key != (model_size, device, compute_type):
         load_model(model_size, device, compute_type)
 
@@ -266,11 +254,8 @@ def transcribe(
                         start=seg.start, end=seg.end, text=seg.text.strip(), words=words
                     )
                 )
-            # Update progress bar by the difference between the segment's end
-            # and our current progress tracker. R32-4: segments aren't
-            # guaranteed strictly monotonic (a later segment can end before
-            # an earlier one in edge cases), which would make this delta
-            # negative and walk the bar backward -- clamp to >= 0.
+            # Advance the bar to this segment's end. Segment ends aren't
+            # strictly monotonic, so clamp the delta to >= 0.
             delta = seg.end - pbar.n
             if delta > 0:
                 pbar.update(delta)

@@ -16,21 +16,13 @@ _suppress()
 from .config import get_data_dir
 from .models import DiarizationSegment, SpeakerProfile
 
-# Module-level embedding-model cache, keyed by the device it was moved to
-# (R4 — same staleness pattern as transcriber._model / diarizer._pipeline:
-# without the key, the first caller's device would silently stick for the
-# lifetime of a long-running web server).
+# Embedding-model cache, keyed by device so a different device reloads it.
 _embedding_model = None
 _embedding_device: Optional[str] = None
 
-# R37: speakers.json is a single shared JSON store (unlike recording_manager,
-# which is per-record and already locked). The mutating operations below
-# (remove/rename/reset, and the JSON-store portion of enroll) did an
-# unlocked load -> modify -> save; two concurrent web requests (e.g. two
-# browser tabs both hitting /speakers/{name}/rename or /remove) can lose one
-# write. Mirrors recording_manager's lock pattern: held around each
-# function's load/modify/save, never around load_profiles/save_profiles
-# themselves (that would deadlock the callers below that already hold it).
+# Guards every load-modify-save of speakers.json against lost updates from
+# concurrent requests. Never taken inside load_profiles/save_profiles
+# themselves: callers already hold it and would deadlock.
 _profiles_lock = threading.Lock()
 
 
@@ -95,12 +87,7 @@ def save_profiles(profiles: dict[str, SpeakerProfile], data_dir: Optional[Path] 
 def remove_profile_files(key: str, data_dir: Optional[Path] = None) -> None:
     """Delete a profile's embedding (``.npy``) and reference clip (``.mp3``).
 
-    R9-5: the reference clip is a convenience file for web playback that both
-    the CLI (``speakers remove``) and the web ``/speakers/{name}/remove``
-    route need to clean up alongside the embedding -- shared here so neither
-    caller can forget the clip. Both files are optional (``missing_ok=True``);
-    a profile enrolled before clips existed, or one whose clip extraction
-    failed, is a normal case, not an error.
+    Both are optional: older profiles or failed clip extraction leave no clip.
     """
     emb_dir = _get_embeddings_dir(data_dir)
     (emb_dir / f"{key}.npy").unlink(missing_ok=True)
@@ -108,22 +95,16 @@ def remove_profile_files(key: str, data_dir: Optional[Path] = None) -> None:
 
 
 def remove_profile(key: str, data_dir: Optional[Path] = None) -> None:
-    """Remove an enrolled speaker profile: drop the ``profiles.json`` entry
-    and delete its embedding + reference clip files.
+    """Remove a profile's ``speakers.json`` entry and its embedding + clip files.
 
-    R37: shared by the CLI ``speakers remove`` command and the web
-    ``/speakers/{name}/remove`` route so both go through the same locked
-    load-modify-save sequence instead of two unlocked copies (previously
-    each route duplicated ``load_profiles()`` / ``profiles.pop()`` /
-    ``save_profiles()`` inline). Raises ``KeyError`` if ``key`` is not an
-    enrolled profile.
+    Shared by the CLI and web remove paths. Raises ``KeyError`` if ``key`` is
+    not enrolled.
     """
     with _profiles_lock:
         profiles = load_profiles(data_dir)
         if key not in profiles:
             raise KeyError(f"Speaker profile {key!r} not found")
         profiles.pop(key)
-        # R9-5: removes both the .npy embedding and the .mp3 reference clip.
         remove_profile_files(key, data_dir)
         save_profiles(profiles, data_dir)
 
@@ -131,12 +112,7 @@ def remove_profile(key: str, data_dir: Optional[Path] = None) -> None:
 def rename_profile_files(old_key: str, new_key: str, data_dir: Optional[Path] = None) -> Path:
     """Rename a profile's embedding and reference clip to a new key.
 
-    R9-5: mirrors ``remove_profile_files`` for the rekey path. Called from
-    ``rename_profile()`` below, which both the CLI ``speakers rename``
-    command and the web rename route go through (R31). Returns the new
-    embedding path so callers can update ``profile.embedding_path``. The
-    clip rename is best-effort (``missing_ok=True``) since it may
-    legitimately not exist.
+    Returns the new embedding path. The clip may not exist.
     """
     emb_dir = _get_embeddings_dir(data_dir)
     old_npy = emb_dir / f"{old_key}.npy"
@@ -153,34 +129,21 @@ def rename_profile_files(old_key: str, new_key: str, data_dir: Optional[Path] = 
 
 
 def rename_profile(old_key: str, new_name: str, data_dir: Optional[Path] = None) -> SpeakerProfile:
-    """Rename an enrolled speaker: rekey the profile, move its files, and
-    update campaign membership — shared by the CLI ``speakers rename``
-    command and the web rename route (R31; previously the web route changed
-    ``display_name`` only, so the same action did two different things
-    depending on the entry point).
+    """Rename a speaker: rekey the profile, move its files, update campaigns.
 
-    Steps, in order:
+    Shared by ``wisper speakers rename`` and the web rename route.
 
-    1. Derive ``new_key`` via the standard key convention
-       (``name.lower().replace(" ", "_")``) and validate it with
-       ``validate_path_component`` — the key becomes a filesystem filename
-       and URL slug, so a name whose derived key fails the ``[\\w-]``
-       whitelist is refused (``ValueError``). This also breaks the CodeQL
-       taint chain for the web route, whose ``new_name`` comes from form
-       data and flows into file paths below.
-    2. Collision check: renaming onto a different existing key raises
-       ``ValueError`` (the CLI's guard, now enforced for the web too).
-    3. Rekey the profiles dict entry and update ``name``/``display_name``/
-       ``embedding_path``; move the ``.npy`` embedding and ``.mp3``
-       reference clip (``rename_profile_files``).
-    4. Rekey campaign membership (``campaign_manager.rekey_member``) so
-       rosters, per-campaign roles/characters, and Discord ID bindings
-       follow the profile instead of dangling.
+    1. Derive ``new_key`` (``name.lower().replace(" ", "_")``) and validate it
+       with ``validate_path_component``; it becomes a filename and URL slug,
+       and validation also breaks the CodeQL taint chain for form input.
+       Invalid keys raise ``ValueError``.
+    2. Renaming onto a different existing key raises ``ValueError``.
+    3. Rekey the entry, update ``name``/``display_name``/``embedding_path``,
+       and move the ``.npy``/``.mp3`` files.
+    4. Rekey campaign membership (roles, characters, Discord bindings).
 
-    Raises ``KeyError`` when ``old_key`` is not an enrolled profile.
-    Renaming to a name that derives the same key (display-name-case tweak,
-    e.g. "alice" -> "Alice") skips the file move and campaign rekey but
-    still updates ``display_name``.
+    Raises ``KeyError`` if ``old_key`` isn't enrolled. A same-key rename (case
+    change) only updates ``display_name``.
     """
     from .path_utils import validate_path_component
 
@@ -200,18 +163,13 @@ def rename_profile(old_key: str, new_name: str, data_dir: Optional[Path] = None)
         profile.name = safe_new_key
         profile.display_name = new_name
         if safe_new_key != old_key:
-            # R9-5: rekeys both the .npy embedding and the .mp3 reference clip
-            # so playback keeps working after a rename.
             profile.embedding_path = rename_profile_files(old_key, safe_new_key, data_dir)
         profiles[safe_new_key] = profile
         save_profiles(profiles, data_dir)
 
         if safe_new_key != old_key:
-            # campaign_manager.rekey_member() takes its own lock
-            # (_campaigns_lock) -- a different lock object, always acquired
-            # in this fixed order (profiles then campaigns), so this nested
-            # call cannot deadlock against anything that only ever acquires
-            # campaigns_lock first.
+            # Lock order is always profiles then campaigns, so this nested
+            # acquire can't deadlock.
             from .campaign_manager import rekey_member
             rekey_member(old_key, safe_new_key, data_dir)
 
@@ -234,9 +192,7 @@ def reset_profiles(data_dir: Optional[Path] = None) -> int:
         if emb_dir.exists():
             for npy in emb_dir.glob("*.npy"):
                 npy.unlink()
-            # R9-5: a full reset must also clear .mp3 reference clips -- the
-            # same leak the removal/rename fixes above target, just for every
-            # profile at once instead of one at a time.
+            # Clear reference clips too.
             for mp3 in emb_dir.glob("*.mp3"):
                 mp3.unlink()
 
@@ -250,8 +206,8 @@ def reset_profiles(data_dir: Optional[Path] = None) -> int:
 def _load_embedding_model(device: str):
     """Load (and cache) the pyannote embedding model for *device*.
 
-    R4: cached per device, and built into a local so a failed load/move never
-    leaves a half-initialised model in the module-level cache.
+    Published to the cache only after a successful load and move, so a
+    failure never leaves a half-initialised model cached.
     """
     global _embedding_model, _embedding_device
     if _embedding_model is None or _embedding_device != device:
@@ -299,26 +255,14 @@ def _select_embedding_segments(
     speaker_label: str,
     max_count: int = 5,
 ) -> list[DiarizationSegment]:
-    """Pick up to ``max_count`` segments to source a speaker's voice embedding.
+    """Pick up to ``max_count`` segments to build a speaker's embedding from.
 
-    Selection policy (in order):
-
-    1. ``speaker_segs`` = all segments carrying ``speaker_label``. Raises
-       ``ValueError`` if there are none (same as before this was split out).
-    2. ``solo`` = the subset of ``speaker_segs`` that do NOT strictly
-       time-overlap any segment belonging to a *different* speaker --
-       overlapping segments are exactly where tabletop audio has cross-talk
-       (or music) bleeding into a diarization turn, which pollutes the
-       embedding.
-    3. Prefer solo segments 2.0-20.0s long (a "sweet spot": long enough to
-       carry real voice characteristics, short enough to stay single-topic
-       and avoid drifting into silence/noise), sorted longest-first, up to
-       ``max_count``.
-    4. If none fall in that band, fall back to all solo segments sorted
-       longest-first, up to ``max_count``.
-    5. If there are no solo segments at all (e.g. constant cross-talk),
-       fall back to the original behavior: the ``max_count`` longest
-       ``speaker_segs`` regardless of overlap.
+    1. Segments with ``speaker_label`` (``ValueError`` if none).
+    2. Prefer *solo* segments — no overlap with another speaker, where
+       cross-talk or music would pollute the embedding — of 2–20 s,
+       longest first.
+    3. Else all solo segments, longest first.
+    4. Else (constant cross-talk) the longest segments regardless of overlap.
     """
     speaker_segs = [s for s in segments if s.speaker == speaker_label]
     if not speaker_segs:
@@ -344,13 +288,9 @@ def extract_embedding(
     speaker_label: str,
     device: str = "cpu",
 ) -> np.ndarray:
-    """Extract a voice embedding for a speaker by averaging select segments.
+    """Extract a speaker's voice embedding, averaged over selected segments.
 
-    Segment choice is delegated to ``_select_embedding_segments()``: it
-    prefers segments that don't overlap another speaker's turn (avoiding
-    cross-talk/music bleed) and are a moderate 2-20s long, falling back to
-    the longest available segments when nothing fits that profile. See that
-    function's docstring for the full policy.
+    See ``_select_embedding_segments()`` for which segments are used.
     """
     from pyannote.core import Segment as PyannoteSegment
 
@@ -388,13 +328,10 @@ def enroll_speaker(
     notes: str = "",
     embedding: Optional[np.ndarray] = None,
 ) -> SpeakerProfile:
-    """Extract embedding and save a new speaker profile.
+    """Extract an embedding and save a new speaker profile.
 
-    ``embedding``, when provided, is used as-is instead of calling
-    ``extract_embedding()`` internally. This lets callers average embeddings
-    extracted from multiple raw diarization labels before saving -- e.g. when
-    two pyannote labels are assigned the same display name in one enrollment
-    wizard submit (over-segmentation of a single real speaker).
+    Pass ``embedding`` to skip extraction, e.g. when the caller averaged
+    several raw labels assigned the same name.
     """
     import datetime
 
@@ -416,10 +353,8 @@ def enroll_speaker(
         notes=notes,
     )
 
-    # R37: lock scoped to just the load/modify/save of the shared
-    # profiles.json store -- the (possibly slow) embedding extraction and
-    # .npy write above intentionally happen outside the lock so they don't
-    # serialize unrelated enrollments against each other.
+    # Lock only the store update; extraction and the .npy write above stay
+    # outside so enrollments don't serialize.
     with _profiles_lock:
         profiles = load_profiles(data_dir)
         profiles[name] = profile
@@ -443,15 +378,10 @@ def enroll_speaker_from_audio_dir(
 ) -> SpeakerProfile:
     """Enroll a speaker from a per-user recording directory.
 
-    Concatenates all .wav files in per_user_dir (single-speaker audio,
-    written by `SegmentedWavWriter` since R12) and calls enroll_speaker()
-    with a synthetic full-file DiarizationSegment.
-
-    Recordings made before the R12 fix only have `.opus` files — those were
-    never valid Opus streams (a pre-R12 bug wrote raw PCM into an Ogg/Opus
-    container), so they are attempted only as a fallback and are expected
-    to fail with the same generic "enrollment failed" error the caller
-    already handles, rather than a crash.
+    Concatenates the directory's ``.wav`` segments (single-speaker audio) and
+    enrolls from one full-length segment. Very old recordings only have
+    ``.opus`` files that were never valid Opus; they are tried as a fallback
+    and fail with the caller's generic error.
     """
     import tempfile
 
@@ -474,8 +404,7 @@ def enroll_speaker_from_audio_dir(
         for f in wav_files:
             combined += PydubSegment.from_file(str(f), format="wav")
     else:
-        # Legacy pre-R12 recordings: no .wav segments, fall back to the
-        # (unplayable) .opus files as a best-effort attempt.
+        # Old recordings: no .wav segments, try the .opus files.
         opus_files = sorted(_safe_dir.glob("*.opus"))
         if not opus_files:
             raise ValueError(f"No audio files found in {_safe_dir}")
@@ -561,28 +490,18 @@ def match_speakers(
     profile_filter: Optional[set] = None,
     allow_many_to_one: bool = False,
 ) -> dict[str, str]:
-    """Match anonymous speaker labels to enrolled profiles via cosine similarity.
+    """Match diarization labels to enrolled profiles by cosine similarity.
 
-    Returns a mapping like {"SPEAKER_00": "Alice", "SPEAKER_01": "Unknown Speaker 1"}.
-    Returns an empty dict if no profiles are enrolled.
+    Returns e.g. ``{"SPEAKER_00": "Alice", "SPEAKER_01": "Unknown Speaker 1"}``,
+    or ``{}`` if no profiles are enrolled.
 
-    profile_filter: when provided, only profiles whose key is in this set are
-    considered candidates.  None (default) uses all enrolled profiles.
+    ``profile_filter`` restricts candidates to those keys (``None`` = all).
 
-    Assignment is pair-scored rather than per-label-best-only: every
-    (label, profile) similarity is computed, then pairs are consumed
-    greedily by descending similarity so a label whose top choice was
-    already claimed by a higher-scoring label still falls back to its
-    next-best *unused* profile above threshold, instead of going straight
-    to "Unknown".
-
-    allow_many_to_one: when True, after the exclusive pass any label still
-    unassigned is given its single best-scoring profile even if that
-    profile was already claimed by another label (still gated on
-    threshold). This models diarization over-segmentation (one real
-    speaker split into two labels) and should only be enabled when the
-    speaker count was not pinned by the user — pinning implies the caller
-    expects one label per person, so exclusivity should hold.
+    Every (label, profile) pair is scored and consumed highest-first, so a
+    label whose top choice is taken falls back to its next-best unused
+    profile. With ``allow_many_to_one``, a still-unassigned label may then
+    claim an already-used profile above threshold (one person split into two
+    labels); only enable it when the speaker count wasn't pinned.
     """
     profiles = load_profiles(data_dir)
     if profile_filter is not None:
@@ -594,10 +513,7 @@ def match_speakers(
 
     unique_labels = sorted({s.speaker for s in diarization_segments})
 
-    # Extract query embeddings. R32-2: a failed extraction used to be
-    # recorded as `query_embeddings[label] = None`, a typed lie against the
-    # declared `dict[str, np.ndarray]` -- failures are tracked in a separate
-    # `failed` set instead, so the dict's value type is honest.
+    # Failed extractions go to `failed`, never into query_embeddings.
     query_embeddings: dict[str, np.ndarray] = {}
     failed: set[str] = set()
     for label in unique_labels:
@@ -615,11 +531,8 @@ def match_speakers(
     if not enrolled:
         return {}
 
-    # Score every (label, profile) pair for labels whose embedding extraction
-    # succeeded. `query_embeddings` only ever holds successful extractions
-    # (failures go to `failed` instead, never inserted here), so iterating
-    # it already excludes them -- failed labels are picked up by the final
-    # Unknown-numbering pass below.
+    # Score every pair for labels with an embedding; failed labels are
+    # numbered as Unknown below.
     pairs: list[tuple[float, str, str]] = []  # (sim, label, profile_name)
     for label, q_emb in query_embeddings.items():
         for pname, e_emb in enrolled.items():
@@ -633,10 +546,7 @@ def match_speakers(
     result: dict[str, str] = {}
     used_profiles: set[str] = set()
 
-    # Exclusive pass: greedily assign the best remaining pair whenever both
-    # the label and the profile are still free. This is what gives a label
-    # whose top choice was already taken the next-best *unused* profile
-    # instead of going straight to Unknown.
+    # Exclusive pass: take the best remaining pair while both sides are free.
     for sim, label, pname in pairs:
         if sim < threshold:
             break  # pairs are sorted descending; nothing further clears threshold
@@ -645,10 +555,8 @@ def match_speakers(
         result[label] = profiles[pname].display_name
         used_profiles.add(pname)
 
-    # Many-to-one pass: each still-unassigned label takes its single best
-    # profile (over ALL enrolled profiles, used or not) if that best score
-    # clears threshold. A label reaching here with best_sim >= threshold
-    # necessarily lost that profile to another label in the exclusive pass.
+    # Many-to-one pass: an unassigned label takes its best profile, used or
+    # not, if it clears threshold.
     if allow_many_to_one:
         best_by_label: dict[str, tuple[float, str]] = {}
         for sim, label, pname in pairs:
@@ -660,9 +568,7 @@ def match_speakers(
             if sim >= threshold:
                 result[label] = profiles[pname].display_name
 
-    # Remaining unassigned labels (below threshold, exclusivity losers with
-    # many-to-one off, or failed embeddings) become "Unknown Speaker N",
-    # numbered deterministically by sorted label order.
+    # Everything else becomes "Unknown Speaker N", numbered by sorted label.
     unknown_counter = 1
     for label in unique_labels:
         if label not in result:

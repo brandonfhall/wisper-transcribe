@@ -418,8 +418,8 @@ async def open_data_dir() -> JSONResponse:
     Only meaningful when running locally — silently fails on headless servers.
     Returns {ok: true} on success, {ok: false, error: "..."} on failure.
 
-    POST, not GET (R16): this is state-changing (spawns an OS process), so a
-    GET version was triggerable cross-site via a simple <img> tag.
+    POST because it spawns a process; a GET could be triggered cross-site by
+    an <img> tag.
     """
     import subprocess
     from wisper_transcribe.config import get_data_dir

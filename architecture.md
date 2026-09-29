@@ -587,7 +587,6 @@ The job page shows step pills and one bar split into equal per-step slices:
 - The `done` event carries `summary_path` and `job_type` so the page shows the right follow-up links.
 
 ### Transcripts and dashboard
-- Transcript cards use an overlay-link pattern (a full-card `<a>` under `relative z-50` buttons) to avoid nesting forms in links.
 - `.summary.md` files are hidden from the list and shown as a notes icon on their transcript.
 - `/transcripts/bulk-delete` and `/transcripts/bulk-campaign` exist and are tested but have no UI yet.
 - The Dashboard System card shows Whisper state and LLM readiness. For cloud providers it shows only a boolean and a generic hint; keys never reach templates.

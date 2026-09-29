@@ -20,21 +20,13 @@ from starlette.responses import Response as StarletteResponse
 
 from .jobs import JobQueue
 
-# Disable TMonitor globally — it spawns a daemon thread with an atexit join()
-# that hangs on Python 3.14's stricter thread cleanup, requiring multiple Ctrl+C.
-# TMonitor only helps detect stalled bars in interactive terminals; it's useless
-# in a web server context.
+# Disable tqdm's TMonitor thread: its atexit join hangs Ctrl+C on Python 3.14,
+# and stall detection is useless in a server.
 _tqdm_module.tqdm.monitor_interval = 0
 
-# Reconfigure stdout/stderr to UTF-8, independently of cli.py's own
-# _ensure_utf8_stdio() -- `uvicorn.run(..., reload=True)` spawns a fresh
-# subprocess that imports this module string ("wisper_transcribe.web.app:app")
-# directly, never re-running cli.py's module-level code, so that fix alone
-# doesn't reach the actual worker process transcription jobs run in. Same
-# per-entrypoint duplication as the tqdm.monitor_interval line above and
-# jobs.py's own copy of it -- see CLAUDE.md's tqdm-patching gotcha. Confirmed
-# live: pipeline.py's tqdm.write("─" * 60) crashed every transcription job
-# with UnicodeEncodeError on this process's inherited cp1252 console codepage.
+# UTF-8 stdio, as in cli._ensure_utf8_stdio(): `uvicorn --reload` imports this
+# module in a fresh subprocess that never runs cli.py, and legacy code pages
+# can't encode the characters pipeline.py writes via tqdm.write().
 for _stream in (sys.stdout, sys.stderr):
     if _stream is not None:
         try:
@@ -55,9 +47,7 @@ def _build_tailwind() -> None:
     no Node.js required).  Safe to call on every startup; skips the build
     if output is already up-to-date.
     """
-    # R32-8: _INPUT_CSS.stat() raised an uncaught FileNotFoundError here (a
-    # stripped/partial install missing input.css would crash startup instead
-    # of falling into the warn-and-continue path below).
+    # A partial install without input.css warns and continues below.
     try:
         up_to_date = (
             _OUTPUT_CSS.exists()
@@ -86,20 +76,12 @@ def _build_tailwind() -> None:
         warnings.warn(f"Tailwind CSS build failed: {exc}. Using existing tailwind.min.css.")
 
 def _cleanup_orphaned_uploads() -> None:
-    """Delete wisper_upload_*/wisper_enroll_*/wisper_enrollsrc_* temp files
-    left by requests or jobs that crashed mid-flight.
+    """Delete wisper_upload_*/wisper_enroll_*/wisper_enrollsrc_* temp files at startup.
 
-    The web upload route saves the file to a NamedTemporaryFile with the
-    wisper_upload_ prefix before enqueuing the job; the standalone speaker
-    enroll route (routes/speakers.py) uses the wisper_enroll_ prefix, which
-    JobQueue.submit_standalone_enroll immediately renames to
-    wisper_enrollsrc_<job-id> at submit time (R6 — same rename-at-submit
-    pattern as F5, so a *pending* job's file never matches the
-    wisper_enroll_* glob; the job deletes it in a finally). This sweep is
-    only the crash-window safety net for all three prefixes. Sweeping
-    wisper_enrollsrc_* here is safe because the sweep runs at startup, when
-    the in-memory job queue is necessarily empty — any such file on disk at
-    boot time belongs to a job that died with the previous process.
+    Jobs rename their uploads at submit time (to ``<stem><suffix>`` or
+    ``wisper_enrollsrc_<job-id>``) and clean up after themselves, so this only
+    covers crashes. Sweeping ``wisper_enrollsrc_*`` is safe because the
+    in-memory queue is empty at startup.
     """
     import glob
     import logging
@@ -126,10 +108,9 @@ except Exception:
     __version__ = "unknown"
 
 
-# Content-Security-Policy: script-src allows 'unsafe-inline' because several
-# templates still use inline <script> blocks and onclick handlers.  Moving those
-# to app.js and switching to a nonce-based policy would eliminate this exception
-# (tracked as a future hardening task).
+# script-src allows 'unsafe-inline' because templates still contain inline
+# <script> blocks and onclick handlers; moving them to app.js would allow a
+# nonce-based policy.
 _CSP = (
     "default-src 'self'; "
     "script-src 'self' 'unsafe-inline'; "
@@ -149,8 +130,7 @@ class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
     ) -> StarletteResponse:
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
-        # R18: must agree with the CSP's `frame-ancestors 'none'` — DENY, not
-        # SAMEORIGIN (the two headers previously contradicted each other).
+        # DENY matches the CSP's frame-ancestors 'none'.
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Content-Security-Policy"] = _CSP
@@ -167,10 +147,8 @@ def create_app() -> FastAPI:
         _build_tailwind()
         job_queue.start()
 
-        # Write server.json so CLI can discover the running server.
-        # WISPER_BIND is set by the `wisper server` CLI command; falls back to
-        # 127.0.0.1:8080 (the CLI's default bind since R16). 0.0.0.0 is
-        # normalised to 127.0.0.1 for CLI use.
+        # Write server.json for CLI discovery. WISPER_BIND comes from
+        # `wisper server`; 0.0.0.0 is normalised to 127.0.0.1 for the CLI.
         raw_bind = os.environ.get("WISPER_BIND", "127.0.0.1:8080")
         host, _, port = raw_bind.rpartition(":")
         cli_host = "127.0.0.1" if host in ("0.0.0.0", "") else host
@@ -199,13 +177,9 @@ def create_app() -> FastAPI:
         try:
             yield
         finally:
-            # Signal any active JOB_LIVE job to end BEFORE job_queue.stop()
-            # -- see stop_all_live()'s docstring for why job_queue.stop()
-            # alone can't stop it and would otherwise hang shutdown.
+            # Must precede job_queue.stop(); see stop_all_live().
             job_queue.stop_all_live()
-            # LocalCaptureManager is synchronous/thread-based (soundcard
-            # recorders are blocking pulls) -- stop() joins threads, so it
-            # must run off the event loop like any other blocking call.
+            # stop() joins threads, so run it off the event loop.
             await asyncio.to_thread(local_capture_manager.stop)
             await bot_manager.stop()
             await job_queue.stop()

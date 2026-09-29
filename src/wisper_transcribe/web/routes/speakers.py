@@ -96,16 +96,10 @@ async def enroll_submit(
     segment: Annotated[Optional[str], Form()] = None,
     update: Annotated[bool, Form()] = False,
 ) -> RedirectResponse:
-    """Enroll a new speaker or update an existing one from an uploaded audio file.
+    """Enroll or update a speaker from an uploaded clip.
 
-    R6: the ML work (WAV conversion, diarization, embedding extraction) used
-    to run synchronously inside this ``async def`` — blocking the entire
-    event loop for minutes and mutating the module-level ML caches
-    concurrently with any running job's worker thread. The route now only
-    validates and saves the upload, then enqueues a standalone JOB_ENROLL
-    job (one-job-at-a-time queue) and redirects to the job detail page.
-    Temp-file cleanup moved into the job with the work — see
-    ``JobQueue.submit_standalone_enroll`` (R9-1 interplay).
+    Validates and saves the upload, then enqueues a standalone JOB_ENROLL job
+    (which owns the temp file) and redirects to its job page.
     """
     import tempfile
 
@@ -126,8 +120,7 @@ async def enroll_submit(
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix, prefix="wisper_enroll_")
     tmp_path = Path(tmp.name)
     try:
-        # R10: stream to disk in 1 MiB chunks instead of buffering the whole
-        # upload (potentially a multi-GB reference clip) in RAM at once.
+        # Stream to disk in 1 MiB chunks; uploads can be large.
         while chunk := await audio.read(1 << 20):
             tmp.write(chunk)
     finally:
@@ -154,26 +147,21 @@ async def enroll_submit(
 
 @router.post("/{name}/remove", response_class=HTMLResponse)
 async def remove_speaker(request: Request, name: str) -> RedirectResponse:
-    # R37: goes through speaker_manager.remove_profile() (locked
-    # load-modify-save, R9-5's .npy + .mp3 cleanup) -- shared with the CLI
-    # `speakers remove` command instead of duplicating the sequence here.
+    # Shared with the CLI remove command (locked; removes .npy and .mp3).
     try:
         remove_profile(name)
     except KeyError:
-        pass  # already gone -- same no-op the old "if name in profiles" gave
+        pass  # already gone
     return RedirectResponse(url="/speakers", status_code=303)
 
 
 @router.post("/{name}/rename", response_class=HTMLResponse)
 async def rename_speaker(request: Request, name: str) -> RedirectResponse:
-    """Rename an enrolled speaker.
+    """Rename an enrolled speaker via ``speaker_manager.rename_profile``.
 
-    R31: goes through ``speaker_manager.rename_profile`` — the same rekey
-    semantic as the CLI ``speakers rename`` command (rekeys the profile,
-    moves the .npy/.mp3 files, updates campaign membership) — instead of the
-    old display-name-only update. Failures (unknown profile, key collision,
-    a name whose derived key fails the path guard) redirect with a generic
-    error code; the submitted name is never reflected.
+    Same semantics as the CLI: rekeys the profile, moves its files, and
+    updates campaign rosters. Failures redirect with a generic error code; the
+    submitted name is never reflected.
     """
     form = await request.form()
     new_display = str(form.get("new_name", "")).strip()

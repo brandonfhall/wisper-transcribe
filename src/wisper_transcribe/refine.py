@@ -34,11 +34,8 @@ _FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 _SPEAKER_LINE_RE = re.compile(r"^\*\*(?P<speaker>[^*]+)\*\*")
 _UNKNOWN_LABEL_RE = re.compile(r"^\*\*(?P<label>Unknown Speaker \d+)\*\*", re.IGNORECASE)
 
-# R11: matches a transcript block's `**Speaker**` / `**Speaker** *(ts)*:`
-# header (see formatter.to_markdown / parse_transcript_blocks) so apply_edits
-# can split it off and never run vocabulary substitutions over the speaker
-# label itself. Group 1 is the header (kept verbatim); group 2 is the
-# spoken-text remainder that substitutions are allowed to touch.
+# A block's `**Speaker**` / `**Speaker** *(ts)*:` header (group 1, kept
+# verbatim) and its spoken text (group 2, the only part edits may touch).
 _BLOCK_HEADER_RE = re.compile(r"^(\*\*.+?\*\*(?:\s*\*\(.+?\)\*)?:\s*)(.*)$")
 
 
@@ -215,13 +212,9 @@ def apply_edits(body: str, edits: list[Edit]) -> str:
     the spoken-text portion of a transcript block, never inside the
     `**Speaker**` label itself.
 
-    R11: the previous implementation ran `body.replace(original, corrected)`
-    over the whole body, so a short `original` like "Dan" also rewrote
-    "Dandy" -> "Dondy" mid-word, and rewrote the `**Dan**:` speaker header
-    to `**Don**:` -- silently renaming the speaker as a side effect of a
-    vocabulary-only fix (speaker renames go through
-    `speaker_manager.rename_profile`, not this pass). Order-preserving;
-    duplicates across edits do not compound.
+    So "Dan" never rewrites "Dandy" or the ``**Dan**:`` header (speaker
+    renames go through ``speaker_manager.rename_profile``). Order-preserving;
+    duplicate edits don't compound.
     """
     lines = body.splitlines(keepends=True)
     patterns = [

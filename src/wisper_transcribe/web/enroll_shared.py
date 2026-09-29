@@ -1,34 +1,20 @@
 """Shared logic for the speaker-enrollment wizard.
 
-Both enrollment entry points -- the transcript-centric wizard
-(``web/routes/transcripts.py``) and the legacy job-centric wizard
-(``web/routes/transcribe.py``) -- need to:
+Used by both the transcript-centric wizard (``routes/transcripts.py``) and the
+job-based wizard (``routes/transcribe.py``) so they can't drift:
 
-1. Resolve the *current* display name for each raw pyannote label so a
-   second pass through the wizard actually finds something to rename
-   (F1 -- the raw label stops existing in the markdown body as soon as any
-   profile exists and ``match_speakers`` writes display names into it).
-2. Refuse to create voice profiles named after the raw pyannote label itself
-   (``SPEAKER_03`` etc.) -- those are never real, and once enrolled they
-   compete in every future ``match_speakers`` call (F2).
-3. Merge into an existing profile's embedding via EMA (``update_embedding``)
-   instead of overwriting it with ``enroll_speaker`` on every resubmission,
-   and average embeddings when two raw labels are assigned the same display
-   name in one submit (F3).
+1. Resolve each raw pyannote label's *current* display name (the raw label
+   disappears from the markdown once names are written in).
+2. Never create a profile named after a raw label (``SPEAKER_03``); such a
+   profile would compete in every future match.
+3. Merge into existing profiles via EMA instead of overwriting, and average
+   embeddings when several raw labels get the same name.
 
-This module holds that logic once so both routes call the same code path.
+The submission is split in two so the slow half can run as a job:
 
-**Phase 2.5 split:** what used to be a single ``apply_enrollment_submit()``
-(rename + convert-to-WAV + extract embeddings, all synchronous inside the
-HTTP request) is now two functions so the slow half can run in the
-background ``JobQueue`` instead of blocking the browser tab for 30-120s:
-
-- ``apply_renames()`` -- fast, synchronous. Rewrites the transcript markdown
-  and returns the validated rename groups for the caller to hand off.
-- ``enroll_profiles()`` -- slow. WAV conversion + pyannote embedding
-  extraction + campaign membership. Called from ``web/jobs.py``'s
-  ``_run_enroll_job`` (a ``JOB_ENROLL`` job), with an optional ``progress``
-  callback so the job's log stream shows what's happening.
+- ``apply_renames()`` — fast, runs in the request; rewrites the transcript.
+- ``enroll_profiles()`` — slow, runs in a ``JOB_ENROLL`` job; WAV conversion,
+  embedding extraction, campaign membership.
 """
 from __future__ import annotations
 
@@ -46,21 +32,12 @@ RAW_LABEL_RE = re.compile(r"^SPEAKER_\d+$")
 
 
 def find_excerpt_clip(out_dir: Path, stem: str, candidates: list[str]) -> Optional[Path]:
-    """Locate an on-disk speaker excerpt clip (``<stem>_excerpt_<label>.mp3``).
+    """Return the first existing ``<stem>_excerpt_<label>.mp3``, or None.
 
-    R24: this lookup (and its CodeQL guard) used to be duplicated between the
-    two enrollment wizards' excerpt routes (``routes/transcribe.py`` and
-    ``routes/transcripts.py``); it lives here once now.
-
-    ``candidates`` are speaker labels to try in order (e.g. the raw pyannote
-    label first, then a legacy display-name key for pre-fix transcripts).
-    Each is whitelisted to ``[\\w-]`` via ``re.sub`` and then run through the
-    ``os.path.abspath`` + ``startswith`` round-trip — the ``re.sub`` is
-    already a tight whitelist, but CodeQL's taint tracker only recognises the
-    ``os.path`` pattern as a path sanitiser (CLAUDE.md security note), so
-    both layers are required. Do not weaken either.
-
-    Returns the first existing clip path, or None.
+    ``candidates`` are labels to try in order (raw label, then a legacy
+    display-name key). Each is whitelisted to ``[\\w-]`` and then passed through
+    the ``os.path.abspath`` + ``startswith`` guard. CodeQL only recognizes the
+    ``os.path`` pattern as a sanitizer, so both layers are required.
     """
     import os as _os
     import re as _re
@@ -111,11 +88,10 @@ def _segment_intervals(segments: list) -> list[tuple[float, float, str]]:
 
 
 def _parse_md_timestamp(ts: str) -> float:
-    """Parse a rendered ``MM:SS`` or ``H:MM:SS`` markdown timestamp to seconds.
+    """Parse a rendered ``MM:SS`` or ``H:MM:SS`` timestamp to seconds.
 
-    Truncated to whole seconds by ``time_utils.format_timestamp`` at render
-    time -- this is the source of the imprecision both ``build_legacy_label_map``
-    and ``_attribute_block_to_label`` document (F7).
+    Rendered timestamps are truncated to whole seconds, which limits how
+    precisely blocks can be matched to diarization turns.
     """
     parts = ts.split(":")
     try:
@@ -131,15 +107,12 @@ def _parse_md_timestamp(ts: str) -> float:
 def _attribute_block_to_label(
     t: float, intervals: list[tuple[float, float, str]]
 ) -> tuple[Optional[str], bool]:
-    """Attribute one markdown block's timestamp to a raw pyannote label.
+    """Attribute one block's timestamp to a raw pyannote label.
 
     Returns ``(raw_label, confident)``. ``confident`` is True only when *t*
-    falls inside a diarization segment's ``[start, end]`` interval exactly;
-    False when just the nearest-by-start fallback matched -- whisper segment
-    starts routinely fall outside pyannote turns, and rendered timestamps are
-    truncated to whole seconds, so the fallback is a real but weaker signal.
-    Used per-block (F6) rather than per-label (F7's fragile first-write-wins
-    ``setdefault``), so one imprecise block no longer poisons a whole label.
+    falls inside a segment's ``[start, end]``; the nearest-start fallback is
+    weaker because whisper starts often fall just outside pyannote turns.
+    Applied per block, so one imprecise block can't mislabel a whole speaker.
     """
     if not intervals:
         return None, False
@@ -151,31 +124,16 @@ def _attribute_block_to_label(
 
 
 def build_legacy_label_map(md_path: Path, segments: list) -> dict[str, str]:
-    """Map raw pyannote labels -> current display name in the transcript body.
+    """Reconstruct raw label -> display name from the transcript body.
 
-    LEGACY FALLBACK ONLY (F7) -- used only when a transcript's ``_diar.json``
-    sidecar predates the persisted ``speaker_map`` key (see
-    ``resolve_current_names``, which is what every caller should go through).
+    Fallback for sidecars without a persisted ``speaker_map``; callers should
+    use ``resolve_current_names``. Matches each block's timestamp against
+    diarization intervals (nearest start if none contains it), first match
+    wins per label.
 
-    Reconstructed by matching markdown block timestamps against pyannote
-    segment intervals: for each ``**display_name** *(HH:MM:SS)*`` line, find
-    the diarization segment whose ``[start, end]`` interval contains that
-    timestamp -- the segment's raw label is the one the aligner assigned to
-    that whisper line. Falls back to the nearest segment by start time when
-    no interval contains the timestamp exactly (whisper segment starts
-    routinely fall outside pyannote turns). First-write-wins (``setdefault``)
-    across the whole transcript -- fragile if an early block is misattributed
-    (see ``_attribute_block_to_label``, which demotes this to a per-block
-    decision for the rename path itself).
-
-    Returns raw_label -> display_name for every label that could be matched.
-    On a *first* pass (no profiles enrolled yet, body still has raw labels)
-    this naturally maps ``SPEAKER_00 -> "SPEAKER_00"`` since the markdown
-    itself contains the raw label as the "display name". Callers that use
-    this map to prefill a form must filter out those raw-label-valued
-    entries themselves (see ``template_current_names``) -- the POST/rename
-    path wants the unfiltered map (raw-to-raw is a correct, useful no-op
-    target on a first pass).
+    On a first pass the body still contains raw labels, so this maps
+    ``SPEAKER_00 -> "SPEAKER_00"``. Form prefill must filter those out
+    (``template_current_names``); the rename path wants the unfiltered map.
     """
     import re as _re
 
@@ -206,25 +164,14 @@ def build_legacy_label_map(md_path: Path, segments: list) -> dict[str, str]:
 def resolve_current_names(
     md_path: Path, diar: Optional[dict], segments: list
 ) -> dict[str, str]:
-    """Resolve raw_label -> current display name in the transcript body.
+    """Resolve raw label -> current display name.
 
-    Single entry point (F7) for "what does this raw pyannote label currently
-    display as". Resolution order:
+    The single entry point for this question. Uses the sidecar's persisted
+    ``speaker_map`` when ``diar`` has one (exactly what the formatter used),
+    else ``build_legacy_label_map()``.
 
-    1. The authoritative ``speaker_map`` persisted in the enrollment sidecar
-       at transcript-write time (``diar["speaker_map"]``) -- exactly the map
-       the formatter used, no reconstruction needed.
-    2. ``build_legacy_label_map()``'s interval-matching heuristic, for
-       sidecars written before the ``speaker_map`` key existed (or when no
-       sidecar dict is available at all).
-
-    ``diar`` is the loaded ``_diar.json`` sidecar dict (or ``None``);
-    ``segments`` is the diarization segments to fall back on (accepts either
-    ``DiarizationSegment``-like objects or the sidecar's plain-dict form --
-    same normalisation as ``build_legacy_label_map``). Every caller that
-    needs this resolution -- both wizard GET routes (prefill) and
-    ``apply_renames`` (old-name resolution for the rename itself) -- goes
-    through this one function.
+    ``segments`` may be ``DiarizationSegment``-like objects or the sidecar's
+    plain dicts.
     """
     if diar:
         speaker_map = diar.get("speaker_map")
@@ -234,33 +181,21 @@ def resolve_current_names(
 
 
 def template_current_names(current_names: dict[str, str]) -> dict[str, str]:
-    """Filter a raw-label-map for template prefill (F2 layer 1).
+    """Drop entries whose value is still a raw label, for form prefill.
 
-    ``build_legacy_label_map`` maps ``SPEAKER_00 -> "SPEAKER_00"`` on a first
-    pass, before any renames have happened -- the markdown body legitimately
-    has the raw label as its only "display name" at that point. Prefilling a
-    form input with that value is exactly the F2 bug (submitting untouched
-    fields enrolls junk "SPEAKER_XX" profiles), so entries whose value is
-    itself raw-label-shaped are dropped here. The wizard template then shows
-    an empty input (with the raw label as heading/placeholder only) instead.
+    Prefilling an input with ``SPEAKER_00`` would let an untouched field
+    enroll a junk profile, so those inputs start empty instead.
     """
     return {k: v for k, v in current_names.items() if not RAW_LABEL_RE.match(v)}
 
 
 @dataclass
 class RenameResult:
-    """Outcome of ``apply_renames`` -- the fast, synchronous half of the
-    wizard submission.
+    """Result of ``apply_renames``.
 
-    ``current_names`` is the (unfiltered) current_names map used to resolve
-    renames -- kept for callers/tests that want to inspect it.
-
-    ``groups`` maps *target display name* -> list of raw pyannote labels
-    assigned to it, for every rename that is actually eligible for
-    enrollment (F2's raw-label guard and F3's unchanged-name-with-existing-
-    profile skip have both already been applied). Empty when nothing
-    submitted was eligible -- callers use this to decide whether a
-    ``JOB_ENROLL`` job is worth enqueueing at all.
+    ``current_names``: the unfiltered map used to resolve renames.
+    ``groups``: target display name -> raw labels, for renames eligible for
+    enrollment. Empty when there is nothing to enroll.
     """
 
     current_names: dict[str, str] = field(default_factory=dict)
@@ -273,30 +208,17 @@ def apply_renames(
     renames: dict[str, str],
     data_dir=None,
 ) -> RenameResult:
-    """Apply a wizard submission's renames to the transcript markdown.
+    """Apply a wizard submission's renames to the transcript.
 
-    Synchronous and fast -- this is the part that used to run inline with
-    the (now-async) embedding extraction; it stays inline in the HTTP
-    request. ``segments`` must be ``DiarizationSegment``-like objects
-    (attribute access) -- both callers normalise to that before calling in.
+    Fast; runs in the request. ``segments`` must be ``DiarizationSegment``-like.
 
-    F6/F7 fix: renames are resolved against the sidecar's authoritative
-    ``speaker_map`` when available (``resolve_current_names``), and applied
-    to the transcript body in a single pass over the ORIGINAL content rather
-    than a sequential loop of global find/replace calls. Each markdown block
-    is attributed to a raw pyannote label *once* (by timestamp, falling back
-    to an unambiguous name match -- see ``_attribute_block_to_label``), and
-    only blocks whose raw label was actually renamed are rewritten
-    (``rewrite_transcript_blocks``). This is what makes a same-submit swap
-    (Alice<->Bob) and a shared-display-name rename (two raw labels both
-    currently "Dan", only one renamed) both come out correct -- neither is
-    representable as "replace this string with that string" the way the old
-    ``update_speaker_names`` loop required.
+    Rewrites the body in one pass over the original content: each block is
+    attributed to a raw label once (``_attribute_block_to_label``) and only
+    blocks whose label was renamed change. That handles a same-submit swap
+    (Alice<->Bob) and two labels sharing one display name, neither of which a
+    global find/replace can express.
 
-    Returns a ``RenameResult`` whose ``groups`` the caller hands to
-    ``enroll_profiles()`` -- directly, or (the web routes' choice) via a
-    ``JOB_ENROLL`` job so the slow embedding-extraction step doesn't block
-    the response.
+    Returns a ``RenameResult`` whose ``groups`` go to ``enroll_profiles()``.
     """
     import json as _json
     from collections import Counter
@@ -307,8 +229,7 @@ def apply_renames(
     diar = _load_diar_sidecar(md_path)
     current_names = resolve_current_names(md_path, diar, segments)
 
-    # F2: never rename/enroll a submission whose *new* name is itself
-    # raw-label-shaped -- that means the field was left untouched.
+    # A raw-label-shaped new name means the field was left untouched.
     valid: dict[str, str] = {
         raw: new for raw, new in renames.items() if not RAW_LABEL_RE.match(new)
     }
@@ -325,14 +246,11 @@ def apply_renames(
         profile_key = new.lower().replace(" ", "_")
         unchanged = old == new
         profile_exists = profile_key in existing_profiles
-        # F3: skip the enroll step (not just the rename) when nothing
-        # changed and a profile already exists under that name.
+        # Unchanged name with an existing profile: rename only, no enroll.
         eligible_for_enroll[raw] = not (unchanged and profile_exists)
 
-    # How many raw labels currently display each name -- >1 means a shared
-    # display name (legitimate after F3's many-to-one naming). Used both to
-    # gate the per-block name-based fallback and to keep the frontmatter
-    # rewrite from guessing at an ambiguous shared entry.
+    # Count of raw labels per current display name; >1 means a shared name,
+    # which disables the name-based fallback and the frontmatter rewrite.
     label_counts = Counter(current_names.values())
 
     content = md_path.read_text(encoding="utf-8")
@@ -344,27 +262,16 @@ def apply_renames(
         for block in blocks:
             if not block["has_speaker"]:
                 continue
-            # `include_timestamps=False` (the web upload's "Include
-            # timestamps" option) renders blocks as "**Speaker**: text" with
-            # no "*(ts)*" at all -- there is no timing signal to attribute
-            # from, so go straight to the name-based fallback below rather
-            # than attributing against t=0.0 (which would look "confident"
-            # purely by accident whenever some segment happens to start at 0).
+            # Timestamp-free blocks ("**Speaker**: text") have no timing signal;
+            # go straight to the name-based fallback instead of matching t=0.
             raw_label: Optional[str] = None
             confident = False
             if block["timestamp"]:
                 t = _parse_md_timestamp(block["timestamp"])
                 raw_label, confident = _attribute_block_to_label(t, intervals)
             if not confident:
-                # The coarse nearest-timestamp guess is unreliable here --
-                # prefer an unambiguous name match instead (exactly one raw
-                # label currently displays this block's speaker name). If
-                # the name is itself shared (ambiguous), keep whatever the
-                # interval match already found (possibly None, if there was
-                # no timestamp at all) rather than guessing further -- it's
-                # imprecise but the best available signal, and per-block
-                # (not per-label) so a bad guess here can't poison anything
-                # beyond this one block.
+                # Low confidence: prefer an unambiguous name match. If the name
+                # is shared, keep the timestamp guess; it only affects this block.
                 candidates = [
                     r for r in current_names if current_names[r] == block["speaker"]
                 ]
@@ -380,16 +287,9 @@ def apply_renames(
         if updated_speakers:
             content = rewrite_transcript_blocks(content, updated_speakers)
 
-    # Frontmatter `speakers:` list -- F11: rewritten via
-    # formatter.rewrite_frontmatter_speakers, which parses/re-dumps the YAML
-    # (exact-value name matching, so no prefix collision, and quoting is
-    # handled by yaml.dump instead of a regex that never matches it). Every
-    # pair is applied in one simultaneous pass against the parsed values
-    # (F6), so a same-submit swap (Alice<->Bob) or a new name colliding with
-    # another entry can't cross-contaminate. Skip any old name shared by
-    # more than one raw label -- the frontmatter list has no way to
-    # represent "two people, one name", so an ambiguous entry is left alone
-    # rather than guessed at.
+    # Rewrite frontmatter `speakers:` via YAML round-trip in one simultaneous
+    # pass (safe for swaps and quoted names). Names shared by several raw
+    # labels are skipped: the list can't represent two people with one name.
     frontmatter_renames = {
         old_names[raw]: new
         for raw, new in valid.items()
@@ -401,11 +301,8 @@ def apply_renames(
 
     md_path.write_text(content, encoding="utf-8")
 
-    # F7: keep the sidecar's speaker_map authoritative across wizard
-    # re-entries -- every raw label submitted (renamed or resubmitted
-    # unchanged) gets its current resolved name recorded, so the next GET
-    # prefill and the next apply_renames() call both resolve from here
-    # instead of re-deriving from rendered markdown.
+    # Record every submitted label's current name so the sidecar stays
+    # authoritative for the next visit.
     if diar is not None:
         updated_map = dict(current_names)
         updated_map.update(valid)
@@ -419,8 +316,7 @@ def apply_renames(
     if not segments:
         return RenameResult(current_names, groups={})
 
-    # Group eligible raw labels by target display name -- handles two raw
-    # labels being assigned the same display name in one submit (F3).
+    # Group eligible raw labels by target name (several labels may share one).
     groups: dict[str, list[str]] = {}
     for raw, new in valid.items():
         if not eligible_for_enroll[raw]:
@@ -440,22 +336,15 @@ def enroll_profiles(
     data_dir=None,
     progress: Optional[Callable[[str], None]] = None,
 ) -> None:
-    """Convert audio to WAV, extract/merge/enroll embeddings, update campaign.
+    """Convert audio, then enroll or EMA-update each group's profile.
 
-    This is the slow half of the wizard submission -- WAV conversion (15-30s
-    for a long file) and pyannote embedding extraction per speaker (up to 5
-    forward passes each). Callers run this off the request thread (the
-    ``JOB_ENROLL`` job runner in ``web/jobs.py``), passing ``progress`` so
-    status lines land in the job's log stream.
+    Slow (WAV conversion plus up to 5 embedding passes per speaker); runs in a
+    ``JOB_ENROLL`` job with ``progress`` feeding the job log. ``groups`` is
+    ``RenameResult.groups``. Existing profiles are EMA-merged; several raw
+    labels for one name are averaged. Each profile is added to the campaign.
 
-    ``groups`` is ``apply_renames()``'s ``RenameResult.groups`` -- target
-    display name -> raw pyannote labels assigned to it. Semantics (F3 EMA
-    merge, averaging across raw labels, campaign membership) are unchanged
-    from the pre-split ``apply_enrollment_submit``.
-
-    Raises if ``input_path`` doesn't exist or WAV conversion fails; per-group
-    enroll/update failures are logged and skipped so one bad speaker doesn't
-    abort the rest.
+    Raises if ``input_path`` is missing or conversion fails; a single group's
+    failure is logged and skipped.
     """
     if not groups:
         return

@@ -91,14 +91,8 @@
       </div>
       {% endif %}
 
-      {#- Only prefill when a *real* current display name is known -- never
-          with the raw pyannote label itself. Submitting an untouched field
-          would otherwise enroll a junk "SPEAKER_XX" voice profile that then
-          competes in match_speakers for every future session (F2). The
-          server-side current_names map is already filtered the same way
-          (see enroll_shared.template_current_names), but this guard is kept
-          here too so a raw label can never end up as a prefilled value even
-          if a caller forgets to filter. -#}
+      {#- Never prefill a raw SPEAKER_XX label: an untouched field would
+          enroll a junk profile. The server filters these too. -#}
       {%- set _known = (current_names | default({})).get(speaker_name) -%}
       {%- set _current = _known if (_known and _known != speaker_name) else "" -%}
       <input type="text" id="{{ field_id }}"

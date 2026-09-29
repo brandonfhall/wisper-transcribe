@@ -437,8 +437,8 @@
 {% if active_recording %}
 <script>
 // ── Record live UI ──
-// SSE stream binds speaker meters + ticker.
-// See app.js for full record-meters.js / record-ticker.js implementations.
+// The status SSE stream drives speaker meters and level gauges; rendering
+// helpers live in app.js.
 (function(){
   var startTs = {{ (active_recording.started_at.timestamp() if active_recording.started_at else 0) }};
   function pad(n) { return String(n).padStart(2, '0'); }
@@ -451,9 +451,8 @@
   }
   tick(); setInterval(tick, 1000);
 
-  // Level gauge -- shares the mic/system RMS peaks the noise-floor slider
-  // script (below) reads/writes `currentNoiseFloor` from, so both live in
-  // window scope rather than duplicating a threshold value in two closures.
+  // Level gauge. `currentNoiseFloor` is shared with the slider script below,
+  // so it lives in window scope.
   var LEVEL_METER_MAX = 2000; // headroom above the slider's 0-1000 range so speech peaks don't constantly pin the bar
   function levelPct(v) { return Math.max(0, Math.min(100, (v / LEVEL_METER_MAX) * 100)); }
   function updateThresholdMarkers(v) {
@@ -494,9 +493,7 @@
     src.onerror = function() { src.close(); };
   } catch(ex) {}
 
-  // Add marker -- any source (not local-only). No page reload: a form
-  // POST would reset scroll position in the ticker mid-session, so this
-  // is a plain fetch with the result dropped straight into the ticker.
+  // Add marker via fetch (any source) so the ticker keeps its scroll position.
   var markerBtn = document.getElementById('add-marker-btn');
   if (markerBtn) {
     markerBtn.addEventListener('click', function() {
@@ -514,16 +511,8 @@
 </script>
 {% if active_recording.source == 'local' %}
 <script>
-// Live-transcript ticker -- shared connector (wisperConnectLiveStream in
-// app.js) handles the SSE + reconnect de-dupe; same endpoint + payload
-// shape as the recording detail page. Local capture is the only source
-// that runs a JOB_LIVE job today.
-//
-// app.js is loaded with `defer`, so it always finishes running strictly
-// after every inline <script> in the body (including this one) and right
-// before DOMContentLoaded -- calling wisperConnectLiveStream synchronously
-// here would silently no-op (window.wisperConnectLiveStream is still
-// undefined at this point), so the connection has to wait for that event.
+// Live-transcript ticker (local sessions) via wisperConnectLiveStream.
+// Wait for DOMContentLoaded: deferred app.js runs after inline scripts.
 (function(){
   function fmtElapsed(s) {
     s = Math.max(0, Math.floor(s || 0));
@@ -544,10 +533,8 @@
   });
 })();
 
-// Noise-floor slider -- debounced POST to /api/record/live-noise-floor,
-// which mutates the running JOB_LIVE job's kwargs directly (see
-// run_live_loop's get_noise_floor docstring in live_transcribe.py).
-// Resets to the library default on page load/reload -- not persisted.
+// Noise-floor slider: debounced POST to /api/record/live-noise-floor, applied
+// to the running live job. Not persisted; resets on reload.
 (function(){
   var slider = document.getElementById('noise-floor-slider');
   var valueEl = document.getElementById('noise-floor-value');

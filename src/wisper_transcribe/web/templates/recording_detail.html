@@ -132,10 +132,8 @@
         {% endif %}
       </div>
 
-      <!-- Live transcript (Phase 2). Two forms: SSE-driven while the
-           session is still recording/degraded, or a static server-render
-           of the persisted live_transcript.md draft once it has stopped
-           but hasn't been through a full Transcribe yet. -->
+      <!-- Live transcript: SSE while recording; static draft once stopped
+           and not yet transcribed. -->
       {% if recording.source == 'local' and recording.status in ('recording', 'degraded') %}
       <div style="margin-bottom:28px">
         <div class="section-head">
@@ -268,15 +266,8 @@
 {% block extra_scripts %}
 {% if recording.source == 'local' and recording.status in ('recording', 'degraded') %}
 <script>
-// Live transcript pane -- shared connector (wisperConnectLiveStream in
-// app.js) handles the SSE + reconnect de-dupe; same endpoint + payload
-// shape as the /record page's ticker (Phase 2).
-//
-// app.js is loaded with `defer`, so it always finishes running strictly
-// after every inline <script> in the body (including this one) and right
-// before DOMContentLoaded -- calling wisperConnectLiveStream synchronously
-// here would silently no-op (window.wisperConnectLiveStream is still
-// undefined at this point), so the connection has to wait for that event.
+// Live transcript pane via wisperConnectLiveStream.
+// Wait for DOMContentLoaded: deferred app.js runs after inline scripts.
 (function(){
   var container = document.getElementById('live-transcript');
   var empty = document.getElementById('live-transcript-empty');
@@ -289,10 +280,7 @@
     var tag = document.createElement('span');
     tag.textContent = speaker;
     tag.style.cssText = 'flex-shrink:0;width:44px;font-family:var(--font-mono);font-size:10px;letter-spacing:0.08em;color:' +
-      // Mic-dominant lines are never labeled 'Other' -- "this is me" can
-      // relabel the mic side to an enrolled profile's display name, so
-      // comparing against the fixed 'Other' label (not 'You') is what
-      // actually distinguishes mic vs. system lines.
+      // Compare against 'Other': the mic label may be a profile name, not 'You'.
       (speaker !== 'Other' ? 'var(--color-accent)' : 'var(--color-paper-dim)');
     var body = document.createElement('span');
     body.textContent = text;

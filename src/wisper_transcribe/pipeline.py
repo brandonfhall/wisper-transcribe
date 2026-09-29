@@ -228,11 +228,8 @@ def _interactive_enroll(
         if prof.embedding_path.exists():
             enrolled_embeddings[pname] = np.load(str(prof.embedding_path))
 
-    # R28: extract_embedding() does up to 5 pyannote forward passes per call.
-    # Each label is queried once here for ranking, then again below if the
-    # user asks to update an existing profile's embedding with this episode's
-    # audio -- cache the first extraction per label so the second reuses it
-    # instead of re-running inference on the same segments.
+    # Cache each label's embedding (up to 5 forward passes) for reuse by the
+    # EMA update and new-profile enrollment below.
     _embedding_cache: dict[str, np.ndarray] = {}
 
     def _get_embedding(label: str) -> np.ndarray:
@@ -312,11 +309,8 @@ def _interactive_enroll(
                 device=device,
                 data_dir=None,
                 notes=notes,
-                # Reuse the ranking-step embedding when available (R28) so a
-                # brand-new speaker doesn't trigger a third extraction for
-                # the same label; enroll_speaker() falls back to computing
-                # it internally when the cache has nothing for this label
-                # (e.g. no profiles were enrolled yet, so ranking never ran).
+                # Reuse the cached embedding; enroll_speaker() extracts one
+                # itself when ranking never ran (no profiles yet).
                 embedding=_embedding_cache.get(label),
             )
             # Refresh in-memory dicts so subsequent speakers in this file see
@@ -385,35 +379,24 @@ def process_file(
     title: Optional[str] = None,
     _result_store: Optional[dict] = None,
 ) -> Path:
-    """Run the full pipeline on a single audio file. Returns path to output .md.
+    """Run the full pipeline on one audio file and return the output .md path.
 
-    Sentinel convention (R5): ``None`` is the *only* "use config, else hardcoded
-    fallback" marker for ``model_size``, ``language``, ``include_timestamps``.
-    A caller-supplied value — including one that happens to equal the
-    hardcoded fallback, e.g. explicit ``model_size="medium"`` — always wins
-    over config; it is never re-overridden.
+    ``None`` means "use config, else the built-in default" for
+    ``model_size``, ``language``, ``include_timestamps``, and ``vad_filter``.
+    An explicit value always wins.
 
-    ``language`` has one extra wrinkle: the string ``"auto"`` is a distinct,
-    explicit "auto-detect" marker (used by the CLI's ``-l auto`` and passed
-    through unresolved). It is only interpreted *after* the ``None`` → config
-    resolution, so config's own ``language`` value may itself be ``"auto"``.
-    ``"auto"`` always resolves to ``None`` before reaching ``transcribe()``,
-    which already treats a falsy language as auto-detect.
+    ``language="auto"`` explicitly requests auto-detection; it is applied after
+    the config lookup (config may also say "auto") and becomes ``None`` before
+    ``transcribe()``.
 
-    ``device="auto"`` and ``compute_type="auto"`` keep their pre-existing
-    sentinel semantics (unrelated to this refactor) — ``"auto"`` triggers
-    device autodetection / compute-type resolution, not a config lookup.
+    ``device="auto"`` / ``compute_type="auto"`` mean hardware detection and
+    dtype resolution, not config lookup.
 
-    ``title`` overrides the default title-cased-filename-stem metadata
-    title (e.g. a recording's user-supplied session name) without touching
-    the actual output filename/stem, which stays derived from ``path`` --
-    the two are deliberately decoupled so a free-text title with
-    filesystem-unsafe characters never has to flow through a rename.
-    ``vad_filter=None`` also keeps its existing "use config" semantics.
+    ``title`` overrides the frontmatter title without changing the output
+    filename, so free text never becomes a path.
 
-    When diarization is enabled and the caller passes neither ``num_speakers``
-    nor ``min_speakers``/``max_speakers``, the config keys ``min_speakers``/
-    ``max_speakers`` are applied as a fallback constraint on the diarizer.
+    With diarization on and no speaker-count arguments, config
+    ``min_speakers``/``max_speakers`` constrain the diarizer.
     """
     from .config import resolve_compute_type
 
@@ -476,10 +459,7 @@ def process_file(
 
     wav_path = convert_to_wav(path)
 
-    # Freed in the finally below once transcription/diarization/enrollment
-    # no longer need the converted copy — process_file's own local, never
-    # referenced by the _diar.json sidecar (that always records the
-    # ORIGINAL input path via job.input_path, not wav_path).
+    # Deleted in the finally below; the sidecar records the original input.
     try:
 
         # Resolve the HF token before any model runs so we know whether diarization
@@ -612,10 +592,8 @@ def process_file(
             metadata["job_id"] = job_id
 
         if _result_store is not None:
-            # F7: persist the authoritative raw_label -> display_name map the
-            # formatter is about to render, so the web enrollment wizard never
-            # has to reconstruct it later by matching rendered timestamps back
-            # against pyannote intervals (see web/enroll_shared.resolve_current_names).
+            # Persist the label -> name map the formatter uses, for the web
+            # enrollment wizard.
             _result_store["speaker_map"] = dict(speaker_map) if speaker_map else {}
 
         content = to_markdown(
@@ -662,15 +640,12 @@ def process_folder(
 ) -> tuple[list[Path], list[Path], list[str]]:
     """Process all audio files in a folder.
 
-    Returns (successful_paths, skipped_paths, error_messages).
-    Skips files whose .md output already exists unless overwrite=True is in kwargs.
-    Skip detection happens once, up front, in this function — files that would
-    be skipped are never submitted to process_file (sequentially or via the
-    worker pool), so a skip can never be miscounted as a success (R22).
+    Returns ``(successful_paths, skipped_paths, error_messages)``. Files whose
+    output already exists are skipped up front (unless ``overwrite``) and
+    never submitted.
 
-    workers > 1 enables parallel processing via ProcessPoolExecutor.  Only
-    supported when device resolves to "cpu" — GPU processing is single-worker
-    because faster-whisper and pyannote are not thread-safe when sharing VRAM.
+    ``workers > 1`` uses ProcessPoolExecutor, only when the device resolves to
+    ``cpu``: GPU memory can't be shared across processes.
     """
     folder = Path(folder)
     audio_files = sorted(

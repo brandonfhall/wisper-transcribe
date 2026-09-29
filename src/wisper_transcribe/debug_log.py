@@ -85,17 +85,9 @@ class Logger:
     def _patch_tqdm(self) -> None:
         """Tee tqdm.write() through this logger so file output is captured.
 
-        R32-10: idempotent against repeated `setup_logging()` calls in the
-        same process (e.g. Click's `CliRunner` invoking the CLI entry point
-        multiple times in a test suite). Without the marker below, each call
-        wrapped whatever `tqdm.write` currently was -- including a *previous*
-        tee -- so the wrapper chain grew by one closure every call, and a
-        single `tqdm.write()` would cascade through every still-referenced
-        prior Logger's `_write_to_file()`. The marker records the true
-        (unwrapped) original on the tee function itself, so re-patching always
-        wraps that original directly and the chain never grows past one
-        layer -- the newest Logger instance is simply the one actively
-        capturing output, matching "permanent tee, but only one at a time".
+        Idempotent across repeated ``setup_logging()`` calls (e.g. CliRunner in
+        tests): the tee stores the true original ``tqdm.write`` on itself, so
+        re-patching wraps that original and the newest Logger is the only tee.
         """
         try:
             import tqdm as _tqdm_mod

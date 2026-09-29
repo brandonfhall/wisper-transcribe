@@ -38,9 +38,8 @@ async def transcribe_form(request: Request) -> HTMLResponse:
 
     campaigns = load_campaigns()
     config = load_config()
-    # R5: preselect the model radio from config, falling back to the form's
-    # own default when the configured model isn't one of the exposed choices
-    # (e.g. "large-v3" or "tiny" — the template only offers a curated subset).
+    # Preselect the configured model, or the form default if the template
+    # doesn't offer it.
     selected_model = config.get("model", "large-v3-turbo")
     if selected_model not in _FORM_MODEL_CHOICES:
         selected_model = "large-v3-turbo"
@@ -72,10 +71,8 @@ async def start_transcribe(
     vocab_file: Annotated[Optional[UploadFile], File()] = None,
 ) -> RedirectResponse:
     """Accept an uploaded audio file, save it to a temp location, enqueue job."""
-    # R33: validate enum fields against the same canonical sets the CLI's
-    # click.Choice lists use, before any file I/O — an invalid value must
-    # never orphan a wisper_upload_* temp file. Never echo the bad value
-    # back (CLAUDE.md: no str(exc)/raw input in redirect params).
+    # Validate enums before any file I/O so a bad value never orphans a temp
+    # upload. Never echo the value back.
     from wisper_transcribe.config import COMPUTE_TYPES, DEVICES, MODEL_SIZES
     if model_size not in MODEL_SIZES or device not in DEVICES or compute_type not in COMPUTE_TYPES:
         return error_redirect("/transcribe", "invalid_option")
@@ -86,8 +83,7 @@ async def start_transcribe(
         delete=False, suffix=suffix, prefix="wisper_upload_"
     )
     try:
-        # R10: stream to disk in 1 MiB chunks instead of buffering the whole
-        # upload (multi-hour audio can be multi-GB) into RAM at once.
+        # Stream to disk in 1 MiB chunks; uploads can be multi-GB.
         while chunk := await file.read(1 << 20):
             tmp.write(chunk)
     finally:
@@ -115,10 +111,7 @@ async def start_transcribe(
     elif vad == "off":
         vad_filter = False
 
-    # Always write transcripts to the default output dir so the Transcripts
-    # page can find them.  A user-supplied path is not accepted — accepting
-    # arbitrary paths from form data would allow writing outside the configured
-    # data directory.
+    # Always use the default output dir; never accept a path from form data.
     out_path: Path = get_output_dir()
 
     # Use the original filename stem as a hint so the output .md has a
@@ -137,8 +130,7 @@ async def start_transcribe(
         input_path=tmp.name,
         original_stem=original_stem,
         model_size=model_size,
-        # "auto" is resolved to auto-detect inside process_file (R5 sentinel
-        # convention) — do not map it to None here, None means "use config".
+        # Pass "auto" through: process_file treats None as "use config".
         language=language,
         device=device,
         num_speakers=_int_or_none(num_speakers),
@@ -170,15 +162,9 @@ async def cancel_job(request: Request, job_id: str) -> Response:
     queue = _get_queue(request)
     job = queue.get(safe_id)
     if job is not None and job.job_type == JOB_LIVE:
-        # A JOB_LIVE session needs its LocalCaptureManager live-sink torn
-        # down too, not just the job stopped -- queue.cancel() only knows
-        # about jobs, not LocalCaptureManager (correct separation of
-        # concerns), and its _cancel_event mechanism isn't even checked by
-        # run_live_loop (that's live_stop_event, a deliberately separate
-        # signal -- see JOB_LIVE's docstring in jobs.py). Route through the
-        # same teardown the Record page's own Stop button uses instead.
-        # This only ends the live-preview job -- the recording itself (if
-        # still active) keeps running; stopping it is the Record page's job.
+        # JOB_LIVE ignores _cancel_event; stop it the same way the Record
+        # page does (clear the live sink, then stop_live). The recording
+        # itself keeps running.
         from wisper_transcribe.web.routes.record import _stop_live_transcription
 
         lcm = get_local_capture_manager(request)
@@ -225,10 +211,8 @@ async def job_stream(request: Request, job_id: str) -> StreamingResponse:
                 yield "event: error\ndata: Job not found\n\n"
                 return
 
-            # Send any new log lines. R14: job.log_lines can have its oldest
-            # entries trimmed once it exceeds jobs._MAX_LOG_LINES -- see
-            # resume_slice()'s docstring for why last_line_idx (an absolute
-            # count of lines produced so far) can't be sliced directly.
+            # Send new log lines; resume_slice maps the absolute index onto
+            # the capped list.
             new_lines, last_line_idx = resume_slice(job.log_lines, job.log_lines_dropped, last_line_idx)
             for line in new_lines:
                 data = json.dumps({"type": "log", "message": line})
@@ -299,11 +283,8 @@ async def enroll_form(request: Request, job_id: str) -> Response:
         template_current_names,
     )
 
-    # Derive speaker labels for the wizard.
-    # Prefer the raw diarization segments stored on the job — those always carry
-    # the original "SPEAKER_N" labels even after the transcript has been renamed.
-    # Fall back to the frontmatter only when the job predates this fix or
-    # diarization was skipped.
+    # Prefer the job's raw diarization labels (unchanged by renames); fall
+    # back to frontmatter when diarization was skipped.
     speakers_in_transcript: list[str] = []
     current_names: dict[str, str] = {}
     if job.diarization_segments:
@@ -312,14 +293,8 @@ async def enroll_form(request: Request, job_id: str) -> Response:
             if seg.speaker not in seen_order:
                 seen_order[seg.speaker] = seg.start
         speakers_in_transcript = sorted(seen_order.keys(), key=lambda s: seen_order[s])
-        # F1: resolve raw label -> current display name in the transcript so
-        # the wizard (and its submit handler) can rename on a second pass,
-        # after match_speakers has already written display names into the
-        # body. Filtered for template prefill so an untouched field shows
-        # empty rather than the raw label (F2). F7: resolve via the sidecar's
-        # authoritative speaker_map when present (same resolution function
-        # the transcript-centric wizard uses), falling back to the interval
-        # heuristic only for legacy sidecars/jobs that predate that key.
+        # Current display name per raw label (sidecar speaker_map when
+        # present), filtered so untouched inputs start empty.
         if job.output_path:
             out_path = Path(job.output_path)
             diar = _load_diar_sidecar(out_path)
@@ -341,9 +316,7 @@ async def enroll_form(request: Request, job_id: str) -> Response:
 
     profiles = load_profiles()
 
-    # F5: warn before submission when the source audio is gone (e.g. after a
-    # restart, if the move-to-output ever failed) rather than letting the
-    # wizard silently rename-only on submit.
+    # Warn before submit when the source audio is gone.
     audio_missing = not (job.input_path and Path(job.input_path).exists())
 
     # Load persisted transcript text snippets for each speaker (written as
@@ -398,21 +371,13 @@ async def speaker_excerpt(request: Request, job_id: str, speaker_name: str) -> R
     if job is not None:
         clip_path = job.speaker_excerpts.get(speaker_name)
 
-    # Fallback: the in-memory clip_path can be missing/stale (e.g. never
-    # recorded, or pointing at a since-cleaned-up temp path) even though the
-    # job itself is still known. Re-derive it from disk, but ONLY within this
-    # job's own transcript stem -- a glob across the whole output dir (F9)
-    # would happily serve a *different transcript's* same-labelled excerpt
-    # (e.g. every transcript has a SPEAKER_00), so the user could hear the
-    # wrong voice and enroll the wrong name. If the job is gone entirely
-    # (server restarted), there is no stem to scope to, so we can't safely
-    # fall back at all -- the transcript-centric wizard's own
-    # /transcripts/{name}/excerpt/{speaker_name} route (transcripts.py) is
-    # what serves excerpts after a restart; this route intentionally 404s
-    # instead of guessing.
+    # The in-memory clip path may be missing or stale. Fall back to disk, but
+    # only within this job's own transcript stem: every transcript has a
+    # SPEAKER_00, so a wider glob could serve another transcript's voice. If
+    # the job is gone there is no stem to scope to, so 404; the
+    # transcript-centric excerpt route serves clips after a restart.
     if job is not None and job.output_path and (not clip_path or not Path(clip_path).exists()):
-        # R24: shared lookup + CodeQL guard — same helper the
-        # transcript-centric wizard's excerpt route uses (transcripts.py).
+        # Shared lookup + CodeQL guard (also used by the transcript wizard).
         from wisper_transcribe.web.enroll_shared import find_excerpt_clip
 
         found = find_excerpt_clip(
@@ -452,13 +417,7 @@ async def enroll_submit(request: Request, job_id: str) -> Response:
     url = f"/transcripts/{quote(transcript_name, safe='')}"
 
     if renames:
-        # Rename synchronously (fast) via the shared handler (unifies this
-        # legacy job-centric path with the transcript-centric wizard in
-        # transcripts.py). See enroll_shared.apply_renames for the
-        # current-name resolution (F1) and raw-label refusal (F2) logic. The
-        # slow half (WAV convert + embedding extraction, F3's EMA-merge
-        # logic) now runs in a JOB_ENROLL job instead of blocking this
-        # request (Phase 2.5) -- see enroll_shared.enroll_profiles.
+        # Rename now; embedding extraction runs as a JOB_ENROLL job.
         from wisper_transcribe.web.enroll_shared import apply_renames
 
         md_path = Path(job.output_path)

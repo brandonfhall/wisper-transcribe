@@ -35,18 +35,10 @@ router = APIRouter(prefix="/transcripts")
 class _HtmlSanitizer(HTMLParser):
     """Strip dangerous elements and attributes from HTML.
 
-    Removes ``<script>``/``<iframe>``/``<object>``/``<embed>`` elements,
-    ``on*`` event-handler attributes, and ``href``/``src`` attributes whose
-    value carries a ``javascript:``/``data:``/``vbscript:`` scheme (R17 —
-    checked after conservatively stripping whitespace/control characters so
-    obfuscations like ``java\\tscript:`` don't slip through; HTMLParser has
-    already decoded character references like ``&#106;`` by the time
-    attribute values reach us).
-
-    Uses Python's built-in HTMLParser rather than regex so that all syntactic
-    variants of tags (e.g. ``</script >``, ``</SCRIPT>``) are handled
-    correctly — regex-based approaches can be bypassed by whitespace or
-    case variations in closing tags (A03 XSS — CWE-79).
+    Removes ``<script>``/``<iframe>``/``<object>``/``<embed>``, ``on*``
+    attributes, and ``href``/``src`` values with a ``javascript:``/``data:``/
+    ``vbscript:`` scheme. Uses HTMLParser rather than regex so variants like
+    ``</script >`` and ``</SCRIPT>`` can't slip through (CWE-79).
     """
 
     # Content-bearing tags stripped together with everything inside them.
@@ -65,12 +57,11 @@ class _HtmlSanitizer(HTMLParser):
 
     @classmethod
     def _is_unsafe_url(cls, value: str) -> bool:
-        """True when *value* resolves to a javascript:/data:/vbscript: URL.
+        """True when *value* is a javascript:/data:/vbscript: URL.
 
-        Conservative normalisation: drop every ASCII control char and
-        whitespace (codepoints <= 0x20) anywhere in the value, then
-        lowercase — browsers tolerate ``java\\tscript:`` and leading
-        whitespace, so a simple startswith on the raw value is bypassable.
+        Drops every char <= 0x20 and lowercases first, since browsers accept
+        obfuscations like ``java\\tscript:``. Character references are already
+        decoded by HTMLParser.
         """
         cleaned = "".join(ch for ch in value if ord(ch) > 0x20).lower()
         return cleaned.startswith(cls._BAD_SCHEMES)
@@ -163,19 +154,10 @@ def _get_safe_content_path(name: str, suffix: str) -> Path | None:
 
 
 def _delete_diar_sidecar_and_audio(name: str) -> None:
-    """Remove the ``_diar.json`` enrollment sidecar and the durable audio copy
-    it points to, if any.
+    """Delete the ``_diar.json`` sidecar and the audio copy it references.
 
-    F5 decision: the audio file living next to a transcript exists solely to
-    back the enrollment wizard (it was moved there from the tempdir by
-    ``_move_upload_to_output`` in ``web/jobs.py``). Once the transcript is
-    deleted there's nothing left to enroll against, so leaving that audio
-    file (and the now-dangling sidecar referencing it) behind would be a
-    permanent leak -- the exact kind of leak F5 was fixing in the first
-    place, just relocated from the tempdir to the output dir. Deleting both
-    here keeps that promise. Excerpt clips (``*_excerpt_*.mp3``/``.txt``) are
-    a separate concern handled by ``_delete_excerpt_clips`` (R9-4), called
-    alongside this function from both delete routes.
+    That audio exists only to back the enrollment wizard, so it goes with the
+    transcript. Excerpt clips are handled by ``_delete_excerpt_clips``.
     """
     diar_path = _get_safe_content_path(name, "_diar.json")
     if not diar_path or not diar_path.exists():
@@ -188,10 +170,8 @@ def _delete_diar_sidecar_and_audio(name: str) -> None:
         stored_input_path = None
 
     if stored_input_path:
-        # Only delete the referenced audio if it actually resolves inside the
-        # output dir -- i.e. it's the durable moved copy, not some external
-        # user file (legacy sidecars from before the F5 fix may still point
-        # at a tempdir path, which must never be touched here).
+        # Only delete audio inside the output dir; old sidecars may point at
+        # a tempdir or user file.
         out_dir = get_output_dir().resolve()
         base_dir = os.path.abspath(str(out_dir))
         if not base_dir.endswith(os.sep):
@@ -210,19 +190,11 @@ def _delete_diar_sidecar_and_audio(name: str) -> None:
 
 
 def _delete_excerpt_clips(name: str) -> None:
-    """Delete ``<stem>_excerpt_*`` speaker-preview clips (``.mp3`` and
-    ``.txt``) left behind by transcription/enrollment (R9-4).
+    """Delete this transcript's ``<stem>_excerpt_*.mp3``/``.txt`` clips.
 
-    ``_get_safe_content_path`` already applies the os.path.basename +
-    abspath/startswith guard (CLAUDE.md security note) and returns a path
-    guaranteed to live inside the output dir, so the glob results derived
-    from it -- always children of that same directory -- need no further
-    per-file *path-traversal* check. ``md_path.stem`` is still untrusted
-    text, though (a transcript can be named e.g. ``mix*``), so it must be
-    ``glob.escape()``-d before being embedded in the pattern -- otherwise
-    a stem containing ``*``/``?``/``[`` would turn this into a wildcard
-    match against *every* transcript's excerpt clips instead of just this
-    one's, deleting other transcripts' clips on a single delete.
+    ``md_path`` is already path-guarded, so glob results stay inside the
+    output dir. The stem is still untrusted text (e.g. ``mix*``) and is
+    ``glob.escape()``-d so it can't match other transcripts' clips.
     """
     import glob as _glob
 
@@ -263,16 +235,11 @@ async def recent_transcripts_partial(request: Request) -> HTMLResponse:
 
 
 def _pending_recordings(data_dir: Path) -> tuple[list, set[str]]:
-    """Recordings that finished capturing but haven't been through the full
-    diarized transcribe pass yet -- status "completed" (never auto-queued;
-    only an explicit Transcribe click moves it to "transcribing"/
-    "transcribed", see `_submit_recording_transcription`) with audio ready.
+    """Recordings with status "completed" and audio on disk, newest first.
 
-    Surfaced at the top of /transcripts so a live/local session doesn't
-    require remembering to go find it on /recordings to kick off Transcribe.
-    Returns `(recordings, live_draft_ids)` -- the second is the subset with
-    a still-on-disk `live_transcript.md` draft preview, checked separately
-    since that's a filesystem fact, not a `Recording` field.
+    Shown as "Awaiting transcription" on /transcripts. Returns
+    ``(recordings, live_draft_ids)``, where the second is the subset that still
+    has a ``live_transcript.md`` draft.
     """
     recordings = load_recordings(data_dir)
     pending = [
@@ -350,7 +317,7 @@ async def bulk_delete_transcripts(request: Request) -> HTMLResponse:
         if summary and summary.exists():
             summary.unlink()
         _delete_diar_sidecar_and_audio(stem)
-        # R9-4: also remove <stem>_excerpt_*.mp3/.txt clips.
+        # Also remove <stem>_excerpt_*.mp3/.txt clips.
         _delete_excerpt_clips(stem)
     return HTMLResponse(content="", status_code=303, headers={"Location": "/transcripts"})
 
@@ -462,11 +429,8 @@ async def delete_transcript(request: Request, name: str) -> HTMLResponse:
     summary_path = _get_safe_content_path(name, ".summary.md")
     if summary_path and summary_path.exists():
         summary_path.unlink()
-    # F5: also remove the enrollment sidecar and the durable audio copy it
-    # references -- see _delete_diar_sidecar_and_audio for the reasoning.
+    # Remove the enrollment sidecar, its audio copy, and excerpt clips.
     _delete_diar_sidecar_and_audio(name)
-    # R9-4: also remove <stem>_excerpt_*.mp3/.txt clips left behind by
-    # transcription/enrollment -- previously left orphaned on delete.
     _delete_excerpt_clips(name)
     return HTMLResponse(
         content="",
@@ -701,9 +665,7 @@ async def assign_campaign(request: Request, name: str) -> HTMLResponse:
 # Transcript-centric enrollment wizard
 # ---------------------------------------------------------------------------
 
-# Shared with web/routes/transcribe.py (the legacy job-centric wizard) via
-# wisper_transcribe.web.enroll_shared -- see that module for the rationale
-# behind the interval-matching approach and the F1/F2/F3 fixes.
+# Shares its logic with the job-based wizard via web/enroll_shared.py.
 from wisper_transcribe.web.enroll_shared import (
     _load_diar_sidecar,
     apply_renames,
@@ -734,12 +696,8 @@ async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
             seen[seg["speaker"]] = seg["start"]
     speakers = sorted(seen.keys(), key=lambda s: seen[s])
 
-    # Locate on-disk excerpt clips and text snippets. New transcripts have
-    # files keyed by the raw pyannote label (matches what's in the sidecar).
-    # Legacy transcripts (pre-fix) keyed files by the *display* name from
-    # the rendered markdown — backfill that mapping by parsing the markdown
-    # and matching first-appearance timestamps so the wizard still works
-    # without re-transcribing.
+    # Clips are keyed by raw label; older transcripts keyed them by display
+    # name, so map those back via first-appearance timestamps.
     out_dir = md_path.parent
     stem = md_path.stem
 
@@ -771,9 +729,8 @@ async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
 
     from wisper_transcribe.speaker_manager import load_profiles
 
-    # F5: warn before submission when the sidecar's recorded input_path is
-    # gone (e.g. transcript predates the move-to-output fix, or the move
-    # failed) rather than letting the wizard silently rename-only on submit.
+    # Warn before submit when the source audio is gone (renames still work,
+    # enrollment won't).
     diar_input_path = diar.get("input_path", "")
     audio_missing = not (diar_input_path and Path(diar_input_path).exists())
 
@@ -790,16 +747,8 @@ async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
             "existing_profiles": load_profiles(),
             "speaker_excerpts": speaker_excerpts,
             "speaker_excerpt_texts": speaker_excerpt_texts,
-            # raw_label -> current display name in the transcript. F7:
-            # resolved from the sidecar's authoritative speaker_map when
-            # present, falling back to the (fragile) interval-matching
-            # heuristic only for legacy sidecars that predate that key --
-            # see resolve_current_names. Lets the wizard pre-fill names the
-            # user previously applied so they can edit corrections instead
-            # of re-typing from scratch. Raw-label-valued entries (first
-            # pass, no renames applied yet) are filtered out so the input
-            # starts empty rather than prefilled with "SPEAKER_00" (F2) --
-            # see template_current_names.
+            # Prefill previously applied names; raw-label values are dropped so
+            # untouched inputs start empty.
             "current_names": template_current_names(
                 resolve_current_names(md_path, diar, diar.get("diarization_segments", []))
             ),
@@ -833,12 +782,7 @@ async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
             headers={"Location": f"/transcripts/{quote(name)}"},
         )
 
-    # Rename synchronously (fast) via the shared handler (unifies this path
-    # with the legacy job-centric wizard in transcribe.py). See
-    # enroll_shared.apply_renames for the current-name resolution (F1) and
-    # raw-label refusal (F2) logic. The slow half (WAV convert + embedding
-    # extraction, F3's EMA-merge logic) now runs in a JOB_ENROLL job instead
-    # of blocking this request (Phase 2.5) -- see enroll_shared.enroll_profiles.
+    # Rename now; embedding extraction runs as a JOB_ENROLL job.
     from wisper_transcribe.models import DiarizationSegment
 
     raw_segments = [
@@ -859,10 +803,8 @@ async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
             headers={"Location": location},
         )
 
-    # F5: only enqueue a job when there's actually something eligible to
-    # enroll AND the source audio is known to exist. A pre-check here (as
-    # opposed to inside the job) avoids enqueueing a job that can only ever
-    # fail, and keeps the existing "notice" UX exactly as before.
+    # Enqueue only when something is eligible and the source audio exists;
+    # otherwise redirect with the existing notice.
     if input_path is None or not input_path.exists():
         log.warning("Enrollment skipped: source audio not found at %s", input_path)
         location += "?notice=enroll_audio_missing"
@@ -916,9 +858,7 @@ async def transcript_excerpt(request: Request, name: str, speaker_name: str):
         if legacy:
             candidates.append(legacy)
 
-    # R24: shared lookup + CodeQL guard — same helper the job-centric
-    # wizard's excerpt route uses (transcribe.py). The whitelist re.sub and
-    # the os.path.abspath + startswith round-trip both live inside it.
+    # Shared lookup + CodeQL guard (also used by the job-based wizard).
     from wisper_transcribe.web.enroll_shared import find_excerpt_clip
 
     clip = find_excerpt_clip(md_path.parent, md_path.stem, candidates)

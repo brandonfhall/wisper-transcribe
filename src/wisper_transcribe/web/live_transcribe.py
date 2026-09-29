@@ -1,21 +1,13 @@
-"""Live (near-real-time) transcription for local capture sessions — Phase 2.
+"""Near-real-time transcription for local capture sessions.
 
-Rolling-window transcription of the mixed 16 kHz mono stream produced by
-`LocalCaptureManager`'s tick thread: accumulate PCM in a `LiveRingBuffer`
-until a VAD silence gap (>= SILENCE_GAP_S) or a hard duration cap
-(FORCE_CUT_S) is reached, transcribe the committed chunk with the existing
-faster-whisper model (module-level cache shared with regular transcription
-jobs -- the JOB_LIVE job holds the JobQueue's single worker slot for its
-duration, so there is never a concurrent transcription job to race with),
-attribute each resulting line to "You" (mic) or "Other" (system) by
-comparing per-track RMS energy over the line's span, and hand the
-resulting `LiveLine`s to a caller-supplied callback.
+Accumulates the tick thread's PCM in a ``LiveRingBuffer`` until a VAD silence
+gap (>= SILENCE_GAP_S) or FORCE_CUT_S, transcribes the chunk with the shared
+faster-whisper model cache (safe: JOB_LIVE holds the only worker slot), labels
+each line "You" (mic) or "Other" (system) by per-track RMS, and passes the
+``LiveLine``s to a callback.
 
-No pyannote in this path -- diarization is too heavy to run per few-second
-chunk. The post-session full pipeline pass (unchanged) still runs real
-diarization + speaker ID once the recording is handed off to
-`POST /recordings/{id}/transcribe`; this is a crash-safety/near-real-time
-preview only.
+No diarization here; it is too heavy per chunk. The post-session Transcribe
+pass is the authoritative transcript.
 """
 from __future__ import annotations
 
@@ -36,15 +28,9 @@ FORCE_CUT_S = 15.0
 MIN_COMMIT_S = 0.3           # skip transcribing sub-300ms scraps
 POLL_INTERVAL_S = 0.25       # how often the live loop checks the ring buffer
 
-# int16 RMS floor below which a track counts as "nothing happening" rather
-# than a real (if quiet) voice. Silero VAD's speech/silence split (used to
-# decide chunk boundaries) can still flag room tone / mic self-noise as
-# "speech", and faster-whisper tends to hallucinate plausible-sounding text
-# on that kind of near-silent audio rather than returning nothing -- this
-# is a coarse starting point (real speech observed well above this on a
-# USB condenser mic; true silence measures exactly 0.0) and may need
-# tuning for a given mic's gain/self-noise level. Raised 150 -> 300
-# 2026-08-16 after field use: 150 still let some mic self-noise through.
+# int16 RMS below which a track counts as silent. Silero VAD can flag room tone
+# as speech and Whisper hallucinates text over it. Real speech measures well
+# above this on a USB condenser mic; tune per mic via the Record page slider.
 NOISE_FLOOR_RMS = 300.0
 
 
@@ -71,13 +57,10 @@ class LiveLine:
 class LiveRingBuffer:
     """Thread-safe accumulator of mic/system/mixed int16 PCM.
 
-    `push()` is called from `LocalCaptureManager`'s tick thread (the hot
-    path -- keep it O(tick size), never blocking); `snapshot()` /
-    `drop_prefix()` are called from the live-transcription loop's own
-    thread. All three tracks stay byte-aligned with each other at all
-    times -- `push()` always receives equal-length chunks (LocalCaptureManager
-    pads a starved track to match, same invariant Phase 1's combined mixer
-    relies on).
+    ``push()`` runs on the capture tick thread and must stay cheap;
+    ``snapshot()``/``drop_prefix()`` run on the live loop's thread. The three
+    tracks stay byte-aligned because the tick thread always pushes
+    equal-length chunks.
     """
 
     def __init__(self) -> None:
@@ -120,35 +103,23 @@ class LiveRingBuffer:
 # Chunk-cut decision
 # ---------------------------------------------------------------------------
 
-# How much of the buffer's tail actually needs scanning to make the
-# trailing-silence decision below -- see find_commit_boundary's docstring
-# for why a bounded window is sufficient (not just an optimization that
-# happens to usually work).
+# Tail length scanned by find_commit_boundary (see its docstring for why
+# this bound is safe).
 _VAD_WINDOW_S = SILENCE_GAP_S + 2 * POLL_INTERVAL_S + 0.5
 
 
 def find_commit_boundary(mixed_i16: np.ndarray) -> Optional[int]:
     """Return the sample index to cut the buffer at, or None if not ready.
 
-    Cuts at the end of the last detected speech region once at least
-    SILENCE_GAP_S of trailing silence follows it (so a chunk boundary
-    doesn't land mid-word), or force-cuts at FORCE_CUT_S regardless of VAD
-    state -- bounds worst-case latency and handles continuous speech that
-    never pauses. A chunk with no speech detected at all is force-cut but
-    the caller skips transcribing it (nothing to transcribe).
+    Cuts at the end of the last speech region once SILENCE_GAP_S of silence
+    follows it (so a cut never lands mid-word), or force-cuts at FORCE_CUT_S to
+    bound latency during continuous speech. A chunk with no speech is cut but
+    not transcribed.
 
-    Only scans the last `_VAD_WINDOW_S` seconds of the buffer, not the
-    whole (up to FORCE_CUT_S-long) thing -- rescanning already-analyzed
-    early audio on every ~250ms poll would be an O(n^2) cost across a
-    session otherwise. This is sound, not just a shortcut that usually
-    works: `run_live_loop` calls this every POLL_INTERVAL_S, and trailing
-    silence measured against the (growing) buffer end only ever increases
-    between polls, so the buffer commits within about one poll interval of
-    crossing SILENCE_GAP_S -- it never accumulates more than
-    SILENCE_GAP_S + POLL_INTERVAL_S of trailing silence before being
-    cleared. The last speech region's END is therefore always within the
-    window; only its START (which this function never uses) could fall
-    outside it, e.g. for one long region that's still ongoing.
+    Only the last ``_VAD_WINDOW_S`` is scanned, avoiding O(n²) rescans. This
+    is safe: the loop polls every POLL_INTERVAL_S, so trailing silence never
+    exceeds SILENCE_GAP_S + POLL_INTERVAL_S before a commit, and the end of
+    the last speech region is always inside the window.
     """
     total_s = len(mixed_i16) / RATE
     if total_s < MIN_COMMIT_S:
@@ -190,19 +161,12 @@ def attribute_speaker(
     other_label: str = "Other",
     noise_floor: float = NOISE_FLOOR_RMS,
 ) -> Optional[str]:
-    """`mic_label` (mic dominant) or `other_label` (system dominant) by RMS
-    energy, or `None` when *neither* track clears `noise_floor` -- nothing
-    is really happening on either side, so the caller should drop the
-    segment rather than mislabel background noise as a real voice. Defaults
-    to "You"/"Other"; a session started with a "this is me" enrolled-profile
-    selection passes the profile's display_name as `mic_label` instead
-    (Phase 3) -- purely cosmetic, doesn't touch the energy-comparison logic
-    itself.
+    """Return ``mic_label`` or ``other_label`` by RMS energy, or None if
+    neither track clears ``noise_floor`` (the caller drops the segment).
 
-    Ties among two tracks that both clear the floor resolve to `mic_label`
-    -- a marginal call either way, but false attribution to `other_label`
-    would be more misleading (words from your own mic showing up unlabeled
-    as the other party).
+    ``mic_label`` defaults to "You" and becomes the profile name with
+    "This is me". Ties go to ``mic_label``: showing your own words as the
+    other party would be more misleading.
     """
     mic_rms = _rms(mic_span)
     system_rms = _rms(system_span)
@@ -225,12 +189,9 @@ def transcribe_array(
 ) -> list:
     """Transcribe an in-memory float32 mono 16 kHz array.
 
-    Reuses `transcriber.py`'s module-level `_model` cache directly (no temp
-    file, no tqdm progress-bar UI -- not useful for a sub-15s live chunk).
-    Safe to share that cache because JOB_LIVE holds the JobQueue's single
-    worker slot for the whole session; no other job can be transcribing
-    concurrently. `vad_filter` is off here -- `find_commit_boundary()`
-    already VAD-gated the chunk before it was committed.
+    Uses ``transcriber._model`` directly (no temp file, no progress bar);
+    safe because JOB_LIVE holds the only worker slot. ``vad_filter`` is off
+    since the chunk was already VAD-gated.
     """
     from wisper_transcribe import transcriber as _transcriber
     from wisper_transcribe.config import get_device
@@ -336,38 +297,20 @@ def run_live_loop(
     get_noise_floor: Callable[[], float] = lambda: NOISE_FLOOR_RMS,
     on_warning: Optional[Callable[[str], None]] = None,
 ) -> None:
-    """Poll the ring buffer, commit + transcribe chunks, call `on_line` for
-    each resulting line, until `stop_event` is set.
+    """Commit and transcribe chunks from the ring buffer until ``stop_event`` is set.
 
-    Backpressure: if a single call to `commit_and_transcribe` takes longer
-    than the audio it covers (falling behind capture -- e.g. a slow CPU
-    model choice), the ring buffer simply keeps growing during that call;
-    the *next* iteration's `find_commit_boundary` naturally force-cuts at
-    FORCE_CUT_S regardless of how much has piled up, so backlog is bounded
-    to at most one FORCE_CUT_S-sized chunk of latency rather than growing
-    unboundedly -- there is no separate queue of pending windows to merge
-    or skip.
+    Backpressure is bounded: if transcription falls behind, the buffer grows
+    and the next ``find_commit_boundary`` force-cuts at FORCE_CUT_S, so the
+    backlog never exceeds one chunk.
 
-    A per-chunk transcription exception is logged and skipped rather than
-    ending the loop -- a single flaky chunk must not kill an hours-long
-    live session.
+    A failing chunk is logged, reported via ``on_warning``, and skipped; it
+    never ends the session.
 
-    `initial_prompt` is passed through unchanged to every chunk -- it is
-    NOT chained from the previous chunk's committed text. That chaining was
-    tried (see plan.md's original open decision) and confirmed on real
-    speech to send the model into repetition loops ("column column column
-    column...") that got worse chunk over chunk as each hallucinated
-    repeat re-primed the next prompt, occasionally producing out-of-order
-    segment timestamps along with it. Dropped per the decision's own
-    documented fallback.
+    ``initial_prompt`` is never chained from earlier output; chaining sends
+    Whisper into repetition loops on real speech.
 
-    `get_noise_floor` is called fresh at the top of every iteration (not
-    just once at loop start) so a caller can adjust sensitivity live during
-    a session -- e.g. the Record page's noise-floor slider mutates
-    `job.kwargs["noise_floor"]` and `jobs._run_live_job` wires a getter
-    that reads it back out on each call, mirroring how `stop_event` already
-    lets the route layer signal a running job rather than baking
-    everything into fixed arguments at submit time.
+    ``get_noise_floor`` is read every iteration so the Record page slider
+    applies to the next chunk.
     """
     while not stop_event.is_set():
         mic, system, mixed, elapsed_s = ring_buffer.snapshot()
@@ -391,9 +334,7 @@ def run_live_loop(
         except Exception:
             log.warning("Live transcription chunk failed; skipping", exc_info=True)
             if on_warning is not None:
-                # R13: no raw exception text in a callback that renders into
-                # job log / SSE -- the server log (exc_info=True above) has
-                # the detail; this just tells the user something was skipped.
+                # Generic message only; the traceback is in the server log.
                 on_warning("Live transcription chunk failed; skipping (see server log)")
             lines = []
 
