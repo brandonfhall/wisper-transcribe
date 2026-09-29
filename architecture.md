@@ -657,8 +657,11 @@ Downloaded on first use to `~/.cache/huggingface/hub/`; later runs are offline.
 | Model | Purpose | Size |
 |-------|---------|------|
 | `openai/whisper-*` (via faster-whisper) | Transcription | 75 MB – 1.5 GB |
-| `pyannote/speaker-diarization-3.1` | Diarization pipeline | ~400 MB |
-| `pyannote/embedding` | Voice embeddings | ~200 MB |
-| `pyannote/segmentation-3.0` | Voice activity (pipeline dependency) | ~100 MB |
+| `pyannote/speaker-diarization-community-1` | Diarization pipeline (segmentation + WeSpeaker embedding + VBx clustering bundled) | ~32 MB |
+| `pyannote/embedding` | Voice embeddings for profile matching | ~200 MB |
 
-License acceptance (free, one-time): [speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1), [embedding](https://huggingface.co/pyannote/embedding), [segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0).
+License acceptance (free, one-time): [speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1), [embedding](https://huggingface.co/pyannote/embedding). Model ids live in `config.DIARIZATION_MODEL` / `config.EMBEDDING_MODEL`.
+
+- **Why community-1 over 3.1:** on multi-hour 5–8-speaker sessions 3.1 produced one catch-all cluster plus several fragments of the same person; community-1 produced one cluster per person at the same runtime.
+- **`diarize()` uses `speaker_diarization`, not `exclusive_speaker_diarization`:** solo-segment selection for embeddings and excerpts needs the overlap information the exclusive view removes.
+- **Gated-model errors:** `load_pipeline()` turns `GatedRepoError` into a message naming the terms URL, since existing users must accept community-1 separately from 3.1.

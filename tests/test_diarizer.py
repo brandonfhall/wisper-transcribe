@@ -208,3 +208,41 @@ def test_load_pipeline_success_sets_device_key():
 
     d._pipeline = None
     d._pipeline_device = None
+
+
+def test_load_pipeline_uses_community_1():
+    """The pipeline comes from the configured community-1 model id."""
+    import wisper_transcribe.diarizer as d
+    from wisper_transcribe.config import DIARIZATION_MODEL
+
+    d._pipeline = None
+    d._pipeline_device = None
+
+    with patch("wisper_transcribe.diarizer.Pipeline") as mock_cls:
+        mock_cls.from_pretrained.return_value = MagicMock()
+        with patch.dict("sys.modules", {"torch": MagicMock()}):
+            d.load_pipeline("hf_fake", "cpu")
+
+    assert DIARIZATION_MODEL == "pyannote/speaker-diarization-community-1"
+    mock_cls.from_pretrained.assert_called_once_with(DIARIZATION_MODEL, token="hf_fake")
+
+    d._pipeline = None
+    d._pipeline_device = None
+
+
+def test_load_pipeline_gated_model_names_terms_url():
+    """An unaccepted gated model raises with the URL to accept its terms."""
+    from huggingface_hub.errors import GatedRepoError
+
+    import wisper_transcribe.diarizer as d
+    from wisper_transcribe.config import DIARIZATION_MODEL
+
+    d._pipeline = None
+    d._pipeline_device = None
+
+    with patch("wisper_transcribe.diarizer.Pipeline") as mock_cls:
+        mock_cls.from_pretrained.side_effect = GatedRepoError("restricted", response=MagicMock())
+        with pytest.raises(RuntimeError, match=f"https://huggingface.co/{DIARIZATION_MODEL}"):
+            d.load_pipeline("hf_fake", "cpu")
+
+    assert d._pipeline is None

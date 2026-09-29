@@ -67,7 +67,7 @@ Speaker diarization (identifying who is speaking) requires a **free** HuggingFac
 1. Create a free account at [huggingface.co](https://huggingface.co) and generate a token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) with **"Read access to contents of all repos under your personal namespace"**.
 
 2. Accept the model license agreements (free, one-time):
-   - [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
+   - [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)
    - [pyannote/embedding](https://huggingface.co/pyannote/embedding)
 
 3. Enter the token when prompted by `wisper setup`, or set it via the web UI Config page, or via env var:
@@ -84,7 +84,7 @@ $env:HF_TOKEN="hf_abc123..."          # Windows PowerShell
 wisper config set hf_token hf_abc123...
 ```
 
-> **Note:** `pyannote/segmentation-3.0` is downloaded automatically as a sub-dependency — you do not need to accept it separately.
+> **Upgrading from an older version?** Diarization now uses `pyannote/speaker-diarization-community-1` instead of `speaker-diarization-3.1`. Accept its terms at the link above once, or diarization fails with a message pointing there.
 
 **Optional — configure an LLM for `refine` / `summarize`:**
 

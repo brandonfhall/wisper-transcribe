@@ -240,8 +240,8 @@ def setup():
         click.echo("   Get one at: https://huggingface.co/settings/tokens")
         click.echo("")
         click.echo("   You must also accept the model licenses (free, one-time):")
-        click.echo("     https://huggingface.co/pyannote/speaker-diarization-3.1")
-        click.echo("     https://huggingface.co/pyannote/embedding")
+        click.echo(f"     https://huggingface.co/{_config.DIARIZATION_MODEL}")
+        click.echo(f"     https://huggingface.co/{_config.EMBEDDING_MODEL}")
         click.echo("")
         token = click.prompt("   HuggingFace token", hide_input=True).strip()
         if token:
@@ -257,11 +257,11 @@ def setup():
         try:
             from pyannote.audio import Inference, Model, Pipeline
 
-            click.echo("   Downloading pyannote/speaker-diarization-3.1 ...")
-            pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=token)
+            click.echo(f"   Downloading {_config.DIARIZATION_MODEL} ...")
+            pipeline = Pipeline.from_pretrained(_config.DIARIZATION_MODEL, token=token)
             del pipeline
-            click.echo("   Downloading pyannote/embedding ...")
-            model = Model.from_pretrained("pyannote/embedding", token=token)
+            click.echo(f"   Downloading {_config.EMBEDDING_MODEL} ...")
+            model = Model.from_pretrained(_config.EMBEDDING_MODEL, token=token)
             del model
             click.echo("   OK  : all models cached — subsequent runs start immediately")
         except Exception as e:
@@ -386,8 +386,8 @@ def config_show():
     click.echo(f"  Device         : {device}")
     click.echo(f"  Whisper model  : {model}")
     click.echo(f"  Compute type   : {ct_display}")
-    click.echo(f"  Diarization    : pyannote/speaker-diarization-3.1")
-    click.echo(f"  Embedding      : pyannote/embedding")
+    click.echo(f"  Diarization    : {_config.DIARIZATION_MODEL}")
+    click.echo(f"  Embedding      : {_config.EMBEDDING_MODEL}")
     click.echo("")
     click.echo("─" * 50)
     click.echo("Settings")

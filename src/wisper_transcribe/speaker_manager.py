@@ -13,7 +13,7 @@ import numpy as np
 from ._noise_suppress import suppress_third_party_noise as _suppress
 _suppress()
 
-from .config import get_data_dir
+from .config import EMBEDDING_MODEL, get_data_dir
 from .models import DiarizationSegment, SpeakerProfile
 
 # Embedding-model cache, keyed by device so a different device reloads it.
@@ -214,7 +214,7 @@ def _load_embedding_model(device: str):
         from pyannote.audio import Model, Inference
         try:
             model = Model.from_pretrained(
-                "pyannote/embedding",
+                EMBEDDING_MODEL,
                 token=_get_hf_token(),
             )
         except Exception as e:

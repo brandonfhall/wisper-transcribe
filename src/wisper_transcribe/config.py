@@ -85,6 +85,10 @@ LLM_SECRET_KEYS = frozenset({
 
 COMPUTE_TYPES = ("auto", "float16", "int8_float16", "int8", "float32")
 
+# Hugging Face model ids. Both are gated: users accept each one's terms once.
+DIARIZATION_MODEL = "pyannote/speaker-diarization-community-1"
+EMBEDDING_MODEL = "pyannote/embedding"
+
 # Allowed values, shared by CLI click.Choice lists and web-form validation.
 MODEL_SIZES = ("tiny", "base", "small", "medium", "large-v3", "large-v3-turbo")
 DEVICES = ("auto", "cpu", "cuda", "mps")
@@ -200,7 +204,8 @@ def get_hf_token(config: Optional[dict] = None) -> str:
         "\nA HuggingFace token is required for speaker diarization.\n"
         "Get a free token at https://huggingface.co/settings/tokens\n"
         "You must also accept the pyannote model terms at:\n"
-        "  https://huggingface.co/pyannote/speaker-diarization-3.1"
+        f"  https://huggingface.co/{DIARIZATION_MODEL}\n"
+        f"  https://huggingface.co/{EMBEDDING_MODEL}"
     )
     token = click.prompt("HuggingFace token").strip()
     if token:
