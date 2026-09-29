@@ -41,7 +41,29 @@
       "Bash(git -C /Users/brandon/VSCode/wisper-transcribe commit -m ' *)",
       "Bash(git -C /Users/brandon/VSCode/wisper-transcribe status)",
       "Bash(git -C /Users/brandon/VSCode/wisper-transcribe diff)",
-      "Bash(git -C /Users/brandon/VSCode/wisper-transcribe add .claude/settings.json plan.md)"
+      "Bash(git -C /Users/brandon/VSCode/wisper-transcribe add .claude/settings.json plan.md)",
+      "Bash(.venv/bin/pytest *)",
+      "Bash(.venv/bin/python -m pytest *)",
+      "Bash(.venv/Scripts/pytest *)",
+      "Bash(.venv/Scripts/pytest.exe *)",
+      "Bash(.venv/Scripts/python.exe -m pytest *)",
+      "PowerShell(.venv\\Scripts\\pytest *)",
+      "PowerShell(.venv\\Scripts\\python -m pytest *)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "py=\"$CLAUDE_PROJECT_DIR/.venv/bin/python\"; [ -x \"$py\" ] || py=\"$CLAUDE_PROJECT_DIR/.venv/Scripts/python.exe\"; \"$py\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre_commit.py\"",
+            "shell": "bash",
+            "timeout": 420
+          }
+        ]
+      }
     ]
   }
 }
