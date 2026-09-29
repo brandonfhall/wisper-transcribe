@@ -172,6 +172,15 @@ Add a speaker from a clean reference clip (e.g. an interview or isolated recordi
 wisper enroll "Alice" --audio alice_intro.mp3
 wisper enroll "Alice" --audio session01.mp3 --segment "0:30-1:15"
 wisper enroll "Alice" --audio session08.mp3 --update   # blend with existing profile
+wisper enroll "Alice" --audio alice_intro.mp3 --notes "DM, usually on mic 2"
+```
+
+```
+Options:
+  --audio PATH       Audio file to extract the voice from (required)
+  --segment TEXT     Time range to use, e.g. "0:30-1:15"
+  --notes TEXT       Free-text notes stored with the speaker profile
+  --update           Average with the existing embedding instead of replacing it
 ```
 
 ---

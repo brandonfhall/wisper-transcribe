@@ -14,6 +14,36 @@
 | `OPENAI_API_KEY` | OpenAI API key — takes precedence over stored config |
 | `GOOGLE_API_KEY` | Google (Gemini) API key — takes precedence over stored config |
 | `OLLAMA_API_KEY` | Ollama Cloud API key (for `llm_provider = ollama-cloud`) — takes precedence over stored config |
+| `WISPER_SERVER_URL` | Server URL used by `wisper record` commands (e.g. `http://192.168.1.10:8080`). Overrides the `server.json` that a running `wisper server` writes to the data dir — set it when the CLI and server are on different machines or containers. |
+
+---
+
+## Config Keys
+
+Stored in `config.toml`. View with `wisper config show`, change with `wisper config set <key> <value>` (or `wisper config llm` / `wisper config discord` for the guided wizards).
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `model` | `large-v3-turbo` | Whisper model size |
+| `language` | `en` | Transcription language (`auto` to detect) |
+| `device` | `auto` | `auto`, `cpu`, `cuda`, or `mps` |
+| `compute_type` | `auto` | CTranslate2 precision (`auto` picks per device) |
+| `vad_filter` | `true` | Skip silence before transcription (`--vad/--no-vad` overrides) |
+| `timestamps` | `true` | Include timestamps in transcript output |
+| `similarity_threshold` | `0.65` | Minimum voice-embedding similarity to match an enrolled speaker |
+| `min_speakers` / `max_speakers` | `2` / `8` | Diarizer range when no speaker count is given |
+| `hf_token` | — | HuggingFace token (env `HF_TOKEN` takes precedence) |
+| `hotwords` | `[]` | Custom vocabulary (names, places) fed to Whisper as a prompt |
+| `use_mlx` | `auto` | Apple Silicon: `auto` uses MLX Whisper when installed, `true` requires it, `false` always uses faster-whisper |
+| `parallel_stages` | `false` | Run transcription and diarization concurrently in two subprocesses. Uses more memory; benchmark before enabling. |
+| `llm_provider` | `ollama` | `ollama`, `ollama-cloud`, `lmstudio`, `anthropic`, `openai`, or `google` |
+| `llm_model` | — | Blank uses the provider's default model |
+| `llm_endpoint` | `http://localhost:11434` | Local LLM server URL (LM Studio default is `:1234`) |
+| `llm_temperature` | `0.2` | Sampling temperature for refine/summarize |
+| `anthropic_api_key`, `openai_api_key`, `google_api_key`, `ollama_cloud_api_key` | — | Provider keys (the env vars above take precedence) |
+| `discord_bot_token` | — | Discord recording bot token (env `DISCORD_BOT_TOKEN` takes precedence) |
+| `discord_default_guild` / `discord_default_channel` | — | Used when `record start` gets no `--guild`/`--voice-channel`/`--preset` |
+| `discord_presets` | `[]` | Saved guild/channel pairs; manage with `wisper config discord-presets` |
 
 ---
 

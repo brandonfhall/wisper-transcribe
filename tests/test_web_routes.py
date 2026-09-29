@@ -1,6 +1,7 @@
 """Tests for web route handlers using FastAPI TestClient."""
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -1651,13 +1652,9 @@ def test_delete_transcript_also_removes_excerpt_clips(client, tmp_path):
     unrelated.unlink()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="'*' is not a legal filename character on Windows")
 def test_delete_transcript_glob_metacharacter_stem_does_not_leak_other_clips(client, tmp_path):
-    """Regression: a transcript stem containing glob metacharacters (e.g.
-    an uploaded file literally named 'mix*.mp3') must not turn
-    _delete_excerpt_clips's pattern into a wildcard that also matches a
-    DIFFERENT transcript's excerpt clips. Without glob.escape(), deleting
-    "mix*" builds the pattern "mix*_excerpt_*", which also matches
-    "mix2_excerpt_SPEAKER_00.mp3" -- a completely unrelated transcript."""
+    """A stem containing glob metacharacters ('mix*') must not delete another transcript's excerpt clips."""
     from urllib.parse import quote
 
     victim_stem = "mix*"
