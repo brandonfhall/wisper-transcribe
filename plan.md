@@ -45,6 +45,27 @@ Run through the native `transformers` implementation (`Qwen/Qwen3-ForcedAligner-
 - **Languages:** 11 (zh, en, yue, fr, de, it, ja, ko, pt, ru, es). The model never sees the language; it only picks the word splitter. Space-delimited and CJK text use the default splitter. Japanese and Korean need `nagisa` / `soynlp`, and `prepare_forced_aligner_inputs` raises on a language outside the 11.
 - **Limits:** 180 s per input (per-segment crops are far below that); 80 ms timestamp resolution.
 
+**Verified call sequence** (ran on the spike clip with transformers 5.17 + torch 2.13):
+
+```python
+from transformers import AutoProcessor, AutoModelForTokenClassification
+REPO = "Qwen/Qwen3-ForcedAligner-0.6B-hf"
+proc = AutoProcessor.from_pretrained(REPO)
+model = AutoModelForTokenClassification.from_pretrained(REPO, dtype=torch.bfloat16).to("cuda").eval()
+# crops: list of 1-D float32 numpy arrays at 16 kHz; texts: list of " ".join(w.text for w in seg.words)
+inputs, word_lists = proc.prepare_forced_aligner_inputs(audio=crops, transcript=texts, language="English")
+inputs = {k: (v.to(dev).to(model.dtype) if v.is_floating_point() else v.to(dev)) for k, v in inputs.items()}
+with torch.inference_mode():
+    logits = model(**inputs).logits
+items = proc.decode_forced_alignment(logits, inputs["input_ids"], word_lists, model.config.timestamp_token_id)
+# items[i] = [{"text", "start_time", "end_time"}, ...] in seconds relative to crop i
+```
+
+- Use `.to(device)`, not `device_map=`: `device_map` needs `accelerate`, which isn't installed.
+- Only floating tensors get the model dtype; `input_ids` and the masks must stay integer.
+- `language` takes a name ("English") or a code ("en"). wisper's config/CLI can hold `"auto"` or empty; map both to `None`.
+- On CPU, load in float32 (`model.float()`); bf16 on CPU is slow.
+
 ### Test results (2026-09-29, real session audio)
 
 10-min excerpt of Hanataz 2026-09-19 (30:00–40:00), production transcribe + community-1 diarize, RTX 3090, transformers 5.17 + torch 2.13. Proxy = words whose midpoint lies inside their assigned speaker's diarization turn.
@@ -96,6 +117,7 @@ Others ruled out: nyra-forced-aligner (non-commercial licence, English only, abs
    - Any per-batch failure (exception, OOM after retry, >180 s crop, item/word mismatch) keeps those segments' Whisper times. Alignment never fails the job.
    - Lazy model/processor cache as module globals (`_fa_model`, `_fa_processor`, `_fa_device`) like `diarizer._pipeline`; covered by the one-job-at-a-time invariant; tests reset them.
    - The batch loop runs under a tqdm bar ("Aligning"), like "Transcribing". Web job cancellation and the SSE log only see tqdm writes, so a single summary line at the end would leave up to ~20 min (CPU) that can't be cancelled.
+   - Import `transformers` lazily inside the loader (like `faster_whisper` in `transcriber`), so importing `word_alignment` stays cheap and tests patch the loader instead of the library.
    - Tests with a mocked processor/model: item → word mapping (punctuation, hyphens, digits, contractions), offsetting, clamping, batch failure fallback, unsupported-language skip, monotonic output across segments.
    - Dependency: add `transformers>=5.17` to `pyproject.toml`; check `setup.sh`/`setup.ps1` and the Docker image pick it up.
 2. **Pipeline + config wiring.**
@@ -112,6 +134,7 @@ Others ruled out: nyra-forced-aligner (non-commercial licence, English only, abs
 - **Automatic proxy:** % of words whose midpoint is inside their assigned speaker's turn, plus the raw micro-run count before smoothing. Spike baseline: 90.0% (Whisper) vs 97.0% (Qwen3-FA). Sanity check only: aligned words shrink onto speech, which is where turns are, so the proxy partly measures two acoustic segmentations agreeing, not correctness.
 - **Manual ground truth:** ~3 excerpts of 3 min with heavy crosstalk from different sessions. At every speaker change, mark the correct speaker of the 2 words on either side (~100–150 judgements). Compare Whisper-timed vs aligned, and the smoothing variants. Ship if boundary-word accuracy improves and no excerpt gets worse.
 - **Large-shift audit:** in one session, check every word shifted >1 s with the re-transcription method above.
+- **Test audio:** real sessions are the user's recordings (the spike used Hanataz 2026-09-12 and 2026-09-19); ask the user for paths. Nothing real goes in the repo or in tests. The spike's scratchpad copies are temporary and may be gone.
 
 ### Risks
 
