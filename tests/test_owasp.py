@@ -1,4 +1,4 @@
-"""OWASP Top 10 regression tests.
+"""OWASP Top 10 tests.
 
 Covers:
   A03 – Injection / XSS  (markdown rendered with Jinja ``| safe``)
@@ -81,7 +81,7 @@ class TestSanitizeHtml:
         assert "<em>" in result
         assert "Hello world" in result
 
-    # -- R17: javascript:/data: URLs and iframe/object/embed ---------------
+    # -- javascript:/data: URLs and iframe/object/embed ---------------
 
     def test_strips_javascript_href(self):
         result = _sanitize_html('<a href="javascript:alert(1)">click</a>')
@@ -221,7 +221,7 @@ def test_x_content_type_options(client: TestClient, route: str):
 @pytest.mark.parametrize("route", _ROUTES)
 def test_x_frame_options(client: TestClient, route: str):
     """X-Frame-Options must be DENY — matching the CSP's
-    ``frame-ancestors 'none'`` (R18: the two previously contradicted)."""
+    ``frame-ancestors 'none'``."""
     resp = client.get(route)
     assert resp.headers.get("x-frame-options") == "DENY"
 

@@ -157,7 +157,7 @@ def test_process_folder_workers_2_cpu_uses_process_pool(
 
     with patch("wisper_transcribe.pipeline.ProcessPoolExecutor", return_value=mock_executor) as mock_ppe_cls:
         with patch("wisper_transcribe.pipeline.as_completed", return_value=iter([mock_future_1, mock_future_2])):
-            # R22: process_folder now pre-filters already-processed files
+            # process_folder now pre-filters already-processed files
             # before ever touching the pool, so overwrite=True is required
             # here — the outputs are pre-written above to give the mocked
             # futures somewhere real to point .result() at.
@@ -179,7 +179,7 @@ def test_process_folder_workers_2_cpu_uses_process_pool(
 def test_process_folder_workers_2_skip_not_counted_as_success(
     mock_t, mock_d, mock_c, mock_v, mock_f, tmp_path
 ):
-    """R22: a file whose output already exists must be pre-filtered before
+    """A file whose output already exists must be pre-filtered before
     the pool is ever submitted to — it must land in `skipped`, never in
     `successes`, and process_file/the executor must not be invoked for it."""
     _make_audio_files(tmp_path, ["s01.mp3", "s02.mp3"])

@@ -1,10 +1,4 @@
-"""Tests for web/audio_writer.py — R12 remediation: WAV segments + downsampling.
-
-Replaces the old SegmentedOggWriter/RealtimePCMMixer tests (Ogg/Opus muxer
-deleted; see senior-review finding R12 — the old writer produced undecodable
-Ogg files and the mixer advanced the combined track N x 20ms per real 20ms
-with N concurrent speakers).
-"""
+"""Tests for web/audio_writer.py: WAV segments, downsampling, concatenation."""
 from __future__ import annotations
 
 import struct
@@ -288,7 +282,7 @@ def test_resample_clips_to_int16_range():
 
 
 # ---------------------------------------------------------------------------
-# concat_wav_segments (R2)
+# concat_wav_segments
 # ---------------------------------------------------------------------------
 
 def test_concat_no_segments_returns_none(tmp_path):

@@ -148,7 +148,7 @@ def test_dashboard_flags_cloud_provider_missing_key(client, tmp_path, monkeypatc
 
 
 def test_dashboard_transcript_count_excludes_summaries(client, tmp_path):
-    """R21: the dashboard's transcript count must exclude .summary.md sidecars,
+    """The dashboard's transcript count must exclude .summary.md sidecars,
     same as the Transcripts page — they are LLM-generated notes, not transcripts."""
     out_dir = tmp_path / "output"
     out_dir.mkdir()
@@ -202,7 +202,7 @@ def test_transcribe_post_queues_job_and_redirects(client, tmp_path):
 
 
 def test_transcribe_post_streams_large_upload_correctly(client, tmp_path):
-    """R10: uploads are streamed to disk in 1 MiB chunks rather than
+    """Uploads are streamed to disk in 1 MiB chunks rather than
     buffered whole into memory. A payload spanning multiple chunks must
     still land on disk byte-for-byte before the job is submitted."""
     payload = b"A" * (1 << 20) + b"B" * (1 << 19)  # 1.5 MiB, crosses a chunk boundary
@@ -229,7 +229,7 @@ def test_transcribe_post_streams_large_upload_correctly(client, tmp_path):
 
 
 def test_job_stream_serves_lines_after_log_trimming(client, tmp_path):
-    """R14: once Job.log_lines has been trimmed (log_lines_dropped > 0), the
+    """Once Job.log_lines has been trimmed (log_lines_dropped > 0), the
     SSE stream must still serve the retained lines using the translated
     index instead of crashing or resending stale data."""
     from wisper_transcribe.web.jobs import Job, COMPLETED
@@ -261,8 +261,7 @@ def test_job_stream_serves_lines_after_log_trimming(client, tmp_path):
 def test_transcribe_post_empty_upload_still_queues(client, tmp_path):
     """An empty upload is still accepted at the route layer (the chunked
     read loop must not choke on an immediate EOF) -- validation of the
-    resulting empty file happens downstream in the job itself, unchanged
-    by the R10 streaming fix."""
+    resulting empty file happens downstream in the job itself."""
     resp = client.post(
         "/transcribe",
         files={"file": ("empty.mp3", b"", "audio/mpeg")},
@@ -279,7 +278,7 @@ def test_transcribe_post_empty_upload_still_queues(client, tmp_path):
     ("compute_type", "bfloat9000"),
 ])
 def test_transcribe_post_invalid_enum_redirects_with_generic_error(client, tmp_path, field, bad_value):
-    """R33: model_size/device/compute_type are validated against the same
+    """model_size/device/compute_type are validated against the same
     canonical enums the CLI uses. An invalid value redirects to /transcribe
     with a generic error code — never the raw value (CLAUDE.md: never echo
     user input into a redirect)."""
@@ -321,7 +320,7 @@ def test_transcribe_post_accepts_video_upload(client, tmp_path, filename, mime):
 
 
 def test_transcribe_output_dir_field_is_ignored(client, tmp_path):
-    """output_dir is no longer a form parameter — posting it must not cause a 422."""
+    """An output_dir form field is ignored and doesn't cause a 422."""
     audio_file = tmp_path / "test.mp3"
     audio_file.write_bytes(b"fake mp3")
     with open(audio_file, "rb") as f:
@@ -358,7 +357,7 @@ def test_job_detail_unknown_returns_404(client):
 
 
 def test_job_detail_nav_contains_config_link(client, tmp_path):
-    """The Config nav link must be present on the job detail page (sticky nav regression guard)."""
+    """The Config nav link must be present on the job detail page ."""
     audio_file = tmp_path / "nav_test.mp3"
     audio_file.write_bytes(b"fake")
     with open(audio_file, "rb") as f:
@@ -651,7 +650,7 @@ def test_config_get_uses_os_specific_open_label(client, platform, expected_label
 
 
 def test_config_open_data_dir_get_is_rejected(client):
-    """R16: open-data-dir spawns an OS process (state-changing), so the GET
+    """Open-data-dir spawns an OS process (state-changing), so the GET
     verb — triggerable cross-site via <img src=...> — must not be routed."""
     with patch("subprocess.Popen") as mock_popen:
         resp = client.get("/config/open-data-dir")
@@ -1170,12 +1169,12 @@ def test_preset_add_missing_name_rejected(client):
 
 
 # ---------------------------------------------------------------------------
-# Startup orphan sweep (R9-1)
+# Startup orphan sweep
 # ---------------------------------------------------------------------------
 
 
 def test_cleanup_orphaned_uploads_removes_all_prefixes(tmp_path, monkeypatch):
-    """R9-1/R6: the startup sweep recognizes wisper_enroll_* temp files (the
+    """The startup sweep recognizes wisper_enroll_* temp files (the
     standalone speaker-enroll route's crash-window safety net) and the
     wisper_enrollsrc_* files a pending standalone enroll job was renamed to,
     not just wisper_upload_*."""
@@ -1219,12 +1218,10 @@ def test_speakers_enroll_form_returns_200(client):
 
 
 def test_speakers_enroll_submit_enqueues_standalone_job(app, client, tmp_path, monkeypatch):
-    """R6: the standalone enroll POST no longer runs WAV conversion /
-    diarization / embedding extraction inside the request — it saves the
-    upload (streamed, R10), hands ownership to a JOB_ENROLL job (mode
-    "standalone"), and redirects to the job detail page. At submit time the
-    wisper_enroll_* upload is renamed to wisper_enrollsrc_<job-id> so the
-    startup sweep can never delete a pending job's file (F5 pattern)."""
+    """The standalone enroll POST streams the upload to disk, hands it to a
+    JOB_ENROLL job (mode "standalone"), and redirects to the job page. The
+    upload is renamed to wisper_enrollsrc_<job-id> so the startup sweep can't
+    delete a pending job's file."""
     import tempfile as _tempfile
 
     from wisper_transcribe.web.jobs import JobQueue
@@ -1271,7 +1268,7 @@ def test_speakers_enroll_submit_enqueues_standalone_job(app, client, tmp_path, m
 
 
 def test_speakers_enroll_submit_cleans_up_temp_file_when_submit_fails(client, tmp_path, monkeypatch):
-    """R9-1/R6: if the job hand-off itself fails, the route still deletes the
+    """If the job hand-off itself fails, the route still deletes the
     temp upload (ownership never transferred) and redirects with a generic
     error code."""
     import tempfile as _tempfile
@@ -1298,11 +1295,8 @@ def test_speakers_enroll_submit_cleans_up_temp_file_when_submit_fails(client, tm
 
 
 def test_speakers_remove_redirects(client, tmp_path):
-    # R37: removal now goes through speaker_manager.remove_profile() (a
-    # locked load-modify-save against the real profiles.json), mirroring
-    # the rename route's real-file test pattern below rather than mocking
-    # load_profiles/save_profiles in the route module (which no longer
-    # calls them directly for removal).
+    # Removal goes through speaker_manager.remove_profile(), so test against
+    # the real profiles.json rather than mocking the route module.
     from wisper_transcribe.speaker_manager import load_profiles as _load
 
     _seed_profile_store(tmp_path)
@@ -1315,7 +1309,7 @@ def test_speakers_remove_redirects(client, tmp_path):
 
 
 def test_speakers_remove_deletes_reference_clip(client, tmp_path):
-    """R9-5: the web removal route deletes the .mp3 reference clip alongside
+    """The web removal route deletes the .mp3 reference clip alongside
     the .npy embedding, not just the profile entry."""
     emb_dir = _seed_profile_store(tmp_path)
     npy_path = emb_dir / "alice.npy"
@@ -1353,9 +1347,8 @@ def _seed_profile_store(tmp_path, key="alice", display="Alice", with_clip=True):
 
 
 def test_speakers_rename_rekeys_profile_and_moves_files(client, tmp_path):
-    """R31: the web rename route adopts the CLI's rekey semantic — the
-    profile key changes and the .npy/.mp3 files move with it (previously the
-    web route changed display_name only)."""
+    """The web rename route adopts the CLI's rekey semantic — the
+    profile key changes and the .npy/.mp3 files move with it."""
     from wisper_transcribe.speaker_manager import load_profiles as _load
 
     emb_dir = _seed_profile_store(tmp_path)
@@ -1381,7 +1374,7 @@ def test_speakers_rename_rekeys_profile_and_moves_files(client, tmp_path):
 
 
 def test_speakers_rename_updates_campaign_membership(client, tmp_path):
-    """R31: a web rename rekeys campaign rosters too — membership (including
+    """A web rename rekeys campaign rosters too — membership (including
     the Discord ID binding) follows the profile instead of dangling."""
     from wisper_transcribe.campaign_manager import (
         add_member, bind_discord_id, create_campaign, load_campaigns,
@@ -1413,7 +1406,7 @@ def test_speakers_rename_updates_campaign_membership(client, tmp_path):
 
 
 def test_speakers_rename_collision_redirects_generic_error(client, tmp_path):
-    """R31: renaming onto an existing key fails with a generic error code —
+    """Renaming onto an existing key fails with a generic error code —
     the CLI's collision guard, without reflecting the submitted name."""
     from wisper_transcribe.models import SpeakerProfile
     from wisper_transcribe.speaker_manager import load_profiles as _load, save_profiles as _save
@@ -1442,7 +1435,7 @@ def test_speakers_rename_collision_redirects_generic_error(client, tmp_path):
 
 
 def test_speakers_rename_invalid_key_redirects_generic_error(client, tmp_path):
-    """R31: a new name whose derived key fails the path-component guard is
+    """A new name whose derived key fails the path-component guard is
     refused with a generic error code — never reflected into the redirect."""
     _seed_profile_store(tmp_path)
 
@@ -1602,7 +1595,7 @@ def test_delete_transcript_also_removes_summary(client, tmp_path):
 
 
 def test_delete_transcript_also_removes_diar_sidecar_and_audio(client, tmp_path):
-    """(g) F5: deleting a transcript must also remove the _diar.json sidecar
+    """(g) Deleting a transcript must also remove the _diar.json sidecar
     and the durable audio copy it references -- that audio exists only to
     back the (now-deleted) transcript's enrollment wizard, so leaving it
     behind would be a permanent leak."""
@@ -1629,8 +1622,8 @@ def test_delete_transcript_also_removes_diar_sidecar_and_audio(client, tmp_path)
 
 
 def test_delete_transcript_also_removes_excerpt_clips(client, tmp_path):
-    """R9-4: deleting a transcript removes its <stem>_excerpt_*.mp3/.txt
-    speaker-preview clips, which the code previously left behind."""
+    """Deleting a transcript removes its <stem>_excerpt_*.mp3/.txt
+    speaker-preview clips."""
     md = tmp_path / "session01.md"
     md.write_text(_TRANSCRIPT_MD)
     clip_mp3 = tmp_path / "session01_excerpt_SPEAKER_00.mp3"
@@ -1677,7 +1670,7 @@ def test_delete_transcript_glob_metacharacter_stem_does_not_leak_other_clips(cli
 
 def test_delete_transcript_never_deletes_audio_outside_output_dir(client, tmp_path):
     """A legacy sidecar pointing at a path outside the output dir (e.g. a
-    pre-F5 tempdir path) must never be deleted by the transcript-delete
+    tempdir path) must never be deleted by the transcript-delete
     route -- only durable copies that actually live in the output dir."""
     import json
 
@@ -1825,8 +1818,7 @@ def test_transcribe_post_no_vocab_file_hotwords_is_none(client, tmp_path, monkey
 def test_speakers_rename_empty_name_no_change(client, tmp_path):
     # An empty new_name short-circuits before the route ever calls
     # speaker_manager.rename_profile(), so no profiles.json write happens --
-    # verified against the real store rather than mocking module-level
-    # load_profiles/save_profiles (the route no longer imports the latter).
+    # verified against the real store.
     from wisper_transcribe.speaker_manager import load_profiles as _load
 
     _seed_profile_store(tmp_path)
@@ -2437,16 +2429,12 @@ def test_assign_campaign_unlinks_when_empty(client, tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Enrollment — job-centric wizard submit enqueues a JOB_ENROLL job (Phase 2.5)
+# Enrollment — job-centric wizard submit enqueues a JOB_ENROLL job
 #
-# The synchronous enroll_speaker()/add_member() assertions that used to live
-# here now live at the enroll_shared.enroll_profiles() unit-test level (see
-# tests/test_transcript_enroll.py) and at the JOB_ENROLL runner level (see
-# tests/test_web_jobs.py) -- the route itself no longer calls those functions
-# inline, so asserting on them right after a POST would be racing the
-# background job queue's worker. These tests instead verify the route's own
-# responsibility: applying the rename synchronously and enqueueing (or not
-# enqueueing) a job with the right payload.
+# The route renames synchronously and enqueues (or doesn't) a JOB_ENROLL job.
+# Enrollment itself is tested in test_transcript_enroll.py (enroll_profiles)
+# and test_web_jobs.py (the runner); asserting on it here would race the
+# background worker.
 # ---------------------------------------------------------------------------
 
 
@@ -2587,16 +2575,16 @@ def test_enroll_form_uses_diarization_segments_not_frontmatter(client, tmp_path,
 
 
 # ---------------------------------------------------------------------------
-# Phase 1 audit fixes — F1 (legacy job-path rename no-op), F2 (junk
-# "SPEAKER_XX" profiles from untouched fields), F3 (EMA merge instead of
-# overwrite on resubmission / two labels -> one profile averaging)
+# Job-path wizard: renames after names are applied, no junk "SPEAKER_XX"
+# profiles from untouched fields, EMA merge on resubmission, and averaging
+# when two labels map to one profile
 # ---------------------------------------------------------------------------
 
 
 def test_job_path_rename_works_when_transcript_has_display_names(
     client, tmp_path, monkeypatch
 ):
-    """F1: once match_speakers has already written a display name into the
+    """Once match_speakers has already written a display name into the
     body (e.g. from a prior session's enrollment), the job-path submit
     handler must still resolve the raw label -> current display name and
     rename correctly, instead of silently no-op'ing against a body that no
@@ -2646,8 +2634,8 @@ def test_job_path_rename_works_when_transcript_has_display_names(
 
 
 def test_job_path_get_form_prefills_current_display_name(client, tmp_path, monkeypatch):
-    """F1: the GET wizard form must also resolve current_names on the job
-    path (previously only the transcript-centric path did this)."""
+    """The GET wizard form must also resolve current_names on the job
+    path, as the transcript-centric path does."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
 
     from wisper_transcribe.web.jobs import Job, COMPLETED
@@ -2683,7 +2671,7 @@ def test_job_path_get_form_prefills_current_display_name(client, tmp_path, monke
 
 
 def test_raw_label_shaped_submission_refused(client, tmp_path, monkeypatch):
-    """F2: submitting an untouched field (value still "SPEAKER_05", pyannote's
+    """Submitting an untouched field (value still "SPEAKER_05", pyannote's
     raw format) must not rename the transcript or enroll a junk profile."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
 
@@ -2729,7 +2717,7 @@ def test_raw_label_shaped_submission_refused(client, tmp_path, monkeypatch):
 
 
 def test_existing_profile_name_still_enqueues_job(client, tmp_path, monkeypatch):
-    """F3: resubmitting a name that already has a voice profile (but the
+    """Resubmitting a name that already has a voice profile (but the
     *transcript's* current name differs, i.e. an actual change) still groups
     and enqueues a JOB_ENROLL job -- the EMA-vs-overwrite branching itself is
     covered at the enroll_shared.enroll_profiles() unit-test level (see
@@ -2779,7 +2767,7 @@ def test_existing_profile_name_still_enqueues_job(client, tmp_path, monkeypatch)
 
 
 def test_two_labels_same_name_grouped_into_one_job_entry(client, tmp_path, monkeypatch):
-    """F3: when two raw pyannote labels are assigned the same display name in
+    """When two raw pyannote labels are assigned the same display name in
     one submit (pyannote over-segmented one real speaker), apply_renames()
     must group them together on the job so enroll_profiles() (unit-tested
     separately) can average their embeddings -- not create two competing
@@ -2827,7 +2815,7 @@ def test_two_labels_same_name_grouped_into_one_job_entry(client, tmp_path, monke
 
 
 def test_unchanged_name_with_existing_profile_skips_enroll(client, tmp_path, monkeypatch):
-    """F3: resubmitting the same (already-current) display name for a
+    """Resubmitting the same (already-current) display name for a
     speaker that already has a profile must not call enroll_speaker OR
     update_embedding -- nothing changed, so nothing should be re-extracted."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
@@ -2908,7 +2896,7 @@ def test_bulk_delete_removes_multiple_transcripts(client, tmp_path, monkeypatch)
 
 
 def test_bulk_delete_removes_excerpt_clips(client, tmp_path, monkeypatch):
-    """R9-4: bulk-delete removes each stem's excerpt clips too."""
+    """Bulk-delete removes each stem's excerpt clips too."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     (tmp_path / "session01.md").write_text("# S1")
     clip = tmp_path / "session01_excerpt_SPEAKER_00.mp3"
@@ -2977,7 +2965,7 @@ def test_bulk_campaign_invalid_slug_redirects_with_error(client, tmp_path, monke
 
 
 # ---------------------------------------------------------------------------
-# F9 -- GET /transcribe/jobs/{job_id}/excerpt/{speaker_name} on-disk fallback
+# GET /transcribe/jobs/{job_id}/excerpt/{speaker_name} on-disk fallback
 # must be scoped to the job's own transcript stem, never glob the whole
 # output directory (which could serve a different transcript's same-labelled
 # excerpt clip).
@@ -3033,13 +3021,12 @@ def test_job_excerpt_fallback_404_when_job_gone(client, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R32-8: _build_tailwind must not crash startup when input.css is missing
+# _build_tailwind must not crash startup when input.css is missing
 # ---------------------------------------------------------------------------
 
 def test_build_tailwind_missing_input_css_does_not_raise(tmp_path, monkeypatch):
-    """_INPUT_CSS.stat() used to raise an uncaught FileNotFoundError when
-    input.css was absent (e.g. a stripped install), crashing app startup
-    instead of falling into the existing warn-and-continue path."""
+    """A missing input.css (e.g. a stripped install) warns and continues
+    instead of crashing startup."""
     import wisper_transcribe.web.app as app_module
 
     missing_input = tmp_path / "does-not-exist.css"

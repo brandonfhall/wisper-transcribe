@@ -50,10 +50,9 @@ def test_list_all_sorted_by_created_at():
 
 
 def test_list_all_ties_break_by_submission_order():
-    """R32-9: two jobs submitted within the same clock tick share an equal
+    """Two jobs submitted within the same clock tick share an equal
     `created_at` -- the tie must break by insertion order, most-recently
-    -submitted first (same guarantee the old reverse-then-stable-sort trick
-    gave, now via an explicit (created_at, insertion_index) sort key)."""
+    -submitted first."""
     q = _make_queue()
     j1 = q.submit("/tmp/a.mp3")
     j2 = q.submit("/tmp/b.mp3")
@@ -131,7 +130,7 @@ def test_run_job_records_error_on_failure(tmp_path):
             pass
 
     assert job.status == FAILED
-    # R13: raw exception text must never reach job.error (it renders into
+    # Raw exception text must never reach job.error (it renders into
     # the job-detail page and SSE stream) — a generic message is used and
     # the real exception goes to the server log.
     assert "boom" not in job.error
@@ -150,7 +149,7 @@ def test_cancel_pending_job_marks_failed():
 
 @pytest.mark.anyio
 async def test_worker_does_not_revive_cancelled_pending_job():
-    """R3 regression: cancel() marks a PENDING job FAILED, but its id stays
+    """cancel() marks a PENDING job FAILED, but its id stays
     in the asyncio queue. _worker() must skip it instead of dequeuing it and
     unconditionally running it as if it were still pending.
     """
@@ -192,9 +191,8 @@ def test_cancel_completed_job_returns_false():
 def test_run_job_completed_after_post_process(tmp_path):
     """COMPLETED status must not be set until _run_post_process finishes.
 
-    Regression test: previously job.status = COMPLETED was set before
-    _run_post_process() was called, causing the SSE stream to fire 'done'
-    while Ollama was still generating the campaign summary.
+    Otherwise the SSE stream fires 'done' while the LLM is still generating
+    the campaign summary.
     """
     from wisper_transcribe.web.jobs import Job, JobQueue, COMPLETED, RUNNING
     from datetime import datetime
@@ -231,12 +229,12 @@ def test_run_job_completed_after_post_process(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R14 -- unbounded memory growth guards
+# Unbounded memory growth guards
 # ---------------------------------------------------------------------------
 
 
 def test_append_log_caps_log_lines_and_tracks_dropped():
-    """R14: Job.append_log trims the oldest lines once _MAX_LOG_LINES is
+    """job.append_log trims the oldest lines once _MAX_LOG_LINES is
     exceeded and counts them in log_lines_dropped, rather than growing
     log_lines without bound."""
     from wisper_transcribe.web.jobs import Job, _MAX_LOG_LINES
@@ -309,7 +307,7 @@ def test_resume_slice_client_fell_behind_the_cap_resumes_from_retained():
 
 
 def test_prune_finished_jobs_caps_terminal_jobs_only(monkeypatch):
-    """R14: only COMPLETED/FAILED jobs count against _MAX_RETAINED_JOBS, and
+    """Only COMPLETED/FAILED jobs count against _MAX_RETAINED_JOBS, and
     the OLDEST terminal jobs are dropped first. PENDING/RUNNING jobs are
     never pruned, even when the terminal-job count alone exceeds the cap."""
     from wisper_transcribe.web.jobs import COMPLETED, FAILED, PENDING, RUNNING
@@ -350,7 +348,7 @@ def test_prune_finished_jobs_noop_under_cap():
 
 
 def test_cancel_pending_job_triggers_prune(monkeypatch):
-    """R14: cancelling a PENDING job (which sets it straight to FAILED
+    """Cancelling a PENDING job (which sets it straight to FAILED
     without ever passing through the worker's finally block) still gets
     swept by the retention cap."""
     from wisper_transcribe.web.jobs import COMPLETED
@@ -519,7 +517,7 @@ def test_run_job_tqdm_patch_restores_original(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# F5 -- durable audio: move wisper_upload_* temp files to the output dir
+# Durable audio: move wisper_upload_* temp files to the output dir
 # ---------------------------------------------------------------------------
 
 def _fake_process_file_with_segments(out_md, segments):
@@ -790,7 +788,7 @@ def test_completed_job_no_diarization_deletes_upload_not_moves(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# JOB_ENROLL — Phase 2.5 (speaker-enrollment wizard's slow half as a job)
+# JOB_ENROLL — Speaker-enrollment wizard's slow half as a job
 # ---------------------------------------------------------------------------
 
 def test_submit_enroll_creates_pending_job_with_groups():
@@ -968,7 +966,7 @@ def test_run_enroll_job_exception_sets_generic_error_not_path(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R13: generic job error messages — no raw exception text in job.error
+# Generic job error messages — no raw exception text in job.error
 # ---------------------------------------------------------------------------
 
 def _make_failed_job(job_type, exc, **fields):
@@ -986,7 +984,7 @@ def _make_failed_job(job_type, exc, **fields):
 
 
 def test_transcription_error_does_not_leak_paths(tmp_path):
-    """R13: an exception message carrying a filesystem path must not land in
+    """An exception message carrying a filesystem path must not land in
     job.error for a transcription job."""
     from wisper_transcribe.web.jobs import FAILED, JobQueue
 
@@ -1009,7 +1007,7 @@ def test_transcription_error_does_not_leak_paths(tmp_path):
 
 
 def test_llm_job_error_is_generic(tmp_path):
-    """R13: standalone refine/summarize job failures use a generic message."""
+    """Standalone refine/summarize job failures use a generic message."""
     from wisper_transcribe.web.jobs import FAILED, JOB_REFINE, JobQueue
 
     q = JobQueue()
@@ -1032,7 +1030,7 @@ def test_llm_job_error_is_generic(tmp_path):
 
 
 def test_file_not_found_maps_to_short_safe_message():
-    """R13: known input errors get short safe text, still with no path."""
+    """Known input errors get short safe text, still with no path."""
     from wisper_transcribe.web.jobs import FAILED, JobQueue
 
     q = JobQueue()
@@ -1053,7 +1051,7 @@ def test_file_not_found_maps_to_short_safe_message():
 
 
 def test_cancelled_error_string_is_preserved():
-    """R13: the literal "Cancelled" string survives the generic-error policy
+    """The literal "Cancelled" string survives the generic-error policy
     (other code and the job template check for it)."""
     from wisper_transcribe.web.jobs import FAILED, JobQueue
 
@@ -1071,7 +1069,7 @@ def test_cancelled_error_string_is_preserved():
 
 
 def test_post_process_log_line_is_generic(tmp_path):
-    """R13: the post-processing failure line appended to job.log_lines (also
+    """The post-processing failure line appended to job.log_lines (also
     rendered in the UI) never carries raw exception text."""
     from wisper_transcribe.web.jobs import JobQueue
 
@@ -1089,7 +1087,7 @@ def test_post_process_log_line_is_generic(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R6: standalone / recording enroll job runners
+# Standalone / recording enroll job runners
 # ---------------------------------------------------------------------------
 
 def _make_standalone_enroll_job(tmp_path, **param_overrides):
@@ -1119,7 +1117,7 @@ def _make_standalone_enroll_job(tmp_path, **param_overrides):
 
 
 def test_standalone_enroll_job_success_cleans_temp_files(tmp_path):
-    """R6/R9-1: the standalone enroll runner enrolls the primary speaker and
+    """The standalone enroll runner enrolls the primary speaker and
     deletes both the temp upload and the converted WAV — the cleanup that
     lived in the route before the hand-off."""
     from wisper_transcribe.models import DiarizationSegment
@@ -1185,7 +1183,7 @@ def test_standalone_enroll_job_update_merges_embedding(tmp_path):
 
 
 def test_standalone_enroll_job_failure_is_generic_and_cleans_up(tmp_path):
-    """R6/R13: a failure mid-enroll sets a generic error (no exception text,
+    """A failure mid-enroll sets a generic error (no exception text,
     no paths) and still deletes the temp upload."""
     from wisper_transcribe.web.jobs import FAILED, JobQueue
 
@@ -1256,7 +1254,7 @@ def _make_recording_enroll_job(recording_id, uid="999999999999999999"):
 
 
 def test_recording_enroll_job_updates_recording_state(tmp_path):
-    """R6: the recording-state updates (unbound list, discord binding,
+    """The recording-state updates (unbound list, discord binding,
     campaign membership) moved from the route into the job runner."""
     from wisper_transcribe.campaign_manager import create_campaign, load_campaigns
     from wisper_transcribe.recording_manager import create_recording, load_recordings, save_recording
@@ -1291,7 +1289,7 @@ def test_recording_enroll_job_updates_recording_state(tmp_path):
 
 
 def test_recording_enroll_job_failure_is_generic(tmp_path):
-    """R6/R13: an enroll failure sets a generic error and leaves the
+    """An enroll failure sets a generic error and leaves the
     recording's speaker state untouched."""
     from wisper_transcribe.recording_manager import create_recording, load_recordings, save_recording
     from wisper_transcribe.web.jobs import FAILED, JobQueue
@@ -1317,7 +1315,7 @@ def test_recording_enroll_job_failure_is_generic(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 (live local recording): JOB_LIVE
+# Live local recording: JOB_LIVE
 # ---------------------------------------------------------------------------
 
 def test_submit_live_creates_pending_job_with_ring_buffer(tmp_path):
@@ -1530,8 +1528,7 @@ def test_run_live_job_exception_still_completes_not_failed(tmp_path):
 
 @pytest.mark.anyio
 async def test_worker_fails_live_job_stopped_before_it_reached_front_of_queue(tmp_path):
-    """Root cause of the 2026-08-23 silent-empty-live-transcript bug:
-    JOB_LIVE shares the single-worker queue with every other job type. If a
+    """JOB_LIVE shares the single-worker queue with every other job type. If a
     long-running job (e.g. a campaign journal rebuild) is already running
     when a local session starts and finishes, `stop_live()` sets
     `live_stop_event` on a JOB_LIVE job that is still PENDING -- and

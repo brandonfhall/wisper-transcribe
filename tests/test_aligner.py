@@ -89,7 +89,7 @@ def test_align_multiple_speakers():
 
 
 # ---------------------------------------------------------------------------
-# Word-level alignment (F8)
+# Word-level alignment
 # ---------------------------------------------------------------------------
 
 
@@ -221,9 +221,8 @@ def test_align_words_empty_list_uses_fallback():
 
 def test_align_word_level_three_turn_sandwich():
     """A B A within one whisper segment yields three AlignedSegments when B
-    is a genuine interjection (F13: 3+ words AND >= 1.0s survives the
-    micro-run smoothing pass -- only consecutive same-speaker words are
-    grouped, but a real interjection is not absorbed into its neighbors)."""
+    is a genuine interjection (3+ words and >= 1.0 s, so micro-run
+    smoothing keeps it)."""
     words = [
         Word(start=0.0, end=1.0, text="one"),
         Word(start=1.0, end=2.0, text="two"),
@@ -256,7 +255,7 @@ def test_align_word_level_three_turn_sandwich():
 
 
 # ---------------------------------------------------------------------------
-# Micro-run smoothing (F13)
+# Micro-run smoothing
 # ---------------------------------------------------------------------------
 
 
@@ -449,16 +448,15 @@ def test_align_cascading_absorption_collapses_to_single_run():
 
 
 # ---------------------------------------------------------------------------
-# R27 — _assign_word_speakers two-pointer rewrite must match brute force
+# _assign_word_speakers two-pointer rewrite must match brute force
 # ---------------------------------------------------------------------------
 
 def _brute_force_assign_word_speakers(
     words: list[Word], diarization: list[DiarizationSegment]
 ) -> list[str]:
-    """Reference implementation: the original O(words * turns) algorithm
-    `_assign_word_speakers` used before the R27 two-pointer rewrite. Kept
-    independent (not imported from aligner.py) so a regression in the
-    production sweep can't be masked by comparing it to itself."""
+    """Reference O(words * turns) implementation, kept independent of
+    aligner.py so a bug in the production sweep can't be masked by comparing
+    it to itself."""
     from wisper_transcribe.aligner import _best_overlap_speaker, _nearest_speaker
 
     speakers: list[str] = []
@@ -478,7 +476,7 @@ def _brute_force_assign_word_speakers(
 
 def test_assign_word_speakers_matches_brute_force_randomized():
     """The two-pointer `_assign_word_speakers` must produce output identical
-    to the old brute-force scan -- including tie-breaking -- for randomized
+    to the brute-force reference -- including tie-breaking -- for randomized
     words/turns with overlapping turns, zero-length words, and words
     entirely outside all turns. Diarization turns are intentionally shuffled
     to prove tie-breaking depends on original list order, not sorted order
@@ -522,7 +520,7 @@ def test_assign_word_speakers_matches_brute_force_randomized():
 
 
 def test_assign_word_speakers_unsorted_words_falls_back_to_bruteforce_and_matches():
-    """Explicit (non-randomized) regression for the sortedness fallback:
+    """Explicit (non-randomized) check of the sortedness fallback:
     words given out of time-order must still produce output identical to
     the brute-force reference, not whatever the sweep's expiry logic would
     (incorrectly) produce if it ran on unsorted input."""

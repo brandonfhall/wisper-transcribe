@@ -105,7 +105,7 @@ def test_convert_to_wav_converts_mp3(tmp_path):
 
 @patch("wisper_transcribe.audio_utils._probe_duration", return_value=42.5)
 def test_get_duration_prefers_ffprobe(mock_probe, tmp_path):
-    """R26: ffprobe (header-only) is tried first; pydub is never invoked."""
+    """ffprobe (header-only) is tried first; pydub is never invoked."""
     from wisper_transcribe.audio_utils import get_duration
 
     f = tmp_path / "audio.mp3"
@@ -121,7 +121,7 @@ def test_get_duration_prefers_ffprobe(mock_probe, tmp_path):
 
 @patch("wisper_transcribe.audio_utils._probe_duration", return_value=None)
 def test_get_duration_falls_back_to_wave_header(mock_probe, tmp_path):
-    """R26: when ffprobe fails, a .wav falls back to the stdlib wave header
+    """When ffprobe fails, a .wav falls back to the stdlib wave header
     (still no full-file decode) rather than jumping straight to pydub."""
     import numpy as np
     import scipy.io.wavfile as wavfile
@@ -141,7 +141,7 @@ def test_get_duration_falls_back_to_wave_header(mock_probe, tmp_path):
 @patch("wisper_transcribe.audio_utils.AudioSegment")
 @patch("wisper_transcribe.audio_utils._probe_duration", return_value=None)
 def test_get_duration_falls_back_to_pydub(mock_probe, mock_audio_segment, tmp_path):
-    """R26: pydub remains the last resort when ffprobe fails and the file
+    """pydub remains the last resort when ffprobe fails and the file
     isn't a .wav (or the wave header can't be read)."""
     mock_audio = MagicMock()
     mock_audio.__len__ = MagicMock(return_value=90000)  # 90 seconds in ms
@@ -297,7 +297,7 @@ def test_extract_first_audio_track_ffmpeg_failure(tmp_path):
 
 
 def test_extract_first_audio_track_ffmpeg_failure_cleans_up_partial_file(tmp_path):
-    """R9-3: a partial output WAV left by a failing ffmpeg run must be
+    """A partial output WAV left by a failing ffmpeg run must be
     deleted, not leaked in the OS tempdir."""
     mp4_file = tmp_path / "bad.mp4"
     mp4_file.write_bytes(b"fake")

@@ -1,4 +1,4 @@
-"""Tests for web/local_capture.py — Phase 1 (capture layer) + Phase 2 (live-sink tap).
+"""Tests for web/local_capture.py — Capture layer + Live-sink tap.
 
 Mirrors tests/test_discord_bot.py's structure but for LocalCaptureManager:
 a scripted capture_factory + instant ticker take the place of asyncio fake
@@ -248,10 +248,8 @@ def test_no_frames_session_leaves_combined_path_none(tmp_path):
 
     assert rec.status == "completed"
     assert rec.combined_path is None
-    # Regression: SegmentedWavWriter.finalize() still closes and returns a
-    # path for the empty (0-frame) segment even with no ticks ever run --
-    # record_completed_wav_segment() must skip it, or the manifest would
-    # show a phantom "Segments: 1" contradicting combined_path being None.
+    # finalize() returns a path even for the empty 0-frame segment;
+    # record_completed_wav_segment() must skip it.
     loaded = load_recordings(tmp_path)[rec.id]
     assert loaded.segment_manifest == []
 
@@ -430,7 +428,7 @@ def test_do_tick_overflow_drains_surplus_and_pads_other_track(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Phase 2: live-transcription sink tap
+# Live-transcription sink tap
 # ---------------------------------------------------------------------------
 
 def test_do_tick_calls_live_sink_with_three_equal_length_tracks(tmp_path):
@@ -593,11 +591,9 @@ def test_finalise_clears_live_sink(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_combined_track_rotation_and_finalize_populate_segment_manifest(tmp_path, monkeypatch):
-    """segment_manifest was previously always empty -- append_segment()
-    existed but nothing ever called it for local sessions either. Each
-    combined-track rotation during _do_tick, plus the final segment closed
-    by _finalise, should land in Recording.segment_manifest as
-    stream == "mixed" entries."""
+    """Each combined-track rotation in _do_tick, plus the final segment
+    closed by _finalise, lands in Recording.segment_manifest as
+    stream == "mixed"."""
     import functools
 
     import wisper_transcribe.web.local_capture as local_capture_module
@@ -628,15 +624,8 @@ def test_combined_track_rotation_and_finalize_populate_segment_manifest(tmp_path
 
 
 def test_marker_added_mid_session_survives_finalise(tmp_path):
-    """Regression: BotManager/LocalCaptureManager hold one long-lived
-    Recording object for the whole session and periodically call
-    save_recording() with it directly (per-track writer setup, disconnect
-    handling, finalise). append_marker() mutates Recording.markers through
-    an independent load-fresh + mutex-protected save from a different call
-    site (the marker route) -- a plain save_recording(recording, ...) using
-    the stale long-lived object would silently overwrite that marker.
-    Confirmed reproducible before the save_recording_merged() fix: this
-    test failed (0 markers) against the unfixed code."""
+    """A marker appended mid-session (from the route) survives the
+    manager's own saves of its long-lived Recording object."""
     n_ticks = 5
     blocks = {"mic-dev": [_block() for _ in range(n_ticks)]}
     mgr = LocalCaptureManager(

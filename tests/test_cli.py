@@ -198,7 +198,7 @@ def test_speakers_remove_success(tmp_path, monkeypatch):
 
 
 def test_speakers_remove_deletes_reference_clip(tmp_path, monkeypatch):
-    """R9-5: removing a profile also deletes its .mp3 reference clip, not
+    """Removing a profile also deletes its .mp3 reference clip, not
     just the .npy embedding, so the Speakers-page play button doesn't
     dangle after a CLI removal."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
@@ -235,7 +235,7 @@ def test_speakers_rename_success(tmp_path, monkeypatch):
 
 
 def test_speakers_rename_moves_reference_clip(tmp_path, monkeypatch):
-    """R9-5: renaming a profile moves its .mp3 reference clip alongside the
+    """Renaming a profile moves its .mp3 reference clip alongside the
     embedding, so playback keeps working under the new key."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     _make_fake_profile(tmp_path, "Alice")
@@ -253,7 +253,7 @@ def test_speakers_rename_moves_reference_clip(tmp_path, monkeypatch):
 
 
 def test_speakers_rename_updates_campaign_membership(tmp_path, monkeypatch):
-    """R31: a CLI rename rekeys campaign rosters (including the Discord ID
+    """A CLI rename rekeys campaign rosters (including the Discord ID
     binding) so membership follows the profile instead of dangling."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     _make_fake_profile(tmp_path, "Alice")
@@ -276,7 +276,7 @@ def test_speakers_rename_updates_campaign_membership(tmp_path, monkeypatch):
 
 
 def test_speakers_rename_rejects_unsafe_new_name(tmp_path, monkeypatch):
-    """R31: the shared rename_profile refuses a new name whose derived key
+    """The shared rename_profile refuses a new name whose derived key
     fails the path-component guard (the key becomes a filename/URL slug)."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     _make_fake_profile(tmp_path, "Alice")
@@ -301,10 +301,8 @@ def test_speakers_rename_success_without_reference_clip(tmp_path, monkeypatch):
 
 
 def test_speakers_rename_refuses_to_overwrite_existing_profile(tmp_path, monkeypatch):
-    """R15 regression: renaming onto an existing speaker key used to
-    silently pop the target profile and overwrite its embedding .npy --
-    permanent data loss. It must now fail loudly and leave both untouched.
-    """
+    """Renaming onto an existing speaker key fails loudly and leaves both
+    profiles and their embeddings untouched."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     _make_fake_profile(tmp_path, "Alice", display_name="Alice")
     _make_fake_profile(tmp_path, "Bob", display_name="Bob")
@@ -326,7 +324,7 @@ def test_speakers_rename_refuses_to_overwrite_existing_profile(tmp_path, monkeyp
 
 
 def test_speakers_test_deletes_converted_wav(tmp_path, monkeypatch):
-    """R9-2: `wisper speakers test` deletes the WAV produced by
+    """`wisper speakers test` deletes the WAV produced by
     convert_to_wav() once matching is done, mirroring the `enroll` command."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     audio = tmp_path / "clip.mp3"
@@ -415,7 +413,7 @@ def test_transcribe_cli_raises_click_exception_on_error(tmp_path):
 def test_transcribe_cli_language_auto_passes_through(tmp_path):
     """--language auto is forwarded as the literal string "auto" — process_file
     (not the CLI) is responsible for turning it into None for auto-detection,
-    since None is now the CLI's own "unset, use config" sentinel (R5)."""
+    since None is now the CLI's own "unset, use config" sentinel."""
     audio = tmp_path / "test.mp3"
     audio.write_bytes(b"fake")
 
@@ -429,7 +427,7 @@ def test_transcribe_cli_language_auto_passes_through(tmp_path):
 
 def test_transcribe_cli_language_unset_passes_none(tmp_path):
     """When --language is not passed at all, process_file receives None
-    (the config-fallback sentinel), not any hardcoded default (R5)."""
+    (the config-fallback sentinel), not any hardcoded default."""
     audio = tmp_path / "test.mp3"
     audio.write_bytes(b"fake")
 
@@ -472,7 +470,7 @@ def test_transcribe_cli_initial_prompt_passes_through(tmp_path):
 
 
 def test_config_set_unknown_key_rejected(tmp_path, monkeypatch):
-    """R23: unknown config keys are rejected instead of being silently written."""
+    """Unknown config keys are rejected instead of being silently written."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     result = CliRunner().invoke(main, ["config", "set", "not_a_real_key", "value"])
     assert result.exit_code != 0
@@ -484,7 +482,7 @@ def test_config_set_unknown_key_rejected(tmp_path, monkeypatch):
 
 
 def test_config_set_int_coercion(tmp_path, monkeypatch):
-    """R23: min_speakers (an int-typed default) is coerced to int, not left
+    """min_speakers (an int-typed default) is coerced to int, not left
     as a string — bool must be checked before int since bool is an int
     subclass, so this also guards that ordering."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
@@ -498,7 +496,7 @@ def test_config_set_int_coercion(tmp_path, monkeypatch):
 
 
 def test_config_set_int_coercion_recovers_from_bad_stored_type(tmp_path, monkeypatch):
-    """R23 regression: coercion must key off DEFAULTS[key]'s schema type, not
+    """Coercion must key off DEFAULTS[key]'s schema type, not
     cfg[key]'s current runtime type. If a prior bug (or manual config.toml
     edit) already stored min_speakers as a string, isinstance(cfg[key], int)
     would miss and silently re-store it as a string forever. Simulate that
@@ -569,7 +567,7 @@ def test_server_missing_uvicorn():
 
 
 def test_server_defaults_to_loopback():
-    """R16: `wisper server` binds 127.0.0.1 by default — the UI has no auth,
+    """`wisper server` binds 127.0.0.1 by default — the UI has no auth,
     so all-interfaces exposure must be an explicit opt-in."""
     mock_uvicorn = MagicMock()
     with patch.dict("sys.modules", {"uvicorn": mock_uvicorn}):
@@ -580,7 +578,7 @@ def test_server_defaults_to_loopback():
 
 
 def test_server_explicit_host_still_works():
-    """R16: --host 0.0.0.0 remains available for trusted networks/Docker."""
+    """--host 0.0.0.0 remains available for trusted networks/Docker."""
     mock_uvicorn = MagicMock()
     with patch.dict("sys.modules", {"uvicorn": mock_uvicorn}):
         result = CliRunner().invoke(main, ["server", "--host", "0.0.0.0"])
@@ -644,7 +642,7 @@ def test_enroll_cli_with_update_flag(tmp_path, monkeypatch):
 
 
 def test_enroll_cli_deletes_converted_wav(tmp_path, monkeypatch):
-    """R9-2: when convert_to_wav() produces a separate temp WAV (input isn't
+    """When convert_to_wav() produces a separate temp WAV (input isn't
     already a correct WAV), `wisper enroll` deletes it afterwards instead of
     leaking it in the OS tempdir."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
@@ -864,10 +862,8 @@ def test_get_lmstudio_models_parses_response():
 
 
 def test_record_delete_passes_purge_true(monkeypatch):
-    """Regression test: `wisper record delete`'s confirmation prompt and
-    docstring promise files are deleted (updated 2026-08-24 when
-    /api/recordings/{id}/delete stopped purging by default) -- the CLI must
-    actually opt in via ?purge=true or that promise is false."""
+    """`wisper record delete` promises to delete files, and the API only
+    purges with ?purge=true, so the CLI must pass it."""
     import uuid
 
     monkeypatch.setenv("WISPER_SERVER_URL", "http://127.0.0.1:8080")
@@ -1010,8 +1006,7 @@ def test_refine_unknown_task_surfaces_suggestions(tmp_path, monkeypatch):
 
 
 def test_refine_provider_lmstudio_accepted(tmp_path, monkeypatch):
-    """R20: --provider lmstudio must be accepted by argument parsing —
-    _LLM_PROVIDER_CHOICE previously omitted lmstudio and ollama-cloud."""
+    """--provider lmstudio is accepted (choices derive from config.LLM_PROVIDERS)."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     transcript = _write_transcript(tmp_path)
 

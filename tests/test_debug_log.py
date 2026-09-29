@@ -114,12 +114,10 @@ class TestLoggerFileMode:
         assert "tqdm message via patched write" in content
 
     def test_patch_tqdm_is_idempotent_no_wrapper_stacking(self):
-        """R32-10: repeated Logger construction (e.g. multiple CLI
+        """Repeated Logger construction (e.g. multiple CLI
         invocations in one process, as CliRunner does across a test suite)
         must not stack tee wrappers -- a tqdm.write() call should reach only
-        the most-recently-constructed Logger's _write_to_file(), not every
-        previously-constructed Logger's (the old code cascaded through all
-        of them, growing one closure deeper on every setup_logging() call)."""
+        the most-recently-constructed Logger's _write_to_file()."""
         from unittest.mock import MagicMock
 
         from wisper_transcribe.debug_log import Logger

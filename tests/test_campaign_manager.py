@@ -407,7 +407,7 @@ def test_bind_discord_id_overwrites_previous_binding(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R31: rekey_member — campaign membership follows a profile rename
+# rekey_member — campaign membership follows a profile rename
 # ---------------------------------------------------------------------------
 
 def test_rekey_member_updates_all_campaigns(tmp_path):
@@ -443,14 +443,12 @@ def test_rekey_member_noop_when_absent(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R37 — concurrent mutation must not lose writes
+# Concurrent mutation must not lose writes
 # ---------------------------------------------------------------------------
 
 def test_add_member_atomic_under_concurrent_calls(tmp_path):
-    """R37: campaigns.json is a single shared JSON store -- concurrent
-    add_member() calls used to unlocked-load/modify/save, so a losing thread's
-    write to the roster could be clobbered by another thread's save.
-    Mirrors test_recording_manager.py's concurrent append_segment test."""
+    """Concurrent add_member() calls against the shared campaigns.json must
+    not lose writes."""
     import threading
 
     campaign = create_campaign("Concurrency Test", data_dir=tmp_path)

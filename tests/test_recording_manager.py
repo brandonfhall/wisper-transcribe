@@ -1,4 +1,4 @@
-"""Tests for recording_manager.py — Phase 1 storage layer."""
+"""Tests for recording_manager.py."""
 from __future__ import annotations
 
 import json
@@ -285,8 +285,7 @@ def _write_wav(path: Path, n_frames: int = 320) -> None:
 def test_record_completed_wav_segment_appends_and_returns_new_started_at(tmp_path):
     """record_completed_wav_segment() is the shared helper BotManager/
     LocalCaptureManager call whenever their combined-track writer rotates
-    or finalizes -- this is what actually populates segment_manifest,
-    which previously had append_segment() defined but never called."""
+    or finalizes; it populates segment_manifest."""
     rec = _make_recording(tmp_path)
     started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
     path = tmp_path / "recordings" / rec.id / "combined" / "0000.wav"

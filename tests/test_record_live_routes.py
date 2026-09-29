@@ -1,4 +1,4 @@
-"""Tests for Phase 2 (live local recording) route wiring: JOB_LIVE
+"""Tests for Live local recording route wiring: JOB_LIVE
 submission/teardown on local session start/stop, and the
 GET /recordings/{id}/live SSE stream.
 
@@ -95,8 +95,7 @@ def test_start_live_transcription_returns_false_when_queue_idle(tmp_path):
 
 
 def test_start_live_transcription_returns_true_when_another_job_already_active(tmp_path):
-    """Regression test for the 2026-08-23 silent-empty-live-transcript bug:
-    if the (single-worker) queue is already occupied by another job -- e.g.
+    """If the single-worker queue is already occupied by another job -- e.g.
     a campaign journal rebuild -- when a local session starts, the caller
     needs to know so it can warn the user the live preview won't start
     right away, rather than leaving them looking at an empty pane."""
@@ -118,7 +117,7 @@ def test_start_live_transcription_returns_true_when_another_job_already_active(t
 
 
 def test_start_live_transcription_resolves_profile_to_display_name(tmp_path):
-    """Phase 3 'this is me': a valid mic_profile_key resolves to the
+    """'This is me': a valid mic_profile_key resolves to the
     enrolled profile's display_name for mic-dominant live lines."""
     from wisper_transcribe.models import SpeakerProfile
 
@@ -282,7 +281,7 @@ def test_recording_live_catches_final_lines_committed_right_before_completion(cl
 
 def test_recording_live_translates_dropped_line_index(client):
     """job.live_lines_dropped (trimmed by append_live_line's _MAX_LIVE_LINES
-    cap) doesn't break the slice math -- mirrors R14's log-line coverage."""
+    cap) doesn't break the slice math."""
     from wisper_transcribe.recording_manager import create_recording
 
     c, tmp_path = client

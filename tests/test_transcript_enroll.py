@@ -108,7 +108,7 @@ def test_sidecar_written_after_job_completes(tmp_path: Path):
 
 
 def test_sidecar_includes_speaker_map_when_job_provides_it(tmp_path: Path):
-    """(d) F7: when the job carries the authoritative speaker_map (populated
+    """(d) When the job carries the authoritative speaker_map (populated
     from pipeline.process_file()'s _result_store), it is persisted into the
     sidecar alongside the diarization segments."""
     from wisper_transcribe.web.jobs import _write_enrollment_sidecar, Job, COMPLETED
@@ -281,7 +281,7 @@ def test_enroll_submit_second_pass_corrects_typo(client: TestClient, tmp_path: P
 
 
 # ---------------------------------------------------------------------------
-# F6/F7 -- resolve_current_names() and apply_renames()'s single-pass,
+# resolve_current_names() and apply_renames()'s single-pass,
 # block-level rename (see enroll_shared.py for the full design rationale).
 # ---------------------------------------------------------------------------
 
@@ -365,8 +365,8 @@ def test_apply_renames_swap_on_reentry(tmp_path: Path):
 
 
 def test_apply_renames_shared_display_name_only_renames_targeted_label(tmp_path: Path):
-    """(b) Two raw labels currently both display "Dan" (many-to-one naming,
-    F3). Renaming only SPEAKER_01 to "Sara" must leave SPEAKER_00's block
+    """(b) Two raw labels currently both display "Dan" (many-to-one naming).
+    Renaming only SPEAKER_01 to "Sara" must leave SPEAKER_00's block
     saying "Dan" -- a name-keyed global rename would have renamed both."""
     from wisper_transcribe.web.enroll_shared import apply_renames
 
@@ -461,7 +461,7 @@ def test_apply_renames_body_rename_without_timestamps(tmp_path: Path):
 def test_apply_renames_legacy_sidecar_low_confidence_block_uses_name_fallback(
     tmp_path: Path,
 ):
-    """F7's known-fragile regime: a legacy sidecar (no persisted speaker_map)
+    """Legacy sidecar case: a legacy sidecar (no persisted speaker_map)
     where one block's rendered timestamp falls *outside every interval* and
     is numerically closer to the WRONG speaker's interval -- the nearest-
     start fallback alone would misattribute it. Because that block's text
@@ -544,7 +544,7 @@ def test_apply_renames_updates_sidecar_speaker_map(tmp_path: Path):
     sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
     assert sidecar["speaker_map"] == {"SPEAKER_00": "Alice"}
 
-    # A second call (re-entry) must now resolve "Alice" as the old name via
+    # A second call (re-entry) must resolve "Alice" as the current name via
     # the persisted map, not by re-deriving from markdown timestamps.
     from wisper_transcribe.web.enroll_shared import _load_diar_sidecar, resolve_current_names
     diar = _load_diar_sidecar(md)
@@ -552,8 +552,7 @@ def test_apply_renames_updates_sidecar_speaker_map(tmp_path: Path):
 
 
 def test_apply_renames_frontmatter_speakers_list_updated(tmp_path: Path):
-    """(g) No regression: a plain rename still updates the frontmatter
-    `speakers:` list (now via formatter.rewrite_frontmatter_speakers, F11)."""
+    """(g) A plain rename updates the frontmatter `speakers:` list."""
     from wisper_transcribe.web.enroll_shared import apply_renames
 
     md = tmp_path / "session01.md"
@@ -577,7 +576,7 @@ def test_enroll_submit_enqueues_job_and_renames_synchronously(
 ):
     """(a)+(b): with an existing audio file, POST applies the rename to the
     transcript synchronously, then enqueues a JOB_ENROLL job for the slow
-    WAV-convert + embedding-extraction step (Phase 2.5) and redirects there
+    WAV-convert + embedding-extraction step and redirects there
     instead of running it inline."""
     audio = tmp_path / "session01.mp3"
     audio.write_bytes(b"fake-mp3")
@@ -612,7 +611,7 @@ def test_enroll_submit_skips_enroll_when_audio_missing(
     client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """(c) No JOB_ENROLL is enqueued when the source audio is already known
-    missing -- the F5 pre-check happens synchronously in the route."""
+    missing -- the route checks this synchronously."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     diar = {**_SAMPLE_DIAR, "input_path": "/nonexistent/audio.mp3"}
     _write_transcript(tmp_path, diar=diar)
@@ -655,10 +654,8 @@ def test_enroll_submit_redirects_with_notice_when_audio_missing(
 def test_enroll_submit_missing_input_path_key_redirects_with_notice(
     client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """R29 regression: a legacy sidecar without an "input_path" key used to
-    raise KeyError (-> 500) via `diar["input_path"]`. It must instead be
-    treated the same as a known-missing audio file (F5's pre-check) and
-    redirect with the generic notice, not crash."""
+    """A legacy sidecar without an "input_path" key is treated as missing
+    audio and redirects with the generic notice instead of a 500."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     diar = {k: v for k, v in _SAMPLE_DIAR.items() if k != "input_path"}
     assert "input_path" not in diar
@@ -918,7 +915,7 @@ def test_extract_speaker_excerpts_uses_raw_labels(tmp_path: Path):
 
 
 def test_extract_speaker_excerpts_cuts_at_longest_segment(tmp_path: Path):
-    """F10a: `_extract_speaker_excerpts` must cut the clip at the LONGEST
+    """`_extract_speaker_excerpts` must cut the clip at the LONGEST
     aligned segment for a label, not the first occurrence -- a short
     misattributed interjection ("Yeah") would otherwise dominate the clip
     and play mostly someone else's voice. The persisted `.txt` snippet must
@@ -963,7 +960,7 @@ def test_extract_speaker_excerpts_cuts_at_longest_segment(tmp_path: Path):
 
 
 def test_extract_speaker_excerpts_clamps_to_short_solo_turn(tmp_path: Path):
-    """F12: when a diarization solo turn is SHORTER than `_EXCERPT_SECONDS`,
+    """When a diarization solo turn is SHORTER than `_EXCERPT_SECONDS`,
     the clip is cut at that turn's start with `-t` strictly clamped to the
     turn's own duration -- no padding floor that would run into another
     speaker's audio."""
@@ -1003,7 +1000,7 @@ def test_extract_speaker_excerpts_clamps_to_short_solo_turn(tmp_path: Path):
 
 
 def test_extract_speaker_excerpts_keeps_full_12s_for_long_solo_turn(tmp_path: Path):
-    """F12: when the solo diarization turn is LONGER than `_EXCERPT_SECONDS`,
+    """When the solo diarization turn is LONGER than `_EXCERPT_SECONDS`,
     `-t` stays at the full 12s (only the start point comes from the turn)."""
     from wisper_transcribe.web.jobs import _extract_speaker_excerpts, Job, COMPLETED
     from wisper_transcribe.models import AlignedSegment, DiarizationSegment
@@ -1041,7 +1038,7 @@ def test_extract_speaker_excerpts_keeps_full_12s_for_long_solo_turn(tmp_path: Pa
 
 
 def test_extract_speaker_excerpts_text_covers_all_word_runs_in_window(tmp_path: Path):
-    """F12: the persisted `.txt` snippet is built from ALL of the label's
+    """The persisted `.txt` snippet is built from ALL of the label's
     aligned word-runs that overlap the clip window, joined in time order --
     not just one segment's text -- so it matches everything audible in the
     clip. A word-run outside the window is excluded."""
@@ -1082,7 +1079,7 @@ def test_extract_speaker_excerpts_text_covers_all_word_runs_in_window(tmp_path: 
 
 
 def test_extract_speaker_excerpts_falls_back_per_label_without_diarization(tmp_path: Path):
-    """F12: a label with no diarization segments falls back to the longest-
+    """A label with no diarization segments falls back to the longest-
     aligned-segment behavior (fixed 12s window) without breaking extraction
     for a sibling label that DOES have diarization data."""
     from wisper_transcribe.web.jobs import _extract_speaker_excerpts, Job, COMPLETED
@@ -1147,11 +1144,11 @@ def test_excerpt_rejects_null_byte(client: TestClient, tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# Phase 1 audit fixes — F2 (template must not prefill raw labels)
+# Template must not prefill raw labels
 # ---------------------------------------------------------------------------
 
 def test_enroll_form_first_pass_leaves_input_empty(client: TestClient, tmp_path: Path):
-    """F2 layer 1: on a first pass (body still has raw '**SPEAKER_00**'
+    """On a first pass (body still has raw '**SPEAKER_00**'
     labels, no renames applied yet), the input must render empty rather than
     prefilled with the raw label -- prefilling it means submitting untouched
     fields creates junk 'SPEAKER_00' voice profiles."""
@@ -1168,7 +1165,7 @@ def test_enroll_form_first_pass_leaves_input_empty(client: TestClient, tmp_path:
 
 
 # ---------------------------------------------------------------------------
-# Phase 1 audit fixes — F2 (refuse raw-label-shaped submissions)
+# Refuse raw-label-shaped submissions
 # ---------------------------------------------------------------------------
 
 def test_enroll_submit_refuses_raw_label_shaped_name(client: TestClient, tmp_path: Path):
@@ -1203,14 +1200,11 @@ def test_enroll_submit_refuses_raw_label_shaped_name(client: TestClient, tmp_pat
 
 
 # ---------------------------------------------------------------------------
-# Phase 2.5 — enroll_shared.enroll_profiles() unit tests
+# enroll_shared.enroll_profiles() unit tests
 #
-# The slow embedding-extraction logic (F3's EMA merge, averaging across raw
-# labels, campaign membership) moved out of the synchronous HTTP request into
-# enroll_profiles(), called from the JOB_ENROLL job runner. These tests
-# exercise that function directly instead of through a full HTTP round trip,
-# since the route no longer runs it inline (see the JOB_ENROLL-specific
-# runner tests in tests/test_web_jobs.py for the job-runner side).
+# enroll_profiles() (EMA merge, averaging across raw labels, campaign
+# membership) runs in the JOB_ENROLL job, so it is tested directly here; the
+# job-runner side is in tests/test_web_jobs.py.
 # ---------------------------------------------------------------------------
 
 def test_enroll_profiles_calls_enroll_speaker_for_new_profile(tmp_path: Path):
@@ -1240,7 +1234,7 @@ def test_enroll_profiles_calls_enroll_speaker_for_new_profile(tmp_path: Path):
 
 
 def test_enroll_profiles_existing_profile_uses_ema_update(tmp_path: Path):
-    """F3: resubmitting a name that already has a voice profile must merge
+    """Resubmitting a name that already has a voice profile must merge
     via update_embedding (EMA), never enroll_speaker (which overwrites)."""
     import numpy as np
     from wisper_transcribe.models import DiarizationSegment, SpeakerProfile
@@ -1275,7 +1269,7 @@ def test_enroll_profiles_existing_profile_uses_ema_update(tmp_path: Path):
 
 
 def test_enroll_profiles_averages_two_labels_same_name(tmp_path: Path):
-    """F3: two raw labels assigned the same display name in one submit must
+    """Two raw labels assigned the same display name in one submit must
     have their embeddings averaged before being saved, not overwritten by
     whichever label happens to process last."""
     import numpy as np
@@ -1422,7 +1416,7 @@ def test_enroll_profiles_calls_progress_callback(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# Phase 2.5 — job_detail.html renders an "E" pill for enroll jobs
+# job_detail.html renders an "E" pill for enroll jobs
 # ---------------------------------------------------------------------------
 
 def test_job_detail_renders_enroll_step_pill(client: TestClient, tmp_path: Path):

@@ -419,7 +419,7 @@ def test_enroll_speaker_uses_precomputed_embedding_when_given(tmp_path):
     """When `embedding` is passed, enroll_speaker must save it as-is and must
     NOT call extract_embedding -- this is what lets web callers average
     embeddings from two raw labels assigned the same display name before
-    saving (F3)."""
+    saving."""
     from wisper_transcribe.speaker_manager import enroll_speaker, load_profiles
 
     segs = _fake_diarization(["SPEAKER_00"])
@@ -464,7 +464,7 @@ def test_reset_profiles_removes_all(tmp_path):
 
 
 def test_reset_profiles_removes_reference_clips(tmp_path):
-    """R9-5: a full reset must also clear .mp3 reference clips, not just
+    """A full reset must also clear .mp3 reference clips, not just
     .npy embeddings -- otherwise every enrolled speaker's clip leaks."""
     from wisper_transcribe.speaker_manager import reset_profiles
 
@@ -504,7 +504,7 @@ def test_extract_embedding_no_matching_segments_raises(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# F10b — _select_embedding_segments (pure function, no mocks needed)
+# _select_embedding_segments (pure function, no mocks needed)
 # ---------------------------------------------------------------------------
 
 def test_select_embedding_segments_no_segments_for_label_raises():
@@ -678,14 +678,12 @@ def test_match_speakers_none_filter_uses_all_profiles(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# enroll_speaker_from_audio_dir (R1: path-traversal guard needs `os` import)
+# enroll_speaker_from_audio_dir
 # ---------------------------------------------------------------------------
 
 def test_enroll_speaker_from_audio_dir_rejects_dir_outside_recordings_tree(tmp_path):
-    """R1 regression: the per_user_dir guard uses os.path.abspath/os.sep,
-    which previously raised NameError because `os` was never imported into
-    speaker_manager.py. This exercises those exact lines -- the validation
-    happens before any file is read, so no audio is needed."""
+    """The per_user_dir guard (os.path.abspath/os.sep) rejects a directory
+    outside the recordings tree before any file is read."""
     from wisper_transcribe.speaker_manager import enroll_speaker_from_audio_dir
 
     outside_dir = tmp_path / "elsewhere" / "someuser"
@@ -733,9 +731,8 @@ def _write_fake_wav_segment(path: Path, seconds: float = 0.5) -> None:
 
 
 def test_enroll_speaker_from_audio_dir_prefers_wav_over_legacy_opus(tmp_path):
-    """R12: since the writer now produces .wav segments, enroll must read
-    those -- and prefer them even if stale .opus files are also present
-    (e.g. a directory re-recorded after the R12 fix)."""
+    """Enrollment reads .wav segments and prefers them over stale .opus
+    files in the same directory."""
     from wisper_transcribe.speaker_manager import enroll_speaker_from_audio_dir
 
     per_user_dir = tmp_path / "recordings" / "session01" / "someuser"
@@ -761,9 +758,8 @@ def test_enroll_speaker_from_audio_dir_prefers_wav_over_legacy_opus(tmp_path):
 
 
 def test_enroll_speaker_from_audio_dir_legacy_opus_fallback_fails_gracefully(tmp_path):
-    """R12: a pre-R12 recording directory has only .opus files, which were
-    never valid Opus streams (the old writer wrote raw PCM into an Ogg/Opus
-    container). enroll_speaker_from_audio_dir attempts them as a
+    """An old recording directory has only (invalid) .opus files.
+    enroll_speaker_from_audio_dir attempts them as a
     best-effort fallback, but must raise a normal exception -- not crash --
     so the JOB_ENROLL runner's generic error handling still applies."""
     from wisper_transcribe.speaker_manager import enroll_speaker_from_audio_dir
@@ -783,7 +779,7 @@ def test_enroll_speaker_from_audio_dir_legacy_opus_fallback_fails_gracefully(tmp
 
 
 # ---------------------------------------------------------------------------
-# R4: embedding-model cache keyed by device
+# Embedding-model cache keyed by device
 # ---------------------------------------------------------------------------
 
 def test_load_embedding_model_reuses_cache_on_same_device():
@@ -804,15 +800,12 @@ def test_load_embedding_model_reuses_cache_on_same_device():
 
 
 # ---------------------------------------------------------------------------
-# R37 — concurrent mutation must not lose writes
+# Concurrent mutation must not lose writes
 # ---------------------------------------------------------------------------
 
 def test_enroll_speaker_atomic_under_concurrent_calls(tmp_path):
-    """R37: speakers.json is a single shared JSON store -- concurrent
-    enroll_speaker() calls used to unlocked-load/modify/save the profiles
-    dict, so a losing thread's new profile entry could be clobbered by
-    another thread's save. Mirrors test_recording_manager.py's concurrent
-    append_segment test. `embedding=` is passed explicitly so no ML model
+    """Concurrent enroll_speaker() calls must not lose writes to the shared
+    speakers.json. `embedding=` is passed explicitly so no ML model
     is invoked; `segments=[]` skips the ffmpeg reference-clip step."""
     import threading
 
@@ -905,7 +898,7 @@ def test_remove_profile_and_enroll_speaker_do_not_lose_writes_concurrently(tmp_p
 
 
 def test_load_embedding_model_reloads_on_device_change():
-    """R4: a cached CPU embedding model is not reused when a later caller
+    """A cached CPU embedding model is not reused when a later caller
     asks for a different device."""
     import wisper_transcribe.speaker_manager as sm
     from unittest.mock import MagicMock, patch as _patch

@@ -1,4 +1,4 @@
-"""Tests for wisper record CLI — Phase 2."""
+"""Tests for the wisper record CLI."""
 from __future__ import annotations
 
 import json
@@ -137,7 +137,7 @@ def test_record_start_missing_voice_channel_errors(runner, server_json):
 
 
 def test_record_start_falls_back_to_config_defaults(runner, server_json):
-    """R30: with no --guild/--voice-channel and no --preset, `record start`
+    """With no --guild/--voice-channel and no --preset, `record start`
     falls back to discord_default_guild/discord_default_channel from config
     (the same keys `wisper config discord` and the web form already use)
     before erroring."""
@@ -189,7 +189,7 @@ def test_record_transcribe_valid_id_posts_to_server(runner, server_json):
 
 
 # ---------------------------------------------------------------------------
-# R7 — end-to-end against the real FastAPI app (not just a mocked httpx.request)
+# End-to-end against the real FastAPI app (not just a mocked httpx.request)
 #
 # Every other test in this file mocks `httpx.request` directly, which can't
 # catch a mismatch between what the CLI expects and what the server route
@@ -243,7 +243,7 @@ def test_record_list_show_transcribe_delete_end_to_end_against_real_app(runner, 
 
 
 # ---------------------------------------------------------------------------
-# Phase 9 — hardening
+# Hardening
 # ---------------------------------------------------------------------------
 
 def test_discord_token_masked_in_config_show(runner, tmp_path):
