@@ -1528,3 +1528,41 @@ def test_process_file_explicit_num_speakers_suppresses_config_min_max(
     assert call_kwargs.get("num_speakers") == 4
     assert call_kwargs.get("min_speakers") is None
     assert call_kwargs.get("max_speakers") is None
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=60.0)
+@patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
+@patch("wisper_transcribe.pipeline.get_hf_token", return_value="fake-token")
+@patch("wisper_transcribe.diarizer.diarize")
+@patch("wisper_transcribe.aligner.align")
+@patch("wisper_transcribe.speaker_manager.match_speakers", return_value={})
+def test_process_file_reports_profiles_from_old_model(
+    mock_match, mock_align, mock_diarize, mock_hf_token,
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg,
+    tmp_path, monkeypatch, capsys,
+):
+    """Untagged (old-model) profiles are named in the log as skipped."""
+    import json
+
+    from wisper_transcribe.models import AlignedSegment, DiarizationSegment
+    from wisper_transcribe.pipeline import process_file
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    profiles_dir = tmp_path / "profiles"
+    profiles_dir.mkdir()
+    (profiles_dir / "speakers.json").write_text(json.dumps({
+        "bob": {"display_name": "Bob", "embedding_file": "embeddings/bob.npy"},
+    }))
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    mock_convert.return_value = audio
+    mock_diarize.return_value = [DiarizationSegment(0.0, 5.0, "SPEAKER_00")]
+    mock_align.return_value = [AlignedSegment(0.0, 5.0, "SPEAKER_00", "Hello")]
+
+    process_file(audio, output_dir=tmp_path, device="cpu")
+
+    assert "Skipped 1 voice profile(s) from an older speaker model (bob)" in capsys.readouterr().out

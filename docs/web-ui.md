@@ -27,7 +27,7 @@ The web UI is a **single-user tool with no authentication and no CSRF protection
 | Dashboard | `/` | Job queue, system status (device, model, HF token, LLM provider), quick upload |
 | Transcribe | `/transcribe` | Upload and transcribe (see below) |
 | Transcripts | `/transcripts` | Recordings awaiting transcription; browse, read, download, edit, and delete transcripts |
-| Speakers | `/speakers` | Enroll, rename, and remove speaker profiles; play reference clips |
+| Speakers | `/speakers` | Enroll, rename, and remove speaker profiles; play reference clips. Profiles from an older speaker model show **NEEDS RE-ENROLL** |
 | Campaigns | `/campaigns` | Campaigns, rosters, episode order, and the rolling journal |
 | Record | `/record` | Start and stop Discord or local recording sessions |
 | Recordings | `/recordings` | Browse recordings by campaign; detail, transcribe, and delete |

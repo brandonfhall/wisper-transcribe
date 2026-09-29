@@ -1212,6 +1212,23 @@ def test_speakers_list_returns_200(client):
     assert resp.status_code == 200
 
 
+def test_speakers_list_flags_profiles_from_old_model(client, tmp_path):
+    from wisper_transcribe.config import EMBEDDING_SPACE
+    from wisper_transcribe.models import SpeakerProfile
+
+    def _p(key, space):
+        return SpeakerProfile(name=key, display_name=key.title(), role="",
+                              embedding_path=tmp_path / f"{key}.npy", enrolled_date="",
+                              enrollment_source="", embedding_space=space)
+
+    profiles = {"alice": _p("alice", EMBEDDING_SPACE), "bob": _p("bob", "")}
+    with patch("wisper_transcribe.web.routes.speakers.load_profiles", return_value=profiles):
+        resp = client.get("/speakers")
+    assert resp.status_code == 200
+    assert resp.text.count("NEEDS RE-ENROLL") == 1
+    assert "1 profile(s) were enrolled with an older speaker model" in resp.text
+
+
 def test_speakers_enroll_form_returns_200(client):
     resp = client.get("/speakers/enroll")
     assert resp.status_code == 200

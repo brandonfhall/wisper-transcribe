@@ -157,13 +157,24 @@ Campaigns are an **additive roster layer** over one global profile store. Embedd
 
 ### Embedding extraction
 
-`extract_embedding()` slices the WAV to a speaker's segments and runs pyannote's embedding model (512-dim). Segments are chosen by `_select_embedding_segments()`:
+`extract_embedding()` slices the WAV to a speaker's segments and runs the WeSpeaker ResNet34 model bundled in the diarization repo (`DIARIZATION_MODEL`, subfolder `EMBEDDING_SUBFOLDER`; 256-dim). Each segment's embedding is L2-normalized before averaging and the mean is normalized again, so long segments don't dominate and stored vectors are unit length. Segments are chosen by `_select_embedding_segments()` with `max_count=EMBEDDING_SEGMENTS` (30):
 
-1. Up to 5 **solo** segments (no overlap with another speaker) of 2–20 s, longest first.
+1. Up to 30 **solo** segments (no overlap with another speaker) of 2–20 s, longest first.
 2. Else all solo segments, longest first.
 3. Else the plain longest segments.
 
-Solo segments are preferred because cross-talk and background music bleed into the longest turns.
+Solo segments are preferred because cross-talk and background music bleed into the longest turns. Excerpt clips reuse the same selector with `max_count=1`.
+
+- **Why the diarizer's own embedding model:** profiles and diarization clusters share one embedding space and one gated license. Measured on real sessions, it separated same-person from different-person pairs by 0.34 cosine vs 0.25 for the old `pyannote/embedding`.
+- **Why 30 segments:** raised same-person similarity across sessions by 0.05–0.10 over 5, at a few extra seconds of GPU time per speaker.
+
+### Embedding spaces
+
+Embeddings from different models aren't comparable (and differ in dimension), so each profile records `embedding_space` in `speakers.json`. `config.EMBEDDING_SPACE` is the current tag; a missing tag means the old 512-dim `pyannote/embedding`.
+
+- `load_profile_embedding()` returns `None` for any profile not in the current space; `match_speakers()` and the CLI ranking only compare through it.
+- `stale_profile_keys()` lists old-space profiles. The pipeline logs them as skipped, the Speakers page badges them, and the CLI ranking lists them unscored.
+- `update_embedding()` replaces an old-space vector outright and retags the profile instead of averaging, so any re-enroll path (wizard, standalone upload, `wisper enroll`, CLI pick) migrates a profile.
 
 ### CLI enrollment (`--enroll-speakers`)
 
@@ -178,7 +189,7 @@ Solo segments are preferred because cross-talk and background music bleed into t
 
 - `<key>.npy` — embedding. `<key>.mp3` — ~12 s reference clip for playback on the Speakers page.
 - Removal, rename, and reset handle `.npy` and `.mp3` together so the play button never dangles.
-- **EMA update** (`--update`): `stored = 0.7 * stored + 0.3 * new`.
+- **EMA update** (`--update`): `stored = unit(0.7 * unit(stored) + 0.3 * unit(new))`, under `_profiles_lock` because it may retag the profile.
 - Profile key is `name.lower().replace(" ", "_")` — both filename and URL slug.
 
 ### Rename
@@ -334,7 +345,7 @@ All user data lives in the OS user data dir unless `WISPER_DATA_DIR` is set. `co
 ├── profiles/
 │   ├── speakers.json                profile key → SpeakerProfile (global)
 │   └── embeddings/
-│       ├── <key>.npy                512-dim float32 voice embedding
+│       ├── <key>.npy                unit-length float32 voice embedding (256-dim; 512 for untagged legacy)
 │       └── <key>.mp3                ~12 s reference clip
 ├── campaigns/
 │   ├── campaigns.json               slug → Campaign (roster + ordered transcripts)
@@ -657,11 +668,10 @@ Downloaded on first use to `~/.cache/huggingface/hub/`; later runs are offline.
 | Model | Purpose | Size |
 |-------|---------|------|
 | `openai/whisper-*` (via faster-whisper) | Transcription | 75 MB – 1.5 GB |
-| `pyannote/speaker-diarization-community-1` | Diarization pipeline (segmentation + WeSpeaker embedding + VBx clustering bundled) | ~32 MB |
-| `pyannote/embedding` | Voice embeddings for profile matching | ~200 MB |
+| `pyannote/speaker-diarization-community-1` | Diarization pipeline (segmentation + WeSpeaker embedding + VBx clustering bundled); its `embedding/` subfolder also produces profile embeddings | ~32 MB |
 
-License acceptance (free, one-time): [speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1), [embedding](https://huggingface.co/pyannote/embedding). Model ids live in `config.DIARIZATION_MODEL` / `config.EMBEDDING_MODEL`.
+License acceptance (free, one-time): [speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1). The model id lives in `config.DIARIZATION_MODEL`.
 
 - **Why community-1 over 3.1:** on multi-hour 5–8-speaker sessions 3.1 produced one catch-all cluster plus several fragments of the same person; community-1 produced one cluster per person at the same runtime.
 - **`diarize()` uses `speaker_diarization`, not `exclusive_speaker_diarization`:** solo-segment selection for embeddings and excerpts needs the overlap information the exclusive view removes.
-- **Gated-model errors:** `load_pipeline()` turns `GatedRepoError` into a message naming the terms URL, since existing users must accept community-1 separately from 3.1.
+- **Gated-model errors:** `load_pipeline()` and `_load_embedding_model()` turn `GatedRepoError` into a message naming the terms URL, since existing users must accept community-1 separately from 3.1.

@@ -183,6 +183,8 @@ Options:
   --update           Average with the existing embedding instead of replacing it
 ```
 
+`--update` on a profile enrolled with the older speaker model replaces its embedding instead of averaging, since the two can't be mixed.
+
 ---
 
 ### `wisper speakers`

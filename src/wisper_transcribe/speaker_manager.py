@@ -13,7 +13,7 @@ import numpy as np
 from ._noise_suppress import suppress_third_party_noise as _suppress
 _suppress()
 
-from .config import EMBEDDING_MODEL, get_data_dir
+from .config import DIARIZATION_MODEL, EMBEDDING_SPACE, EMBEDDING_SUBFOLDER, get_data_dir
 from .models import DiarizationSegment, SpeakerProfile
 
 # Embedding-model cache, keyed by device so a different device reloads it.
@@ -61,6 +61,8 @@ def load_profiles(data_dir: Optional[Path] = None) -> dict[str, SpeakerProfile]:
             enrolled_date=data.get("enrolled_date", ""),
             enrollment_source=data.get("enrollment_source", ""),
             notes=data.get("notes", ""),
+            # Untagged profiles predate the current embedding model.
+            embedding_space=data.get("embedding_space", ""),
         )
     return profiles
 
@@ -78,6 +80,7 @@ def save_profiles(profiles: dict[str, SpeakerProfile], data_dir: Optional[Path] 
             "enrolled_date": p.enrolled_date,
             "enrollment_source": p.enrollment_source,
             "notes": p.notes,
+            "embedding_space": p.embedding_space,
         }
 
     with open(path, "w", encoding="utf-8") as f:
@@ -214,10 +217,19 @@ def _load_embedding_model(device: str):
         from pyannote.audio import Model, Inference
         try:
             model = Model.from_pretrained(
-                EMBEDDING_MODEL,
+                DIARIZATION_MODEL,
+                subfolder=EMBEDDING_SUBFOLDER,
                 token=_get_hf_token(),
             )
         except Exception as e:
+            from huggingface_hub.errors import GatedRepoError
+
+            if isinstance(e, GatedRepoError):
+                raise RuntimeError(
+                    "Your Hugging Face token can't access the speaker model. "
+                    f"Accept its terms at https://huggingface.co/{DIARIZATION_MODEL} "
+                    "(free, one-time), then retry."
+                ) from e
             if "locate the file on the Hub" in str(e) or "connection" in str(e).lower():
                 raise RuntimeError(
                     "Failed to download the embedding model from Hugging Face. "
@@ -282,21 +294,32 @@ def _select_embedding_segments(
     return sorted(speaker_segs, key=lambda s: s.end - s.start, reverse=True)[:max_count]
 
 
+# Segments averaged per speaker embedding. Measured on real sessions, 30
+# instead of 5 raised same-person similarity across sessions by 0.05-0.10.
+EMBEDDING_SEGMENTS = 30
+
+
+def _unit(v: np.ndarray) -> np.ndarray:
+    norm = np.linalg.norm(v)
+    return v / norm if norm > 0 else v
+
+
 def extract_embedding(
     audio_path: Path,
     segments: list[DiarizationSegment],
     speaker_label: str,
     device: str = "cpu",
 ) -> np.ndarray:
-    """Extract a speaker's voice embedding, averaged over selected segments.
+    """Extract a speaker's unit-length voice embedding, averaged over selected segments.
 
     See ``_select_embedding_segments()`` for which segments are used.
+    Each segment is normalized before averaging so long segments don't dominate.
     """
     from pyannote.core import Segment as PyannoteSegment
 
     inference = _load_embedding_model(device)
 
-    selected = _select_embedding_segments(segments, speaker_label)
+    selected = _select_embedding_segments(segments, speaker_label, max_count=EMBEDDING_SEGMENTS)
 
     # Pre-load audio via scipy so pyannote never calls torchaudio (removed in 2.x).
     from .audio_utils import load_wav_as_tensor
@@ -307,9 +330,9 @@ def extract_embedding(
     for seg in selected:
         excerpt = PyannoteSegment(seg.start, seg.end)
         emb = inference.crop(audio_dict, excerpt)
-        embeddings.append(emb)
+        embeddings.append(_unit(np.asarray(emb, dtype=np.float32).reshape(-1)))
 
-    return np.mean(embeddings, axis=0)
+    return _unit(np.mean(embeddings, axis=0))
 
 
 # ---------------------------------------------------------------------------
@@ -341,7 +364,7 @@ def enroll_speaker(
     emb_dir = _get_embeddings_dir(data_dir)
     emb_dir.mkdir(parents=True, exist_ok=True)
     emb_path = emb_dir / f"{name}.npy"
-    np.save(str(emb_path), embedding)
+    np.save(str(emb_path), _unit(np.asarray(embedding, dtype=np.float32)))
 
     profile = SpeakerProfile(
         name=name,
@@ -473,6 +496,18 @@ def _save_reference_clip(
 # Matching
 # ---------------------------------------------------------------------------
 
+def load_profile_embedding(profile: SpeakerProfile) -> Optional[np.ndarray]:
+    """The profile's embedding, or ``None`` if it's missing or from another model."""
+    if profile.embedding_space != EMBEDDING_SPACE or not profile.embedding_path.exists():
+        return None
+    return np.load(str(profile.embedding_path))
+
+
+def stale_profile_keys(profiles: dict[str, SpeakerProfile]) -> list[str]:
+    """Keys of profiles enrolled with an older embedding model; they need re-enrolling."""
+    return sorted(k for k, p in profiles.items() if p.embedding_space != EMBEDDING_SPACE)
+
+
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     a_norm = np.linalg.norm(a)
     b_norm = np.linalg.norm(b)
@@ -525,8 +560,9 @@ def match_speakers(
     # Load enrolled embeddings
     enrolled: dict[str, np.ndarray] = {}
     for pname, profile in profiles.items():
-        if profile.embedding_path.exists():
-            enrolled[pname] = np.load(str(profile.embedding_path))
+        emb = load_profile_embedding(profile)
+        if emb is not None:
+            enrolled[pname] = emb
 
     if not enrolled:
         return {}
@@ -588,13 +624,25 @@ def update_embedding(
     data_dir: Optional[Path] = None,
     alpha: float = 0.3,
 ) -> None:
-    """Update an existing embedding using exponential moving average."""
+    """Blend ``new_embedding`` into a profile by exponential moving average.
+
+    A profile from an older embedding model is replaced outright and retagged,
+    since its vector can't be averaged with the new one.
+    """
     emb_dir = _get_embeddings_dir(data_dir)
     emb_dir.mkdir(parents=True, exist_ok=True)
     emb_path = emb_dir / f"{name}.npy"
-    if not emb_path.exists():
-        np.save(str(emb_path), new_embedding)
-        return
-    existing = np.load(str(emb_path))
-    updated = alpha * new_embedding + (1 - alpha) * existing
-    np.save(str(emb_path), updated)
+    new_unit = _unit(np.asarray(new_embedding, dtype=np.float32))
+
+    with _profiles_lock:
+        profiles = load_profiles(data_dir)
+        profile = profiles.get(name)
+        stale = profile is not None and profile.embedding_space != EMBEDDING_SPACE
+        if stale or not emb_path.exists():
+            np.save(str(emb_path), new_unit)
+        else:
+            existing = _unit(np.load(str(emb_path)))
+            np.save(str(emb_path), _unit(alpha * new_unit + (1 - alpha) * existing))
+        if stale:
+            profile.embedding_space = EMBEDDING_SPACE
+            save_profiles(profiles, data_dir)

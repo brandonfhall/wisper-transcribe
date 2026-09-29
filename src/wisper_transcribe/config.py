@@ -85,9 +85,14 @@ LLM_SECRET_KEYS = frozenset({
 
 COMPUTE_TYPES = ("auto", "float16", "int8_float16", "int8", "float32")
 
-# Hugging Face model ids. Both are gated: users accept each one's terms once.
+# Gated Hugging Face model; users accept its terms once.
 DIARIZATION_MODEL = "pyannote/speaker-diarization-community-1"
-EMBEDDING_MODEL = "pyannote/embedding"
+# Profile embeddings load from the diarization repo's WeSpeaker subfolder, so
+# one license covers both and profiles share the clustering's embedding space.
+EMBEDDING_SUBFOLDER = "embedding"
+# Stored on each profile. Profiles tagged otherwise (or untagged, from the old
+# pyannote/embedding model) are incomparable and never matched.
+EMBEDDING_SPACE = "wespeaker-resnet34"
 
 # Allowed values, shared by CLI click.Choice lists and web-form validation.
 MODEL_SIZES = ("tiny", "base", "small", "medium", "large-v3", "large-v3-turbo")
@@ -204,8 +209,7 @@ def get_hf_token(config: Optional[dict] = None) -> str:
         "\nA HuggingFace token is required for speaker diarization.\n"
         "Get a free token at https://huggingface.co/settings/tokens\n"
         "You must also accept the pyannote model terms at:\n"
-        f"  https://huggingface.co/{DIARIZATION_MODEL}\n"
-        f"  https://huggingface.co/{EMBEDDING_MODEL}"
+        f"  https://huggingface.co/{DIARIZATION_MODEL}"
     )
     token = click.prompt("HuggingFace token").strip()
     if token:

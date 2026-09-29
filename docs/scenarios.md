@@ -31,6 +31,19 @@ No problem — their profile is simply ignored for that file. Unused profiles ne
 
 ---
 
+## Re-enrolling after the speaker-model upgrade
+
+Voice profiles enrolled before the switch to `speaker-diarization-community-1` came from a different embedding model and can't be compared with new sessions. They are skipped during matching (the job log names them), and the **Speakers** page marks them **NEEDS RE-ENROLL**.
+
+Re-enroll each one by naming them again, which replaces the old voice data:
+
+- **Web:** open a transcript they appear in, click **Name speakers**, and pick their existing name.
+- **CLI:** `wisper enroll "Alice" --audio session08.mp3 --update`
+
+Enrolling from a long session gives a better profile than from a short clip.
+
+---
+
 ## Wrong automatic match
 
 ```bash

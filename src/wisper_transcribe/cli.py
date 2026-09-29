@@ -239,9 +239,8 @@ def setup():
         click.echo("   A free HuggingFace token is required for speaker diarization.")
         click.echo("   Get one at: https://huggingface.co/settings/tokens")
         click.echo("")
-        click.echo("   You must also accept the model licenses (free, one-time):")
+        click.echo("   You must also accept the model license (free, one-time):")
         click.echo(f"     https://huggingface.co/{_config.DIARIZATION_MODEL}")
-        click.echo(f"     https://huggingface.co/{_config.EMBEDDING_MODEL}")
         click.echo("")
         token = click.prompt("   HuggingFace token", hide_input=True).strip()
         if token:
@@ -255,14 +254,11 @@ def setup():
     if token:
         click.echo("\n>> Pre-downloading pyannote models (first run only — may take a few minutes)...")
         try:
-            from pyannote.audio import Inference, Model, Pipeline
+            from pyannote.audio import Pipeline
 
             click.echo(f"   Downloading {_config.DIARIZATION_MODEL} ...")
             pipeline = Pipeline.from_pretrained(_config.DIARIZATION_MODEL, token=token)
             del pipeline
-            click.echo(f"   Downloading {_config.EMBEDDING_MODEL} ...")
-            model = Model.from_pretrained(_config.EMBEDDING_MODEL, token=token)
-            del model
             click.echo("   OK  : all models cached — subsequent runs start immediately")
         except Exception as e:
             click.echo(f"   WARN: model download failed: {e}", err=True)
@@ -387,7 +383,7 @@ def config_show():
     click.echo(f"  Whisper model  : {model}")
     click.echo(f"  Compute type   : {ct_display}")
     click.echo(f"  Diarization    : {_config.DIARIZATION_MODEL}")
-    click.echo(f"  Embedding      : {_config.EMBEDDING_MODEL}")
+    click.echo(f"  Embedding      : {_config.DIARIZATION_MODEL} ({_config.EMBEDDING_SUBFOLDER}/)")
     click.echo("")
     click.echo("─" * 50)
     click.echo("Settings")

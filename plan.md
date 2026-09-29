@@ -28,7 +28,7 @@ A local-recording `JOB_TRANSCRIPTION` job reported COMPLETED and logged "Wrote `
 
 ---
 
-## Speaker consistency (planned — not started)
+## Speaker consistency (in progress)
 
 The failure is speaker attribution, not transcription. Identity drifts within a file (one person split across clusters, or several merged into one) and across sessions (profiles miss). Research and a measured spike on two real Hanataz sessions (2026-09-12, 2026-09-19) on 2026-09-29 point at diarization quality and matching calibration, not the architecture: diarize → embed each label → match to profiles is correct.
 
@@ -44,7 +44,7 @@ The failure is speaker attribution, not transcription. Identity drifts within a 
 - **0.65 is too strict across sessions.** Same-person cosine between sessions, `pyannote/embedding` → wespeaker: Brandon 0.83–0.92 → 0.91–0.95, Nick 0.39–0.49 → 0.46–0.56, Jarrod 0.48–0.58 → 0.60–0.64. Only the local-mic speaker clears the threshold.
 - **wespeaker separates better.** Same-person vs other-person gap 0.34 (wespeaker-voxceleb-resnet34-LM) vs 0.25 (`pyannote/embedding`) on single segments.
 - **More segments help.** Averaging 30 L2-normalized segments instead of 5 raw ones raised same-person similarity 0.05–0.10 in both models.
-- **pyannote 4.x already returns wespeaker centroids.** `DiarizeOutput.speaker_embeddings` is `(num_speakers, 256)`, row order matching `speaker_diarization.labels()`. `diarize()` currently discards it and `speaker_manager` runs a second model.
+- **Profiles now use the diarizer's WeSpeaker model** (shipped; see architecture.md "Embedding spaces"). Extraction re-embeds solo segments rather than using `DiarizeOutput.speaker_embeddings`, so enrollment and matching share one estimator and the parallel-subprocess path is untouched.
 - **The local profile store is contaminated** (user data, not code). `mike.npy` = `brandon.npy` = `speaker_00.npy` byte-for-byte; `brad.npy` = `speaker_04.npy`; six more duplicate pairs from audiobook enrollment. Timestamps (2026-07-12) predate the enrollment fixes in #52; current enrollment paths look clean. `ben.npy` was enrolled from the 09-12 catch-all cluster and is mostly Nick.
 
 Caveat: one session pair, wizard names as rough ground truth, no DER. Strong signal, not proof — confirm with the measurement set below before tuning numbers.
@@ -52,11 +52,10 @@ Caveat: one session pair, wizard names as rough ground truth, no DER. Strong sig
 ### Phases
 
 1. **Profile cleanup (user action, no code).** Delete duplicate `speaker_*` profiles, re-enroll Mike and Ben from clean sessions. Consider a `wisper speakers doctor` check that flags identical or near-identical (>0.95) profile embeddings.
-2. **Match on the pipeline's own embeddings.** Carry `speaker_embeddings` out of `diarize()` (sidecar too, so the wizard can enroll without a second model pass) and drop the `pyannote/embedding` load. Embedding spaces aren't comparable: store a model id per profile, refuse to match across spaces, and prompt re-enrollment for old profiles. Profile updates L2-normalize before averaging.
-3. **Recalibrate `similarity_threshold`** on real sessions after phase 2; the spike suggests ~0.45–0.55. Expose the per-label best score in the wizard so misses are visible.
-4. **Cross-file registry pass per campaign.** Pool per-file speaker embeddings across a campaign's transcripts, cluster globally, and write names back through each `_diar.json` `speaker_map`.
-5. **Rename propagation.** A wizard rename applies to every transcript in the campaign that carries the same matched profile.
-6. **Forced alignment (later).** Whisper word timestamps drift ~120–150 ms, which misattributes boundary words; a wav2vec2 alignment pass (WhisperX-style) brings that to ~35–40 ms. Keep faster-whisper as the decoder.
+2. **Recalibrate `similarity_threshold`** on real sessions now that profiles use the WeSpeaker space; the spike suggests ~0.45–0.55. Expose the per-label best score in the wizard so misses are visible.
+3. **Cross-file registry pass per campaign.** Pool per-file speaker embeddings across a campaign's transcripts, cluster globally, and write names back through each `_diar.json` `speaker_map`.
+4. **Rename propagation.** A wizard rename applies to every transcript in the campaign that carries the same matched profile.
+5. **Forced alignment (later).** Whisper word timestamps drift ~120–150 ms, which misattributes boundary words; a wav2vec2 alignment pass (WhisperX-style) brings that to ~35–40 ms. Keep faster-whisper as the decoder.
 
 ### Measurement
 
