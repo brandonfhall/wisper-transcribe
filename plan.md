@@ -28,44 +28,70 @@ A local-recording `JOB_TRANSCRIPTION` job reported COMPLETED and logged "Wrote `
 
 ---
 
-## Speaker consistency (in progress)
+## Forced word alignment (planned — next)
 
-The failure is speaker attribution, not transcription. Identity drifts within a file (one person split across clusters, or several merged into one) and across sessions (profiles miss). Research and a measured spike on two real Hanataz sessions (2026-09-12, 2026-09-19) on 2026-09-29 point at diarization quality and matching calibration, not the architecture: diarize → embed each label → match to profiles is correct.
+Speaker identity is now consistent (#63); the remaining attribution error is **timing**. `aligner.py` gives each word to the diarization turn it overlaps most, using faster-whisper's word timestamps. Those are a by-product of decoding, not a measurement, and at speaker changes they put words in the neighbouring turn. `_smooth_word_speakers` (fold runs of ≤2 words or <1 s into the neighbours) papers over this and also swallows genuine one-word interjections.
 
-### Already in place (don't redo)
+Forced alignment re-times each already-transcribed word against the audio with a CTC acoustic model. faster-whisper stays the decoder; only `Word.start`/`Word.end` change.
 
-- `min_speakers=2`/`max_speakers=8` config defaults constrain the diarizer when no count is given.
-- `allow_many_to_one` is on whenever `num_speakers` is unpinned.
-- pyannote issue #1525 (`num_clusters` bug) was fixed in 2023; `num_speakers` is safe to use.
+### Spike results (2026-09-29, real session audio)
 
-### Spike findings
+10-min excerpt of Hanataz 2026-09-19 (30:00–40:00), production transcribe + community-1 diarize. Spike scripts lived in the session scratchpad and are not committed.
 
-- **Diarization now runs on community-1** (shipped; rationale in `architecture.md`). On 09-12 it gave one cluster per person where 3.1 gave a 59-min catch-all plus four Nick fragments.
-- **Threshold recalibrated to 0.55** (shipped). On the new production path (community-1 clusters + 30-segment WeSpeaker embeddings), every 09-12 cluster's best 09-19 match scored 0.65–0.95; the highest wrong-person score was 0.50.
-- **wespeaker separates better.** Same-person vs other-person gap 0.34 (wespeaker-voxceleb-resnet34-LM) vs 0.25 (`pyannote/embedding`) on single segments.
-- **More segments help.** Averaging 30 L2-normalized segments instead of 5 raw ones raised same-person similarity 0.05–0.10 in both models.
-- **Profiles now use the diarizer's WeSpeaker model** (shipped; see architecture.md "Embedding spaces"). Extraction re-embeds solo segments rather than using `DiarizeOutput.speaker_embeddings`, so enrollment and matching share one estimator and the parallel-subprocess path is untouched.
-- **Campaign relabel + rename propagation** (shipped; see architecture.md "Campaign relabel").
-- **The local profile store is contaminated** (user data, not code). `mike.npy` = `brandon.npy` = `speaker_00.npy` byte-for-byte; `brad.npy` = `speaker_04.npy`; six more duplicate pairs from audiobook enrollment. Timestamps (2026-07-12) predate the enrollment fixes in #52; current enrollment paths look clean. `ben.npy` was enrolled from the 09-12 catch-all cluster and is mostly Nick.
+- **Model:** `torchaudio.pipelines.MMS_FA`, already importable from the pinned `torchaudio` (2.11), so no new pip dependency. 315M params, 1.26 GB one-time download to the torch hub cache (`~/.cache/torch/hub/checkpoints/model.pt`).
+- **Speed:** 10 min aligned in 5.3 s on an RTX 3090 (~80 s for a 2.5 h session); ~7× realtime on 8 CPU threads (~21 min for 2.5 h).
+- **Effect:** words whose midpoint lies inside their assigned speaker's diarization turn: **90.0% → 97.4%**. The final speaker changes on 32 of 1369 words (2.3%) across 80 speaker changes.
+- **Whisper is sometimes seconds off, not ~100 ms.** Median |Δstart| 87 ms, p90 523 ms, 50 words shifted >1 s. Spot checks by re-transcribing short windows: "he's" whisper 39.15 s → aligned 41.57 s (aligned correct); "i'm" 47.03 → 50.20 (aligned correct).
+- **Plain alignment drifts under crosstalk; the star token fixes it.** Without it, "blend in" moved 114.85 → 119.83 s, which was wrong (Whisper was right): untranscribed speech from other players forced the aligner to stretch. With `get_model(with_star=True)` and a `*` token between every word to absorb audio not in the transcript, "blend" stays at 114.90 while the two real fixes above still happen. Star mode is required, not optional.
+- **Alignment scores are not a usable quality gate.** The correct "blend" alignment scored 0.007, and 604 of 1369 words scored <0.3. Don't threshold on them.
 
-Caveat: one session pair, wizard names as rough ground truth, no DER. Strong signal, not proof — confirm with the measurement set below before tuning numbers.
+### Decisions
+
+- **Engine:** `torchaudio.functional.forced_align` + `MMS_FA` with star. `forced_align` was slated for removal in torchaudio 2.9 but kept after user feedback ([pytorch/audio#3902](https://github.com/pytorch/audio/issues/3902), 2026-01-22 update); `Wav2Vec2FABundle` is the documented path. Not WhisperX (pins its own faster-whisper/pyannote versions, heavy) and not `ctc-forced-aligner` (extra deps for the same MMS weights).
+- **License, needs sign-off:** the MMS_FA weights are **CC-BY-NC 4.0**. The code downloads them at runtime (not redistributed) and this is a personal, non-commercial tool, so it's fine for current use; state it in the docs. If that changes, the English-only `WAV2VEC2_ASR_BASE_960H` bundle is the fallback, but it has no star token, so the crosstalk drift above would return.
+- **Languages:** MMS_FA takes romanized lowercase text (`a–z` and `'`). Latin-script languages work after accent stripping (`unicodedata` NFKD). Non-Latin scripts need `uroman`; phase 1 keeps Whisper times for them rather than adding the dependency.
+- **Default:** config key `forced_alignment` = `auto` | `true` | `false`. `auto` aligns when diarization runs on a GPU, since CPU adds ~20 min per 2.5 h session. Never with `--no-diarize`; timing only matters for speaker attribution.
 
 ### Phases
 
-1. **Profile cleanup (user action, no code).** The model upgrade already requires re-enrolling every profile. While doing it, delete the `speaker_*` / `SPEAKER_NN` junk profiles and duplicates, and enroll Mike and Ben from sessions where they're clearly separated. Consider a `wisper speakers doctor` check that flags identical or near-identical (>0.95) profile embeddings.
-2. **Forced alignment (later).** Whisper word timestamps drift ~120–150 ms, which misattributes boundary words; a wav2vec2 alignment pass (WhisperX-style) brings that to ~35–40 ms. Keep faster-whisper as the decoder.
+1. **`word_alignment.py` module + tests.**
+   - `align_words(wav_path, segments, language, device) -> list[TranscriptionSegment]`: per Whisper segment, crop `[start − 0.25 s, end + 0.25 s]`, emissions via MMS_FA (fp16 on CUDA), targets `* w1 * w2 * … *`, `forced_align` + `merge_tokens`, map token spans back to words by target-index ownership, frames → seconds by `crop_samples / frames / 16000`.
+   - Words with no alignable characters after normalization (e.g. "20", "&") keep Whisper times, clamped between their re-timed neighbours so word order stays monotonic.
+   - Any per-segment failure (empty emission, more targets than frames, exception) keeps that segment's Whisper times. Alignment never fails the job.
+   - Lazy model cache as a module global (`_fa_model`, `_fa_device`) like `diarizer._pipeline`; covered by the one-job-at-a-time invariant; tests reset it.
+   - Audio via `audio_utils.load_wav_as_tensor()`, never `torchaudio.load` (the torchcodec/Windows constraint).
+   - Tests with a mocked model: span → word mapping, star ownership, unalignable-word clamping, failure fallback, language skip, monotonic output.
+2. **Pipeline + config wiring.**
+   - `pipeline.process_file()`: after transcription, before `align()`, when diarization ran and `forced_alignment` resolves on. In `parallel_stages` mode it runs in the main process after both futures return (it needs only the WAV and the segments).
+   - Log one summary line: words re-timed, words kept, time taken.
+   - The MLX path (Apple Silicon) yields the same `Word` objects; alignment runs on MPS or CPU there.
+   - Config key, web Config page field, `wisper transcribe --forced-align/--no-forced-align`. `wisper setup` pre-downloads the model when enabled.
+   - Docker: keep the torch hub cache in the data volume, or the 1.26 GB model re-downloads per container.
+3. **Re-tune smoothing.** With aligned words, reduce `_MICRO_RUN_MAX_WORDS` / `_MICRO_RUN_MAX_SECONDS`, or skip smoothing for aligned segments, so real interjections survive. Decide from the measurement below.
+4. **Optional: `exclusive_speaker_diarization` for word assignment.** community-1's exclusive view is built for reconciling with transcripts. Try it as a measurement arm: aligned words × {regular, exclusive} turns. Embedding and excerpt selection keep the regular, overlap-aware view either way.
 
-### Measurement
+### Measurement (gate for phases 2–4)
 
-- 8–12 hand-corrected excerpts of 2–3 min, stratified by speaker count (2–3 / 4–5 / 6–8), in-room vs remote, low vs high overlap. Export RTTM.
-- Report DER split into missed / false alarm / confusion (`pyannote.metrics`), plus JER so quiet players aren't hidden by the loudest one. cpWER via `meeteval` once alignment work starts.
-- Compare configs with a paired bootstrap over recordings (B ≥ 1000); ship a change only when the 95% CI on the difference excludes 0.
+- **Automatic proxy:** % of words whose midpoint is inside their assigned speaker's turn, plus the raw micro-run count before smoothing. Spike baseline: 90.0% (Whisper) vs 97.4% (star-aligned).
+- **Manual ground truth:** ~3 excerpts of 3 min with heavy crosstalk from different sessions. At every speaker change, mark the correct speaker of the 2 words on either side (~100–150 judgements). Compare Whisper-timed vs aligned, and the smoothing variants. Ship if boundary-word accuracy improves and no excerpt gets worse.
+- **Large-shift audit:** in one session, check every word shifted >1 s by re-transcribing a short window around each candidate time (the spike's method).
 
-### Ruled out for now
+### Risks
 
-- **Sortformer:** 4-speaker cap.
-- **DiariZen:** best open accuracy but CC-BY-NC.
-- **NVIDIA Nemotron diarization:** claims 8 speakers, no independent validation yet. Revisit only if community-1 plateaus on the measurement set.
+- **Whisper text errors** (misheard or hallucinated words) still get force-placed somewhere; star absorbs some of it. Watch the >1 s shifts in the audit.
+- **Overlapped speech:** one word timeline can't represent two people talking at once. Alignment only helps the words Whisper transcribed.
+- **CPU-only installs:** ~20 min per 2.5 h session, which is why `auto` is GPU-only.
+- **torchaudio maintenance mode:** `forced_align` is kept today. If a future torchaudio drops it, pin torchaudio or vendor the CTC alignment (a small dynamic program).
+
+---
+
+## Speaker consistency — remaining
+
+Shipped in #63; the design is in `architecture.md`. What's left:
+
+- **Profile cleanup (user action).** Re-enroll every profile after the embedding-model change; delete the `speaker_*` / `SPEAKER_NN` junk and duplicate profiles; enroll Mike and Ben from sessions where they're clearly separated. Consider a `wisper speakers doctor` check that flags identical or near-identical (>0.95) profile embeddings.
+- **Diarization measurement set.** 8–12 hand-corrected excerpts of 2–3 min, stratified by speaker count (2–3 / 4–5 / 6–8), in-room vs remote, low vs high overlap. Report DER split into missed / false alarm / confusion (`pyannote.metrics`) plus JER, and compare configs with a paired bootstrap over recordings (B ≥ 1000). The 0.55 threshold and the community-1 choice rest on one session pair until this exists.
+- **Ruled out for now:** Sortformer (4-speaker cap), DiariZen (CC-BY-NC), NVIDIA Nemotron diarization (no independent validation). Revisit only if community-1 plateaus on the measurement set.
 
 ---
 
