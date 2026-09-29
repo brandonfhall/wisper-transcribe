@@ -35,6 +35,8 @@ A task is not complete until all four are true — in this order:
 
 When a todo list reaches 100% completed, execute steps 1–3 immediately without waiting to be asked.
 
+A Claude Code pre-commit hook (`.claude/hooks/pre_commit.py`) enforces steps 1 and 3 on every `git commit`: it rebuilds Tailwind and blocks if `tailwind.min.css` changed but isn't staged, runs the test suite and blocks on failure (~1 min), and warns when `src/` changes have no doc changes. A blocked commit means fix and retry — never bypass it.
+
 Commits are authorized as part of completing any task per the Definition of Done — no separate permission required.
 
 ---
