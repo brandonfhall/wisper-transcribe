@@ -37,7 +37,7 @@ A Claude Code pre-commit hook (`.claude/hooks/pre_commit.py`) runs steps 1 and 3
 
 When a todo list reaches 100% completed, do steps 2–4 immediately without waiting to be asked.
 
-Commits are authorized as part of completing any task per the Definition of Done — no separate permission required.
+Commits (and pushing the feature branch) are authorized as part of completing any task per the Definition of Done — no separate permission required. Opening or merging a PR is not: ask the user first.
 
 ---
 
