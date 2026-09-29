@@ -28,6 +28,53 @@ A local-recording `JOB_TRANSCRIPTION` job reported COMPLETED and logged "Wrote `
 
 ---
 
+## Speaker consistency (planned — not started)
+
+The failure is speaker attribution, not transcription. Identity drifts within a file (one person split across clusters, or several merged into one) and across sessions (profiles miss). Research and a measured spike on two real Hanataz sessions (2026-09-12, 2026-09-19) on 2026-09-29 point at diarization quality and matching calibration, not the architecture: diarize → embed each label → match to profiles is correct.
+
+### Already in place (don't redo)
+
+- `min_speakers=2`/`max_speakers=8` config defaults constrain the diarizer when no count is given.
+- `embedding_exclude_overlap: true` and `min_cluster_size: 12` ship in the speaker-diarization-3.1 `config.yaml`.
+- `allow_many_to_one` is on whenever `num_speakers` is unpinned.
+- pyannote issue #1525 (`num_clusters` bug) was fixed in 2023; `num_speakers` is safe to use.
+
+### Spike findings
+
+- **3.1 merges and fragments on real sessions.** Re-diarizing 09-12 (2.5 h, same min/max) gave 8 clusters: one 59-min cluster about equally similar to everyone, and four small clusters that are all Nick (up to 0.81 cluster-to-cluster).
+- **community-1 fixes that on the same file.** 7 clusters, six mapping to distinct people from 09-19 (Brandon 0.92, Brad 0.76, Nick 0.61 over 43 min, Jarrod 0.57, two unnamed), one 4-min unmatched. No catch-all cluster. Same runtime (~170 s on an RTX 3090). Already a pyannote 4.x pipeline; the swap is the model id in `diarizer.load_pipeline()`.
+- **0.65 is too strict across sessions.** Same-person cosine between sessions, `pyannote/embedding` → wespeaker: Brandon 0.83–0.92 → 0.91–0.95, Nick 0.39–0.49 → 0.46–0.56, Jarrod 0.48–0.58 → 0.60–0.64. Only the local-mic speaker clears the threshold.
+- **wespeaker separates better.** Same-person vs other-person gap 0.34 (wespeaker-voxceleb-resnet34-LM) vs 0.25 (`pyannote/embedding`) on single segments.
+- **More segments help.** Averaging 30 L2-normalized segments instead of 5 raw ones raised same-person similarity 0.05–0.10 in both models.
+- **pyannote 4.x already returns wespeaker centroids.** `DiarizeOutput.speaker_embeddings` is `(num_speakers, 256)`, row order matching `speaker_diarization.labels()`. `diarize()` currently discards it and `speaker_manager` runs a second model.
+- **The local profile store is contaminated** (user data, not code). `mike.npy` = `brandon.npy` = `speaker_00.npy` byte-for-byte; `brad.npy` = `speaker_04.npy`; six more duplicate pairs from audiobook enrollment. Timestamps (2026-07-12) predate the enrollment fixes in #52; current enrollment paths look clean. `ben.npy` was enrolled from the 09-12 catch-all cluster and is mostly Nick.
+
+Caveat: one session pair, wizard names as rough ground truth, no DER. Strong signal, not proof — confirm with the measurement set below before tuning numbers.
+
+### Phases
+
+1. **Profile cleanup (user action, no code).** Delete duplicate `speaker_*` profiles, re-enroll Mike and Ben from clean sessions. Consider a `wisper speakers doctor` check that flags identical or near-identical (>0.95) profile embeddings.
+2. **Switch to `pyannote/speaker-diarization-community-1`.** Model id change plus test/doc updates. Use `exclusive_speaker_diarization` for word attribution if it simplifies `aligner` overlap handling.
+3. **Match on the pipeline's own embeddings.** Carry `speaker_embeddings` out of `diarize()` (sidecar too, so the wizard can enroll without a second model pass) and drop the `pyannote/embedding` load. Embedding spaces aren't comparable: store a model id per profile, refuse to match across spaces, and prompt re-enrollment for old profiles. Profile updates L2-normalize before averaging.
+4. **Recalibrate `similarity_threshold`** on real sessions after phase 3; the spike suggests ~0.45–0.55. Expose the per-label best score in the wizard so misses are visible.
+5. **Cross-file registry pass per campaign.** Pool per-file speaker embeddings across a campaign's transcripts, cluster globally, and write names back through each `_diar.json` `speaker_map`.
+6. **Rename propagation.** A wizard rename applies to every transcript in the campaign that carries the same matched profile.
+7. **Forced alignment (later).** Whisper word timestamps drift ~120–150 ms, which misattributes boundary words; a wav2vec2 alignment pass (WhisperX-style) brings that to ~35–40 ms. Keep faster-whisper as the decoder.
+
+### Measurement
+
+- 8–12 hand-corrected excerpts of 2–3 min, stratified by speaker count (2–3 / 4–5 / 6–8), in-room vs remote, low vs high overlap. Export RTTM.
+- Report DER split into missed / false alarm / confusion (`pyannote.metrics`), plus JER so quiet players aren't hidden by the loudest one. cpWER via `meeteval` once alignment work starts.
+- Compare configs with a paired bootstrap over recordings (B ≥ 1000); ship a change only when the 95% CI on the difference excludes 0.
+
+### Ruled out for now
+
+- **Sortformer:** 4-speaker cap.
+- **DiariZen:** best open accuracy but CC-BY-NC.
+- **NVIDIA Nemotron diarization:** claims 8 speakers, no independent validation yet. Revisit only if community-1 plateaus on the measurement set.
+
+---
+
 ## Live recording — feature requests
 
 - **Change input devices mid-session.** `LocalCaptureManager.start_session()` binds both capture threads to fixed device IDs; switching today means Stop + Start (a new `Recording` and a gap in the transcript). Needs capture threads that can restart against a new device while the tick thread, segment writers, and `Recording` keep running. Needs a design pass first.
