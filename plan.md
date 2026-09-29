@@ -279,8 +279,7 @@ RUN pip install --no-cache-dir -e ".[intel]" \
         --index-url https://download.pytorch.org/whl/xpu \
  && curl -sL "https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js" \
          -o /app/src/wisper_transcribe/static/htmx.min.js \
- && python -m pytailwindcss -i /app/src/wisper_transcribe/static/input.css \
-         -o /app/src/wisper_transcribe/static/tailwind.min.css --minify
+ && python -m wisper_transcribe.tailwind
 ENTRYPOINT ["wisper"]
 CMD ["--help"]
 ```

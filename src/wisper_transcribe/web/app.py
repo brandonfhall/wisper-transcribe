@@ -18,6 +18,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request as StarletteRequest
 from starlette.responses import Response as StarletteResponse
 
+from ..tailwind import build_css
 from .jobs import JobQueue
 
 # Disable tqdm's TMonitor thread: its atexit join hangs Ctrl+C on Python 3.14,
@@ -60,16 +61,7 @@ def _build_tailwind() -> None:
         return  # already up-to-date
 
     try:
-        subprocess.run(
-            [
-                sys.executable, "-m", "pytailwindcss",
-                "-i", str(_INPUT_CSS),
-                "-o", str(_OUTPUT_CSS),
-                "--minify",
-            ],
-            check=True,
-            capture_output=True,
-        )
+        build_css(_INPUT_CSS, _OUTPUT_CSS).check_returncode()
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         # Non-fatal: serve the existing CSS if the build fails
         import warnings

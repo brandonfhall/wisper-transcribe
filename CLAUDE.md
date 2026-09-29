@@ -59,9 +59,8 @@ Commits (and pushing the feature branch) are authorized as part of completing an
 wisper server --reload                # dev mode; http://localhost:8080
 
 # Rebuild Tailwind CSS (the pre-commit hook also does this)
-.venv/bin/python -m pytailwindcss -i src/wisper_transcribe/static/input.css \
-    -o src/wisper_transcribe/static/tailwind.min.css --minify     # Mac/Linux
-.venv\Scripts\python -m pytailwindcss -i src/wisper_transcribe/static/input.css -o src/wisper_transcribe/static/tailwind.min.css --minify   # Windows
+.venv/bin/python -m wisper_transcribe.tailwind        # Mac/Linux
+.venv\Scripts\python -m wisper_transcribe.tailwind    # Windows
 
 # Manage vendored web assets (htmx, fonts, Tailwind)
 python scripts/vendor.py --check    # audit current state
@@ -78,7 +77,8 @@ python scripts/vendor.py            # re-download + rebuild all assets
 - **After committing a phase, pause for user review before starting the next.**
 - **Branch naming:** `feat/...` or `fix/...`
 - **CI matrix:** Python 3.13 and 3.14 — the versions the project ships on (Docker `python:3.14-slim`; local-`.venv` floor 3.13). Both are blocking. We deliberately do not test versions we don't ship; `requires-python = ">=3.13"` and the `setup.sh`/`setup.ps1` floor checks must stay in sync with the lowest matrix entry.
-- **CI does not catch stale Tailwind CSS.** CI only checks that the CSS builds; it can't diff the output because the macOS and Linux Tailwind binaries emit different CSS for the same source. The pre-commit hook is the only staleness guard, so commits made outside Claude need a manual rebuild.
+- **CI Tailwind staleness check:** CI rebuilds `tailwind.min.css` and fails on `git diff --exit-code` if the committed CSS is stale.
+- **Tailwind version is pinned** in `wisper_transcribe/tailwind.py` (`TAILWIND_VERSION`). Different releases emit different CSS, so always build through `python -m wisper_transcribe.tailwind`, never `python -m pytailwindcss` directly. To upgrade, bump the constant and commit the rebuilt CSS.
 
 ---
 
@@ -124,7 +124,7 @@ Full list in `docs/configuration.md`. The ones that affect code: `WISPER_DATA_DI
 ## Non-Obvious Gotchas
 
 - **All web assets are fully committed** — `static/htmx.min.js` (HTMX 1.9.12), `static/fonts/*.woff2` (Newsreader, Geist, JetBrains Mono, Instrument Serif), and `static/tailwind.min.css`. No download step needed. Use `python scripts/vendor.py` to refresh them when upgrading.
-- **Tailwind auto-rebuilds on startup** only when `input.css` is newer than the output (mtime check in `app.py`). Tailwind v4 scans every tracked text file — docs, docstrings, and tests included — so even a prose change can add or drop a class (e.g. the word "invisible" in a docstring). Rebuild and commit `tailwind.min.css` whenever it changes; CI won't catch a stale file (see Git / CI Rules).
+- **Tailwind auto-rebuilds on startup** only when `input.css` is newer than the output (mtime check in `app.py`). Tailwind v4 scans every tracked text file — docs, docstrings, and tests included — so even a prose change can add or drop a class (e.g. the word "invisible" in a docstring). Rebuild and commit `tailwind.min.css` whenever it changes.
 - **Startup cleanup** — `app._cleanup_orphaned_uploads()` runs on every startup and deletes `wisper_upload_*`, `wisper_enroll_*`, and `wisper_enrollsrc_*` temp files. It is only the crash-window safety net: `JobQueue.submit()` renames the transcribe upload to a friendly name immediately (so running jobs never match the glob), `submit_standalone_enroll()` renames enroll uploads to `wisper_enrollsrc_<job-id>` at submit time and the job deletes them in a `finally`, and completed transcription jobs either move the audio next to the transcript (durable, backs the enrollment wizard) or delete it. Never point anything long-lived at any of these temp paths.
 - **Web-upload audio lives next to its transcript** — `<stem><suffix>` in the output dir, referenced by `<stem>_diar.json`'s `input_path`. Deleted together with the transcript. The `_diar.json` sidecar also carries the authoritative `speaker_map` (raw label → display name), updated on every wizard rename — never reconstruct that mapping from the rendered markdown when the sidecar has it.
 - **`tqdm.monitor_interval = 0`** is set globally at app startup (`app.py`) and per-job (`jobs.py`) to prevent `TMonitor` from spawning a daemon thread that hangs `Ctrl+C` on Python 3.14.

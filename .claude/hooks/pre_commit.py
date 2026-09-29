@@ -10,6 +10,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "src"))
+from wisper_transcribe.tailwind import build_css  # noqa: E402
+
 CSS = "src/wisper_transcribe/static/tailwind.min.css"
 DOC_PATHS = ("architecture.md", "README.md", "docs/", "plan.md")
 COMMIT_RE = re.compile(r"\bgit\b(?:\s+-[Cc]\s+\S+)*\s+commit\b(.*)")
@@ -29,8 +32,7 @@ def main():
 
     problems = []
 
-    build = run(sys.executable, "-m", "pytailwindcss", "-i", "src/wisper_transcribe/static/input.css",
-                "-o", CSS, "--minify", timeout=120)
+    build = build_css()
     if build.returncode != 0:
         problems.append(f"Tailwind rebuild failed:\n{build.stderr[-1500:]}")
     elif not commit_all and run("git", "diff", "--quiet", "--", CSS).returncode != 0:

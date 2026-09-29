@@ -46,6 +46,7 @@ src/wisper_transcribe/
 ├── journal.py           Rolling campaign journal; whole-campaign rebuild
 ├── debug_log.py         Logger for --debug (file tee) and --verbose (console)
 ├── _noise_suppress.py   Third-party warning/logging suppression; safe to call in subprocesses
+├── tailwind.py          Pinned Tailwind build (TAILWIND_VERSION, build_css()); `python -m wisper_transcribe.tailwind`
 ├── llm/                 Provider-agnostic LLM clients
 │   ├── base.py          LLMClient ABC: complete() + complete_json(schema)
 │   ├── errors.py        LLMUnavailableError (soft-fail) / LLMResponseError
@@ -598,10 +599,11 @@ The job page shows step pills and one bar split into equal per-step slices:
 
 ### Offline assets and CI
 - `static/htmx.min.js`, fonts, and `tailwind.min.css` are committed.
+- Every Tailwind build goes through `tailwind.build_css()`, which pins the binary to `TAILWIND_VERSION`. Different Tailwind releases emit different CSS for the same source; with one version, Windows and Linux output is byte-identical. `pytailwindcss` defaults to "latest" and caches whatever that was on first download, so an unpinned call drifts per machine. `tests/test_tailwind.py` fails if any caller bypasses the module.
 - `app._build_tailwind()` rebuilds CSS at startup when `input.css` is newer than the output (mtime check); `pytailwindcss` needs no Node.
 - Tailwind v4 scans every tracked text file (Markdown, docstrings, tests), not just templates, so a class-like word anywhere can change the output.
 - `scripts/vendor.py` (`--check` to audit) re-downloads HTMX/fonts and rebuilds Tailwind.
-- CI rebuilds Tailwind and fails on `git diff --exit-code` if the committed CSS is stale.
+- CI rebuilds Tailwind and fails on `git diff --exit-code` if the committed CSS is stale. The Claude Code pre-commit hook (`.claude/hooks/pre_commit.py`) runs the same rebuild before each commit Claude makes.
 
 ### Docker and launchers
 - `docker-compose.yml`: `wisper`/`wisper-cpu` (CLI) and `wisper-web`/`wisper-cpu-web` (port 8080), sharing `x-volumes`/`x-env` anchors; secrets come from `.env`. The `Makefile` wraps common `docker compose` commands.

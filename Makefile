@@ -60,10 +60,7 @@ test:
 	.venv/bin/pytest tests/ -v
 
 tailwind:
-	.venv/bin/python -m pytailwindcss \
-	    -i src/wisper_transcribe/static/input.css \
-	    -o src/wisper_transcribe/static/tailwind.min.css \
-	    --minify
+	.venv/bin/python -m wisper_transcribe.tailwind
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
