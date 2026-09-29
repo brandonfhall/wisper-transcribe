@@ -92,9 +92,9 @@ wisper config set hf_token hf_abc123...
 wisper config llm
 ```
 
-Walks you through provider (Ollama / LM Studio / Anthropic / OpenAI / Google), model, and API key or endpoint. Skip this if you're not planning to use the LLM post-processing commands.
+Walks you through provider (Ollama / Ollama Cloud / LM Studio / Anthropic / OpenAI / Google), model, and API key or endpoint. Skip this if you're not planning to use the LLM post-processing commands.
 
-> The `setup.sh` / `setup.ps1` scripts auto-detect a running Ollama (`localhost:11434`) or LM Studio (`localhost:1234`) instance during first-run setup and offer to pick a model right there — so if either is already running locally, you don't need to run `wisper config llm` separately.
+> `setup.sh` / `setup.ps1` detect a running Ollama (`localhost:11434`) or LM Studio (`localhost:1234`) and offer a model picker, so you can skip `wisper config llm` if either is already running.
 
 ---
 
@@ -123,8 +123,14 @@ cd wisper-transcribe
 python -m venv .venv
 source .venv/bin/activate       # Mac/Linux
 # .venv\Scripts\activate        # Windows
+
+# NVIDIA GPU: install CUDA PyTorch FIRST
+pip install "torch>=2.8.0" "torchaudio>=2.8.0" --index-url https://download.pytorch.org/whl/cu126
+
 pip install -e .
 ```
+
+Install CUDA PyTorch before the project; otherwise pip pulls CPU-only PyTorch from PyPI and other packages bind to it. `setup.ps1` does this for you.
 
 **Optional cloud-LLM extras** (Ollama works out of the box — only needed for cloud providers):
 
@@ -141,29 +147,21 @@ pip install -e '.[llm-all]'         # all three
 pip install -e '.[live]'
 ```
 
-> **Windows CUDA:** `pip install` gives CPU-only PyTorch by default. After setup, run:
-> ```powershell
-> pip install "torch>=2.8.0" "torchaudio>=2.8.0" --index-url https://download.pytorch.org/whl/cu126 --force-reinstall
-> ```
-> `setup.ps1` handles this automatically.
+**Optional Apple Silicon extra** (MLX Whisper — GPU transcription on M-series Macs):
+
+```bash
+pip install -e '.[macos]'
+```
 
 ---
 
 ## Local Recording (mic + system audio)
 
-Optional — captures your microphone and the machine's system audio output
-(the other side of a call, a video, a game session) directly on the machine
-running `wisper server`, without a Discord bot. Requires the `[live]` extra
-(`pip install 'wisper-transcribe[live]'`), which installs
-[`soundcard`](https://github.com/bastibe/SoundCard). **Native install only —
-not available in Docker**, since a container has no access to host audio
-devices; the Record page's Local capture card is hidden automatically
-whenever `soundcard` isn't importable or no devices are detected, on any
-platform.
+Records your microphone and the machine's system audio (the other side of a call, a video, a game) on the machine running `wisper server`, without a Discord bot. Requires the `[live]` extra, which installs [`soundcard`](https://github.com/bastibe/SoundCard).
 
-"System audio" means capturing what the machine is currently playing
-(loopback capture) — treated as just another input device, the same way
-[OBS Studio](https://obsproject.com/) treats its Desktop Audio source:
+**Native install only** — a Docker container can't reach host audio devices. The Record page hides the Local capture card when `soundcard` or devices are unavailable.
+
+System audio is captured through a loopback device, the same way [OBS Studio](https://obsproject.com/)'s Desktop Audio works:
 
 | Platform | Setup |
 |----------|-------|
@@ -171,10 +169,7 @@ platform.
 | **Linux** | Nothing extra needed on PulseAudio/PipeWire — the monitor source for your output device shows up automatically. |
 | **macOS** | macOS has no built-in loopback capture. Install [BlackHole](https://github.com/ExistentialAudio/BlackHole) (free, 2ch is enough), then create a **Multi-Output Device** in Audio MIDI Setup routing your normal output *and* BlackHole together, and set that Multi-Output Device as your system output. BlackHole then appears as an ordinary input device in the system-audio dropdown. |
 
-Recordings show up on the Recordings page the same as Discord sessions
-(a **LOCAL** badge in place of the channel column) and hand off to the
-same transcribe pipeline once stopped. See [web-ui.md](web-ui.md#local-recording-mic--system-audio)
-for how to start a session from the Record page.
+Local recordings appear on the Recordings page with a **LOCAL** badge and transcribe like any other. See [web-ui.md](web-ui.md#local-mic--system-audio) for using the Record page.
 
 ---
 
@@ -191,7 +186,7 @@ for how to start a session from the Record page.
 
 **Recommended:**
 - RTX 3090 (24 GB): `large-v3-turbo --device cuda` (best speed/accuracy tradeoff)
-- Apple M-series: `medium` (auto-detects MPS; diarization runs on GPU, transcription on CPU)
+- Apple M-series: `large-v3-turbo` with the `[macos]` extra (MLX transcribes on the GPU); without it transcription runs on CPU, so use `small` or `medium`
 - CPU-only machine: `small` or `base`
 
 ---
@@ -203,6 +198,4 @@ for how to start a session from the Record page.
 .venv\Scripts\pytest tests/ -v    # Windows
 ```
 
-Tests mock all ML models — no GPU, network, or real audio files required.
-
-CI runs the test suite on Python 3.13 and 3.14 — the versions the project actually ships on (Docker uses `python:3.14-slim`; the local-`.venv` install floor is 3.13). Both are blocking.
+Tests mock all ML models — no GPU, network, or real audio needed. CI runs them on Python 3.13 and 3.14.

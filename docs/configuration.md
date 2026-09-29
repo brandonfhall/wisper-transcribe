@@ -55,6 +55,7 @@ Speaker profiles and config are stored in your OS user data directory — separa
 |----------|------|
 | Windows | `%APPDATA%\wisper-transcribe\` |
 | Mac | `~/Library/Application Support/wisper-transcribe/` |
+| Linux | `~/.local/share/wisper-transcribe/` |
 
 ```
 wisper-transcribe/
@@ -64,10 +65,12 @@ wisper-transcribe/
 │   └── embeddings/
 │       ├── alice.npy    voice fingerprint
 │       └── bob.npy
-└── campaigns/
-    ├── campaigns.json   campaign rosters (additive layer over global profiles)
-    └── <slug>/
-        └── journal.md  rolling campaign journal (one per campaign; written by `wisper campaigns journal`)
+├── campaigns/
+│   ├── campaigns.json   campaign rosters (additive layer over global profiles)
+│   └── <slug>/
+│       └── journal.md   rolling campaign journal (`wisper campaigns journal`)
+├── recordings/          Discord and local recordings (audio + metadata)
+└── output/              transcripts, when ./output doesn't exist in the working directory
 ```
 
 Override the storage path with `WISPER_DATA_DIR` (set automatically in Docker).
@@ -76,7 +79,7 @@ Override the storage path with `WISPER_DATA_DIR` (set automatically in Docker).
 
 ## Config Resolution Order (CLI / web transcription options)
 
-`wisper transcribe` and the web upload form share the same resolution order for `model`, `language`, and `timestamps`: **explicit CLI/web value → `config.toml` → hardcoded fallback.** An explicit value always wins, even one that happens to match the hardcoded fallback (e.g. explicitly passing `--model medium` is never silently overridden by a `model = "large-v3-turbo"` in config).
+`wisper transcribe` and the web upload form resolve `model`, `language`, and `timestamps` as **explicit value → `config.toml` → built-in default.** An explicit value always wins.
 
 | Setting | CLI flag | Config key | Hardcoded fallback |
 |---|---|---|---|
@@ -84,13 +87,13 @@ Override the storage path with `WISPER_DATA_DIR` (set automatically in Docker).
 | Language | `-l/--language` | `language` | `en` |
 | Timestamps | `--timestamps/--no-timestamps` | `timestamps` | on (`true`) |
 
-`--language auto` (or a web form value of `auto`) is a separate, explicit "auto-detect" marker — not the same as omitting `--language` — and always wins regardless of what `language` is set to in config.
+`--language auto` explicitly requests auto-detection and overrides the config `language`.
 
-**Speaker-count fallback:** when diarization is enabled and neither `-n/--num-speakers` nor `--min-speakers`/`--max-speakers` is passed, wisper falls back to the `min_speakers`/`max_speakers` config keys (defaults: `2` / `8`) as a constraint on the diarizer. Pinning `-n/--num-speakers` (an exact expected count) suppresses this fallback entirely — it's the user asserting one label per person, so no min/max range applies.
+**Speaker count:** with diarization on and no `-n`/`--min-speakers`/`--max-speakers`, the `min_speakers`/`max_speakers` config keys (default `2`/`8`) bound the diarizer. `-n/--num-speakers` pins an exact count and ignores them.
 
-**`device` and `compute_type`** keep their own separate `"auto"` sentinel (auto-detect hardware / resolve a concrete CTranslate2 dtype) — they are not part of the config-fallback chain above; `--device`/`--compute-type` and their web-form equivalents pass `"auto"` as their own literal default already.
+**`device` and `compute_type`** default to `auto` (detect hardware / pick a dtype per device) rather than following the chain above.
 
-**`wisper config set` validation:** only keys that already exist in the default config schema can be set — `wisper config set some_typo value` fails with `Unknown config key 'some_typo'; run wisper config show to list keys` rather than silently writing an unused key. The value is coerced to match the key's *schema* type (i.e. the type of `DEFAULTS[key]`, not whatever type happens to already be stored — this self-heals a value that was previously stored with the wrong type) using bool → int → float → comma-split list → string, in that check order — bool is checked first since Python's `bool` is an `int` subclass.
+**`wisper config set` validation:** only keys in the table above can be set; a typo fails with `Unknown config key '...'`. Values are converted to the key's default type (bool, int, float, comma-separated list, or string).
 
 ---
 

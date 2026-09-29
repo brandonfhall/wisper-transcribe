@@ -44,10 +44,13 @@ On first run the server downloads the Whisper and pyannote models (~2 GB) into `
 | `make stop` | Stop all containers |
 | `make logs` | Follow container logs |
 | `make build` | (Re)build all images |
+| `make build-cpu` / `make build-gpu` | Build one image |
 | `make shell` | Shell in the CPU container |
 | `make shell-gpu` | Shell in the GPU container |
 | `make setup` | Local (non-Docker) setup |
 | `make test` | Run the test suite |
+| `make tailwind` | Rebuild `tailwind.min.css` |
+| `make clean` | Remove caches and coverage output |
 
 ### CLI via Docker
 
@@ -67,6 +70,7 @@ docker compose run wisper wisper transcribe /app/input/session01.mp3 --enroll-sp
 | `./data/` | `/data` | `config.toml` + speaker profiles |
 | `./input/` | `/app/input` | Your audio files |
 | `./output/` | `/app/output` | Transcribed `.md` files |
+| `./recordings/` | `/data/recordings` | Discord recordings |
 
 All directories are created automatically on first run and persist across container restarts.
 
@@ -96,17 +100,16 @@ Record Discord voice channel sessions directly from the web UI. The bot joins yo
 
 1. Start the server: `make start` (Docker) or `wisper server` (local)
 2. Open `http://localhost:8080/record`
-3. Optional: expand **Browse bot's channels** to see all guilds and voice channels the bot can see — click any channel to auto-fill the Guild ID and Voice Channel ID fields
-4. Select a campaign and voice channel, then click **Start Recording**
-5. When the session ends, click **Stop** — the recording appears in **Recordings**
-6. On the recording detail page, click **Transcribe** to queue it for processing
+3. Enter the Guild ID and Voice Channel ID (or pick a saved preset), choose a campaign, and click **Start Recording**
+4. When the session ends, click **Stop** — the recording appears in **Recordings**
+5. On the recording detail page, click **Transcribe** to queue it for processing
 
-The bot joins per-session (not always-on) and auto-rejoins on transient disconnects. Recordings are stored at `./recordings/` (bind-mounted in Docker) alongside your other data.
+To find an ID, enable Developer Mode in Discord, then right-click the server or channel → *Copy ID*.
+
+The bot joins per session (not always-on) and rejoins automatically after transient disconnects. In Docker, recordings are stored in `./recordings/`.
 
 > **CLI equivalent:** `wisper record start --voice-channel <ID> --campaign <slug>` — see [cli-reference.md](cli-reference.md) for all `wisper record` subcommands.
 
 ### Known Limitations
 
-- **One active recording at a time.** Starting a second recording while one is active returns an error.
-- **No multi-guild / multi-channel.** The bot connects to one voice channel in one guild per session.
-- **DAVE E2EE voice receive depends on JDAVE (Java).** Discord's DAVE protocol encrypts per-user voice — only JDA+JDAVE has confirmed working decrypt as of 2026-05. When [Pycord PR #3159](https://github.com/Pycord-Development/pycord/pull/3159) ships DAVE support, the Java sidecar can be replaced with a ~100-line Python implementation.
+See [scenarios.md](scenarios.md#known-limitations).
