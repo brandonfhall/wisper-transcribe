@@ -30,6 +30,10 @@ log = logging.getLogger(__name__)
 # never a real display name -- it means the field was left untouched.
 RAW_LABEL_RE = re.compile(r"^SPEAKER_\d+$")
 
+# Names the pipeline assigns on its own. Renaming to one is allowed, but it
+# never becomes a profile (it would compete in every future match).
+AUTO_NAME_RE = re.compile(r"^(SPEAKER_\d+|Unknown Speaker \d+|Recurring Speaker \d+)$")
+
 
 def find_excerpt_clip(out_dir: Path, stem: str, candidates: list[str]) -> Optional[Path]:
     """Return the first existing ``<stem>_excerpt_<label>.mp3``, or None.
@@ -207,6 +211,7 @@ def apply_renames(
     segments: list,
     renames: dict[str, str],
     data_dir=None,
+    source: str = "manual",
 ) -> RenameResult:
     """Apply a wizard submission's renames to the transcript.
 
@@ -217,6 +222,9 @@ def apply_renames(
     blocks whose label was renamed change. That handles a same-submit swap
     (Alice<->Bob) and two labels sharing one display name, neither of which a
     global find/replace can express.
+
+    Each changed label's ``speaker_map_source`` becomes ``source``, so the
+    campaign relabel pass (``source="auto"``) never overwrites a manual name.
 
     Returns a ``RenameResult`` whose ``groups`` go to ``enroll_profiles()``.
     """
@@ -247,7 +255,7 @@ def apply_renames(
         unchanged = old == new
         profile_exists = profile_key in existing_profiles
         # Unchanged name with an existing profile: rename only, no enroll.
-        eligible_for_enroll[raw] = not (unchanged and profile_exists)
+        eligible_for_enroll[raw] = not (unchanged and profile_exists) and not AUTO_NAME_RE.match(new)
 
     # Count of raw labels per current display name; >1 means a shared name,
     # which disables the name-based fallback and the frontmatter rewrite.
@@ -307,6 +315,12 @@ def apply_renames(
         updated_map = dict(current_names)
         updated_map.update(valid)
         diar["speaker_map"] = updated_map
+        sources = dict(diar.get("speaker_map_source") or {})
+        for raw, new in valid.items():
+            if new != old_names[raw]:
+                sources[raw] = source
+        if sources:
+            diar["speaker_map_source"] = sources
         try:
             sidecar_path = md_path.with_name(md_path.stem + "_diar.json")
             sidecar_path.write_text(_json.dumps(diar, indent=2), encoding="utf-8")

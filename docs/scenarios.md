@@ -31,6 +31,12 @@ No problem — their profile is simply ignored for that file. Unused profiles ne
 
 ---
 
+## Same unknown guest across several sessions
+
+Put the sessions in a campaign and run **Re-match speakers** on the Campaign page (or `wisper campaigns relabel <slug>`). A voice that isn't enrolled but shows up in two or more sessions gets one shared name, `Recurring Speaker N`, in all of them. Name them in any one session's speaker wizard; the other sessions are renamed automatically.
+
+---
+
 ## Re-enrolling after the speaker-model upgrade
 
 Voice profiles enrolled before the switch to `speaker-diarization-community-1` came from a different embedding model and can't be compared with new sessions. They are skipped during matching (the job log names them), and the **Speakers** page marks them **NEEDS RE-ENROLL**.

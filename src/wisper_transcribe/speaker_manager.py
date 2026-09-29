@@ -531,6 +531,7 @@ def match_speakers(
     profile_filter: Optional[set] = None,
     allow_many_to_one: bool = False,
     scores: Optional[dict[str, tuple[str, float]]] = None,
+    embeddings: Optional[dict[str, np.ndarray]] = None,
 ) -> dict[str, str]:
     """Match diarization labels to enrolled profiles by cosine similarity.
 
@@ -538,52 +539,70 @@ def match_speakers(
     or ``{}`` if no profiles are enrolled.
 
     ``profile_filter`` restricts candidates to those keys (``None`` = all).
+    See ``assign_labels()`` for the assignment rules and ``scores``.
+    Pass a dict as ``embeddings`` to receive each label's extracted embedding;
+    they are extracted even with no profiles, for the campaign relabel pass.
+    """
+    profiles = load_profiles(data_dir)
+    if profile_filter is not None:
+        profiles = {k: v for k, v in profiles.items() if k in profile_filter}
+    if not profiles and embeddings is None:
+        return {}
+
+    unique_labels = sorted({s.speaker for s in diarization_segments})
+
+    # Failed extractions stay out of query_embeddings and number as Unknown.
+    query_embeddings: dict[str, np.ndarray] = {}
+    for label in unique_labels:
+        try:
+            query_embeddings[label] = extract_embedding(audio_path, diarization_segments, label, device)
+        except Exception:
+            pass
+    if embeddings is not None:
+        embeddings.update(query_embeddings)
+    if not profiles:
+        return {}
+
+    return assign_labels(
+        unique_labels, query_embeddings, profiles,
+        threshold=threshold, allow_many_to_one=allow_many_to_one, scores=scores,
+    )
+
+
+def assign_labels(
+    labels: list[str],
+    query_embeddings: dict[str, np.ndarray],
+    profiles: dict[str, SpeakerProfile],
+    threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+    allow_many_to_one: bool = False,
+    scores: Optional[dict[str, tuple[str, float]]] = None,
+) -> dict[str, str]:
+    """Assign each label a profile display name or ``Unknown Speaker N``.
+
+    Returns ``{}`` when no profile has a current-space embedding.
 
     Every (label, profile) pair is scored and consumed highest-first, so a
     label whose top choice is taken falls back to its next-best unused
     profile. With ``allow_many_to_one``, a still-unassigned label may then
     claim an already-used profile above threshold (one person split into two
-    labels); only enable it when the speaker count wasn't pinned.
+    labels); only enable it when the speaker count wasn't pinned. Labels
+    missing from ``query_embeddings`` are numbered as Unknown.
 
     Pass a dict as ``scores`` to receive each scored label's closest profile
     as ``label -> (display_name, similarity)``, whether or not it matched.
     """
-    profiles = load_profiles(data_dir)
-    if profile_filter is not None:
-        profiles = {k: v for k, v in profiles.items() if k in profile_filter}
-        if not profiles:
-            return {}
-    if not profiles:
-        return {}
-
-    unique_labels = sorted({s.speaker for s in diarization_segments})
-
-    # Failed extractions go to `failed`, never into query_embeddings.
-    query_embeddings: dict[str, np.ndarray] = {}
-    failed: set[str] = set()
-    for label in unique_labels:
-        try:
-            query_embeddings[label] = extract_embedding(audio_path, diarization_segments, label, device)
-        except Exception:
-            failed.add(label)
-
-    # Load enrolled embeddings
     enrolled: dict[str, np.ndarray] = {}
     for pname, profile in profiles.items():
         emb = load_profile_embedding(profile)
         if emb is not None:
             enrolled[pname] = emb
-
     if not enrolled:
         return {}
 
-    # Score every pair for labels with an embedding; failed labels are
-    # numbered as Unknown below.
     pairs: list[tuple[float, str, str]] = []  # (sim, label, profile_name)
     for label, q_emb in query_embeddings.items():
         for pname, e_emb in enrolled.items():
-            sim = _cosine_similarity(q_emb, e_emb)
-            pairs.append((sim, label, pname))
+            pairs.append((_cosine_similarity(q_emb, e_emb), label, pname))
 
     # Deterministic ordering: highest similarity first, ties broken by label
     # then profile name so results don't depend on dict/insertion order.
@@ -619,7 +638,7 @@ def match_speakers(
 
     # Everything else becomes "Unknown Speaker N", numbered by sorted label.
     unknown_counter = 1
-    for label in unique_labels:
+    for label in sorted(labels):
         if label not in result:
             result[label] = f"Unknown Speaker {unknown_counter}"
             unknown_counter += 1

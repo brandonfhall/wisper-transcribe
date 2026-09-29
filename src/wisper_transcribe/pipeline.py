@@ -582,6 +582,9 @@ def process_file(
                             f"({', '.join(stale)}); re-enroll them to match again."
                         )
                     match_scores: dict[str, tuple[str, float]] = {}
+                    # Only web jobs keep embeddings (in the sidecar, for the
+                    # campaign relabel pass); CLI runs skip the extra extraction.
+                    label_embeddings: Optional[dict] = {} if _result_store is not None else None
                     matches = match_speakers(
                         audio_path=wav_path,
                         diarization_segments=diarization,
@@ -591,7 +594,10 @@ def process_file(
                         profile_filter=profile_filter,
                         allow_many_to_one=(num_speakers is None),
                         scores=match_scores,
+                        embeddings=label_embeddings,
                     )
+                    if label_embeddings:
+                        _result_store["speaker_embeddings"] = label_embeddings
                     if matches:
                         speaker_map = matches
                         tqdm.write("  Speaker matches:")

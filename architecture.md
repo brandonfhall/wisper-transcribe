@@ -33,6 +33,7 @@ src/wisper_transcribe/
 ├── diarizer.py          pyannote pipeline wrapper, lazy pipeline cache
 ├── aligner.py           Merge transcription words with diarization turns (see "Alignment")
 ├── speaker_manager.py   Profile CRUD, embedding extraction, cosine matching, EMA updates, rename
+├── speaker_registry.py  Campaign-wide relabel pass from per-transcript sidecar embeddings
 ├── formatter.py         Markdown + YAML frontmatter output; per-block parse/rewrite for speaker edits
 ├── audio_utils.py       validate_audio(), convert_to_wav(), get_duration(), load_wav_as_tensor()
 ├── time_utils.py        format_timestamp(), format_duration()
@@ -157,6 +158,21 @@ Ties sort by label then profile name for determinism.
 ### Campaign scoping
 
 Campaigns are an **additive roster layer** over one global profile store. Embeddings in `profiles/embeddings/` stay global so the same person is recognized across campaigns without re-enrolling. Passing `campaign=<slug>` restricts `match_speakers()` candidates to that roster via `profile_filter`; `None` matches globally. Deleting a campaign never touches profiles or embeddings.
+
+### Campaign relabel (`speaker_registry.py`)
+
+Diarization labels are scoped to one run, so cross-session identity comes only from embeddings. Web transcription jobs store each label's embedding in the sidecar (`speaker_embeddings` + `embedding_space`) and each name's provenance (`speaker_map_source`: `auto` from matching, `manual` from the wizard). `relabel_campaign()`:
+
+1. Loads every campaign transcript's sidecar. Missing or old-space embeddings are backfilled from the durable source audio when it still exists (`backfill=True`) and saved; otherwise the transcript is skipped.
+2. Re-matches each transcript's labels against the campaign roster with `assign_labels()` (many-to-one on).
+3. Clusters the still-unknown labels across transcripts (greedy centroid, same threshold). A cluster heard in two or more transcripts becomes `Recurring Speaker N`; single-session voices keep per-transcript `Unknown Speaker N` numbering.
+4. Renames only labels that are relabelable, through `apply_renames(source="auto")`, the same single-pass block rewrite the wizard uses.
+
+- **Manual names are never overwritten.** A label with `speaker_map_source` follows it. Sidecars without provenance (older runs) treat only pipeline-shaped names (`AUTO_NAME_RE`: raw labels, `Unknown/Recurring Speaker N`) as automatic, since a real name there may have been typed.
+- **Pipeline-shaped names never become profiles.** `apply_renames()` excludes `AUTO_NAME_RE` names from enrollment, so a prefilled `Unknown Speaker 1` submitted unchanged can't create a junk profile that competes in every match.
+- **Propagation:** a wizard enroll job for a campaign transcript runs `relabel_campaign(backfill=False)` after enrolling, so a newly named person is renamed in the campaign's other sessions from stored embeddings without re-reading audio. The full pass (with backfill) is `wisper campaigns relabel` or the campaign page's **Re-match speakers** (`JOB_SPEAKER_RELABEL`).
+- **Profiles aren't updated from auto matches**, only from wizard or explicit enrollment, so a wrong match can't reinforce itself.
+- `speaker_registry` imports `apply_renames`/`AUTO_NAME_RE` lazily from `web/enroll_shared.py` (pure Python, no FastAPI) rather than duplicating the block-rewrite logic.
 
 ### Embedding extraction
 
@@ -376,7 +392,7 @@ output/
 └── <stem>_excerpt_<label>.txt       words audible in that clip
 ```
 
-`<stem>_diar.json` holds `diarization_segments`, `speaker_map`, `input_path` (the durable audio copy), and `campaign`. It makes the transcript-centric enrollment wizard work after restarts.
+`<stem>_diar.json` holds `diarization_segments`, `speaker_map`, `input_path` (the durable audio copy), and `campaign`. It makes the transcript-centric enrollment wizard work after restarts. Newer sidecars also carry `speaker_map_source` (label → `auto`/`manual`), `speaker_embeddings` (label → unit-length vector), and `embedding_space`, used by the campaign relabel pass.
 
 - **`speaker_map` is authoritative** for "what does raw label X display as": it is exactly what the formatter used, and every wizard rename updates it. Never reconstruct it from the rendered markdown when the sidecar has it. Sidecars without the key fall back to interval matching.
 - Deleting a transcript also deletes its summary, sidecar, excerpt clips, and the referenced audio copy — but only a path inside the output dir, so old sidecars pointing at a tempdir are left alone.
@@ -528,8 +544,9 @@ Job types:
 - **Transcription** — `process_file()`, optionally chaining refine/summarize (`post_refine`/`post_summarize`) in the same thread.
 - **`refine` / `summarize`** — `submit_llm()`. Provider output is captured by redirecting `sys.stderr` for the job thread (safe under one-job-at-a-time).
 - **`JOB_CAMPAIGN_JOURNAL`** — `submit_journal()`: fold next, fold all, or rebuild.
+- **`JOB_SPEAKER_RELABEL`** — `submit_relabel()`: `relabel_campaign()` with audio backfill; logs renames and skipped sessions.
 - **`JOB_ENROLL`** — `enroll_mode` selects:
-  - `wizard` — embeddings for renames already applied by the wizard. Carries only the transcript path, rename groups, and device; re-reads the sidecar. `output_path` is set at submit so "View transcript" works immediately.
+  - `wizard` — embeddings for renames already applied by the wizard. Carries only the transcript path, rename groups, and device; re-reads the sidecar. `output_path` is set at submit so "View transcript" works immediately. For a campaign transcript it then propagates names with `relabel_campaign(backfill=False)`; a propagation failure is logged and doesn't fail the job.
   - `standalone` — `/speakers/enroll` upload: convert → diarize → pick the speaker with the most speech → enroll or EMA-update. The upload is renamed to `wisper_enrollsrc_<job-id>` at submit and deleted in a `finally`.
   - `recording` — enroll an unbound Discord speaker from their per-user track, then bind the id in the recording and campaign (best-effort follow-ups). Never deletes recording audio.
 - **`JOB_LIVE`** — open-ended; runs `run_live_loop()` until `stop_live()` sets `live_stop_event`, which is normal completion, not cancellation. It holds the only worker slot for the whole session. Lines go to `job.live_lines` and `recordings/<id>/live_transcript.md`.

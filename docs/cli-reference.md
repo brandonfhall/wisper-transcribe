@@ -221,6 +221,28 @@ wisper campaigns reorder d-d-mondays --set "s01,s02,s03" # replace the whole ord
 
 `reorder` sets the order sessions are folded into the journal and numbered on the campaign page. The order is when each transcript was added to the campaign, not its date, so a late-added session can land out of place. `--set` takes every transcript stem in the campaign, comma-separated, and errors unless it is an exact permutation of the current list.
 
+#### `wisper campaigns relabel`
+
+Re-matches speakers across every session in a campaign, so identities stay consistent between sessions:
+
+```bash
+wisper campaigns relabel d-d-mondays --dry-run      # show what would change
+wisper campaigns relabel d-d-mondays                # apply
+wisper campaigns relabel d-d-mondays --no-backfill  # only use voice data already stored
+```
+
+- Automatically assigned names are matched against the campaign roster again, so a player enrolled after a session was transcribed gets named in it.
+- An unknown voice heard in two or more sessions gets one shared name, `Recurring Speaker N`. Name them once in any session's wizard and the others follow.
+- Names you set by hand are never changed.
+- Sessions transcribed before this feature have no stored voice data; it is re-extracted from the saved source audio when that still exists (web uploads keep it next to the transcript). Sessions without either are skipped and listed.
+
+```
+Options:
+  --dry-run       Show what would change without writing anything
+  --no-backfill   Don't re-read source audio for sessions without stored voice data
+  --device        Device for voice extraction (auto, cpu, cuda, mps)
+```
+
 #### `wisper campaigns journal`
 
 Maintains a **rolling campaign journal** — a single living document the LLM rewrites as each new session is folded in. It reads the per-session `.summary.md` sidecars (from `wisper summarize`) and accumulates them into `campaigns/<slug>/journal.md`, tracking story arcs, open plot threads, NPCs, party decisions, and a running loot ledger. Context stays bounded: each fold sends only the current journal plus one new session summary.

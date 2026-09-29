@@ -961,6 +961,46 @@ def campaigns_reorder(slug: str, stem: Optional[str], move_up: bool, move_down: 
         click.echo(f"  {i}. {s}{marker}")
 
 
+@campaigns.command("relabel")
+@click.argument("slug")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Show what would change without writing anything")
+@click.option("--no-backfill", is_flag=True, default=False,
+              help="Only use voice data already stored with each transcript; "
+                   "don't re-read source audio for older ones")
+@click.option("--device", default="auto", type=click.Choice(_config.DEVICES),
+              help="Device for extracting voice data from source audio")
+def campaigns_relabel(slug: str, dry_run: bool, no_backfill: bool, device: str):
+    """Re-match automatically named speakers across a campaign's sessions.
+
+    Every web-transcribed session in the campaign is matched against the
+    roster again, and unknown voices heard in two or more sessions get one
+    shared "Recurring Speaker N" name. Names you set by hand are never changed.
+    """
+    from .campaign_manager import _validate_campaign_slug, load_campaigns
+    from .config import get_device
+    from .speaker_registry import relabel_campaign
+
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        raise click.ClickException(f"Invalid campaign slug: {slug!r}")
+    if safe not in load_campaigns():
+        raise click.ClickException(f"Campaign {safe!r} not found.")
+    if device == "auto":
+        device = get_device()
+
+    report = relabel_campaign(safe, device=device, backfill=not no_backfill,
+                              dry_run=dry_run, progress=click.echo)
+    changed = sum(len(t.renamed) for t in report.transcripts)
+    verb = "Would rename" if dry_run else "Renamed"
+    click.echo(f"{verb} {changed} speaker label(s) across {len(report.transcripts)} session(s).")
+    if report.recurring:
+        click.echo(f"Unknown voices heard in more than one session: {report.recurring}")
+    for t in report.transcripts:
+        if t.skipped:
+            click.echo(f"  Skipped {t.stem}: {t.skipped}")
+
+
 @campaigns.command("journal")
 @click.argument("slug")
 @click.option("--session", default=None,

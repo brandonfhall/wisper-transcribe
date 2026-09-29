@@ -314,6 +314,22 @@ def test_campaigns_delete_path_traversal_blocked(client, payload):
 
 
 @pytest.mark.parametrize("payload", _CAMPAIGN_SLUG_PAYLOADS)
+def test_campaigns_relabel_path_traversal_blocked(client, payload):
+    from urllib.parse import quote
+    with patch.object(client.app.state.job_queue, "submit_relabel") as mock_submit:
+        resp = client.post(
+            f"/campaigns/{quote(payload, safe='')}/relabel", follow_redirects=False
+        )
+    # 303/400: our validator rejected; 404/405: routing rejected after normalisation.
+    assert resp.status_code in (303, 400, 404, 405)
+    mock_submit.assert_not_called()
+    location = resp.headers.get("location", "")
+    assert "\x00" not in location
+    assert ".." not in location
+    assert "\r" not in location and "\n" not in location
+
+
+@pytest.mark.parametrize("payload", _CAMPAIGN_SLUG_PAYLOADS)
 def test_campaigns_add_member_path_traversal_blocked(client, payload):
     from urllib.parse import quote
     resp = client.post(

@@ -45,16 +45,15 @@ The failure is speaker attribution, not transcription. Identity drifts within a 
 - **wespeaker separates better.** Same-person vs other-person gap 0.34 (wespeaker-voxceleb-resnet34-LM) vs 0.25 (`pyannote/embedding`) on single segments.
 - **More segments help.** Averaging 30 L2-normalized segments instead of 5 raw ones raised same-person similarity 0.05–0.10 in both models.
 - **Profiles now use the diarizer's WeSpeaker model** (shipped; see architecture.md "Embedding spaces"). Extraction re-embeds solo segments rather than using `DiarizeOutput.speaker_embeddings`, so enrollment and matching share one estimator and the parallel-subprocess path is untouched.
+- **Campaign relabel + rename propagation** (shipped; see architecture.md "Campaign relabel").
 - **The local profile store is contaminated** (user data, not code). `mike.npy` = `brandon.npy` = `speaker_00.npy` byte-for-byte; `brad.npy` = `speaker_04.npy`; six more duplicate pairs from audiobook enrollment. Timestamps (2026-07-12) predate the enrollment fixes in #52; current enrollment paths look clean. `ben.npy` was enrolled from the 09-12 catch-all cluster and is mostly Nick.
 
 Caveat: one session pair, wizard names as rough ground truth, no DER. Strong signal, not proof — confirm with the measurement set below before tuning numbers.
 
 ### Phases
 
-1. **Profile cleanup (user action, no code).** Delete duplicate `speaker_*` profiles, re-enroll Mike and Ben from clean sessions. Consider a `wisper speakers doctor` check that flags identical or near-identical (>0.95) profile embeddings.
-2. **Cross-file registry pass per campaign.** Pool per-file speaker embeddings across a campaign's transcripts, cluster globally, and write names back through each `_diar.json` `speaker_map`.
-3. **Rename propagation.** A wizard rename applies to every transcript in the campaign that carries the same matched profile.
-4. **Forced alignment (later).** Whisper word timestamps drift ~120–150 ms, which misattributes boundary words; a wav2vec2 alignment pass (WhisperX-style) brings that to ~35–40 ms. Keep faster-whisper as the decoder.
+1. **Profile cleanup (user action, no code).** The model upgrade already requires re-enrolling every profile. While doing it, delete the `speaker_*` / `SPEAKER_NN` junk profiles and duplicates, and enroll Mike and Ben from sessions where they're clearly separated. Consider a `wisper speakers doctor` check that flags identical or near-identical (>0.95) profile embeddings.
+2. **Forced alignment (later).** Whisper word timestamps drift ~120–150 ms, which misattributes boundary words; a wav2vec2 alignment pass (WhisperX-style) brings that to ~35–40 ms. Keep faster-whisper as the decoder.
 
 ### Measurement
 

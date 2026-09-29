@@ -2230,6 +2230,55 @@ def test_campaign_journal_post_unknown_campaign(client, tmp_path, monkeypatch):
     assert "error=not_found" in resp.headers.get("location", "")
 
 
+def test_campaign_relabel_post_submits_job_and_redirects(client, tmp_path, monkeypatch):
+    """POST /campaigns/{slug}/relabel queues a re-match job and redirects to it."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.web.jobs import Job
+    from wisper_transcribe.campaign_manager import create_campaign
+    import uuid
+
+    create_campaign("My Game", data_dir=tmp_path)
+    fake_job = MagicMock(spec=Job)
+    fake_job.id = str(uuid.uuid4())
+
+    with patch.object(client.app.state.job_queue, "submit_relabel",
+                      return_value=fake_job) as mock_submit:
+        resp = client.post("/campaigns/my-game/relabel", follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/transcribe/jobs/{fake_job.id}"
+    assert mock_submit.call_args.args[0] == "my-game"
+
+
+def test_campaign_relabel_post_unknown_campaign(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    resp = client.post("/campaigns/ghost/relabel", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "error=not_found" in resp.headers.get("location", "")
+
+
+def test_relabel_job_runs_registry_and_logs_summary(tmp_path):
+    from wisper_transcribe.speaker_registry import RelabelReport, TranscriptRelabel
+    from wisper_transcribe.web.jobs import COMPLETED, JOB_SPEAKER_RELABEL, JobQueue
+
+    queue = JobQueue()
+    job = queue.submit_relabel("my-game")
+    report = RelabelReport(
+        transcripts=[TranscriptRelabel("s1", renamed={"SPEAKER_00": ("Unknown Speaker 1", "Alice")}),
+                     TranscriptRelabel("s2", skipped="no speaker data")],
+        recurring=1,
+    )
+    with patch("wisper_transcribe.speaker_registry.relabel_campaign", return_value=report) as mock_relabel:
+        queue._run_job(job)
+
+    assert job.job_type == JOB_SPEAKER_RELABEL
+    assert job.status == COMPLETED
+    assert mock_relabel.call_args.args[0] == "my-game"
+    log = "\n".join(job.log_lines)
+    assert "Renamed 1 speaker label(s) across 2 session(s)" in log
+    assert "Skipped s2: no speaker data" in log
+
+
 def test_campaign_journal_view_empty_state(client, tmp_path, monkeypatch):
     """GET the journal page before any journal exists shows the empty state."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))

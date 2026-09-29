@@ -137,6 +137,68 @@ def test_sidecar_includes_speaker_map_when_job_provides_it(tmp_path: Path):
     assert sidecar["speaker_map"] == {"SPEAKER_00": "Alice"}
 
 
+def test_sidecar_includes_embeddings_and_auto_source(tmp_path: Path):
+    """Per-label embeddings (tagged with their space) and 'auto' provenance
+    are persisted for the campaign relabel pass."""
+    import numpy as np
+
+    from wisper_transcribe.config import EMBEDDING_SPACE
+    from wisper_transcribe.web.jobs import _write_enrollment_sidecar, Job, COMPLETED
+    from wisper_transcribe.models import DiarizationSegment
+    from datetime import datetime
+    import uuid
+
+    out_md = tmp_path / "session01.md"
+    out_md.write_text("# Session 01", encoding="utf-8")
+    job = Job(
+        id=str(uuid.uuid4()),
+        status=COMPLETED,
+        created_at=datetime.now(),
+        input_path=str(tmp_path / "session01.mp3"),
+        kwargs={},
+        output_path=str(out_md),
+        diarization_segments=[DiarizationSegment(start=0.0, end=5.0, speaker="SPEAKER_00")],
+        speaker_map={"SPEAKER_00": "Alice"},
+        speaker_embeddings={"SPEAKER_00": np.array([0.6, 0.8], dtype=np.float32)},
+    )
+
+    _write_enrollment_sidecar(job, out_md)
+
+    sidecar = json.loads((tmp_path / "session01_diar.json").read_text())
+    assert sidecar["speaker_map_source"] == {"SPEAKER_00": "auto"}
+    assert sidecar["embedding_space"] == EMBEDDING_SPACE
+    assert sidecar["speaker_embeddings"]["SPEAKER_00"] == pytest.approx([0.6, 0.8])
+
+
+def test_wizard_enroll_propagates_to_campaign(tmp_path: Path):
+    """After enrolling, a wizard job for a campaign transcript re-matches the
+    campaign's other sessions from stored embeddings (no audio backfill)."""
+    from datetime import datetime
+    import uuid
+
+    from wisper_transcribe.web.jobs import COMPLETED, JOB_ENROLL, Job, JobQueue
+
+    md = tmp_path / "s1.md"
+    md.write_text("# s1", encoding="utf-8")
+    audio = tmp_path / "s1.wav"
+    audio.write_bytes(b"x")
+    (tmp_path / "s1_diar.json").write_text(json.dumps({
+        "input_path": str(audio), "campaign": "game",
+        "diarization_segments": [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"}],
+    }), encoding="utf-8")
+    job = Job(id=str(uuid.uuid4()), status=COMPLETED, created_at=datetime.now(),
+              input_path=str(md), kwargs={}, job_type=JOB_ENROLL,
+              enroll_md_path=str(md), enroll_groups={"Alice": ["SPEAKER_00"]})
+
+    with patch("wisper_transcribe.web.enroll_shared.enroll_profiles"), \
+         patch("wisper_transcribe.speaker_registry.relabel_campaign") as mock_relabel:
+        JobQueue()._run_wizard_enroll(job)
+
+    assert job.status == COMPLETED
+    assert mock_relabel.call_args.args[0] == "game"
+    assert mock_relabel.call_args.kwargs["backfill"] is False
+
+
 def test_sidecar_not_written_when_no_segments(tmp_path: Path):
     """_write_enrollment_sidecar is a no-op when diarization_segments is empty."""
     from wisper_transcribe.web.jobs import _write_enrollment_sidecar, Job, COMPLETED
@@ -333,6 +395,56 @@ def test_resolve_current_names_falls_back_to_interval_heuristic_for_legacy_sidec
     assert resolve_current_names(md, {"speaker_map": {}, **legacy_diar}, segments) == {
         "SPEAKER_00": "Alice"
     }
+
+
+def test_apply_renames_never_enrolls_pipeline_shaped_names(tmp_path: Path):
+    """A prefilled "Unknown Speaker 1" left as-is renames nothing into a profile."""
+    from wisper_transcribe.web.enroll_shared import apply_renames
+
+    md = tmp_path / "session01.md"
+    md.write_text(
+        "---\ntitle: Session 01\n---\n\n"
+        "**Unknown Speaker 1** *(00:00)*: hi\n"
+        "**Recurring Speaker 2** *(00:12)*: hello\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "session01_diar.json").write_text(json.dumps({
+        "diarization_segments": [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"},
+                                 {"start": 12.0, "end": 18.0, "speaker": "SPEAKER_01"}],
+        "speaker_map": {"SPEAKER_00": "Unknown Speaker 1", "SPEAKER_01": "Recurring Speaker 2"},
+    }), encoding="utf-8")
+    segments = _diar_segments(("SPEAKER_00", 0.0, 5.0), ("SPEAKER_01", 12.0, 18.0))
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        result = apply_renames(md, segments, {"SPEAKER_00": "Unknown Speaker 1",
+                                              "SPEAKER_01": "Recurring Speaker 2"})
+
+    assert result.groups == {}
+
+
+def test_apply_renames_records_name_source(tmp_path: Path):
+    """Changed labels get the caller's source; unchanged labels keep theirs."""
+    from wisper_transcribe.web.enroll_shared import apply_renames
+
+    md = tmp_path / "session01.md"
+    md.write_text(
+        "---\ntitle: Session 01\n---\n\n**Unknown Speaker 1** *(00:00)*: hi\n**Bob** *(00:12)*: yo\n",
+        encoding="utf-8",
+    )
+    sidecar = tmp_path / "session01_diar.json"
+    sidecar.write_text(json.dumps({
+        "diarization_segments": [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"},
+                                 {"start": 12.0, "end": 18.0, "speaker": "SPEAKER_01"}],
+        "speaker_map": {"SPEAKER_00": "Unknown Speaker 1", "SPEAKER_01": "Bob"},
+        "speaker_map_source": {"SPEAKER_00": "auto", "SPEAKER_01": "auto"},
+    }), encoding="utf-8")
+    segments = _diar_segments(("SPEAKER_00", 0.0, 5.0), ("SPEAKER_01", 12.0, 18.0))
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        apply_renames(md, segments, {"SPEAKER_00": "Carol", "SPEAKER_01": "Bob"})
+
+    sources = json.loads(sidecar.read_text())["speaker_map_source"]
+    assert sources == {"SPEAKER_00": "manual", "SPEAKER_01": "auto"}
 
 
 def test_apply_renames_swap_on_reentry(tmp_path: Path):
