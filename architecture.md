@@ -33,6 +33,7 @@ src/wisper_transcribe/
 ├── diarizer.py          pyannote pipeline wrapper, lazy pipeline cache
 ├── aligner.py           Merge transcription words with diarization turns (see "Alignment")
 ├── speaker_manager.py   Profile CRUD, embedding extraction, cosine matching, EMA updates, rename
+├── speaker_registry.py  Campaign-wide relabel pass from per-transcript sidecar embeddings
 ├── formatter.py         Markdown + YAML frontmatter output; per-block parse/rewrite for speaker edits
 ├── audio_utils.py       validate_audio(), convert_to_wav(), get_duration(), load_wav_as_tensor()
 ├── time_utils.py        format_timestamp(), format_duration()
@@ -145,25 +146,54 @@ Audio file
 
 1. Extract an embedding for each diarization label.
 2. Cosine-score every (label, profile) pair.
-3. **Exclusive pass:** consume pairs highest-first, assigning when both the label and the profile are free and the score clears `similarity_threshold` (default 0.65). A label whose first choice is taken falls through to its next-best unused profile.
+3. **Exclusive pass:** consume pairs highest-first, assigning when both the label and the profile are free and the score clears `similarity_threshold` (default `DEFAULT_SIMILARITY_THRESHOLD`, 0.55). A label whose first choice is taken falls through to its next-best unused profile.
 4. **Many-to-one pass** (`allow_many_to_one=True`, used when `num_speakers` isn't pinned): a still-unassigned label may claim an already-used profile above threshold. This absorbs pyannote splitting one person into two labels. Pinning `num_speakers` asserts one label per person, so this pass is skipped.
 5. Anything left becomes `Unknown Speaker N`, numbered by sorted label order so numbering is deterministic.
 
 Ties sort by label then profile name for determinism.
 
+- **Why 0.55:** on real sessions in the WeSpeaker space, cross-session same-person pairs scored 0.65–0.95 and different people at most 0.50. `load_config()` migrates a saved `0.65` (the old model's default, persisted verbatim by `save_config()`) to the new default.
+- **Scores are surfaced:** `match_speakers(scores=...)` fills `label -> (closest profile, similarity)`. The job log and `wisper speakers test` print the score of each match, or the closest profile for a miss, so near-misses are visible when tuning.
+
 ### Campaign scoping
 
 Campaigns are an **additive roster layer** over one global profile store. Embeddings in `profiles/embeddings/` stay global so the same person is recognized across campaigns without re-enrolling. Passing `campaign=<slug>` restricts `match_speakers()` candidates to that roster via `profile_filter`; `None` matches globally. Deleting a campaign never touches profiles or embeddings.
 
+### Campaign relabel (`speaker_registry.py`)
+
+Diarization labels are scoped to one run, so cross-session identity comes only from embeddings. Web transcription jobs store each label's embedding in the sidecar (`speaker_embeddings` + `embedding_space`) and each name's provenance (`speaker_map_source`: `auto` from matching, `manual` from the wizard). `relabel_campaign()`:
+
+1. Loads every campaign transcript's sidecar. Missing or old-space embeddings are backfilled from the durable source audio when it still exists (`backfill=True`) and saved; otherwise the transcript is skipped.
+2. Re-matches each transcript's labels against the campaign roster with `assign_labels()` (many-to-one on).
+3. Clusters the still-unknown labels across transcripts (greedy centroid, same threshold). A cluster heard in two or more transcripts becomes `Recurring Speaker N`; single-session voices keep per-transcript `Unknown Speaker N` numbering.
+4. Renames only labels that are relabelable, through `apply_renames(source="auto")`, the same single-pass block rewrite the wizard uses.
+
+- **Manual names are never overwritten.** A label with `speaker_map_source` follows it. Sidecars without provenance (older runs) treat only pipeline-shaped names (`AUTO_NAME_RE`: raw labels, `Unknown/Recurring Speaker N`) as automatic, since a real name there may have been typed.
+- **Pipeline-shaped names never become profiles.** `apply_renames()` excludes `AUTO_NAME_RE` names from enrollment, so a prefilled `Unknown Speaker 1` submitted unchanged can't create a junk profile that competes in every match.
+- **Propagation:** a wizard enroll job for a campaign transcript runs `relabel_campaign(backfill=False)` after enrolling, so a newly named person is renamed in the campaign's other sessions from stored embeddings without re-reading audio. The full pass (with backfill) is `wisper campaigns relabel` or the campaign page's **Re-match speakers** (`JOB_SPEAKER_RELABEL`).
+- **Profiles aren't updated from auto matches**, only from wizard or explicit enrollment, so a wrong match can't reinforce itself.
+- `speaker_registry` imports `apply_renames`/`AUTO_NAME_RE` lazily from `web/enroll_shared.py` (pure Python, no FastAPI) rather than duplicating the block-rewrite logic.
+
 ### Embedding extraction
 
-`extract_embedding()` slices the WAV to a speaker's segments and runs pyannote's embedding model (512-dim). Segments are chosen by `_select_embedding_segments()`:
+`extract_embedding()` slices the WAV to a speaker's segments and runs the WeSpeaker ResNet34 model bundled in the diarization repo (`DIARIZATION_MODEL`, subfolder `EMBEDDING_SUBFOLDER`; 256-dim). Each segment's embedding is L2-normalized before averaging and the mean is normalized again, so long segments don't dominate and stored vectors are unit length. Segments are chosen by `_select_embedding_segments()` with `max_count=EMBEDDING_SEGMENTS` (30):
 
-1. Up to 5 **solo** segments (no overlap with another speaker) of 2–20 s, longest first.
+1. Up to 30 **solo** segments (no overlap with another speaker) of 2–20 s, longest first.
 2. Else all solo segments, longest first.
 3. Else the plain longest segments.
 
-Solo segments are preferred because cross-talk and background music bleed into the longest turns.
+Solo segments are preferred because cross-talk and background music bleed into the longest turns. Excerpt clips reuse the same selector with `max_count=1`.
+
+- **Why the diarizer's own embedding model:** profiles and diarization clusters share one embedding space and one gated license. Measured on real sessions, it separated same-person from different-person pairs by 0.34 cosine vs 0.25 for the old `pyannote/embedding`.
+- **Why 30 segments:** raised same-person similarity across sessions by 0.05–0.10 over 5, at a few extra seconds of GPU time per speaker.
+
+### Embedding spaces
+
+Embeddings from different models aren't comparable (and differ in dimension), so each profile records `embedding_space` in `speakers.json`. `config.EMBEDDING_SPACE` is the current tag; a missing tag means the old 512-dim `pyannote/embedding`.
+
+- `load_profile_embedding()` returns `None` for any profile not in the current space; `match_speakers()` and the CLI ranking only compare through it.
+- `stale_profile_keys()` lists old-space profiles. The pipeline logs them as skipped, the Speakers page badges them, and the CLI ranking lists them unscored.
+- `update_embedding()` replaces an old-space vector outright and retags the profile instead of averaging, so any re-enroll path (wizard, standalone upload, `wisper enroll`, CLI pick) migrates a profile.
 
 ### CLI enrollment (`--enroll-speakers`)
 
@@ -178,7 +208,7 @@ Solo segments are preferred because cross-talk and background music bleed into t
 
 - `<key>.npy` — embedding. `<key>.mp3` — ~12 s reference clip for playback on the Speakers page.
 - Removal, rename, and reset handle `.npy` and `.mp3` together so the play button never dangles.
-- **EMA update** (`--update`): `stored = 0.7 * stored + 0.3 * new`.
+- **EMA update** (`--update`): `stored = unit(0.7 * unit(stored) + 0.3 * unit(new))`, under `_profiles_lock` because it may retag the profile.
 - Profile key is `name.lower().replace(" ", "_")` — both filename and URL slug.
 
 ### Rename
@@ -334,7 +364,7 @@ All user data lives in the OS user data dir unless `WISPER_DATA_DIR` is set. `co
 ├── profiles/
 │   ├── speakers.json                profile key → SpeakerProfile (global)
 │   └── embeddings/
-│       ├── <key>.npy                512-dim float32 voice embedding
+│       ├── <key>.npy                unit-length float32 voice embedding (256-dim; 512 for untagged legacy)
 │       └── <key>.mp3                ~12 s reference clip
 ├── campaigns/
 │   ├── campaigns.json               slug → Campaign (roster + ordered transcripts)
@@ -362,7 +392,7 @@ output/
 └── <stem>_excerpt_<label>.txt       words audible in that clip
 ```
 
-`<stem>_diar.json` holds `diarization_segments`, `speaker_map`, `input_path` (the durable audio copy), and `campaign`. It makes the transcript-centric enrollment wizard work after restarts.
+`<stem>_diar.json` holds `diarization_segments`, `speaker_map`, `input_path` (the durable audio copy), and `campaign`. It makes the transcript-centric enrollment wizard work after restarts. Newer sidecars also carry `speaker_map_source` (label → `auto`/`manual`), `speaker_embeddings` (label → unit-length vector), and `embedding_space`, used by the campaign relabel pass.
 
 - **`speaker_map` is authoritative** for "what does raw label X display as": it is exactly what the formatter used, and every wizard rename updates it. Never reconstruct it from the rendered markdown when the sidecar has it. Sidecars without the key fall back to interval matching.
 - Deleting a transcript also deletes its summary, sidecar, excerpt clips, and the referenced audio copy — but only a path inside the output dir, so old sidecars pointing at a tempdir are left alone.
@@ -514,8 +544,9 @@ Job types:
 - **Transcription** — `process_file()`, optionally chaining refine/summarize (`post_refine`/`post_summarize`) in the same thread.
 - **`refine` / `summarize`** — `submit_llm()`. Provider output is captured by redirecting `sys.stderr` for the job thread (safe under one-job-at-a-time).
 - **`JOB_CAMPAIGN_JOURNAL`** — `submit_journal()`: fold next, fold all, or rebuild.
+- **`JOB_SPEAKER_RELABEL`** — `submit_relabel()`: `relabel_campaign()` with audio backfill; logs renames and skipped sessions.
 - **`JOB_ENROLL`** — `enroll_mode` selects:
-  - `wizard` — embeddings for renames already applied by the wizard. Carries only the transcript path, rename groups, and device; re-reads the sidecar. `output_path` is set at submit so "View transcript" works immediately.
+  - `wizard` — embeddings for renames already applied by the wizard. Carries only the transcript path, rename groups, and device; re-reads the sidecar. `output_path` is set at submit so "View transcript" works immediately. For a campaign transcript it then propagates names with `relabel_campaign(backfill=False)`; a propagation failure is logged and doesn't fail the job.
   - `standalone` — `/speakers/enroll` upload: convert → diarize → pick the speaker with the most speech → enroll or EMA-update. The upload is renamed to `wisper_enrollsrc_<job-id>` at submit and deleted in a `finally`.
   - `recording` — enroll an unbound Discord speaker from their per-user track, then bind the id in the recording and campaign (best-effort follow-ups). Never deletes recording audio.
 - **`JOB_LIVE`** — open-ended; runs `run_live_loop()` until `stop_live()` sets `live_stop_event`, which is normal completion, not cancellation. It holds the only worker slot for the whole session. Lines go to `job.live_lines` and `recordings/<id>/live_transcript.md`.
@@ -559,7 +590,7 @@ On transcription completion, `jobs.py`:
 `enroll_shared.py`:
 - **`resolve_current_names()`** — the one answer to "what does this raw label display as": sidecar `speaker_map`, else `build_legacy_label_map()` (interval-matching timestamps against diarization spans).
 - **`template_current_names()`** — drops entries whose value is still a raw `SPEAKER_XX` label, so untouched fields start empty and can't create junk "SPEAKER_03" profiles.
-- **`apply_renames()`** — fast, runs in the request. Ignores raw-label-shaped new names. Rewrites the transcript in **one pass**: each block is attributed to a raw label once, by timestamp containment, falling back to an unambiguous current-name match when the timestamp guess isn't confident. Only renamed labels' blocks change. This handles swaps (Alice↔Bob) and two labels sharing a display name. Frontmatter `speakers:` is rewritten via YAML round-trip (`formatter.rewrite_frontmatter_speakers()`), skipping names shared by several labels. `speaker_map` is updated. Returns eligible renames grouped by target name.
+- **`apply_renames()`** — fast, runs in the request. Ignores raw-label-shaped new names. Rewrites the transcript in **one pass**: each block is attributed to a raw label once: by its displayed name when exactly one label currently has that name, otherwise by timestamp among the labels sharing the name (or all labels if the name isn't in the map). The name comes first because block timestamps are whole seconds and overlapping turns put many of them inside another speaker's turn; timestamp-first attribution silently skipped those blocks. Only renamed labels' blocks change. Changed labels get `speaker_map_source` = the caller's `source` (`manual` from the wizard); pipeline-shaped names (`AUTO_NAME_RE`) are never grouped for enrollment. This handles swaps (Alice↔Bob) and two labels sharing a display name. Frontmatter `speakers:` is rewritten via YAML round-trip (`formatter.rewrite_frontmatter_speakers()`), skipping names shared by several labels. `speaker_map` is updated. Returns eligible renames grouped by target name.
 - **`enroll_profiles()`** — slow, runs in `JOB_ENROLL`. Converts once. Existing profiles get EMA updates (`update_embedding()`), never `enroll_speaker()`, which would overwrite metadata. New profiles get `enroll_speaker()` with a pre-averaged `embedding=` when several labels map to one name. Adds each profile to the campaign if it isn't already a member.
 - **`find_excerpt_clip()`** — the one excerpt disk lookup + CodeQL guard, scoped to a single transcript stem (every transcript reuses `SPEAKER_00`…). The job-based excerpt route 404s once the job is gone instead of guessing.
 
@@ -657,8 +688,10 @@ Downloaded on first use to `~/.cache/huggingface/hub/`; later runs are offline.
 | Model | Purpose | Size |
 |-------|---------|------|
 | `openai/whisper-*` (via faster-whisper) | Transcription | 75 MB – 1.5 GB |
-| `pyannote/speaker-diarization-3.1` | Diarization pipeline | ~400 MB |
-| `pyannote/embedding` | Voice embeddings | ~200 MB |
-| `pyannote/segmentation-3.0` | Voice activity (pipeline dependency) | ~100 MB |
+| `pyannote/speaker-diarization-community-1` | Diarization pipeline (segmentation + WeSpeaker embedding + VBx clustering bundled); its `embedding/` subfolder also produces profile embeddings | ~32 MB |
 
-License acceptance (free, one-time): [speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1), [embedding](https://huggingface.co/pyannote/embedding), [segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0).
+License acceptance (free, one-time): [speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1). The model id lives in `config.DIARIZATION_MODEL`.
+
+- **Why community-1 over 3.1:** on multi-hour 5–8-speaker sessions 3.1 produced one catch-all cluster plus several fragments of the same person; community-1 produced one cluster per person at the same runtime.
+- **`diarize()` uses `speaker_diarization`, not `exclusive_speaker_diarization`:** solo-segment selection for embeddings and excerpts needs the overlap information the exclusive view removes.
+- **Gated-model errors:** `load_pipeline()` and `_load_embedding_model()` turn `GatedRepoError` into a message naming the terms URL, since existing users must accept community-1 separately from 3.1.

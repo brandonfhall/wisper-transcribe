@@ -321,6 +321,24 @@ async def campaign_journal_update(
     return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
 
 
+@router.post("/{slug}/relabel", response_class=HTMLResponse)
+async def campaign_relabel(request: Request, slug: str) -> RedirectResponse:
+    """Submit a campaign-wide speaker re-match job and redirect to its progress page."""
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        return invalid_input_response("Invalid campaign slug")
+
+    campaign = load_campaigns().get(safe)
+    if campaign is None:
+        return error_redirect("/campaigns", "not_found")
+
+    job = get_queue(request).submit_relabel(
+        safe, name=f"Re-match speakers: {campaign.display_name}"
+    )
+    # job.id is a server-generated uuid4 — never user input (CodeQL-safe redirect).
+    return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
+
+
 @router.get("/{slug}/journal", response_class=HTMLResponse)
 async def campaign_journal_view(request: Request, slug: str) -> HTMLResponse:
     """Render the campaign's rolling journal, or an empty-state page."""

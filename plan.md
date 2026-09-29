@@ -28,6 +28,47 @@ A local-recording `JOB_TRANSCRIPTION` job reported COMPLETED and logged "Wrote `
 
 ---
 
+## Speaker consistency (in progress)
+
+The failure is speaker attribution, not transcription. Identity drifts within a file (one person split across clusters, or several merged into one) and across sessions (profiles miss). Research and a measured spike on two real Hanataz sessions (2026-09-12, 2026-09-19) on 2026-09-29 point at diarization quality and matching calibration, not the architecture: diarize → embed each label → match to profiles is correct.
+
+### Already in place (don't redo)
+
+- `min_speakers=2`/`max_speakers=8` config defaults constrain the diarizer when no count is given.
+- `allow_many_to_one` is on whenever `num_speakers` is unpinned.
+- pyannote issue #1525 (`num_clusters` bug) was fixed in 2023; `num_speakers` is safe to use.
+
+### Spike findings
+
+- **Diarization now runs on community-1** (shipped; rationale in `architecture.md`). On 09-12 it gave one cluster per person where 3.1 gave a 59-min catch-all plus four Nick fragments.
+- **Threshold recalibrated to 0.55** (shipped). On the new production path (community-1 clusters + 30-segment WeSpeaker embeddings), every 09-12 cluster's best 09-19 match scored 0.65–0.95; the highest wrong-person score was 0.50.
+- **wespeaker separates better.** Same-person vs other-person gap 0.34 (wespeaker-voxceleb-resnet34-LM) vs 0.25 (`pyannote/embedding`) on single segments.
+- **More segments help.** Averaging 30 L2-normalized segments instead of 5 raw ones raised same-person similarity 0.05–0.10 in both models.
+- **Profiles now use the diarizer's WeSpeaker model** (shipped; see architecture.md "Embedding spaces"). Extraction re-embeds solo segments rather than using `DiarizeOutput.speaker_embeddings`, so enrollment and matching share one estimator and the parallel-subprocess path is untouched.
+- **Campaign relabel + rename propagation** (shipped; see architecture.md "Campaign relabel").
+- **The local profile store is contaminated** (user data, not code). `mike.npy` = `brandon.npy` = `speaker_00.npy` byte-for-byte; `brad.npy` = `speaker_04.npy`; six more duplicate pairs from audiobook enrollment. Timestamps (2026-07-12) predate the enrollment fixes in #52; current enrollment paths look clean. `ben.npy` was enrolled from the 09-12 catch-all cluster and is mostly Nick.
+
+Caveat: one session pair, wizard names as rough ground truth, no DER. Strong signal, not proof — confirm with the measurement set below before tuning numbers.
+
+### Phases
+
+1. **Profile cleanup (user action, no code).** The model upgrade already requires re-enrolling every profile. While doing it, delete the `speaker_*` / `SPEAKER_NN` junk profiles and duplicates, and enroll Mike and Ben from sessions where they're clearly separated. Consider a `wisper speakers doctor` check that flags identical or near-identical (>0.95) profile embeddings.
+2. **Forced alignment (later).** Whisper word timestamps drift ~120–150 ms, which misattributes boundary words; a wav2vec2 alignment pass (WhisperX-style) brings that to ~35–40 ms. Keep faster-whisper as the decoder.
+
+### Measurement
+
+- 8–12 hand-corrected excerpts of 2–3 min, stratified by speaker count (2–3 / 4–5 / 6–8), in-room vs remote, low vs high overlap. Export RTTM.
+- Report DER split into missed / false alarm / confusion (`pyannote.metrics`), plus JER so quiet players aren't hidden by the loudest one. cpWER via `meeteval` once alignment work starts.
+- Compare configs with a paired bootstrap over recordings (B ≥ 1000); ship a change only when the 95% CI on the difference excludes 0.
+
+### Ruled out for now
+
+- **Sortformer:** 4-speaker cap.
+- **DiariZen:** best open accuracy but CC-BY-NC.
+- **NVIDIA Nemotron diarization:** claims 8 speakers, no independent validation yet. Revisit only if community-1 plateaus on the measurement set.
+
+---
+
 ## Live recording — feature requests
 
 - **Change input devices mid-session.** `LocalCaptureManager.start_session()` binds both capture threads to fixed device IDs; switching today means Stop + Start (a new `Recording` and a gap in the transcript). Needs capture threads that can restart against a new device while the tick thread, segment writers, and `Recording` keep running. Needs a design pass first.

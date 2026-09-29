@@ -132,6 +132,11 @@
           <button type="submit" class="btn btn-secondary btn-sm"
                   onclick="return confirm('Rebuild the whole journal? This re-summarizes all {{ active_campaign.transcripts|length }} session transcripts and regenerates the journal from scratch — {{ (active_campaign.transcripts|length) * 2 }} LLM calls.')">Rebuild journal</button>
         </form>
+        <form method="post" action="/campaigns/{{ slug }}/relabel" style="display:inline">
+          <button type="submit" class="btn btn-secondary btn-sm"
+                  title="Re-match automatically named speakers in every session against the roster. Names you set by hand are kept."
+                  onclick="return confirm('Re-match speakers in all {{ active_campaign.transcripts|length }} sessions? Automatically assigned names may change; names you set by hand are kept.')">Re-match speakers</button>
+        </form>
         {% endif %}
       </div>
     </div>

@@ -148,3 +148,20 @@ def test_resolve_compute_type_explicit():
     from wisper_transcribe.config import resolve_compute_type
     assert resolve_compute_type("int8_float16", "cuda") == "int8_float16"
     assert resolve_compute_type("float32", "cpu") == "float32"
+
+
+def test_legacy_similarity_threshold_migrates_to_new_default(tmp_path):
+    """A saved 0.65 (the old model's default) reads back as the new default."""
+    with patch("wisper_transcribe.config.get_data_dir", return_value=tmp_path):
+        from wisper_transcribe.config import DEFAULT_SIMILARITY_THRESHOLD, load_config, save_config
+
+        save_config({"similarity_threshold": 0.65})
+        assert load_config()["similarity_threshold"] == DEFAULT_SIMILARITY_THRESHOLD
+
+
+def test_custom_similarity_threshold_is_kept(tmp_path):
+    with patch("wisper_transcribe.config.get_data_dir", return_value=tmp_path):
+        from wisper_transcribe.config import load_config, save_config
+
+        save_config({"similarity_threshold": 0.6})
+        assert load_config()["similarity_threshold"] == 0.6

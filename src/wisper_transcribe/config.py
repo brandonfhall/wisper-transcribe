@@ -14,6 +14,14 @@ except ImportError:
 
 APP_NAME = "wisper-transcribe"
 
+# Cosine similarity a label needs to match a profile. Calibrated on real
+# sessions in the WeSpeaker space: same-person pairs scored 0.65+, different
+# people at most 0.50.
+DEFAULT_SIMILARITY_THRESHOLD = 0.55
+# The old pyannote/embedding default. Saved configs hold it verbatim, so
+# load_config() migrates that exact value.
+_LEGACY_SIMILARITY_THRESHOLD = 0.65
+
 DEFAULTS = {
     "model": "large-v3-turbo",
     "language": "en",
@@ -21,7 +29,7 @@ DEFAULTS = {
     "compute_type": "auto",
     "vad_filter": True,
     "timestamps": True,
-    "similarity_threshold": 0.65,
+    "similarity_threshold": DEFAULT_SIMILARITY_THRESHOLD,
     "min_speakers": 2,
     "max_speakers": 8,
     "hf_token": "",
@@ -85,6 +93,15 @@ LLM_SECRET_KEYS = frozenset({
 
 COMPUTE_TYPES = ("auto", "float16", "int8_float16", "int8", "float32")
 
+# Gated Hugging Face model; users accept its terms once.
+DIARIZATION_MODEL = "pyannote/speaker-diarization-community-1"
+# Profile embeddings load from the diarization repo's WeSpeaker subfolder, so
+# one license covers both and profiles share the clustering's embedding space.
+EMBEDDING_SUBFOLDER = "embedding"
+# Stored on each profile. Profiles tagged otherwise (or untagged, from the old
+# pyannote/embedding model) are incomparable and never matched.
+EMBEDDING_SPACE = "wespeaker-resnet34"
+
 # Allowed values, shared by CLI click.Choice lists and web-form validation.
 MODEL_SIZES = ("tiny", "base", "small", "medium", "large-v3", "large-v3-turbo")
 DEVICES = ("auto", "cpu", "cuda", "mps")
@@ -116,6 +133,8 @@ def load_config() -> dict:
         with open(config_path, "rb") as f:
             stored = tomllib.load(f)
         config.update(stored)
+    if config.get("similarity_threshold") == _LEGACY_SIMILARITY_THRESHOLD:
+        config["similarity_threshold"] = DEFAULT_SIMILARITY_THRESHOLD
     return config
 
 
@@ -200,7 +219,7 @@ def get_hf_token(config: Optional[dict] = None) -> str:
         "\nA HuggingFace token is required for speaker diarization.\n"
         "Get a free token at https://huggingface.co/settings/tokens\n"
         "You must also accept the pyannote model terms at:\n"
-        "  https://huggingface.co/pyannote/speaker-diarization-3.1"
+        f"  https://huggingface.co/{DIARIZATION_MODEL}"
     )
     token = click.prompt("HuggingFace token").strip()
     if token:

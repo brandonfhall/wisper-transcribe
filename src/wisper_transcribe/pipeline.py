@@ -9,7 +9,7 @@ from typing import Optional
 from tqdm import tqdm
 
 from .audio_utils import SUPPORTED_EXTENSIONS, convert_to_wav, get_duration, validate_audio
-from .config import check_ffmpeg, get_device, get_hf_token, load_config
+from .config import DEFAULT_SIMILARITY_THRESHOLD, check_ffmpeg, get_device, get_hf_token, load_config
 from .formatter import to_markdown
 from .models import TranscriptionSegment
 from .time_utils import format_duration
@@ -17,6 +17,16 @@ from .transcriber import transcribe
 
 
 _MAX_PLAYBACK_SECONDS = 10.0
+
+
+def _score_note(assigned: str, best: Optional[tuple[str, float]]) -> str:
+    """Log suffix: the match's score, or the closest profile for a miss."""
+    if best is None:
+        return ""
+    closest, sim = best
+    if closest == assigned:
+        return f" ({sim:.2f})"
+    return f" (closest: {closest} {sim:.2f})"
 
 
 def _play_excerpt(wav_path: Path, start: float, end: float) -> None:
@@ -214,7 +224,8 @@ def _interactive_enroll(
     ``(speaker_map, speaker_metadata)`` for use by the formatter.
     """
     from .speaker_manager import (
-        _cosine_similarity, enroll_speaker, extract_embedding, load_profiles, update_embedding,
+        _cosine_similarity, enroll_speaker, extract_embedding, load_profile_embedding,
+        load_profiles, stale_profile_keys, update_embedding,
     )
     import numpy as np
     import click
@@ -225,10 +236,13 @@ def _interactive_enroll(
     existing_profiles = load_profiles()
     enrolled_embeddings: dict[str, np.ndarray] = {}
     for pname, prof in existing_profiles.items():
-        if prof.embedding_path.exists():
-            enrolled_embeddings[pname] = np.load(str(prof.embedding_path))
+        emb = load_profile_embedding(prof)
+        if emb is not None:
+            enrolled_embeddings[pname] = emb
+    # Old-model profiles are listed unscored; picking one re-enrolls it.
+    stale_keys = stale_profile_keys(existing_profiles)
 
-    # Cache each label's embedding (up to 5 forward passes) for reuse by the
+    # Cache each label's embedding (many forward passes) for reuse by the
     # EMA update and new-profile enrollment below.
     _embedding_cache: dict[str, np.ndarray] = {}
 
@@ -254,15 +268,16 @@ def _interactive_enroll(
 
         # Show existing speakers ranked by voice similarity
         ranked_names: list[str] = []
-        if enrolled_embeddings:
+        if enrolled_embeddings or stale_keys:
             ranked: list[tuple[str, float]] = []
             try:
-                query_emb = _get_embedding(label)
+                query_emb = _get_embedding(label) if enrolled_embeddings else None
                 for pname, emb in enrolled_embeddings.items():
                     ranked.append((pname, _cosine_similarity(query_emb, emb)))
                 ranked.sort(key=lambda x: x[1], reverse=True)
             except Exception:
                 ranked = [(pname, 0.0) for pname in sorted(enrolled_embeddings)]
+            ranked += [(pname, 0.0) for pname in stale_keys]
             ranked_names = [pname for pname, _ in ranked]
 
             click.echo("  Existing speakers:")
@@ -276,7 +291,7 @@ def _interactive_enroll(
 
         # Name prompt — supports 'r' replay and numeric selection
         name = _prompt_speaker_name(
-            enrolled_embeddings, ranked_names, existing_profiles,
+            ranked_names, existing_profiles,
             play_audio, sample, wav_path,
         )
 
@@ -286,7 +301,10 @@ def _interactive_enroll(
             profile_key = next(k for k, p in existing_profiles.items() if p.display_name == name)
             role = existing_profiles[profile_key].role
             click.echo(f"  Using existing profile for {name}.")
-            if click.confirm(
+            stale = profile_key in stale_keys
+            if stale:
+                click.echo("  Its voice profile predates the current model; re-enrolling from this episode.")
+            if stale or click.confirm(
                 f"  Add this episode's audio to improve future recognition of {name}?",
                 default=False,
             ):
@@ -329,7 +347,6 @@ def _interactive_enroll(
 
 
 def _prompt_speaker_name(
-    enrolled_embeddings: dict,
     ranked_names: list[str],
     existing_profiles: dict,
     play_audio: bool,
@@ -345,7 +362,7 @@ def _prompt_speaker_name(
         if play_audio and sample and raw.lower() == "r":
             _play_excerpt(wav_path, sample.start, sample.end)
             continue
-        if enrolled_embeddings and raw.isdigit():
+        if ranked_names and raw.isdigit():
             idx = int(raw) - 1
             if 0 <= idx < len(ranked_names):
                 return existing_profiles[ranked_names[idx]].display_name
@@ -546,29 +563,46 @@ def process_file(
                         unique_speakers=unique_speakers,
                         device=device,
                         play_audio=play_audio,
-                        similarity_threshold=config.get("similarity_threshold", 0.65),
+                        similarity_threshold=config.get("similarity_threshold", DEFAULT_SIMILARITY_THRESHOLD),
                     )
                 else:
-                    from .speaker_manager import match_speakers
+                    from .speaker_manager import load_profiles, match_speakers, stale_profile_keys
                     profile_filter: Optional[set] = None
                     if campaign:
                         from .campaign_manager import get_campaign_profile_keys
                         profile_filter = get_campaign_profile_keys(campaign)
                         tqdm.write(f"  Campaign filter: {campaign} ({len(profile_filter)} member(s))")
+                    stale = stale_profile_keys({
+                        k: p for k, p in load_profiles().items()
+                        if profile_filter is None or k in profile_filter
+                    })
+                    if stale:
+                        tqdm.write(
+                            f"  Skipped {len(stale)} voice profile(s) from an older speaker model "
+                            f"({', '.join(stale)}); re-enroll them to match again."
+                        )
+                    match_scores: dict[str, tuple[str, float]] = {}
+                    # Only web jobs keep embeddings (in the sidecar, for the
+                    # campaign relabel pass); CLI runs skip the extra extraction.
+                    label_embeddings: Optional[dict] = {} if _result_store is not None else None
                     matches = match_speakers(
                         audio_path=wav_path,
                         diarization_segments=diarization,
                         data_dir=None,
                         device=device,
-                        threshold=config.get("similarity_threshold", 0.65),
+                        threshold=config.get("similarity_threshold", DEFAULT_SIMILARITY_THRESHOLD),
                         profile_filter=profile_filter,
                         allow_many_to_one=(num_speakers is None),
+                        scores=match_scores,
+                        embeddings=label_embeddings,
                     )
+                    if label_embeddings:
+                        _result_store["speaker_embeddings"] = label_embeddings
                     if matches:
                         speaker_map = matches
                         tqdm.write("  Speaker matches:")
                         for label, name in sorted(matches.items()):
-                            tqdm.write(f"    {label} → {name}")
+                            tqdm.write(f"    {label} → {name}{_score_note(name, match_scores.get(label))}")
                         # Build speaker metadata from matched names (deduplicated, preserving order)
                         seen: set[str] = set()
                         for name in matches.values():

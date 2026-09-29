@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal, Optional
 
+from .config import EMBEDDING_SPACE
+
 
 @dataclass
 class Word:
@@ -46,6 +48,7 @@ class SpeakerProfile:
     enrolled_date: str
     enrollment_source: str
     notes: str = ""
+    embedding_space: str = EMBEDDING_SPACE
 
 
 # ---------------------------------------------------------------------------

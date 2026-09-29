@@ -24,7 +24,7 @@ _BASE_CONFIG = {
     "hotwords": [],
     "use_mlx": "false",
     "parallel_stages": False,
-    "similarity_threshold": 0.65,
+    "similarity_threshold": 0.55,
 }
 
 

@@ -39,6 +39,8 @@ from tqdm import tqdm
 
 from pyannote.audio import Pipeline
 
+from .config import DIARIZATION_MODEL
+
 from .models import DiarizationSegment
 
 # Pipeline cache. _pipeline_device is the device it was moved to; a different
@@ -90,7 +92,7 @@ class _DiarizationProgressHook:
 
 
 def load_pipeline(hf_token: str, device: str):
-    """Load pyannote speaker-diarization-3.1 and cache it.
+    """Load the pyannote diarization pipeline and cache it.
 
     Built into a local and published only after the device checks and
     ``.to(device)`` succeed, so a failure leaves the previous cache intact.
@@ -99,10 +101,18 @@ def load_pipeline(hf_token: str, device: str):
 
     try:
         pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
+            DIARIZATION_MODEL,
             token=hf_token,
         )
     except Exception as e:
+        from huggingface_hub.errors import GatedRepoError
+
+        if isinstance(e, GatedRepoError):
+            raise RuntimeError(
+                "Your Hugging Face token can't access the diarization model. "
+                f"Accept its terms at https://huggingface.co/{DIARIZATION_MODEL} "
+                "(free, one-time), then retry."
+            ) from e
         if "locate the file on the Hub" in str(e) or "connection" in str(e).lower():
             raise RuntimeError(
                 "Failed to download the diarization model from Hugging Face. "

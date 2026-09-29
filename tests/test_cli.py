@@ -1412,3 +1412,32 @@ def test_transcripts_move_invalid_slug_rejected(tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     result = CliRunner().invoke(main, ["transcripts", "move", "session01", "--campaign", "../evil"])
     assert result.exit_code != 0
+
+
+def test_campaigns_relabel_reports_changes(tmp_path, monkeypatch):
+    from wisper_transcribe.campaign_manager import create_campaign
+    from wisper_transcribe.speaker_registry import RelabelReport, TranscriptRelabel
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    create_campaign("My Game", data_dir=tmp_path)
+    report = RelabelReport(
+        transcripts=[TranscriptRelabel("s1", renamed={"SPEAKER_00": ("Unknown Speaker 1", "Alice")}),
+                     TranscriptRelabel("s2", skipped="no speaker data")],
+        recurring=2,
+    )
+    with patch("wisper_transcribe.speaker_registry.relabel_campaign", return_value=report) as mock_relabel:
+        result = CliRunner().invoke(main, ["campaigns", "relabel", "my-game", "--dry-run", "--device", "cpu"])
+
+    assert result.exit_code == 0, result.output
+    assert mock_relabel.call_args.kwargs["dry_run"] is True
+    assert mock_relabel.call_args.kwargs["backfill"] is True
+    assert "Would rename 1 speaker label(s) across 2 session(s)." in result.output
+    assert "Unknown voices heard in more than one session: 2" in result.output
+    assert "Skipped s2: no speaker data" in result.output
+
+
+def test_campaigns_relabel_unknown_campaign(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    result = CliRunner().invoke(main, ["campaigns", "relabel", "ghost"])
+    assert result.exit_code != 0
+    assert "not found" in result.output

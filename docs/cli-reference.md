@@ -183,6 +183,8 @@ Options:
   --update           Average with the existing embedding instead of replacing it
 ```
 
+`--update` on a profile enrolled with the older speaker model replaces its embedding instead of averaging, since the two can't be mixed.
+
 ---
 
 ### `wisper speakers`
@@ -195,6 +197,8 @@ wisper speakers reset                   # delete ALL profiles and embeddings (wi
 wisper speakers test session03.mp3                         # preview match results without writing output
 wisper speakers test session03.mp3 --campaign d-d-mondays  # restrict to campaign roster
 ```
+
+`speakers test` prints each label's similarity score, or for an unmatched label the closest profile and its score (e.g. `SPEAKER_03 → Unknown Speaker 1 (closest: Ben 0.48)`). Use it to tune `similarity_threshold`.
 
 ---
 
@@ -216,6 +220,28 @@ wisper campaigns reorder d-d-mondays --set "s01,s02,s03" # replace the whole ord
 ```
 
 `reorder` sets the order sessions are folded into the journal and numbered on the campaign page. The order is when each transcript was added to the campaign, not its date, so a late-added session can land out of place. `--set` takes every transcript stem in the campaign, comma-separated, and errors unless it is an exact permutation of the current list.
+
+#### `wisper campaigns relabel`
+
+Re-matches speakers across every session in a campaign, so identities stay consistent between sessions:
+
+```bash
+wisper campaigns relabel d-d-mondays --dry-run      # show what would change
+wisper campaigns relabel d-d-mondays                # apply
+wisper campaigns relabel d-d-mondays --no-backfill  # only use voice data already stored
+```
+
+- Automatically assigned names are matched against the campaign roster again, so a player enrolled after a session was transcribed gets named in it.
+- An unknown voice heard in two or more sessions gets one shared name, `Recurring Speaker N`. Name them once in any session's wizard and the others follow.
+- Names you set by hand are never changed.
+- Sessions transcribed before this feature have no stored voice data; it is re-extracted from the saved source audio when that still exists (web uploads keep it next to the transcript). Sessions without either are skipped and listed.
+
+```
+Options:
+  --dry-run       Show what would change without writing anything
+  --no-backfill   Don't re-read source audio for sessions without stored voice data
+  --device        Device for voice extraction (auto, cpu, cuda, mps)
+```
 
 #### `wisper campaigns journal`
 
@@ -352,7 +378,7 @@ With `--refine`, vocabulary edits are applied in place (same `.md.bak` guarantee
 wisper config show                        # print all settings (API keys masked as ***)
 wisper config set model large-v3          # use the big model by default
 wisper config set hf_token hf_abc123...   # store HuggingFace token
-wisper config set similarity_threshold 0.70  # stricter speaker matching
+wisper config set similarity_threshold 0.60  # stricter speaker matching
 wisper config set min_speakers 2          # min speaker count when diarizing (int)
 wisper config set max_speakers 8          # max speaker count when diarizing (int)
 wisper config path                        # show where config.toml lives

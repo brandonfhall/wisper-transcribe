@@ -13,7 +13,13 @@ import numpy as np
 from ._noise_suppress import suppress_third_party_noise as _suppress
 _suppress()
 
-from .config import get_data_dir
+from .config import (
+    DEFAULT_SIMILARITY_THRESHOLD,
+    DIARIZATION_MODEL,
+    EMBEDDING_SPACE,
+    EMBEDDING_SUBFOLDER,
+    get_data_dir,
+)
 from .models import DiarizationSegment, SpeakerProfile
 
 # Embedding-model cache, keyed by device so a different device reloads it.
@@ -61,6 +67,8 @@ def load_profiles(data_dir: Optional[Path] = None) -> dict[str, SpeakerProfile]:
             enrolled_date=data.get("enrolled_date", ""),
             enrollment_source=data.get("enrollment_source", ""),
             notes=data.get("notes", ""),
+            # Untagged profiles predate the current embedding model.
+            embedding_space=data.get("embedding_space", ""),
         )
     return profiles
 
@@ -78,6 +86,7 @@ def save_profiles(profiles: dict[str, SpeakerProfile], data_dir: Optional[Path] 
             "enrolled_date": p.enrolled_date,
             "enrollment_source": p.enrollment_source,
             "notes": p.notes,
+            "embedding_space": p.embedding_space,
         }
 
     with open(path, "w", encoding="utf-8") as f:
@@ -214,10 +223,19 @@ def _load_embedding_model(device: str):
         from pyannote.audio import Model, Inference
         try:
             model = Model.from_pretrained(
-                "pyannote/embedding",
+                DIARIZATION_MODEL,
+                subfolder=EMBEDDING_SUBFOLDER,
                 token=_get_hf_token(),
             )
         except Exception as e:
+            from huggingface_hub.errors import GatedRepoError
+
+            if isinstance(e, GatedRepoError):
+                raise RuntimeError(
+                    "Your Hugging Face token can't access the speaker model. "
+                    f"Accept its terms at https://huggingface.co/{DIARIZATION_MODEL} "
+                    "(free, one-time), then retry."
+                ) from e
             if "locate the file on the Hub" in str(e) or "connection" in str(e).lower():
                 raise RuntimeError(
                     "Failed to download the embedding model from Hugging Face. "
@@ -282,21 +300,32 @@ def _select_embedding_segments(
     return sorted(speaker_segs, key=lambda s: s.end - s.start, reverse=True)[:max_count]
 
 
+# Segments averaged per speaker embedding. Measured on real sessions, 30
+# instead of 5 raised same-person similarity across sessions by 0.05-0.10.
+EMBEDDING_SEGMENTS = 30
+
+
+def _unit(v: np.ndarray) -> np.ndarray:
+    norm = np.linalg.norm(v)
+    return v / norm if norm > 0 else v
+
+
 def extract_embedding(
     audio_path: Path,
     segments: list[DiarizationSegment],
     speaker_label: str,
     device: str = "cpu",
 ) -> np.ndarray:
-    """Extract a speaker's voice embedding, averaged over selected segments.
+    """Extract a speaker's unit-length voice embedding, averaged over selected segments.
 
     See ``_select_embedding_segments()`` for which segments are used.
+    Each segment is normalized before averaging so long segments don't dominate.
     """
     from pyannote.core import Segment as PyannoteSegment
 
     inference = _load_embedding_model(device)
 
-    selected = _select_embedding_segments(segments, speaker_label)
+    selected = _select_embedding_segments(segments, speaker_label, max_count=EMBEDDING_SEGMENTS)
 
     # Pre-load audio via scipy so pyannote never calls torchaudio (removed in 2.x).
     from .audio_utils import load_wav_as_tensor
@@ -307,9 +336,9 @@ def extract_embedding(
     for seg in selected:
         excerpt = PyannoteSegment(seg.start, seg.end)
         emb = inference.crop(audio_dict, excerpt)
-        embeddings.append(emb)
+        embeddings.append(_unit(np.asarray(emb, dtype=np.float32).reshape(-1)))
 
-    return np.mean(embeddings, axis=0)
+    return _unit(np.mean(embeddings, axis=0))
 
 
 # ---------------------------------------------------------------------------
@@ -341,7 +370,7 @@ def enroll_speaker(
     emb_dir = _get_embeddings_dir(data_dir)
     emb_dir.mkdir(parents=True, exist_ok=True)
     emb_path = emb_dir / f"{name}.npy"
-    np.save(str(emb_path), embedding)
+    np.save(str(emb_path), _unit(np.asarray(embedding, dtype=np.float32)))
 
     profile = SpeakerProfile(
         name=name,
@@ -473,6 +502,18 @@ def _save_reference_clip(
 # Matching
 # ---------------------------------------------------------------------------
 
+def load_profile_embedding(profile: SpeakerProfile) -> Optional[np.ndarray]:
+    """The profile's embedding, or ``None`` if it's missing or from another model."""
+    if profile.embedding_space != EMBEDDING_SPACE or not profile.embedding_path.exists():
+        return None
+    return np.load(str(profile.embedding_path))
+
+
+def stale_profile_keys(profiles: dict[str, SpeakerProfile]) -> list[str]:
+    """Keys of profiles enrolled with an older embedding model; they need re-enrolling."""
+    return sorted(k for k, p in profiles.items() if p.embedding_space != EMBEDDING_SPACE)
+
+
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     a_norm = np.linalg.norm(a)
     b_norm = np.linalg.norm(b)
@@ -486,9 +527,11 @@ def match_speakers(
     diarization_segments: list[DiarizationSegment],
     data_dir: Optional[Path] = None,
     device: str = "cpu",
-    threshold: float = 0.65,
+    threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
     profile_filter: Optional[set] = None,
     allow_many_to_one: bool = False,
+    scores: Optional[dict[str, tuple[str, float]]] = None,
+    embeddings: Optional[dict[str, np.ndarray]] = None,
 ) -> dict[str, str]:
     """Match diarization labels to enrolled profiles by cosine similarity.
 
@@ -496,52 +539,77 @@ def match_speakers(
     or ``{}`` if no profiles are enrolled.
 
     ``profile_filter`` restricts candidates to those keys (``None`` = all).
+    See ``assign_labels()`` for the assignment rules and ``scores``.
+    Pass a dict as ``embeddings`` to receive each label's extracted embedding;
+    they are extracted even with no profiles, for the campaign relabel pass.
+    """
+    profiles = load_profiles(data_dir)
+    if profile_filter is not None:
+        profiles = {k: v for k, v in profiles.items() if k in profile_filter}
+    if not profiles and embeddings is None:
+        return {}
+
+    unique_labels = sorted({s.speaker for s in diarization_segments})
+
+    # Failed extractions stay out of query_embeddings and number as Unknown.
+    query_embeddings: dict[str, np.ndarray] = {}
+    for label in unique_labels:
+        try:
+            query_embeddings[label] = extract_embedding(audio_path, diarization_segments, label, device)
+        except Exception:
+            pass
+    if embeddings is not None:
+        embeddings.update(query_embeddings)
+    if not profiles:
+        return {}
+
+    return assign_labels(
+        unique_labels, query_embeddings, profiles,
+        threshold=threshold, allow_many_to_one=allow_many_to_one, scores=scores,
+    )
+
+
+def assign_labels(
+    labels: list[str],
+    query_embeddings: dict[str, np.ndarray],
+    profiles: dict[str, SpeakerProfile],
+    threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+    allow_many_to_one: bool = False,
+    scores: Optional[dict[str, tuple[str, float]]] = None,
+) -> dict[str, str]:
+    """Assign each label a profile display name or ``Unknown Speaker N``.
+
+    Returns ``{}`` when no profile has a current-space embedding.
 
     Every (label, profile) pair is scored and consumed highest-first, so a
     label whose top choice is taken falls back to its next-best unused
     profile. With ``allow_many_to_one``, a still-unassigned label may then
     claim an already-used profile above threshold (one person split into two
-    labels); only enable it when the speaker count wasn't pinned.
+    labels); only enable it when the speaker count wasn't pinned. Labels
+    missing from ``query_embeddings`` are numbered as Unknown.
+
+    Pass a dict as ``scores`` to receive each scored label's closest profile
+    as ``label -> (display_name, similarity)``, whether or not it matched.
     """
-    profiles = load_profiles(data_dir)
-    if profile_filter is not None:
-        profiles = {k: v for k, v in profiles.items() if k in profile_filter}
-        if not profiles:
-            return {}
-    if not profiles:
-        return {}
-
-    unique_labels = sorted({s.speaker for s in diarization_segments})
-
-    # Failed extractions go to `failed`, never into query_embeddings.
-    query_embeddings: dict[str, np.ndarray] = {}
-    failed: set[str] = set()
-    for label in unique_labels:
-        try:
-            query_embeddings[label] = extract_embedding(audio_path, diarization_segments, label, device)
-        except Exception:
-            failed.add(label)
-
-    # Load enrolled embeddings
     enrolled: dict[str, np.ndarray] = {}
     for pname, profile in profiles.items():
-        if profile.embedding_path.exists():
-            enrolled[pname] = np.load(str(profile.embedding_path))
-
+        emb = load_profile_embedding(profile)
+        if emb is not None:
+            enrolled[pname] = emb
     if not enrolled:
         return {}
 
-    # Score every pair for labels with an embedding; failed labels are
-    # numbered as Unknown below.
     pairs: list[tuple[float, str, str]] = []  # (sim, label, profile_name)
     for label, q_emb in query_embeddings.items():
         for pname, e_emb in enrolled.items():
-            sim = _cosine_similarity(q_emb, e_emb)
-            pairs.append((sim, label, pname))
+            pairs.append((_cosine_similarity(q_emb, e_emb), label, pname))
 
     # Deterministic ordering: highest similarity first, ties broken by label
     # then profile name so results don't depend on dict/insertion order.
     pairs.sort(key=lambda p: (-p[0], p[1], p[2]))
+    if scores is not None:
+        for sim, label, pname in pairs:
+            scores.setdefault(label, (profiles[pname].display_name, sim))
 
     result: dict[str, str] = {}
     used_profiles: set[str] = set()
@@ -570,7 +638,7 @@ def match_speakers(
 
     # Everything else becomes "Unknown Speaker N", numbered by sorted label.
     unknown_counter = 1
-    for label in unique_labels:
+    for label in sorted(labels):
         if label not in result:
             result[label] = f"Unknown Speaker {unknown_counter}"
             unknown_counter += 1
@@ -588,13 +656,25 @@ def update_embedding(
     data_dir: Optional[Path] = None,
     alpha: float = 0.3,
 ) -> None:
-    """Update an existing embedding using exponential moving average."""
+    """Blend ``new_embedding`` into a profile by exponential moving average.
+
+    A profile from an older embedding model is replaced outright and retagged,
+    since its vector can't be averaged with the new one.
+    """
     emb_dir = _get_embeddings_dir(data_dir)
     emb_dir.mkdir(parents=True, exist_ok=True)
     emb_path = emb_dir / f"{name}.npy"
-    if not emb_path.exists():
-        np.save(str(emb_path), new_embedding)
-        return
-    existing = np.load(str(emb_path))
-    updated = alpha * new_embedding + (1 - alpha) * existing
-    np.save(str(emb_path), updated)
+    new_unit = _unit(np.asarray(new_embedding, dtype=np.float32))
+
+    with _profiles_lock:
+        profiles = load_profiles(data_dir)
+        profile = profiles.get(name)
+        stale = profile is not None and profile.embedding_space != EMBEDDING_SPACE
+        if stale or not emb_path.exists():
+            np.save(str(emb_path), new_unit)
+        else:
+            existing = _unit(np.load(str(emb_path)))
+            np.save(str(emb_path), _unit(alpha * new_unit + (1 - alpha) * existing))
+        if stale:
+            profile.embedding_space = EMBEDDING_SPACE
+            save_profiles(profiles, data_dir)

@@ -43,6 +43,7 @@ JOB_ENROLL = "enroll"
 # session, transcribing chunks from LocalCaptureManager's live sink.
 JOB_LIVE = "live"
 JOB_CAMPAIGN_JOURNAL = "campaign_journal"
+JOB_SPEAKER_RELABEL = "speaker_relabel"
 
 _MAX_LIVE_LINES = 2000  # mirrors _MAX_LOG_LINES below -- bound a very long session's memory
 
@@ -56,6 +57,7 @@ _GENERIC_JOB_ERRORS = {
     JOB_REFINE: "Post-processing failed — see server logs",
     JOB_SUMMARIZE: "Post-processing failed — see server logs",
     JOB_ENROLL: "Enrollment failed",
+    JOB_SPEAKER_RELABEL: "Speaker re-match failed — see server logs",
 }
 
 
@@ -160,6 +162,12 @@ def _write_enrollment_sidecar(job: "Job", output_path: "Path") -> None:  # type:
             # Authoritative raw label -> display name map; absent in old sidecars.
             "speaker_map": dict(job.speaker_map) if job.speaker_map else {},
         }
+        if job.speaker_map:
+            from wisper_transcribe.speaker_registry import SOURCE_AUTO
+            sidecar["speaker_map_source"] = {label: SOURCE_AUTO for label in job.speaker_map}
+        if job.speaker_embeddings:
+            from wisper_transcribe.speaker_registry import embeddings_to_sidecar
+            sidecar.update(embeddings_to_sidecar(job.speaker_embeddings))
         sidecar_path = out.with_name(out.stem + "_diar.json")
         sidecar_path.write_text(_json.dumps(sidecar, indent=2), encoding="utf-8")
     except Exception:
@@ -366,6 +374,8 @@ class Job:
     diarization_segments: list = field(default_factory=list)
     # Raw label -> display name map the formatter used; persisted to _diar.json.
     speaker_map: dict[str, str] = field(default_factory=dict)
+    # Raw label -> voice embedding from matching; persisted to _diar.json.
+    speaker_embeddings: dict = field(default_factory=dict)
     # speaker_label -> path to a short audio excerpt (for enrollment wizard)
     speaker_excerpts: dict[str, str] = field(default_factory=dict)
     # Threading event set by cancel() to signal the worker to abort
@@ -743,6 +753,21 @@ class JobQueue:
         self._queue.put_nowait(job.id)
         return job
 
+    def submit_relabel(self, slug: str, name: str = "") -> Job:
+        """Enqueue a campaign-wide speaker re-match (``speaker_registry.relabel_campaign``)."""
+        job = Job(
+            id=str(uuid.uuid4()),
+            status=PENDING,
+            created_at=datetime.now(),
+            input_path="",
+            kwargs={"slug": slug},
+            name=name or f"Re-match speakers: {slug}",
+            job_type=JOB_SPEAKER_RELABEL,
+        )
+        self._jobs[job.id] = job
+        self._queue.put_nowait(job.id)
+        return job
+
     def set_live_noise_floor(self, job_id: str, noise_floor: float) -> bool:
         """Live-update a running JOB_LIVE job's noise floor. Returns False
         if the job doesn't exist (route layer turns that into a 404)."""
@@ -886,6 +911,8 @@ class JobQueue:
         """Dispatch to the appropriate worker based on job_type."""
         if job.job_type == JOB_CAMPAIGN_JOURNAL:
             self._run_journal_job(job)
+        elif job.job_type == JOB_SPEAKER_RELABEL:
+            self._run_relabel_job(job)
         elif job.job_type in (JOB_REFINE, JOB_SUMMARIZE):
             self._run_llm_job(job)
         elif job.job_type == JOB_ENROLL:
@@ -894,6 +921,23 @@ class JobQueue:
             self._run_live_job(job)
         else:
             self._run_transcription_job(job)
+
+    def _run_relabel_job(self, job: Job) -> None:
+        """Re-match auto-named speakers across a campaign's transcripts."""
+        from wisper_transcribe.config import get_device
+        from wisper_transcribe.speaker_registry import relabel_campaign
+
+        report = relabel_campaign(job.kwargs["slug"], device=get_device(),
+                                  backfill=True, progress=job.append_log)
+        changed = sum(len(t.renamed) for t in report.transcripts)
+        job.append_log(f"Renamed {changed} speaker label(s) across {len(report.transcripts)} session(s)")
+        if report.recurring:
+            job.append_log(f"Unknown voices heard in more than one session: {report.recurring}")
+        for t in report.transcripts:
+            if t.skipped:
+                job.append_log(f"  Skipped {t.stem}: {t.skipped}")
+        job.status = COMPLETED
+        job.finished_at = datetime.now()
 
     def _run_journal_job(self, job: Job) -> None:
         """Fold session summaries into a campaign's rolling journal.
@@ -1021,6 +1065,7 @@ class JobQueue:
             output_path = process_file(Path(job.input_path), _result_store=_result_store, job_id=job.id, **job.kwargs)
             job.diarization_segments = _result_store.get("diarization_segments", [])
             job.speaker_map = _result_store.get("speaker_map", {})
+            job.speaker_embeddings = _result_store.get("speaker_embeddings", {})
             job.output_path = str(output_path)
 
             # Move the temp upload next to the transcript (before excerpts and
@@ -1318,6 +1363,17 @@ class JobQueue:
                 device=job.enroll_device,
                 progress=_progress,
             )
+            if campaign_slug:
+                # Propagate the new names to the campaign's other sessions,
+                # from stored embeddings only so the job stays fast.
+                try:
+                    from wisper_transcribe.speaker_registry import relabel_campaign
+
+                    _progress("Updating other sessions in the campaign…")
+                    relabel_campaign(campaign_slug, device=job.enroll_device,
+                                     backfill=False, progress=_progress)
+                except Exception as exc:
+                    log.warning("campaign relabel after enroll failed: %s", exc)
             job.status = COMPLETED
         except Exception:
             job.status = FAILED

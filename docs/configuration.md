@@ -30,7 +30,7 @@ Stored in `config.toml`. View with `wisper config show`, change with `wisper con
 | `compute_type` | `auto` | CTranslate2 precision (`auto` picks per device) |
 | `vad_filter` | `true` | Skip silence before transcription (`--vad/--no-vad` overrides) |
 | `timestamps` | `true` | Include timestamps in transcript output |
-| `similarity_threshold` | `0.65` | Minimum voice-embedding similarity to match an enrolled speaker |
+| `similarity_threshold` | `0.55` | Minimum voice-embedding similarity to match an enrolled speaker. A saved `0.65` (the old default, from the previous speaker model) is read as `0.55`; to keep a stricter value, set something other than exactly `0.65` |
 | `min_speakers` / `max_speakers` | `2` / `8` | Diarizer range when no speaker count is given |
 | `hf_token` | — | HuggingFace token (env `HF_TOKEN` takes precedence) |
 | `hotwords` | `[]` | Custom vocabulary (names, places) fed to Whisper as a prompt |

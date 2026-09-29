@@ -239,9 +239,8 @@ def setup():
         click.echo("   A free HuggingFace token is required for speaker diarization.")
         click.echo("   Get one at: https://huggingface.co/settings/tokens")
         click.echo("")
-        click.echo("   You must also accept the model licenses (free, one-time):")
-        click.echo("     https://huggingface.co/pyannote/speaker-diarization-3.1")
-        click.echo("     https://huggingface.co/pyannote/embedding")
+        click.echo("   You must also accept the model license (free, one-time):")
+        click.echo(f"     https://huggingface.co/{_config.DIARIZATION_MODEL}")
         click.echo("")
         token = click.prompt("   HuggingFace token", hide_input=True).strip()
         if token:
@@ -255,14 +254,11 @@ def setup():
     if token:
         click.echo("\n>> Pre-downloading pyannote models (first run only — may take a few minutes)...")
         try:
-            from pyannote.audio import Inference, Model, Pipeline
+            from pyannote.audio import Pipeline
 
-            click.echo("   Downloading pyannote/speaker-diarization-3.1 ...")
-            pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=token)
+            click.echo(f"   Downloading {_config.DIARIZATION_MODEL} ...")
+            pipeline = Pipeline.from_pretrained(_config.DIARIZATION_MODEL, token=token)
             del pipeline
-            click.echo("   Downloading pyannote/embedding ...")
-            model = Model.from_pretrained("pyannote/embedding", token=token)
-            del model
             click.echo("   OK  : all models cached — subsequent runs start immediately")
         except Exception as e:
             click.echo(f"   WARN: model download failed: {e}", err=True)
@@ -386,8 +382,8 @@ def config_show():
     click.echo(f"  Device         : {device}")
     click.echo(f"  Whisper model  : {model}")
     click.echo(f"  Compute type   : {ct_display}")
-    click.echo(f"  Diarization    : pyannote/speaker-diarization-3.1")
-    click.echo(f"  Embedding      : pyannote/embedding")
+    click.echo(f"  Diarization    : {_config.DIARIZATION_MODEL}")
+    click.echo(f"  Embedding      : {_config.DIARIZATION_MODEL} ({_config.EMBEDDING_SUBFOLDER}/)")
     click.echo("")
     click.echo("─" * 50)
     click.echo("Settings")
@@ -710,10 +706,12 @@ def speakers_test(audio: Path, num_speakers: Optional[int], campaign: Optional[s
             click.echo(f"  Campaign filter: {safe} ({len(profile_filter)} member(s))")
 
         allow_many_to_one = num_speakers is None
+        scores: dict[str, tuple[str, float]] = {}
         matches = match_speakers(wav_path, diarization, device=device,
-                                 threshold=config.get("similarity_threshold", 0.65),
+                                 threshold=config.get("similarity_threshold", _config.DEFAULT_SIMILARITY_THRESHOLD),
                                  profile_filter=profile_filter,
-                                 allow_many_to_one=allow_many_to_one)
+                                 allow_many_to_one=allow_many_to_one,
+                                 scores=scores)
 
         if not matches:
             click.echo("No enrolled profiles to match against.")
@@ -722,8 +720,9 @@ def speakers_test(audio: Path, num_speakers: Optional[int], campaign: Optional[s
         if allow_many_to_one:
             click.echo("  (num_speakers not pinned — many-to-one matching enabled)")
 
+        from .pipeline import _score_note
         for label, name in sorted(matches.items()):
-            click.echo(f"  {label} → {name}")
+            click.echo(f"  {label} → {name}{_score_note(name, scores.get(label))}")
     finally:
         # Delete the converted temp WAV, as in `enroll`.
         if wav_path != audio:
@@ -960,6 +959,46 @@ def campaigns_reorder(slug: str, stem: Optional[str], move_up: bool, move_down: 
     for i, s in enumerate(get_transcripts_for_campaign(safe), 1):
         marker = " <-" if s == stem else ""
         click.echo(f"  {i}. {s}{marker}")
+
+
+@campaigns.command("relabel")
+@click.argument("slug")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Show what would change without writing anything")
+@click.option("--no-backfill", is_flag=True, default=False,
+              help="Only use voice data already stored with each transcript; "
+                   "don't re-read source audio for older ones")
+@click.option("--device", default="auto", type=click.Choice(_config.DEVICES),
+              help="Device for extracting voice data from source audio")
+def campaigns_relabel(slug: str, dry_run: bool, no_backfill: bool, device: str):
+    """Re-match automatically named speakers across a campaign's sessions.
+
+    Every web-transcribed session in the campaign is matched against the
+    roster again, and unknown voices heard in two or more sessions get one
+    shared "Recurring Speaker N" name. Names you set by hand are never changed.
+    """
+    from .campaign_manager import _validate_campaign_slug, load_campaigns
+    from .config import get_device
+    from .speaker_registry import relabel_campaign
+
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        raise click.ClickException(f"Invalid campaign slug: {slug!r}")
+    if safe not in load_campaigns():
+        raise click.ClickException(f"Campaign {safe!r} not found.")
+    if device == "auto":
+        device = get_device()
+
+    report = relabel_campaign(safe, device=device, backfill=not no_backfill,
+                              dry_run=dry_run, progress=click.echo)
+    changed = sum(len(t.renamed) for t in report.transcripts)
+    verb = "Would rename" if dry_run else "Renamed"
+    click.echo(f"{verb} {changed} speaker label(s) across {len(report.transcripts)} session(s).")
+    if report.recurring:
+        click.echo(f"Unknown voices heard in more than one session: {report.recurring}")
+    for t in report.transcripts:
+        if t.skipped:
+            click.echo(f"  Skipped {t.stem}: {t.skipped}")
 
 
 @campaigns.command("journal")

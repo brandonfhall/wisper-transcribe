@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 
+from wisper_transcribe.config import DIARIZATION_MODEL, EMBEDDING_SPACE, EMBEDDING_SUBFOLDER
 from wisper_transcribe.models import DiarizationSegment
 
 
@@ -14,7 +16,13 @@ from wisper_transcribe.models import DiarizationSegment
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _write_profile(data_dir: Path, name: str, embedding: np.ndarray, role: str = "Player") -> None:
+def _write_profile(
+    data_dir: Path,
+    name: str,
+    embedding: np.ndarray,
+    role: str = "Player",
+    embedding_space: Optional[str] = EMBEDDING_SPACE,
+) -> None:
     """Write a speaker profile and embedding to data_dir for testing."""
     profiles_dir = data_dir / "profiles"
     emb_dir = profiles_dir / "embeddings"
@@ -32,6 +40,8 @@ def _write_profile(data_dir: Path, name: str, embedding: np.ndarray, role: str =
         "enrollment_source": "session01.mp3",
         "notes": "",
     }
+    if embedding_space is not None:
+        existing[name]["embedding_space"] = embedding_space
     speakers_json.write_text(json.dumps(existing, indent=2))
 
 
@@ -376,7 +386,7 @@ def test_update_embedding_ema(tmp_path):
 
     saved = np.load(str(emb_dir / "alice.npy"))
     expected = 0.3 * new_emb + 0.7 * existing
-    np.testing.assert_array_almost_equal(saved, expected)
+    np.testing.assert_array_almost_equal(saved, expected / np.linalg.norm(expected))
 
 
 # ---------------------------------------------------------------------------
@@ -441,7 +451,7 @@ def test_enroll_speaker_uses_precomputed_embedding_when_given(tmp_path):
     mock_extract.assert_not_called()
     assert profile.display_name == "Alice"
     saved = np.load(str(tmp_path / "profiles" / "embeddings" / "alice.npy"))
-    np.testing.assert_array_equal(saved, precomputed)
+    np.testing.assert_array_almost_equal(saved, precomputed / np.linalg.norm(precomputed))
     assert "alice" in load_profiles(data_dir=tmp_path)
 
 
@@ -921,3 +931,119 @@ def test_load_embedding_model_reloads_on_device_change():
     finally:
         sm._embedding_model = None
         sm._embedding_device = None
+
+
+# ---------------------------------------------------------------------------
+# Embedding space (profiles from an older embedding model)
+# ---------------------------------------------------------------------------
+
+def test_legacy_profile_skipped_without_dimension_crash(tmp_path):
+    """A 512-d untagged profile is never compared with a 256-d query."""
+    from wisper_transcribe.speaker_manager import match_speakers
+
+    _write_profile(tmp_path, "old", np.ones(512), embedding_space=None)
+    new = np.zeros(256)
+    new[0] = 1.0
+    _write_profile(tmp_path, "alice", new)
+
+    with patch("wisper_transcribe.speaker_manager.extract_embedding", return_value=new):
+        result = match_speakers(Path("fake.wav"), _fake_diarization(["SPEAKER_00"]), data_dir=tmp_path)
+
+    assert result == {"SPEAKER_00": "Alice"}
+
+
+def test_only_legacy_profiles_returns_empty(tmp_path):
+    from wisper_transcribe.speaker_manager import match_speakers
+
+    _write_profile(tmp_path, "old", np.ones(512), embedding_space=None)
+    with patch("wisper_transcribe.speaker_manager.extract_embedding", return_value=np.ones(256)):
+        assert match_speakers(Path("fake.wav"), _fake_diarization(["SPEAKER_00"]), data_dir=tmp_path) == {}
+
+
+def test_stale_profile_keys(tmp_path):
+    from wisper_transcribe.speaker_manager import load_profiles, stale_profile_keys
+
+    _write_profile(tmp_path, "old", np.ones(512), embedding_space=None)
+    _write_profile(tmp_path, "other", np.ones(512), embedding_space="something-else")
+    _write_profile(tmp_path, "alice", np.ones(256))
+
+    assert stale_profile_keys(load_profiles(tmp_path)) == ["old", "other"]
+
+
+def test_update_embedding_replaces_legacy_profile_and_retags(tmp_path):
+    from wisper_transcribe.speaker_manager import load_profiles, update_embedding
+
+    _write_profile(tmp_path, "alice", np.ones(512), embedding_space=None)
+    new = np.array([3.0, 4.0])
+
+    update_embedding("alice", new, data_dir=tmp_path)
+
+    saved = np.load(str(tmp_path / "profiles" / "embeddings" / "alice.npy"))
+    np.testing.assert_array_almost_equal(saved, [0.6, 0.8])
+    assert load_profiles(tmp_path)["alice"].embedding_space == EMBEDDING_SPACE
+
+
+def test_embedding_space_round_trips_through_save(tmp_path):
+    from wisper_transcribe.speaker_manager import load_profiles, save_profiles
+
+    _write_profile(tmp_path, "alice", np.ones(256))
+    save_profiles(load_profiles(tmp_path), tmp_path)
+    raw = json.loads((tmp_path / "profiles" / "speakers.json").read_text())
+    assert raw["alice"]["embedding_space"] == EMBEDDING_SPACE
+
+
+def test_extract_embedding_normalizes_and_uses_many_segments():
+    import wisper_transcribe.speaker_manager as sm
+
+    segs = [DiarizationSegment(start=i * 10.0, end=i * 10.0 + 5.0, speaker="SPEAKER_00") for i in range(40)]
+    inference = MagicMock()
+    inference.crop.side_effect = lambda audio, seg: np.array([seg.start + 1.0, 0.0])
+
+    with patch.object(sm, "_load_embedding_model", return_value=inference),          patch("wisper_transcribe.audio_utils.load_wav_as_tensor", return_value={}):
+        emb = sm.extract_embedding(Path("fake.wav"), segs, "SPEAKER_00")
+
+    assert inference.crop.call_count == sm.EMBEDDING_SEGMENTS
+    np.testing.assert_array_almost_equal(emb, [1.0, 0.0])
+
+
+def test_load_embedding_model_uses_diarization_repo_subfolder():
+    import wisper_transcribe.speaker_manager as sm
+
+    sm._embedding_model = None
+    sm._embedding_device = None
+    with patch("pyannote.audio.Model") as mock_model_cls, patch("pyannote.audio.Inference"):
+        sm._load_embedding_model("cpu")
+
+    args, kwargs = mock_model_cls.from_pretrained.call_args
+    assert args == (DIARIZATION_MODEL,)
+    assert kwargs["subfolder"] == EMBEDDING_SUBFOLDER
+    sm._embedding_model = None
+    sm._embedding_device = None
+
+
+def test_match_speakers_reports_closest_profile_scores(tmp_path):
+    """``scores`` gets every label's closest profile, matched or not."""
+    from wisper_transcribe.speaker_manager import match_speakers
+
+    _write_profile(tmp_path, "alice", np.array([1.0, 0.0]))
+    embs = {"SPEAKER_00": np.array([1.0, 0.0]), "SPEAKER_01": np.array([0.6, 0.8])}
+    scores: dict = {}
+
+    with patch("wisper_transcribe.speaker_manager.extract_embedding",
+               side_effect=lambda _a, _s, label, _d: embs[label]):
+        result = match_speakers(Path("fake.wav"), _fake_diarization(["SPEAKER_00", "SPEAKER_01"]),
+                                data_dir=tmp_path, threshold=0.55, scores=scores)
+
+    assert result == {"SPEAKER_00": "Alice", "SPEAKER_01": "Unknown Speaker 1"}
+    assert scores["SPEAKER_00"] == ("Alice", pytest.approx(1.0))
+    assert scores["SPEAKER_01"] == ("Alice", pytest.approx(0.6))
+
+
+def test_default_threshold_is_calibrated_value():
+    import inspect
+
+    from wisper_transcribe.config import DEFAULT_SIMILARITY_THRESHOLD
+    from wisper_transcribe.speaker_manager import match_speakers
+
+    assert DEFAULT_SIMILARITY_THRESHOLD == 0.55
+    assert inspect.signature(match_speakers).parameters["threshold"].default == DEFAULT_SIMILARITY_THRESHOLD
