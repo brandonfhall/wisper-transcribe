@@ -270,21 +270,20 @@ def apply_renames(
         for block in blocks:
             if not block["has_speaker"]:
                 continue
-            # Timestamp-free blocks ("**Speaker**: text") have no timing signal;
-            # go straight to the name-based fallback instead of matching t=0.
+            # The block's displayed name is the strongest signal: timestamps are
+            # whole seconds and overlapping turns make them land in another
+            # speaker's turn. Timing only separates labels sharing one name
+            # (or places a block whose name isn't in the map).
             raw_label: Optional[str] = None
-            confident = False
-            if block["timestamp"]:
+            candidates = [
+                r for r in current_names if current_names[r] == block["speaker"]
+            ]
+            if len(candidates) == 1:
+                raw_label = candidates[0]
+            elif block["timestamp"]:
                 t = _parse_md_timestamp(block["timestamp"])
-                raw_label, confident = _attribute_block_to_label(t, intervals)
-            if not confident:
-                # Low confidence: prefer an unambiguous name match. If the name
-                # is shared, keep the timestamp guess; it only affects this block.
-                candidates = [
-                    r for r in current_names if current_names[r] == block["speaker"]
-                ]
-                if len(candidates) == 1:
-                    raw_label = candidates[0]
+                pool = [iv for iv in intervals if iv[2] in candidates] if candidates else intervals
+                raw_label, _confident = _attribute_block_to_label(t, pool)
             if raw_label is None or raw_label not in valid:
                 continue
             new_name = valid[raw_label]

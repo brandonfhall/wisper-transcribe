@@ -422,6 +422,34 @@ def test_apply_renames_never_enrolls_pipeline_shaped_names(tmp_path: Path):
     assert result.groups == {}
 
 
+def test_apply_renames_follows_unique_name_over_overlapping_timestamp(tmp_path: Path):
+    """A block whose rounded timestamp lands inside another speaker's
+    (overlapping) turn is still renamed by its unambiguous displayed name."""
+    from wisper_transcribe.web.enroll_shared import apply_renames
+
+    md = tmp_path / "session01.md"
+    md.write_text(
+        "---\ntitle: Session 01\n---\n\n"
+        "**Alice** *(00:00)*: long turn\n"
+        "**Unknown Speaker 1** *(00:03)*: interjection over Alice\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "session01_diar.json").write_text(json.dumps({
+        "diarization_segments": [{"start": 0.0, "end": 10.0, "speaker": "SPEAKER_00"},
+                                 {"start": 3.4, "end": 5.0, "speaker": "SPEAKER_01"}],
+        "speaker_map": {"SPEAKER_00": "Alice", "SPEAKER_01": "Unknown Speaker 1"},
+    }), encoding="utf-8")
+    # 00:03 falls inside SPEAKER_00's turn, not SPEAKER_01's (which starts at 3.4).
+    segments = _diar_segments(("SPEAKER_00", 0.0, 10.0), ("SPEAKER_01", 3.4, 5.0))
+
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        apply_renames(md, segments, {"SPEAKER_01": "Carol"})
+
+    content = md.read_text(encoding="utf-8")
+    assert "**Carol** *(00:03)*: interjection over Alice" in content
+    assert "**Alice** *(00:00)*: long turn" in content
+
+
 def test_apply_renames_records_name_source(tmp_path: Path):
     """Changed labels get the caller's source; unchanged labels keep theirs."""
     from wisper_transcribe.web.enroll_shared import apply_renames
