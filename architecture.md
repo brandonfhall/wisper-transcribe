@@ -598,7 +598,8 @@ The job page shows step pills and one bar split into equal per-step slices:
 
 ### Offline assets and CI
 - `static/htmx.min.js`, fonts, and `tailwind.min.css` are committed.
-- `app._build_tailwind()` rebuilds CSS at startup when templates are newer (mtime check); `pytailwindcss` needs no Node.
+- `app._build_tailwind()` rebuilds CSS at startup when `input.css` is newer than the output (mtime check); `pytailwindcss` needs no Node.
+- Tailwind v4 scans every tracked text file (Markdown, docstrings, tests), not just templates, so a class-like word anywhere can change the output.
 - `scripts/vendor.py` (`--check` to audit) re-downloads HTMX/fonts and rebuilds Tailwind.
 - CI rebuilds Tailwind and fails on `git diff --exit-code` if the committed CSS is stale.
 

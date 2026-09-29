@@ -30,7 +30,7 @@ A task is not complete until all four are true — in this order:
 
 1. **Tests pass** — run `.venv/bin/pytest tests/ -v` and confirm green
 2. **Docs updated** — `architecture.md` updated; `README.md` updated if user-facing (per Documentation Rules above)
-3. **Tailwind rebuilt** — if any template (`.html` in `src/wisper_transcribe/web/templates/`) or `static/input.css` changed, rebuild: `.venv/bin/python -m pytailwindcss -i src/wisper_transcribe/static/input.css -o src/wisper_transcribe/static/tailwind.min.css --minify`. Commit the rebuilt `tailwind.min.css` alongside the template change.
+3. **Tailwind rebuilt** — rebuild before every commit that changes any text file (Tailwind v4 scans the whole repo, including Markdown and docstrings, not just templates): `.venv/bin/python -m pytailwindcss -i src/wisper_transcribe/static/input.css -o src/wisper_transcribe/static/tailwind.min.css --minify`. Commit the rebuilt `tailwind.min.css` if it changed.
 4. **Committed** — all changed files in a single `git commit`
 
 When a todo list reaches 100% completed, execute steps 1–3 immediately without waiting to be asked.
@@ -165,7 +165,7 @@ Every security control must have a corresponding test in `tests/test_path_traver
 ## Non-Obvious Gotchas
 
 - **All web assets are fully committed** — `static/htmx.min.js` (HTMX 1.9.12), `static/fonts/*.woff2` (Newsreader, Geist, JetBrains Mono, Instrument Serif), and `static/tailwind.min.css`. No download step needed. Use `python scripts/vendor.py` to refresh them when upgrading.
-- **Tailwind auto-rebuilds on startup** (mtime check in `app.py`), but you still need to rebuild manually and commit `tailwind.min.css` when changing template classes. CI will catch a stale CSS file via `git diff --exit-code`.
+- **Tailwind auto-rebuilds on startup** only when `input.css` is newer than the output (mtime check in `app.py`). Tailwind v4 scans every tracked text file — docs, docstrings, and tests included — so even a prose change can add or drop a class (e.g. the word "invisible" in a docstring). Rebuild and commit `tailwind.min.css` whenever it changes; CI catches a stale file via `git diff --exit-code`.
 - **Startup cleanup** — `app._cleanup_orphaned_uploads()` runs on every startup and deletes `wisper_upload_*`, `wisper_enroll_*`, and `wisper_enrollsrc_*` temp files. It is only the crash-window safety net: `JobQueue.submit()` renames the transcribe upload to a friendly name immediately (so running jobs never match the glob), `submit_standalone_enroll()` renames enroll uploads to `wisper_enrollsrc_<job-id>` at submit time and the job deletes them in a `finally`, and completed transcription jobs either move the audio next to the transcript (durable, backs the enrollment wizard) or delete it. Never point anything long-lived at any of these temp paths.
 - **Web-upload audio lives next to its transcript** — `<stem><suffix>` in the output dir, referenced by `<stem>_diar.json`'s `input_path`. Deleted together with the transcript. The `_diar.json` sidecar also carries the authoritative `speaker_map` (raw label → display name), updated on every wizard rename — never reconstruct that mapping from the rendered markdown when the sidecar has it.
 - **`tqdm.monitor_interval = 0`** is set globally at app startup (`app.py`) and per-job (`jobs.py`) to prevent `TMonitor` from spawning a daemon thread that hangs `Ctrl+C` on Python 3.14.
