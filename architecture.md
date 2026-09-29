@@ -145,11 +145,14 @@ Audio file
 
 1. Extract an embedding for each diarization label.
 2. Cosine-score every (label, profile) pair.
-3. **Exclusive pass:** consume pairs highest-first, assigning when both the label and the profile are free and the score clears `similarity_threshold` (default 0.65). A label whose first choice is taken falls through to its next-best unused profile.
+3. **Exclusive pass:** consume pairs highest-first, assigning when both the label and the profile are free and the score clears `similarity_threshold` (default `DEFAULT_SIMILARITY_THRESHOLD`, 0.55). A label whose first choice is taken falls through to its next-best unused profile.
 4. **Many-to-one pass** (`allow_many_to_one=True`, used when `num_speakers` isn't pinned): a still-unassigned label may claim an already-used profile above threshold. This absorbs pyannote splitting one person into two labels. Pinning `num_speakers` asserts one label per person, so this pass is skipped.
 5. Anything left becomes `Unknown Speaker N`, numbered by sorted label order so numbering is deterministic.
 
 Ties sort by label then profile name for determinism.
+
+- **Why 0.55:** on real sessions in the WeSpeaker space, cross-session same-person pairs scored 0.65–0.95 and different people at most 0.50. `load_config()` migrates a saved `0.65` (the old model's default, persisted verbatim by `save_config()`) to the new default.
+- **Scores are surfaced:** `match_speakers(scores=...)` fills `label -> (closest profile, similarity)`. The job log and `wisper speakers test` print the score of each match, or the closest profile for a miss, so near-misses are visible when tuning.
 
 ### Campaign scoping
 

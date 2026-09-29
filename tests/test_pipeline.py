@@ -1566,3 +1566,11 @@ def test_process_file_reports_profiles_from_old_model(
     process_file(audio, output_dir=tmp_path, device="cpu")
 
     assert "Skipped 1 voice profile(s) from an older speaker model (bob)" in capsys.readouterr().out
+
+
+def test_score_note_formats_match_and_miss():
+    from wisper_transcribe.pipeline import _score_note
+
+    assert _score_note("Alice", ("Alice", 0.723)) == " (0.72)"
+    assert _score_note("Unknown Speaker 1", ("Ben", 0.481)) == " (closest: Ben 0.48)"
+    assert _score_note("Unknown Speaker 1", None) == ""

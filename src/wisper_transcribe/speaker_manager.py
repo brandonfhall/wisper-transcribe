@@ -13,7 +13,13 @@ import numpy as np
 from ._noise_suppress import suppress_third_party_noise as _suppress
 _suppress()
 
-from .config import DIARIZATION_MODEL, EMBEDDING_SPACE, EMBEDDING_SUBFOLDER, get_data_dir
+from .config import (
+    DEFAULT_SIMILARITY_THRESHOLD,
+    DIARIZATION_MODEL,
+    EMBEDDING_SPACE,
+    EMBEDDING_SUBFOLDER,
+    get_data_dir,
+)
 from .models import DiarizationSegment, SpeakerProfile
 
 # Embedding-model cache, keyed by device so a different device reloads it.
@@ -521,9 +527,10 @@ def match_speakers(
     diarization_segments: list[DiarizationSegment],
     data_dir: Optional[Path] = None,
     device: str = "cpu",
-    threshold: float = 0.65,
+    threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
     profile_filter: Optional[set] = None,
     allow_many_to_one: bool = False,
+    scores: Optional[dict[str, tuple[str, float]]] = None,
 ) -> dict[str, str]:
     """Match diarization labels to enrolled profiles by cosine similarity.
 
@@ -537,6 +544,9 @@ def match_speakers(
     profile. With ``allow_many_to_one``, a still-unassigned label may then
     claim an already-used profile above threshold (one person split into two
     labels); only enable it when the speaker count wasn't pinned.
+
+    Pass a dict as ``scores`` to receive each scored label's closest profile
+    as ``label -> (display_name, similarity)``, whether or not it matched.
     """
     profiles = load_profiles(data_dir)
     if profile_filter is not None:
@@ -578,6 +588,9 @@ def match_speakers(
     # Deterministic ordering: highest similarity first, ties broken by label
     # then profile name so results don't depend on dict/insertion order.
     pairs.sort(key=lambda p: (-p[0], p[1], p[2]))
+    if scores is not None:
+        for sim, label, pname in pairs:
+            scores.setdefault(label, (profiles[pname].display_name, sim))
 
     result: dict[str, str] = {}
     used_profiles: set[str] = set()

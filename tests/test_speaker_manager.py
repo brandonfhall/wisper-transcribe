@@ -1019,3 +1019,31 @@ def test_load_embedding_model_uses_diarization_repo_subfolder():
     assert kwargs["subfolder"] == EMBEDDING_SUBFOLDER
     sm._embedding_model = None
     sm._embedding_device = None
+
+
+def test_match_speakers_reports_closest_profile_scores(tmp_path):
+    """``scores`` gets every label's closest profile, matched or not."""
+    from wisper_transcribe.speaker_manager import match_speakers
+
+    _write_profile(tmp_path, "alice", np.array([1.0, 0.0]))
+    embs = {"SPEAKER_00": np.array([1.0, 0.0]), "SPEAKER_01": np.array([0.6, 0.8])}
+    scores: dict = {}
+
+    with patch("wisper_transcribe.speaker_manager.extract_embedding",
+               side_effect=lambda _a, _s, label, _d: embs[label]):
+        result = match_speakers(Path("fake.wav"), _fake_diarization(["SPEAKER_00", "SPEAKER_01"]),
+                                data_dir=tmp_path, threshold=0.55, scores=scores)
+
+    assert result == {"SPEAKER_00": "Alice", "SPEAKER_01": "Unknown Speaker 1"}
+    assert scores["SPEAKER_00"] == ("Alice", pytest.approx(1.0))
+    assert scores["SPEAKER_01"] == ("Alice", pytest.approx(0.6))
+
+
+def test_default_threshold_is_calibrated_value():
+    import inspect
+
+    from wisper_transcribe.config import DEFAULT_SIMILARITY_THRESHOLD
+    from wisper_transcribe.speaker_manager import match_speakers
+
+    assert DEFAULT_SIMILARITY_THRESHOLD == 0.55
+    assert inspect.signature(match_speakers).parameters["threshold"].default == DEFAULT_SIMILARITY_THRESHOLD

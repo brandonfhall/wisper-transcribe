@@ -706,10 +706,12 @@ def speakers_test(audio: Path, num_speakers: Optional[int], campaign: Optional[s
             click.echo(f"  Campaign filter: {safe} ({len(profile_filter)} member(s))")
 
         allow_many_to_one = num_speakers is None
+        scores: dict[str, tuple[str, float]] = {}
         matches = match_speakers(wav_path, diarization, device=device,
-                                 threshold=config.get("similarity_threshold", 0.65),
+                                 threshold=config.get("similarity_threshold", _config.DEFAULT_SIMILARITY_THRESHOLD),
                                  profile_filter=profile_filter,
-                                 allow_many_to_one=allow_many_to_one)
+                                 allow_many_to_one=allow_many_to_one,
+                                 scores=scores)
 
         if not matches:
             click.echo("No enrolled profiles to match against.")
@@ -718,8 +720,9 @@ def speakers_test(audio: Path, num_speakers: Optional[int], campaign: Optional[s
         if allow_many_to_one:
             click.echo("  (num_speakers not pinned — many-to-one matching enabled)")
 
+        from .pipeline import _score_note
         for label, name in sorted(matches.items()):
-            click.echo(f"  {label} → {name}")
+            click.echo(f"  {label} → {name}{_score_note(name, scores.get(label))}")
     finally:
         # Delete the converted temp WAV, as in `enroll`.
         if wav_path != audio:

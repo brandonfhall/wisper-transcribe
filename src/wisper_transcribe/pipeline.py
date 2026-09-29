@@ -9,7 +9,7 @@ from typing import Optional
 from tqdm import tqdm
 
 from .audio_utils import SUPPORTED_EXTENSIONS, convert_to_wav, get_duration, validate_audio
-from .config import check_ffmpeg, get_device, get_hf_token, load_config
+from .config import DEFAULT_SIMILARITY_THRESHOLD, check_ffmpeg, get_device, get_hf_token, load_config
 from .formatter import to_markdown
 from .models import TranscriptionSegment
 from .time_utils import format_duration
@@ -17,6 +17,16 @@ from .transcriber import transcribe
 
 
 _MAX_PLAYBACK_SECONDS = 10.0
+
+
+def _score_note(assigned: str, best: Optional[tuple[str, float]]) -> str:
+    """Log suffix: the match's score, or the closest profile for a miss."""
+    if best is None:
+        return ""
+    closest, sim = best
+    if closest == assigned:
+        return f" ({sim:.2f})"
+    return f" (closest: {closest} {sim:.2f})"
 
 
 def _play_excerpt(wav_path: Path, start: float, end: float) -> None:
@@ -553,7 +563,7 @@ def process_file(
                         unique_speakers=unique_speakers,
                         device=device,
                         play_audio=play_audio,
-                        similarity_threshold=config.get("similarity_threshold", 0.65),
+                        similarity_threshold=config.get("similarity_threshold", DEFAULT_SIMILARITY_THRESHOLD),
                     )
                 else:
                     from .speaker_manager import load_profiles, match_speakers, stale_profile_keys
@@ -571,20 +581,22 @@ def process_file(
                             f"  Skipped {len(stale)} voice profile(s) from an older speaker model "
                             f"({', '.join(stale)}); re-enroll them to match again."
                         )
+                    match_scores: dict[str, tuple[str, float]] = {}
                     matches = match_speakers(
                         audio_path=wav_path,
                         diarization_segments=diarization,
                         data_dir=None,
                         device=device,
-                        threshold=config.get("similarity_threshold", 0.65),
+                        threshold=config.get("similarity_threshold", DEFAULT_SIMILARITY_THRESHOLD),
                         profile_filter=profile_filter,
                         allow_many_to_one=(num_speakers is None),
+                        scores=match_scores,
                     )
                     if matches:
                         speaker_map = matches
                         tqdm.write("  Speaker matches:")
                         for label, name in sorted(matches.items()):
-                            tqdm.write(f"    {label} → {name}")
+                            tqdm.write(f"    {label} → {name}{_score_note(name, match_scores.get(label))}")
                         # Build speaker metadata from matched names (deduplicated, preserving order)
                         seen: set[str] = set()
                         for name in matches.values():

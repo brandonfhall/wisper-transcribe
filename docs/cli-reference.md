@@ -198,6 +198,8 @@ wisper speakers test session03.mp3                         # preview match resul
 wisper speakers test session03.mp3 --campaign d-d-mondays  # restrict to campaign roster
 ```
 
+`speakers test` prints each label's similarity score, or for an unmatched label the closest profile and its score (e.g. `SPEAKER_03 → Unknown Speaker 1 (closest: Ben 0.48)`). Use it to tune `similarity_threshold`.
+
 ---
 
 ### `wisper campaigns`
@@ -354,7 +356,7 @@ With `--refine`, vocabulary edits are applied in place (same `.md.bak` guarantee
 wisper config show                        # print all settings (API keys masked as ***)
 wisper config set model large-v3          # use the big model by default
 wisper config set hf_token hf_abc123...   # store HuggingFace token
-wisper config set similarity_threshold 0.70  # stricter speaker matching
+wisper config set similarity_threshold 0.60  # stricter speaker matching
 wisper config set min_speakers 2          # min speaker count when diarizing (int)
 wisper config set max_speakers 8          # max speaker count when diarizing (int)
 wisper config path                        # show where config.toml lives

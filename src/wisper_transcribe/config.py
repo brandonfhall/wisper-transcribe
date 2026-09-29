@@ -14,6 +14,14 @@ except ImportError:
 
 APP_NAME = "wisper-transcribe"
 
+# Cosine similarity a label needs to match a profile. Calibrated on real
+# sessions in the WeSpeaker space: same-person pairs scored 0.65+, different
+# people at most 0.50.
+DEFAULT_SIMILARITY_THRESHOLD = 0.55
+# The old pyannote/embedding default. Saved configs hold it verbatim, so
+# load_config() migrates that exact value.
+_LEGACY_SIMILARITY_THRESHOLD = 0.65
+
 DEFAULTS = {
     "model": "large-v3-turbo",
     "language": "en",
@@ -21,7 +29,7 @@ DEFAULTS = {
     "compute_type": "auto",
     "vad_filter": True,
     "timestamps": True,
-    "similarity_threshold": 0.65,
+    "similarity_threshold": DEFAULT_SIMILARITY_THRESHOLD,
     "min_speakers": 2,
     "max_speakers": 8,
     "hf_token": "",
@@ -125,6 +133,8 @@ def load_config() -> dict:
         with open(config_path, "rb") as f:
             stored = tomllib.load(f)
         config.update(stored)
+    if config.get("similarity_threshold") == _LEGACY_SIMILARITY_THRESHOLD:
+        config["similarity_threshold"] = DEFAULT_SIMILARITY_THRESHOLD
     return config
 
 
