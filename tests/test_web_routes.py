@@ -3182,13 +3182,17 @@ def test_campaign_page_marks_missing_transcripts(client, tmp_path):
 
 
 @pytest.mark.parametrize("will_align", [True, False])
-def test_job_detail_align_step_only_when_aligning(client, tmp_path, will_align):
-    audio_file = tmp_path / "align_step.mp3"
-    audio_file.write_bytes(b"fake")
-    with open(audio_file, "rb") as f:
-        post = client.post("/transcribe", files={"file": ("align_step.mp3", f, "audio/mpeg")},
-                           data={}, follow_redirects=False)
+def test_job_detail_align_step_only_when_aligning(client, will_align):
+    # Inject a pending job directly: a submitted one would be picked up by the
+    # worker, and without ffmpeg (CI) it fails before the page renders.
+    import uuid
+    from datetime import datetime
+    from wisper_transcribe.web.jobs import JOB_TRANSCRIPTION, Job
+    job = Job(id=str(uuid.uuid4()), status="pending", created_at=datetime.now(),
+              input_path="/tmp/align_step.mp3", kwargs={}, name="align_step",
+              job_type=JOB_TRANSCRIPTION)
+    client.app.state.job_queue._jobs[job.id] = job
     with patch("wisper_transcribe.web.jobs.Job.will_align", new=will_align):
-        html = client.get(post.headers["location"]).text
+        html = client.get(f"/transcribe/jobs/{job.id}").text
     assert ('id="step_align"' in html) is will_align
     assert ("'align'," in html) is will_align
