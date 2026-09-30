@@ -40,6 +40,7 @@ src/wisper_transcribe/
 ├── audio_utils.py       validate_audio(), convert_to_wav(), get_duration(), load_wav_as_tensor()
 ├── time_utils.py        format_timestamp(), format_duration()
 ├── path_utils.py        validate_path_component() (CodeQL-safe guard), get_output_dir()
+├── db.py                SQLite: connect()/transaction(), migrations, capability/dev-data/runtime guards, to_rel()/from_rel() (see "Database")
 ├── config.py            Config load/save, device detection, HF token and LLM key lookup, provider metadata
 ├── models.py            Dataclasses shared across modules (segments, profiles, campaigns, recordings, LLM results)
 ├── campaign_manager.py  Campaign CRUD, rosters, Discord ID binding, transcript association and order
@@ -332,6 +333,21 @@ JSON stores are guarded against lost updates from concurrent writers:
 
 `load_*()`/`save_*()` never take the lock themselves; callers that already hold it would deadlock.
 
+These locks only cover threads in one process. The SQLite migration (plan.md) moves each store into the database, and its transactions replace the locks.
+
+### Database (`db.py`)
+`<data dir>/wisper.db`, stdlib `sqlite3`, no ORM. The SQLite migration moves the JSON stores in phases (see plan.md); Phase 0 adds only the foundation.
+- **One way in.** Every connection comes from `db.connect()`, which sets `foreign_keys=ON` (off by default, per connection), `busy_timeout=5000`, and the rollback journal (`journal_mode=DELETE`, which works on any filesystem including Docker Desktop bind mounts, where WAL misbehaves). A test fails if any other module calls `sqlite3.connect`.
+- **Connection per unit of work.** `with db.transaction() as conn:` opens, runs `BEGIN IMMEDIATE`, commits or rolls back, and closes. Connections are `autocommit=True`, so nothing commits implicitly. `BEGIN IMMEDIATE` takes the write lock up front: a deferred read-then-write gets `SQLITE_BUSY` on lock upgrade without waiting. No connection is cached, so `WISPER_DATA_DIR` changes (tests) just work. Never hold a transaction across ML or LLM work.
+- **Migrations** run on first `connect()` when `PRAGMA user_version` is behind. Each is DDL plus an optional legacy-import step, applied with the version bump in one `BEGIN IMMEDIATE` transaction with `defer_foreign_keys=ON`; `PRAGMA foreign_key_check` must be empty or everything rolls back. A second process waits on the lock, then sees the new version and does nothing. Upgrading an existing DB first snapshots it to `backups/wisper-v<N>-<time>.db` (backup API on a second connection, after the migrator holds the lock). An import step copies its legacy files to `backups/pre-sqlite-v<N>-<time>/` first and writes `import-report.txt` there.
+- **Guards**, each refusing with a user-facing `db.DatabaseError` (the CLI prints it without a traceback; the server refuses to start):
+  - SQLite ≥ 3.43 with FTS5 contentless-delete, checked once per process.
+  - Downgrade: a DB newer than the code refuses; an old build must not write a newer schema.
+  - Dev data: while `SCHEMA_FROZEN` is `False` (unmerged branch, migrations still edited in place), migrating the platform-default data dir is refused. Branch work uses a copied `WISPER_DATA_DIR`; flipping the flag is on the merge checklist, and `test_schema_frozen_on_main` fails on `main` or a PR into it otherwise.
+  - Runtime lease (`runtime_leases`): a host process and a Docker Desktop container writing one DB corrupts it (file locks don't cross the VM). `connect()` records a `host` or `container` lease (container = `/.dockerenv`; `crosses_vm` = `/proc/version` contains `linuxkit`) and refreshes it at most every 30 s; the server also runs `db.Heartbeat` every 60 s. Startup refuses only when the *other* runtime's lease is under 2 minutes old and the container lease crosses the VM, so native Linux Docker is never blocked. Advisory: two processes starting in the same second could both pass.
+- **Stored paths** are relative to the output root and POSIX-separated. `db.to_rel()`/`from_rel()` are the only converters; they resolve symlinks on both sides and reject absolute paths, backslashes, and `..`.
+- **Inspection:** `wisper db status` (read-only: never migrates or claims a lease) reports version, `integrity_check`, `foreign_key_check`, leases, and schema drift (the live schema compared with this build's DDL replayed in memory — a DB made by an older branch build shows as drift). `wisper db backup`, `wisper db dump`.
+
 ---
 
 ## LLM Post-processing
@@ -361,7 +377,7 @@ Campaign fold order is `Campaign.transcripts` order — **insertion order**, not
 
 ### Single sources of truth
 - `config.py`'s `LLM_PROVIDERS`, `_LLM_DEFAULT_MODELS`, `_LLM_DEFAULT_ENDPOINTS`, and `_LLM_API_KEY_ENV` are the only provider tables. The CLI wizards, `llm.get_client()`, and the `--provider` choice list all derive from them.
-- `path_utils.get_output_dir()` is the only output-dir resolver (`./output` if present, else `data_dir/output`).
+- `path_utils.get_output_dir()` is the only output-dir resolver (via `config.get_output_root()`: `WISPER_OUTPUT_DIR`, then the `output_dir` setting, then `<data dir>/output`). It never looks at the working directory.
 - `config.MODEL_SIZES`, `DEVICES`, and `COMPUTE_TYPES` back both the CLI `click.Choice` lists and web-form validation.
 
 ---
@@ -380,6 +396,8 @@ All user data lives in the OS user data dir unless `WISPER_DATA_DIR` is set. `co
 ```
 <data dir>/
 ├── config.toml
+├── wisper.db                        SQLite database (see "Database")
+├── backups/                         pre-migration DB snapshots and legacy-file copies; `wisper db backup` default
 ├── server.json                      bind address of a running `wisper server` (read by `wisper record`)
 ├── profiles/
 │   ├── speakers.json                profile key → SpeakerProfile (global)
@@ -397,10 +415,12 @@ All user data lives in the OS user data dir unless `WISPER_DATA_DIR` is set. `co
 │       ├── combined/NNNN.wav        60 s segments of the mixed track
 │       ├── combined.wav             concatenated at session end
 │       └── live_transcript.md       live draft (local sessions)
-└── output/                          transcripts (when ./output doesn't exist)
+└── output/                          transcripts (default output root; see below)
 ```
 
 ### Output directory
+
+The output root is `WISPER_OUTPUT_DIR`, else the `output_dir` setting (relative values are relative to the data dir; `wisper config set` stores an absolute path), else `<data dir>/output`. It used to be `./output` in the working directory when that existed; the database records which transcripts exist, so the root must not depend on where wisper was launched. On upgrade, migration v1 pins an existing install's working-directory `./output` into `output_dir` (only when the data dir already has a config or legacy store, and neither the env var nor the setting is set). Docker sets `WISPER_OUTPUT_DIR=/app/output`.
 
 ```
 output/
@@ -419,7 +439,7 @@ output/
 - Excerpt clip globs are `glob.escape()`-d so a stem like `mix*` can't match another transcript's clips.
 
 ### Config keys
-`model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`, `hotwords`, `use_mlx`, `forced_alignment`, `parallel_stages`, `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`, `ollama_cloud_api_key`, `discord_bot_token`, `discord_default_guild`, `discord_default_channel`, `discord_presets`.
+`model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`, `hotwords`, `use_mlx`, `forced_alignment`, `parallel_stages`, `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`, `ollama_cloud_api_key`, `discord_bot_token`, `discord_default_guild`, `discord_default_channel`, `discord_presets`, `output_dir`.
 
 `default_mic_profile_key` is also stored, written by the Record page (not in `DEFAULTS`, so not settable via `config set`).
 
@@ -659,7 +679,7 @@ The job page shows step pills and one bar split into equal per-step slices:
 - CI rebuilds Tailwind and fails on `git diff --exit-code` if the committed CSS is stale. The Claude Code pre-commit hook (`.claude/hooks/pre_commit.py`) runs the same rebuild before each commit Claude makes.
 
 ### Docker and launchers
-- `docker-compose.yml`: `wisper`/`wisper-cpu` (CLI) and `wisper-web`/`wisper-cpu-web` (port 8080), sharing `x-volumes`/`x-env` anchors; secrets come from `.env`. The `Makefile` wraps common `docker compose` commands.
+- `docker-compose.yml`: `wisper`/`wisper-cpu` (CLI) and `wisper-web`/`wisper-cpu-web` (port 8080), sharing `x-volumes`/`x-env` anchors (`WISPER_DATA_DIR=/data`, `WISPER_OUTPUT_DIR=/app/output`); secrets come from `.env`. CLI and web containers can share `./data` safely (verified); a native CLI alongside a running Docker Desktop container can't (see "Database"). The `Makefile` wraps common `docker compose` commands.
 - `start.command` (macOS), `start.bat` (Windows), `start.sh` (Linux) run setup on first launch, then start the server and open the browser. The shell launchers are committed executable.
 - **Dependency refresh:** setup stamps `.venv/.wisper-deps` after `pip install -e .`. The launchers reinstall whenever `pyproject.toml` is newer than the stamp (or it's missing), so updating an existing install picks up new dependencies. A failed reinstall leaves the stamp stale and the server starts anyway. `word_alignment` also names the fix when `transformers` is missing, since that's how a stale install shows up.
 - `setup.sh`/`setup.ps1` probe Ollama (`:11434`) and LM Studio (`:1234`) and offer a model picker, and show progress for long installs.
@@ -671,17 +691,19 @@ The job page shows step pills and one bar split into equal per-step slices:
 
 - Tests live in `tests/`, one `test_<module>.py` per module (routes are grouped in `test_web_routes.py`, `test_record_routes.py`, and `test_record_live_routes.py`).
 - **No GPU, network, or real audio.** `WhisperModel`, pyannote `Pipeline`, and embedding extraction are mocked; `load_wav_as_tensor` returns a fake tensor dict.
-- `tests/conftest.py` autouse-patches `pipeline.load_config` with a safe baseline (including `forced_alignment = false`, so no test loads the real aligner on a GPU machine) so a developer's real config can't leak in, and points `WISPER_DATA_DIR` at a fresh temp dir so no test reads or writes the developer's real campaigns, profiles, or config. Enrollment tests patch `speaker_manager.load_profiles`.
+- `tests/conftest.py` autouse-patches `pipeline.load_config` with a safe baseline (including `forced_alignment = false`, so no test loads the real aligner on a GPU machine) so a developer's real config can't leak in, and points `WISPER_DATA_DIR` at a fresh temp dir (and clears `WISPER_OUTPUT_DIR`) so no test reads or writes the developer's real campaigns, profiles, config, or database. Each test therefore gets its own `wisper.db`, migrated on first connect. Enrollment tests patch `speaker_manager.load_profiles`.
 - The aligner's tests (`test_word_alignment.py`) use a fake processor/model but the real `split_words_for_alignment()` from transformers, so word-mapping rules are tested against the actual splitter. `scripts/alignment_eval.py`'s pure logic is tested in `test_alignment_eval.py`.
 - Real LLM HTTP calls are blocked for the whole suite; clients are tested with mocked httpx and fake SDK modules injected via `sys.modules`.
 - Web tests use `TestClient`. Live-recording tests use a `JobQueue` that is never started, and inject jobs directly, so no real worker loads a model.
 - Infinite SSE endpoints are tested by pulling one chunk from the `StreamingResponse` body iterator, not over HTTP.
 - Recording managers are tested through injected fake sources (`tests/_discord_fakes.py`) and a scripted `capture_factory` + instant `ticker`.
+- `test_db.py` covers the migration runner (rollback, `foreign_key_check`, snapshot, cross-process race under spawn), every guard, lease scenarios with `detect_runtime` mocked, and Windows path conversion via `PureWindowsPath`. Thread and process tests use `join(timeout)` so a lock bug fails instead of hanging the suite.
 - Security controls have regression tests in `test_path_traversal.py` (null bytes, regex-busting ids, open-redirect/CRLF) and `test_owasp.py` (XSS sanitizer, headers, no stack traces).
 - There is no JS test harness; client-only behavior (e.g. ticker de-dupe) is verified manually via `LIVE_AUDIO_TEST_PLAN.md`.
 
 **CI** (`.github/workflows/ci.yml`):
 - Python 3.13 and 3.14, both blocking — the versions shipped (Docker `python:3.14-slim`; `requires-python >= 3.13`).
+- A `windows-latest` job (3.13) runs the storage tests (`test_db.py`, `test_path_utils.py`) on a real Windows filesystem. While the SQLite branch is open, `push` also triggers on `feat/sqlite-storage`; remove that at merge.
 - Weekly cron adds a `latest-deps` job (`pip install --upgrade`, 3.14) to catch upstream breakage early.
 - Tailwind staleness check; CodeQL. The Docker CPU image smoke build (`docker.yml`) is currently disabled on GitHub, so image builds are verified manually.
 - Dependabot watches `pip`, `docker`, and `github-actions` weekly.
@@ -702,6 +724,7 @@ The job page shows step pills and one bar split into equal per-step slices:
 | Local recording is native-only | `soundcard` needs host audio devices, so it never works in Docker; the Local capture card hides when unavailable |
 | Live session holds the queue | `JOB_LIVE` occupies the only worker slot for the session. A job already running when a session starts delays live transcription for the whole session (the Record page warns) |
 | Cooperative cancellation | Cancel is checked on tqdm writes; the GPU finishes its current batch |
+| Host + Docker Desktop container on one DB | File locks don't cross Docker Desktop's VM, so both writing `wisper.db` at once corrupts it. The runtime lease refuses the second one; use Docker for everything or the native CLI with a local `wisper server`. Container + container is safe; native Linux Docker is unaffected |
 | Markers after reload | Markers aren't replayed into the live ticker on page reload (they're on the detail page) |
 
 ---

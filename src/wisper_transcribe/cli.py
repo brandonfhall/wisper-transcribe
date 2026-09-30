@@ -37,7 +37,19 @@ from . import __version__
 from . import config as _config
 
 
-@click.group()
+class _WisperGroup(click.Group):
+    """Report database refusals (too-new schema, dev data dir, runtime
+    conflict, old SQLite) as a clean error instead of a traceback."""
+
+    def invoke(self, ctx):
+        from .db import DatabaseError
+        try:
+            return super().invoke(ctx)
+        except DatabaseError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+
+@click.group(cls=_WisperGroup)
 @click.version_option(__version__, prog_name="wisper")
 def main():
     """wisper-transcribe: Podcast transcription with speaker diarization."""
@@ -190,6 +202,11 @@ def server(host: str, port: int, reload: bool, debug: bool) -> None:
             "uvicorn is required to run the web server.  "
             "Install with: pip install 'wisper-transcribe[web]' or pip install uvicorn"
         )
+    # Fail before serving if the database can't be used (the lifespan checks
+    # again for `uvicorn` launched directly and --reload subprocesses).
+    from . import db
+    db.connect().close()
+
     # Publish bind address so app.py can write server.json for CLI discovery.
     os.environ["WISPER_BIND"] = f"{host}:{port}"
 
@@ -447,6 +464,9 @@ def config_set(key: str, value: str):
     elif isinstance(schema_value, list):
         # Accept comma-separated input: "Kyra, Golarion, Zeldris" → ["Kyra", "Golarion", "Zeldris"]
         coerced = [w.strip() for w in value.split(",") if w.strip()]
+    elif key == "output_dir" and value.strip():
+        # Store an absolute path so the root doesn't depend on the CWD.
+        coerced = str(Path(value.strip()).expanduser().resolve())
     else:
         coerced = value
     cfg[key] = coerced
@@ -1761,3 +1781,92 @@ def discord_presets_remove(name: str):
     cfg["discord_presets"] = new_presets
     save_config(cfg)
     click.echo(f"Removed preset {name!r}.")
+
+
+# ---------------------------------------------------------------------------
+# wisper db
+# ---------------------------------------------------------------------------
+
+@main.group("db")
+def db_group():
+    """Inspect, back up, or dump the wisper database."""
+
+
+@db_group.command("status")
+def db_status():
+    """Show schema version, integrity checks, and runtime leases.
+
+    Read-only: never migrates, so it also works on a database that startup
+    refuses.
+    """
+    from . import db
+
+    st = db.status()
+    click.echo(f"Database       : {st.path}")
+    click.echo(f"SQLite         : {st.sqlite_version}")
+    if st.capability_error:
+        click.echo(f"  ! {st.capability_error}")
+    if not st.exists:
+        click.echo("Not created yet (it is created on first use).")
+        return
+    click.echo(f"Size           : {st.size_bytes / 1024:.1f} KB")
+    click.echo(f"Schema version : {st.version} (this build: {st.latest})")
+    if st.version > st.latest:
+        click.echo("  ! Newer than this build; upgrade wisper before using it.")
+    elif st.version < st.latest:
+        click.echo("  Migrations pending; they run on next start.")
+    integrity_ok = st.integrity == ["ok"]
+    click.echo(f"Integrity      : {'ok' if integrity_ok else 'FAILED'}")
+    for line in ([] if integrity_ok else st.integrity[:20]):
+        click.echo(f"  {line}")
+    click.echo(f"Foreign keys   : {'ok' if st.fk_violations == 0 else f'{st.fk_violations} violation(s)'}")
+    if st.schema_drift:
+        click.echo(
+            "  ! Schema differs from what this build creates at this version. "
+            "The database was probably created by an unmerged development build."
+        )
+    if not st.frozen:
+        click.echo("Build          : unmerged development build (schema not frozen)")
+    for m in st.migrations:
+        backup = f", backup {m['backup_dir']}" if m["backup_dir"] else ""
+        click.echo(f"  v{m['version']} applied {m['applied_at']}{backup}")
+    if st.leases:
+        click.echo("Runtime leases :")
+        for lease in st.leases:
+            vm = " (Docker Desktop VM)" if lease["crosses_vm"] else ""
+            state = "active" if lease["age_s"] < db.LEASE_TTL_S else "expired"
+            click.echo(
+                f"  {lease['runtime']:<9} {lease['holder']}{vm} "
+                f"— heartbeat {lease['heartbeat_at']} ({state})"
+            )
+
+
+@db_group.command("backup")
+@click.argument("dest", required=False, type=click.Path(dir_okay=False, path_type=Path))
+def db_backup(dest: Optional[Path]):
+    """Copy the database to DEST (default: <data dir>/backups/wisper-<time>.db).
+
+    Uses SQLite's backup API, so it is consistent even while the server runs.
+    """
+    from . import db
+
+    out = db.backup(dest=dest)
+    click.echo(f"Backed up to {out}")
+
+
+@db_group.command("dump")
+@click.option("-o", "--output", "output", type=click.Path(dir_okay=False, path_type=Path),
+              default=None, help="Write to a file instead of stdout")
+def db_dump(output: Optional[Path]):
+    """Print the whole database as SQL text."""
+    from . import db
+
+    lines = db.dump()
+    if output is None:
+        for line in lines:
+            click.echo(line)
+        return
+    with open(output, "w", encoding="utf-8") as fh:
+        for line in lines:
+            fh.write(line + "\n")
+    click.echo(f"Wrote {output}")

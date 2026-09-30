@@ -6,7 +6,8 @@
 |----------|---------|
 | `HF_TOKEN` | HuggingFace token — preferred name (used by Docker `.env` and all HF libraries) |
 | `HUGGINGFACE_TOKEN` | Alias for `HF_TOKEN`; both are accepted and propagated to each other |
-| `WISPER_DATA_DIR` | Override config/profile storage path — set automatically in Docker |
+| `WISPER_DATA_DIR` | Override the data directory (config, database, profiles) — set automatically in Docker |
+| `WISPER_OUTPUT_DIR` | Override the transcripts folder (takes precedence over the `output_dir` setting) — set to `/app/output` in Docker |
 | `WISPER_DEBUG` | Set to `1` to disable warning suppression and see raw dependency output |
 | `DISCORD_BOT_TOKEN` | Discord bot token for the recording bot (see [docker.md](docker.md)) |
 | `WISPER_SIDECAR_JAR` | Absolute path to the JDA sidecar fat JAR (`discord-bot-all.jar`). Overrides the default search path. Useful when the JAR is not in the standard repo or Docker location. |
@@ -45,6 +46,7 @@ Stored in `config.toml`. View with `wisper config show`, change with `wisper con
 | `discord_bot_token` | — | Discord recording bot token (env `DISCORD_BOT_TOKEN` takes precedence) |
 | `discord_default_guild` / `discord_default_channel` | — | Used when `record start` gets no `--guild`/`--voice-channel`/`--preset` |
 | `discord_presets` | `[]` | Saved guild/channel pairs; manage with `wisper config discord-presets` |
+| `output_dir` | — | Transcripts folder. Blank = `output/` in the data directory. `wisper config set` stores it as an absolute path; env `WISPER_OUTPUT_DIR` takes precedence |
 
 ---
 
@@ -61,6 +63,8 @@ Speaker profiles and config are stored in your OS user data directory — separa
 ```
 wisper-transcribe/
 ├── config.toml          settings
+├── wisper.db            database (SQLite)
+├── backups/             automatic pre-upgrade copies; `wisper db backup` default
 ├── profiles/
 │   ├── speakers.json    speaker registry (global — one entry per person)
 │   └── embeddings/
@@ -71,10 +75,30 @@ wisper-transcribe/
 │   └── <slug>/
 │       └── journal.md   rolling campaign journal (`wisper campaigns journal`)
 ├── recordings/          Discord and local recordings (audio + metadata)
-└── output/              transcripts, when ./output doesn't exist in the working directory
+└── output/              transcripts (unless `output_dir` / `WISPER_OUTPUT_DIR` points elsewhere)
 ```
 
-Override the storage path with `WISPER_DATA_DIR` (set automatically in Docker).
+Override the storage path with `WISPER_DATA_DIR` (set automatically in Docker). Don't point it at a synced folder (OneDrive, Dropbox, iCloud): syncing a database file while it's open can corrupt it.
+
+### Transcripts folder
+
+Transcripts go to the output root: `WISPER_OUTPUT_DIR` if set, else the `output_dir` setting, else `output/` in the data directory. Older versions used `./output` in whatever directory wisper was started from when that folder existed; that check is gone, so the folder no longer depends on where you launch wisper. When you upgrade, an existing install that was using a working-directory `./output` has that path saved into `output_dir` automatically.
+
+To move your transcripts: stop the server, move the files, then `wisper config set output_dir <new path>`.
+
+### Database and backups
+
+`wisper.db` in the data directory holds wisper's records. It is created on first use and upgraded automatically; before an upgrade changes an existing database, a copy is saved in `backups/`.
+
+- `wisper db status` — schema version, integrity check, and which processes are using it.
+- `wisper db backup [DEST]` — a consistent copy, safe while the server is running.
+- `wisper db dump` — the whole database as SQL text.
+
+To restore, stop the server and replace `wisper.db` with the backup. On Windows the database file is locked while wisper runs, so stop the server before moving or restoring the data directory.
+
+Requires SQLite 3.43 or newer with FTS5, which the Python 3.13+ builds from python.org and Homebrew and the Docker image all include. wisper refuses to start, naming what's missing, on an older system SQLite.
+
+**Development builds:** a build from an unmerged development branch refuses to use the default data directory, because its database layout may still change. Point `WISPER_DATA_DIR` at a copy of your data instead.
 
 ---
 

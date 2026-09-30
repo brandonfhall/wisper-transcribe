@@ -45,3 +45,59 @@ def test_returns_basename_not_full_path():
     assert result == "simple-id"
     assert "/" not in (result or "")
     assert "\\" not in (result or "")
+
+
+# ---------------------------------------------------------------------------
+# get_output_dir(): WISPER_OUTPUT_DIR → output_dir setting → <data dir>/output
+# ---------------------------------------------------------------------------
+
+from pathlib import Path
+
+from wisper_transcribe.config import get_data_dir, load_config, save_config
+from wisper_transcribe.path_utils import get_output_dir
+
+
+def test_output_dir_defaults_to_data_dir():
+    assert get_output_dir() == get_data_dir() / "output"
+    assert get_output_dir().is_dir()
+
+
+def test_output_dir_ignores_cwd_output(tmp_path, monkeypatch):
+    (tmp_path / "output").mkdir()
+    monkeypatch.chdir(tmp_path)
+    assert get_output_dir() == get_data_dir() / "output"
+
+
+def test_output_dir_from_config(tmp_path):
+    cfg = load_config()
+    cfg["output_dir"] = str(tmp_path / "transcripts")
+    save_config(cfg)
+    assert get_output_dir() == tmp_path / "transcripts"
+
+
+def test_relative_output_dir_setting_is_relative_to_data_dir():
+    cfg = load_config()
+    cfg["output_dir"] = "mine"
+    save_config(cfg)
+    assert get_output_dir() == get_data_dir() / "mine"
+
+
+def test_env_overrides_config(tmp_path, monkeypatch):
+    cfg = load_config()
+    cfg["output_dir"] = str(tmp_path / "from-config")
+    save_config(cfg)
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(tmp_path / "from-env"))
+    assert get_output_dir() == tmp_path / "from-env"
+
+
+def test_config_set_output_dir_stores_absolute(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    from wisper_transcribe.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(main, ["config", "set", "output_dir", "rel/out"])
+    assert result.exit_code == 0, result.output
+    stored = load_config()["output_dir"]
+    assert Path(stored).is_absolute()
+    assert Path(stored) == (tmp_path / "rel" / "out").resolve()

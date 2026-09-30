@@ -136,6 +136,16 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[misc]
+        # Migrate (or refuse) before serving anything.
+        from wisper_transcribe import db
+        try:
+            db.connect().close()
+        except db.DatabaseError as exc:
+            import logging
+            logging.getLogger(__name__).error("%s", exc)
+            raise
+        heartbeat = db.Heartbeat().start()
+
         _build_tailwind()
         job_queue.start()
 
@@ -175,6 +185,7 @@ def create_app() -> FastAPI:
             await asyncio.to_thread(local_capture_manager.stop)
             await bot_manager.stop()
             await job_queue.stop()
+            await asyncio.to_thread(heartbeat.stop)
             try:
                 _sj.unlink(missing_ok=True)
             except OSError:

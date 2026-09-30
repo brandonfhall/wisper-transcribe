@@ -425,9 +425,9 @@ Nothing else changes; the wire protocol is the stable interface.
 
 ---
 
-## Storage — SQLite migration (plan approved; Phase 0 next)
+## Storage — SQLite migration (in progress: Phase 0 done)
 
-Branch `feat/sqlite-storage`. Plan only. The schema below is signed off. Decisions are listed under "Decisions" at the end.
+Branch `feat/sqlite-storage`. Phase 0 is implemented (`db.py`, `wisper db`, output-root setting, guards, Windows CI job); Phases 1–7 remain. The schema below is signed off. Decisions are listed under "Decisions" at the end.
 
 ### Why, and what SQLite does and doesn't fix
 
@@ -783,7 +783,7 @@ Rules:
 
 Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → `dict[str, SpeakerProfile]`, `load_campaigns()`, `get_transcripts_for_campaign()`, `load_recordings()`, …). Routes, the CLI, and the CLAUDE.md mock targets therefore barely change in the early phases, and most of the ~200 test references keep working. Internals switch from JSON to SQL. A later cleanup phase can narrow the APIs (e.g. drop whole-store `save_*`).
 
-**Phase 0 — Foundation (no data moves).**
+**Phase 0 — Foundation (no data moves). Done.** Implementation notes: the pre-upgrade snapshot runs on a second connection after the migrator takes `BEGIN IMMEDIATE` (the backup API on the locked connection itself hangs); "created by an unmerged build" is detected as schema drift against this build's DDL replayed in memory, so no column was added; `connect()` claims the lease lazily (≤ every 30 s) and only the server runs the 60 s heartbeat thread; CI `push` also triggers on `feat/sqlite-storage` until merge.
 - New `db.py`: `connect()`, `transaction()`, migrations runner, downgrade guard, backup helper.
 - `wisper db status | backup | dump`.
 - Migrations run on first `connect()`; startup in `web/app.py` calls it early so a failure is reported before serving.
@@ -992,7 +992,7 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 
 ### Open questions
 
-None. Schema signed off (decision 30). Next step: Phase 0.
+None. Schema signed off (decision 30). Phase 0 done; next: Phase 1.
 
 ---
 

@@ -34,10 +34,12 @@ def validate_path_component(value: str, guard_name: str = "_guard") -> Optional[
 
 
 def get_output_dir() -> Path:
-    """Return the output directory for web-submitted jobs, creating it if needed."""
-    from wisper_transcribe.config import get_data_dir
-    out = Path("output")
-    if not out.exists():
-        out = Path(get_data_dir()) / "output"
+    """Return the transcript output root, creating it if needed.
+
+    See ``config.get_output_root()``: ``WISPER_OUTPUT_DIR``, then the
+    ``output_dir`` setting, then ``<data dir>/output``. No CWD check.
+    """
+    from wisper_transcribe.config import get_output_root
+    out = get_output_root()
     out.mkdir(parents=True, exist_ok=True)
     return out

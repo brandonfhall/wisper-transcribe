@@ -385,6 +385,7 @@ wisper config set similarity_threshold 0.60  # stricter speaker matching
 wisper config set min_speakers 2          # min speaker count when diarizing (int)
 wisper config set max_speakers 8          # max speaker count when diarizing (int)
 wisper config path                        # show where config.toml lives
+wisper config set output_dir ~/Transcripts  # transcripts folder (stored as an absolute path)
 wisper config llm                         # interactive wizard: provider + model + key/endpoint
 ```
 
@@ -429,6 +430,24 @@ wisper config discord-presets remove "Weekly D&D"
 ```
 
 Presets are also manageable via the web UI — the Record page has an inline "Save as preset" form.
+
+---
+
+### `wisper db`
+
+Inspect and back up the database (`wisper.db` in the data directory).
+
+```bash
+wisper db status                  # schema version, integrity and foreign-key checks, runtime leases
+wisper db backup                  # copy to <data dir>/backups/wisper-<time>.db
+wisper db backup ~/wisper.db.bak  # copy to a chosen file (refuses to overwrite)
+wisper db dump                    # whole database as SQL text
+wisper db dump -o dump.sql
+```
+
+`status` is read-only: it never upgrades the database, so it also works when startup refuses (for example, a database from a newer wisper). `backup` uses SQLite's backup API and is safe while the server is running.
+
+Every command that uses the database stops with a clear message, not a traceback, when it can't: a database newer than this wisper, an unmerged development build pointed at the default data directory, an SQLite older than 3.43 or without FTS5, or a native process while a Docker Desktop container is using the same data directory (see [docker.md](docker.md#one-way-of-running-at-a-time)).
 
 ---
 
