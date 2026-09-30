@@ -443,7 +443,7 @@ Other gains:
    1. Read the companion paths: the audio copy's path comes from the row or sidecar, because a collision suffix (`_1`, `_2`) means it can't be derived from the stem.
    2. Unlink the `.md`.
    3. Delete the row in one transaction. The cascade removes campaign, journal, and speaker rows and nulls recording and job links. Until Phase 4, recordings are still JSON, so step 3 also calls `recording_manager.clear_transcript_link(stem)` (clears `transcript_path`, reverts `transcribed` → `completed`). Jobs are in memory until Phase 5 and need nothing.
-   4. Unlink the companions, best-effort. The source-audio copy is deleted only when its root is `output` (a recording's `combined.wav` belongs to the recording).
+   4. Unlink the companions, best-effort. The source-audio copy is always under the output root (web uploads are moved there; recordings copy `combined.wav` to `<output>/<recording-id>.wav`, `record.py:930`), so the recording's own `combined.wav` is never touched.
 
    A crash between steps 3 and 4 leaves companions with no `.md` and no row. That is the only case reconcile sweeps (see "Transcript identity").
 
@@ -471,54 +471,227 @@ Costs:
 | Job queue | In-memory runtime, plus a DB **history projection** | Events, closures, and cancel flags can't persist. Same DB file, not a jobs-only store. |
 | `config.toml`, `server.json` | File | Hand-edited, holds secrets, or is a runtime pointer. Out of scope. |
 
-### Schema (DRAFT, for discussion)
+### Schema (DRAFT, for sign-off)
 
-One file, `<data dir>/wisper.db`. Surrogate integer ids for everything user-renamable, so a rename is one `UPDATE`. Every stored path is **relative, POSIX-separated, and resolved against a named root** (`output` or `recordings`) by one `db.resolve(root, rel)` helper, never absolute, so the same DB works on host and Docker and on Windows.
+One file, `<data dir>/wisper.db`. The DDL below has been run against SQLite 3.53 with `foreign_keys=ON`; every constraint listed in "Schema principles" was checked by an insert that should fail and did.
 
+**Schema principles** (decided: build it properly, not as a JSON mirror):
+- **Normalized to 3NF/BCNF.** Every non-key column depends on the whole key and nothing else. Anything derivable is derived, not stored:
+  - A recording's `transcribed` state is `transcript_id IS NOT NULL`; `transcribing` is "an active job exists for this recording" (the in-memory `JobQueue` before Phase 5, the `jobs` table after). Only the capture lifecycle is stored (`capture_status`). Decision 8's revert happens by `ON DELETE SET NULL` with no app code, and the stuck-`transcribing` bug can't happen. `Recording.status` stays a computed property so templates don't change.
+  - Segment paths (`recordings/<id>/combined/<idx:04d>.wav`), `combined.wav`, and `per-user/` are fixed layout, so no path columns. The manifest's `stream` is always `"mixed"` (`recording_manager.py:377`), so no stream column.
+  - Marker `elapsed_s` is `marked_at − started_at` (`started_at` never changes). This reverses the store-once choice commented at `append_marker()`.
+  - `Recording.unbound_speakers` is `recording_speakers` rows with NULL `profile_id`.
+- **No multi-valued columns (1NF).** `devices_json` becomes `recording_devices`. One documented exception: `jobs.params_json`, an audit snapshot of kwargs that is never queried by field, constrained to a JSON object.
+- **Subtypes enforced by the schema.** Discord-only data (`guild_id`, `voice_channel_id`, speakers, rejoins) hangs off `recording_discord`, and local devices off `recording_devices`. Both use a composite FK to `recordings(id, source)`, so a local recording can't have Discord rows and vice versa.
+- **Integrity in the DB, not in app code:** `STRICT` tables, explicit `NOT NULL`, `CHECK` on every enum and on paired-nullable columns (embedding + space, indexed mtime + size), `UNIQUE` for every one-to-one rule the code enforces today (one Discord account per member per campaign — `bind_discord_id`'s loop; one campaign per transcript; one recording per transcript; campaign order positions).
+- **Journal entries must belong to the campaign that holds the transcript:** composite FK to `campaign_transcripts(campaign_id, transcript_id)`. Moving a journaled transcript fails unless its entry is deleted in the same transaction (today's behaviour, now enforced); unassigning it drops the entry, so re-adding it offers the fold again.
+- **Every FK child column is indexed** (SQLite doesn't do this; unindexed children make cascades full scans).
+- **Surrogate integer ids** for everything user-renamable, so a rename is one `UPDATE`. UUIDs stay the key for recordings and jobs (they're already in URLs).
+- **Deliberate non-derivations**, each for a stated reason:
+  - `profiles.key`: an alternate key (URL slug and reference-clip filename), written only by `rename_profile()`.
+  - `transcript_speakers.display_name`: the name as rendered in that `.md`, which a profile rename doesn't rewrite. It's a fact about the file, not a profile FK.
+  - `recording_speakers.profile_id`: who that Discord user was when captured. Needed for recordings with no campaign, where there's no membership to derive it from.
+  - `search_blocks` and `search_fts`: a derived, disposable index (Phase 6).
+- **Types:** timestamps are ISO-8601 UTC `TEXT`; booleans are `INTEGER CHECK IN (0,1)`; stored paths are relative to the output root and POSIX-separated, with a `CHECK` rejecting absolute paths, backslashes, and `..` components.
+- **Checks at runtime:** `PRAGMA foreign_key_check` runs before every migration commits (a non-empty result rolls back); `wisper db status` runs it plus `PRAGMA integrity_check`. Imports use `PRAGMA defer_foreign_keys=ON` so load order doesn't matter.
+- **Enum CHECKs mirror Python constants** (`JOB_*`, statuses, `SOURCE_AUTO`/`SOURCE_MANUAL`). A test asserts they match, so adding a job type without a migration fails CI.
+
+```sql
+-- Conventions: every table STRICT; timestamps are TEXT, ISO-8601 UTC ('…Z');
+-- booleans are INTEGER CHECK IN (0,1); every FK child column is indexed.
+
+CREATE TABLE migrations (                      -- append-only log; PRAGMA user_version is authoritative
+  version     INTEGER PRIMARY KEY,
+  applied_at  TEXT NOT NULL,
+  backup_dir  TEXT                             -- relative to the data dir; NULL = nothing backed up
+) STRICT;
+
+-- Phase 1 ------------------------------------------------------------------
+CREATE TABLE profiles (
+  id                INTEGER PRIMARY KEY,
+  key               TEXT NOT NULL UNIQUE,      -- alternate key: URL slug + clip filename; set only by rename_profile()
+  display_name      TEXT NOT NULL CHECK (display_name <> ''),
+  role              TEXT NOT NULL DEFAULT '',
+  notes             TEXT NOT NULL DEFAULT '',
+  enrolled_date     TEXT NOT NULL,
+  enrollment_source TEXT NOT NULL,
+  embedding         BLOB,
+  embedding_space   TEXT,
+  CHECK ((embedding IS NULL) = (embedding_space IS NULL)),
+  CHECK (embedding IS NULL OR length(embedding) % 4 = 0)   -- float32 vector
+) STRICT;
+
+CREATE TABLE campaigns (
+  id             INTEGER PRIMARY KEY,
+  slug           TEXT NOT NULL UNIQUE,
+  display_name   TEXT NOT NULL CHECK (display_name <> ''),
+  created_at     TEXT NOT NULL,
+  journal_sha256 TEXT CHECK (journal_sha256 IS NULL OR length(journal_sha256) = 64)
+) STRICT;
+
+CREATE TABLE campaign_members (
+  campaign_id     INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  profile_id      INTEGER NOT NULL REFERENCES profiles(id)  ON DELETE CASCADE,
+  role            TEXT NOT NULL DEFAULT '',
+  character       TEXT NOT NULL DEFAULT '',
+  discord_user_id TEXT CHECK (discord_user_id IS NULL OR discord_user_id GLOB '[0-9]*'),
+  PRIMARY KEY (campaign_id, profile_id),
+  UNIQUE (campaign_id, discord_user_id)       -- one member per Discord account per campaign (NULLs allowed)
+) STRICT;
+CREATE INDEX campaign_members_profile ON campaign_members(profile_id);
+
+-- Phase 2 ------------------------------------------------------------------
+CREATE TABLE transcripts (
+  id             INTEGER PRIMARY KEY,
+  stem           TEXT NOT NULL UNIQUE CHECK (stem <> '' AND stem NOT GLOB '*[/\]*'),  -- NFC, relative to the output root
+  created_at     TEXT NOT NULL,
+  missing_since  TEXT,
+  audio_rel_path TEXT CHECK (audio_rel_path IS NULL OR (audio_rel_path NOT GLOB '/*'
+                                                  AND audio_rel_path NOT GLOB '*\*'
+                                                  AND '/' || audio_rel_path || '/' NOT GLOB '*/../*')),
+  indexed_mtime_ns INTEGER,                    -- Phase 6
+  indexed_size     INTEGER,                    -- Phase 6
+  CHECK ((indexed_mtime_ns IS NULL) = (indexed_size IS NULL))
+) STRICT;
+
+CREATE TABLE campaign_transcripts (           -- 1:N kept as its own relation so "no campaign" needs no NULLs
+  transcript_id INTEGER PRIMARY KEY REFERENCES transcripts(id) ON DELETE CASCADE,   -- one campaign per transcript
+  campaign_id   INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  position      INTEGER NOT NULL CHECK (position >= 0),
+  UNIQUE (campaign_id, position),
+  UNIQUE (campaign_id, transcript_id)         -- target of journal_entries' composite FK
+) STRICT;
+
+CREATE TABLE journal_entries (
+  transcript_id INTEGER PRIMARY KEY,
+  campaign_id   INTEGER NOT NULL,
+  folded_at     TEXT NOT NULL,
+  FOREIGN KEY (campaign_id, transcript_id)
+    REFERENCES campaign_transcripts(campaign_id, transcript_id) ON DELETE CASCADE
+    -- ON UPDATE NO ACTION: moving a journaled transcript fails unless its entry is deleted first
+) STRICT;
+CREATE INDEX journal_entries_campaign ON journal_entries(campaign_id, transcript_id);
+
+-- Phase 3 ------------------------------------------------------------------
+CREATE TABLE transcript_speakers (
+  transcript_id   INTEGER NOT NULL REFERENCES transcripts(id) ON DELETE CASCADE,
+  label           TEXT NOT NULL,              -- raw pyannote label
+  display_name    TEXT NOT NULL,              -- the name as rendered in the .md (not a profile FK, by design)
+  source          TEXT NOT NULL CHECK (source IN ('auto', 'manual')),
+  embedding       BLOB,
+  embedding_space TEXT,
+  PRIMARY KEY (transcript_id, label),
+  CHECK ((embedding IS NULL) = (embedding_space IS NULL))
+) STRICT;
+
+-- Phase 4 ------------------------------------------------------------------
+CREATE TABLE recordings (
+  id             TEXT PRIMARY KEY CHECK (length(id) = 36),   -- uuid4
+  source         TEXT NOT NULL CHECK (source IN ('discord', 'local')),
+  name           TEXT,
+  notes          TEXT,
+  campaign_id    INTEGER REFERENCES campaigns(id) ON DELETE SET NULL,
+  transcript_id  INTEGER UNIQUE REFERENCES transcripts(id) ON DELETE SET NULL,
+  capture_status TEXT NOT NULL CHECK (capture_status IN ('recording', 'degraded', 'completed', 'failed')),
+  started_at     TEXT NOT NULL,
+  ended_at       TEXT,
+  recovered_at   TEXT,
+  UNIQUE (id, source),                        -- target of the subtype FKs below
+  CHECK (capture_status NOT IN ('recording', 'degraded') OR ended_at IS NULL),
+  CHECK (recovered_at IS NULL OR capture_status = 'completed')
+) STRICT;
+CREATE INDEX recordings_campaign ON recordings(campaign_id);
+
+CREATE TABLE recording_discord (              -- subtype: Discord-only attributes
+  recording_id     TEXT PRIMARY KEY,
+  source           TEXT NOT NULL DEFAULT 'discord' CHECK (source = 'discord'),
+  guild_id         TEXT NOT NULL,
+  voice_channel_id TEXT NOT NULL,
+  FOREIGN KEY (recording_id, source) REFERENCES recordings(id, source) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE recording_devices (              -- subtype: local-capture devices (display only)
+  recording_id TEXT NOT NULL,
+  source       TEXT NOT NULL DEFAULT 'local' CHECK (source = 'local'),
+  role         TEXT NOT NULL CHECK (role IN ('mic', 'system')),
+  device_name  TEXT NOT NULL,
+  PRIMARY KEY (recording_id, role),
+  FOREIGN KEY (recording_id, source) REFERENCES recordings(id, source) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE recording_speakers (             -- Discord users heard; NULL profile = unbound
+  recording_id    TEXT NOT NULL REFERENCES recording_discord(recording_id) ON DELETE CASCADE,
+  discord_user_id TEXT NOT NULL CHECK (discord_user_id GLOB '[0-9]*'),
+  profile_id      INTEGER REFERENCES profiles(id) ON DELETE SET NULL,
+  PRIMARY KEY (recording_id, discord_user_id)
+) STRICT;
+CREATE INDEX recording_speakers_profile ON recording_speakers(profile_id);
+
+CREATE TABLE recording_segments (             -- path derived: recordings/<id>/combined/<idx:04d>.wav
+  recording_id TEXT NOT NULL REFERENCES recordings(id) ON DELETE CASCADE,
+  idx          INTEGER NOT NULL CHECK (idx >= 0),
+  started_at   TEXT NOT NULL,
+  duration_s   REAL NOT NULL CHECK (duration_s >= 0),
+  finalized    INTEGER NOT NULL CHECK (finalized IN (0, 1)),
+  PRIMARY KEY (recording_id, idx)
+) STRICT;
+
+CREATE TABLE recording_markers (              -- elapsed = marked_at - recordings.started_at (derived)
+  recording_id TEXT NOT NULL REFERENCES recordings(id) ON DELETE CASCADE,
+  marked_at    TEXT NOT NULL,
+  PRIMARY KEY (recording_id, marked_at)
+) STRICT;
+
+CREATE TABLE recording_rejoins (
+  recording_id   TEXT NOT NULL REFERENCES recording_discord(recording_id) ON DELETE CASCADE,
+  attempted_at   TEXT NOT NULL,
+  close_code     INTEGER NOT NULL,
+  attempt_number INTEGER NOT NULL CHECK (attempt_number >= 1),
+  PRIMARY KEY (recording_id, attempted_at)
+) STRICT;
+
+-- Phase 5 ------------------------------------------------------------------
+CREATE TABLE jobs (
+  id            TEXT PRIMARY KEY CHECK (length(id) = 36),
+  type          TEXT NOT NULL CHECK (type IN ('transcription', 'refine', 'summarize', 'enroll',
+                                              'live', 'campaign_journal', 'speaker_relabel')),
+  status        TEXT NOT NULL CHECK (status IN ('pending', 'running', 'completed', 'failed')),
+  created_at    TEXT NOT NULL,
+  started_at    TEXT,
+  finished_at   TEXT,
+  error_code    TEXT,
+  transcript_id INTEGER REFERENCES transcripts(id) ON DELETE SET NULL,
+  campaign_id   INTEGER REFERENCES campaigns(id)   ON DELETE SET NULL,
+  recording_id  TEXT    REFERENCES recordings(id)  ON DELETE SET NULL,
+  params_json   TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(params_json) AND json_type(params_json) = 'object'),
+  log_tail      TEXT NOT NULL DEFAULT '',
+  CHECK (status <> 'pending' OR started_at IS NULL),
+  CHECK (status <> 'running' OR started_at IS NOT NULL),   -- a failed job may never have started (cancelled/interrupted while pending)
+  CHECK ((status IN ('completed', 'failed')) = (finished_at IS NOT NULL)),
+  CHECK ((status = 'failed') = (error_code IS NOT NULL))
+) STRICT;
+CREATE INDEX jobs_created    ON jobs(created_at);
+CREATE INDEX jobs_transcript ON jobs(transcript_id);
+CREATE INDEX jobs_campaign   ON jobs(campaign_id);
+CREATE INDEX jobs_recording  ON jobs(recording_id);
+
+-- Phase 6 (derived; rebuildable) ------------------------------------------
+CREATE TABLE search_blocks (
+  id            INTEGER PRIMARY KEY,           -- = search_fts.rowid
+  transcript_id INTEGER NOT NULL REFERENCES transcripts(id) ON DELETE CASCADE,
+  kind          TEXT NOT NULL CHECK (kind IN ('transcript', 'summary')),
+  block_idx     INTEGER NOT NULL CHECK (block_idx >= 0),
+  speaker       TEXT,                          -- filter + display; NULL for summary sections
+  start_s       REAL CHECK (start_s IS NULL OR start_s >= 0),
+  UNIQUE (transcript_id, kind, block_idx)
+) STRICT;
+CREATE VIRTUAL TABLE search_fts USING fts5(
+  text, content='', contentless_delete=1,
+  tokenize='porter unicode61 remove_diacritics 2', prefix='2 3');
+CREATE TRIGGER search_blocks_ad AFTER DELETE ON search_blocks BEGIN
+  DELETE FROM search_fts WHERE rowid = old.id;
+END;
 ```
-meta(key PK, value)                     -- imported_at, …
-profiles(id PK, key UNIQUE, display_name, role, notes, enrolled_date,
-         enrollment_source, embedding BLOB NULL, embedding_space)
-campaigns(id PK, slug UNIQUE, display_name, created,
-          journal_sha256 NULL)          -- hash of journal.md as last written by a fold
-campaign_members(campaign_id FK→campaigns CASCADE, profile_id FK→profiles CASCADE,
-                 role, character, discord_user_id, PK(campaign_id, profile_id))
-transcripts(id PK, stem UNIQUE, created_at, missing_since NULL,  -- stem: NFC-normalized, relative to the output root
-            audio_root NULL, audio_rel_path NULL)               -- source audio: root 'output' (web-upload copy)
-                                                                --   or 'recordings' (a recording's combined.wav)
-campaign_transcripts(campaign_id FK CASCADE, transcript_id FK CASCADE UNIQUE, position)
-                                        -- UNIQUE(transcript_id) = one campaign per transcript
-journal_entries(campaign_id FK CASCADE, transcript_id FK CASCADE, position, folded_at)
-transcript_speakers(transcript_id FK CASCADE, label, display_name, source,
-                    embedding BLOB NULL, embedding_space, PK(transcript_id, label))
-recordings(id TEXT PK uuid, campaign_id FK SET NULL, transcript_id FK SET NULL, status,
-           source, name, started_at, ended_at, voice_channel_id, guild_id, devices_json,
-           combined_rel_path, notes,   -- combined_rel_path is relative to the recordings root
-           job_id TEXT NULL)           -- no FK until Phase 5 adds FK→jobs SET NULL
-                                        -- per_user_dir is derived (recordings/<id>/per-user), not stored
-recording_speakers(recording_id FK CASCADE, discord_user_id, profile_id FK SET NULL NULL,
-                   PK(recording_id, discord_user_id))
-                                        -- NULL profile = unbound speaker. Replaces both discord_speakers
-                                        -- and unbound_speakers; Recording.unbound_speakers becomes derived.
-                                        -- Deleting a profile unbinds its speakers (intended: the enroll
-                                        -- button comes back, which is the recovery path).
-recording_segments(recording_id FK CASCADE, idx, stream, started_at, duration_s, rel_path, finalized)
-recording_markers(recording_id FK CASCADE, timestamp, elapsed_s)
-recording_rejoins(recording_id FK CASCADE, timestamp, close_code, attempt_number)
-jobs(id TEXT PK uuid, type, status, created_at, started_at, finished_at, error_code,
-     transcript_id FK SET NULL, campaign_id FK SET NULL, recording_id FK SET NULL,
-     params_json, log_tail)
-
--- Phase 6: full-text search (derived from the .md files; rebuildable at any time)
-transcripts += indexed_mtime_ns NULL, indexed_size NULL                  -- NULL = not indexed yet
-search_blocks(id PK, transcript_id FK CASCADE, kind,                      -- kind: transcript | summary
-              block_idx, speaker, start_s NULL)
-search_fts USING fts5(speaker, text, content='', contentless_delete=1,
-              tokenize='porter unicode61 remove_diacritics 2', prefix='2 3')   -- rowid = search_blocks.id
-trigger: AFTER DELETE ON search_blocks → DELETE FROM search_fts WHERE rowid = old.id
-```
-
-When a transcript is deleted, `recordings.transcript_id` becomes NULL, and app code reverts the status `transcribed` → `completed` in the same transaction, so the Transcribe button comes back (decision 8).
 
 ### Transcript identity (settle before Phase 2)
 
@@ -547,7 +720,8 @@ Rules:
 ### Migrating existing installs
 
 - **Mechanism.** `db.py` holds an ordered list of Python migration functions, versioned by `PRAGMA user_version`. The stdlib `sqlite3` module is enough: no ORM, no Alembic, no new dependency. Connections use Python 3.12+ `autocommit=True` with an explicit `BEGIN IMMEDIATE`, avoiding the legacy implicit-transaction mode.
-- **Each phase is one migration:** create its tables, then import its legacy files if present, in **the same `BEGIN IMMEDIATE` transaction that bumps `user_version`**. The result is all or nothing.
+- **Each phase is one migration:** create its tables, then import its legacy files if present, in **the same `BEGIN IMMEDIATE` transaction that bumps `user_version`**, with `PRAGMA defer_foreign_keys=ON`. `PRAGMA foreign_key_check` must come back empty before commit, or the migration rolls back. The result is all or nothing.
+- **Editable until merge** (decision 24): the branch ships as one PR, so no installed DB ever has an intermediate schema. Later phases edit earlier migrations in place instead of stacking `ALTER TABLE` rebuilds; after merge, migrations are frozen and changes go in new ones. Consequence for development: import deletes the legacy JSON and version numbers get reused, so **branch work runs against a copied data dir** (`WISPER_DATA_DIR=~/wisper-dev-data`), never `~/Library/Application Support/wisper-transcribe`. `wisper db status` warns when the DB was created by an unmerged build.
 - **Idempotency.** Re-running is a no-op because the version already moved. If the server and a CLI command start at the same moment, the second blocks on the write lock, then sees the new version and skips.
 - **Downgrade guard.** A DB whose `user_version` is newer than the code knows makes the app refuse to start, with a clear message. An old build must not write to a newer schema.
 - **Backup.** Before a migration that imports legacy data, copy those legacy files into `<data dir>/backups/pre-sqlite-v<N>-<timestamp>/`. Before any later schema migration, snapshot `wisper.db` with the sqlite3 backup API. Audio is never copied.
@@ -557,7 +731,9 @@ Rules:
   - A member whose profile key isn't in `speakers.json` is dropped and reported.
   - `journaled_sessions` entries with no transcript are dropped and reported.
   - A sidecar or metadata file that fails to parse is skipped and reported.
-  - A sidecar `input_path` under neither the output root nor the recordings root (old sidecars point at temp dirs or user-chosen files) imports as NULL audio and is reported. The enroll wizard already handles missing source audio.
+  - Two members of one campaign bound to the same Discord id (the new `UNIQUE`): the first keeps it, the rest are cleared and reported.
+  - A row that would violate a `CHECK` (an unknown status, an active recording with an `ended_at`, a missing required timestamp) is repaired to the nearest valid value when that's unambiguous (e.g. an active status at import becomes `failed`, as startup reconcile would do), otherwise skipped, and always reported.
+  - A sidecar `input_path` outside the output root (old sidecars point at temp dirs or user-chosen files) imports as NULL audio and is reported. The enroll wizard already handles missing source audio.
   - A sidecar `campaign` whose transcript has no `campaign_transcripts` row is associated if that campaign exists, and reported.
 - **Unparseable top-level JSON** (`speakers.json`, `campaigns.json`) rolls the transaction back, leaves `user_version` unchanged, and stops startup with a message naming the file and the backup. Importing an empty store instead would silently lose data.
 - **Import report** goes to the log and to `import-report.txt` in the backup dir.
@@ -573,7 +749,7 @@ Rules:
 - **The one-job-at-a-time invariant is unchanged.** It protects the model globals, not storage, and the DB neither needs nor relaxes it. The worker writes job transitions (pending → running → terminal) as short transactions.
 - **Async routes** call sync `sqlite3` inline. That costs about the same as today's inline JSON reads (sub-millisecond at this scale). Revisit only if a query gets slow.
 - **Journal mode.** Rollback journal (`DELETE`) everywhere (decided). Write volume is tiny, it works on any filesystem, and WAL needs shared memory that can misbehave on network or virtualized filesystems. WAL is the upgrade if read/write contention is ever observed (open question 7).
-- **Docker.** The DB lives in `/data`, next to `config.toml`. Transcripts stay on the `/app/output` mount and recordings on the nested `/data/recordings` mount, which is why stored paths are relative to a named root. Needs verification, not assumption: a `docker compose run wisper …` CLI container and `wisper-web` sharing `./data`, on Linux and on Docker Desktop for Mac. A host process and a container writing the same bind-mounted DB at once is unsupported; the docs will say so.
+- **Docker.** The DB lives in `/data`, next to `config.toml`. Transcripts stay on the `/app/output` mount and recordings on the nested `/data/recordings` mount, which is why stored paths are relative (to the output root) or derived from fixed layout (recordings), never absolute. Needs verification, not assumption: a `docker compose run wisper …` CLI container and `wisper-web` sharing `./data`, on Linux and on Docker Desktop for Mac. A host process and a container writing the same bind-mounted DB at once is unsupported; the docs will say so.
 - **Windows.** An open DB holds a file lock, so docs note "stop the server before moving or restoring the data dir". Stored relative paths use POSIX separators and are converted with `pathlib` on read. `%APPDATA%` is local, not a synced folder, but a data dir redirected into OneDrive via `WISPER_DATA_DIR` gets a docs warning.
 
 ### Phases (each merges separately and ships its migration, tests, and docs)
@@ -586,7 +762,7 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 - Migrations run on first `connect()`; startup in `web/app.py` calls it early so a failure is reported before serving.
 - SQLite capability check at startup: version ≥ 3.43 **and** FTS5 compiled in, tested by creating `temp` `fts5(x, content='', contentless_delete=1)`. Either failure refuses startup with a message naming what's missing, instead of failing mid-migration.
 - **Output root setting** (Transcript identity rule 1): `output_dir` config key + `WISPER_OUTPUT_DIR`; `get_output_dir()` drops the CWD check; the migration pins a non-default CWD `./output` into `output_dir`; `docker-compose.yml` sets `WISPER_OUTPUT_DIR=/app/output`.
-- `db.resolve(root, rel)` and its inverse, the only place named roots map to directories.
+- `db.to_rel()` / `db.from_rel()`: the only place stored relative paths are converted to and from real paths under the output root.
 - Tests: `test_db.py`, plus a guard test that no module outside `db.py` calls `sqlite3.connect`, in the spirit of `test_tailwind.py`. Output root: default, config, env override, and the CWD-pinning migration.
 - Docs: architecture.md (module map; "Database" replaces "File-store locking"; output-root resolution), `docs/cli-reference.md`, `docs/configuration.md` (data layout, backup, `output_dir`/`WISPER_OUTPUT_DIR`), `docs/docker.md`.
 
@@ -612,6 +788,7 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
   - `journal.py`: `unjournalled_sessions()`, `update_journal()`, `rebuild_campaign()`; stop writing `journaled_sessions` into the frontmatter.
   - `cli.py`: `transcripts list/move`, `campaigns journal/reorder`.
 - **Journal write rule.** Body and entries are two stores, and the `.md`-first rule doesn't cover them (body first → a crash folds the session twice; row first → it's silently lost). A fold runs the LLM call outside any transaction, then: (1) writes the new body to a temp file, (2) in one `BEGIN IMMEDIATE` inserts the `journal_entries` row and sets `campaigns.journal_sha256` to the new body's hash, (3) `os.replace`s the temp file into place. A crash before (2) folded nothing and the temp is swept; a crash between (2) and (3) is detected as a hash mismatch with a leftover temp file, which is then moved into place. On read: `journal.md` **missing** → clear that campaign's `journal_entries` (fresh start) and log it; **present but a different hash** → the user edited it in Obsidian, which is allowed, so keep the entries and adopt the new hash. `rebuild_campaign()` clears `journal_entries` in the transaction that records its reset.
+- **Campaign order and moves under the constraints.** SQLite checks `UNIQUE(campaign_id, position)` row by row, so `position = position + 1` collides. Reorder is two steps in one transaction: shift the campaign's rows above the current maximum, then write the final positions. Moving a transcript to another campaign deletes its journal entry in the same transaction (the composite FK refuses the move otherwise); the old journal's text is untouched, as today.
 - **Export with frontmatter:** a download or CLI export of the journal that adds `journaled_sessions` from the DB to its frontmatter. The same export path can later add DB-held metadata (campaign, speakers) to transcript or summary downloads.
 - **Atomic file writes.** New `atomic_write_text(path, text)` helper (temp file in the same dir, then `os.replace()`, the pattern `recording_manager` already uses). Every transcript, summary, sidecar, and journal write goes through it: `pipeline.py` (transcript output), `web/jobs.py` (sidecar, excerpt `.txt`, refine, summarize, live draft), `web/enroll_shared.py` (wizard rewrite), the edit and fix-speaker routes, `speaker_registry._write_sidecar`, `journal.py`. A crash mid-write then leaves the old file or the new one, never a truncated `.md` that reconcile would register and search would index. Temp names get a recognisable prefix so reconcile can sweep leftovers. **Windows:** `os.replace()` raises `PermissionError` while Obsidian or antivirus holds the target open, so the helper retries 5 times with backoff (50 → 800 ms), then falls back to an in-place write, logs a warning, and removes the temp file.
 - **Missing-transcript detection** (scoped in from the open bug): when a transcription job registers its output, it checks the `.md` exists. If not, the job fails with a distinct error ("Transcript file missing after write") instead of reporting success, and the resolved output root goes into the job log. Covers web jobs and the recording hand-off.
@@ -619,25 +796,25 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 - Tests: cascade tests for every delete path (including the interim recordings-JSON revert); the missing-file job failure; bulk actions through the UI form fields; reconcile (external delete keeps order; reappearing file clears the flag; case-only rename keeps the row on a case-insensitive FS; NFC and NFD names map to one row); `register()` origin cases; upload collision (form offers Overwrite; overwrite keeps campaign and journal entries; the pre-write re-check fails the job); Relink; journal write rule (crash between each step, deleted `journal.md` resets entries, edited `journal.md` keeps them, rebuild clears them); `atomic_write_text` retry and fallback with `os.replace` mocked to raise; a guard test that no module outside `transcript_store.py` unlinks `*.md` in the output dir.
 
 **Phase 3 — Diarization sidecar data.**
-- Import `_diar.json`'s speaker map, provenance, embeddings, and `input_path` into `transcript_speakers` and `transcripts.audio_root`/`audio_rel_path` (root `output` for web-upload copies, `recordings` for a recording's `combined.wav`; anything else → NULL, reported). The sidecar is rewritten with only `diarization_segments`.
+- Import `_diar.json`'s speaker map, provenance, embeddings, and `input_path` into `transcript_speakers` and `transcripts.audio_rel_path` (relative to the output root; a path outside it → NULL, reported). The sidecar is rewritten with only `diarization_segments`.
 - The enroll job's campaign comes from `get_campaign_for_transcript(stem)` instead of the sidecar's `campaign` key (`jobs.py:1381`), so a reassigned transcript uses its current campaign.
-- Changes: `jobs._write_enrollment_sidecar()`, `JobQueue._run_wizard_enroll()` (source audio via `db.resolve()`, campaign lookup), `web/enroll_shared.py` (`resolve_current_names()`, `apply_renames()`), `speaker_registry.py` (`_load_sidecar`/`_write_sidecar`, `embeddings_to/from_sidecar`), and `web/routes/transcripts.py` and `transcribe.py` (enroll wizard).
+- Changes: `jobs._write_enrollment_sidecar()`, `JobQueue._run_wizard_enroll()` (source audio via `db.from_rel()`, campaign lookup), `web/enroll_shared.py` (`resolve_current_names()`, `apply_renames()`), `speaker_registry.py` (`_load_sidecar`/`_write_sidecar`, `embeddings_to/from_sidecar`), and `web/routes/transcripts.py` and `transcribe.py` (enroll wizard).
 - `apply_renames()` rewrites the `.md` and then updates `speaker_map` rows. Under the ordering rule the file comes first. A crash in between leaves the rows stale, so the existing interval-matching fallback stays as the repair path.
 - CLAUDE.md's "`_diar.json` carries the authoritative `speaker_map`" gotcha is rewritten to name the table.
 - Tests: the largest fixture churn (36 `_diar.json` references across 6 test files), moved to a helper that seeds the DB.
 
 **Phase 4 — Recordings.**
-- Import `recordings.json`, each `metadata.json`, `discord_speakers` → `recording_speakers.profile_id`, and `unbound_speakers` → `recording_speakers` rows with NULL profile. This fixes rename-not-rekeying for free. `Recording.unbound_speakers` becomes derived; `per_user_dir` is derived from the id. `job_id` imports into its column. `transcript_path` links to `transcript_id`, and `combined_path` becomes `combined_rel_path` against the recordings root.
-- Delete `save_recording_merged()`, the per-recording mutex, and Phase 2's interim `clear_transcript_link()` (the cascade plus status revert replace it); `reconcile_on_startup()` becomes one `UPDATE`.
-- **Stuck `transcribing` fix:** today `reconcile_on_startup()` only resets `recording`/`degraded` (`recording_manager.py:451`), so a restart mid-transcription leaves `transcribing` forever, and `record.py:922` then refuses to re-transcribe. Startup also resets `transcribing` → `transcribed` if `transcript_id` is set, else `completed`, and clears `job_id` (matching the restore-on-failure logic at `record.py:936`). Phase 5 ties this to the interrupted job row.
-- **Recover crashed sessions.** Today a session interrupted by a crash is marked `failed` with no `combined.wav`, so it never gets a Transcribe button even though its segments are on disk. Startup keeps marking it `failed` (fast, no file work) and sets `recoverable` when combined segments exist. A **Recover** button on the recording page and `wisper record recover <id>` join the segments with the existing `concat_wav_segments()` (off the request thread), set `combined_rel_path`, and mark the recording `completed` with `recovered_at` set. It then shows under "Awaiting transcription" like any other, and the detail page notes it was recovered and may be missing the last partial minute. Segments are self-contained WAVs (file-format invariant 1), so recovery needs no repair step. Schema: `recordings += recovered_at NULL`; `recoverable` is derived, not stored.
+- Import `recordings.json`, each `metadata.json`, `discord_speakers` → `recording_speakers.profile_id`, and `unbound_speakers` → `recording_speakers` rows with NULL profile. This fixes rename-not-rekeying for free. Discord fields go to `recording_discord`, `devices` to `recording_devices`. `status` splits: capture states import into `capture_status`; `transcribed` and `transcribing` import as `completed` (their meaning now comes from `transcript_id` and the job). `transcript_path` links to `transcript_id`. `job_id`, `combined_path`, `per_user_dir`, segment `path`/`stream`, and marker `elapsed_s` are not imported: they're derived (see "Schema principles"). `Recording` keeps these as computed properties, so routes and templates barely change. `JobQueue` gains `find_active_job_for_recording(id)` (the transcription `Job` carries `recording_id`) for the `transcribing` state and the progress link.
+- Delete `save_recording_merged()`, the per-recording mutex, and Phase 2's interim `clear_transcript_link()` (`ON DELETE SET NULL` on `recordings.transcript_id` replaces it); `reconcile_on_startup()` becomes one `UPDATE`.
+- **Stuck `transcribing` is fixed structurally:** today `reconcile_on_startup()` only resets `recording`/`degraded` (`recording_manager.py:451`), so a restart mid-transcription leaves `transcribing` forever and `record.py:922` refuses to re-transcribe. With `transcribing` derived from a live job, a restart simply has no active job. The restore-on-failure dance at `record.py:936` goes away too.
+- **Recover crashed sessions.** Today a session interrupted by a crash is marked `failed` with no `combined.wav`, so it never gets a Transcribe button even though its segments are on disk. Startup keeps marking it `failed` (fast, no file work) and sets `recoverable` when combined segments exist. A **Recover** button on the recording page and `wisper record recover <id>` join the segments with the existing `concat_wav_segments()` (off the request thread), write `combined.wav`, and mark the recording `completed` with `recovered_at` set. It then shows under "Awaiting transcription" like any other, and the detail page notes it was recovered and may be missing the last partial minute. Segments are self-contained WAVs (file-format invariant 1), so recovery needs no repair step. `recoverable` is derived (failed + segments on disk), not stored.
 - Changes: `recording_manager.py`, `web/discord_bot.py`, `web/local_capture.py` (hot-path contract above), `web/routes/record.py`, and the `wisper record` CLI.
-- Tests: `test_recording_manager.py`, record routes, a hot-path test with the DB held busy, unbound-speaker derivation (including a deleted profile unbinding its speakers), a recording in `transcribing` at startup becomes transcribable, and recovery: a crashed session with synthetic segments becomes `completed` and transcribable; a crashed session with no segments isn't offered recovery; recovery refuses an active session.
+- Tests: `test_recording_manager.py`, record routes, a hot-path test with the DB held busy, unbound-speaker derivation (including a deleted profile unbinding its speakers), derived status (`transcribed` follows `transcript_id`; `transcribing` only while a job is active; a restart mid-job leaves it transcribable), the subtype constraints, and recovery: a crashed session with synthetic segments becomes `completed` and transcribable; a crashed session with no segments isn't offered recovery; recovery refuses an active session.
 
 **Phase 5 — Job history.**
 - Write-through from `JobQueue` at submit and at each status transition. On terminal status, store `error_code` (the same generic codes, never exception text) and the last ~200 log lines.
 - `params_json` holds an allowlisted subset of kwargs: no secrets, no temp paths. It includes the resolved output root, so a job that wrote somewhere unexpected is visible afterwards (the missing-transcript bug).
-- At startup, pending and running rows become `failed` / "Interrupted by restart". They are never auto-resumed: the uploads are gone and the jobs are multi-hour GPU work. In the same transaction, a recording whose `job_id` points at an interrupted job gets Phase 4's `transcribing` reset, and `recordings.job_id` gains its `FK→jobs SET NULL`.
+- At startup, pending and running rows become `failed` / "Interrupted by restart". They are never auto-resumed: the uploads are gone and the jobs are multi-hour GPU work. A recording's `transcribing` state and its "view job" link now come from `jobs.recording_id` (latest job), so recordings need no job column and job history survives restarts.
 - The in-memory 50-job cap stays. The DB keeps every job (decided).
 - UI (decided): the dashboard keeps its 20 most recent (memory plus DB). A new paginated **Job history** page (50 per page, filter by type and status). "Jobs for this" links on transcript and campaign pages.
 - Changes: `web/jobs.py`, `web/routes/dashboard.py` and `transcribe.py`, `docs/web-ui.md`.
@@ -650,6 +827,7 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 - **One row per speaker block,** not per transcript, so a hit points at a moment rather than a 2-hour file. Blocks come from `formatter.parse_transcript_blocks()`, the parser the rename logic already uses. Summaries are indexed per section.
 - **Contentless FTS5** (`content=''`, `contentless_delete=1`) stores only the index, not a second copy of the text. That keeps the DB small: the index is estimated at roughly a third of the text size (measure in this phase), e.g. ~25 MB for 500 two-hour sessions. The cost is that FTS5 can't produce snippets itself, so the search route reads the matching blocks from the `.md` files (one file read per result transcript on a page of 20) and builds snippets there.
 - **Deletes follow the foreign keys.** FTS tables can't hold foreign keys, so `search_blocks` holds them. Deleting a transcript cascades to `search_blocks`, whose trigger removes the FTS rows. The test suite must confirm the trigger fires on cascade deletes.
+- **One FTS column (`text`).** Speaker lives on `search_blocks`, which the speaker filter joins, so it isn't stored twice.
 - **Tokenizer:** `porter` stemming (so "fights" matches "fight"), accent-insensitive, with prefix indexes so `Stra*` is fast. Fantasy names aren't damaged by stemming because both the query and the text are stemmed the same way.
 
 *Keeping it fresh:*
@@ -703,9 +881,12 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
   - `foreign_keys` is on for every connection `db.connect()` returns.
   - `BEGIN IMMEDIATE` under two threads: the second waits instead of erroring.
   - One cross-process import race under spawn (the macOS default): exactly one import happens.
+  - **Schema constraints:** one should-fail insert per rule in "Schema principles" (the prototype's checks, kept as tests): subtype FKs, the journal composite FK (including a move that fails until the entry is deleted), each `UNIQUE`, each `CHECK`, `STRICT` type rejection, cascades (including the FTS trigger firing on a cascade), and the two-step reorder under `UNIQUE(campaign_id, position)`.
+  - Enum `CHECK` lists match the Python constants.
+  - `foreign_key_check` is empty after every migration on a synthetic legacy import.
 - **Importer tests** use a synthetic legacy data dir built by a frozen copy of today's serializers (`tests/_legacy_store.py`), so the tests don't change when the managers do. Cases: clean import, each dirty-data case, a malformed top-level file (rolls back, version unchanged, backup present), and a re-run.
 - **Invariant guards:** no raw `sqlite3.connect` outside `db.py`, no `.md` unlink outside `transcript_store.py`, no plain `write_text()` on transcript, summary, sidecar, or journal paths outside `atomic_write_text()`, and (Phase 6) every function that writes a transcript `.md` calls `reindex()`.
-- **Cross-platform paths:** relative-path round-trips through `PureWindowsPath`/`PurePosixPath` and `db.resolve()` for both named roots, so the Windows logic is tested on macOS and Linux CI. Case-insensitive reconcile is tested by mocking the filesystem probe, so it runs on Linux CI too.
+- **Cross-platform paths:** relative-path round-trips through `PureWindowsPath`/`PurePosixPath` and `db.to_rel()`/`from_rel()`, so the Windows logic is tested on macOS and Linux CI. Case-insensitive reconcile is tested by mocking the filesystem probe, so it runs on Linux CI too.
 - No CI change: `sqlite3` is stdlib, and the bundled SQLite on 3.13/3.14 (macOS, Windows, and Debian slim) supports `RETURNING`, `DROP COLUMN`, and `STRICT`.
 - Existing test rules still hold: no GPU, network, or real audio, and synthetic data only.
 
@@ -729,7 +910,7 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 5. **Missing transcripts:** keep flagged rows until the user removes them.
 6. **Legacy files:** delete them after a committed import; keep the `backups/pre-sqlite-*` copies. No downgrade support.
 7. **Journal mode:** rollback journal everywhere.
-8. **Deleting a recording's transcript:** revert the recording to `completed`. This applies to every recording, both Discord and local capture.
+8. **Deleting a recording's transcript:** the recording goes back to `completed` (Discord and local). With derived status this is just `transcript_id` → NULL.
 9. **Job history:** keep every job; the dashboard shows the 20 most recent, plus a new paginated history page.
 10. **Journal frontmatter:** stop writing `journaled_sessions`; add a journal export that includes it.
 11. **Merge cadence:** stack phase PRs on `feat/sqlite-storage`; one PR to `main` when the feature is complete.
@@ -738,12 +919,14 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 14. **Stemming:** `porter`.
 15. **SQLite < 3.43 or without FTS5:** unsupported; startup refuses with a clear message.
 16. **Scoped in from elsewhere in this file:** missing-transcript detection (Phases 2 and 5), `wisper speakers doctor` (Phase 1), the bulk-actions UI on `/transcripts` (Phase 2), and the Docker alignment check done alongside the Docker DB check.
-17. **Failure handling:** atomic writes for every transcript, summary, sidecar, and journal file, with a Windows retry/fallback (Phase 2); crashed recording sessions recoverable via a Recover button and `wisper record recover` (Phase 4); recordings stuck in `transcribing` reset at startup (Phases 4 and 5).
+17. **Failure handling:** atomic writes for every transcript, summary, sidecar, and journal file, with a Windows retry/fallback (Phase 2); crashed recording sessions recoverable via a Recover button and `wisper record recover` (Phase 4); recordings can't get stuck in `transcribing`, because the state is derived (Phase 4).
 18. **Name collisions:** blocked, with an explicit Overwrite in the web UI; recording re-transcribe overwrites after confirmation; the CLI keeps `--overwrite`. Overwrite keeps the transcript's identity, campaign, and journal entries.
 19. **Profile embeddings in the API:** `SpeakerProfile.embedding_path` → `embedding` (the one Phase 1 API break).
 20. **Journal consistency:** the DB commit is the fold's commit point, with `journal_sha256`; a deleted `journal.md` resets its entries, an edited one keeps them.
 21. **Unbound Discord speakers:** one `recording_speakers` table with NULL profile; deleting a profile unbinds its speakers. Keying by profile-key text (no FK) is dropped.
-22. **Source-audio paths:** a named root (`output` or `recordings`) plus a relative path; anything else imports as NULL.
+22. **Source-audio paths:** relative to the output root (every app-created copy lives there); anything else imports as NULL.
+23. **Schema discipline:** normalized (3NF/BCNF), derived values not stored, `STRICT` tables, DB-enforced constraints and subtypes, indexed FK children, `foreign_key_check` gating every migration. See "Schema principles".
+24. **Branch migrations are editable until merge:** nothing ships between phases (decision 11), so each phase edits the migrations in place rather than stacking `ALTER`s. After merge they're frozen.
 
 ### Open questions
 
