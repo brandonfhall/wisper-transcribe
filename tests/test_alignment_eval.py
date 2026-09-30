@@ -40,9 +40,12 @@ def test_sheet_covers_both_sides_of_every_change_and_is_blind(tmp_path):
     out, _ = _eval_dir(tmp_path)
     ae.cmd_sheet(SimpleNamespace(out=str(out), force=False))
     rows = list(csv.DictReader((out / "sheet.csv").open()))
-    assert [int(r["word_index"]) for r in rows] == [0, 1, 2, 3]
-    assert set(rows[0]) == {"word_index", "clip_time", "source_time", "word", "context", "correct_speaker"}
-    assert rows[2]["source_time"] == "1:02.20"  # clip start 60 s + aligned 2.2 s
+    # "there" (index 2) is the only word the arms disagree on, so it's first.
+    assert [int(r["word_index"]) for r in rows] == [2, 0, 1, 3]
+    assert [r["discriminating"] for r in rows] == ["yes", "", "", ""]
+    assert set(rows[0]) == {"word_index", "discriminating", "clip_time", "source_time", "word",
+                            "context", "correct_speaker"}
+    assert rows[0]["source_time"] == "1:02.20"  # clip start 60 s + aligned 2.2 s
     assert "A:" in (out / "speakers.txt").read_text()
 
 
@@ -69,3 +72,10 @@ def test_score_counts_accuracy_and_wins(tmp_path, capsys):
     report = capsys.readouterr().out
     assert "whisper 2/3" in report
     assert "aligned-nosmooth 3/3" in report
+
+
+def test_guard_arm_keeps_whisper_time_for_large_moves(tmp_path):
+    _, data = _eval_dir(tmp_path)
+    data["segments"][0]["words"][2]["aligned"] = [3.0, 3.4]  # moved 1.5 s
+    assert ae.assign(data, "aligned")[0][2] == "B"
+    assert ae.assign(data, "aligned-guard-1s")[0][2] == "A"  # Whisper's 1.5-1.9

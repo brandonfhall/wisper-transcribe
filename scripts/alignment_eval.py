@@ -47,12 +47,15 @@ from wisper_transcribe.aligner import (
 )
 from wisper_transcribe.models import DiarizationSegment, Word
 
-# name -> (word timing, diarization view, smoothing (max_words, max_seconds) or None)
+# name -> (word timing, diarization view, smoothing (max_words, max_seconds) or None).
+# "guarded" timing is aligned, except words moved more than _GUARD_SECONDS
+# keep Whisper's time.
 _DEFAULT_SMOOTHING = (_MICRO_RUN_MAX_WORDS, _MICRO_RUN_MAX_SECONDS)
+_GUARD_SECONDS = 1.0
 ARMS = {
-    "whisper": ("whisper", "regular", (2, 1.0)),
+    "whisper": ("whisper", "regular", _DEFAULT_SMOOTHING),
     "aligned": ("aligned", "regular", _DEFAULT_SMOOTHING),
-    "aligned-legacy-smooth": ("aligned", "regular", (2, 1.0)),
+    "aligned-guard-1s": ("guarded", "regular", _DEFAULT_SMOOTHING),
     "aligned-smooth-1w": ("aligned", "regular", (1, 0.5)),
     "aligned-nosmooth": ("aligned", "regular", None),
     "aligned-exclusive": ("aligned", "exclusive", _DEFAULT_SMOOTHING),
@@ -88,6 +91,13 @@ def _fmt(t: float) -> str:
     return f"{int(m)}:{s:05.2f}"
 
 
+def _timing(w: dict, timing: str) -> list[float]:
+    if timing == "guarded":
+        moved = abs(sum(w["aligned"]) / 2 - sum(w["whisper"]) / 2) > _GUARD_SECONDS
+        return w["whisper"] if moved else w["aligned"]
+    return w[timing]
+
+
 def assign(data: dict, arm: str) -> tuple[list[str], int]:
     """Flat per-word speakers for ``arm``, and the micro-run count before smoothing.
 
@@ -99,7 +109,7 @@ def assign(data: dict, arm: str) -> tuple[list[str], int]:
     speakers: list[str] = []
     micro = 0
     for seg in data["segments"]:
-        words = [Word(*w[timing], w["text"]) for w in seg["words"]]
+        words = [Word(*_timing(w, timing), w["text"]) for w in seg["words"]]
         if not words:
             continue
         sp = _assign_word_speakers(words, turns)
@@ -200,7 +210,7 @@ def _print_proxy(data: dict) -> None:
         speakers, micro = assign(data, arm)
         ok = 0
         for w, spk in zip(words, speakers):
-            mid = sum(w[timing]) / 2
+            mid = sum(_timing(w, timing)) / 2
             ok += any(t.speaker == spk and t.start <= mid <= t.end for t in regular)
         changes = sum(a != b for a, b in zip(speakers, speakers[1:]))
         print(f"{arm:30} {ok / max(len(words), 1):7.1%} {micro:11d} {changes:8d}")
@@ -267,25 +277,30 @@ def cmd_sheet(args) -> None:
     words = _flat_words(data)
 
     rows: set[int] = set()
-    for arm in ARMS:
-        speakers, _ = assign(data, arm)
+    preds = [assign(data, arm)[0] for arm in ARMS]
+    for speakers in preds:
         for i in range(len(speakers) - 1):
             if speakers[i] != speakers[i + 1]:
                 rows.update(j for j in range(i - 1, i + 3) if 0 <= j < len(words))
+    # Only rows where arms disagree can separate them; label those first.
+    # Still blind: the sheet never says which arm said what.
+    disagree = {i for i in rows if len({p[i] for p in preds}) > 1}
 
     sheet = out / "sheet.csv"
     if sheet.exists() and not args.force:
         sys.exit(f"{sheet} exists (it may hold your labels); pass --force to overwrite")
     with sheet.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["word_index", "clip_time", "source_time", "word", "context", "correct_speaker"])
-        for i in sorted(rows):
+        writer.writerow(["word_index", "discriminating", "clip_time", "source_time", "word",
+                         "context", "correct_speaker"])
+        for i in sorted(rows, key=lambda i: (i not in disagree, i)):
             t = words[i]["aligned"][0]
             context = " ".join(
                 (f"[{w['text']}]" if j == i else w["text"])
                 for j, w in enumerate(words[max(0, i - 4): i + 5], start=max(0, i - 4))
             )
-            writer.writerow([i, _fmt(t), _fmt(t + data["meta"]["start"]), words[i]["text"], context, ""])
+            writer.writerow([i, "yes" if i in disagree else "", _fmt(t), _fmt(t + data["meta"]["start"]),
+                             words[i]["text"], context, ""])
 
     legend = out / "speakers.txt"
     lines = ["Each label's three longest turns (clip time), to learn the voices:"]
@@ -298,10 +313,12 @@ def cmd_sheet(args) -> None:
     lines += [
         "",
         "Fill correct_speaker with the label who actually says the bracketed word.",
+        "Rows marked discriminating (listed first) are the ones that decide the result;",
+        "the rest only matter if you want to check that nothing got worse.",
         "Leave it blank or write ? if unsure; write overlap if two people say it at once.",
     ]
     legend.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"Wrote {len(rows)} rows to {sheet} and the voice legend to {legend}")
+    print(f"Wrote {len(rows)} rows ({len(disagree)} discriminating) to {sheet} and the voice legend to {legend}")
 
 
 def cmd_score(args) -> None:

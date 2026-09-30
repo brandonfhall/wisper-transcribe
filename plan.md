@@ -107,25 +107,35 @@ Others ruled out: nyra-forced-aligner (non-commercial licence, English only, abs
 
 1. **Done:** `word_alignment.py` + `tests/test_word_alignment.py`; design in `architecture.md` ("Forced word alignment"). `align_words()` returns `(segments, AlignmentStats)` and logs the summary line itself. Words map to items exactly through the processor's own per-word split instead of fuzzy text matching.
 2. **Done:** wired into `process_file()` (both paths), `forced_alignment` config key (`auto` default), Config page field, `--forced-align/--no-forced-align`, `wisper setup` pre-download. `wisper config set` and the Config page now reject values outside a choice key's list. `scripts/alignment_eval.py` (`run` / `audit` / `sheet` / `score`) is the measurement tool, documented in `docs/scenarios.md`.
-3. **Re-tune smoothing.** With aligned words, reduce `_MICRO_RUN_MAX_WORDS` / `_MICRO_RUN_MAX_SECONDS`, or skip smoothing for aligned segments, so real interjections survive. Decide from the measurement below.
-4. **Optional: `exclusive_speaker_diarization` for word assignment.** community-1's exclusive view is built for reconciling with transcripts. Try it as a measurement arm: aligned words × {regular, exclusive} turns. Embedding and excerpt selection keep the regular, overlap-aware view either way.
+3. **Measured; no change pending labels.** Smoothing stays at 2 words / 1.0 s. On the four podcast excerpts below it re-assigned only 7 words, and at least 3 were clear mid-phrase flips from diarization jitter ("magic [and] wonder", "[they] talk on a video screen", "[pulls his headphones] off"); none looked like a swallowed interjection. The proxy prefers no smoothing, but that's circular: it rewards agreement with the diarization's own jitter. `aligned-smooth-1w` and `aligned-nosmooth` stay as arms so the labels can overturn this.
+4. **Measured; no change pending labels.** `exclusive_speaker_diarization` showed no consistent proxy gain (the proxy scores it against the *regular* turns, which biases it down). It stays as two arms (`aligned-exclusive`, `aligned-exclusive-nosmooth`).
 
-### Measurement (gate for phases 2–4)
+### Measurement status (2026-09-30)
 
-- **Automatic proxy:** % of words whose midpoint is inside their assigned speaker's turn, plus the raw micro-run count before smoothing. Spike baseline: 90.0% (Whisper) vs 97.0% (Qwen3-FA). Sanity check only: aligned words shrink onto speech, which is where turns are, so the proxy partly measures two acoustic segmentations agreeing, not correctness.
-- **Manual ground truth:** ~3 excerpts of 3 min with heavy crosstalk from different sessions. At every speaker change, mark the correct speaker of the 2 words on either side (~100–150 judgements). Compare Whisper-timed vs aligned, and the smoothing variants. Ship if boundary-word accuracy improves and no excerpt gets worse.
-- **Large-shift audit:** in one session, check every word shifted >1 s with the re-transcription method above.
-- **Test audio:** real sessions are the user's recordings (the spike used Hanataz 2026-09-12 and 2026-09-19); ask the user for paths. Nothing real goes in the repo or in tests. The spike's scratchpad copies are temporary and may be gone.
+Four 3-min excerpts with the most diarization speaker changes (100+ per 3 min, 5–7 speakers), from the `example-file/` podcast episodes. Output is in `alignment-eval/` (gitignored, on the dev Mac).
+
+| Proxy | e1-64m | e2-03m | e3-09m | e2-128m |
+|---|---|---|---|---|
+| whisper | 96.3% | 98.0% | 96.6% | 94.6% |
+| aligned (shipped) | 98.3% | 97.7% | 98.2% | 97.5% |
+| aligned-guard-1s | 98.0% | 97.7% | 98.2% | 97.5% |
+| aligned-nosmooth | 98.7% | 98.0% | 98.4% | 98.3% |
+| aligned-exclusive | 98.3% | 97.5% | 98.2% | 97.5% |
+
+- **Aligned vs Whisper disagree** on the speaker of 28 of 1,762 words (4–10 per excerpt). Those are what the labels decide.
+- **Large-shift audit disagrees with the Hanataz spike.** On the podcast, 12 words moved >1 s; re-transcription heard 1 at the aligned placement vs 8 at Whisper's (content words 1 vs 3). On Hanataz it was 28 vs 1. Only 3 of the 12 ("if you remember", e1-64m 2:52) changed speaker. Edited podcast audio has little drift to fix, so large moves there are mostly the aligner reaching into a neighbour's speech; live-table audio has real drift. `aligned-guard-1s` (keep Whisper's time for moves >1 s) is an arm so the labels can test a guard.
+
+**Gate: not passed; needs labels (user action).** For each excerpt: read `speakers.txt` to learn the voices, listen to `clip.wav`, and fill `correct_speaker` in `sheet.csv`. The 76 rows marked `discriminating` (9 / 20 / 27 / 20) are listed first and decide the result; the other 322 only check that nothing got worse. Then `python scripts/alignment_eval.py score alignment-eval/*/`. Ship as-is if `aligned` beats `whisper` and no excerpt gets worse; if `aligned-guard-1s` or a smoothing arm wins, change the default to match. Ideally repeat with one Hanataz excerpt, which is the audio the feature is for.
 
 ### Risks
 
-- **Whisper text errors** (misheard or hallucinated words) still get placed somewhere. Watch the >1 s shifts in the audit.
+- **Whisper text errors** (misheard or hallucinated words) still get placed somewhere. Watch the >1 s shifts in the audit; on podcast audio most >1 s moves were wrong (see Measurement status).
 - **No confidence signal:** Qwen returns bins, not scores, so bad placements can't be filtered. The audit is the only check.
 - **Overlapped speech:** one word timeline can't represent two people talking at once. Alignment only helps the words Whisper transcribed.
-- **CPU-only installs:** ~20 min per 2.5 h session, which is why `auto` needs a GPU.
-- **VRAM:** the model (~1.8 GB bf16) stays resident next to Whisper and pyannote as module globals in the sequential path, plus the batch's activations. Tight on 8 GB cards; batch size and OOM retry handle it.
+- **CPU-only installs:** ~9 min (M5) to ~20 min per 2.5 h session, which is why `auto` needs a GPU.
+- **VRAM:** the model (~1.2 GB weights; 3–4 GB in use at batch 8) stays resident next to Whisper and pyannote as module globals in the sequential path, plus the batch's activations. Tight on 8 GB cards; batch size and OOM retry handle it.
 - **transformers churn:** `Qwen3ASR*` is new in 5.x, and API names may shift in later releases. Pin a lower bound, test on upgrade, and cover the calls in tests.
-- **One clip:** every number above comes from one 10-min excerpt of one session.
+- **Small samples:** the spike used one 10-min excerpt of one session; the Mac measurement is four 3-min excerpts of edited podcast audio.
 
 ---
 
