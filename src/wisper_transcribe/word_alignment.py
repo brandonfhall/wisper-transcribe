@@ -266,6 +266,12 @@ def align_words(
         ]
     except InterruptedError:
         raise
+    except ModuleNotFoundError as exc:
+        if exc.name == "transformers":
+            # Existing install updated without reinstalling dependencies.
+            return unchanged("transformers is not installed; re-run setup.sh / setup.ps1 "
+                             "or `pip install -e .`")
+        return unchanged(f"{type(exc).__name__}: {exc}")
     except Exception as exc:  # noqa: BLE001
         return unchanged(f"{type(exc).__name__}: {exc}")
 

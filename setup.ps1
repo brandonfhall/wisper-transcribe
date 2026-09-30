@@ -107,6 +107,9 @@ if ($hasNvidia) {
 Write-Step "Installing wisper-transcribe (this may take several minutes)..."
 Invoke-PipWithProgress "Installing wisper-transcribe" @("install", "-e", ".", "-q")
 Write-OK "wisper-transcribe installed"
+# Marks the installed dependency set; start.bat reinstalls when
+# pyproject.toml is newer (i.e. after an update).
+New-Item -ItemType File -Force -Path ".venv\.wisper-deps" | Out-Null
 
 $cudaAvailable = & $python -c "import torch; print(torch.cuda.is_available())"
 if ($cudaAvailable -eq "True") {

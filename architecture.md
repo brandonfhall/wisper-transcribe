@@ -657,6 +657,7 @@ The job page shows step pills and one bar split into equal per-step slices:
 ### Docker and launchers
 - `docker-compose.yml`: `wisper`/`wisper-cpu` (CLI) and `wisper-web`/`wisper-cpu-web` (port 8080), sharing `x-volumes`/`x-env` anchors; secrets come from `.env`. The `Makefile` wraps common `docker compose` commands.
 - `start.command` (macOS), `start.bat` (Windows), `start.sh` (Linux) run setup on first launch, then start the server and open the browser. The shell launchers are committed executable.
+- **Dependency refresh:** setup stamps `.venv/.wisper-deps` after `pip install -e .`. The launchers reinstall whenever `pyproject.toml` is newer than the stamp (or it's missing), so updating an existing install picks up new dependencies. A failed reinstall leaves the stamp stale and the server starts anyway. `word_alignment` also names the fix when `transformers` is missing, since that's how a stale install shows up.
 - `setup.sh`/`setup.ps1` probe Ollama (`:11434`) and LM Studio (`:1234`) and offer a model picker, and show progress for long installs.
 - `setup.ps1` installs CUDA `torch`/`torchaudio` **before** `pip install -e .`. Otherwise pip resolves the CPU `torch` first and dependent packages bind to the wrong build (`torch has no attribute _utils`).
 

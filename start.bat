@@ -23,6 +23,24 @@ if not exist ".venv\" (
     )
 )
 
+:: ── Dependency refresh after an update ───────────────────────────────────────
+:: setup.ps1 stamps .venv\.wisper-deps; a newer pyproject.toml (git pull, new
+:: release) means dependencies may have changed.
+set "REFRESH="
+if not exist ".venv\.wisper-deps" set "REFRESH=1"
+if not defined REFRESH (
+    for /f %%i in ('powershell -NoProfile -Command "if ((Get-Item pyproject.toml).LastWriteTime -gt (Get-Item .venv\.wisper-deps).LastWriteTime) { 'yes' }"') do set "REFRESH=1"
+)
+if defined REFRESH (
+    echo Dependencies changed since the last launch -- updating ^(one-time^)...
+    .venv\Scripts\pip install -e . -q
+    if !errorlevel! equ 0 (
+        type nul > ".venv\.wisper-deps"
+    ) else (
+        echo WARNING: dependency update failed; starting anyway. Re-run setup.ps1 to retry.
+    )
+)
+
 :: ── Check for Java 25 (needed by Discord recording bot) ──────────────────────
 where java >nul 2>&1
 if !errorlevel! neq 0 (

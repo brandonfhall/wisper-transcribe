@@ -80,6 +80,9 @@ PYTHON=".venv/bin/python"
 step "Installing wisper-transcribe (this may take several minutes)..."
 pip_with_spinner "Installing wisper-transcribe" install -e . -q
 ok "wisper-transcribe installed"
+# Marks the installed dependency set; the launchers reinstall when
+# pyproject.toml is newer (i.e. after an update).
+touch .venv/.wisper-deps
 
 # ── ffmpeg ────────────────────────────────────────────────────────────────────
 step "Checking ffmpeg..."

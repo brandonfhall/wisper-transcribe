@@ -296,3 +296,12 @@ def test_dtype_per_device():
     assert wa._dtype_for("cuda") == torch.bfloat16
     assert wa._dtype_for("mps") == torch.float16
     assert wa._dtype_for("cpu") == torch.float32
+
+
+def test_missing_transformers_gives_install_hint(audio, capsys):
+    wa._fa_model = None
+    err = ModuleNotFoundError("No module named 'transformers'", name="transformers")
+    with patch("wisper_transcribe.word_alignment.load_aligner", side_effect=err):
+        out, stats = wa.align_words(Path("x.wav"), [_seg(0.0, 5.0, ("hi", 1.0, 1.5))], "cpu", "en")
+    assert _times(out[0]) == [(1.0, 1.5)]
+    assert "pip install -e ." in capsys.readouterr().out
