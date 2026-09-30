@@ -191,3 +191,71 @@ def import_profiles_and_campaigns(conn: sqlite3.Connection, ctx: MigrationContex
             path.unlink(missing_ok=True)
 
     ctx.after_commit.append(_delete_legacy)
+
+
+def import_journal_entries(conn: sqlite3.Connection, ctx: MigrationContext) -> None:
+    """v3: each journal's ``journaled_sessions`` frontmatter → ``journal_entries``.
+
+    Records the journal's current hash, so a later edit in Obsidian is
+    recognised as an edit, not a crash. ``journal.md`` itself is not
+    rewritten: new folds simply stop writing ``journaled_sessions``. A listed
+    session that isn't in that campaign (deleted, moved, or never assigned)
+    is dropped and reported; the composite foreign key would reject it.
+    """
+    import hashlib
+
+    import yaml
+
+    for campaign_id, slug in conn.execute("SELECT id, slug FROM campaigns").fetchall():
+        jpath = ctx.data_dir / "campaigns" / slug / "journal.md"
+        if not jpath.is_file():
+            continue
+        raw = jpath.read_bytes()
+        text = raw.decode("utf-8", errors="replace")
+        meta: dict = {}
+        if text.startswith("---"):
+            parts = text.split("---", 2)
+            if len(parts) >= 3:
+                try:
+                    meta = yaml.safe_load(parts[1]) or {}
+                except yaml.YAMLError:
+                    ctx.note(f"campaign {slug!r}: journal frontmatter unreadable; no sessions marked as folded")
+        if not isinstance(meta, dict):
+            meta = {}
+        folded_at = _as_utc(meta.get("updated_at")) or _file_timestamp(jpath)
+        for raw_stem in meta.get("journaled_sessions") or []:
+            stem = unicodedata.normalize("NFC", str(raw_stem))
+            row = conn.execute(
+                "SELECT ct.transcript_id FROM campaign_transcripts ct "
+                "JOIN transcripts t ON t.id = ct.transcript_id "
+                "WHERE ct.campaign_id = ? AND t.stem = ?",
+                (campaign_id, stem),
+            ).fetchone()
+            if row is None:
+                ctx.note(f"campaign {slug!r}: journaled session {stem!r} is not in the campaign; dropped")
+                continue
+            conn.execute(
+                "INSERT OR IGNORE INTO journal_entries (transcript_id, campaign_id, folded_at) "
+                "VALUES (?, ?, ?)",
+                (row[0], campaign_id, folded_at),
+            )
+        conn.execute(
+            "UPDATE campaigns SET journal_sha256 = ? WHERE id = ?",
+            (hashlib.sha256(raw).hexdigest(), campaign_id),
+        )
+
+
+def _as_utc(value: object) -> str | None:
+    """A frontmatter ``updated_at`` (local ISO time or datetime) as a UTC timestamp."""
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.astimezone()  # naive = local time, as render_journal() wrote it
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")

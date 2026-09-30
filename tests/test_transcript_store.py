@@ -212,11 +212,15 @@ def test_delete_keeps_audio_outside_output_root(out, tmp_path):
 
 
 def test_delete_escapes_glob_in_stem(out):
-    _md(out, "mix*")
-    other_clip = out / "mixdown_excerpt_SPEAKER_00.mp3"
+    # "[1]" is a glob character class that's also a legal Windows filename.
+    _md(out, "mix[1]")
+    other_clip = out / "mix1_excerpt_SPEAKER_00.mp3"   # matched by an unescaped "mix[1]_excerpt_*"
+    own_clip = out / "mix[1]_excerpt_SPEAKER_00.mp3"
     other_clip.write_bytes(b"x")
-    ts.delete_transcript("mix*")
+    own_clip.write_bytes(b"x")
+    ts.delete_transcript("mix[1]")
     assert other_clip.exists()
+    assert not own_clip.exists()
 
 
 def test_delete_missing_transcript_still_removes_row(out):
@@ -279,7 +283,7 @@ def _src_lines():
 _WRITE_TEXT_ALLOWED = {
     ("web/app.py", "_sj.write_text"),                   # server.json runtime pointer
     ("web/jobs.py", "Path(job.live_output_path).write_text("),  # live draft, appended line by line
-    ("db.py", '"import-report.txt").write_text('),        # migration report in the backup dir
+    ("db.py", "path.write_text("),                        # migration import report
 }
 
 

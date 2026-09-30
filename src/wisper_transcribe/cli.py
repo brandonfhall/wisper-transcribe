@@ -935,6 +935,17 @@ def campaigns_show(slug: str):
 
     click.echo(f"Campaign: {campaign.display_name} (slug: {campaign.slug})")
     click.echo(f"Created:  {campaign.created}")
+    from .journal import journal_path, journal_stale_since, sync_journal
+    sync_journal(safe)
+    jpath = journal_path(safe)
+    if jpath is not None and jpath.exists():
+        stale = journal_stale_since(safe)
+        if stale:
+            click.echo(f"Journal:  STALE since {stale} — it mentions sessions that were moved, "
+                       "removed, or re-transcribed.")
+            click.echo(f"          Rebuild it: wisper campaigns journal {safe} --rebuild")
+        else:
+            click.echo("Journal:  up to date")
     click.echo("")
 
     if not campaign.members:
@@ -1101,10 +1112,18 @@ def campaigns_relabel(slug: str, dry_run: bool, no_backfill: bool, device: str):
 @click.option("--all", "fold_all", is_flag=True, default=False,
               help="Fold every pending session in one run (oldest first)")
 @click.option("--rebuild", is_flag=True, default=False,
-              help="Redrive the whole campaign: re-summarize every session "
-                   "transcript from scratch and rebuild the journal from a "
-                   "clean start. A lot of LLM calls -- asks for confirmation "
-                   "unless --yes is also passed.")
+              help="Start the journal over from each session's existing "
+                   "summary (one LLM call per session; summaries and your "
+                   "edits to them are kept). Asks for confirmation unless "
+                   "--yes is also passed.")
+@click.option("--resummarize", is_flag=True, default=False,
+              help="With --rebuild: re-summarize every session transcript "
+                   "first, overwriting the summaries (two LLM calls per session).")
+@click.option("--export", "export", is_flag=True, default=False,
+              help="Print the journal with its folded-session list in the "
+                   "frontmatter (no LLM call). Use -o to write a file.")
+@click.option("-o", "--output", "output", type=click.Path(dir_okay=False, path_type=Path),
+              default=None, help="With --export: write to this file")
 @click.option("--yes", is_flag=True, default=False,
               help="Skip the --rebuild confirmation prompt")
 @click.option("--provider", default=None, type=_LLM_PROVIDER_CHOICE,
@@ -1112,7 +1131,8 @@ def campaigns_relabel(slug: str, dry_run: bool, no_backfill: bool, device: str):
 @click.option("--model", default=None, help="Model override (default: llm_model from config)")
 @click.option("--endpoint", default=None, help="Ollama endpoint override")
 def campaigns_journal(slug: str, session: Optional[str], fold_all: bool,
-                      rebuild: bool, yes: bool,
+                      rebuild: bool, resummarize: bool, export: bool,
+                      output: Optional[Path], yes: bool,
                       provider: Optional[str], model: Optional[str],
                       endpoint: Optional[str]):
     """Fold session summaries into a rolling campaign journal.
@@ -1121,11 +1141,16 @@ def campaigns_journal(slug: str, session: Optional[str], fold_all: bool,
     ``campaigns/<slug>/journal.md`` that the LLM rewrites as each new session
     is folded in. With no flags it folds the next unjournalled session (one
     that has a ``.summary.md`` from `wisper summarize`). Pass ``--all`` to fold
-    every pending session, ``--session <stem>`` to fold a specific one, or
-    ``--rebuild`` to redrive the entire campaign from its transcripts.
+    every pending session, ``--session <stem>`` to fold a specific one,
+    ``--rebuild`` to start the journal over from the existing summaries
+    (add ``--resummarize`` to re-summarize the transcripts first), or
+    ``--export`` to print it with its folded-session list.
     """
     from .campaign_manager import _validate_campaign_slug, get_transcripts_for_campaign, load_campaigns
-    from .journal import rebuild_campaign, unjournalled_sessions, update_journal
+    from .journal import (
+        export_journal, rebuild_campaign, refold_campaign, unjournalled_sessions, update_journal,
+    )
+    from .path_utils import get_output_dir
     from .llm.errors import LLMResponseError, LLMUnavailableError
     from .speaker_manager import load_profiles
 
@@ -1135,30 +1160,54 @@ def campaigns_journal(slug: str, session: Optional[str], fold_all: bool,
     if safe not in load_campaigns():
         raise click.ClickException(f"Campaign {safe!r} not found.")
 
-    exclusive = [session is not None, fold_all, rebuild]
+    exclusive = [session is not None, fold_all, rebuild, export]
     if sum(exclusive) > 1:
-        raise click.ClickException("--session, --all, and --rebuild are mutually exclusive.")
+        raise click.ClickException("--session, --all, --rebuild, and --export are mutually exclusive.")
+    if resummarize and not rebuild:
+        raise click.ClickException("--resummarize only applies with --rebuild.")
+    if output is not None and not export:
+        raise click.ClickException("-o/--output only applies with --export.")
+
+    if export:
+        text = export_journal(safe)
+        if text is None:
+            raise click.ClickException(f"Campaign {safe!r} has no journal yet.")
+        if output is None:
+            click.echo(text, nl=False)
+        else:
+            output.write_bytes(text.encode("utf-8"))
+            click.echo(f"Wrote {output}")
+        return
 
     if rebuild:
-        transcript_count = len(get_transcripts_for_campaign(safe))
+        stems = get_transcripts_for_campaign(safe)
+        transcript_count = len(stems)
         if transcript_count == 0:
             click.echo(f"Campaign {safe!r} has no transcripts to rebuild from.")
             return
+        if resummarize:
+            calls = transcript_count * 2
+            question = (f"Rebuild {safe!r} from transcripts: re-summarize all {transcript_count} "
+                        f"session(s), overwriting their summaries, and regenerate the journal "
+                        f"from scratch? This is {calls} LLM calls.")
+        else:
+            out_dir = get_output_dir()
+            unsummarized = sum(1 for st in stems if not (out_dir / f"{st}.summary.md").exists())
+            calls = transcript_count + unsummarized
+            extra = f" ({unsummarized} need a summary first)" if unsummarized else ""
+            question = (f"Rebuild {safe!r}: start the journal over from the {transcript_count} "
+                        f"sessions' existing summaries{extra}? About {calls} LLM calls.")
         if not yes:
-            click.confirm(
-                f"Rebuild {safe!r}: re-summarize all {transcript_count} session "
-                f"transcript(s) and regenerate the journal from scratch? "
-                f"This is {transcript_count * 2} LLM calls.",
-                abort=True,
-            )
+            click.confirm(question, abort=True)
         client = _get_llm_client(provider, model, endpoint)
         click.echo(f"Rebuilding {safe!r} with {client.provider} / {client.model} "
                    f"({transcript_count} session(s)) ...", err=True)
-        result = rebuild_campaign(
+        rebuild_fn = rebuild_campaign if resummarize else refold_campaign
+        result = rebuild_fn(
             safe, client, load_profiles(), data_dir=None,
             on_progress=lambda msg: click.echo(f"  {msg}", err=True),
         )
-        click.echo(f"Re-summarized: {len(result.resummarized)}")
+        click.echo(f"Summarized: {len(result.resummarized)}")
         if result.skipped:
             click.echo(f"Skipped: {len(result.skipped)}")
             for stem, reason in result.skipped:

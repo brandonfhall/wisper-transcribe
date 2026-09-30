@@ -765,11 +765,15 @@ class JobQueue:
         session_stem: Optional[str] = None,
         fold_all: bool = False,
         rebuild: bool = False,
+        resummarize: bool = False,
     ) -> Job:
         """Enqueue a rolling-journal job for a campaign.
 
-        ``rebuild=True`` re-summarizes every session and rebuilds the journal
-        from scratch. The route must get the user's confirmation first.
+        ``rebuild=True`` resets the journal and re-folds every session's
+        existing summary (one LLM call each; ``journal.refold_campaign``).
+        With ``resummarize=True`` too, every session is re-summarized first
+        (two calls each; ``journal.rebuild_campaign``). The route must get the
+        user's confirmation first.
         """
         job = Job(
             id=str(uuid.uuid4()),
@@ -777,7 +781,8 @@ class JobQueue:
             created_at=datetime.now(),
             input_path="",
             kwargs={"slug": slug, "session_stem": session_stem,
-                    "fold_all": fold_all, "rebuild": rebuild},
+                    "fold_all": fold_all, "rebuild": rebuild,
+                    "resummarize": resummarize},
             name=name or (f"Rebuild journal: {slug}" if rebuild else f"Journal: {slug}"),
             job_type=JOB_CAMPAIGN_JOURNAL,
         )
@@ -979,7 +984,9 @@ class JobQueue:
         refine/summarize LLM jobs — safe because the queue is single-worker).
         """
         from wisper_transcribe.config import load_config
-        from wisper_transcribe.journal import rebuild_campaign, unjournalled_sessions, update_journal
+        from wisper_transcribe.journal import (
+            rebuild_campaign, refold_campaign, unjournalled_sessions, update_journal,
+        )
         from wisper_transcribe.llm import get_client
         from wisper_transcribe.speaker_manager import load_profiles
 
@@ -987,6 +994,7 @@ class JobQueue:
         session_stem = job.kwargs.get("session_stem")
         fold_all = bool(job.kwargs.get("fold_all", False))
         rebuild = bool(job.kwargs.get("rebuild", False))
+        resummarize = bool(job.kwargs.get("resummarize", False))
 
         old_stderr = _sys.stderr
         _sys.stderr = _StderrCapture(job)
@@ -997,9 +1005,9 @@ class JobQueue:
             profiles = load_profiles()
 
             if rebuild:
-                result = rebuild_campaign(slug, client, profiles,
-                                          on_progress=job.append_log)
-                job.append_log(f"Re-summarized: {len(result.resummarized)}")
+                rebuild_fn = rebuild_campaign if resummarize else refold_campaign
+                result = rebuild_fn(slug, client, profiles, on_progress=job.append_log)
+                job.append_log(f"Summarized: {len(result.resummarized)}")
                 if result.skipped:
                     job.append_log(f"Skipped: {len(result.skipped)}")
                     for stem, reason in result.skipped:

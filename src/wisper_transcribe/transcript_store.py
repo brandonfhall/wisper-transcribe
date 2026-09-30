@@ -165,7 +165,8 @@ def register(stem: str, *, origin: Literal["job", "reconcile"],
     Call after the ``.md`` is written. An existing row keeps its id, campaign
     position, and journal entries, so an overwrite or re-transcribe keeps its
     links; a row flagged missing is un-flagged. ``origin`` is ``"job"`` when
-    the app just wrote the file, ``"reconcile"`` when it was found on disk.
+    the app just wrote the file (an existing, journaled transcript then marks
+    that campaign's journal stale), ``"reconcile"`` when it was found on disk.
     """
     if origin not in ("job", "reconcile"):
         raise ValueError(f"invalid origin: {origin!r}")
@@ -180,6 +181,14 @@ def register(stem: str, *, origin: Literal["job", "reconcile"],
             conn.execute("UPDATE transcripts SET missing_since = NULL WHERE id = ?", (row["id"],))
             if origin == "job":
                 log.info("Reused the name of a previously missing transcript: %s", stem)
+        if origin == "job":
+            # Overwritten or re-transcribed: a journal that folded the old text
+            # now describes something else. Flag it; never un-fold automatically.
+            conn.execute(
+                "UPDATE campaigns SET journal_stale_since = coalesce(journal_stale_since, ?) "
+                "WHERE id IN (SELECT campaign_id FROM journal_entries WHERE transcript_id = ?)",
+                (db.now_utc(), row["id"]),
+            )
         return row["id"]
 
 

@@ -102,11 +102,22 @@ def _write_order(conn: sqlite3.Connection, campaign_id: int, transcript_ids: lis
         (offset, campaign_id),
     )
     for pos, tid in enumerate(transcript_ids):
-        # A transcript in another campaign moves here (one campaign per transcript).
+        current = conn.execute(
+            "SELECT campaign_id FROM campaign_transcripts WHERE transcript_id = ?", (tid,)
+        ).fetchone()
+        if current is not None and current[0] == campaign_id:
+            # Already here: position only. Never rewrite campaign_id in place —
+            # journal_entries' composite FK refuses that.
+            conn.execute(
+                "UPDATE campaign_transcripts SET position = ? WHERE transcript_id = ?", (pos, tid)
+            )
+            continue
+        # Moving in from another campaign (one campaign per transcript): delete
+        # and insert, so the old campaign's journal entry cascades and its
+        # journal is marked stale.
+        conn.execute("DELETE FROM campaign_transcripts WHERE transcript_id = ?", (tid,))
         conn.execute(
-            "INSERT INTO campaign_transcripts (transcript_id, campaign_id, position) "
-            "VALUES (?, ?, ?) ON CONFLICT (transcript_id) DO UPDATE SET "
-            "campaign_id = excluded.campaign_id, position = excluded.position",
+            "INSERT INTO campaign_transcripts (transcript_id, campaign_id, position) VALUES (?, ?, ?)",
             (tid, campaign_id, pos),
         )
 

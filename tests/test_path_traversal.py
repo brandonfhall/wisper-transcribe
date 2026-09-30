@@ -314,6 +314,19 @@ def test_campaigns_delete_path_traversal_blocked(client, payload):
 
 
 @pytest.mark.parametrize("payload", _CAMPAIGN_SLUG_PAYLOADS)
+def test_campaigns_journal_download_path_traversal_blocked(client, payload):
+    from urllib.parse import quote
+    resp = client.get(
+        f"/campaigns/{quote(payload, safe='')}/journal/download", follow_redirects=False
+    )
+    # 400: our validator rejected; 404: routing or unknown campaign.
+    assert resp.status_code in (400, 404)
+    disposition = resp.headers.get("content-disposition", "")
+    assert "\x00" not in disposition and ".." not in disposition
+    assert "\r" not in disposition and "\n" not in disposition
+
+
+@pytest.mark.parametrize("payload", _CAMPAIGN_SLUG_PAYLOADS)
 def test_campaigns_relabel_path_traversal_blocked(client, payload):
     from urllib.parse import quote
     with patch.object(client.app.state.job_queue, "submit_relabel") as mock_submit:

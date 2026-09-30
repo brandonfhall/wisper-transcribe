@@ -2199,6 +2199,86 @@ def test_campaign_journal_post_rebuild(client, tmp_path, monkeypatch):
     assert resp.status_code == 303
     assert resp.headers["location"] == f"/transcribe/jobs/{fake_job.id}"
     assert mock_submit.call_args.kwargs.get("rebuild") is True
+    assert mock_submit.call_args.kwargs.get("resummarize") is False
+
+
+def test_campaign_journal_post_resummarize(client, tmp_path, monkeypatch):
+    """mode=resummarize is the full redrive: rebuild and resummarize."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.web.jobs import Job
+    from wisper_transcribe.campaign_manager import create_campaign
+    import uuid
+
+    create_campaign("My Game", data_dir=tmp_path)
+    fake_job = MagicMock(spec=Job)
+    fake_job.id = str(uuid.uuid4())
+    with patch.object(client.app.state.job_queue, "submit_journal",
+                      return_value=fake_job) as mock_submit:
+        resp = client.post("/campaigns/my-game/journal",
+                           data={"mode": "resummarize"}, follow_redirects=False)
+    assert resp.status_code == 303
+    kwargs = mock_submit.call_args.kwargs
+    assert kwargs.get("rebuild") is True and kwargs.get("resummarize") is True
+
+
+def _journaled_game(tmp_path, monkeypatch):
+    """A campaign with s1 folded into its journal; returns the output dir."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    from wisper_transcribe import journal as journal_mod
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+
+    create_campaign("My Game")
+    move_transcript_to_campaign("s1", "my-game")
+    (out / "s1.md").write_text("x", encoding="utf-8")
+    (out / "s1.summary.md").write_text("A session.", encoding="utf-8")
+
+    class _Client:
+        provider, model = "fake", "m"
+
+        def complete(self, system, user):
+            return "## Story So Far\n\nThe heroes gathered."
+
+    journal_mod.update_journal("my-game", _Client(), {}, session_stem="s1")
+    return out
+
+
+def test_campaign_page_shows_stale_banner(client, tmp_path, monkeypatch):
+    from wisper_transcribe.campaign_manager import remove_transcript_from_campaign
+
+    _journaled_game(tmp_path, monkeypatch)
+    resp = client.get("/campaigns/my-game")
+    assert 'data-testid="journal-stale"' not in resp.text
+    assert "Rebuild from transcripts" in resp.text
+
+    remove_transcript_from_campaign("s1")
+    resp = client.get("/campaigns/my-game")
+    assert 'data-testid="journal-stale"' in resp.text
+    resp = client.get("/campaigns/my-game/journal")
+    assert 'data-testid="journal-stale"' in resp.text
+
+
+def test_campaign_journal_download_adds_journaled_sessions(client, tmp_path, monkeypatch):
+    from wisper_transcribe.journal import parse_journal
+
+    _journaled_game(tmp_path, monkeypatch)
+    resp = client.get("/campaigns/my-game/journal/download")
+    assert resp.status_code == 200
+    assert 'filename="my-game-journal.md"' in resp.headers["content-disposition"]
+    meta, body = parse_journal(resp.text)
+    assert meta["journaled_sessions"] == ["s1"]
+    assert "The heroes gathered." in body
+
+
+def test_campaign_journal_download_404_without_journal(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    create_campaign("My Game")
+    assert client.get("/campaigns/my-game/journal/download").status_code == 404
+    assert client.get("/campaigns/ghost/journal/download").status_code == 404
 
 
 def test_campaign_journal_post_unknown_campaign(client, tmp_path, monkeypatch):
@@ -2287,7 +2367,7 @@ def test_campaign_journal_view_renders_body(client, tmp_path, monkeypatch):
     jpath = journal_mod.journal_path("my-game", data_dir=tmp_path)
     jpath.parent.mkdir(parents=True, exist_ok=True)
     jpath.write_text(journal_mod.render_journal(
-        "my-game", "## Story So Far\n\nThe heroes gathered.", ["s1"], "ollama", "llama3.1:8b"
+        "my-game", "## Story So Far\n\nThe heroes gathered.", "ollama", "llama3.1:8b"
     ), encoding="utf-8")
 
     resp = client.get("/campaigns/my-game/journal")

@@ -96,9 +96,14 @@
     </div>
 
     <!-- Campaign journal -->
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 18px;margin-bottom:28px;border:1px solid var(--color-rule);border-radius:8px;background:var(--color-ink-900)">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 18px;margin-bottom:28px;border:1px solid {{ 'var(--color-signal-amber)' if journal_stale else 'var(--color-rule)' }};border-radius:8px;background:var(--color-ink-900)">
       <div>
         <div class="mono-kicker" style="margin-bottom:5px">Rolling journal</div>
+        {% if journal_stale %}
+        <div data-testid="journal-stale" style="font-size:13px;color:var(--color-signal-amber);margin-bottom:6px">
+          This journal mentions sessions that were moved, removed, or re-transcribed since it was written. Rebuild it to bring it up to date.
+        </div>
+        {% endif %}
         <div style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper)">
           {% if journal_pending %}
             {{ journal_pending }} session{{ 's' if journal_pending != 1 else '' }} ready to fold in
@@ -127,10 +132,18 @@
         {% endif %}
         {% endif %}
         {% if active_campaign.transcripts %}
+        {% set n_sessions = active_campaign.transcripts|length %}
         <form method="post" action="/campaigns/{{ slug }}/journal" style="display:inline">
           <input type="hidden" name="mode" value="rebuild"/>
+          <button type="submit" class="btn {{ 'btn-primary' if journal_stale else 'btn-secondary' }} btn-sm"
+                  title="Start the journal over from each session's existing summary. Summaries (and your edits to them) are kept."
+                  onclick="return confirm('Rebuild the journal from the {{ n_sessions }} sessions\' existing summaries? The current journal is replaced. About {{ n_sessions + sessions_needing_summary }} LLM calls{% if sessions_needing_summary %} ({{ sessions_needing_summary }} session(s) need a summary first){% endif %}.')">Rebuild journal</button>
+        </form>
+        <form method="post" action="/campaigns/{{ slug }}/journal" style="display:inline">
+          <input type="hidden" name="mode" value="resummarize"/>
           <button type="submit" class="btn btn-secondary btn-sm"
-                  onclick="return confirm('Rebuild the whole journal? This re-summarizes all {{ active_campaign.transcripts|length }} session transcripts and regenerates the journal from scratch — {{ (active_campaign.transcripts|length) * 2 }} LLM calls.')">Rebuild journal</button>
+                  title="Re-summarize every session transcript (overwriting the summaries), then rebuild the journal."
+                  onclick="return confirm('Rebuild from transcripts? This re-summarizes all {{ n_sessions }} session transcripts, overwriting their summaries, and regenerates the journal from scratch — {{ n_sessions * 2 }} LLM calls.')">Rebuild from transcripts</button>
         </form>
         <form method="post" action="/campaigns/{{ slug }}/relabel" style="display:inline">
           <button type="submit" class="btn btn-secondary btn-sm"

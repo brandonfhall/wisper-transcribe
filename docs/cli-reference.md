@@ -258,13 +258,18 @@ wisper campaigns journal d-d-mondays                  # fold the next unjournall
 wisper campaigns journal d-d-mondays --all            # fold every pending session (oldest first)
 wisper campaigns journal d-d-mondays --session s05    # fold a specific session stem
 wisper campaigns journal d-d-mondays --provider openai --model gpt-4o-mini
-wisper campaigns journal d-d-mondays --rebuild        # redrive the whole campaign (asks to confirm)
+wisper campaigns journal d-d-mondays --rebuild        # start over from the existing summaries (asks to confirm)
 wisper campaigns journal d-d-mondays --rebuild --yes  # same, skip the confirmation prompt
+wisper campaigns journal d-d-mondays --rebuild --resummarize  # re-summarize every transcript first
+wisper campaigns journal d-d-mondays --export         # print it with the folded-session list
+wisper campaigns journal d-d-mondays --export -o journal.md
 ```
 
-A session is "pending" once it has a `.summary.md`. With no flags the command folds the single oldest unjournalled session; re-run (or use `--all`) to catch up the rest. Sessions already folded are tracked in the journal's `journaled_sessions:` frontmatter and skipped.
+A session is "pending" once it has a `.summary.md`. With no flags the command folds the single oldest unjournalled session; re-run (or use `--all`) to catch up the rest. Sessions already folded are tracked in wisper's database and skipped. `--export` adds that list back as `journaled_sessions:` in the frontmatter (the file itself no longer carries it).
 
-`--rebuild` re-summarizes every session transcript (overwriting its `.summary.md`) and rebuilds the journal from scratch, in order — two LLM calls per session, so it asks for confirmation unless `--yes` is passed. Sessions whose transcript is missing or whose summary fails are skipped and reported. `--session`, `--all`, and `--rebuild` are mutually exclusive.
+`--rebuild` starts the journal over from each session's existing `.summary.md`, in campaign order — one LLM call per session, plus one for any session that has no summary yet. Your edits to summaries are kept. Add `--resummarize` to re-summarize every transcript first, overwriting the summaries (two calls per session) — for when the summaries themselves are bad. Both ask for confirmation, showing the call count, unless `--yes` is passed. Sessions whose transcript is missing or whose summary fails are skipped and reported. `--session`, `--all`, `--rebuild`, and `--export` are mutually exclusive.
+
+**Stale journal:** moving a folded session to another campaign, removing it from the campaign, deleting it, or re-transcribing it never edits the journal text; it marks the journal stale instead. `wisper campaigns show <slug>` prints `Journal: STALE since …` with the rebuild command. Deleting `journal.md` by hand starts a fresh journal (every session becomes pending again); editing it by hand is fine, and later folds build on your edits.
 
 **Scoping transcription to a campaign:**
 

@@ -6,7 +6,7 @@ import re
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from . import get_queue, templates
 from wisper_transcribe.campaign_manager import (
@@ -74,10 +74,11 @@ async def campaign_detail(request: Request, slug: str) -> HTMLResponse:
     # Profiles not yet in this campaign (for the add-member dropdown)
     unenrolled = {k: v for k, v in profiles.items() if k not in campaign.members}
 
-    from wisper_transcribe.journal import journal_path, unjournalled_sessions
+    from wisper_transcribe.journal import journal_path, journal_stale_since, unjournalled_sessions
+    journal_pending = len(unjournalled_sessions(safe))  # also syncs file ↔ DB
     jpath = journal_path(safe)
     journal_exists = bool(jpath and jpath.exists())
-    journal_pending = len(unjournalled_sessions(safe))
+    journal_stale = journal_stale_since(safe) if journal_exists else None
 
     # Entries whose transcript is gone (deleted before deletes unlinked
     # campaigns, or removed by hand). Shown as missing, not pruned: an
@@ -94,6 +95,11 @@ async def campaign_detail(request: Request, slug: str) -> HTMLResponse:
         return safe != stem or not candidate.startswith(base_dir) or not os.path.exists(candidate)
 
     missing = {stem for stem in campaign.transcripts if _transcript_missing(stem)}
+    # For the rebuild confirmation's LLM-call count: sessions without a summary.
+    summarized = sum(
+        1 for stem in campaign.transcripts
+        if os.path.exists(os.path.join(base_dir, f"{os.path.basename(stem)}.summary.md"))
+    )
 
     return templates.TemplateResponse(
         request,
@@ -106,6 +112,8 @@ async def campaign_detail(request: Request, slug: str) -> HTMLResponse:
             "unenrolled": unenrolled,
             "journal_exists": journal_exists,
             "journal_pending": journal_pending,
+            "journal_stale": journal_stale,
+            "sessions_needing_summary": len(campaign.transcripts) - summarized,
             "missing_transcripts": missing,
         },
     )
@@ -313,9 +321,11 @@ async def campaign_journal_update(
 ) -> RedirectResponse:
     """Submit a rolling-journal job and redirect to its progress page.
 
-    `mode="all"` folds every pending session, `mode="rebuild"` redrives the
-    whole campaign from its transcripts (confirmed client-side before this
-    POST — same pattern as "Fold all"); anything else folds the next one.
+    `mode="all"` folds every pending session; `mode="rebuild"` resets the
+    journal and re-folds the existing summaries; `mode="resummarize"`
+    redrives the whole campaign from its transcripts. Rebuilds are confirmed
+    client-side before this POST (same pattern as "Fold all"); anything else
+    folds the next one.
     """
     safe = _validate_campaign_slug(slug)
     if safe is None:
@@ -326,9 +336,12 @@ async def campaign_journal_update(
         return error_redirect("/campaigns", "not_found")
 
     queue = get_queue(request)
-    if mode == "rebuild":
+    if mode in ("rebuild", "resummarize"):
+        resummarize = mode == "resummarize"
+        label = "Rebuild journal from transcripts" if resummarize else "Rebuild journal"
         job = queue.submit_journal(
-            safe, name=f"Rebuild journal: {campaign.display_name}", rebuild=True
+            safe, name=f"{label}: {campaign.display_name}",
+            rebuild=True, resummarize=resummarize,
         )
     else:
         job = queue.submit_journal(
@@ -367,9 +380,12 @@ async def campaign_journal_view(request: Request, slug: str) -> HTMLResponse:
     if campaign is None:
         return error_redirect("/campaigns", "not_found")
 
-    from wisper_transcribe.journal import journal_path, unjournalled_sessions, parse_journal
+    from wisper_transcribe.journal import (
+        journal_path, journal_stale_since, journaled_stems, parse_journal, unjournalled_sessions,
+    )
     from .transcripts import _sanitize_html
 
+    pending = unjournalled_sessions(safe)  # also syncs file ↔ DB
     jpath = journal_path(safe)
     meta: dict = {}
     html_body = ""
@@ -378,8 +394,6 @@ async def campaign_journal_view(request: Request, slug: str) -> HTMLResponse:
         meta, body = parse_journal(jpath.read_text(encoding="utf-8"))
         import markdown as _md
         html_body = _sanitize_html(_md.markdown(body, extensions=["nl2br"]))
-
-    pending = unjournalled_sessions(safe)
 
     return templates.TemplateResponse(
         request,
@@ -392,6 +406,29 @@ async def campaign_journal_view(request: Request, slug: str) -> HTMLResponse:
             "html_body": html_body,
             "has_journal": has_journal,
             "pending": pending,
-            "journaled_count": len(meta.get("journaled_sessions") or []),
+            "journaled_count": len(journaled_stems(safe)),
+            "journal_stale": journal_stale_since(safe) if has_journal else None,
         },
+    )
+
+
+@router.get("/{slug}/journal/download")
+async def campaign_journal_download(slug: str) -> Response:
+    """Download journal.md with ``journaled_sessions`` added to its frontmatter
+    (the list lives in the database, not in the file)."""
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        return invalid_input_response("Invalid campaign slug")
+
+    from wisper_transcribe.journal import export_journal
+
+    campaign = load_campaigns().get(safe)
+    text = export_journal(campaign.slug) if campaign is not None else None
+    if text is None:
+        return HTMLResponse(content="Journal not found", status_code=404)
+    return Response(
+        content=text,
+        media_type="text/markdown; charset=utf-8",
+        # campaign.slug comes from the database, not the URL.
+        headers={"Content-Disposition": f'attachment; filename="{campaign.slug}-journal.md"'},
     )

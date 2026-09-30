@@ -78,13 +78,15 @@ def test_journal_path_invalid_slug_returns_none(tmp_path):
 
 def test_render_parse_roundtrip():
     rendered = journal.render_journal(
-        "my-game", "## Story So Far\n\nStuff.", ["s1", "s2"], "ollama", "llama3.1:8b"
+        "my-game", "## Story So Far\n\nStuff.", "ollama", "llama3.1:8b"
     )
     meta, body = journal.parse_journal(rendered)
     assert meta["type"] == "campaign-journal"
     assert meta["campaign"] == "my-game"
-    assert meta["journaled_sessions"] == ["s1", "s2"]
+    assert "journaled_sessions" not in meta  # lives in the database now
     assert body == "## Story So Far\n\nStuff."
+    exported = journal.render_journal("my-game", "x", "ollama", "m", journaled_sessions=["s1"])
+    assert journal.parse_journal(exported)[0]["journaled_sessions"] == ["s1"]
 
 
 def test_parse_journal_no_frontmatter():
@@ -141,7 +143,8 @@ def test_update_journal_first_fold_writes_file(tmp_path, out_dir):
     assert result.journaled_sessions == ["s1"]
     assert result.path.exists()
     meta, body = journal.parse_journal(result.path.read_text(encoding="utf-8"))
-    assert meta["journaled_sessions"] == ["s1"]
+    assert "journaled_sessions" not in meta
+    assert journal.journaled_stems("my-game", data_dir=tmp_path) == ["s1"]
     assert "The party met." in body
     # The session summary must have been handed to the LLM.
     assert "The party met in a tavern." in client.calls[0][1]
@@ -422,8 +425,84 @@ def test_cli_campaigns_journal_rebuild_with_yes(tmp_path, out_dir, monkeypatch):
         cli.main, ["campaigns", "journal", "my-game", "--rebuild", "--yes"]
     )
     assert result.exit_code == 0, result.output
-    assert "Re-summarized: 1" in result.output
+    assert "Summarized: 1" in result.output  # s1 had no summary yet
     assert journal.journal_path("my-game", data_dir=tmp_path).exists()
+
+
+def _cli_game(tmp_path, out_dir, monkeypatch, client):
+    from wisper_transcribe import cli
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out_dir))
+    create_campaign("My Game", data_dir=tmp_path)
+    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
+    _write_transcript(out_dir, "s1")
+    _write_summary(out_dir, "s1", "KEEP ME")
+    monkeypatch.setattr(cli, "_get_llm_client", lambda *a, **k: client)
+    return cli
+
+
+def test_cli_rebuild_refolds_existing_summaries(tmp_path, out_dir, monkeypatch):
+    from click.testing import CliRunner
+
+    client = FakeClient()
+    cli = _cli_game(tmp_path, out_dir, monkeypatch, client)
+    result = CliRunner().invoke(cli.main, ["campaigns", "journal", "my-game", "--rebuild"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "About 1 LLM calls" in result.output
+    assert (out_dir / "s1.summary.md").read_text(encoding="utf-8") == "KEEP ME"
+    assert client.json_calls == []
+
+
+def test_cli_rebuild_resummarize_overwrites_summaries(tmp_path, out_dir, monkeypatch):
+    from click.testing import CliRunner
+
+    client = FakeClient(json_body={"summary": "Fresh."})
+    cli = _cli_game(tmp_path, out_dir, monkeypatch, client)
+    result = CliRunner().invoke(
+        cli.main, ["campaigns", "journal", "my-game", "--rebuild", "--resummarize"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "2 LLM calls" in result.output
+    assert "Fresh." in (out_dir / "s1.summary.md").read_text(encoding="utf-8")
+
+
+def test_cli_resummarize_requires_rebuild(tmp_path, out_dir, monkeypatch):
+    from click.testing import CliRunner
+
+    cli = _cli_game(tmp_path, out_dir, monkeypatch, FakeClient())
+    result = CliRunner().invoke(cli.main, ["campaigns", "journal", "my-game", "--resummarize"])
+    assert result.exit_code != 0
+    assert "only applies with --rebuild" in result.output
+
+
+def test_cli_export_includes_journaled_sessions(tmp_path, out_dir, monkeypatch):
+    from click.testing import CliRunner
+
+    cli = _cli_game(tmp_path, out_dir, monkeypatch, FakeClient())
+    journal.update_journal("my-game", FakeClient(), {}, session_stem="s1")
+    result = CliRunner().invoke(cli.main, ["campaigns", "journal", "my-game", "--export"])
+    assert result.exit_code == 0, result.output
+    assert journal.parse_journal(result.output)[0]["journaled_sessions"] == ["s1"]
+
+    dest = tmp_path / "exported.md"
+    result = CliRunner().invoke(cli.main, ["campaigns", "journal", "my-game", "--export", "-o", str(dest)])
+    assert result.exit_code == 0
+    assert "journaled_sessions" in dest.read_text(encoding="utf-8")
+
+
+def test_cli_campaigns_show_reports_stale_journal(tmp_path, out_dir, monkeypatch):
+    from click.testing import CliRunner
+
+    from wisper_transcribe.campaign_manager import remove_transcript_from_campaign
+
+    cli = _cli_game(tmp_path, out_dir, monkeypatch, FakeClient())
+    journal.update_journal("my-game", FakeClient(), {}, session_stem="s1")
+    result = CliRunner().invoke(cli.main, ["campaigns", "show", "my-game"])
+    assert "Journal:  up to date" in result.output
+    remove_transcript_from_campaign("s1")
+    result = CliRunner().invoke(cli.main, ["campaigns", "show", "my-game"])
+    assert "STALE since" in result.output
+    assert "--rebuild" in result.output
 
 
 def test_cli_campaigns_journal_rebuild_prompts_without_yes(tmp_path, out_dir, monkeypatch):
@@ -500,7 +579,7 @@ def test_run_journal_job_folds_and_completes(tmp_path, out_dir, monkeypatch):
 
 
 def test_run_journal_job_rebuild_resummarizes_and_completes(tmp_path, out_dir, monkeypatch):
-    """rebuild=True redrives every transcript instead of folding pending ones."""
+    """rebuild + resummarize redrives every transcript instead of folding pending ones."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     from wisper_transcribe.web import jobs as jobs_mod
 
@@ -516,15 +595,40 @@ def test_run_journal_job_rebuild_resummarizes_and_completes(tmp_path, out_dir, m
     ))
 
     q = jobs_mod.JobQueue()
-    job = q.submit_journal("my-game", rebuild=True)
-    assert job.kwargs["rebuild"] is True
+    job = q.submit_journal("my-game", rebuild=True, resummarize=True)
+    assert job.kwargs["rebuild"] is True and job.kwargs["resummarize"] is True
     q._run_journal_job(job)
 
     assert job.status == jobs_mod.COMPLETED
     assert "STALE" not in (out_dir / "s1.summary.md").read_text(encoding="utf-8")
     assert "Rebuilt via job." in (out_dir / "s1.summary.md").read_text(encoding="utf-8")
     assert job.output_path and job.output_path.endswith("journal.md")
-    assert any("Re-summarized: 1" in line for line in job.log_lines)
+    assert any("Summarized: 1" in line for line in job.log_lines)
+
+
+def test_run_journal_job_rebuild_refolds_existing_summaries(tmp_path, out_dir, monkeypatch):
+    """rebuild alone re-folds the summaries as they are (no re-summarize)."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.web import jobs as jobs_mod
+
+    create_campaign("My Game", data_dir=tmp_path)
+    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
+    _write_transcript(out_dir, "s1")
+    _write_summary(out_dir, "s1", "KEEP ME")
+    client = FakeClient()
+
+    monkeypatch.setattr(jobs_mod, "_StderrCapture", lambda job: _Devnull())
+    import wisper_transcribe.llm as llm_mod
+    monkeypatch.setattr(llm_mod, "get_client", lambda *a, **k: client)
+
+    q = jobs_mod.JobQueue()
+    job = q.submit_journal("my-game", rebuild=True)
+    q._run_journal_job(job)
+
+    assert job.status == jobs_mod.COMPLETED
+    assert (out_dir / "s1.summary.md").read_text(encoding="utf-8") == "KEEP ME"
+    assert client.json_calls == [] and len(client.calls) == 1
+    assert "KEEP ME" in client.calls[0][1]
 
 
 class _Devnull:
@@ -533,3 +637,226 @@ class _Devnull:
 
     def flush(self):
         pass
+
+
+
+# ---------------------------------------------------------------------------
+# Journal write rule: entries in the DB, body in the file
+# ---------------------------------------------------------------------------
+
+import hashlib  # noqa: E402
+
+from wisper_transcribe import db  # noqa: E402
+
+
+def _campaign_row(data_dir, slug="my-game"):
+    with db.connection(data_dir) as conn:
+        return dict(conn.execute(
+            "SELECT journal_sha256, journal_stale_since FROM campaigns WHERE slug = ?", (slug,)
+        ).fetchone())
+
+
+def _folded_game(tmp_path, out_dir, stems=("s1", "s2")):
+    create_campaign("My Game", data_dir=tmp_path)
+    for stem in stems:
+        move_transcript_to_campaign(stem, "my-game", data_dir=tmp_path)
+        _write_summary(out_dir, stem)
+        journal.update_journal("my-game", FakeClient(), {}, session_stem=stem, data_dir=tmp_path)
+    return journal.journal_path("my-game", data_dir=tmp_path)
+
+
+def test_fold_records_hash_of_written_file(tmp_path, out_dir):
+    jpath = _folded_game(tmp_path, out_dir, ("s1",))
+    assert _campaign_row(tmp_path)["journal_sha256"] == hashlib.sha256(jpath.read_bytes()).hexdigest()
+    assert not journal._pending_path(jpath).exists()
+
+
+def test_committed_but_unmoved_fold_is_finished_on_next_read(tmp_path, out_dir):
+    """Crash between the commit and os.replace: the pending file's hash matches."""
+    jpath = _folded_game(tmp_path, out_dir, ("s1",))
+    pending = journal._pending_path(jpath)
+    pending.write_text("---\ntype: campaign-journal\n---\n\nNewer body\n", encoding="utf-8")
+    with db.transaction(tmp_path) as conn:
+        conn.execute("UPDATE campaigns SET journal_sha256 = ?",
+                     (hashlib.sha256(pending.read_bytes()).hexdigest(),))
+
+    journal.sync_journal("my-game", data_dir=tmp_path)
+
+    assert "Newer body" in jpath.read_text(encoding="utf-8")
+    assert not pending.exists()
+
+
+def test_uncommitted_pending_file_is_discarded(tmp_path, out_dir):
+    """Crash before the commit: the pending file's hash doesn't match."""
+    jpath = _folded_game(tmp_path, out_dir, ("s1",))
+    before = jpath.read_text(encoding="utf-8")
+    pending = journal._pending_path(jpath)
+    pending.write_text("never committed", encoding="utf-8")
+
+    journal.sync_journal("my-game", data_dir=tmp_path)
+
+    assert jpath.read_text(encoding="utf-8") == before
+    assert not pending.exists()
+    assert journal.journaled_stems("my-game", data_dir=tmp_path) == ["s1"]
+
+
+def test_deleted_journal_resets_entries(tmp_path, out_dir):
+    jpath = _folded_game(tmp_path, out_dir)
+    jpath.unlink()
+    assert journal.unjournalled_sessions("my-game", data_dir=tmp_path) == ["s1", "s2"]
+    assert journal.journaled_stems("my-game", data_dir=tmp_path) == []
+    row = _campaign_row(tmp_path)
+    assert row["journal_sha256"] is None and row["journal_stale_since"] is None
+
+
+def test_edited_journal_keeps_entries_and_adopts_hash(tmp_path, out_dir):
+    jpath = _folded_game(tmp_path, out_dir)
+    jpath.write_text(jpath.read_text(encoding="utf-8") + "\nMy own note.\n", encoding="utf-8")
+    journal.sync_journal("my-game", data_dir=tmp_path)
+    assert journal.journaled_stems("my-game", data_dir=tmp_path) == ["s1", "s2"]
+    assert _campaign_row(tmp_path)["journal_sha256"] == hashlib.sha256(jpath.read_bytes()).hexdigest()
+
+
+def test_fold_aborts_if_journal_changed_during_llm_call(tmp_path, out_dir):
+    jpath = _folded_game(tmp_path, out_dir, ("s1",))
+    move_transcript_to_campaign("s2", "my-game", data_dir=tmp_path)
+    _write_summary(out_dir, "s2")
+
+    class RacingClient(FakeClient):
+        def complete(self, system, user):
+            with db.transaction(tmp_path) as conn:  # another fold committed meanwhile
+                conn.execute("UPDATE campaigns SET journal_sha256 = ?", ("f" * 64,))
+            return super().complete(system, user)
+
+    with pytest.raises(RuntimeError, match="changed while"):
+        journal.update_journal("my-game", RacingClient(), {}, session_stem="s2", data_dir=tmp_path)
+    assert journal.journaled_stems("my-game", data_dir=tmp_path) == ["s1"]
+    assert not journal._pending_path(jpath).exists()
+
+
+def test_export_adds_journaled_sessions(tmp_path, out_dir):
+    _folded_game(tmp_path, out_dir)
+    meta, body = journal.parse_journal(journal.export_journal("my-game", data_dir=tmp_path))
+    assert meta["journaled_sessions"] == ["s1", "s2"]
+    assert "It happened." in body
+
+
+# ---------------------------------------------------------------------------
+# Stale journal: moves, removals, re-transcribes; reorders don't count
+# ---------------------------------------------------------------------------
+
+def test_reorder_keeps_entries_and_not_stale(tmp_path, out_dir):
+    from wisper_transcribe.campaign_manager import reorder_campaign_transcript, set_campaign_transcript_order
+
+    _folded_game(tmp_path, out_dir)
+    reorder_campaign_transcript("my-game", "s2", "up", data_dir=tmp_path)
+    set_campaign_transcript_order("my-game", ["s1", "s2"], data_dir=tmp_path)
+    assert set(journal.journaled_stems("my-game", data_dir=tmp_path)) == {"s1", "s2"}
+    assert _campaign_row(tmp_path)["journal_stale_since"] is None
+
+
+def test_move_to_other_campaign_drops_entry_and_marks_stale(tmp_path, out_dir):
+    _folded_game(tmp_path, out_dir)
+    create_campaign("Other", data_dir=tmp_path)
+    move_transcript_to_campaign("s1", "other", data_dir=tmp_path)
+    assert journal.journaled_stems("my-game", data_dir=tmp_path) == ["s2"]
+    assert journal.journal_stale_since("my-game", data_dir=tmp_path) is not None
+    assert journal.journal_stale_since("other", data_dir=tmp_path) is None
+
+
+def test_save_campaigns_move_marks_stale(tmp_path, out_dir):
+    from wisper_transcribe.campaign_manager import load_campaigns, save_campaigns
+
+    _folded_game(tmp_path, out_dir)
+    create_campaign("Other", data_dir=tmp_path)
+    campaigns = load_campaigns(tmp_path)
+    campaigns["my-game"].transcripts.remove("s1")
+    campaigns["other"].transcripts.append("s1")
+    save_campaigns(campaigns, tmp_path)
+    assert journal.journal_stale_since("my-game", data_dir=tmp_path) is not None
+
+
+def test_unassign_marks_stale(tmp_path, out_dir):
+    from wisper_transcribe.campaign_manager import remove_transcript_from_campaign
+
+    _folded_game(tmp_path, out_dir)
+    remove_transcript_from_campaign("s1", data_dir=tmp_path)
+    assert journal.journal_stale_since("my-game", data_dir=tmp_path) is not None
+
+
+def test_transcript_delete_marks_stale(tmp_path, out_dir, monkeypatch):
+    from wisper_transcribe import transcript_store
+
+    _folded_game(tmp_path, out_dir)
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    transcript_store.delete_transcript("s1", output_dir=out_dir)
+    assert journal.journaled_stems("my-game") == ["s2"]
+    assert journal.journal_stale_since("my-game") is not None
+
+
+def test_retranscribe_of_journaled_session_marks_stale(tmp_path, out_dir, monkeypatch):
+    from wisper_transcribe import transcript_store
+
+    _folded_game(tmp_path, out_dir)
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    transcript_store.register("s1", origin="job")
+    assert journal.journaled_stems("my-game") == ["s1", "s2"]  # never un-folded
+    assert journal.journal_stale_since("my-game") is not None
+
+
+def test_register_from_reconcile_does_not_mark_stale(tmp_path, out_dir, monkeypatch):
+    from wisper_transcribe import transcript_store
+
+    _folded_game(tmp_path, out_dir)
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    transcript_store.register("s1", origin="reconcile")
+    assert journal.journal_stale_since("my-game") is None
+
+
+def test_composite_fk_refuses_in_place_campaign_change(tmp_path, out_dir):
+    import sqlite3
+
+    _folded_game(tmp_path, out_dir, ("s1",))
+    create_campaign("Other", data_dir=tmp_path)
+    with pytest.raises(sqlite3.IntegrityError):
+        with db.transaction(tmp_path) as conn:
+            conn.execute("UPDATE campaign_transcripts SET campaign_id = "
+                         "(SELECT id FROM campaigns WHERE slug = 'other')")
+
+
+# ---------------------------------------------------------------------------
+# refold_campaign — rebuild from existing summaries
+# ---------------------------------------------------------------------------
+
+def test_refold_uses_existing_summaries_one_call_each(tmp_path, out_dir):
+    jpath = _folded_game(tmp_path, out_dir, ("s1", "s2"))
+    _write_summary(out_dir, "s1", "Edited by hand.")
+    create_campaign("Other", data_dir=tmp_path)
+    move_transcript_to_campaign("s2", "other", data_dir=tmp_path)  # marks stale
+    move_transcript_to_campaign("s3", "my-game", data_dir=tmp_path)
+    _write_transcript(out_dir, "s3")  # no summary yet
+    client = FakeClient(body="## Story So Far\n\nRefolded.")
+
+    result = journal.refold_campaign("my-game", client, {}, data_dir=tmp_path)
+
+    assert len(client.json_calls) == 1          # only s3 was summarized
+    assert len(client.calls) == 2               # s1 and s3 folded
+    assert "Edited by hand." in client.calls[0][1]
+    assert (out_dir / "s1.summary.md").read_text(encoding="utf-8") == "Edited by hand."
+    assert result.resummarized == ["s3"]
+    assert journal.journaled_stems("my-game", data_dir=tmp_path) == ["s1", "s3"]
+    assert _campaign_row(tmp_path)["journal_stale_since"] is None
+    assert "Refolded." in jpath.read_text(encoding="utf-8")
+    # The first fold starts from an empty journal, not the stale text.
+    assert "It happened." not in client.calls[0][1]
+
+
+def test_rebuild_clears_stale(tmp_path, out_dir):
+    _folded_game(tmp_path, out_dir)
+    for stem in ("s1", "s2"):
+        _write_transcript(out_dir, stem)
+    from wisper_transcribe.campaign_manager import remove_transcript_from_campaign
+    remove_transcript_from_campaign("s2", data_dir=tmp_path)
+    journal.rebuild_campaign("my-game", FakeClient(), {}, data_dir=tmp_path)
+    assert _campaign_row(tmp_path)["journal_stale_since"] is None
+    assert journal.journaled_stems("my-game", data_dir=tmp_path) == ["s1"]

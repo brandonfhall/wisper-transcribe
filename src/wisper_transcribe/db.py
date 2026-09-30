@@ -368,9 +368,34 @@ def _v2_import(conn: sqlite3.Connection, ctx: MigrationContext) -> None:
     import_profiles_and_campaigns(conn, ctx)
 
 
+# --- v3: journal entries ---------------------------------------------------
+
+_V3_DDL = """
+CREATE TABLE journal_entries (
+  transcript_id INTEGER PRIMARY KEY,
+  campaign_id   INTEGER NOT NULL,
+  folded_at     TEXT NOT NULL,
+  FOREIGN KEY (campaign_id, transcript_id)
+    REFERENCES campaign_transcripts(campaign_id, transcript_id) ON DELETE CASCADE
+    -- ON UPDATE NO ACTION: moving a journaled transcript fails unless its entry is deleted first
+) STRICT;
+CREATE INDEX journal_entries_campaign ON journal_entries(campaign_id, transcript_id);
+CREATE TRIGGER journal_entries_ad AFTER DELETE ON journal_entries BEGIN   -- also fires on FK cascades
+  UPDATE campaigns SET journal_stale_since = coalesce(journal_stale_since, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+   WHERE id = old.campaign_id;
+END;
+"""
+
+
+def _v3_import(conn: sqlite3.Connection, ctx: MigrationContext) -> None:
+    from .legacy_import import import_journal_entries
+    import_journal_entries(conn, ctx)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "foundation", _V1_DDL, _v1_pin_output_dir),
     Migration(2, "profiles-campaigns", _V2_DDL, _v2_import),
+    Migration(3, "journal-entries", _V3_DDL, _v3_import),
 )
 LATEST_VERSION = MIGRATIONS[-1].version
 
@@ -466,8 +491,8 @@ def migrate(data_dir: Optional[Path] = None) -> list[int]:
     finally:
         conn.close()
 
+    _write_report(data_dir, contexts)
     for ctx in contexts:
-        _write_report(ctx)
         for fn in ctx.after_commit:
             try:
                 fn()
@@ -493,13 +518,22 @@ def _exec_ddl(conn: sqlite3.Connection, ddl: str) -> None:
         conn.execute(buf)
 
 
-def _write_report(ctx: MigrationContext) -> None:
-    if not ctx.report or ctx.backup_dir is None:
+def _write_report(data_dir: Path, contexts: list[MigrationContext]) -> None:
+    """One ``import-report.txt`` for everything a migration run repaired or
+    dropped: in the run's legacy-backup dir, else in ``backups/``."""
+    lines = [f"v{ctx.version}: {note}" for ctx in contexts for note in ctx.report]
+    if not lines:
         return
+    backup_dirs = [ctx.backup_dir for ctx in contexts if ctx.backup_dir is not None]
+    if backup_dirs:
+        path = backup_dirs[0] / "import-report.txt"
+    else:
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        path = data_dir / "backups" / f"import-report-{stamp}.txt"
     try:
-        (ctx.backup_dir / "import-report.txt").write_text(
-            "\n".join(ctx.report) + "\n", encoding="utf-8"
-        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        log.warning("Import report: %s", path)
     except OSError as exc:
         log.warning("Could not write import report: %s", exc)
 

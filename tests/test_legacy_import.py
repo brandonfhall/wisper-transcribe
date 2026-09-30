@@ -226,3 +226,61 @@ def test_leftover_legacy_files_after_commit_are_removed_next_start(data_dir, mon
 def test_fresh_install_has_no_backup(data_dir):
     load_profiles()
     assert not (data_dir / "backups").exists()
+
+
+# ---------------------------------------------------------------------------
+# v3: journaled_sessions frontmatter → journal_entries
+# ---------------------------------------------------------------------------
+
+def _write_journal(data_dir, slug, sessions, updated_at="2026-03-01T20:15:00"):
+    import yaml
+
+    path = data_dir / "campaigns" / slug / "journal.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fm = yaml.safe_dump({"type": "campaign-journal", "campaign": slug,
+                         "journaled_sessions": sessions, "updated_at": updated_at,
+                         "provider": "ollama", "model": "m"}, sort_keys=False)
+    path.write_text(f"---\n{fm}---\n\n## Story So Far\n\nThings.\n", encoding="utf-8")
+    return path
+
+
+def test_journaled_sessions_import_as_entries(data_dir):
+    import hashlib
+
+    from wisper_transcribe import journal
+
+    write_campaigns(data_dir, {"game": {"transcripts": ["s1", "s2", "s3"]}})
+    jpath = _write_journal(data_dir, "game", ["s1", "s2"])
+    before = jpath.read_bytes()
+
+    assert journal.journaled_stems("game") == ["s1", "s2"]
+    assert jpath.read_bytes() == before  # the file itself isn't rewritten
+    with db.connection() as conn:
+        sha, stale = conn.execute(
+            "SELECT journal_sha256, journal_stale_since FROM campaigns").fetchone()
+        folded_at = conn.execute("SELECT DISTINCT folded_at FROM journal_entries").fetchall()
+    assert sha == hashlib.sha256(before).hexdigest()
+    assert stale is None
+    assert len(folded_at) == 1 and folded_at[0][0].endswith("Z")
+    assert journal.unjournalled_sessions("game") == []  # no summaries on disk
+
+
+def test_journaled_session_not_in_campaign_dropped_and_reported(data_dir):
+    from wisper_transcribe import journal
+
+    write_campaigns(data_dir, {"game": {"transcripts": ["s1"]}, "other": {"transcripts": ["s9"]}})
+    _write_journal(data_dir, "game", ["s1", "gone", "s9"])
+    assert journal.journaled_stems("game") == ["s1"]
+    report = _report(data_dir)
+    assert "gone" in report and "s9" in report
+
+
+def test_unreadable_journal_frontmatter_imports_no_entries(data_dir):
+    from wisper_transcribe import journal
+
+    write_campaigns(data_dir, {"game": {"transcripts": ["s1"]}})
+    path = data_dir / "campaigns" / "game" / "journal.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("---\n: : bad yaml [\n---\n\nbody\n", encoding="utf-8")
+    assert journal.journaled_stems("game") == []
+    assert "frontmatter" in _report(data_dir)
