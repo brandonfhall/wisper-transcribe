@@ -425,7 +425,7 @@ Nothing else changes; the wire protocol is the stable interface.
 
 ---
 
-## Storage — SQLite migration (plan, awaiting review)
+## Storage — SQLite migration (plan approved; Phase 0 next)
 
 Branch `feat/sqlite-storage`. Plan only. The schema below is signed off. Decisions are listed under "Decisions" at the end.
 
