@@ -427,7 +427,7 @@ Nothing else changes; the wire protocol is the stable interface.
 
 ## Storage — SQLite migration (plan, awaiting review)
 
-Branch `feat/sqlite-storage`. Plan only. The schema below is a **DRAFT** until signed off. Decisions are listed under "Decisions" at the end.
+Branch `feat/sqlite-storage`. Plan only. The schema below is signed off. Decisions are listed under "Decisions" at the end.
 
 ### Why, and what SQLite does and doesn't fix
 
@@ -477,7 +477,7 @@ Costs:
 | Job queue | In-memory runtime, plus a DB **history projection** | Events, closures, and cancel flags can't persist. Same DB file, not a jobs-only store. |
 | `config.toml`, `server.json` | File | Hand-edited, holds secrets, or is a runtime pointer. Out of scope. |
 
-### Schema (DRAFT, for sign-off)
+### Schema (signed off 2026-09-30)
 
 One file, `<data dir>/wisper.db`. The DDL below has been run against SQLite 3.53 with `foreign_keys=ON`; every constraint listed in "Schema principles" was checked by an insert that should fail and did.
 
@@ -489,10 +489,15 @@ One file, `<data dir>/wisper.db`. The DDL below has been run against SQLite 3.53
   - `Recording.unbound_speakers` is `recording_speakers` rows with NULL `profile_id`.
 - **No multi-valued columns (1NF).** `devices_json` becomes `recording_devices`. One documented exception: `jobs.params_json`, an audit snapshot of kwargs that is never queried by field, constrained to a JSON object.
 - **Subtypes enforced by the schema.** Discord-only data (`guild_id`, `voice_channel_id`, speakers, rejoins) hangs off `recording_discord`, and local devices off `recording_devices`. Both use a composite FK to `recordings(id, source)`, so a local recording can't have Discord rows and vice versa.
-- **Integrity in the DB, not in app code:** `STRICT` tables, explicit `NOT NULL`, `CHECK` on every enum and on paired-nullable columns (embedding + space, indexed mtime + size), `UNIQUE` for every one-to-one rule the code enforces today (one Discord account per member per campaign — `bind_discord_id`'s loop; one campaign per transcript; one recording per transcript; campaign order positions).
+- **Integrity in the DB, not in app code:** `STRICT` tables, explicit `NOT NULL`, `CHECK` on every enum and on paired-nullable columns (embedding + space), `UNIQUE` for every one-to-one rule the code enforces today (one Discord account per member per campaign — `bind_discord_id`'s loop; one campaign per transcript; one recording per transcript; campaign order positions).
 - **Journal entries must belong to the campaign that holds the transcript:** composite FK to `campaign_transcripts(campaign_id, transcript_id)`. Transcripts always move freely: moving, unassigning, or deleting one drops its entry, and a trigger on `journal_entries` deletes (which also fires on cascades) marks the old campaign's journal **stale** (`journal_stale_since`). The journal text is never edited automatically; the user chooses when to rebuild.
 - **Every FK child column is indexed** (SQLite doesn't do this; unindexed children make cascades full scans).
 - **Surrogate integer ids** for everything user-renamable, so a rename is one `UPDATE`. UUIDs stay the key for recordings and jobs (they're already in URLs).
+- **Controlled redundancy**, where a repeated value is forced to match by a constraint, so it can't diverge:
+  - `journal_entries.campaign_id` is derivable from `campaign_transcripts`, but the composite FK needs it and guarantees it equals the transcript's current campaign. Without it, a move would silently carry the entry into the new campaign.
+  - `recording_discord.source` and `recording_devices.source` are constants, pinned by `CHECK`, that exist only so the subtype FK can reference `recordings(id, source)`.
+- **Job subject columns** (`jobs.transcript_id`, `campaign_id`, `recording_id`) record only the job's **direct** subject, never one derivable from it: a summarize job sets `transcript_id`, not the transcript's campaign; a journal job sets `campaign_id`; a recording transcription sets `recording_id` and, on success, the `transcript_id` it produced. They can't be `NOT NULL` per type, because `ON DELETE SET NULL` has to keep history rows when the subject is deleted.
+- **Search-index state lives with the index** (`search_index_state`), not on `transcripts`, so the whole disposable index (state, blocks, FTS) can be dropped and rebuilt without touching registry rows.
 - **Deliberate non-derivations**, each for a stated reason:
   - `profiles.key`: an alternate key (URL slug and reference-clip filename), written only by `rename_profile()`.
   - `transcript_speakers.display_name`: the name as rendered in that `.md`, which a profile rename doesn't rewrite. It's a fact about the file, not a profile FK.
@@ -563,10 +568,7 @@ CREATE TABLE transcripts (
   missing_since  TEXT,
   audio_rel_path TEXT CHECK (audio_rel_path IS NULL OR (audio_rel_path NOT GLOB '/*'
                                                   AND audio_rel_path NOT GLOB '*\*'
-                                                  AND '/' || audio_rel_path || '/' NOT GLOB '*/../*')),
-  indexed_mtime_ns INTEGER,                    -- Phase 6
-  indexed_size     INTEGER,                    -- Phase 6
-  CHECK ((indexed_mtime_ns IS NULL) = (indexed_size IS NULL))
+                                                  AND '/' || audio_rel_path || '/' NOT GLOB '*/../*'))
 ) STRICT;
 
 CREATE TABLE campaign_transcripts (           -- 1:N kept as its own relation so "no campaign" needs no NULLs
@@ -695,6 +697,11 @@ CREATE INDEX jobs_campaign   ON jobs(campaign_id);
 CREATE INDEX jobs_recording  ON jobs(recording_id);
 
 -- Phase 6 (derived; rebuildable) ------------------------------------------
+CREATE TABLE search_index_state (             -- one row per indexed transcript; no row = not indexed or stale
+  transcript_id    INTEGER PRIMARY KEY REFERENCES transcripts(id) ON DELETE CASCADE,
+  indexed_mtime_ns INTEGER NOT NULL,
+  indexed_size     INTEGER NOT NULL CHECK (indexed_size >= 0)
+) STRICT;
 CREATE TABLE search_blocks (
   id            INTEGER PRIMARY KEY,           -- = search_fts.rowid
   transcript_id INTEGER NOT NULL REFERENCES transcripts(id) ON DELETE CASCADE,
@@ -858,8 +865,8 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 - **Tokenizer:** `porter` stemming (so "fights" matches "fight"), accent-insensitive, with prefix indexes so `Stra*` is fast. Fantasy names aren't damaged by stemming because both the query and the text are stemmed the same way.
 
 *Keeping it fresh:*
-- **App writes reindex immediately.** Every path that rewrites a `.md` (wizard renames, the edit page, fix-speaker, refine, summarize, relabel) calls `transcript_store.reindex(stem)`. Indexing one transcript is one short transaction: delete its blocks, insert the new ones, record mtime and size.
-- **External edits** (Obsidian, sync) are caught by reconcile when `indexed_mtime_ns`/`indexed_size` differ from the file's. Reconcile only marks the row stale (`indexed_mtime_ns = NULL`); the background backfill worker does the reindex, so no parsing happens in a request.
+- **App writes reindex immediately.** Every path that rewrites a `.md` (wizard renames, the edit page, fix-speaker, refine, summarize, relabel) calls `transcript_store.reindex(stem)`. Indexing one transcript is one short transaction: delete its blocks, insert the new ones, upsert its `search_index_state` row.
+- **External edits** (Obsidian, sync) are caught by reconcile when `indexed_mtime_ns`/`indexed_size` differ from the file's. Reconcile only marks it stale (deletes its `search_index_state` row); the background backfill worker reindexes every transcript without a state row, so no parsing happens in a request.
 - **Initial build** runs as a background backfill after startup, outside the migration transaction, one transcript per transaction, so a large archive doesn't delay startup and a crash resumes where it stopped. The search page shows "Indexing N of M" until the backfill finishes.
 - **The index is disposable.** `wisper db reindex` drops and rebuilds it from the files. A corrupt or stale index is never data loss.
 
@@ -868,7 +875,7 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 - A query FTS5 still rejects returns a generic "couldn't search for that" message, never exception text.
 - Ranking uses `bm25()`, grouped by transcript on the results page.
 - **Snippets are XSS-safe:** the block text is HTML-escaped first, then the matched terms are wrapped in `<mark>`. No `| safe` on raw transcript text.
-- **Stale snippets:** snippets are rebuilt from the current `.md` by `block_idx`, so before building one the route compares the file's mtime and size to `indexed_mtime_ns`/`indexed_size`. On a mismatch it shows "Transcript changed — reindexing" without a snippet, links without an anchor, and marks the row stale.
+- **Stale snippets:** snippets are rebuilt from the current `.md` by `block_idx`, so before building one the route compares the file's mtime and size to its `search_index_state` row. On a mismatch it shows "Transcript changed — reindexing" without a snippet, links without an anchor, and marks the row stale.
 - **Highlighting is approximate; matching is exact.** Porter matches "fights" to "fight", but Python can't reproduce the stemmer, so each query term is highlighted by prefix: strip a common suffix (`-s`, `-es`, `-ed`, `-ing`), then match `\b<prefix>\w*` case-insensitively over the escaped text. A hit with no highlighted term is acceptable.
 
 *Changes:*
@@ -981,10 +988,11 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 27. **Host + container on one DB:** verified to corrupt on Docker Desktop. Guarded by an advisory runtime lease that only enforces when the container is inside Docker Desktop's VM, documented ("use Docker, or the native CLI with a local web server, not both at once on one data dir"), and tracked as an open bug (guarded, not fixed). Container + container is verified safe.
 28. **Branch lifetime:** a long-lived branch is accepted; search and the smaller add-ons stay in this PR.
 29. **Journal rebuild:** the default re-folds existing summaries (one LLM call per session, keeps summary edits); "Rebuild from transcripts" is the full redrive.
+30. **Schema signed off** on the condition that it's normalized and follows best practice. Final audit: every table `STRICT`; every FK child column indexed (the two subtype FKs via their `recording_id` primary key); redundancy only where a constraint pins it (listed under "Controlled redundancy"); derived values not stored except the documented non-derivations.
 
 ### Open questions
 
-None. Next step: sign-off on the schema, then Phase 0.
+None. Schema signed off (decision 30). Next step: Phase 0.
 
 ---
 
