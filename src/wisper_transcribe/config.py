@@ -41,6 +41,10 @@ DEFAULTS = {
     # Each subprocess gets its own copy of the module-level model globals.
     # Disabled by default — enable after benchmarking on your hardware.
     "parallel_stages": False,
+    # Re-time Whisper's words against the audio before speaker assignment
+    # (word_alignment.py). "auto" aligns when diarization runs on a GPU
+    # (CUDA or MPS); CPU adds ~9-20 min per 2.5 h session.
+    "forced_alignment": "auto",
     # LLM post-processing (wisper refine / wisper summarize). Opt-in, CLI-only MVP.
     # Default provider is local Ollama; cloud providers require explicit config + key.
     "llm_provider": "ollama",                 # ollama | anthropic | openai | google
@@ -101,10 +105,22 @@ EMBEDDING_SUBFOLDER = "embedding"
 # Stored on each profile. Profiles tagged otherwise (or untagged, from the old
 # pyannote/embedding model) are incomparable and never matched.
 EMBEDDING_SPACE = "wespeaker-resnet34"
+# Re-times Whisper's words against the audio before speaker assignment.
+# Apache-2.0 and ungated, so no token is needed.
+FORCED_ALIGNMENT_MODEL = "Qwen/Qwen3-ForcedAligner-0.6B-hf"
 
 # Allowed values, shared by CLI click.Choice lists and web-form validation.
 MODEL_SIZES = ("tiny", "base", "small", "medium", "large-v3", "large-v3-turbo")
 DEVICES = ("auto", "cpu", "cuda", "mps")
+FORCED_ALIGNMENT_MODES = ("auto", "true", "false")
+
+# Choice-valued keys, validated by `wisper config set` and the web Config page.
+CONFIG_CHOICES = {
+    "model": MODEL_SIZES,
+    "device": DEVICES,
+    "compute_type": COMPUTE_TYPES,
+    "forced_alignment": FORCED_ALIGNMENT_MODES,
+}
 
 
 def resolve_compute_type(compute_type: str, device: str) -> str:
@@ -166,6 +182,22 @@ def check_ffmpeg() -> None:
         raise RuntimeError(
             "ffmpeg not found. Please install it:\n" + install_hint
         )
+
+
+def forced_alignment_enabled(setting, device: str) -> bool:
+    """Resolve the ``forced_alignment`` setting for a resolved ``device``.
+
+    ``auto`` means on for GPU devices only. A hand-edited TOML boolean is
+    accepted as well as the strings.
+    """
+    if isinstance(setting, bool):
+        return setting
+    setting = str(setting).strip().lower()
+    if setting in ("true", "1", "yes", "on"):
+        return True
+    if setting in ("false", "0", "no", "off"):
+        return False
+    return device in ("cuda", "mps")
 
 
 def get_device() -> str:

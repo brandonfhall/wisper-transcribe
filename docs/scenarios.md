@@ -85,6 +85,20 @@ The `--vocab-file` flag takes precedence over the stored config when both are pr
 
 ---
 
+## Checking word alignment on your own audio
+
+Forced alignment re-times each word before it's given to a speaker. To see what it changes on one of your recordings, run the measurement script on a short excerpt with crosstalk (output goes to `alignment-eval/`, which is gitignored):
+
+```bash
+python scripts/alignment_eval.py run session.mp3 --start 1800 --duration 180 --out alignment-eval/s1
+python scripts/alignment_eval.py audit alignment-eval/s1   # re-listens to words moved >1 s
+python scripts/alignment_eval.py sheet alignment-eval/s1   # blind labelling sheet
+# listen to alignment-eval/s1/clip.wav and fill correct_speaker in sheet.csv
+python scripts/alignment_eval.py score alignment-eval/*/
+```
+
+`run` prints an automatic proxy for each variant (Whisper vs aligned timing, smoothing on/off, regular vs exclusive diarization). `score` reports how often each variant gave the words around speaker changes to the right person, according to your labels.
+
 ## Known Limitations
 
 - **One recording at a time.** Starting a Discord or local recording while either kind is active is rejected.
@@ -93,5 +107,6 @@ The `--vocab-file` flag takes precedence over the stored config when both are pr
 - **Live transcription is local-only.** Discord sessions are transcribed after they stop.
 - **The live preview is a draft.** Lines are labelled "You" or "Other" by comparing mic and system-audio volume, not by voice. The diarized transcript from **Transcribe** is the real one. On CPU-only machines, use `base` or `small` so the preview keeps up.
 - **Live preview waits for other jobs.** Jobs run one at a time, so a job already running when a local session starts delays the preview until it finishes.
+- **Word alignment needs a GPU by default.** On CPU-only machines `forced_alignment = auto` leaves it off (it adds ~10–20 min per 2.5 h session); set it to `true` to use it anyway. It supports 11 languages (English, Chinese, Cantonese, French, German, Italian, Japanese, Korean, Portuguese, Russian, Spanish); others keep Whisper's word timing. It can't split words when two people talk at once.
 - **Cancelling is best-effort.** A cancelled transcription stops at its next progress update; the GPU may finish its current batch first.
 - **No web authentication.** `wisper server` binds `127.0.0.1` by default. With `--host 0.0.0.0`, anyone who can reach the port has full control, including recording — see the [trust model](web-ui.md#trust-model).

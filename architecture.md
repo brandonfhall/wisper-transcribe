@@ -11,6 +11,7 @@ Current-state technical reference: what each part does and why it is built that 
 | Transcription | `faster-whisper` (CTranslate2) | Lazy-cached Whisper model; `hotwords` and `initial_prompt` for vocabulary guidance; default model `large-v3-turbo` |
 | Transcription (macOS) | `mlx-whisper` (optional `[macos]` extra) | Apple Silicon GPU/ANE backend, dispatched on MPS when `use_mlx` allows |
 | Diarization | `pyannote-audio 4.x` | Speaker segmentation + voice embeddings |
+| Word alignment | `transformers` (Qwen3-ForcedAligner-0.6B) | Re-times Whisper's words against the audio before speaker assignment |
 | Audio loading (diarizer) | `scipy.io.wavfile` via `load_wav_as_tensor()` | Bypasses `torchcodec` (see [Known Constraints](#known-constraints)) |
 | Audio conversion | ffmpeg (streaming) | Any audio/video → 16 kHz mono WAV |
 | CLI | `click` | `setup`, `server`, `transcribe`, `enroll`, `speakers`, `campaigns`, `transcripts`, `fix`, `refine`, `summarize`, `record`, `config` |
@@ -31,6 +32,7 @@ src/wisper_transcribe/
 ├── pipeline.py          Orchestrator: process_file(), process_folder(), CLI enrollment prompts
 ├── transcriber.py       faster-whisper wrapper, lazy model cache, CUDA DLL path fix, MLX dispatch
 ├── diarizer.py          pyannote pipeline wrapper, lazy pipeline cache
+├── word_alignment.py    Forced word alignment: re-time Whisper words with Qwen3-ForcedAligner (see "Forced word alignment")
 ├── aligner.py           Merge transcription words with diarization turns (see "Alignment")
 ├── speaker_manager.py   Profile CRUD, embedding extraction, cosine matching, EMA updates, rename
 ├── speaker_registry.py  Campaign-wide relabel pass from per-transcript sidecar embeddings
@@ -105,7 +107,9 @@ Audio file
     │                                               │
     └──────────────────┬────────────────────────────┘
                        ▼
-               5. ALIGN      aligner.align() — words → speaker runs (see "Alignment")
+               5. ALIGN      word_alignment.align_words() — re-time words (when forced_alignment
+                             resolves on; see "Forced word alignment")
+                             aligner.align() — words → speaker runs (see "Alignment")
                        ▼
                6. IDENTIFY   speaker_manager.match_speakers() — labels → names
                        ▼
@@ -131,10 +135,24 @@ Audio file
 `aligner.align()` produces one `AlignedSegment` per same-speaker run of words.
 
 - **Word-level assignment.** Each word takes the diarization turn with the greatest time overlap, or the nearest turn by midpoint distance if none overlaps. A whisper segment spanning a speaker change therefore splits at the turn boundary.
-- **Micro-run smoothing** (`_smooth_word_speakers()`). A run of ≤2 words or <1.0 s sandwiched between two runs of the same *other* speaker is absorbed into them. Diarization boundaries jitter by a word or two, and without this a single sentence splits across speakers. Runs at a segment edge, or between two *different* speakers, are kept (they are real interjections). Repeats to a fixpoint.
+- **Micro-run smoothing** (`_smooth_word_speakers()`). A run of ≤2 words or <1.0 s sandwiched between two runs of the same *other* speaker is absorbed into them. Re-checked with forced-aligned words: it still mostly fixes mid-phrase flips caused by diarization-boundary jitter, so the thresholds stay (they're parameters so `scripts/alignment_eval.py` can compare variants). Diarization boundaries jitter by a word or two, and without this a single sentence splits across speakers. Runs at a segment edge, or between two *different* speakers, are kept (they are real interjections). Repeats to a fixpoint.
 - **Sweep, not brute force.** `_assign_word_speakers()` sorts turns once and sweeps words against an active window, avoiding an O(words × turns) scan (~60M overlap checks for a 3-hour session). The sweep requires time-ordered words; out-of-order input is routed to `_assign_word_speakers_bruteforce()`. Ties break on original turn order, so both paths return identical output.
 - **Fallback.** Segments with no word data use whole-segment max overlap (`_best_overlap_speaker()`).
 - Unmatched words or segments are labelled `UNKNOWN`.
+
+### Forced word alignment (`word_alignment.py`)
+
+Whisper's word timestamps are a by-product of decoding, and at speaker changes they drift into the neighbouring turn. `align_words()` re-times each already-transcribed word with Qwen3-ForcedAligner-0.6B (`config.FORCED_ALIGNMENT_MODEL`, Apache-2.0, ungated) through native `transformers`. Only `Word.start`/`Word.end` change; the text is Whisper's.
+
+- **One crop per segment, no padding.** Each segment is aligned against exactly `[seg.start, seg.end]`. The model places words anywhere in its crop, so padding lets a segment's words claim its neighbour's audio (measured: more order inversions, known words moved early).
+- **Exact word mapping.** Each Whisper word is split with the processor's own `split_words_for_alignment()` (letters, digits and `'` kept; CJK per character), so every alignment item belongs to a known word. A word with no alignable characters keeps its Whisper times, clamped between its re-timed neighbours. If the processor's split of the joined tokens doesn't reproduce the per-word split, that segment keeps Whisper times.
+- **Batching.** Segments are sorted by length and batched (8 on CUDA/MPS, 4 on CPU). An out-of-memory batch is split in half and retried.
+- **Never fails the job.** Any failure (model load, OOM at batch 1, a crop over the model's 180 s limit, an unsupported language, a non-16 kHz WAV) keeps Whisper times for the affected segments. `InterruptedError` is re-raised so web cancellation still works; the "Aligning" tqdm bar is what gives cancellation a check point.
+- **Ordering.** Items within a crop are monotonic (the processor repairs out-of-order bins); across segments, a segment's first word is clamped to start no earlier than the previous word's end.
+- **Dtype.** bf16 on CUDA, fp16 on MPS (matched fp32 exactly and ran faster than bf16), fp32 on CPU.
+- **When it runs.** `process_file()` calls it right before `align()`, in the main process on both the sequential and `parallel_stages` paths (it needs only the WAV and the segments). `config.forced_alignment_enabled()` resolves the `forced_alignment` setting: `auto` = CUDA or MPS, since CPU costs ~9–20 min per 2.5 h session. Never without diarization; timing only matters for speaker attribution.
+- **Measurement.** `scripts/alignment_eval.py` runs the production path on an excerpt and compares arms (Whisper vs aligned timing, smoothing variants, regular vs exclusive turns) by an automatic proxy, a re-transcription audit of >1 s shifts, and a blind labelling sheet scored per arm.
+- **Language.** The model never sees the language; it only picks the word splitter. `auto`/empty uses the default splitter; an explicit language outside the 11 supported ones skips alignment. Japanese and Korean need `nagisa`/`soynlp`; without them alignment is skipped for that job.
 
 ---
 
@@ -279,12 +297,12 @@ They coexist only because of the one-job-at-a-time invariant: layer 2 wraps one 
 - **VAD:** `vad_filter` goes straight to faster-whisper's bundled Silero VAD. Timestamps stay relative to the original audio.
 - **Vocabulary:** `hotwords` (boosted tokens) and `initial_prompt` (fake prior context). `--vocab-file` (one word per line, `#` comments) overrides config `hotwords`.
 - **Compute type:** `resolve_compute_type()` maps `auto` to `float16` on CUDA and `int8` on CPU; explicit values pass through.
-- **MLX (Apple Silicon):** `use_mlx` = `auto` (use MLX if `mlx-whisper` imports), `true` (require it), `false` (faster-whisper CPU). Models come from `mlx-community/whisper-*-mlx` via `_MLX_MODEL_MAP`. MLX has no hotwords param, so hotwords are prefixed into `initial_prompt`; `vad_filter` is ignored.
+- **MLX (Apple Silicon):** `use_mlx` = `auto` (use MLX if `mlx-whisper` imports), `true` (require it), `false` (faster-whisper CPU). Models come from `mlx-community/whisper-*-mlx` via `_MLX_MODEL_MAP`. MLX has no hotwords param, so hotwords are prefixed into `initial_prompt`; `vad_filter` is ignored. `verbose=False` is passed for its progress bar (see "Job progress display").
 
 ### Module-level model caches
-`transcriber._model`, `diarizer._pipeline`, and `speaker_manager._embedding_model` are module globals so folder runs and the web server don't reload multi-GB models per file. Tests reset them to `None`.
+`transcriber._model`, `diarizer._pipeline`, `speaker_manager._embedding_model`, and `word_alignment._fa_model`/`_fa_processor` are module globals so folder runs and the web server don't reload multi-GB models per file. Tests reset them to `None`.
 
-- **Cache keys:** each cache records its load parameters and reloads on mismatch (`_model_key = (model_size, device, compute_type)`, `_pipeline_device`, `_embedding_device`). Without this, the web server would keep the first job's model forever.
+- **Cache keys:** each cache records its load parameters and reloads on mismatch (`_model_key = (model_size, device, compute_type)`, `_pipeline_device`, `_embedding_device`, `_fa_device`). Without this, the web server would keep the first job's model forever.
 - **No poisoned cache:** loaders build into a local and publish to the global only after device checks and `.to(device)` succeed. The old reference is dropped before loading the replacement so two models are never resident at once.
 - These globals are not thread-safe, which is why the web queue runs one job at a time.
 
@@ -399,11 +417,11 @@ output/
 - Excerpt clip globs are `glob.escape()`-d so a stem like `mix*` can't match another transcript's clips.
 
 ### Config keys
-`model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`, `hotwords`, `use_mlx`, `parallel_stages`, `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`, `ollama_cloud_api_key`, `discord_bot_token`, `discord_default_guild`, `discord_default_channel`, `discord_presets`.
+`model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`, `hotwords`, `use_mlx`, `forced_alignment`, `parallel_stages`, `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`, `ollama_cloud_api_key`, `discord_bot_token`, `discord_default_guild`, `discord_default_channel`, `discord_presets`.
 
 `default_mic_profile_key` is also stored, written by the Record page (not in `DEFAULTS`, so not settable via `config set`).
 
-`wisper config set` rejects keys not in `DEFAULTS` and coerces values to the default's type: bool → int → float → comma-list → string (bool first, since `bool` subclasses `int`).
+`wisper config set` rejects keys not in `DEFAULTS` and coerces values to the default's type: bool → int → float → comma-list → string (bool first, since `bool` subclasses `int`). Keys in `config.CONFIG_CHOICES` must be one of their values; the web Config page applies the same rule to its `str` fields with options.
 
 `omegaconf` is declared explicitly in `pyproject.toml`: pyannote imports it but doesn't list it.
 
@@ -613,9 +631,11 @@ CodeQL scans every PR. The patterns (see also CLAUDE.md):
 
 ### Job progress display
 The job page shows step pills and one bar split into equal per-step slices:
-- Transcription: T → D → F (→ R → S with post-processing). Refine: R. Summarize: S. Enroll: E. Journal: J.
+- Transcription: T → D (→ A) → F (→ R → S with post-processing). Refine: R. Summarize: S. Enroll: E. Journal: J.
+- **Align step:** shown when `Job.will_align` is true, which mirrors `process_file()` (diarization on, a HuggingFace token, `forced_alignment_enabled()` for the job's device). `JobQueue.submit()` freezes the `forced_alignment` setting into the job's kwargs so the pill and the run agree if the config changes while queued. The "Aligning" bar and the "Aligned words" log line drive it.
 - The active step is detected from log keywords; tqdm percentages fill its slice. Parallel mode fills T and D from their channels.
-- With no tqdm update for ≥5 s (LLM steps, enrollment), the bar creeps ~1 %/5 s up to 90 % of the slice.
+- With no tqdm update for ≥5 s (LLM steps, enrollment), the bar creeps ~1 %/5 s up to 90 % of the slice. The ETA and rate clear when a step starts, so a finished step's `0:00` doesn't linger.
+- MLX transcription reports real progress: `_transcribe_mlx()` passes `verbose=False`, which enables mlx-whisper's frame-based tqdm bar (the default `None` disables it). It advances once per 30 s decoding window.
 - The `done` event carries `summary_path` and `job_type` so the page shows the right follow-up links.
 
 ### Transcripts and dashboard
@@ -639,6 +659,7 @@ The job page shows step pills and one bar split into equal per-step slices:
 ### Docker and launchers
 - `docker-compose.yml`: `wisper`/`wisper-cpu` (CLI) and `wisper-web`/`wisper-cpu-web` (port 8080), sharing `x-volumes`/`x-env` anchors; secrets come from `.env`. The `Makefile` wraps common `docker compose` commands.
 - `start.command` (macOS), `start.bat` (Windows), `start.sh` (Linux) run setup on first launch, then start the server and open the browser. The shell launchers are committed executable.
+- **Dependency refresh:** setup stamps `.venv/.wisper-deps` after `pip install -e .`. The launchers reinstall whenever `pyproject.toml` is newer than the stamp (or it's missing), so updating an existing install picks up new dependencies. A failed reinstall leaves the stamp stale and the server starts anyway. `word_alignment` also names the fix when `transformers` is missing, since that's how a stale install shows up.
 - `setup.sh`/`setup.ps1` probe Ollama (`:11434`) and LM Studio (`:1234`) and offer a model picker, and show progress for long installs.
 - `setup.ps1` installs CUDA `torch`/`torchaudio` **before** `pip install -e .`. Otherwise pip resolves the CPU `torch` first and dependent packages bind to the wrong build (`torch has no attribute _utils`).
 
@@ -648,7 +669,8 @@ The job page shows step pills and one bar split into equal per-step slices:
 
 - Tests live in `tests/`, one `test_<module>.py` per module (routes are grouped in `test_web_routes.py`, `test_record_routes.py`, and `test_record_live_routes.py`).
 - **No GPU, network, or real audio.** `WhisperModel`, pyannote `Pipeline`, and embedding extraction are mocked; `load_wav_as_tensor` returns a fake tensor dict.
-- `tests/conftest.py` autouse-patches `pipeline.load_config` with a safe baseline so a developer's real config can't leak in. Enrollment tests patch `speaker_manager.load_profiles`.
+- `tests/conftest.py` autouse-patches `pipeline.load_config` with a safe baseline (including `forced_alignment = false`, so no test loads the real aligner on a GPU machine) so a developer's real config can't leak in, and points `WISPER_DATA_DIR` at a fresh temp dir so no test reads or writes the developer's real campaigns, profiles, or config. Enrollment tests patch `speaker_manager.load_profiles`.
+- The aligner's tests (`test_word_alignment.py`) use a fake processor/model but the real `split_words_for_alignment()` from transformers, so word-mapping rules are tested against the actual splitter. `scripts/alignment_eval.py`'s pure logic is tested in `test_alignment_eval.py`.
 - Real LLM HTTP calls are blocked for the whole suite; clients are tested with mocked httpx and fake SDK modules injected via `sys.modules`.
 - Web tests use `TestClient`. Live-recording tests use a `JobQueue` that is never started, and inject jobs directly, so no real worker loads a model.
 - Infinite SSE endpoints are tested by pulling one chunk from the `StreamingResponse` body iterator, not over HTTP.
@@ -669,7 +691,8 @@ The job page shows step pills and one bar split into equal per-step slices:
 | Constraint | Detail |
 |-----------|--------|
 | torchcodec on Windows | Needs FFmpeg's full-shared build; bypassed by scipy pre-loading |
-| MPS on Apple Silicon | CTranslate2 has no MPS backend. With `[macos]`, transcription uses MLX; otherwise CPU. Diarization and embeddings use MPS |
+| MPS on Apple Silicon | CTranslate2 has no MPS backend. With `[macos]`, transcription uses MLX; otherwise CPU. Diarization, embeddings, and word alignment use MPS |
+| Forced alignment scope | 11 languages (others keep Whisper times); `auto` skips CPU-only machines (~9–20 min per 2.5 h session); no confidence score, so a misplaced word can't be filtered; one timeline can't represent overlapped speech |
 | Thread safety | Model globals aren't thread-safe: the web queue runs one job at a time; folder mode uses processes |
 | pyannote license | HF token + one-time model license acceptance |
 | No web auth | Recording and all other endpoints are unauthenticated; the server assumes localhost or a trusted network |
@@ -688,6 +711,7 @@ Downloaded on first use to `~/.cache/huggingface/hub/`; later runs are offline.
 | Model | Purpose | Size |
 |-------|---------|------|
 | `openai/whisper-*` (via faster-whisper) | Transcription | 75 MB – 1.5 GB |
+| `Qwen/Qwen3-ForcedAligner-0.6B-hf` | Forced word alignment (Apache-2.0, ungated) | ~1.7 GB |
 | `pyannote/speaker-diarization-community-1` | Diarization pipeline (segmentation + WeSpeaker embedding + VBx clustering bundled); its `embedding/` subfolder also produces profile embeddings | ~32 MB |
 
 License acceptance (free, one-time): [speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1). The model id lives in `config.DIARIZATION_MODEL`.

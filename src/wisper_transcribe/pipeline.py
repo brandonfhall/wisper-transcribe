@@ -9,7 +9,14 @@ from typing import Optional
 from tqdm import tqdm
 
 from .audio_utils import SUPPORTED_EXTENSIONS, convert_to_wav, get_duration, validate_audio
-from .config import DEFAULT_SIMILARITY_THRESHOLD, check_ffmpeg, get_device, get_hf_token, load_config
+from .config import (
+    DEFAULT_SIMILARITY_THRESHOLD,
+    check_ffmpeg,
+    forced_alignment_enabled,
+    get_device,
+    get_hf_token,
+    load_config,
+)
 from .formatter import to_markdown
 from .models import TranscriptionSegment
 from .time_utils import format_duration
@@ -394,6 +401,7 @@ def process_file(
     campaign: Optional[str] = None,
     job_id: Optional[str] = None,
     title: Optional[str] = None,
+    forced_alignment: Optional[str] = None,
     _result_store: Optional[dict] = None,
 ) -> Path:
     """Run the full pipeline on one audio file and return the output .md path.
@@ -414,6 +422,10 @@ def process_file(
 
     With diarization on and no speaker-count arguments, config
     ``min_speakers``/``max_speakers`` constrain the diarizer.
+
+    ``forced_alignment`` is ``"auto"``/``"true"``/``"false"`` (``None`` = config).
+    It only applies when diarization runs, since word timing only matters for
+    speaker attribution.
     """
     from .config import resolve_compute_type
 
@@ -447,6 +459,8 @@ def process_file(
         max_speakers = config.get("max_speakers")
 
     use_mlx: str = config.get("use_mlx", "auto")
+    if forced_alignment is None:
+        forced_alignment = config.get("forced_alignment", "auto")
     parallel_stages: bool = config.get("parallel_stages", False)
 
     check_ffmpeg()
@@ -546,6 +560,10 @@ def process_file(
             if diarization is not None:
                 if _result_store is not None:
                     _result_store["diarization_segments"] = list(diarization)
+                if forced_alignment_enabled(forced_alignment, device):
+                    # Main process in both paths: needs only the WAV and segments.
+                    from .word_alignment import align_words
+                    segments, _ = align_words(wav_path, segments, device, language)
                 aligned_segments = align(segments, diarization)
                 if _result_store is not None:
                     _result_store["aligned_segments"] = list(aligned_segments)

@@ -1834,3 +1834,19 @@ def test_api_recording_transcribe_unknown_id_returns_404(client):
     resp = c.post(f"/api/recordings/{uuid.uuid4()}/transcribe")
     assert resp.status_code == 404
     assert resp.json() == {"error": "not_found"}
+
+
+def test_recording_purge_removes_campaign_entry(client):
+    """Purging a transcribed recording also unlinks its transcript from the campaign."""
+    from wisper_transcribe.campaign_manager import (
+        create_campaign, get_transcripts_for_campaign, move_transcript_to_campaign,
+    )
+    c, tmp_path = client
+    rec, paths = _make_transcribed_recording_with_files(tmp_path)
+    # campaign_manager resolves the data dir itself (WISPER_DATA_DIR, from conftest).
+    camp = create_campaign("Purge Test")
+    move_transcript_to_campaign(paths["md_path"].stem, camp.slug)
+
+    c.post(f"/recordings/{rec.id}/delete", follow_redirects=False)
+
+    assert get_transcripts_for_campaign(camp.slug) == []

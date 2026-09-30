@@ -189,6 +189,24 @@ def _delete_diar_sidecar_and_audio(name: str) -> None:
         pass
 
 
+def _delete_transcript_companions(name: str) -> None:
+    """Delete everything that belongs to a transcript except its ``.md``.
+
+    The summary sidecar, the enrollment sidecar and its audio, excerpt clips,
+    and the transcript's campaign entry (left behind, the campaign page links
+    to a 404). Every transcript delete path calls this.
+    """
+    summary_path = _get_safe_content_path(name, ".summary.md")
+    if summary_path and summary_path.exists():
+        try:
+            summary_path.unlink()
+        except OSError:
+            pass
+    _delete_diar_sidecar_and_audio(name)
+    _delete_excerpt_clips(name)
+    remove_transcript_from_campaign(name)
+
+
 def _delete_excerpt_clips(name: str) -> None:
     """Delete this transcript's ``<stem>_excerpt_*.mp3``/``.txt`` clips.
 
@@ -311,14 +329,11 @@ async def bulk_delete_transcripts(request: Request) -> HTMLResponse:
     stems = form.getlist("stems")
     for stem in stems:
         md_path = _get_safe_content_path(stem, ".md")
-        if md_path and md_path.exists():
+        if not md_path:
+            continue
+        if md_path.exists():
             md_path.unlink()
-        summary = _get_safe_content_path(stem, ".summary.md")
-        if summary and summary.exists():
-            summary.unlink()
-        _delete_diar_sidecar_and_audio(stem)
-        # Also remove <stem>_excerpt_*.mp3/.txt clips.
-        _delete_excerpt_clips(stem)
+        _delete_transcript_companions(stem)
     return HTMLResponse(content="", status_code=303, headers={"Location": "/transcripts"})
 
 
@@ -425,13 +440,7 @@ async def delete_transcript(request: Request, name: str) -> HTMLResponse:
         return invalid_input_response("Invalid name")
     if md_path.exists():
         md_path.unlink()
-    # Also remove summary sidecar if present
-    summary_path = _get_safe_content_path(name, ".summary.md")
-    if summary_path and summary_path.exists():
-        summary_path.unlink()
-    # Remove the enrollment sidecar, its audio copy, and excerpt clips.
-    _delete_diar_sidecar_and_audio(name)
-    _delete_excerpt_clips(name)
+    _delete_transcript_companions(name)
     return HTMLResponse(
         content="",
         status_code=303,

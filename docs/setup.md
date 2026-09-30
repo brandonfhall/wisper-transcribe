@@ -16,6 +16,8 @@ Pick the path that fits you. All three end up at the same web UI on `http://loca
 
 The first run takes 5–10 minutes (creates a virtualenv and installs ~2 GB of ML models). Subsequent launches are instant.
 
+**Updating:** after `git pull` (or unpacking a new release over the old folder), just launch as usual. When `pyproject.toml` has changed since the last launch, the launcher reinstalls dependencies once before starting. If that fails (e.g. offline), it starts anyway and retries next launch; running `setup.sh` / `setup.ps1` also works. CLI-only installs: `pip install -e .` after pulling.
+
 After the server starts, your browser opens automatically to `http://localhost:8080`. Press `Ctrl+C` in the terminal to stop.
 
 ### Option B — Docker *(server / shared use)*
@@ -102,7 +104,7 @@ Walks you through provider (Ollama / Ollama Cloud / LM Studio / Anthropic / Open
 - Python 3.13+ (for Option A/C)
 - [ffmpeg](https://ffmpeg.org/download.html) on your PATH
 - A free [HuggingFace token](https://huggingface.co/settings/tokens)
-- GPU recommended but not required (CPU works, just slower)
+- GPU recommended but not required (CPU works, just slower). On a GPU (CUDA or Apple Silicon), forced word alignment is on by default and downloads a ~1.7 GB model on first use.
 - **Discord recording bot:** Java 25+ ([Adoptium](https://adoptium.net/) or `apt-get install openjdk-25-jre-headless`)
 
 **Windows CUDA:**

@@ -50,7 +50,9 @@
 
     {# Build step list #}
     {% if job.job_type == "transcription" %}
-      {% set steps = [("transcribe","T","Transcribe"), ("diarize","D","Diarize"), ("format","F","Format")] %}
+      {% set steps = [("transcribe","T","Transcribe"), ("diarize","D","Diarize")] %}
+      {% if job.will_align %}{% set steps = steps + [("align","A","Align")] %}{% endif %}
+      {% set steps = steps + [("format","F","Format")] %}
       {% if job.post_refine %}{% set steps = steps + [("refine","R","Refine")] %}{% endif %}
       {% if job.post_summarize %}{% set steps = steps + [("summarize","S","Summarize")] %}{% endif %}
       {% if job.needs_extraction %}{% set steps = [("extract","E","Extract")] + steps %}{% endif %}
@@ -167,7 +169,7 @@
   const STEPS = [
     {% if job.job_type == "transcription" %}
       {% if job.needs_extraction %}'extract',{% endif %}
-      'transcribe', 'diarize', 'format',
+      'transcribe', 'diarize',{% if job.will_align %} 'align',{% endif %} 'format',
       {% if job.post_refine %}'refine',{% endif %}
       {% if job.post_summarize %}'summarize',{% endif %}
     {% elif job.job_type == "refine" %}
@@ -217,11 +219,14 @@
     setStepState(STEPS[idx], 'active');
     if (stepLabel) stepLabel.textContent = {
       extract: 'Extracting audio…', transcribe: 'Transcribing…',
-      diarize: 'Diarizing…', format: 'Formatting…',
+      diarize: 'Diarizing…', align: 'Aligning words…', format: 'Formatting…',
       refine: 'Refining…', summarize: 'Summarizing…',
       enroll: 'Enrolling voices…',
     }[STEPS[idx]] || STEPS[idx] + '…';
     setBar(idx * sliceWidth);
+    // A new step's bar hasn't reported yet; don't show the last one's ETA.
+    if (progressEta)  progressEta.textContent  = '';
+    if (progressRate) progressRate.textContent = '';
   }
 
   function setBar(pct) {
@@ -246,6 +251,7 @@
     const lo = msg.toLowerCase();
     if (lo.includes('extracting audio') || lo.includes('audio extraction')) { const i = STEPS.indexOf('extract'); if (i>=0) activateStep(i); }
     else if (lo.includes('transcrib') || lo.includes('whisper') || lo.includes('loading model')) activateStep(STEPS.indexOf('transcribe'));
+    else if (lo.includes('align') && STEPS.includes('align')) activateStep(STEPS.indexOf('align'));
     else if (lo.includes('diariz') || lo.includes('pyannote') || lo.includes('align')) activateStep(STEPS.indexOf('diarize'));
     else if (lo.includes('wrote') || lo.includes('format') || lo.includes('speaker match')) activateStep(STEPS.indexOf('format'));
     else if (lo.includes('refin') || lo.includes('fix_vocabulary')) { const i = STEPS.indexOf('refine'); if (i>=0) activateStep(i); }
@@ -275,6 +281,7 @@
         if (lo.includes('extracting audio')) { idx = STEPS.indexOf('extract'); if (idx>=0) activateStep(idx); }
         else if (lo.includes('transcrib')) { idx = STEPS.indexOf('transcribe'); if (idx>=0) activateStep(idx); }
         else if (lo.includes('segmentation') || lo.includes('embedding') || lo.includes('clustering')) { idx = STEPS.indexOf('diarize'); if (idx>=0) activateStep(idx); }
+        else if (lo.includes('aligning')) { idx = STEPS.indexOf('align'); if (idx>=0) activateStep(idx); }
         if (idx >= 0) setBar(stepPctToBar(idx, pct));
       }
       if (progressEta  && eta)  progressEta.textContent  = 'ETA ' + eta;

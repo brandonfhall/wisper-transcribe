@@ -25,7 +25,18 @@ _BASE_CONFIG = {
     "use_mlx": "false",
     "parallel_stages": False,
     "similarity_threshold": 0.55,
+    # Off so no test loads the real aligner on a GPU machine; forced-alignment
+    # tests set it explicitly.
+    "forced_alignment": "false",
 }
+
+
+@pytest.fixture(autouse=True)
+def _isolated_data_dir(tmp_path_factory, monkeypatch):
+    """Point WISPER_DATA_DIR at a fresh temp dir so no test reads or writes
+    the developer's real data (campaigns.json, profiles, config). Tests that
+    need a specific dir still set their own (inner setenv/patch wins)."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path_factory.mktemp("wisper_data")))
 
 
 @pytest.fixture(autouse=True)

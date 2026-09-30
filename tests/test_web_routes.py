@@ -3105,3 +3105,94 @@ def test_build_tailwind_missing_input_css_does_not_raise(tmp_path, monkeypatch):
     # Should not raise, and should fall through to attempt (and gracefully
     # fail) the subprocess rebuild rather than crashing on the stat() call.
     app_module._build_tailwind()
+
+
+def _post_config(client, data, stored=None):
+    captured = {}
+    with patch("wisper_transcribe.web.routes.config.load_config", return_value=dict(stored or {})), \
+         patch("wisper_transcribe.web.routes.config.save_config", side_effect=captured.update):
+        client.post("/config", data=data, follow_redirects=False)
+    return captured
+
+
+def test_config_post_forced_alignment_saved(client):
+    assert _post_config(client, {"forced_alignment": "false"})["forced_alignment"] == "false"
+
+
+def test_config_post_rejects_value_outside_choices(client):
+    saved = _post_config(client, {"forced_alignment": "sometimes", "device": "tpu"},
+                         stored={"forced_alignment": "auto", "device": "cpu"})
+    assert saved["forced_alignment"] == "auto"
+    assert saved["device"] == "cpu"
+
+
+def test_config_page_shows_forced_alignment(client):
+    with patch("wisper_transcribe.web.routes.config.load_config",
+               return_value={"forced_alignment": "true"}), \
+         patch("wisper_transcribe.web.routes.config.get_config_path",
+               return_value=Path("/tmp/config.toml")):
+        resp = client.get("/config")
+    assert b'name="forced_alignment"' in resp.content
+    assert b'<option value="true" selected>' in resp.content
+
+
+# ---------------------------------------------------------------------------
+# Deleting a transcript unlinks it from its campaign
+# ---------------------------------------------------------------------------
+
+
+def _campaign_with(stems):
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    c = create_campaign("Test Campaign")
+    for s in stems:
+        move_transcript_to_campaign(s, c.slug)
+    return c.slug
+
+
+def test_delete_transcript_removes_campaign_entry(client, tmp_path):
+    from wisper_transcribe.campaign_manager import get_transcripts_for_campaign
+    slug = _campaign_with(["session01", "session02"])
+    (tmp_path / "session01.md").write_text("# s1")
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
+        client.post("/transcripts/session01/delete", follow_redirects=False)
+    assert get_transcripts_for_campaign(slug) == ["session02"]
+
+
+def test_bulk_delete_removes_campaign_entries(client, tmp_path):
+    from wisper_transcribe.campaign_manager import get_transcripts_for_campaign
+    slug = _campaign_with(["a", "b", "c"])
+    for s in "abc":
+        (tmp_path / f"{s}.md").write_text("#")
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
+        client.post("/transcripts/bulk-delete", data={"stems": ["a", "c"]}, follow_redirects=False)
+    assert get_transcripts_for_campaign(slug) == ["b"]
+
+
+def test_campaign_page_marks_missing_transcripts(client, tmp_path):
+    slug = _campaign_with(["present", "gone"])
+    (tmp_path / "present.md").write_text("#")
+    with patch("wisper_transcribe.path_utils.get_output_dir", return_value=tmp_path):
+        resp = client.get(f"/campaigns/{slug}")
+    html = resp.text
+    assert 'href="/transcripts/present"' in html
+    assert 'href="/transcripts/gone"' not in html  # no dead link
+    assert "MISSING" in html
+    # Still listed (not pruned), so the remove button can clear it.
+    assert 'name="stem" value="gone"' in html
+
+
+@pytest.mark.parametrize("will_align", [True, False])
+def test_job_detail_align_step_only_when_aligning(client, will_align):
+    # Inject a pending job directly: a submitted one would be picked up by the
+    # worker, and without ffmpeg (CI) it fails before the page renders.
+    import uuid
+    from datetime import datetime
+    from wisper_transcribe.web.jobs import JOB_TRANSCRIPTION, Job
+    job = Job(id=str(uuid.uuid4()), status="pending", created_at=datetime.now(),
+              input_path="/tmp/align_step.mp3", kwargs={}, name="align_step",
+              job_type=JOB_TRANSCRIPTION)
+    client.app.state.job_queue._jobs[job.id] = job
+    with patch("wisper_transcribe.web.jobs.Job.will_align", new=will_align):
+        html = client.get(f"/transcribe/jobs/{job.id}").text
+    assert ('id="step_align"' in html) is will_align
+    assert ("'align'," in html) is will_align

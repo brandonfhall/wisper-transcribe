@@ -502,10 +502,7 @@ def _purge_recording_files(recording, data_dir: Path) -> None:
     if recording.status in ACTIVE_STATUSES:
         return
 
-    from wisper_transcribe.web.routes.transcripts import (
-        _delete_diar_sidecar_and_audio,
-        _delete_excerpt_clips,
-    )
+    from wisper_transcribe.web.routes.transcripts import _delete_transcript_companions
 
     rec_dir = data_dir / "recordings" / recording.id
     shutil.rmtree(rec_dir, ignore_errors=True)
@@ -515,13 +512,9 @@ def _purge_recording_files(recording, data_dir: Path) -> None:
         try:
             if recording.transcript_path.exists():
                 recording.transcript_path.unlink()
-            summary_path = recording.transcript_path.with_name(f"{stem}.summary.md")
-            if summary_path.exists():
-                summary_path.unlink()
         except OSError:
             pass
-        _delete_diar_sidecar_and_audio(stem)
-        _delete_excerpt_clips(stem)
+        _delete_transcript_companions(stem)
 
 
 @router.post("/api/recordings/{recording_id}/delete")

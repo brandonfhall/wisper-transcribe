@@ -154,10 +154,17 @@
           {% for stem in active_campaign.transcripts %}
           <div style="display:grid;grid-template-columns:60px 1fr 90px 22px 22px 32px;gap:10px;padding:14px 0;border-bottom:1px solid var(--color-rule);align-items:center">
             <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint);letter-spacing:0.06em">{{ "%02d"|format(loop.index) }}</div>
+            {% if stem in missing_transcripts %}
+            <span title="The transcript file no longer exists. Remove it from the campaign with ✕." style="font-family:var(--font-serif);font-size:16px;color:var(--color-paper-faint)">{{ stem | replace('-', ' ') | title }}</span>
+            <div style="text-align:right">
+              <span class="pill pill-rose">MISSING</span>
+            </div>
+            {% else %}
             <a href="/transcripts/{{ stem | urlencode }}" style="font-family:var(--font-serif);font-size:16px;color:var(--color-paper);text-decoration:none">{{ stem | replace('-', ' ') | title }}</a>
             <div style="text-align:right">
               <span class="pill pill-green">TRANSCRIBED</span>
             </div>
+            {% endif %}
             {% if not loop.first %}
             <form method="post" action="/campaigns/{{ slug }}/transcripts/reorder" style="display:flex">
               <input type="hidden" name="stem" value="{{ stem }}"/>

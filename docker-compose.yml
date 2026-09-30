@@ -6,7 +6,7 @@ name: wisper-transcribe
 #    make start-gpu        →  GPU web UI (requires NVIDIA Container Toolkit)
 #
 # Local bind-mount directories (created automatically by Docker on first run):
-#   ./cache/   — HuggingFace model downloads (~2 GB, persisted across restarts)
+#   ./cache/   — HuggingFace model downloads (~2 GB; ~3.7 GB on GPU with word alignment; persisted across restarts)
 #   ./data/    — wisper config.toml + speaker profiles (persisted)
 #   ./input/   — place your audio files here before running
 #   ./output/  — transcribed .md files appear here

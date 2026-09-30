@@ -22,6 +22,18 @@ if [ ! -d ".venv" ]; then
     bash setup.sh
 fi
 
+# ── Dependency refresh after an update ────────────────────────────────────────
+# setup.sh stamps .venv/.wisper-deps; a newer pyproject.toml (git pull, new
+# release) means dependencies may have changed.
+if [ ! -f ".venv/.wisper-deps" ] || [ "pyproject.toml" -nt ".venv/.wisper-deps" ]; then
+    echo "Dependencies changed since the last launch — updating (one-time)..."
+    if .venv/bin/pip install -e . -q; then
+        touch .venv/.wisper-deps
+    else
+        echo -e "${YELLOW}WARNING: dependency update failed; starting anyway. Re-run setup.sh to retry.${NC}"
+    fi
+fi
+
 # ── Check for Java 25 (needed by Discord recording bot) ───────────────────────
 if ! command -v java &>/dev/null; then
     echo ""

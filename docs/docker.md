@@ -24,7 +24,7 @@ make start
 make start-gpu
 ```
 
-On first run the server downloads the Whisper and pyannote models (~2 GB) into `./cache/` — this only happens once.
+On first run the server downloads the Whisper and pyannote models (~2 GB) into `./cache/` — this only happens once. The GPU image also downloads the word alignment model (~1.7 GB) on its first diarized job.
 
 > **Note on binding:** inside the container the web services run
 > `wisper server --host 0.0.0.0 --port 8080` (set explicitly in

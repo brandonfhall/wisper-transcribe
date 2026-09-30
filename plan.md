@@ -24,48 +24,49 @@ A local-recording `JOB_TRANSCRIPTION` job reported COMPLETED and logged "Wrote `
 
 - **Live recording + campaign journal:** `LIVE_AUDIO_TEST_PLAN.md` — real-device capture, live transcript, journal browser flows, bulk delete, busy-queue notice.
 - **Live Discord acceptance test.** The recording pipeline (WAV segments, `__mixed__` combined track, `combined_path` hand-off) is covered by synthesized-PCM tests, but the JDA → socket → Python path needs one real session: record a few minutes with 2+ speakers, play the per-user WAVs, and run Transcribe.
+- **Windows launcher dependency refresh.** `start.bat` reinstalls dependencies when `pyproject.toml` is newer than `.venv\.wisper-deps` (untested on Windows): update an existing install with `git pull`, double-click `start.bat`, confirm the one-time "Dependencies changed" reinstall runs, and that a second launch skips it.
 - **macOS loopback (PR #59).** Record page on a Mac with BlackHole installed: BlackHole appears under System Audio and captures audio.
 
 ---
 
-## Speaker consistency (in progress)
+## Forced word alignment — remaining
 
-The failure is speaker attribution, not transcription. Identity drifts within a file (one person split across clusters, or several merged into one) and across sessions (profiles miss). Research and a measured spike on two real Hanataz sessions (2026-09-12, 2026-09-19) on 2026-09-29 point at diarization quality and matching calibration, not the architecture: diarize → embed each label → match to profiles is correct.
+Shipped on `feat/forced-alignment` (design in `architecture.md`, "Forced word alignment"): Qwen3-ForcedAligner-0.6B re-times Whisper's words before speaker assignment; `forced_alignment = auto` (on for CUDA/MPS); Align step on the job page. Phases 3–4 (smoothing re-tune, exclusive diarization) were measured and left unchanged. What's left is confirming it with labels.
 
-### Already in place (don't redo)
+### Gate: needs labels (user action)
 
-- `min_speakers=2`/`max_speakers=8` config defaults constrain the diarizer when no count is given.
-- `allow_many_to_one` is on whenever `num_speakers` is unpinned.
-- pyannote issue #1525 (`num_clusters` bug) was fixed in 2023; `num_speakers` is safe to use.
+- **Podcast excerpts:** `alignment-eval/{e1-64m,e2-03m,e3-09m,e2-128m}/` on the dev Mac. Per excerpt: learn the voices from `speakers.txt`, listen to `clip.wav`, fill `correct_speaker` in `sheet.csv` (the 76 `discriminating` rows first), then `python scripts/alignment_eval.py score alignment-eval/*/`.
+- **Full-episode web UI comparison (E1, 2 h):** `alignment-eval/e1-webui-diff.csv`, 121 places where aligned and unaligned transcripts disagree (155 of 20,675 words). User spot-check so far: aligned right 4/4.
+- **Ship rule:** keep `aligned` if it beats `whisper` and no excerpt gets worse. If `aligned-guard-1s`, `aligned-smooth-1w`/`aligned-nosmooth`, or `aligned-exclusive` wins, change the default to match (all are arms in the script).
+- **Best evidence would be one Hanataz excerpt,** the live-table audio the feature is for.
 
-### Spike findings
+### Results so far
 
-- **Diarization now runs on community-1** (shipped; rationale in `architecture.md`). On 09-12 it gave one cluster per person where 3.1 gave a 59-min catch-all plus four Nick fragments.
-- **Threshold recalibrated to 0.55** (shipped). On the new production path (community-1 clusters + 30-segment WeSpeaker embeddings), every 09-12 cluster's best 09-19 match scored 0.65–0.95; the highest wrong-person score was 0.50.
-- **wespeaker separates better.** Same-person vs other-person gap 0.34 (wespeaker-voxceleb-resnet34-LM) vs 0.25 (`pyannote/embedding`) on single segments.
-- **More segments help.** Averaging 30 L2-normalized segments instead of 5 raw ones raised same-person similarity 0.05–0.10 in both models.
-- **Profiles now use the diarizer's WeSpeaker model** (shipped; see architecture.md "Embedding spaces"). Extraction re-embeds solo segments rather than using `DiarizeOutput.speaker_embeddings`, so enrollment and matching share one estimator and the parallel-subprocess path is untouched.
-- **Campaign relabel + rename propagation** (shipped; see architecture.md "Campaign relabel").
-- **The local profile store is contaminated** (user data, not code). `mike.npy` = `brandon.npy` = `speaker_00.npy` byte-for-byte; `brad.npy` = `speaker_04.npy`; six more duplicate pairs from audiobook enrollment. Timestamps (2026-07-12) predate the enrollment fixes in #52; current enrollment paths look clean. `ben.npy` was enrolled from the 09-12 catch-all cluster and is mostly Nick.
+- **Hanataz spike (2026-09-29, RTX 3090, 10 min):** proxy 90.0% → 97.0%; words moved >1 s: aligned placement heard 28 vs Whisper's 1.
+- **Podcast, M5 (2026-09-30, four 3-min crosstalk excerpts):** proxy 94.6–98.0% → 97.5–98.3% (flat in one excerpt). But words moved >1 s favoured Whisper 8 vs 1 (12 words, 3 changed speaker): edited audio has little drift, so large moves there are mostly the aligner reaching into a neighbour's speech. Hence the `aligned-guard-1s` arm.
+- **Full E1 via web UI:** identical text/diarization/speaker map between runs; one-word "islands" inside another speaker's run: unaligned 10, aligned 3.
+- **Speed (M5):** ~11 s per 10 min on MPS (fp16), 80 s for a 2 h episode; CPU ~22 s per 10 min.
 
-Caveat: one session pair, wizard names as rough ground truth, no DER. Strong signal, not proof — confirm with the measurement set below before tuning numbers.
+### Fallback engine
 
-### Phases
+`torchaudio.pipelines.MMS_FA` + star token was spiked first: no new dependency, but CC-BY-NC weights, weaker on crosstalk drift, and torchaudio is in maintenance mode. Use it only if the transformers dependency becomes a problem; recipe in git history (`6286e21`).
 
-1. **Profile cleanup (user action, no code).** The model upgrade already requires re-enrolling every profile. While doing it, delete the `speaker_*` / `SPEAKER_NN` junk profiles and duplicates, and enroll Mike and Ben from sessions where they're clearly separated. Consider a `wisper speakers doctor` check that flags identical or near-identical (>0.95) profile embeddings.
-2. **Forced alignment (later).** Whisper word timestamps drift ~120–150 ms, which misattributes boundary words; a wav2vec2 alignment pass (WhisperX-style) brings that to ~35–40 ms. Keep faster-whisper as the decoder.
+### Risks
 
-### Measurement
+- **Whisper text errors** still get placed somewhere, and there's no confidence score to filter bad placements.
+- **Overlapped speech:** one word timeline can't represent two people at once.
+- **VRAM:** the model (~1.2 GB weights; 3–4 GB in use at batch 8) stays resident beside Whisper and pyannote; tight on 8 GB cards (batch halving on OOM helps).
+- **transformers churn:** `Qwen3ASR*` is new in 5.x; names may shift. The lower bound is pinned and the calls are covered by tests.
 
-- 8–12 hand-corrected excerpts of 2–3 min, stratified by speaker count (2–3 / 4–5 / 6–8), in-room vs remote, low vs high overlap. Export RTTM.
-- Report DER split into missed / false alarm / confusion (`pyannote.metrics`), plus JER so quiet players aren't hidden by the loudest one. cpWER via `meeteval` once alignment work starts.
-- Compare configs with a paired bootstrap over recordings (B ≥ 1000); ship a change only when the 95% CI on the difference excludes 0.
+---
 
-### Ruled out for now
+## Speaker consistency — remaining
 
-- **Sortformer:** 4-speaker cap.
-- **DiariZen:** best open accuracy but CC-BY-NC.
-- **NVIDIA Nemotron diarization:** claims 8 speakers, no independent validation yet. Revisit only if community-1 plateaus on the measurement set.
+Shipped in #63; the design is in `architecture.md`. What's left:
+
+- **Profile cleanup (user action).** Re-enroll every profile after the embedding-model change; delete the `speaker_*` / `SPEAKER_NN` junk and duplicate profiles; enroll Mike and Ben from sessions where they're clearly separated. Consider a `wisper speakers doctor` check that flags identical or near-identical (>0.95) profile embeddings.
+- **Diarization measurement set.** 8–12 hand-corrected excerpts of 2–3 min, stratified by speaker count (2–3 / 4–5 / 6–8), in-room vs remote, low vs high overlap. Report DER split into missed / false alarm / confusion (`pyannote.metrics`) plus JER, and compare configs with a paired bootstrap over recordings (B ≥ 1000). The 0.55 threshold and the community-1 choice rest on one session pair until this exists.
+- **Ruled out for now:** Sortformer (4-speaker cap), DiariZen (CC-BY-NC), NVIDIA Nemotron diarization (no independent validation). Revisit only if community-1 plateaus on the measurement set.
 
 ---
 
@@ -444,6 +445,7 @@ Today files are the database: `speakers.json` + `.npy` embeddings, `campaigns.js
 
 **Why it might be worth it later:**
 - Transactional writes across related data (`campaigns.json` and `speakers.json` can drift on a mid-write crash).
+- Referential integrity: transcripts and campaigns are linked only by stem, so every delete path must remember to unlink. Three didn't (fixed 2026-09-30 with `_delete_transcript_companions()`; the campaign page now marks missing entries). A foreign key would make this class of bug impossible.
 - Persistent job history across restarts.
 - Relational queries ("all transcripts for a speaker", "jobs by campaign").
 - One source of truth instead of a growing set of sidecars.

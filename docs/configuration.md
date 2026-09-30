@@ -35,6 +35,7 @@ Stored in `config.toml`. View with `wisper config show`, change with `wisper con
 | `hf_token` | — | HuggingFace token (env `HF_TOKEN` takes precedence) |
 | `hotwords` | `[]` | Custom vocabulary (names, places) fed to Whisper as a prompt |
 | `use_mlx` | `auto` | Apple Silicon: `auto` uses MLX Whisper when installed, `true` requires it, `false` always uses faster-whisper |
+| `forced_alignment` | `auto` | Re-time Whisper's words against the audio before speaker assignment, so words at speaker changes land with the right person. `auto` = on when diarizing on a GPU (CUDA or Apple Silicon), off on CPU; `true` / `false` force it. Never runs with `--no-diarize`. `--forced-align/--no-forced-align` overrides. |
 | `parallel_stages` | `false` | Run transcription and diarization concurrently in two subprocesses. Uses more memory; benchmark before enabling. |
 | `llm_provider` | `ollama` | `ollama`, `ollama-cloud`, `lmstudio`, `anthropic`, `openai`, or `google` |
 | `llm_model` | — | Blank uses the provider's default model |
@@ -93,7 +94,7 @@ Override the storage path with `WISPER_DATA_DIR` (set automatically in Docker).
 
 **`device` and `compute_type`** default to `auto` (detect hardware / pick a dtype per device) rather than following the chain above.
 
-**`wisper config set` validation:** only keys in the table above can be set; a typo fails with `Unknown config key '...'`. Values are converted to the key's default type (bool, int, float, comma-separated list, or string).
+**`wisper config set` validation:** only keys in the table above can be set; a typo fails with `Unknown config key '...'`. Values are converted to the key's default type (bool, int, float, comma-separated list, or string). `model`, `device`, `compute_type`, and `forced_alignment` only accept their listed values.
 
 ---
 

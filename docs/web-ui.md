@@ -50,8 +50,8 @@ Large uploads show a byte-level progress bar ("Uploading… N%", then "Processin
 
 ### Job page
 
-- A progress bar with per-step pills: **T**ranscribe → **D**iarize → **F**ormat, plus **R**efine / **S**ummarize when requested. Enrollment jobs show **E**, journal jobs **J**.
-- A live log, ETA, and speed.
+- A progress bar with per-step pills: **T**ranscribe → **D**iarize → **A**lign → **F**ormat, plus **R**efine / **S**ummarize when requested. **Align** appears only when forced word alignment will run for the job (the setting is fixed when you submit, so changing the Config page while a job is queued doesn't change it). Enrollment jobs show **E**, journal jobs **J**.
+- A live log, ETA, and speed. On Apple Silicon (MLX) the Transcribe ETA updates about every 30 s of audio.
 - **Stop Job** cancels a pending or running job. A running transcription stops at its next progress update; the GPU may finish its current batch first.
 - Failed jobs show a generic message ("Transcription failed — see server logs"). The full error is in the server log (the terminal running `wisper server`, or the `--debug` log file).
 - The job list keeps the 50 most recently finished jobs. Transcripts themselves are never pruned.
@@ -141,11 +141,13 @@ The Campaign page's **Rolling journal** panel combines session summaries into on
 
 **Episode order:** the ▲/▼ arrows on the Episodes list set the order sessions are folded in. Order is when a transcript was added to the campaign, not its date, so check it before rebuilding.
 
+**Deleted transcripts:** deleting a transcript (or a recording with its files) also removes it from its campaign. Entries left behind by older versions show as **MISSING** on the Campaign page; remove them with ✕.
+
 ---
 
 ## Settings (Config page)
 
-- All `config.toml` settings, including the LLM provider, model, and API keys. A blank API-key field keeps the stored key; env vars take precedence.
+- All `config.toml` settings, including forced word alignment (`auto` / `true` / `false`), the LLM provider, model, and API keys. Choice fields ignore values outside their list. A blank API-key field keeps the stored key; env vars take precedence.
 - The model field lists installed models for Ollama and LM Studio, the Ollama Cloud catalog, and (once a key is entered) Anthropic, OpenAI, and Google models.
 - Discord bot token, default guild/channel, and presets.
 - **Open data folder** opens the data directory in your file manager.
