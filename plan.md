@@ -463,7 +463,7 @@ Costs:
 | `campaigns.json` | **DB** (`campaigns`, `campaign_members`, `campaign_transcripts`) | The core relational data. |
 | `journal.md` body | File | Obsidian-ready product the user reads. |
 | `journaled_sessions` | **DB** (`journal_entries`) | A stem list, so it becomes a foreign key. No longer written to `journal.md` frontmatter (decided); a journal export adds it back (see Phase 2). |
-| `<stem>.md` transcripts | File, plus a DB **registry row** (full text is **not** stored) | The file is the product, edited in Obsidian and synced. The row is the identity that links point at. Listing still reads frontmatter from disk, so there is no cached title to go stale. If search is ever wanted, an FTS5 index derived from the files (rebuilt by reconcile on mtime change) can be added without making the DB the source of truth. |
+| `<stem>.md` transcripts | File, plus a DB **registry row** (full text is **not** stored) | The file is the product, edited in Obsidian and synced. The row is the identity that links point at. Listing still reads frontmatter from disk, so there is no cached title to go stale. Full-text search (Phase 6) is a **derived** FTS5 index built from the files, so the DB never becomes the source of truth for the text. |
 | `.summary.md`, excerpt `.mp3`/`.txt`, source audio copy | File | Product or media. Existence is checked on disk. |
 | `_diar.json` | **Split** (decided) | `speaker_map`, `speaker_map_source`, per-label embeddings, and the audio-copy path go to the DB. `diarization_segments` (hundreds of KB, only ever read whole) stays in a slimmed `_diar.json`, treated like the other companion files. |
 | `recordings.json` + `metadata.json` | **DB** (`recordings`, `recording_segments`, `recording_markers`) | Kills the `save_recording_merged()` re-read dance, since appends become INSERTs. |
@@ -500,6 +500,14 @@ recording_rejoins(recording_id FK CASCADE, timestamp, close_code, attempt_number
 jobs(id TEXT PK uuid, type, status, created_at, started_at, finished_at, error_code,
      transcript_id FK SET NULL, campaign_id FK SET NULL, recording_id FK SET NULL,
      params_json, log_tail)
+
+-- Phase 6: full-text search (derived from the .md files; rebuildable at any time)
+transcripts += indexed_mtime_ns NULL, indexed_size NULL                  -- NULL = not indexed yet
+search_blocks(id PK, transcript_id FK CASCADE, kind,                      -- kind: transcript | summary
+              block_idx, speaker, start_s NULL)
+search_fts USING fts5(speaker, text, content='', contentless_delete=1,
+              tokenize='porter unicode61 remove_diacritics 2', prefix='2 3')   -- rowid = search_blocks.id
+trigger: AFTER DELETE ON search_blocks → DELETE FROM search_fts WHERE rowid = old.id
 ```
 
 Alternative held open: key `recording_speakers` by profile key text (no FK). When a transcript is deleted, `recordings.transcript_id` becomes NULL, and app code reverts the status `transcribed` → `completed` in the same transaction, so the Transcribe button comes back (open question 8).
@@ -602,7 +610,49 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 - UI (decided): the dashboard keeps its 20 most recent (memory plus DB). A new paginated **Job history** page (50 per page, filter by type and status). "Jobs for this" links on transcript and campaign pages.
 - Changes: `web/jobs.py`, `web/routes/dashboard.py` and `transcribe.py`, `docs/web-ui.md`.
 
-**Phase 6 — Cleanup.**
+**Phase 6 — Full-text search** (needs only Phase 2's registry, so it can move earlier).
+
+*What it does:* search every transcript (and its session summary) for words or phrases, e.g. "every session where Strahd comes up". Results show the campaign, session, speaker, timestamp, and a highlighted snippet, and link straight to that moment in the transcript. Filters: campaign, speaker, transcript vs summary.
+
+*Index design:*
+- **One row per speaker block,** not per transcript, so a hit points at a moment rather than a 2-hour file. Blocks come from `formatter.parse_transcript_blocks()`, the parser the rename logic already uses. Summaries are indexed per section.
+- **Contentless FTS5** (`content=''`, `contentless_delete=1`) stores only the index, not a second copy of the text. That keeps the DB small: the index is estimated at roughly a third of the text size (measure in this phase), e.g. ~25 MB for 500 two-hour sessions. The cost is that FTS5 can't produce snippets itself, so the search route reads the matching blocks from the `.md` files (one file read per result transcript on a page of 20) and builds snippets there.
+- **Deletes follow the foreign keys.** FTS tables can't hold foreign keys, so `search_blocks` holds them. Deleting a transcript cascades to `search_blocks`, whose trigger removes the FTS rows. The test suite must confirm the trigger fires on cascade deletes.
+- **Tokenizer:** `porter` stemming (so "fights" matches "fight"), accent-insensitive, with prefix indexes so `Stra*` is fast. Fantasy names aren't damaged by stemming because both the query and the text are stemmed the same way.
+
+*Keeping it fresh:*
+- **App writes reindex immediately.** Every path that rewrites a `.md` (wizard renames, the edit page, fix-speaker, refine, summarize, relabel) calls `transcript_store.reindex(stem)`. Indexing one transcript is one short transaction: delete its blocks, insert the new ones, record mtime and size.
+- **External edits** (Obsidian, sync) are caught by reconcile when `indexed_mtime_ns`/`indexed_size` differ from the file's.
+- **Initial build** runs as a background backfill after startup, outside the migration transaction, one transcript per transaction, so a large archive doesn't delay startup and a crash resumes where it stopped. The search page shows "Indexing N of M" until the backfill finishes.
+- **The index is disposable.** `wisper db reindex` drops and rebuilds it from the files. A corrupt or stale index is never data loss.
+
+*Query handling:*
+- **Plain input by default:** each word is quoted before `MATCH`, so FTS5 syntax characters (`"`, `*`, `-`, `NEAR`, `:`) are inert and a stray quote can't cause a syntax error. A trailing `*` stays as a prefix search. Phrase search with `"double quotes"` is supported.
+- A query FTS5 still rejects returns a generic "couldn't search for that" message, never exception text.
+- Ranking uses `bm25()`, grouped by transcript on the results page.
+- **Snippets are XSS-safe:** the block text is HTML-escaped first, then the matched terms are wrapped in `<mark>`. No `| safe` on raw transcript text.
+
+*Changes:*
+- `transcript_store.py`: `reindex()`, the backfill, and a `search()` query helper.
+- New route `web/routes/search.py`: `GET /search?q=&campaign=&speaker=&kind=&page=`. Plus a search box in the sidebar.
+- Transcript detail: per-block anchors (`id="b-<index>"`, numbered in the same order as `parse_transcript_blocks()`), so results deep-link with `#b-<index>` and the matched terms are highlighted.
+- CLI: `wisper search "query" [--campaign] [--speaker] [--limit]`, printing stem, timestamp, speaker, and snippet.
+- Every `.md`-rewriting path listed above gains its `reindex()` call.
+
+*Availability:* contentless-delete needs SQLite ≥ 3.43. The shipped platforms have it: this Mac's venv reports 3.53; python.org 3.13+ builds on macOS and Windows, and Debian trixie (the `python:3.14-slim` base) bundle newer. On an older system SQLite (e.g. Ubuntu 22.04's 3.37 in a local venv), search is disabled with a notice and everything else works.
+
+*Tests:*
+- Block and summary indexing from synthetic transcripts.
+- Reindex on each app write path.
+- Reconcile reindexes on an mtime or size change.
+- Transcript delete leaves no `search_fts` rows (the trigger fires on cascade).
+- Query escaping: quotes, `*`, `-`, `NEAR`, and column syntax are inert.
+- XSS: `<script>` in transcript text renders escaped in snippets.
+- Filters, paging, the backfill resuming after an interruption, the disabled-search path on an old SQLite version (mocked), and CLI output.
+
+*Docs:* `docs/web-ui.md` (search page), `docs/cli-reference.md` (`wisper search`, `wisper db reindex`), architecture.md (index design, freshness rules), CLAUDE.md gotcha ("every `.md` rewrite calls `reindex()`").
+
+**Phase 7 — Cleanup.**
 - Remove the remaining JSON code paths (the importers stay, frozen, for old installs).
 - Narrow APIs where the stability shims are no longer needed.
 - Final pass over architecture.md, `docs/`, and CLAUDE.md.
@@ -618,7 +668,7 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
   - `BEGIN IMMEDIATE` under two threads: the second waits instead of erroring.
   - One cross-process import race under spawn (the macOS default): exactly one import happens.
 - **Importer tests** use a synthetic legacy data dir built by a frozen copy of today's serializers (`tests/_legacy_store.py`), so the tests don't change when the managers do. Cases: clean import, each dirty-data case, a malformed top-level file (rolls back, version unchanged, backup present), and a re-run.
-- **Invariant guards:** no raw `sqlite3.connect` outside `db.py`, and no `.md` unlink outside `transcript_store.py`.
+- **Invariant guards:** no raw `sqlite3.connect` outside `db.py`, no `.md` unlink outside `transcript_store.py`, and (Phase 6) every function that writes a transcript `.md` calls `reindex()`.
 - **Cross-platform paths:** relative-path round-trips through `PureWindowsPath`/`PurePosixPath`, so the Windows logic is tested on macOS and Linux CI.
 - No CI change: `sqlite3` is stdlib, and the bundled SQLite on 3.13/3.14 (macOS, Windows, and Debian slim) supports `RETURNING`, `DROP COLUMN`, and `STRICT`.
 - Existing test rules still hold: no GPU, network, or real audio, and synthetic data only.
@@ -626,10 +676,10 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 **Docs touched across the phases:**
 - architecture.md: Module Map; Data Storage tree and "Output directory"; "File-store locking" → "Database"; Job Queue ("Nothing persists across restarts" changes in Phase 5); Test Strategy; Known Constraints (host-plus-container DB writes, WAL).
 - `docs/configuration.md`: data layout, backups, the `WISPER_DATA_DIR` + synced-folder warning.
-- `docs/cli-reference.md`: `wisper db`, and the `transcribe --campaign` rule.
+- `docs/cli-reference.md`: `wisper db`, `wisper search`, and the `transcribe --campaign` rule.
 - `docs/docker.md`: DB location, backup, CLI and web containers sharing `./data`.
 - `docs/scenarios.md`: restore from backup, moved output dir, externally deleted transcripts.
-- `docs/web-ui.md`: missing transcripts, job history.
+- `docs/web-ui.md`: missing transcripts, job history, search.
 - CLAUDE.md: new gotchas (connect only through `db.py`; `BEGIN IMMEDIATE`; no transaction across ML work; delete transcripts only via `transcript_store`; `speaker_map` location).
 - README: unchanged.
 
@@ -646,10 +696,17 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 9. **Job history:** keep every job; the dashboard shows the 20 most recent, plus a new paginated history page.
 10. **Journal frontmatter:** stop writing `journaled_sessions`; add a journal export that includes it.
 11. **Merge cadence:** stack phase PRs on `feat/sqlite-storage`; one PR to `main` when the feature is complete.
+12. **Full-text search:** added as Phase 6, as a derived contentless FTS5 index over transcript blocks and summaries.
 
 ### Open questions
 
-None. Next step: sign-off on the schema, then Phase 0.
+Search (Phase 6), each with a recommendation:
+
+1. **Index summaries too?** Recommended yes, so loot, NPC, and follow-up notes are searchable, with a transcript/summary filter.
+2. **Stemming:** `porter` (recommended; "fights" finds "fight") or exact words only?
+3. **Old SQLite (< 3.43):** disable search with a notice (recommended), or fall back to a regular FTS5 table that stores a copy of the text?
+
+After these: sign-off on the schema, then Phase 0.
 
 ---
 
