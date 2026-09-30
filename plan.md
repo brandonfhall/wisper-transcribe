@@ -10,7 +10,7 @@ Active plans, open bugs, and parked designs. Shipped work is removed; its design
 
 A local-recording `JOB_TRANSCRIPTION` job reported COMPLETED and logged "Wrote `<id>.md`", and the recording's metadata points at that path, but the file never existed on disk. Ruled out: a CWD-relative write, a `WISPER_DATA_DIR` mismatch, and every delete path in `jobs.py` (the upload-cleanup helpers are gated on `job.is_web_upload`, which recordings never set). The job queue has no persistence, so the evidence was lost on restart.
 
-**Next step:** run the server with `WISPER_DEBUG=1` during local-recording transcribes so a recurrence is captured. See `LIVE_AUDIO_TEST_PLAN.md` §4a.
+**Next step:** run the server with `WISPER_DEBUG=1` during local-recording transcribes so a recurrence is captured. See `LIVE_AUDIO_TEST_PLAN.md` §4a. The SQLite migration adds detection: Phase 2 fails the job if the `.md` is missing at registration and records the output root; Phase 5 keeps the job's log tail across restarts.
 
 ### Ollama: empty responses from reasoning models
 
@@ -25,7 +25,7 @@ A local-recording `JOB_TRANSCRIPTION` job reported COMPLETED and logged "Wrote `
 - **Live recording + campaign journal:** `LIVE_AUDIO_TEST_PLAN.md` — real-device capture, live transcript, journal browser flows, bulk delete, busy-queue notice.
 - **Live Discord acceptance test.** The recording pipeline (WAV segments, `__mixed__` combined track, `combined_path` hand-off) is covered by synthesized-PCM tests, but the JDA → socket → Python path needs one real session: record a few minutes with 2+ speakers, play the per-user WAVs, and run Transcribe.
 - **Windows launcher dependency refresh.** `start.bat` reinstalls dependencies when `pyproject.toml` is newer than `.venv\.wisper-deps` (untested on Windows): update an existing install with `git pull`, double-click `start.bat`, confirm the one-time "Dependencies changed" reinstall runs, and that a second launch skips it.
-- **Docker image with forced alignment.** The "Docker Build" workflow is disabled on GitHub, so nothing builds the image automatically. Confirm the CPU and GPU images build with `transformers`, and that a diarized job on the GPU image downloads the alignment model into `./cache/` and logs "Aligned words".
+- **Docker image with forced alignment.** Do this in the same session as the SQLite migration's Docker check (CLI and web containers sharing `./data`). The "Docker Build" workflow is disabled on GitHub, so nothing builds the image automatically. Confirm the CPU and GPU images build with `transformers`, and that a diarized job on the GPU image downloads the alignment model into `./cache/` and logs "Aligned words".
 - **macOS loopback (PR #59).** Record page on a Mac with BlackHole installed: BlackHole appears under System Audio and captures audio.
 
 ---
@@ -44,7 +44,7 @@ Shipped in #64 (design in `architecture.md`, "Forced word alignment"), default `
 
 Shipped in #63; the design is in `architecture.md`. What's left:
 
-- **Profile cleanup (user action).** Re-enroll every profile after the embedding-model change; delete the `speaker_*` / `SPEAKER_NN` junk and duplicate profiles; enroll Mike and Ben from sessions where they're clearly separated. Consider a `wisper speakers doctor` check that flags identical or near-identical (>0.95) profile embeddings.
+- **Profile cleanup (user action).** Re-enroll every profile after the embedding-model change; delete the `speaker_*` / `SPEAKER_NN` junk and duplicate profiles; enroll Mike and Ben from sessions where they're clearly separated. `wisper speakers doctor` (flags identical or near-identical profiles) is scoped into the SQLite migration's Phase 1.
 - **Diarization measurement set.** 8–12 hand-corrected excerpts of 2–3 min, stratified by speaker count (2–3 / 4–5 / 6–8), in-room vs remote, low vs high overlap. Report DER split into missed / false alarm / confusion (`pyannote.metrics`) plus JER, and compare configs with a paired bootstrap over recordings (B ≥ 1000). The 0.55 threshold and the community-1 choice rest on one session pair until this exists.
 - **Ruled out for now:** Sortformer (4-speaker cap), DiariZen (CC-BY-NC), NVIDIA Nemotron diarization (no independent validation). Revisit only if community-1 plateaus on the measurement set.
 
@@ -574,7 +574,8 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 - Embeddings to BLOB: import `.npy`, and `load_profile_embedding()`/`update_embedding()` read and write the column.
 - Rename becomes one transaction across profile and memberships.
 - Changes: `speaker_manager.py`, `campaign_manager.py`. `web/routes/speakers.py` and `campaigns.py` change only if an API narrows.
-- Tests: rewrite `test_speaker_manager.py`/`test_campaign_manager.py` internals, plus importer tests (including the dirty-data cases above).
+- **`wisper speakers doctor`** (scoped in from "Speaker consistency"): lists profile pairs whose embeddings score above 0.95 cosine (likely duplicates), profiles in an old embedding space, and pipeline-shaped junk names (`AUTO_NAME_RE`: `SPEAKER_NN`, `Unknown Speaker N`). Report only, no automatic fixes; it points at `wisper speakers remove`/`rename`.
+- Tests: rewrite `test_speaker_manager.py`/`test_campaign_manager.py` internals, plus importer tests (including the dirty-data cases above), plus `speakers doctor` on synthetic near-duplicate embeddings.
 
 **Phase 2 — Transcript registry and links (fixes the #64 class).**
 - New `transcript_store.py`: `register()`, `reconcile()`, and `delete_transcript()` as the only delete path, following the ordering rule. Everything that unlinks a `.md` calls it.
@@ -588,7 +589,9 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
   - `journal.py`: `unjournalled_sessions()`, `update_journal()`, `rebuild_campaign()`; stop writing `journaled_sessions` into the frontmatter.
 - **Export with frontmatter:** a download or CLI export of the journal that adds `journaled_sessions` from the DB to its frontmatter. The same export path can later add DB-held metadata (campaign, speakers) to transcript or summary downloads.
   - `cli.py`: `transcripts list/move`, `campaigns journal/reorder`.
-- Tests: cascade tests for every delete path; reconcile (external delete keeps order; reappearing file clears the flag; an output-root change doesn't mark rows missing); a guard test that no module outside `transcript_store.py` unlinks `*.md` in the output dir.
+- **Missing-transcript detection** (scoped in from the open bug): when a transcription job registers its output, it checks the `.md` exists. If not, the job fails with a distinct error ("Transcript file missing after write") instead of reporting success, and the resolved output root goes into the job log. Covers web jobs and the recording hand-off.
+- **Bulk actions UI** on `/transcripts`: row checkboxes plus a toolbar for delete and assign to campaign, wired to the existing `/transcripts/bulk-delete` and `/transcripts/bulk-campaign` routes. Those routes are rewritten in this phase anyway. Delete goes through a confirmation step. Same bulk-select pattern as `/recordings` (a separate hidden form, since rows contain their own forms).
+- Tests: cascade tests for every delete path; the missing-file job failure; bulk actions through the UI form fields; reconcile (external delete keeps order; reappearing file clears the flag; an output-root change doesn't mark rows missing); a guard test that no module outside `transcript_store.py` unlinks `*.md` in the output dir.
 
 **Phase 3 — Diarization sidecar data.**
 - Import `_diar.json`'s speaker map, provenance, embeddings, and `input_path` into `transcript_speakers` and `transcripts.audio_rel_path`. The sidecar is rewritten with only `diarization_segments`.
@@ -605,7 +608,7 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 
 **Phase 5 — Job history.**
 - Write-through from `JobQueue` at submit and at each status transition. On terminal status, store `error_code` (the same generic codes, never exception text) and the last ~200 log lines.
-- `params_json` holds an allowlisted subset of kwargs: no secrets, no temp paths.
+- `params_json` holds an allowlisted subset of kwargs: no secrets, no temp paths. It includes the resolved output root, so a job that wrote somewhere unexpected is visible afterwards (the missing-transcript bug).
 - At startup, pending and running rows become `failed` / "Interrupted by restart". They are never auto-resumed: the uploads are gone and the jobs are multi-hour GPU work.
 - The in-memory 50-job cap stays. The DB keeps every job (decided).
 - UI (decided): the dashboard keeps its 20 most recent (memory plus DB). A new paginated **Job history** page (50 per page, filter by type and status). "Jobs for this" links on transcript and campaign pages.
@@ -678,10 +681,10 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 - architecture.md: Module Map; Data Storage tree and "Output directory"; "File-store locking" → "Database"; Job Queue ("Nothing persists across restarts" changes in Phase 5); Test Strategy; Known Constraints (host-plus-container DB writes, WAL).
 - `docs/configuration.md`: data layout, backups, the `WISPER_DATA_DIR` + synced-folder warning.
 - `docs/setup.md`: the SQLite ≥ 3.43 requirement.
-- `docs/cli-reference.md`: `wisper db`, `wisper search`, and the `transcribe --campaign` rule.
+- `docs/cli-reference.md`: `wisper db`, `wisper search`, and the `transcribe --campaign` rule, `wisper speakers doctor`.
 - `docs/docker.md`: DB location, backup, CLI and web containers sharing `./data`.
 - `docs/scenarios.md`: restore from backup, moved output dir, externally deleted transcripts.
-- `docs/web-ui.md`: missing transcripts, job history, search.
+- `docs/web-ui.md`: missing transcripts, bulk actions, job history, search.
 - CLAUDE.md: new gotchas (connect only through `db.py`; `BEGIN IMMEDIATE`; no transaction across ML work; delete transcripts only via `transcript_store`; `speaker_map` location).
 - README: unchanged.
 
@@ -702,6 +705,7 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 13. **Search summaries:** yes, with a transcript/summary filter.
 14. **Stemming:** `porter`.
 15. **SQLite < 3.43:** unsupported; startup refuses with a clear message.
+16. **Scoped in from elsewhere in this file:** missing-transcript detection (Phases 2 and 5), `wisper speakers doctor` (Phase 1), the bulk-actions UI on `/transcripts` (Phase 2), and the Docker alignment check done alongside the Docker DB check.
 
 ### Open questions
 
@@ -712,6 +716,8 @@ None. Next step: sign-off on the schema, then Phase 0.
 ## Campaign-level LLM summaries (DM tools)
 
 The rolling campaign journal shipped first and set the pattern: slug-scoped storage under `campaigns/<slug>/`, `.summary.md` discovery via `unjournalled_sessions()`, and `JobQueue.submit_journal` / `_run_journal_job` as the template for new `JOB_CAMPAIGN_*` types on the standard SSE progress page. All three features below read the same `.summary.md` sidecars (`SummaryNote` already carries loot, NPCs, and follow-ups). Campaigns with no summarized sessions hide or disable the buttons.
+
+**Depends on the SQLite migration's Phase 2.** Build these on the transcript registry and `journal_entries` rather than stem lists and `journaled_sessions` frontmatter. Combined-summary and recap outputs get a registry-style row, so deletes cascade.
 
 ### 1. Combined summary
 
