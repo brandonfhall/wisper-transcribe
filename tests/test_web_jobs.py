@@ -818,9 +818,8 @@ def _write_sidecar(tmp_path, md_path, input_path, campaign=None):
         "campaign": campaign,
         "diarization_segments": [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"}],
     }
-    md_path.with_name(md_path.stem + "_diar.json").write_text(
-        json.dumps(diar), encoding="utf-8"
-    )
+    from ._seed import seed_sidecar
+    seed_sidecar(md_path, diar)
 
 
 def test_run_enroll_job_success_calls_enroll_profiles_and_completes(tmp_path):

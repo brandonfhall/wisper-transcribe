@@ -64,7 +64,7 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Run storage tests
-        run: pytest tests/test_db.py tests/test_path_utils.py tests/test_legacy_import.py tests/test_speaker_manager.py tests/test_campaign_manager.py tests/test_transcript_store.py tests/test_journal.py tests/test_recording_manager.py tests/test_job_history.py tests/test_search_index.py -v
+        run: pytest tests/test_db.py tests/test_path_utils.py tests/test_legacy_import.py tests/test_speaker_manager.py tests/test_campaign_manager.py tests/test_transcript_store.py tests/test_journal.py tests/test_recording_manager.py tests/test_job_history.py tests/test_search_index.py tests/test_schema.py tests/test_e2e.py -v
 
   latest-deps:
     name: latest deps (3.14)

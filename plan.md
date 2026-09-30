@@ -501,21 +501,12 @@ Branch `feat/sqlite-storage`, pushed; one PR to `main` at the end (ask the user 
   - missing coverage of new behaviour: `wisper db`, `output_dir`, missing transcripts and Relink, name collisions, job history, search, crashed-session recovery, the dev-data-dir rule.
 
   Docstrings and code comments in changed modules get the same pass.
-- **Test suite re-evaluation, end to end.** Review every test file, not only the ones each phase changed:
-  - **Delete** tests that only exercised removed JSON code paths.
-  - **Rewrite** tests that now pass vacuously: they mock a manager the code no longer calls, assert on a file the DB replaced, or test a foreign-key rule on a connection with `foreign_keys` off.
-  - **Consolidate** the per-phase fixtures (legacy seeding, `_diar.json` helpers, DB seeding) into one shared set.
-  - **Confirm every invariant has a test:**
-    - each schema constraint;
-    - each guard test: no `sqlite3.connect` outside `db.py`, no `.md` unlink outside `transcript_store`, atomic writes only, `reindex()` on every `.md` write;
-    - each delete path's cascade;
-    - each dirty-data import case.
-  - **Add end-to-end flows** through `TestClient` with ML mocked, against a real temp DB (no manager mocks):
-    - upload → transcribe → assign to campaign → summarize → fold into journal → rename a speaker → search → delete, checking DB rows, files, and the search index at each step;
-    - a legacy data dir → import → the same flow;
-    - Discord recording → transcribe → delete the transcript → the recording is transcribable again.
-  - **Check** the full suite's runtime against the pre-migration baseline, and add the session-scoped template DB if it has grown noticeably.
-  - **Run** the coverage report (`--cov`) and review uncovered lines in `db.py`, `transcript_store.py`, and the importers.
+- **7b (test re-evaluation, done):**
+  - Deleted 5 tests that only exercised the whole-store savers (now test helpers), and 4 dead `dashboard.get_data_dir` patches with the unused import.
+  - Found by a never-called-mock sweep: ~20 wizard tests, the relabel tests, and the enroll-job tests seeded old-format `_diar.json` files, so they ran through the legacy fallback instead of the database. They now use `seed_sidecar()`. The rest of the sweep's unused mocks are safety nets or validation paths that return before storage.
+  - New `test_schema.py` (70 cases: every constraint, cascade, and trigger, plus FK-index coverage) and `test_e2e.py` (the three flows), both also on the Windows job.
+  - Runtime: `main` 1447 tests / 16.2 s, this branch 1850 / ~25 s. Per-test migration is 1.7 ms, so no template DB.
+  - Coverage of the storage modules: 91–96%. What's left is defensive `OSError` and race branches. The importer's timestamp fallbacks got a test.
 
 ### Decisions (2026-09-30)
 

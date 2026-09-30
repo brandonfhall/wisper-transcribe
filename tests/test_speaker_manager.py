@@ -819,8 +819,8 @@ def test_load_embedding_model_reuses_cache_on_same_device():
 # ---------------------------------------------------------------------------
 
 def test_enroll_speaker_atomic_under_concurrent_calls(tmp_path):
-    """Concurrent enroll_speaker() calls must not lose writes to the shared
-    speakers.json. `embedding=` is passed explicitly so no ML model
+    """Concurrent enroll_speaker() calls must not lose writes to the
+    profiles table. `embedding=` is passed explicitly so no ML model
     is invoked; `segments=[]` skips the ffmpeg reference-clip step."""
     import threading
 
@@ -987,36 +987,6 @@ def test_update_embedding_replaces_legacy_profile_and_retags(tmp_path):
     saved = _stored_embedding(tmp_path, "alice")
     np.testing.assert_array_almost_equal(saved, [0.6, 0.8])
     assert load_profiles(tmp_path)["alice"].embedding_space == EMBEDDING_SPACE
-
-
-def test_embedding_space_round_trips_through_save(tmp_path):
-    from wisper_transcribe.speaker_manager import load_profiles
-    from tests._seed import save_profiles
-
-    _write_profile(tmp_path, "alice", np.ones(256))
-    _write_profile(tmp_path, "old", np.ones(512), embedding_space=None)
-    save_profiles(load_profiles(tmp_path), tmp_path)
-    loaded = load_profiles(tmp_path)
-    assert loaded["alice"].embedding_space == EMBEDDING_SPACE
-    assert loaded["old"].embedding_space == ""
-
-
-def test_save_profiles_keeps_ids_and_deletes_absent(tmp_path):
-    from wisper_transcribe import db
-    from wisper_transcribe.speaker_manager import load_profiles
-    from tests._seed import save_profiles
-
-    _write_profile(tmp_path, "alice", np.ones(4))
-    _write_profile(tmp_path, "bob", np.ones(4))
-    with db.connection(tmp_path) as conn:
-        alice_id = conn.execute("SELECT id FROM profiles WHERE key = 'alice'").fetchone()[0]
-    profiles = load_profiles(tmp_path)
-    del profiles["bob"]
-    profiles["alice"].role = "DM"
-    save_profiles(profiles, tmp_path)
-    with db.connection(tmp_path) as conn:
-        rows = conn.execute("SELECT id, key, role FROM profiles").fetchall()
-    assert [tuple(r) for r in rows] == [(alice_id, "alice", "DM")]
 
 
 def test_rename_profile_moves_clip_after_commit(tmp_path):

@@ -639,7 +639,6 @@ class _Devnull:
         pass
 
 
-
 # ---------------------------------------------------------------------------
 # Journal write rule: entries in the DB, body in the file
 # ---------------------------------------------------------------------------
@@ -762,19 +761,6 @@ def test_move_to_other_campaign_drops_entry_and_marks_stale(tmp_path, out_dir):
     assert journal.journaled_stems("my-game", data_dir=tmp_path) == ["s2"]
     assert journal.journal_stale_since("my-game", data_dir=tmp_path) is not None
     assert journal.journal_stale_since("other", data_dir=tmp_path) is None
-
-
-def test_save_campaigns_move_marks_stale(tmp_path, out_dir):
-    from wisper_transcribe.campaign_manager import load_campaigns
-    from tests._seed import save_campaigns
-
-    _folded_game(tmp_path, out_dir)
-    create_campaign("Other", data_dir=tmp_path)
-    campaigns = load_campaigns(tmp_path)
-    campaigns["my-game"].transcripts.remove("s1")
-    campaigns["other"].transcripts.append("s1")
-    save_campaigns(campaigns, tmp_path)
-    assert journal.journal_stale_since("my-game", data_dir=tmp_path) is not None
 
 
 def test_unassign_marks_stale(tmp_path, out_dir):

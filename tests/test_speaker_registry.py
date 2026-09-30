@@ -14,7 +14,7 @@ from wisper_transcribe.config import EMBEDDING_SPACE
 from wisper_transcribe.formatter import to_markdown
 from wisper_transcribe.models import AlignedSegment
 
-from ._seed import seed_profile, sidecar_data
+from ._seed import seed_profile, seed_sidecar, sidecar_data
 
 ALICE = np.array([1.0, 0.0, 0.0, 0.0])
 BOB = np.array([0.0, 1.0, 0.0, 0.0])
@@ -49,7 +49,7 @@ def _transcript(out_dir: Path, stem: str, names: dict[str, str], embeddings=None
     if embeddings is not None:
         diar["embedding_space"] = EMBEDDING_SPACE
         diar["speaker_embeddings"] = {k: v.tolist() for k, v in embeddings.items()}
-    (out_dir / f"{stem}_diar.json").write_text(json.dumps(diar), encoding="utf-8")
+    seed_sidecar(md_path, diar)
     return md_path
 
 
@@ -154,9 +154,9 @@ def test_dry_run_writes_nothing(world):
     assert (out / "s1_diar.json").read_text() == before_sidecar
 
 
-def test_backfills_embeddings_from_durable_audio(world, tmp_path):
+def test_backfills_embeddings_from_durable_audio(world):
     data, out = world
-    audio = tmp_path / "s1.wav"
+    audio = out / "s1.wav"  # durable copies live next to the transcript
     audio.write_bytes(b"fake")
     _transcript(out, "s1", {"SPEAKER_00": "Unknown Speaker 1"}, input_path=str(audio))
     _add(data, "s1")

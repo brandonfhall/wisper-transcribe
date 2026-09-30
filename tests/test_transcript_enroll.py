@@ -9,6 +9,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from ._seed import seed_sidecar
+
 from ._seed import seed_profile, sidecar_data
 
 
@@ -57,9 +59,7 @@ def _write_transcript(tmp_path: Path, diar: dict | None = _SAMPLE_DIAR) -> Path:
     md = tmp_path / "session01.md"
     md.write_text(_SAMPLE_MD, encoding="utf-8")
     if diar is not None:
-        (tmp_path / "session01_diar.json").write_text(
-            json.dumps(diar), encoding="utf-8"
-        )
+        seed_sidecar(tmp_path / "session01.md", diar)
     return md
 
 
@@ -201,10 +201,10 @@ def test_wizard_enroll_propagates_to_campaign(tmp_path: Path):
     md.write_text("# s1", encoding="utf-8")
     audio = tmp_path / "s1.wav"
     audio.write_bytes(b"x")
-    (tmp_path / "s1_diar.json").write_text(json.dumps({
+    seed_sidecar(tmp_path / "s1.md", {
         "input_path": str(audio),
         "diarization_segments": [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"}],
-    }), encoding="utf-8")
+    })
     # The campaign comes from the transcript's current campaign row.
     from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
     create_campaign("Game")
@@ -285,9 +285,7 @@ def test_enroll_form_prefills_previously_applied_names(client: TestClient, tmp_p
         "**Sam** *(00:12)*: Thanks for having me\n",
         encoding="utf-8",
     )
-    (tmp_path / "session01_diar.json").write_text(
-        json.dumps(_SAMPLE_DIAR), encoding="utf-8",
-    )
+    seed_sidecar(tmp_path / "session01.md", _SAMPLE_DIAR)
     with _patch_output(tmp_path), \
          patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
         resp = client.get("/transcripts/session01/enroll")
@@ -349,9 +347,7 @@ def test_enroll_submit_second_pass_corrects_typo(client: TestClient, tmp_path: P
         "**Sam** *(00:12)*: Thanks for having me\n",
         encoding="utf-8",
     )
-    (tmp_path / "session01_diar.json").write_text(
-        json.dumps(_SAMPLE_DIAR), encoding="utf-8",
-    )
+    seed_sidecar(tmp_path / "session01.md", _SAMPLE_DIAR)
     with _patch_output(tmp_path):
         resp = client.post(
             "/transcripts/session01/enroll",
@@ -431,11 +427,11 @@ def test_apply_renames_never_enrolls_pipeline_shaped_names(tmp_path: Path):
         "**Recurring Speaker 2** *(00:12)*: hello\n",
         encoding="utf-8",
     )
-    (tmp_path / "session01_diar.json").write_text(json.dumps({
+    seed_sidecar(tmp_path / "session01.md", {
         "diarization_segments": [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"},
                                  {"start": 12.0, "end": 18.0, "speaker": "SPEAKER_01"}],
         "speaker_map": {"SPEAKER_00": "Unknown Speaker 1", "SPEAKER_01": "Recurring Speaker 2"},
-    }), encoding="utf-8")
+    })
     segments = _diar_segments(("SPEAKER_00", 0.0, 5.0), ("SPEAKER_01", 12.0, 18.0))
 
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
@@ -457,11 +453,11 @@ def test_apply_renames_follows_unique_name_over_overlapping_timestamp(tmp_path: 
         "**Unknown Speaker 1** *(00:03)*: interjection over Alice\n",
         encoding="utf-8",
     )
-    (tmp_path / "session01_diar.json").write_text(json.dumps({
+    seed_sidecar(tmp_path / "session01.md", {
         "diarization_segments": [{"start": 0.0, "end": 10.0, "speaker": "SPEAKER_00"},
                                  {"start": 3.4, "end": 5.0, "speaker": "SPEAKER_01"}],
         "speaker_map": {"SPEAKER_00": "Alice", "SPEAKER_01": "Unknown Speaker 1"},
-    }), encoding="utf-8")
+    })
     # 00:03 falls inside SPEAKER_00's turn, not SPEAKER_01's (which starts at 3.4).
     segments = _diar_segments(("SPEAKER_00", 0.0, 10.0), ("SPEAKER_01", 3.4, 5.0))
 
@@ -597,8 +593,7 @@ def test_apply_renames_body_rename_without_timestamps(tmp_path: Path):
         "**Bob**: Thanks for having me\n",
         encoding="utf-8",
     )
-    (tmp_path / "session01_diar.json").write_text(
-        json.dumps({
+    seed_sidecar(tmp_path / "session01.md", {
             "input_path": str(tmp_path / "session01.mp3"),
             "campaign": None,
             "speaker_map": {"SPEAKER_00": "Alice", "SPEAKER_01": "Bob"},
@@ -606,9 +601,7 @@ def test_apply_renames_body_rename_without_timestamps(tmp_path: Path):
                 {"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"},
                 {"start": 12.0, "end": 18.0, "speaker": "SPEAKER_01"},
             ],
-        }),
-        encoding="utf-8",
-    )
+        })
     segments = _diar_segments(("SPEAKER_00", 0.0, 5.0), ("SPEAKER_01", 12.0, 18.0))
 
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
@@ -650,8 +643,7 @@ def test_apply_renames_legacy_sidecar_low_confidence_block_uses_name_fallback(
     )
     # No speaker_map key at all -- legacy sidecar, forces the interval
     # heuristic (build_legacy_label_map) rather than the persisted map.
-    (tmp_path / "session01_diar.json").write_text(
-        json.dumps({
+    seed_sidecar(tmp_path / "session01.md", {
             "input_path": str(tmp_path / "session01.mp3"),
             "campaign": None,
             "diarization_segments": [
@@ -659,9 +651,7 @@ def test_apply_renames_legacy_sidecar_low_confidence_block_uses_name_fallback(
                 {"start": 20.0, "end": 30.0, "speaker": "SPEAKER_01"},
                 {"start": 1000.0, "end": 1010.0, "speaker": "SPEAKER_01"},
             ],
-        }),
-        encoding="utf-8",
-    )
+        })
     segments = _diar_segments(
         ("SPEAKER_00", 0.0, 10.0),
         ("SPEAKER_01", 20.0, 30.0),
@@ -959,9 +949,7 @@ def test_excerpt_falls_back_to_legacy_display_name(client: TestClient, tmp_path:
         "**Unknown Speaker 2** *(00:12)*: Thanks for having me\n",
         encoding="utf-8",
     )
-    (tmp_path / "session01_diar.json").write_text(
-        json.dumps(_SAMPLE_DIAR), encoding="utf-8",
-    )
+    seed_sidecar(tmp_path / "session01.md", _SAMPLE_DIAR)
     # Legacy file name: keyed by display name, not raw label
     legacy_clip = tmp_path / "session01_excerpt_Unknown_Speaker_1.mp3"
     legacy_clip.write_bytes(b"fake-mp3-data")
@@ -982,9 +970,7 @@ def test_enroll_form_finds_legacy_display_name_excerpts(client: TestClient, tmp_
         "**Unknown Speaker 2** *(00:12)*: Thanks for having me\n",
         encoding="utf-8",
     )
-    (tmp_path / "session01_diar.json").write_text(
-        json.dumps(_SAMPLE_DIAR), encoding="utf-8",
-    )
+    seed_sidecar(tmp_path / "session01.md", _SAMPLE_DIAR)
     (tmp_path / "session01_excerpt_Unknown_Speaker_1.mp3").write_bytes(b"audio")
     (tmp_path / "session01_excerpt_Unknown_Speaker_1.txt").write_text(
         "Hello everyone", encoding="utf-8",
@@ -1022,7 +1008,7 @@ def test_legacy_backfill_uses_interval_match_not_exact_timestamp(client: TestCli
             {"start": 0.0, "end": 300.0, "speaker": "SPEAKER_00"},
         ],
     }
-    (tmp_path / "session01_diar.json").write_text(json.dumps(diar), encoding="utf-8")
+    seed_sidecar(tmp_path / "session01.md", diar)
     (tmp_path / "session01_excerpt_Unknown_Speaker_1.mp3").write_bytes(b"audio")
 
     with _patch_output(tmp_path):
@@ -1347,7 +1333,7 @@ def test_enroll_submit_refuses_raw_label_shaped_name(client: TestClient, tmp_pat
             {"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"},
         ],
     }
-    (tmp_path / "session01_diar.json").write_text(json.dumps(diar), encoding="utf-8")
+    seed_sidecar(tmp_path / "session01.md", diar)
 
     with _patch_output(tmp_path), \
          patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \

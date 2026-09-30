@@ -7,8 +7,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from . import get_queue, templates
-from wisper_transcribe.config import (  # noqa: F401 (get_data_dir used in template context and tests)
-    get_data_dir,
+from wisper_transcribe.config import (
     get_device,
     get_llm_api_key,
     load_config,

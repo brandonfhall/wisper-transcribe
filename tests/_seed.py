@@ -163,3 +163,12 @@ def save_campaigns(campaigns: dict[str, Campaign], data_dir: Optional[Path] = No
                      m.discord_user_id or None),
                 )
             cm._write_order(conn, cid, [cm._transcript_id(conn, st) for st in c.transcripts])
+
+
+def seed_sidecar(md_path: Path, diar: dict, data_dir: Optional[Path] = None) -> None:
+    """Store a transcript's diarization data the way a transcription job does
+    (``transcript_store.write_sidecar``): speakers and the audio path in the
+    database, segments in ``<stem>_diar.json``. Registers the transcript.
+    An ``input_path`` outside the transcript's folder is not tracked."""
+    from wisper_transcribe.transcript_store import write_sidecar
+    write_sidecar(Path(md_path), diar, data_dir)

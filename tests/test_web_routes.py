@@ -81,7 +81,6 @@ def test_dashboard_html_includes_mtime_cache_buster(client, tmp_path):
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.load_config", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
-         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)), \
          patch("wisper_transcribe.web.routes.dashboard.get_output_dir", return_value=tmp_path / "output"):
         resp = client.get("/")
 
@@ -94,7 +93,6 @@ def test_dashboard_returns_200(client, tmp_path):
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.load_config", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
-         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)), \
          patch("wisper_transcribe.web.routes.dashboard.get_output_dir", return_value=tmp_path / "output"):
         resp = client.get("/")
     assert resp.status_code == 200
@@ -113,7 +111,6 @@ def test_dashboard_shows_llm_provider_and_model(client, tmp_path, monkeypatch):
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.load_config", return_value=cfg), \
          patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
-         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)), \
          patch("wisper_transcribe.web.routes.dashboard.get_output_dir", return_value=tmp_path / "output"):
         resp = client.get("/")
     assert resp.status_code == 200
@@ -136,7 +133,6 @@ def test_dashboard_flags_cloud_provider_missing_key(client, tmp_path, monkeypatc
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.load_config", return_value=cfg), \
          patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
-         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)), \
          patch("wisper_transcribe.web.routes.dashboard.get_output_dir", return_value=tmp_path / "output"):
         resp = client.get("/")
     assert resp.status_code == 200

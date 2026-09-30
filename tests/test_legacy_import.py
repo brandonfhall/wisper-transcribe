@@ -476,3 +476,14 @@ def test_recording_bad_id_and_unreadable_metadata_skipped(data_dir):
     assert _recordings() == {}
     report = _v4_report(data_dir)
     assert "not-a-uuid" in report and RID in report
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("2026-03-01T20:15:30.123456+00:00", "2026-03-01T20:15:30.123456Z"),   # the JSON-era format
+    ("2026-03-01T21:15:30.5+01:00", "2026-03-01T20:15:30.500000Z"),        # other offset, short fraction
+    ("2026-03-01T20:15:30", "2026-03-01T20:15:30.000000Z"),                # naive: taken as UTC
+    ("not a time", None), ("", None), (None, None), (1700000000, None),
+])
+def test_legacy_recording_times_normalize_or_drop(raw, expected):
+    from wisper_transcribe.legacy_import import _legacy_time
+    assert _legacy_time(raw) == expected

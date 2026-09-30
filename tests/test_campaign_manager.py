@@ -554,23 +554,6 @@ def test_transcript_without_md_is_registered_missing(tmp_path):
     assert flags == {"present": 0, "absent": 1}
 
 
-def test_save_campaigns_rejects_unknown_member(tmp_path):
-    with pytest.raises(KeyError):
-        save_campaigns({"x": Campaign(slug="x", display_name="X", created="2026-01-01",
-                                      members={"ghost": CampaignMember(profile_key="ghost")})},
-                       tmp_path)
-    assert load_campaigns(tmp_path) == {}
-
-
-def test_save_campaigns_deletes_absent_slugs(tmp_path):
-    create_campaign("Alpha", data_dir=tmp_path)
-    create_campaign("Beta", data_dir=tmp_path)
-    campaigns = load_campaigns(tmp_path)
-    del campaigns["alpha"]
-    save_campaigns(campaigns, tmp_path)
-    assert set(load_campaigns(tmp_path)) == {"beta"}
-
-
 # ---------------------------------------------------------------------------
 # Concurrent mutation must not lose writes
 # ---------------------------------------------------------------------------
