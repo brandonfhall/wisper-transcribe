@@ -442,8 +442,8 @@ Other gains:
 3. A write that touches both a row and a file can't be atomic. One ordering rule applies everywhere: **the `.md` is the existence marker, the row follows it, and companion files follow the row.** Deleting a transcript goes in four steps:
    1. Read the companion paths: the audio copy's path comes from the row or sidecar, because a collision suffix (`_1`, `_2`) means it can't be derived from the stem.
    2. Unlink the `.md`.
-   3. Delete the row in one transaction. The cascade removes campaign, journal, and speaker rows and nulls recording and job links.
-   4. Unlink the companions, best-effort.
+   3. Delete the row in one transaction. The cascade removes campaign, journal, and speaker rows and nulls recording and job links. Until Phase 4, recordings are still JSON, so step 3 also calls `recording_manager.clear_transcript_link(stem)` (clears `transcript_path`, reverts `transcribed` → `completed`). Jobs are in memory until Phase 5 and need nothing.
+   4. Unlink the companions, best-effort. The source-audio copy is deleted only when its root is `output` (a recording's `combined.wav` belongs to the recording).
 
    A crash between steps 3 and 4 leaves companions with no `.md` and no row. That is the only case reconcile sweeps (see "Transcript identity").
 
@@ -458,14 +458,14 @@ Costs:
 | Data | Decision | Why |
 |------|----------|-----|
 | `speakers.json` | **DB** (`profiles`) | Relational: rosters, Discord bindings, and recordings reference it. |
-| `.npy` embeddings (256 float32, 1 KB) | **DB BLOB** (decided) | Keeps vector, `embedding_space` tag, and EMA update atomic with the row. Rename stops moving files. |
+| `.npy` embeddings (256 float32, 1 KB) | **DB BLOB** (decided) | Keeps vector, `embedding_space` tag, and EMA update atomic with the row. Rename stops moving files. `SpeakerProfile.embedding_path` becomes `embedding: Optional[np.ndarray]`, loaded with the profile (see Phase 1). |
 | `<key>.mp3` reference clips | File | Media, served by a route. Stays key-named, and rename moves it as today (after the DB commit, per the ordering rule), so the migration renames no files. |
 | `campaigns.json` | **DB** (`campaigns`, `campaign_members`, `campaign_transcripts`) | The core relational data. |
 | `journal.md` body | File | Obsidian-ready product the user reads. |
-| `journaled_sessions` | **DB** (`journal_entries`) | A stem list, so it becomes a foreign key. No longer written to `journal.md` frontmatter (decided); a journal export adds it back (see Phase 2). |
+| `journaled_sessions` | **DB** (`journal_entries`) | A stem list, so it becomes a foreign key. No longer written to `journal.md` frontmatter (decided); a journal export adds it back (see Phase 2). Body and entries now live in two stores, so folds follow the journal write rule in Phase 2. |
 | `<stem>.md` transcripts | File, plus a DB **registry row** (full text is **not** stored) | The file is the product, edited in Obsidian and synced. The row is the identity that links point at. Listing still reads frontmatter from disk, so there is no cached title to go stale. Full-text search (Phase 6) is a **derived** FTS5 index built from the files, so the DB never becomes the source of truth for the text. |
 | `.summary.md`, excerpt `.mp3`/`.txt`, source audio copy | File | Product or media. Existence is checked on disk. |
-| `_diar.json` | **Split** (decided) | `speaker_map`, `speaker_map_source`, per-label embeddings, and the audio-copy path go to the DB. `diarization_segments` (hundreds of KB, only ever read whole) stays in a slimmed `_diar.json`, treated like the other companion files. |
+| `_diar.json` | **Split** (decided) | `speaker_map`, `speaker_map_source`, per-label embeddings, and the source-audio path go to the DB. The `campaign` key is dropped (the enroll job reads `campaign_transcripts` instead). `diarization_segments` (hundreds of KB, only ever read whole) stays in a slimmed `_diar.json`, treated like the other companion files. |
 | `recordings.json` + `metadata.json` | **DB** (`recordings`, `recording_segments`, `recording_markers`) | Kills the `save_recording_merged()` re-read dance, since appends become INSERTs. |
 | WAV segments, `combined.wav`, `live_transcript.md` | File | Media. |
 | Job queue | In-memory runtime, plus a DB **history projection** | Events, closures, and cancel flags can't persist. Same DB file, not a jobs-only store. |
@@ -473,17 +473,19 @@ Costs:
 
 ### Schema (DRAFT, for discussion)
 
-One file, `<data dir>/wisper.db`. Surrogate integer ids for everything user-renamable, so a rename is one `UPDATE`. Every stored path is **relative, POSIX-separated, and resolved against a named root**, never absolute, so the same DB works on host and Docker and on Windows.
+One file, `<data dir>/wisper.db`. Surrogate integer ids for everything user-renamable, so a rename is one `UPDATE`. Every stored path is **relative, POSIX-separated, and resolved against a named root** (`output` or `recordings`) by one `db.resolve(root, rel)` helper, never absolute, so the same DB works on host and Docker and on Windows.
 
 ```
-meta(key PK, value)                     -- output_root_hint, imported_at, …
+meta(key PK, value)                     -- imported_at, …
 profiles(id PK, key UNIQUE, display_name, role, notes, enrolled_date,
          enrollment_source, embedding BLOB NULL, embedding_space)
-campaigns(id PK, slug UNIQUE, display_name, created)
+campaigns(id PK, slug UNIQUE, display_name, created,
+          journal_sha256 NULL)          -- hash of journal.md as last written by a fold
 campaign_members(campaign_id FK→campaigns CASCADE, profile_id FK→profiles CASCADE,
                  role, character, discord_user_id, PK(campaign_id, profile_id))
-transcripts(id PK, stem UNIQUE, created_at, missing_since NULL,  -- stem is relative to the output root
-            audio_rel_path NULL)                                -- durable source-audio copy, relative to the output root
+transcripts(id PK, stem UNIQUE, created_at, missing_since NULL,  -- stem: NFC-normalized, relative to the output root
+            audio_root NULL, audio_rel_path NULL)               -- source audio: root 'output' (web-upload copy)
+                                                                --   or 'recordings' (a recording's combined.wav)
 campaign_transcripts(campaign_id FK CASCADE, transcript_id FK CASCADE UNIQUE, position)
                                         -- UNIQUE(transcript_id) = one campaign per transcript
 journal_entries(campaign_id FK CASCADE, transcript_id FK CASCADE, position, folded_at)
@@ -491,9 +493,15 @@ transcript_speakers(transcript_id FK CASCADE, label, display_name, source,
                     embedding BLOB NULL, embedding_space, PK(transcript_id, label))
 recordings(id TEXT PK uuid, campaign_id FK SET NULL, transcript_id FK SET NULL, status,
            source, name, started_at, ended_at, voice_channel_id, guild_id, devices_json,
-           combined_rel_path, notes)
-recording_speakers(recording_id FK CASCADE, discord_user_id, profile_id FK SET NULL NULL)
-                                        -- NULL profile = unbound speaker
+           combined_rel_path, notes,   -- combined_rel_path is relative to the recordings root
+           job_id TEXT NULL)           -- no FK until Phase 5 adds FK→jobs SET NULL
+                                        -- per_user_dir is derived (recordings/<id>/per-user), not stored
+recording_speakers(recording_id FK CASCADE, discord_user_id, profile_id FK SET NULL NULL,
+                   PK(recording_id, discord_user_id))
+                                        -- NULL profile = unbound speaker. Replaces both discord_speakers
+                                        -- and unbound_speakers; Recording.unbound_speakers becomes derived.
+                                        -- Deleting a profile unbinds its speakers (intended: the enroll
+                                        -- button comes back, which is the recovery path).
 recording_segments(recording_id FK CASCADE, idx, stream, started_at, duration_s, rel_path, finalized)
 recording_markers(recording_id FK CASCADE, timestamp, elapsed_s)
 recording_rejoins(recording_id FK CASCADE, timestamp, close_code, attempt_number)
@@ -510,22 +518,31 @@ search_fts USING fts5(speaker, text, content='', contentless_delete=1,
 trigger: AFTER DELETE ON search_blocks → DELETE FROM search_fts WHERE rowid = old.id
 ```
 
-Alternative held open: key `recording_speakers` by profile key text (no FK). When a transcript is deleted, `recordings.transcript_id` becomes NULL, and app code reverts the status `transcribed` → `completed` in the same transaction, so the Transcribe button comes back (open question 8).
+When a transcript is deleted, `recordings.transcript_id` becomes NULL, and app code reverts the status `transcribed` → `completed` in the same transaction, so the Transcribe button comes back (decision 8).
 
 ### Transcript identity (settle before Phase 2)
 
-Today "a transcript" is `get_output_dir()/<stem>.md`. That resolves to `./output` relative to the **CWD** when that directory exists, and to `data_dir/output` otherwise. In Docker it is `/app/output`, a different bind mount from `/data`. So the same DB can see different transcript roots depending on where it was launched.
+Today "a transcript" is `get_output_dir()/<stem>.md`. That resolves to `./output` relative to the **CWD** when that directory exists, and to `<data dir>/output` otherwise (`~/Library/Application Support/wisper-transcribe/output`, `%LOCALAPPDATA%\wisper-transcribe\output`, `~/.local/share/wisper-transcribe/output`). Docker relies on the CWD check to get `/app/output`. Once the DB (always in the data dir) records which transcripts exist, a CWD-dependent transcript folder means a launch from another directory makes every transcript look deleted and every file look new.
 
-Proposed rules:
-1. The registry holds only transcripts under the resolved output root, keyed by stem. That is the web UI's scope today, and stems are unique there.
-2. `meta.output_root_hint` records the resolved root. When a later launch resolves a different root, the app logs a warning and shows a banner. It **never** marks rows missing because of the change, so launching from another directory can't wipe campaign associations.
+Rules:
+1. **The output root is a setting, not a CWD check** (decided). New `output_dir` config key, overridden by `WISPER_OUTPUT_DIR` (same pattern as `WISPER_DATA_DIR`). Blank means `<data dir>/output`. `get_output_dir()` stops looking at the CWD. Docker sets `WISPER_OUTPUT_DIR=/app/output` in the compose env anchor. The Phase 0 migration writes `output_dir` when the old CWD rule would have resolved to a `./output` other than the default, so nothing moves on upgrade. Moving transcripts later is `wisper config set output_dir <path>` (the user moves the files; reconcile re-finds them by stem).
+2. The registry holds only transcripts under the output root, keyed by stem. That is the web UI's scope today, and stems are unique there. Stems are **NFC-normalized** on register and reconcile.
 3. **Reconcile** runs at startup and on list pages, which already glob:
    - An unregistered `.md` gets a new row.
-   - A row whose `.md` is gone gets `missing_since` set but keeps its campaign position (the campaign page already renders missing entries) **and all of its companions**, because the file may come back (a sync or a Finder rename). A reappearing file clears the flag.
-   - A companion is an orphan only when it has **no `.md` and no row**. The sweep deletes only pattern-identifiable orphans (`.summary.md`, `_diar.json`, `_excerpt_*`) and never deletes a generic audio file.
-   - Rows are never deleted automatically (open question 5).
-   - **While the resolved root differs from `meta.output_root_hint`, reconcile does nothing:** no inserts, no missing flags, no sweep, until the user confirms the new root. Otherwise every old-root row would be flagged missing, and with `stem UNIQUE` a same-named `.md` in the new root would silently take over an old row's campaign association.
-4. `wisper transcribe -o elsewhere --campaign X`: register and associate only when the output lands under the output root. Otherwise warn that the web UI won't see it (decided).
+   - A row whose `.md` is gone gets `missing_since` set but keeps its campaign position (the campaign page already renders missing entries) **and all of its companions**, because the file may come back (a sync, an unmounted drive). A reappearing file clears the flag.
+   - **Case-insensitive filesystems** (macOS and Windows defaults; probed once at startup on the output dir): a `.md` whose stem matches a row case-insensitively updates that row's stored stem instead of creating a new row, so a case-only rename keeps its links.
+   - A companion is an orphan only when it has **no `.md` and no row**. The sweep deletes only pattern-identifiable orphans (`.summary.md`, `_diar.json`, `_excerpt_*`, atomic-write temp files) and never deletes a generic audio file.
+   - Rows are never deleted automatically (decision 5). A missing campaign entry gets a **Relink** action: pick an unregistered `.md` and move the old row's identity onto it, keeping campaign, journal, and speakers.
+   - On list pages reconcile does only cheap work (stat, insert, flag). A changed mtime or size marks the row stale for search (Phase 6); the background worker reindexes it, never the request.
+4. **`register(stem, *, origin)`** — `origin` is `job` (the app just wrote the file) or `reconcile` (found on disk):
+   - Live row + `job` (overwrite or re-transcribe): keep the id, campaign position, and journal entries. Replace `transcript_speakers`, the audio path (deleting the old `output`-root copy if it differs), the sidecar, and search blocks. If the transcript was already journaled, the campaign page notes "journal describes the previous version; rebuild to refresh" — no automatic un-fold.
+   - Missing row + either origin: the file is (re)appearing, so clear `missing_since`; a `job` origin also replaces speakers/audio/search as above and logs "reused stem of a previously missing transcript".
+5. **Name collisions are blocked, with an explicit overwrite** (decided):
+   - Web upload: before submitting, the route checks for `<stem>.md` in the output root. If present, the form returns "A transcript named *X* already exists" with **Overwrite** (resubmit with `overwrite=True`) and **Cancel**.
+   - Recording re-transcribe always overwrites, behind a confirmation step.
+   - CLI keeps "Skipping — use `--overwrite`", and names the campaign the existing transcript belongs to.
+   - The job re-checks immediately before writing. If the file appeared meanwhile and overwrite wasn't chosen, the job fails with "Transcript already exists" instead of today's silent skip that reports success on the old file (`pipeline.py:473`).
+6. `wisper transcribe -o elsewhere --campaign X`: register and associate only when the output lands under the output root. Otherwise warn that the web UI won't see it (decided).
 
 ### Migrating existing installs
 
@@ -540,6 +557,8 @@ Proposed rules:
   - A member whose profile key isn't in `speakers.json` is dropped and reported.
   - `journaled_sessions` entries with no transcript are dropped and reported.
   - A sidecar or metadata file that fails to parse is skipped and reported.
+  - A sidecar `input_path` under neither the output root nor the recordings root (old sidecars point at temp dirs or user-chosen files) imports as NULL audio and is reported. The enroll wizard already handles missing source audio.
+  - A sidecar `campaign` whose transcript has no `campaign_transcripts` row is associated if that campaign exists, and reported.
 - **Unparseable top-level JSON** (`speakers.json`, `campaigns.json`) rolls the transaction back, leaves `user_version` unchanged, and stops startup with a message naming the file and the backup. Importing an empty store instead would silently lose data.
 - **Import report** goes to the log and to `import-report.txt` in the backup dir.
 - **Legacy files after import are deleted** once the import transaction has committed (decided). This covers `speakers.json`, `.npy` files, `campaigns.json`, `recordings.json`, `metadata.json`, and `_diar.json` (rewritten with only `diarization_segments`). The pre-import copies in `backups/pre-sqlite-*` are kept (decided). A crash between commit and delete is harmless: the version has already moved, so nothing re-imports, and the next startup deletes files a committed migration already imported.
@@ -565,53 +584,60 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 - New `db.py`: `connect()`, `transaction()`, migrations runner, downgrade guard, backup helper.
 - `wisper db status | backup | dump`.
 - Migrations run on first `connect()`; startup in `web/app.py` calls it early so a failure is reported before serving.
-- Minimum SQLite version check (3.43, for Phase 6's contentless FTS5), so an unsupported system fails at startup instead of mid-migration.
-- Tests: `test_db.py`, plus a guard test that no module outside `db.py` calls `sqlite3.connect`, in the spirit of `test_tailwind.py`.
-- Docs: architecture.md (module map; "Database" replaces "File-store locking"), `docs/cli-reference.md`, `docs/configuration.md` (data layout, backup).
+- SQLite capability check at startup: version ≥ 3.43 **and** FTS5 compiled in, tested by creating `temp` `fts5(x, content='', contentless_delete=1)`. Either failure refuses startup with a message naming what's missing, instead of failing mid-migration.
+- **Output root setting** (Transcript identity rule 1): `output_dir` config key + `WISPER_OUTPUT_DIR`; `get_output_dir()` drops the CWD check; the migration pins a non-default CWD `./output` into `output_dir`; `docker-compose.yml` sets `WISPER_OUTPUT_DIR=/app/output`.
+- `db.resolve(root, rel)` and its inverse, the only place named roots map to directories.
+- Tests: `test_db.py`, plus a guard test that no module outside `db.py` calls `sqlite3.connect`, in the spirit of `test_tailwind.py`. Output root: default, config, env override, and the CWD-pinning migration.
+- Docs: architecture.md (module map; "Database" replaces "File-store locking"; output-root resolution), `docs/cli-reference.md`, `docs/configuration.md` (data layout, backup, `output_dir`/`WISPER_OUTPUT_DIR`), `docs/docker.md`.
 
 **Phase 1 — Profiles + campaigns** (coupled through `rename_profile()` → `rekey_member()`).
 - Import `speakers.json` and `campaigns.json`. `campaign_transcripts` temporarily holds stem text plus position.
-- Embeddings to BLOB: import `.npy`, and `load_profile_embedding()`/`update_embedding()` read and write the column.
+- Embeddings to BLOB: import `.npy`. **The one API break in Phase 1:** `SpeakerProfile.embedding_path` is replaced by `embedding: Optional[np.ndarray]`, filled by `load_profiles()` in the same query (~1 KB per profile). `load_profile_embedding(profile)` keeps its signature and returns `profile.embedding` after the embedding-space check. `update_embedding()` and `enroll_speaker()` write the column. `pipeline.py:345`'s direct `np.load(embedding_path)` switches to `load_profile_embedding()`. Reference clips stay key-named files, located by a new `reference_clip_path(key, data_dir)` helper.
 - Rename becomes one transaction across profile and memberships.
-- Changes: `speaker_manager.py`, `campaign_manager.py`. `web/routes/speakers.py` and `campaigns.py` change only if an API narrows.
+- Changes: `speaker_manager.py`, `campaign_manager.py`, `models.py`, `pipeline.py`. `web/routes/speakers.py` and `campaigns.py` change only if an API narrows. ~13 test files reference `embedding_path` (mechanical churn).
 - **`wisper speakers doctor`** (scoped in from "Speaker consistency"): lists profile pairs whose embeddings score above 0.95 cosine (likely duplicates), profiles in an old embedding space, and pipeline-shaped junk names (`AUTO_NAME_RE`: `SPEAKER_NN`, `Unknown Speaker N`). Report only, no automatic fixes; it points at `wisper speakers remove`/`rename`.
 - Tests: rewrite `test_speaker_manager.py`/`test_campaign_manager.py` internals, plus importer tests (including the dirty-data cases above), plus `speakers doctor` on synthetic near-duplicate embeddings.
 
 **Phase 2 — Transcript registry and links (fixes the #64 class).**
-- New `transcript_store.py`: `register()`, `reconcile()`, and `delete_transcript()` as the only delete path, following the ordering rule. Everything that unlinks a `.md` calls it.
-- Migration rebuilds `campaign_transcripts` onto `transcript_id`, imports `journaled_sessions` into `journal_entries`, and links recordings' `transcript_path` if Phase 4 has landed (otherwise Phase 4 does it).
+- New `transcript_store.py`: `register()` (the origin rules in "Transcript identity"), `reconcile()`, `relink()`, and `delete_transcript()` as the only delete path, following the ordering rule. Everything that unlinks a `.md` calls it.
+- Migration rebuilds `campaign_transcripts` onto `transcript_id` and imports `journaled_sessions` into `journal_entries` (setting `journal_sha256` from the current `journal.md`). Recordings' `transcript_path` is linked by Phase 4.
 - Changes:
-  - `web/routes/transcripts.py`: single delete, bulk delete, list, and campaign assign; `_delete_transcript_companions()` moves into the store.
-  - `web/routes/record.py`: `_purge_recording_files()`.
-  - `web/routes/campaigns.py`: the missing-entry rendering reads `missing_since`.
-  - `pipeline.py`: CLI registration and the `--campaign` rule.
-  - `web/jobs.py`: register on completion.
+  - `web/routes/transcripts.py`: single delete, bulk delete, list, campaign assign, and Relink; `_delete_transcript_companions()` moves into the store.
+  - `web/routes/transcribe.py`: the upload name-collision check with Overwrite/Cancel.
+  - `web/routes/record.py`: `_purge_recording_files()`; the re-transcribe confirmation.
+  - `web/routes/campaigns.py`: the missing-entry rendering reads `missing_since`; Relink; the "journal describes the previous version" note.
+  - `pipeline.py`: CLI registration, the `--campaign` rule, and the skip message naming the existing transcript's campaign.
+  - `web/jobs.py`: register on completion; the pre-write collision re-check (fail with "Transcript already exists").
+  - `recording_manager.py`: interim `clear_transcript_link(stem)` for the delete path (removed in Phase 4).
   - `journal.py`: `unjournalled_sessions()`, `update_journal()`, `rebuild_campaign()`; stop writing `journaled_sessions` into the frontmatter.
-- **Export with frontmatter:** a download or CLI export of the journal that adds `journaled_sessions` from the DB to its frontmatter. The same export path can later add DB-held metadata (campaign, speakers) to transcript or summary downloads.
   - `cli.py`: `transcripts list/move`, `campaigns journal/reorder`.
-- **Atomic file writes.** New `atomic_write_text(path, text)` helper (temp file in the same dir, then `os.replace()`, the pattern `recording_manager` already uses). Every transcript, summary, sidecar, and journal write goes through it: `pipeline.py` (transcript output), `web/jobs.py` (sidecar, excerpt `.txt`, refine, summarize, live draft), `web/enroll_shared.py` (wizard rewrite), the edit and fix-speaker routes, `speaker_registry._write_sidecar`, `journal.py`. A crash mid-write then leaves the old file or the new one, never a truncated `.md` that reconcile would register and search would index. Temp names get a recognisable prefix so reconcile can sweep leftovers.
+- **Journal write rule.** Body and entries are two stores, and the `.md`-first rule doesn't cover them (body first → a crash folds the session twice; row first → it's silently lost). A fold runs the LLM call outside any transaction, then: (1) writes the new body to a temp file, (2) in one `BEGIN IMMEDIATE` inserts the `journal_entries` row and sets `campaigns.journal_sha256` to the new body's hash, (3) `os.replace`s the temp file into place. A crash before (2) folded nothing and the temp is swept; a crash between (2) and (3) is detected as a hash mismatch with a leftover temp file, which is then moved into place. On read: `journal.md` **missing** → clear that campaign's `journal_entries` (fresh start) and log it; **present but a different hash** → the user edited it in Obsidian, which is allowed, so keep the entries and adopt the new hash. `rebuild_campaign()` clears `journal_entries` in the transaction that records its reset.
+- **Export with frontmatter:** a download or CLI export of the journal that adds `journaled_sessions` from the DB to its frontmatter. The same export path can later add DB-held metadata (campaign, speakers) to transcript or summary downloads.
+- **Atomic file writes.** New `atomic_write_text(path, text)` helper (temp file in the same dir, then `os.replace()`, the pattern `recording_manager` already uses). Every transcript, summary, sidecar, and journal write goes through it: `pipeline.py` (transcript output), `web/jobs.py` (sidecar, excerpt `.txt`, refine, summarize, live draft), `web/enroll_shared.py` (wizard rewrite), the edit and fix-speaker routes, `speaker_registry._write_sidecar`, `journal.py`. A crash mid-write then leaves the old file or the new one, never a truncated `.md` that reconcile would register and search would index. Temp names get a recognisable prefix so reconcile can sweep leftovers. **Windows:** `os.replace()` raises `PermissionError` while Obsidian or antivirus holds the target open, so the helper retries 5 times with backoff (50 → 800 ms), then falls back to an in-place write, logs a warning, and removes the temp file.
 - **Missing-transcript detection** (scoped in from the open bug): when a transcription job registers its output, it checks the `.md` exists. If not, the job fails with a distinct error ("Transcript file missing after write") instead of reporting success, and the resolved output root goes into the job log. Covers web jobs and the recording hand-off.
 - **Bulk actions UI** on `/transcripts`: row checkboxes plus a toolbar for delete and assign to campaign, wired to the existing `/transcripts/bulk-delete` and `/transcripts/bulk-campaign` routes. Those routes are rewritten in this phase anyway. Delete goes through a confirmation step. Same bulk-select pattern as `/recordings` (a separate hidden form, since rows contain their own forms).
-- Tests: cascade tests for every delete path; the missing-file job failure; bulk actions through the UI form fields; reconcile (external delete keeps order; reappearing file clears the flag; an output-root change doesn't mark rows missing); a guard test that no module outside `transcript_store.py` unlinks `*.md` in the output dir.
+- Tests: cascade tests for every delete path (including the interim recordings-JSON revert); the missing-file job failure; bulk actions through the UI form fields; reconcile (external delete keeps order; reappearing file clears the flag; case-only rename keeps the row on a case-insensitive FS; NFC and NFD names map to one row); `register()` origin cases; upload collision (form offers Overwrite; overwrite keeps campaign and journal entries; the pre-write re-check fails the job); Relink; journal write rule (crash between each step, deleted `journal.md` resets entries, edited `journal.md` keeps them, rebuild clears them); `atomic_write_text` retry and fallback with `os.replace` mocked to raise; a guard test that no module outside `transcript_store.py` unlinks `*.md` in the output dir.
 
 **Phase 3 — Diarization sidecar data.**
-- Import `_diar.json`'s speaker map, provenance, embeddings, and `input_path` into `transcript_speakers` and `transcripts.audio_rel_path`. The sidecar is rewritten with only `diarization_segments`.
-- Changes: `jobs._write_enrollment_sidecar()`, `web/enroll_shared.py` (`resolve_current_names()`, `apply_renames()`), `speaker_registry.py` (`_load_sidecar`/`_write_sidecar`, `embeddings_to/from_sidecar`), and `web/routes/transcripts.py` and `transcribe.py` (enroll wizard).
+- Import `_diar.json`'s speaker map, provenance, embeddings, and `input_path` into `transcript_speakers` and `transcripts.audio_root`/`audio_rel_path` (root `output` for web-upload copies, `recordings` for a recording's `combined.wav`; anything else → NULL, reported). The sidecar is rewritten with only `diarization_segments`.
+- The enroll job's campaign comes from `get_campaign_for_transcript(stem)` instead of the sidecar's `campaign` key (`jobs.py:1381`), so a reassigned transcript uses its current campaign.
+- Changes: `jobs._write_enrollment_sidecar()`, `JobQueue._run_wizard_enroll()` (source audio via `db.resolve()`, campaign lookup), `web/enroll_shared.py` (`resolve_current_names()`, `apply_renames()`), `speaker_registry.py` (`_load_sidecar`/`_write_sidecar`, `embeddings_to/from_sidecar`), and `web/routes/transcripts.py` and `transcribe.py` (enroll wizard).
 - `apply_renames()` rewrites the `.md` and then updates `speaker_map` rows. Under the ordering rule the file comes first. A crash in between leaves the rows stale, so the existing interval-matching fallback stays as the repair path.
 - CLAUDE.md's "`_diar.json` carries the authoritative `speaker_map`" gotcha is rewritten to name the table.
 - Tests: the largest fixture churn (36 `_diar.json` references across 6 test files), moved to a helper that seeds the DB.
 
 **Phase 4 — Recordings.**
-- Import `recordings.json`, each `metadata.json`, and `discord_speakers` → `recording_speakers.profile_id`, which fixes rename-not-rekeying for free.
-- Delete `save_recording_merged()` and the per-recording mutex; `reconcile_on_startup()` becomes one `UPDATE`.
+- Import `recordings.json`, each `metadata.json`, `discord_speakers` → `recording_speakers.profile_id`, and `unbound_speakers` → `recording_speakers` rows with NULL profile. This fixes rename-not-rekeying for free. `Recording.unbound_speakers` becomes derived; `per_user_dir` is derived from the id. `job_id` imports into its column. `transcript_path` links to `transcript_id`, and `combined_path` becomes `combined_rel_path` against the recordings root.
+- Delete `save_recording_merged()`, the per-recording mutex, and Phase 2's interim `clear_transcript_link()` (the cascade plus status revert replace it); `reconcile_on_startup()` becomes one `UPDATE`.
+- **Stuck `transcribing` fix:** today `reconcile_on_startup()` only resets `recording`/`degraded` (`recording_manager.py:451`), so a restart mid-transcription leaves `transcribing` forever, and `record.py:922` then refuses to re-transcribe. Startup also resets `transcribing` → `transcribed` if `transcript_id` is set, else `completed`, and clears `job_id` (matching the restore-on-failure logic at `record.py:936`). Phase 5 ties this to the interrupted job row.
 - **Recover crashed sessions.** Today a session interrupted by a crash is marked `failed` with no `combined.wav`, so it never gets a Transcribe button even though its segments are on disk. Startup keeps marking it `failed` (fast, no file work) and sets `recoverable` when combined segments exist. A **Recover** button on the recording page and `wisper record recover <id>` join the segments with the existing `concat_wav_segments()` (off the request thread), set `combined_rel_path`, and mark the recording `completed` with `recovered_at` set. It then shows under "Awaiting transcription" like any other, and the detail page notes it was recovered and may be missing the last partial minute. Segments are self-contained WAVs (file-format invariant 1), so recovery needs no repair step. Schema: `recordings += recovered_at NULL`; `recoverable` is derived, not stored.
 - Changes: `recording_manager.py`, `web/discord_bot.py`, `web/local_capture.py` (hot-path contract above), `web/routes/record.py`, and the `wisper record` CLI.
-- Tests: `test_recording_manager.py`, record routes, a hot-path test with the DB held busy, and recovery: a crashed session with synthetic segments becomes `completed` and transcribable; a crashed session with no segments isn't offered recovery; recovery refuses an active session.
+- Tests: `test_recording_manager.py`, record routes, a hot-path test with the DB held busy, unbound-speaker derivation (including a deleted profile unbinding its speakers), a recording in `transcribing` at startup becomes transcribable, and recovery: a crashed session with synthetic segments becomes `completed` and transcribable; a crashed session with no segments isn't offered recovery; recovery refuses an active session.
 
 **Phase 5 — Job history.**
 - Write-through from `JobQueue` at submit and at each status transition. On terminal status, store `error_code` (the same generic codes, never exception text) and the last ~200 log lines.
 - `params_json` holds an allowlisted subset of kwargs: no secrets, no temp paths. It includes the resolved output root, so a job that wrote somewhere unexpected is visible afterwards (the missing-transcript bug).
-- At startup, pending and running rows become `failed` / "Interrupted by restart". They are never auto-resumed: the uploads are gone and the jobs are multi-hour GPU work.
+- At startup, pending and running rows become `failed` / "Interrupted by restart". They are never auto-resumed: the uploads are gone and the jobs are multi-hour GPU work. In the same transaction, a recording whose `job_id` points at an interrupted job gets Phase 4's `transcribing` reset, and `recordings.job_id` gains its `FK→jobs SET NULL`.
 - The in-memory 50-job cap stays. The DB keeps every job (decided).
 - UI (decided): the dashboard keeps its 20 most recent (memory plus DB). A new paginated **Job history** page (50 per page, filter by type and status). "Jobs for this" links on transcript and campaign pages.
 - Changes: `web/jobs.py`, `web/routes/dashboard.py` and `transcribe.py`, `docs/web-ui.md`.
@@ -628,7 +654,7 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 
 *Keeping it fresh:*
 - **App writes reindex immediately.** Every path that rewrites a `.md` (wizard renames, the edit page, fix-speaker, refine, summarize, relabel) calls `transcript_store.reindex(stem)`. Indexing one transcript is one short transaction: delete its blocks, insert the new ones, record mtime and size.
-- **External edits** (Obsidian, sync) are caught by reconcile when `indexed_mtime_ns`/`indexed_size` differ from the file's.
+- **External edits** (Obsidian, sync) are caught by reconcile when `indexed_mtime_ns`/`indexed_size` differ from the file's. Reconcile only marks the row stale (`indexed_mtime_ns = NULL`); the background backfill worker does the reindex, so no parsing happens in a request.
 - **Initial build** runs as a background backfill after startup, outside the migration transaction, one transcript per transaction, so a large archive doesn't delay startup and a crash resumes where it stopped. The search page shows "Indexing N of M" until the backfill finishes.
 - **The index is disposable.** `wisper db reindex` drops and rebuilds it from the files. A corrupt or stale index is never data loss.
 
@@ -637,6 +663,8 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 - A query FTS5 still rejects returns a generic "couldn't search for that" message, never exception text.
 - Ranking uses `bm25()`, grouped by transcript on the results page.
 - **Snippets are XSS-safe:** the block text is HTML-escaped first, then the matched terms are wrapped in `<mark>`. No `| safe` on raw transcript text.
+- **Stale snippets:** snippets are rebuilt from the current `.md` by `block_idx`, so before building one the route compares the file's mtime and size to `indexed_mtime_ns`/`indexed_size`. On a mismatch it shows "Transcript changed — reindexing" without a snippet, links without an anchor, and marks the row stale.
+- **Highlighting is approximate; matching is exact.** Porter matches "fights" to "fight", but Python can't reproduce the stemmer, so each query term is highlighted by prefix: strip a common suffix (`-s`, `-es`, `-ed`, `-ing`), then match `\b<prefix>\w*` case-insensitively over the escaped text. A hit with no highlighted term is acceptable.
 
 *Changes:*
 - `transcript_store.py`: `reindex()`, the backfill, and a `search()` query helper.
@@ -645,16 +673,18 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 - CLI: `wisper search "query" [--campaign] [--speaker] [--limit]`, printing stem, timestamp, speaker, and snippet.
 - Every `.md`-rewriting path listed above gains its `reindex()` call.
 
-*Availability:* contentless-delete needs SQLite ≥ 3.43. The shipped platforms have it: this Mac's venv reports 3.53; python.org 3.13+ builds on macOS and Windows, and Debian trixie (the `python:3.14-slim` base) bundle newer. Older SQLite is **not supported** (decided): Phase 0's `db.connect()` checks `sqlite3.sqlite_version` and refuses to start below 3.43, with a message naming the version found. `docs/setup.md` lists the requirement. This affects only a local venv on an old Linux system SQLite (e.g. Ubuntu 22.04's 3.37); Docker is unaffected.
+*Availability:* contentless-delete needs SQLite ≥ 3.43. The shipped platforms have it: this Mac's venv reports 3.53; python.org 3.13+ builds on macOS and Windows, and Debian trixie (the `python:3.14-slim` base) bundle newer. Older SQLite is **not supported** (decided): Phase 0's startup check refuses to start below 3.43 or without FTS5, with a message naming what's missing. `docs/setup.md` lists the requirement. This affects only a local venv on an old Linux system SQLite (e.g. Ubuntu 22.04's 3.37); Docker is unaffected.
 
 *Tests:*
 - Block and summary indexing from synthetic transcripts.
 - Reindex on each app write path.
-- Reconcile reindexes on an mtime or size change.
+- Reconcile marks a row stale on an mtime or size change, and the backfill reindexes it.
+- A snippet for a file changed since indexing shows the "reindexing" state instead of the wrong block.
+- Highlighting: a stemmed match ("fights" → "fight") is highlighted.
 - Transcript delete leaves no `search_fts` rows (the trigger fires on cascade).
 - Query escaping: quotes, `*`, `-`, `NEAR`, and column syntax are inert.
 - XSS: `<script>` in transcript text renders escaped in snippets.
-- Filters, paging, the backfill resuming after an interruption, and CLI output. The version check (in `test_db.py`) refuses a mocked 3.42.
+- Filters, paging, the backfill resuming after an interruption, and CLI output. The capability check (in `test_db.py`) refuses a mocked 3.42 and a mocked missing FTS5.
 
 *Docs:* `docs/web-ui.md` (search page), `docs/cli-reference.md` (`wisper search`, `wisper db reindex`), architecture.md (index design, freshness rules), CLAUDE.md gotcha ("every `.md` rewrite calls `reindex()`").
 
@@ -675,24 +705,24 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
   - One cross-process import race under spawn (the macOS default): exactly one import happens.
 - **Importer tests** use a synthetic legacy data dir built by a frozen copy of today's serializers (`tests/_legacy_store.py`), so the tests don't change when the managers do. Cases: clean import, each dirty-data case, a malformed top-level file (rolls back, version unchanged, backup present), and a re-run.
 - **Invariant guards:** no raw `sqlite3.connect` outside `db.py`, no `.md` unlink outside `transcript_store.py`, no plain `write_text()` on transcript, summary, sidecar, or journal paths outside `atomic_write_text()`, and (Phase 6) every function that writes a transcript `.md` calls `reindex()`.
-- **Cross-platform paths:** relative-path round-trips through `PureWindowsPath`/`PurePosixPath`, so the Windows logic is tested on macOS and Linux CI.
+- **Cross-platform paths:** relative-path round-trips through `PureWindowsPath`/`PurePosixPath` and `db.resolve()` for both named roots, so the Windows logic is tested on macOS and Linux CI. Case-insensitive reconcile is tested by mocking the filesystem probe, so it runs on Linux CI too.
 - No CI change: `sqlite3` is stdlib, and the bundled SQLite on 3.13/3.14 (macOS, Windows, and Debian slim) supports `RETURNING`, `DROP COLUMN`, and `STRICT`.
 - Existing test rules still hold: no GPU, network, or real audio, and synthetic data only.
 
 **Docs touched across the phases:**
 - architecture.md: Module Map; Data Storage tree and "Output directory"; "File-store locking" → "Database"; Job Queue ("Nothing persists across restarts" changes in Phase 5); Test Strategy; Known Constraints (host-plus-container DB writes, WAL).
-- `docs/configuration.md`: data layout, backups, the `WISPER_DATA_DIR` + synced-folder warning.
-- `docs/setup.md`: the SQLite ≥ 3.43 requirement.
-- `docs/cli-reference.md`: `wisper db`, `wisper search`, and the `transcribe --campaign` rule, `wisper speakers doctor`, `wisper record recover`.
-- `docs/docker.md`: DB location, backup, CLI and web containers sharing `./data`.
-- `docs/scenarios.md`: restore from backup, moved output dir, externally deleted transcripts, recovering a crashed recording session.
-- `docs/web-ui.md`: missing transcripts, bulk actions, job history, search.
-- CLAUDE.md: new gotchas (connect only through `db.py`; `BEGIN IMMEDIATE`; no transaction across ML work; delete transcripts only via `transcript_store`; `speaker_map` location).
+- `docs/configuration.md`: data layout (default paths per OS), backups, `output_dir`/`WISPER_OUTPUT_DIR` (and that the CWD `./output` check is gone), the `WISPER_DATA_DIR` + synced-folder warning.
+- `docs/setup.md`: the SQLite ≥ 3.43 + FTS5 requirement.
+- `docs/cli-reference.md`: `wisper db`, `wisper search`, the `transcribe --campaign` rule and collision message, `wisper speakers doctor`, `wisper record recover`, `output_dir`.
+- `docs/docker.md`: DB location, backup, CLI and web containers sharing `./data`, `WISPER_OUTPUT_DIR=/app/output`.
+- `docs/scenarios.md`: restore from backup, moving the output dir (`output_dir`), externally deleted or renamed transcripts (Relink), deleting `journal.md`, recovering a crashed recording session.
+- `docs/web-ui.md`: missing transcripts and Relink, upload name collisions (Overwrite/Cancel), bulk actions, job history, search.
+- CLAUDE.md: new gotchas (connect only through `db.py`; `BEGIN IMMEDIATE`; no transaction across ML work; delete transcripts only via `transcript_store`; `speaker_map` location; `get_output_dir()` no longer checks the CWD).
 - README: unchanged.
 
 ### Decisions (2026-09-30)
 
-1. **Output root:** keep the current `./output` vs `data_dir/output` resolution, with the drift warning and reconcile freeze.
+1. **Output root:** a setting (`output_dir` / `WISPER_OUTPUT_DIR`, default `<data dir>/output`), no CWD check. Upgrade pins an existing CWD `./output`; Docker sets `/app/output`. Replaces the earlier drift-warning/reconcile-freeze design.
 2. **CLI `--campaign` outside the output root:** warn and skip the association.
 3. **Embeddings:** DB BLOBs. Size check: 1 KB per profile and 1 KB per label per transcript. 500 transcripts × 8 labels ≈ 4 MB, which is negligible for SQLite.
 4. **`_diar.json`:** split. Names, provenance, embeddings, and the audio path go to the DB; segments stay in a slim sidecar.
@@ -706,9 +736,14 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 12. **Full-text search:** added as Phase 6, as a derived contentless FTS5 index over transcript blocks and summaries.
 13. **Search summaries:** yes, with a transcript/summary filter.
 14. **Stemming:** `porter`.
-15. **SQLite < 3.43:** unsupported; startup refuses with a clear message.
+15. **SQLite < 3.43 or without FTS5:** unsupported; startup refuses with a clear message.
 16. **Scoped in from elsewhere in this file:** missing-transcript detection (Phases 2 and 5), `wisper speakers doctor` (Phase 1), the bulk-actions UI on `/transcripts` (Phase 2), and the Docker alignment check done alongside the Docker DB check.
-17. **Failure handling:** atomic writes for every transcript, summary, sidecar, and journal file (Phase 2); crashed recording sessions recoverable via a Recover button and `wisper record recover` (Phase 4).
+17. **Failure handling:** atomic writes for every transcript, summary, sidecar, and journal file, with a Windows retry/fallback (Phase 2); crashed recording sessions recoverable via a Recover button and `wisper record recover` (Phase 4); recordings stuck in `transcribing` reset at startup (Phases 4 and 5).
+18. **Name collisions:** blocked, with an explicit Overwrite in the web UI; recording re-transcribe overwrites after confirmation; the CLI keeps `--overwrite`. Overwrite keeps the transcript's identity, campaign, and journal entries.
+19. **Profile embeddings in the API:** `SpeakerProfile.embedding_path` → `embedding` (the one Phase 1 API break).
+20. **Journal consistency:** the DB commit is the fold's commit point, with `journal_sha256`; a deleted `journal.md` resets its entries, an edited one keeps them.
+21. **Unbound Discord speakers:** one `recording_speakers` table with NULL profile; deleting a profile unbinds its speakers. Keying by profile-key text (no FK) is dropped.
+22. **Source-audio paths:** a named root (`output` or `recordings`) plus a relative path; anything else imports as NULL.
 
 ### Open questions
 
