@@ -18,6 +18,7 @@
     <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-signal-green);letter-spacing:0.12em;margin-right:6px">
       {% if meta.date_processed %}● PROCESSED {{ meta.date_processed }}{% endif %}
     </span>
+    <a href="/jobs/history?transcript={{ name | urlencode }}" class="btn btn-secondary btn-sm" title="Every job that worked on this transcript">Jobs</a>
     <a href="/transcripts/{{ name | urlencode }}/download" class="btn btn-secondary btn-sm">Export .md</a>
     {% if has_summary %}
     <form method="post" action="/transcripts/{{ name | urlencode }}/refine" style="display:inline">

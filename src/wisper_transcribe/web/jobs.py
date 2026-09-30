@@ -62,6 +62,12 @@ _GENERIC_JOB_ERRORS = {
 }
 
 
+def _record_history(job: "Job") -> None:
+    """Write the job's current state to the ``jobs`` table (never raises)."""
+    from wisper_transcribe import job_history
+    job_history.record(job)
+
+
 class TranscriptMissingError(RuntimeError):
     """The pipeline reported a transcript path, but no file is there."""
 
@@ -379,6 +385,7 @@ class Job:
     progress: Optional[str] = None
     # Parallel mode: per-channel progress strings keyed by channel name
     progress_channels: dict[str, str] = field(default_factory=dict)
+    started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     # Set after transcription completes when enroll flow is needed
     diarization_labels: list[str] = field(default_factory=list)
@@ -499,21 +506,12 @@ class JobQueue:
         self._worker_task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
         self._on_complete_callbacks: dict[str, Callable[["Job"], None]] = {}
         self._on_error_callbacks: dict[str, Callable[["Job"], None]] = {}
-        # Recordings derive "transcribing" from this queue's jobs.
-        from wisper_transcribe.recording_manager import set_job_lookup
-        set_job_lookup(self.find_job_for_recording)
 
-    def find_job_for_recording(self, recording_id: str) -> Optional[tuple[str, bool]]:
-        """The newest transcription job for a recording, as ``(job id,
-        is_active)``, or None. Active means pending or running."""
-        latest: Optional[Job] = None
-        for job in list(self._jobs.values()):
-            if job.job_type == JOB_TRANSCRIPTION and job.recording_id == recording_id:
-                if latest is None or job.created_at >= latest.created_at:
-                    latest = job
-        if latest is None:
-            return None
-        return latest.id, latest.status in (PENDING, RUNNING)
+    def _enqueue(self, job: Job) -> None:
+        """Track a new job, record it in history, and queue it."""
+        self._jobs[job.id] = job
+        _record_history(job)
+        self._queue.put_nowait(job.id)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -596,12 +594,11 @@ class JobQueue:
             is_web_upload=is_web_upload,
             recording_id=recording_id,
         )
-        self._jobs[job.id] = job
         if on_complete is not None:
             self._on_complete_callbacks[job.id] = on_complete
         if on_error is not None:
             self._on_error_callbacks[job.id] = on_error
-        self._queue.put_nowait(job.id)
+        self._enqueue(job)
         return job
 
     def submit_llm(
@@ -625,8 +622,7 @@ class JobQueue:
             job_type=job_type,
             llm_transcript_path=transcript_path,
         )
-        self._jobs[job.id] = job
-        self._queue.put_nowait(job.id)
+        self._enqueue(job)
         return job
 
     def submit_enroll(
@@ -654,8 +650,7 @@ class JobQueue:
             enroll_groups=groups,
             enroll_device=device,
         )
-        self._jobs[job.id] = job
-        self._queue.put_nowait(job.id)
+        self._enqueue(job)
         return job
 
     def submit_standalone_enroll(
@@ -701,8 +696,7 @@ class JobQueue:
                 "update": bool(update),
             },
         )
-        self._jobs[job.id] = job
-        self._queue.put_nowait(job.id)
+        self._enqueue(job)
         return job
 
     def submit_recording_enroll(
@@ -736,8 +730,7 @@ class JobQueue:
                 "display_name": display_name,
             },
         )
-        self._jobs[job.id] = job
-        self._queue.put_nowait(job.id)
+        self._enqueue(job)
         return job
 
     def submit_live(
@@ -785,8 +778,7 @@ class JobQueue:
             live_ring_buffer=LiveRingBuffer(),
             live_output_path=output_path,
         )
-        self._jobs[job.id] = job
-        self._queue.put_nowait(job.id)
+        self._enqueue(job)
         return job
 
     def submit_journal(
@@ -817,8 +809,7 @@ class JobQueue:
             name=name or (f"Rebuild journal: {slug}" if rebuild else f"Journal: {slug}"),
             job_type=JOB_CAMPAIGN_JOURNAL,
         )
-        self._jobs[job.id] = job
-        self._queue.put_nowait(job.id)
+        self._enqueue(job)
         return job
 
     def submit_relabel(self, slug: str, name: str = "") -> Job:
@@ -832,8 +823,7 @@ class JobQueue:
             name=name or f"Re-match speakers: {slug}",
             job_type=JOB_SPEAKER_RELABEL,
         )
-        self._jobs[job.id] = job
-        self._queue.put_nowait(job.id)
+        self._enqueue(job)
         return job
 
     def set_live_noise_floor(self, job_id: str, noise_floor: float) -> bool:
@@ -900,6 +890,7 @@ class JobQueue:
             job.status = FAILED
             job.error = "Cancelled"
             job.finished_at = datetime.now()
+            _record_history(job)
             self._prune_finished_jobs()
             return True
         if job.status == RUNNING:
@@ -958,10 +949,13 @@ class JobQueue:
                 job.status = FAILED
                 job.error = "Live transcript never started -- the job queue was busy for the whole session"
                 job.finished_at = datetime.now()
+                _record_history(job)
                 self._prune_finished_jobs()
                 self._queue.task_done()
                 continue
             job.status = RUNNING
+            job.started_at = datetime.now()
+            await asyncio.to_thread(_record_history, job)
             try:
                 await asyncio.to_thread(self._run_job, job)
             except Exception as exc:
@@ -972,6 +966,11 @@ class JobQueue:
                 job.finished_at = datetime.now()
             finally:
                 # Runs exactly once per processed job, however it ended.
+                if job.status in (PENDING, RUNNING):   # a runner that forgot its terminal state
+                    job.status = COMPLETED if not job.error else FAILED
+                if job.finished_at is None:
+                    job.finished_at = datetime.now()
+                await asyncio.to_thread(_record_history, job)
                 self._prune_finished_jobs()
                 self._queue.task_done()
 

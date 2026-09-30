@@ -18,6 +18,25 @@ from wisper_transcribe.path_utils import get_output_dir
 
 router = APIRouter()
 
+RECENT_JOBS = 20
+HISTORY_PAGE_SIZE = 50
+
+
+def recent_jobs(queue, limit: int = RECENT_JOBS) -> list:
+    """The newest jobs: live ones from the queue, the rest from job history
+    (which survives restarts and the queue's 50-job cap)."""
+    from wisper_transcribe import job_history
+
+    live = queue.list_recent(limit)
+    seen = {j.id for j in live}
+    try:
+        stored, _ = job_history.list_jobs(per_page=limit)
+    except Exception:
+        stored = []
+    merged = live + [r for r in stored if r.id not in seen]
+    merged.sort(key=lambda j: j.created_at, reverse=True)
+    return merged[:limit]
+
 
 @router.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request) -> HTMLResponse:
@@ -64,7 +83,7 @@ async def dashboard(request: Request) -> HTMLResponse:
         "index.html",
         {
             "request": request,
-            "jobs": queue.list_recent(),
+            "jobs": recent_jobs(queue),
             "active_count": queue.active_count(),
             "transcript_count": transcript_count,
             "speaker_count": speaker_count,
@@ -86,7 +105,7 @@ async def jobs_partial(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
         "partials/job_rows.html",
-        {"request": request, "jobs": queue.list_recent()},
+        {"request": request, "jobs": recent_jobs(queue)},
     )
 
 
@@ -100,4 +119,42 @@ async def sidebar_status(request: Request) -> HTMLResponse:
         request,
         "partials/sidebar_status.html",
         {"request": request, "device": device, "active_jobs": active},
+    )
+
+
+@router.get("/jobs/history", response_class=HTMLResponse)
+async def job_history_page(
+    request: Request,
+    page: int = 1,
+    type: str = "",
+    status: str = "",
+    transcript: str = "",
+    campaign: str = "",
+) -> HTMLResponse:
+    """Every job ever run, newest first, 50 per page, filterable."""
+    from wisper_transcribe import job_history
+    from wisper_transcribe.web.jobs import (
+        JOB_CAMPAIGN_JOURNAL, JOB_ENROLL, JOB_LIVE, JOB_REFINE, JOB_SPEAKER_RELABEL,
+        JOB_SUMMARIZE, JOB_TRANSCRIPTION,
+    )
+
+    job_types = (JOB_TRANSCRIPTION, JOB_REFINE, JOB_SUMMARIZE, JOB_ENROLL, JOB_LIVE,
+                 JOB_CAMPAIGN_JOURNAL, JOB_SPEAKER_RELABEL)
+    type_filter = type if type in job_types else ""
+    status_filter = status if status in job_history.JOB_STATUSES else ""
+    page = max(1, page)
+    records, total = job_history.list_jobs(
+        page=page, per_page=HISTORY_PAGE_SIZE, job_type=type_filter or None,
+        status=status_filter or None, transcript=transcript or None, campaign=campaign or None,
+    )
+    pages = max(1, -(-total // HISTORY_PAGE_SIZE))
+    return templates.TemplateResponse(
+        request,
+        "job_history.html",
+        {
+            "request": request, "records": records, "total": total, "page": page, "pages": pages,
+            "job_types": job_types, "statuses": job_history.JOB_STATUSES,
+            "type_filter": type_filter, "status_filter": status_filter,
+            "transcript_filter": transcript, "campaign_filter": campaign,
+        },
     )

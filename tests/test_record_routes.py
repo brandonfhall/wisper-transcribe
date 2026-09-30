@@ -1425,6 +1425,8 @@ def _queue_fake_job(queue, fake_job):
         fake_job.recording_id = kwargs.get("recording_id")
         fake_job.job_type = "transcription"
         queue._jobs[fake_job.id] = fake_job
+        from wisper_transcribe import job_history
+        job_history.record(fake_job)
         return fake_job
     return _submit
 
@@ -1560,6 +1562,9 @@ def test_failed_transcription_leaves_recording_transcribable(client):
     assert load_recordings(tmp_path)[rec.id].status == "transcribing"
 
     fake_job.status = FAILED
+    fake_job.error = "Transcription failed"
+    from wisper_transcribe import job_history
+    job_history.record(fake_job)
     loaded = load_recordings(tmp_path)[rec.id]
     assert loaded.status == "completed"
     assert loaded.job_id == fake_job.id   # the failed job stays linked for its log
@@ -1586,6 +1591,9 @@ def test_failed_retranscribe_keeps_the_existing_transcript(client):
     with patch.object(queue, "submit", side_effect=_queue_fake_job(queue, fake_job)):
         c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
     fake_job.status = FAILED
+    fake_job.error = "Transcription failed"
+    from wisper_transcribe import job_history
+    job_history.record(fake_job)
     assert load_recordings(tmp_path)[rec.id].status == "transcribed"
 
 

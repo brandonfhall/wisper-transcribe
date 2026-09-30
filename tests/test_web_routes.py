@@ -464,13 +464,11 @@ def test_pending_recordings_excludes_non_completed_statuses(tmp_path):
     md.write_text("x", encoding="utf-8")
     rm.link_transcript(transcribed.id, md, tmp_path)
     busy = _seed_completed_recording(tmp_path, name="rec-transcribing")
+    from ._seed import seed_job
+    seed_job("22222222-2222-4222-8222-222222222222", status="running",
+             recording_id=busy.id, data_dir=tmp_path)
 
-    real_lookup = rm._job_lookup
-    rm.set_job_lookup(lambda rid: ("job", True) if rid == busy.id else None)
-    try:
-        pending, _ = _pending_recordings(tmp_path)
-    finally:
-        rm.set_job_lookup(real_lookup)
+    pending, _ = _pending_recordings(tmp_path)
     assert pending == []
 
 

@@ -29,11 +29,6 @@ from wisper_transcribe.recording_manager import (
 from ._seed import seed_profile
 
 
-@pytest.fixture(autouse=True)
-def _no_job_lookup(monkeypatch):
-    monkeypatch.setattr(rm, "_job_lookup", None)
-
-
 def _make_recording(tmp_path: Path, **kwargs):
     return create_recording(
         voice_channel_id=kwargs.get("voice_channel_id", "VC1"),
@@ -192,18 +187,20 @@ def test_transcribed_follows_the_transcript_link(tmp_path, monkeypatch):
     assert r.status == "completed" and r.transcript_path is None
 
 
-def test_transcribing_only_while_a_job_is_active(tmp_path, monkeypatch):
+def test_transcribing_only_while_a_job_is_active(tmp_path):
+    from wisper_transcribe import job_history
+
+    from ._seed import seed_job
+
+    job_id = "11111111-1111-4111-8111-111111111111"
     rec = _make_recording(tmp_path)
     update_recording_status(rec.id, "completed", tmp_path)
-    state = {"job": ("job-1", True)}
-    monkeypatch.setattr(rm, "_job_lookup", lambda rid: state["job"] if rid == rec.id else None)
+    seed_job(job_id, status="running", recording_id=rec.id, data_dir=tmp_path)
     r = load_recordings(tmp_path)[rec.id]
-    assert r.status == "transcribing" and r.job_id == "job-1"
-    state["job"] = ("job-1", False)                  # finished, failed, or cancelled
+    assert r.status == "transcribing" and r.job_id == job_id
+    job_history.mark_interrupted(tmp_path)           # a restart
     r = load_recordings(tmp_path)[rec.id]
-    assert r.status == "completed" and r.job_id == "job-1"
-    monkeypatch.setattr(rm, "_job_lookup", None)     # a restart: no queue memory
-    assert load_recordings(tmp_path)[rec.id].status == "completed"
+    assert r.status == "completed" and r.job_id == job_id
 
 
 def test_saving_a_derived_status_keeps_the_capture_state(tmp_path):

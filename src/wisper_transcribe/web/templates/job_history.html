@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Job history{% endblock %}
+
+{% block toolbar %}
+<div class="toolbar">
+  <div>
+    <div class="toolbar-kicker">Jobs</div>
+    <div style="display:flex;align-items:baseline;gap:12px">
+      <span class="toolbar-title">Job history</span>
+      <span class="toolbar-sub">{{ total }} JOBS</span>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block page %}
+<div class="studio-page">
+  <form method="get" action="/jobs/history" data-testid="job-history-filters"
+        style="display:flex;gap:10px;align-items:center;margin-bottom:18px;flex-wrap:wrap">
+    <select name="type" aria-label="Job type" style="background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:5px 8px;border-radius:4px;font-size:12px">
+      <option value="">All types</option>
+      {% for t in job_types %}<option value="{{ t }}" {% if t == type_filter %}selected{% endif %}>{{ t | replace('_', ' ') }}</option>{% endfor %}
+    </select>
+    <select name="status" aria-label="Status" style="background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:5px 8px;border-radius:4px;font-size:12px">
+      <option value="">All statuses</option>
+      {% for st in statuses %}<option value="{{ st }}" {% if st == status_filter %}selected{% endif %}>{{ st }}</option>{% endfor %}
+    </select>
+    {% if transcript_filter %}<input type="hidden" name="transcript" value="{{ transcript_filter }}"/>
+      <span class="pill pill-dim">transcript: {{ transcript_filter }}</span>{% endif %}
+    {% if campaign_filter %}<input type="hidden" name="campaign" value="{{ campaign_filter }}"/>
+      <span class="pill pill-dim">campaign: {{ campaign_filter }}</span>{% endif %}
+    <button type="submit" class="btn btn-secondary btn-sm">Filter</button>
+    {% if type_filter or status_filter or transcript_filter or campaign_filter %}
+    <a href="/jobs/history" style="font-size:12px;color:var(--color-accent)">clear</a>
+    {% endif %}
+  </form>
+
+  <div style="display:grid;grid-template-columns:150px 1.6fr 130px 100px 1.4fr;gap:14px;padding:8px 0;border-top:1px solid var(--color-rule);border-bottom:1px solid var(--color-rule);font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);letter-spacing:0.12em">
+    <div>STARTED</div><div>SUBJECT</div><div>TYPE</div><div>STATUS</div><div>RESULT</div>
+  </div>
+  {% for r in records %}
+  <a href="/transcribe/jobs/{{ r.id }}" data-testid="job-history-row"
+     style="display:grid;grid-template-columns:150px 1.6fr 130px 100px 1.4fr;gap:14px;padding:12px 0;border-bottom:1px solid var(--color-rule);align-items:center;text-decoration:none;color:inherit">
+    <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">{{ r.created_at.strftime('%Y-%m-%d %H:%M') }}</div>
+    <div style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper)">{{ r.name }}</div>
+    <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">{{ r.job_type | replace('_', ' ') }}</div>
+    <div>
+      {% if r.status == 'completed' %}<span class="pill pill-green">DONE</span>
+      {% elif r.status == 'failed' %}<span class="pill pill-rose">FAILED</span>
+      {% elif r.status == 'running' %}<span class="pill pill-cyan">RUNNING</span>
+      {% else %}<span class="pill pill-dim">QUEUED</span>{% endif %}
+    </div>
+    <div style="font-size:12px;color:var(--color-paper-faint)">{{ r.error or '' }}</div>
+  </a>
+  {% else %}
+  <div style="padding:24px 0;color:var(--color-paper-faint);font-size:13px;font-style:italic">No jobs match.</div>
+  {% endfor %}
+
+  {% if pages > 1 %}
+  {%- set qs = '&type=' ~ (type_filter | urlencode) ~ '&status=' ~ (status_filter | urlencode) ~ '&transcript=' ~ (transcript_filter | urlencode) ~ '&campaign=' ~ (campaign_filter | urlencode) -%}
+  <div style="display:flex;gap:14px;align-items:center;margin-top:18px;font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">
+    {% if page > 1 %}<a href="/jobs/history?page={{ page - 1 }}{{ qs }}" style="color:var(--color-accent)">← newer</a>{% endif %}
+    <span>page {{ page }} of {{ pages }}</span>
+    {% if page < pages %}<a href="/jobs/history?page={{ page + 1 }}{{ qs }}" style="color:var(--color-accent)">older →</a>{% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

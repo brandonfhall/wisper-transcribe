@@ -228,7 +228,17 @@ async def job_detail(request: Request, job_id: str) -> HTMLResponse:
     queue = _get_queue(request)
     job = queue.get(job_id)
     if job is None:
-        return HTMLResponse(content="Job not found", status_code=404)
+        # Not in memory (restart, or pruned past the 50-job cap): show what
+        # job history kept. The id is only a lookup key, never echoed.
+        from wisper_transcribe import job_history
+
+        safe_id = _validate_job_id(job_id)
+        record = job_history.get_job(safe_id) if safe_id else None
+        if record is None:
+            return HTMLResponse(content="Job not found", status_code=404)
+        return templates.TemplateResponse(
+            request, "job_history_detail.html", {"request": request, "record": record},
+        )
     return templates.TemplateResponse(
         request,
         "job_detail.html",

@@ -496,12 +496,42 @@ def _v5_import(conn: sqlite3.Connection, ctx: MigrationContext) -> None:
     import_recordings(conn, ctx)
 
 
+# --- v6: job history ------------------------------------------------------
+
+_V6_DDL = """
+CREATE TABLE jobs (
+  id            TEXT PRIMARY KEY CHECK (length(id) = 36),
+  type          TEXT NOT NULL CHECK (type IN ('transcription', 'refine', 'summarize', 'enroll',
+                                              'live', 'campaign_journal', 'speaker_relabel')),
+  status        TEXT NOT NULL CHECK (status IN ('pending', 'running', 'completed', 'failed')),
+  created_at    TEXT NOT NULL,
+  started_at    TEXT,
+  finished_at   TEXT,
+  error_code    TEXT,
+  transcript_id INTEGER REFERENCES transcripts(id) ON DELETE SET NULL,
+  campaign_id   INTEGER REFERENCES campaigns(id)   ON DELETE SET NULL,
+  recording_id  TEXT    REFERENCES recordings(id)  ON DELETE SET NULL,
+  params_json   TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(params_json) AND json_type(params_json) = 'object'),
+  log_tail      TEXT NOT NULL DEFAULT '',
+  CHECK (status <> 'pending' OR started_at IS NULL),
+  CHECK (status <> 'running' OR started_at IS NOT NULL),
+  CHECK ((status IN ('completed', 'failed')) = (finished_at IS NOT NULL)),
+  CHECK ((status = 'failed') = (error_code IS NOT NULL))
+) STRICT;
+CREATE INDEX jobs_created    ON jobs(created_at);
+CREATE INDEX jobs_transcript ON jobs(transcript_id);
+CREATE INDEX jobs_campaign   ON jobs(campaign_id);
+CREATE INDEX jobs_recording  ON jobs(recording_id);
+"""
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "foundation", _V1_DDL, _v1_pin_output_dir),
     Migration(2, "profiles-campaigns", _V2_DDL, _v2_import),
     Migration(3, "journal-entries", _V3_DDL, _v3_import),
     Migration(4, "transcript-speakers", _V4_DDL, _v4_import),
     Migration(5, "recordings", _V5_DDL, _v5_import),
+    Migration(6, "jobs", _V6_DDL),
 )
 LATEST_VERSION = MIGRATIONS[-1].version
 

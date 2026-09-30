@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Job {{ record.id[:8] }}{% endblock %}
+
+{% block toolbar %}
+<div class="toolbar">
+  <div>
+    <div class="toolbar-kicker"><a href="/jobs/history" style="color:inherit">Job history</a></div>
+    <div style="display:flex;align-items:baseline;gap:12px">
+      <span class="toolbar-title">{{ record.name }}</span>
+      <span class="toolbar-sub">{{ record.job_type | replace('_', ' ') | upper }}</span>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block page %}
+<div class="studio-page" data-testid="job-history-detail">
+  <div style="display:flex;gap:28px;font-family:var(--font-mono);font-size:11px;margin-bottom:20px;flex-wrap:wrap">
+    <div><div style="color:var(--color-paper-faint);letter-spacing:0.12em">STATUS</div><div style="color:var(--color-paper-dim);margin-top:3px">{{ record.status }}</div></div>
+    <div><div style="color:var(--color-paper-faint);letter-spacing:0.12em">CREATED</div><div style="color:var(--color-paper-dim);margin-top:3px">{{ record.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</div></div>
+    {% if record.finished_at %}<div><div style="color:var(--color-paper-faint);letter-spacing:0.12em">FINISHED</div><div style="color:var(--color-paper-dim);margin-top:3px">{{ record.finished_at.strftime('%Y-%m-%d %H:%M:%S') }}</div></div>{% endif %}
+    {% if record.error %}<div><div style="color:var(--color-paper-faint);letter-spacing:0.12em">ERROR</div><div style="color:var(--color-signal-rose);margin-top:3px">{{ record.error }}</div></div>{% endif %}
+  </div>
+
+  <div style="display:flex;gap:10px;margin-bottom:22px;flex-wrap:wrap">
+    {% if record.transcript_stem %}<a class="btn btn-secondary btn-sm" href="/transcripts/{{ record.transcript_stem | urlencode }}">Transcript</a>{% endif %}
+    {% if record.campaign_slug %}<a class="btn btn-secondary btn-sm" href="/campaigns/{{ record.campaign_slug | urlencode }}">Campaign</a>{% endif %}
+    {% if record.recording_id %}<a class="btn btn-secondary btn-sm" href="/recordings/{{ record.recording_id }}">Recording</a>{% endif %}
+  </div>
+
+  {% if record.params %}
+  <div class="mono-kicker" style="margin-bottom:6px">Settings</div>
+  <div style="font-family:var(--font-mono);font-size:11.5px;color:var(--color-paper-dim);margin-bottom:22px;line-height:1.7">
+    {% for k, v in record.params | dictsort %}<div>{{ k }} = {{ v }}</div>{% endfor %}
+  </div>
+  {% endif %}
+
+  <div class="mono-kicker" style="margin-bottom:6px">Log (last lines)</div>
+  <pre style="font-family:var(--font-mono);font-size:11.5px;color:var(--color-paper-dim);background:var(--color-ink-900);border:1px solid var(--color-rule);border-radius:6px;padding:12px;white-space:pre-wrap;max-height:520px;overflow:auto">{{ record.log_tail or '(no log kept)' }}</pre>
+</div>
+{% endblock %}

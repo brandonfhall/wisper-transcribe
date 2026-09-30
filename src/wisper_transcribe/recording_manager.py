@@ -15,9 +15,9 @@ so paths are never stored: :class:`~wisper_transcribe.models.Recording`'s
 the layout. So is ``status``: only the capture lifecycle is stored
 (``capture_status``); ``transcribed`` means the recording has a transcript
 (``transcript_id``, which ``ON DELETE SET NULL`` clears when the transcript
-is deleted) and ``transcribing`` means a transcription job is active for it,
-asked of the job queue through :func:`set_job_lookup`. A restart has no
-active job, so a recording can never be stuck in ``transcribing``.
+is deleted) and ``transcribing`` means a pending or running transcription
+job for it exists in ``jobs``. Startup marks jobs left pending or running as
+interrupted, so a recording can never be stuck in ``transcribing``.
 
 Writes never lose each other's updates: :func:`save_recording` updates the
 recording's own fields and only *adds* missing segment, marker, and rejoin
@@ -32,7 +32,7 @@ import uuid
 import wave
 from datetime import UTC, datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 
 from . import db
 from .config import get_data_dir
@@ -97,31 +97,6 @@ def _dt(s: Optional[str]) -> Optional[datetime]:
 
 
 # ---------------------------------------------------------------------------
-# Derived "transcribing": asked of the job queue
-# ---------------------------------------------------------------------------
-
-# recording id -> (latest job id, whether it is pending or running).
-_job_lookup: Optional[Callable[[str], Optional[tuple[str, bool]]]] = None
-
-
-def set_job_lookup(fn: Optional[Callable[[str], Optional[tuple[str, bool]]]]) -> None:
-    """Register how to find a recording's transcription job (the web
-    ``JobQueue`` does this). Without one, nothing is ``transcribing``."""
-    global _job_lookup
-    _job_lookup = fn
-
-
-def _job_for(recording_id: str) -> Optional[tuple[str, bool]]:
-    if _job_lookup is None:
-        return None
-    try:
-        return _job_lookup(recording_id)
-    except Exception:
-        log.debug("job lookup failed for %s", recording_id, exc_info=True)
-        return None
-
-
-# ---------------------------------------------------------------------------
 # Load
 # ---------------------------------------------------------------------------
 
@@ -131,7 +106,12 @@ def _load(conn: sqlite3.Connection, data_dir: Optional[Path],
 
     rows = conn.execute(
         "SELECT r.*, c.slug AS campaign_slug, t.stem AS transcript_stem, "
-        "d.guild_id, d.voice_channel_id FROM recordings r "
+        "d.guild_id, d.voice_channel_id, "
+        "(SELECT j.id FROM jobs j WHERE j.recording_id = r.id AND j.type = 'transcription' "
+        " ORDER BY j.created_at DESC, j.rowid DESC LIMIT 1) AS latest_job_id, "
+        "EXISTS (SELECT 1 FROM jobs j WHERE j.recording_id = r.id AND j.type = 'transcription' "
+        " AND j.status IN ('pending', 'running')) AS job_active "
+        "FROM recordings r "
         "LEFT JOIN campaigns c ON c.id = r.campaign_id "
         "LEFT JOIN transcripts t ON t.id = r.transcript_id "
         "LEFT JOIN recording_discord d ON d.recording_id = r.id "
@@ -163,10 +143,9 @@ def _load(conn: sqlite3.Connection, data_dir: Optional[Path],
     for r in rows:
         rid = r["id"]
         started = _dt(r["started_at"])
-        job = _job_for(rid)
         if r["transcript_stem"] is not None:
             status = "transcribed"
-        elif r["capture_status"] == "completed" and job is not None and job[1]:
+        elif r["capture_status"] == "completed" and r["job_active"]:
             status = "transcribing"
         else:
             status = r["capture_status"]
@@ -199,7 +178,7 @@ def _load(conn: sqlite3.Connection, data_dir: Optional[Path],
             ],
             notes=r["notes"],
             unbound_speakers=[s["discord_user_id"] for s in spk if s["key"] is None],
-            job_id=job[0] if job else None,
+            job_id=r["latest_job_id"],
             source=r["source"],
             devices={d["role"]: d["device_name"] for d in devices.get(rid, [])},
             name=r["name"],

@@ -66,6 +66,24 @@ def sidecar_data(sidecar_path: Path) -> dict:
     return data
 
 
+def seed_job(job_id: str, *, job_type: str = "transcription", status: str = "pending",
+             recording_id: Optional[str] = None, data_dir: Optional[Path] = None) -> None:
+    """A row in job history (e.g. an active transcription for a recording)."""
+    import types
+    from datetime import datetime
+
+    from wisper_transcribe import job_history
+
+    now = datetime.now()
+    job_history.record(types.SimpleNamespace(
+        id=job_id, job_type=job_type, status=status, created_at=now,
+        started_at=now if status != "pending" else None,
+        finished_at=now if status in ("completed", "failed") else None,
+        error="Cancelled" if status == "failed" else None, kwargs={}, log_lines=[],
+        recording_id=recording_id, output_path=None,
+    ), data_dir)
+
+
 def seed_recording(data_dir: Optional[Path] = None, *, status: str = "completed",
                    with_audio: bool = True, **kwargs):
     """A recording in ``status`` with the real on-disk layout: when

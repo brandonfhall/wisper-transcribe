@@ -152,6 +152,7 @@
                   title="Re-match automatically named speakers in every session against the roster. Names you set by hand are kept."
                   onclick="return confirm('Re-match speakers in all {{ active_campaign.transcripts|length }} sessions? Automatically assigned names may change; names you set by hand are kept.')">Re-match speakers</button>
         </form>
+        <a href="/jobs/history?campaign={{ slug | urlencode }}" class="btn btn-secondary btn-sm" title="Journal and re-match jobs for this campaign">Jobs</a>
         {% endif %}
       </div>
     </div>

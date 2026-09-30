@@ -33,7 +33,7 @@ Once storage moves to SQLite: with the web server in Docker Desktop (Mac or Wind
 - **Windows launcher dependency refresh.** `start.bat` reinstalls dependencies when `pyproject.toml` is newer than `.venv\.wisper-deps` (untested on Windows): update an existing install with `git pull`, double-click `start.bat`, confirm the one-time "Dependencies changed" reinstall runs, and that a second launch skips it.
 - **Docker image with forced alignment.** Do this in the same session as the SQLite migration's Docker check (CLI and web containers sharing `./data`). The "Docker Build" workflow is disabled on GitHub, so nothing builds the image automatically. Confirm the CPU and GPU images build with `transformers`, and that a diarized job on the GPU image downloads the alignment model into `./cache/` and logs "Aligned words".
 - **SQLite branch capture path (Phase 4).** Record a few minutes (Discord and local), add markers (including two in quick succession), stop, Transcribe, Re-transcribe, then delete the transcript and confirm the recording is transcribable again. Kill the server mid-session once, restart, and use **Recover recording**. The Live Discord acceptance test below covers the JDA half.
-- **SQLite branch UI (Phase 2).** In a browser, with `WISPER_DATA_DIR` pointing at a copy of real data: the stale-journal notice (move a folded session to another campaign) on the Campaign and Journal pages; **Rebuild journal** vs **Rebuild from transcripts** confirmations and their call counts; journal **Download** includes `journaled_sessions`; delete a transcript that's in a campaign and on a recording (recording returns to "Awaiting transcription").
+- **SQLite branch UI (Phase 2).** In a browser, with `WISPER_DATA_DIR` pointing at a copy of real data: the stale-journal notice (move a folded session to another campaign) on the Campaign and Journal pages; **Rebuild journal** vs **Rebuild from transcripts** confirmations and their call counts; journal **Download** includes `journaled_sessions`; Job history page, filters, paging, and a historical job's page after a restart; delete a transcript that's in a campaign and on a recording (recording returns to "Awaiting transcription").
 - **macOS loopback (PR #59).** Record page on a Mac with BlackHole installed: BlackHole appears under System Audio and captures audio.
 
 ---
@@ -427,9 +427,9 @@ Nothing else changes; the wire protocol is the stable interface.
 
 ---
 
-## Storage — SQLite migration (in progress: Phases 0–4 done)
+## Storage — SQLite migration (in progress: Phases 0–5 done)
 
-Branch `feat/sqlite-storage`. Phase 0 (`db.py`, `wisper db`, output-root setting, guards, Windows CI job) Phase 1 (profiles, campaigns, transcript registry table, `speakers doctor`), Phase 2 (transcript store, journal entries, reconcile, collisions), Phase 3 (per-transcript speakers), and Phase 4 (recordings, derived status, Recover) are implemented; Phases 5–7 remain. The schema below is signed off. Decisions are listed under "Decisions" at the end.
+Branch `feat/sqlite-storage`. Phase 0 (`db.py`, `wisper db`, output-root setting, guards, Windows CI job) Phase 1 (profiles, campaigns, transcript registry table, `speakers doctor`), Phase 2 (transcript store, journal entries, reconcile, collisions), Phase 3 (per-transcript speakers), Phase 4 (recordings, derived status, Recover), and Phase 5 (job history) are implemented; Phases 6 (full-text search) and 7 (cleanup, full doc review, test re-evaluation) remain. The schema below is signed off. Decisions are listed under "Decisions" at the end.
 
 ### Why, and what SQLite does and doesn't fix
 
@@ -866,7 +866,9 @@ Original scope:
 - Changes: `recording_manager.py`, `web/discord_bot.py`, `web/local_capture.py` (hot-path contract above), `web/routes/record.py`, and the `wisper record` CLI.
 - Tests: `test_recording_manager.py`, record routes, a hot-path test with the DB held busy, unbound-speaker derivation (including a deleted profile unbinding its speakers), derived status (`transcribed` follows `transcript_id`; `transcribing` only while a job is active; a restart mid-job leaves it transcribable), the subtype constraints, and recovery: a crashed session with synthetic segments becomes `completed` and transcribable; a crashed session with no segments isn't offered recovery; recovery refuses an active session.
 
-**Phase 5 — Job history.**
+**Phase 5 — Job history. Done** (migration v6). Notes: `job_history.py` holds the DB side (write-through from `JobQueue._enqueue()`, worker start/finish, pending cancel); recordings' derived `transcribing`/job link query `jobs` directly (the Phase 4 `set_job_lookup()` bridge is gone); history page at `/jobs/history` (`/jobs` was already the dashboard's live-rows partial); historical job page is `job_history_detail.html`. `test_enum_checks_mirror_python_constants` lives in `test_job_history.py`. Not yet checked in a browser (added to Manual verification owed).
+
+Original scope:
 - Write-through from `JobQueue` at submit and at each status transition. On terminal status, store `error_code` (the same generic codes, never exception text) and the last ~200 log lines.
 - `params_json` holds an allowlisted subset of kwargs: no secrets, no temp paths. It includes the resolved output root, so a job that wrote somewhere unexpected is visible afterwards (the missing-transcript bug).
 - At startup, pending and running rows become `failed` / "Interrupted by restart". They are never auto-resumed: the uploads are gone and the jobs are multi-hour GPU work. A recording's `transcribing` state and its "view job" link now come from `jobs.recording_id` (latest job), so recordings need no job column and job history survives restarts.
@@ -1013,7 +1015,7 @@ Original scope:
 
 ### Open questions
 
-None. Schema signed off (decision 30). Phases 0–4 done; next: Phase 5.
+None. Schema signed off (decision 30). Phases 0–5 done; next: Phase 6.
 
 ---
 

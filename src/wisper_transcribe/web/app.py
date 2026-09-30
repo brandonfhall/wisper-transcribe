@@ -146,6 +146,14 @@ def create_app() -> FastAPI:
             raise
         heartbeat = db.Heartbeat().start()
 
+        # Jobs left pending/running died with the last process.
+        try:
+            from wisper_transcribe import job_history
+            job_history.mark_interrupted()
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning("Could not mark interrupted jobs", exc_info=True)
+
         # Register transcripts added while the server was down, flag deleted
         # ones, and sweep crash leftovers (temp files, orphaned companions).
         try:
