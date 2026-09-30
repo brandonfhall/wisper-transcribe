@@ -430,6 +430,32 @@ def delete_recording(recording_id: str, data_dir: Optional[Path] = None) -> None
     tmp.replace(index_path)
 
 
+def clear_transcript_link(stem: str, data_dir: Optional[Path] = None) -> int:
+    """Unlink a deleted transcript from the recording(s) that produced it.
+
+    Clears ``transcript_path`` and reverts ``transcribed`` to ``completed`` so
+    the recording can be transcribed again. Called by
+    ``transcript_store.delete_transcript()``. Interim: once recordings move to
+    the database (SQLite migration Phase 4), ``ON DELETE SET NULL`` does this.
+
+    Returns the number of recordings updated.
+    """
+    changed = 0
+    for rec in load_recordings(data_dir).values():
+        if rec.transcript_path is None or rec.transcript_path.stem != stem:
+            continue
+        with _get_recording_lock(rec.id):
+            current = load_recordings(data_dir).get(rec.id)
+            if current is None:
+                continue
+            current.transcript_path = None
+            if current.status == "transcribed":
+                current.status = "completed"
+            save_recording(current, data_dir)
+            changed += 1
+    return changed
+
+
 # ---------------------------------------------------------------------------
 # Crash recovery
 # ---------------------------------------------------------------------------

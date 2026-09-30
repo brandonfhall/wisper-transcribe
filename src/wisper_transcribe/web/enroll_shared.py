@@ -23,6 +23,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
+from wisper_transcribe.transcript_store import atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -306,7 +307,7 @@ def apply_renames(
         from wisper_transcribe.formatter import rewrite_frontmatter_speakers
         content = rewrite_frontmatter_speakers(content, frontmatter_renames)
 
-    md_path.write_text(content, encoding="utf-8")
+    atomic_write_text(md_path, content)
 
     # Record every submitted label's current name so the sidecar stays
     # authoritative for the next visit.
@@ -322,7 +323,7 @@ def apply_renames(
             diar["speaker_map_source"] = sources
         try:
             sidecar_path = md_path.with_name(md_path.stem + "_diar.json")
-            sidecar_path.write_text(_json.dumps(diar, indent=2), encoding="utf-8")
+            atomic_write_text(sidecar_path, _json.dumps(diar, indent=2))
         except Exception:
             pass
 

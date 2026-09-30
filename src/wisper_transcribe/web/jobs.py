@@ -25,6 +25,7 @@ from typing import Any, Callable, Optional
 import tqdm as _tqdm_module
 
 from wisper_transcribe.pipeline import process_file
+from wisper_transcribe.transcript_store import atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -169,7 +170,7 @@ def _write_enrollment_sidecar(job: "Job", output_path: "Path") -> None:  # type:
             from wisper_transcribe.speaker_registry import embeddings_to_sidecar
             sidecar.update(embeddings_to_sidecar(job.speaker_embeddings))
         sidecar_path = out.with_name(out.stem + "_diar.json")
-        sidecar_path.write_text(_json.dumps(sidecar, indent=2), encoding="utf-8")
+        atomic_write_text(sidecar_path, _json.dumps(sidecar, indent=2))
     except Exception:
         pass
 
@@ -342,7 +343,7 @@ def _extract_speaker_excerpts(job: "Job", output_path: "Path",  # type: ignore[n
         # Persist the transcript snippet to disk so it survives server restarts.
         text_path = out_dir / f"{stem}_excerpt_{safe_name}.txt"
         try:
-            text_path.write_text(text, encoding="utf-8")
+            atomic_write_text(text_path, text)
         except Exception:
             pass
 
@@ -1513,8 +1514,8 @@ class JobQueue:
                 refined_md, edits = md, []
             if edits and refined_md != md:
                 backup = transcript_path.with_suffix(transcript_path.suffix + ".bak")
-                backup.write_text(md, encoding="utf-8")
-                transcript_path.write_text(refined_md, encoding="utf-8")
+                atomic_write_text(backup, md)
+                atomic_write_text(transcript_path, refined_md)
                 job.append_log(
                     f"Applied {len(edits)} edit(s). Backup: {backup.name}"
                 )
@@ -1541,7 +1542,7 @@ class JobQueue:
                 )
                 out_path = default_summary_path(transcript_path)
                 body = render_markdown(note, profiles=profiles)
-                out_path.write_text(body, encoding="utf-8")
+                atomic_write_text(out_path, body)
                 job.append_log(f"Summary written: {out_path.name}")
                 job.summary_path = str(out_path)
             except (LLMUnavailableError, LLMResponseError) as exc:

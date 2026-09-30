@@ -35,6 +35,7 @@ from .campaign_manager import (
 from .llm import LLMClient
 from .models import SpeakerProfile
 from .path_utils import get_output_dir
+from .transcript_store import atomic_write_text
 
 JOURNAL_FILENAME = "journal.md"
 
@@ -253,7 +254,7 @@ def update_journal(slug: str, client: LLMClient,
                               getattr(client, "provider", ""),
                               getattr(client, "model", ""))
     jpath.parent.mkdir(parents=True, exist_ok=True)
-    jpath.write_text(rendered, encoding="utf-8")
+    atomic_write_text(jpath, rendered)
 
     return JournalResult(
         path=jpath,
@@ -332,7 +333,7 @@ def rebuild_campaign(slug: str, client: LLMClient,
             continue
 
         body = render_markdown(note, profiles=profiles, sections=sections)
-        default_summary_path(transcript_path).write_text(body, encoding="utf-8")
+        atomic_write_text(default_summary_path(transcript_path), body)
         resummarized.append(stem)
         result.resummarized.append(stem)
 

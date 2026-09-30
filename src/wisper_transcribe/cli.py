@@ -35,6 +35,7 @@ _ensure_utf8_stdio()
 
 from . import __version__
 from . import config as _config
+from .transcript_store import atomic_write_text
 
 
 class _WisperGroup(click.Group):
@@ -1309,7 +1310,7 @@ def fix(transcript: Path, speaker: str, new_name: str, re_enroll: bool):
 
     content = transcript.read_text(encoding="utf-8")
     updated = update_speaker_names(content, speaker, new_name)
-    transcript.write_text(updated, encoding="utf-8")
+    atomic_write_text(transcript, updated)
     click.echo(f"Updated {transcript.name}: {speaker!r} → {new_name!r}")
 
     if re_enroll:
@@ -1448,8 +1449,8 @@ def refine(transcript: Path, tasks_raw: str, provider: Optional[str],
         return
 
     backup = transcript.with_suffix(transcript.suffix + ".bak")
-    backup.write_text(original, encoding="utf-8")
-    transcript.write_text(refined_md, encoding="utf-8")
+    atomic_write_text(backup, original)
+    atomic_write_text(transcript, refined_md)
     click.echo(f"\nWrote {transcript}. Backup at {backup}.")
 
 
@@ -1541,8 +1542,8 @@ def summarize(transcript: Path, provider: Optional[str], model: Optional[str],
 
         if applied_edits and refined_md != current_md:
             backup = transcript.with_suffix(transcript.suffix + ".bak")
-            backup.write_text(current_md, encoding="utf-8")
-            transcript.write_text(refined_md, encoding="utf-8")
+            atomic_write_text(backup, current_md)
+            atomic_write_text(transcript, refined_md)
             click.echo(f"Refine applied {len(applied_edits)} edit(s). "
                        f"Backup: {backup}")
             current_md = refined_md
@@ -1564,7 +1565,7 @@ def summarize(transcript: Path, provider: Optional[str], model: Optional[str],
         raise click.ClickException(str(exc))
 
     body = render_markdown(note, profiles=profiles, sections=sections)
-    out_path.write_text(body, encoding="utf-8")
+    atomic_write_text(out_path, body)
     click.echo(f"Wrote {out_path}")
     click.echo(
         f"  sections: {', '.join(sections)} | "

@@ -502,19 +502,18 @@ def _purge_recording_files(recording, data_dir: Path) -> None:
     if recording.status in ACTIVE_STATUSES:
         return
 
-    from wisper_transcribe.web.routes.transcripts import _delete_transcript_companions
+    from wisper_transcribe.path_utils import get_output_dir
+    from wisper_transcribe.transcript_store import delete_transcript
 
     rec_dir = data_dir / "recordings" / recording.id
     shutil.rmtree(rec_dir, ignore_errors=True)
 
+    # The transcript is deleted only when it's the one under the output root
+    # (the only place the hand-off writes); anything else isn't ours to delete.
     if recording.transcript_path is not None:
-        stem = recording.transcript_path.stem
-        try:
-            if recording.transcript_path.exists():
-                recording.transcript_path.unlink()
-        except OSError:
-            pass
-        _delete_transcript_companions(stem)
+        out_dir = os.path.abspath(str(get_output_dir()))
+        if os.path.dirname(os.path.abspath(str(recording.transcript_path))) == out_dir:
+            delete_transcript(recording.transcript_path.stem)
 
 
 @router.post("/api/recordings/{recording_id}/delete")

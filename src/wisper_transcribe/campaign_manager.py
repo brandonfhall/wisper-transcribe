@@ -74,10 +74,9 @@ def _profile_id(conn: sqlite3.Connection, key: str) -> int:
 
 def _transcript_id(conn: sqlite3.Connection, stem: str) -> int:
     """The registry row for ``stem``, created if absent."""
-    from .legacy_import import ensure_transcript_row
-    from .path_utils import get_output_dir
+    from .transcript_store import ensure_row
 
-    return ensure_transcript_row(conn, _nfc(stem), get_output_dir())
+    return ensure_row(conn, stem)
 
 
 def _write_order(conn: sqlite3.Connection, campaign_id: int, transcript_ids: list[int]) -> None:

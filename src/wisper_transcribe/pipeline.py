@@ -654,21 +654,39 @@ def process_file(
             include_timestamps=include_timestamps,
         )
 
-        out_path.write_text(content, encoding="utf-8")
+        from .transcript_store import atomic_write_text, register
+        atomic_write_text(out_path, content)
         tqdm.write(f"  Wrote {out_path.name}")
 
-        # Associate transcript with campaign so the list view can group it.
-        if campaign:
-            try:
-                from .campaign_manager import move_transcript_to_campaign
-                move_transcript_to_campaign(out_path.stem, campaign)
-            except Exception:
-                pass  # Non-fatal — transcript is still written
+        # Register it (the .md first, then the row) and associate its
+        # campaign — only under the output root, the web UI's scope.
+        if _under_output_root(out_path):
+            register(out_path.stem, origin="job")
+            if campaign:
+                try:
+                    from .campaign_manager import move_transcript_to_campaign
+                    move_transcript_to_campaign(out_path.stem, campaign)
+                except Exception:
+                    tqdm.write(f"  Warning: could not add it to campaign {campaign!r}")
+        elif campaign:
+            tqdm.write(
+                f"  Note: not added to campaign {campaign!r} — {out_path.parent} is outside "
+                "the transcripts folder, so the web UI won't see it "
+                "(see `wisper config set output_dir`)."
+            )
 
         return out_path
     finally:
         if wav_path != path:
             wav_path.unlink(missing_ok=True)
+
+
+def _under_output_root(out_path: Path) -> bool:
+    """True when ``out_path`` is directly in the transcript output root."""
+    import os
+
+    from .path_utils import get_output_dir
+    return os.path.realpath(out_path.parent) == os.path.realpath(get_output_dir())
 
 
 def _folder_output_path(input_path: Path, output_dir: Optional[Path], folder: Path) -> Path:

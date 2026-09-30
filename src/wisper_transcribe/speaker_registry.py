@@ -20,6 +20,7 @@ from typing import Callable, Optional
 import numpy as np
 
 from .config import EMBEDDING_SPACE, load_config
+from .transcript_store import atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -139,7 +140,7 @@ def _load_sidecar(md_path: Path) -> Optional[dict]:
 
 def _write_sidecar(md_path: Path, diar: dict) -> None:
     path = md_path.with_name(md_path.stem + "_diar.json")
-    path.write_text(json.dumps(diar, indent=2), encoding="utf-8")
+    atomic_write_text(path, json.dumps(diar, indent=2))
 
 
 def _backfill_embeddings(diar: dict, segments: list, device: str) -> Optional[dict[str, np.ndarray]]:

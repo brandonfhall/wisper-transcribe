@@ -1649,3 +1649,64 @@ def test_forced_alignment_runs_in_parallel_stages_path(tmp_path):
 def test_forced_alignment_auto_language_passes_none(tmp_path):
     align_words, _ = _run_with_alignment(tmp_path, device="cuda", language="auto")
     assert align_words.call_args.args[3] is None
+
+
+# ---------------------------------------------------------------------------
+# Registration: output under the output root is registered and associated
+# ---------------------------------------------------------------------------
+
+_PIPELINE_PATCHES = [
+    patch("wisper_transcribe.pipeline.check_ffmpeg"),
+    patch("wisper_transcribe.pipeline.validate_audio"),
+    patch("wisper_transcribe.pipeline.get_duration", return_value=60.0),
+    patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS),
+    patch("wisper_transcribe.pipeline.get_hf_token", return_value="fake-token"),
+    patch("wisper_transcribe.diarizer.diarize", return_value=[]),
+    patch("wisper_transcribe.aligner.align", return_value=[]),
+    patch("wisper_transcribe.speaker_manager.match_speakers", return_value={}),
+]
+
+
+def _run_process_file(audio, **kwargs):
+    import contextlib
+
+    from wisper_transcribe.pipeline import process_file
+
+    with contextlib.ExitStack() as stack:
+        for p in _PIPELINE_PATCHES:
+            stack.enter_context(p)
+        stack.enter_context(patch("wisper_transcribe.pipeline.convert_to_wav", return_value=audio))
+        return process_file(audio, device="cpu", no_diarize=True, **kwargs)
+
+
+def test_output_in_root_is_registered_and_joins_campaign(tmp_path, capsys):
+    from wisper_transcribe import db
+    import wisper_transcribe.campaign_manager as cm
+    from wisper_transcribe.path_utils import get_output_dir
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    cm.create_campaign("Game")
+    out = _run_process_file(audio, output_dir=get_output_dir(), campaign="game")
+
+    assert out.exists()
+    with db.connection() as conn:
+        rows = conn.execute("SELECT stem, missing_since FROM transcripts").fetchall()
+    assert [tuple(r) for r in rows] == [("session01", None)]
+    assert cm.get_transcripts_for_campaign("game") == ["session01"]
+
+
+def test_output_outside_root_skips_campaign_with_note(tmp_path, capsys):
+    from wisper_transcribe import db
+    import wisper_transcribe.campaign_manager as cm
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    elsewhere = tmp_path / "elsewhere"
+    cm.create_campaign("Game")
+    _run_process_file(audio, output_dir=elsewhere, campaign="game")
+
+    assert cm.get_transcripts_for_campaign("game") == []
+    with db.connection() as conn:
+        assert conn.execute("SELECT count(*) FROM transcripts").fetchone()[0] == 0
+    assert "outside the transcripts folder" in capsys.readouterr().out
