@@ -83,11 +83,17 @@ async def campaign_detail(request: Request, slug: str) -> HTMLResponse:
     # campaigns, or removed by hand). Shown as missing, not pruned: an
     # unavailable output dir would otherwise wipe every assignment.
     from wisper_transcribe.path_utils import get_output_dir
-    out_dir = get_output_dir()
-    missing = {
-        stem for stem in campaign.transcripts
-        if os.path.basename(stem) != stem or not (out_dir / f"{stem}.md").exists()
-    }
+    base_dir = os.path.abspath(str(get_output_dir()))
+    if not base_dir.endswith(os.sep):
+        base_dir += os.sep
+
+    def _transcript_missing(stem: str) -> bool:
+        # Stems come from campaigns.json; same basename + abspath guard as routes.
+        safe = os.path.basename(stem)
+        candidate = os.path.abspath(os.path.join(base_dir, safe + ".md"))
+        return safe != stem or not candidate.startswith(base_dir) or not os.path.exists(candidate)
+
+    missing = {stem for stem in campaign.transcripts if _transcript_missing(stem)}
 
     return templates.TemplateResponse(
         request,
