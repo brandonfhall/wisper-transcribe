@@ -439,7 +439,13 @@ Other gains:
 **Foreign keys alone don't close the bug class:**
 1. SQLite ships with `PRAGMA foreign_keys` **off**, and it is set per connection. Every connection must go through one `db.connect()` that turns it on, and a test must enforce that.
 2. Files are deleted out of band: Finder, Obsidian, a different launch CWD, an unmounted Docker volume. A foreign key can't see that, so a **reconcile pass** is still needed (see "Transcript identity").
-3. A write that touches both a row and a file can't be atomic. One ordering rule applies everywhere: **the `.md` is the existence marker, the row follows it, and companion files follow the row.** Deleting a transcript: unlink the `.md`, delete the row in one transaction (the cascade removes campaign, journal, and speaker rows and nulls recording and job links), then unlink companions best-effort. Companions a crash leaves behind are swept by reconcile.
+3. A write that touches both a row and a file can't be atomic. One ordering rule applies everywhere: **the `.md` is the existence marker, the row follows it, and companion files follow the row.** Deleting a transcript goes in four steps:
+   1. Read the companion paths: the audio copy's path comes from the row or sidecar, because a collision suffix (`_1`, `_2`) means it can't be derived from the stem.
+   2. Unlink the `.md`.
+   3. Delete the row in one transaction. The cascade removes campaign, journal, and speaker rows and nulls recording and job links.
+   4. Unlink the companions, best-effort.
+
+   A crash between steps 3 and 4 leaves companions with no `.md` and no row. That is the only case reconcile sweeps (see "Transcript identity").
 
 Costs:
 - A one-time import on every existing install.
@@ -453,7 +459,7 @@ Costs:
 |------|----------|-----|
 | `speakers.json` | **DB** (`profiles`) | Relational: rosters, Discord bindings, and recordings reference it. |
 | `.npy` embeddings (256 float32, 1 KB) | **DB BLOB** recommended (open question 3) | Keeps vector, `embedding_space` tag, and EMA update atomic with the row. Rename stops moving files. |
-| `<key>.mp3` reference clips | File | Media, served by a route. Keyed by profile id, so rename doesn't move it. |
+| `<key>.mp3` reference clips | File | Media, served by a route. Stays key-named, and rename moves it as today (after the DB commit, per the ordering rule), so the migration renames no files. |
 | `campaigns.json` | **DB** (`campaigns`, `campaign_members`, `campaign_transcripts`) | The core relational data. |
 | `journal.md` body | File | Obsidian-ready product the user reads. |
 | `journaled_sessions` | **DB** (`journal_entries`) | A stem list, so it becomes a foreign key. The frontmatter copy is open question 10. |
@@ -505,7 +511,12 @@ Today "a transcript" is `get_output_dir()/<stem>.md`. That resolves to `./output
 Proposed rules:
 1. The registry holds only transcripts under the resolved output root, keyed by stem. That is the web UI's scope today, and stems are unique there.
 2. `meta.output_root_hint` records the resolved root. When a later launch resolves a different root, the app logs a warning and shows a banner. It **never** marks rows missing because of the change, so launching from another directory can't wipe campaign associations.
-3. **Reconcile** (at startup and on list pages, which already glob): an unregistered `.md` gets a new row; a row whose `.md` is gone gets `missing_since` set but keeps its campaign position (the campaign page already renders missing entries). A reappearing file clears the flag. Orphaned companions with no `.md` are deleted. Rows are never deleted automatically (open question 5).
+3. **Reconcile** runs at startup and on list pages, which already glob:
+   - An unregistered `.md` gets a new row.
+   - A row whose `.md` is gone gets `missing_since` set but keeps its campaign position (the campaign page already renders missing entries) **and all of its companions**, because the file may come back (a sync or a Finder rename). A reappearing file clears the flag.
+   - A companion is an orphan only when it has **no `.md` and no row**. The sweep deletes only pattern-identifiable orphans (`.summary.md`, `_diar.json`, `_excerpt_*`) and never deletes a generic audio file.
+   - Rows are never deleted automatically (open question 5).
+   - **While the resolved root differs from `meta.output_root_hint`, reconcile does nothing:** no inserts, no missing flags, no sweep, until the user confirms the new root. Otherwise every old-root row would be flagged missing, and with `stem UNIQUE` a same-named `.md` in the new root would silently take over an old row's campaign association.
 4. `wisper transcribe -o elsewhere --campaign X`: register and associate only when the output lands under the output root. Otherwise warn that the web UI won't see it (open question 2).
 
 ### Migrating existing installs
@@ -574,7 +585,7 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 - Changes: `jobs._write_enrollment_sidecar()`, `web/enroll_shared.py` (`resolve_current_names()`, `apply_renames()`), `speaker_registry.py` (`_load_sidecar`/`_write_sidecar`, `embeddings_to/from_sidecar`), and `web/routes/transcripts.py` and `transcribe.py` (enroll wizard).
 - `apply_renames()` rewrites the `.md` and then updates `speaker_map` rows. Under the ordering rule the file comes first. A crash in between leaves the rows stale, so the existing interval-matching fallback stays as the repair path.
 - CLAUDE.md's "`_diar.json` carries the authoritative `speaker_map`" gotcha is rewritten to name the table.
-- Tests: the largest fixture churn (36 direct `_diar.json` writes across 6 test files), moved to a helper that seeds the DB.
+- Tests: the largest fixture churn (36 `_diar.json` references across 6 test files), moved to a helper that seeds the DB.
 
 **Phase 4 — Recordings.**
 - Import `recordings.json`, each `metadata.json`, and `discord_speakers` → `recording_speakers.profile_id`, which fixes rename-not-rekeying for free.
