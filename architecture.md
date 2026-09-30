@@ -297,7 +297,7 @@ They coexist only because of the one-job-at-a-time invariant: layer 2 wraps one 
 - **VAD:** `vad_filter` goes straight to faster-whisper's bundled Silero VAD. Timestamps stay relative to the original audio.
 - **Vocabulary:** `hotwords` (boosted tokens) and `initial_prompt` (fake prior context). `--vocab-file` (one word per line, `#` comments) overrides config `hotwords`.
 - **Compute type:** `resolve_compute_type()` maps `auto` to `float16` on CUDA and `int8` on CPU; explicit values pass through.
-- **MLX (Apple Silicon):** `use_mlx` = `auto` (use MLX if `mlx-whisper` imports), `true` (require it), `false` (faster-whisper CPU). Models come from `mlx-community/whisper-*-mlx` via `_MLX_MODEL_MAP`. MLX has no hotwords param, so hotwords are prefixed into `initial_prompt`; `vad_filter` is ignored.
+- **MLX (Apple Silicon):** `use_mlx` = `auto` (use MLX if `mlx-whisper` imports), `true` (require it), `false` (faster-whisper CPU). Models come from `mlx-community/whisper-*-mlx` via `_MLX_MODEL_MAP`. MLX has no hotwords param, so hotwords are prefixed into `initial_prompt`; `vad_filter` is ignored. `verbose=False` is passed for its progress bar (see "Job progress display").
 
 ### Module-level model caches
 `transcriber._model`, `diarizer._pipeline`, `speaker_manager._embedding_model`, and `word_alignment._fa_model`/`_fa_processor` are module globals so folder runs and the web server don't reload multi-GB models per file. Tests reset them to `None`.
@@ -631,9 +631,11 @@ CodeQL scans every PR. The patterns (see also CLAUDE.md):
 
 ### Job progress display
 The job page shows step pills and one bar split into equal per-step slices:
-- Transcription: T → D → F (→ R → S with post-processing). Refine: R. Summarize: S. Enroll: E. Journal: J.
+- Transcription: T → D (→ A) → F (→ R → S with post-processing). Refine: R. Summarize: S. Enroll: E. Journal: J.
+- **Align step:** shown when `Job.will_align` is true, which mirrors `process_file()` (diarization on, a HuggingFace token, `forced_alignment_enabled()` for the job's device). `JobQueue.submit()` freezes the `forced_alignment` setting into the job's kwargs so the pill and the run agree if the config changes while queued. The "Aligning" bar and the "Aligned words" log line drive it.
 - The active step is detected from log keywords; tqdm percentages fill its slice. Parallel mode fills T and D from their channels.
-- With no tqdm update for ≥5 s (LLM steps, enrollment), the bar creeps ~1 %/5 s up to 90 % of the slice.
+- With no tqdm update for ≥5 s (LLM steps, enrollment), the bar creeps ~1 %/5 s up to 90 % of the slice. The ETA and rate clear when a step starts, so a finished step's `0:00` doesn't linger.
+- MLX transcription reports real progress: `_transcribe_mlx()` passes `verbose=False`, which enables mlx-whisper's frame-based tqdm bar (the default `None` disables it). It advances once per 30 s decoding window.
 - The `done` event carries `summary_path` and `job_type` so the page shows the right follow-up links.
 
 ### Transcripts and dashboard
@@ -667,7 +669,8 @@ The job page shows step pills and one bar split into equal per-step slices:
 
 - Tests live in `tests/`, one `test_<module>.py` per module (routes are grouped in `test_web_routes.py`, `test_record_routes.py`, and `test_record_live_routes.py`).
 - **No GPU, network, or real audio.** `WhisperModel`, pyannote `Pipeline`, and embedding extraction are mocked; `load_wav_as_tensor` returns a fake tensor dict.
-- `tests/conftest.py` autouse-patches `pipeline.load_config` with a safe baseline so a developer's real config can't leak in. Enrollment tests patch `speaker_manager.load_profiles`.
+- `tests/conftest.py` autouse-patches `pipeline.load_config` with a safe baseline (including `forced_alignment = false`, so no test loads the real aligner on a GPU machine) so a developer's real config can't leak in, and points `WISPER_DATA_DIR` at a fresh temp dir so no test reads or writes the developer's real campaigns, profiles, or config. Enrollment tests patch `speaker_manager.load_profiles`.
+- The aligner's tests (`test_word_alignment.py`) use a fake processor/model but the real `split_words_for_alignment()` from transformers, so word-mapping rules are tested against the actual splitter. `scripts/alignment_eval.py`'s pure logic is tested in `test_alignment_eval.py`.
 - Real LLM HTTP calls are blocked for the whole suite; clients are tested with mocked httpx and fake SDK modules injected via `sys.modules`.
 - Web tests use `TestClient`. Live-recording tests use a `JobQueue` that is never started, and inject jobs directly, so no real worker loads a model.
 - Infinite SSE endpoints are tested by pulling one chunk from the `StreamingResponse` body iterator, not over HTTP.
@@ -688,7 +691,8 @@ The job page shows step pills and one bar split into equal per-step slices:
 | Constraint | Detail |
 |-----------|--------|
 | torchcodec on Windows | Needs FFmpeg's full-shared build; bypassed by scipy pre-loading |
-| MPS on Apple Silicon | CTranslate2 has no MPS backend. With `[macos]`, transcription uses MLX; otherwise CPU. Diarization and embeddings use MPS |
+| MPS on Apple Silicon | CTranslate2 has no MPS backend. With `[macos]`, transcription uses MLX; otherwise CPU. Diarization, embeddings, and word alignment use MPS |
+| Forced alignment scope | 11 languages (others keep Whisper times); `auto` skips CPU-only machines (~9–20 min per 2.5 h session); no confidence score, so a misplaced word can't be filtered; one timeline can't represent overlapped speech |
 | Thread safety | Model globals aren't thread-safe: the web queue runs one job at a time; folder mode uses processes |
 | pyannote license | HF token + one-time model license acceptance |
 | No web auth | Recording and all other endpoints are unauthenticated; the server assumes localhost or a trusted network |

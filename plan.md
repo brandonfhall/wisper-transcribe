@@ -28,116 +28,34 @@ A local-recording `JOB_TRANSCRIPTION` job reported COMPLETED and logged "Wrote `
 
 ---
 
-## Forced word alignment (in progress)
+## Forced word alignment — remaining
 
-Speaker identity is now consistent (#63); the remaining attribution error is **timing**. `aligner.py` gives each word to the diarization turn it overlaps most, using faster-whisper's word timestamps. Those are a by-product of decoding, not a measurement, and at speaker changes they put words in the neighbouring turn. `_smooth_word_speakers` (fold runs of ≤2 words or <1 s into the neighbours) papers over this and also swallows genuine one-word interjections.
+Shipped on `feat/forced-alignment` (design in `architecture.md`, "Forced word alignment"): Qwen3-ForcedAligner-0.6B re-times Whisper's words before speaker assignment; `forced_alignment = auto` (on for CUDA/MPS); Align step on the job page. Phases 3–4 (smoothing re-tune, exclusive diarization) were measured and left unchanged. What's left is confirming it with labels.
 
-Forced alignment re-times each already-transcribed word against the audio. faster-whisper stays the decoder; only `Word.start`/`Word.end` change.
+### Gate: needs labels (user action)
 
-### Engine: Qwen3-ForcedAligner-0.6B (decided 2026-09-29)
+- **Podcast excerpts:** `alignment-eval/{e1-64m,e2-03m,e3-09m,e2-128m}/` on the dev Mac. Per excerpt: learn the voices from `speakers.txt`, listen to `clip.wav`, fill `correct_speaker` in `sheet.csv` (the 76 `discriminating` rows first), then `python scripts/alignment_eval.py score alignment-eval/*/`.
+- **Full-episode web UI comparison (E1, 2 h):** `alignment-eval/e1-webui-diff.csv`, 121 places where aligned and unaligned transcripts disagree (155 of 20,675 words). User spot-check so far: aligned right 4/4.
+- **Ship rule:** keep `aligned` if it beats `whisper` and no excerpt gets worse. If `aligned-guard-1s`, `aligned-smooth-1w`/`aligned-nosmooth`, or `aligned-exclusive` wins, change the default to match (all are arms in the script).
+- **Best evidence would be one Hanataz excerpt,** the live-table audio the feature is for.
 
-Run through the native `transformers` implementation (`Qwen/Qwen3-ForcedAligner-0.6B-hf`, `Qwen3ASRForTokenClassification` + `Qwen3ASRProcessor`, in transformers ≥5.17). Not through the `qwen-asr` package, which pins `transformers==4.57.6` (→ `huggingface_hub<1.0`) and pulls in gradio, flask, librosa, nagisa and soynlp.
+### Results so far
 
-- **License:** Apache-2.0 weights and code. No sign-off needed, and weights may be baked into Docker images.
-- **How it works:** non-autoregressive. The processor splits the transcript into words, puts two `<timestamp>` slots after each, and the model classifies every slot into an 80 ms bin in one forward pass. `decode_forced_alignment` repairs non-monotonic bins. There's no acoustic model or CTC path, so there's no untranscribed-speech drift to absorb (MMS_FA needed a star token for that).
-- **Dependency:** new direct dependency `transformers>=5.17`. It fits the current environment: needs `huggingface_hub>=1.5` (venv 1.23) and `tokenizers>=0.23.1` (venv 0.23.1); faster-whisper allows `tokenizers<1`. torch stays as is; transformers only needs `torch>=2.5`.
-- **Model:** 0.6B params, ~1.7 GB download. Downloaded from the HF hub into the HF cache (ungated, no token), which Docker already persists via `./cache:/root/.cache/huggingface`.
-- **Languages:** 11 (zh, en, yue, fr, de, it, ja, ko, pt, ru, es). The model never sees the language; it only picks the word splitter. Space-delimited and CJK text use the default splitter. Japanese and Korean need `nagisa` / `soynlp`, and `prepare_forced_aligner_inputs` raises on a language outside the 11.
-- **Limits:** 180 s per input (per-segment crops are far below that); 80 ms timestamp resolution.
+- **Hanataz spike (2026-09-29, RTX 3090, 10 min):** proxy 90.0% → 97.0%; words moved >1 s: aligned placement heard 28 vs Whisper's 1.
+- **Podcast, M5 (2026-09-30, four 3-min crosstalk excerpts):** proxy 94.6–98.0% → 97.5–98.3% (flat in one excerpt). But words moved >1 s favoured Whisper 8 vs 1 (12 words, 3 changed speaker): edited audio has little drift, so large moves there are mostly the aligner reaching into a neighbour's speech. Hence the `aligned-guard-1s` arm.
+- **Full E1 via web UI:** identical text/diarization/speaker map between runs; one-word "islands" inside another speaker's run: unaligned 10, aligned 3.
+- **Speed (M5):** ~11 s per 10 min on MPS (fp16), 80 s for a 2 h episode; CPU ~22 s per 10 min.
 
-### Test results (2026-09-29, real session audio)
+### Fallback engine
 
-10-min excerpt of Hanataz 2026-09-19 (30:00–40:00), production transcribe + community-1 diarize, RTX 3090, transformers 5.17 + torch 2.13. Proxy = words whose midpoint lies inside their assigned speaker's diarization turn.
-
-| | Whisper | MMS_FA + star (±0.25 s) | Qwen3-FA (no pad) |
-|---|---|---|---|
-| Proxy | 90.0% | 97.4% | 97.0% |
-| Words shifted >1 s | – | 49 | 40 |
-| >1 s shifts, aligned vs Whisper right (exactly one heard) | – | 31 vs 3 | 28 vs 1 |
-| Same, content words only (≥4 letters, no stopwords) | – | 8 vs 1 | 8 vs 0 |
-| Known drift cases "in" (115.13), "grease" (162.76) | right | wrong (119.31, 164.48) | right (115.17, 162.76) |
-| Known fixes "he's" 39.15→~41.5, "i'm" 47.03→~50.2 | wrong | right | right |
-| Cross-word order inversions | – | 7 | 3 |
-| Time per 10 min (GPU) | – | 5–6 s | 2.4 s at batch 16; 17 s at batch 1 |
-| Peak VRAM | – | 1.0 GB (fp16) | 2.0 GB at batch 1; 5.6 GB at batch 16 |
-| CPU (8 threads) | – | ~7× realtime | ~7× realtime (fp32) |
-
-- **Head-to-head:** where the two aligners disagree by >1 s and re-transcription hears exactly one, Qwen (no pad) and MMS_FA tie 3–3. With ±0.25 s padding Qwen loses 3–7, so padding hurts.
-- **Crop padding:** no padding gives the fewest inversions (3). Padding 0.5/1.0 s gives 53/92 inversions and moves "grease" early (162.26/161.76). Qwen places words anywhere in the crop, so padding lets a segment's words claim its neighbour's audio.
-- **Re-transcription audit method:** window `[t − 0.5, t + 1.0]` around each candidate; count only words heard at exactly one candidate (closer candidates are often both heard). Function words turn up anywhere in crosstalk, hence the content-word row. Small samples; directional.
-- **Native vs `qwen-asr` package:** same results except 6 of 1369 words (word-splitting differences).
-- **Alignment confidence:** not exposed. The decoder takes `argmax` over bins; `decode_forced_alignment` returns no scores.
-
-### Apple Silicon results (2026-09-30, M5, 32 GB)
-
-10-min excerpt of an `example-file/` podcast episode (Impossible Landscapes S1E2, 30:00–40:00; edited audio, 6 speakers), MLX large-v3-turbo transcription + community-1 diarization on MPS.
-
-| | MLX Whisper times | Qwen3-FA |
-|---|---|---|
-| Proxy | 94.9% | 99.0% |
-| Micro-runs (≤2 words, before smoothing) | 6 | 9 |
-| Words shifted >1 s | – | 3 |
-| Time per 10 min, MPS, batch 8 | – | 10.6 s fp16 · 11.2 s bf16 · 16.5 s fp32; bf16 batch 1 22 s, batch 16 8 s |
-| Time per 10 min, CPU fp32, batch 8 | – | 35.5 s unsorted; 22.5 s with segments sorted by length |
-| MPS driver memory, batch 8 | – | 4.2 GB fp16/bf16 · 7.7 GB fp32 |
-
-- fp16 on MPS matched fp32 to the 80 ms bin on every word; bf16 differed on 1–2. The module uses fp16 on MPS.
-- MPS is ~2–3× CPU speed, so `auto` keeps MPS. ~3 min per 2.5 h session.
-- Edited podcast audio has less crosstalk than a live table, so the Whisper baseline is higher than the Hanataz clip's 90%.
-
-### MMS_FA (evaluated, not chosen)
-
-`torchaudio.pipelines.MMS_FA` + `forced_align` with a star token was the first spike. No new dependency and ~1 GB fp16, but:
-- CC-BY-NC weights;
-- the star token only partly stops crosstalk drift (the "in"/"grease" misses above);
-- a torchaudio that's in maintenance mode, whose latest release (2.11) trails torch (2.14) and declares no torch requirement.
-
-It's the fallback if the transformers dependency ever becomes a problem. Recipe details are in git history (`6286e21`).
-
-Others ruled out: nyra-forced-aligner (non-commercial licence, English only, absorbs untranscribed speech into neighbouring words); FuseAlign (no released weights); WhisperX / `ctc-forced-aligner` (same CTC approach as MMS_FA, heavier dependencies). Published benchmarks (FA-Bench Buckeye, approximate: MMS-FA ~35 ms, Qwen3-FA ~35 ms, WhisperX ~40 ms MAE) measure tens-of-ms precision on clean transcripts, not multi-second misplacement under crosstalk.
-
-### Decisions
-
-- **No crop padding:** each Whisper segment is aligned against exactly `[seg.start, seg.end]`.
-- **Batching:** 8 on CUDA/MPS, 4 on CPU, segments sorted by length; an OOM batch is split in half and retried.
-- **Language:** no detected-language plumbing. `transcribe()` discards `info.language`, so pass the configured language when it's set explicitly (mapping unsupported ones to "skip alignment, keep Whisper times"), and `None` (default splitter) under auto-detect. Japanese/Korean alignment needs the optional `nagisa`/`soynlp`; without them, keep Whisper times for that job and log it.
-- **Default:** config key `forced_alignment` = `auto` | `true` | `false`. `auto` aligns when diarization runs on a GPU, CUDA or MPS, since CPU adds ~20 min per 2.5 h session. Never with `--no-diarize`; timing only matters for speaker attribution. MPS measured at ~2–3× CPU on an M5, so it stays in `auto`.
-
-### Phases
-
-1. **Done:** `word_alignment.py` + `tests/test_word_alignment.py`; design in `architecture.md` ("Forced word alignment"). `align_words()` returns `(segments, AlignmentStats)` and logs the summary line itself. Words map to items exactly through the processor's own per-word split instead of fuzzy text matching.
-2. **Done:** wired into `process_file()` (both paths), `forced_alignment` config key (`auto` default), Config page field, `--forced-align/--no-forced-align`, `wisper setup` pre-download. `wisper config set` and the Config page now reject values outside a choice key's list. `scripts/alignment_eval.py` (`run` / `audit` / `sheet` / `score`) is the measurement tool, documented in `docs/scenarios.md`.
-3. **Measured; no change pending labels.** Smoothing stays at 2 words / 1.0 s. On the four podcast excerpts below it re-assigned only 7 words, and at least 3 were clear mid-phrase flips from diarization jitter ("magic [and] wonder", "[they] talk on a video screen", "[pulls his headphones] off"); none looked like a swallowed interjection. The proxy prefers no smoothing, but that's circular: it rewards agreement with the diarization's own jitter. `aligned-smooth-1w` and `aligned-nosmooth` stay as arms so the labels can overturn this.
-4. **Measured; no change pending labels.** `exclusive_speaker_diarization` showed no consistent proxy gain (the proxy scores it against the *regular* turns, which biases it down). It stays as two arms (`aligned-exclusive`, `aligned-exclusive-nosmooth`).
-
-### Measurement status (2026-09-30)
-
-Four 3-min excerpts with the most diarization speaker changes (100+ per 3 min, 5–7 speakers), from the `example-file/` podcast episodes. Output is in `alignment-eval/` (gitignored, on the dev Mac).
-
-| Proxy | e1-64m | e2-03m | e3-09m | e2-128m |
-|---|---|---|---|---|
-| whisper | 96.3% | 98.0% | 96.6% | 94.6% |
-| aligned (shipped) | 98.3% | 97.7% | 98.2% | 97.5% |
-| aligned-guard-1s | 98.0% | 97.7% | 98.2% | 97.5% |
-| aligned-nosmooth | 98.7% | 98.0% | 98.4% | 98.3% |
-| aligned-exclusive | 98.3% | 97.5% | 98.2% | 97.5% |
-
-- **Aligned vs Whisper disagree** on the speaker of 28 of 1,762 words (4–10 per excerpt). Those are what the labels decide.
-- **Large-shift audit disagrees with the Hanataz spike.** On the podcast, 12 words moved >1 s; re-transcription heard 1 at the aligned placement vs 8 at Whisper's (content words 1 vs 3). On Hanataz it was 28 vs 1. Only 3 of the 12 ("if you remember", e1-64m 2:52) changed speaker. Edited podcast audio has little drift to fix, so large moves there are mostly the aligner reaching into a neighbour's speech; live-table audio has real drift. `aligned-guard-1s` (keep Whisper's time for moves >1 s) is an arm so the labels can test a guard.
-
-- **Full-episode web UI comparison (E1, 2 h).** Same file transcribed with `forced_alignment` true vs false: identical text, diarization and speaker map, so only timing differs. 155 of 20,675 words (0.75%) change speaker, in 121 places (105 single words). One-word "islands" inside another speaker's run: unaligned 10, aligned 3. User spot-check of 4 disputed rows: aligned right 4/4 (2 islands, 2 boundaries). Sheet: `alignment-eval/e1-webui-diff.csv`. Small sample (4/4 is p≈0.06 under a coin flip), but consistent with the triage.
-
-**Gate: not passed; needs labels (user action).** For each excerpt: read `speakers.txt` to learn the voices, listen to `clip.wav`, and fill `correct_speaker` in `sheet.csv`. The 76 rows marked `discriminating` (9 / 20 / 27 / 20) are listed first and decide the result; the other 322 only check that nothing got worse. Then `python scripts/alignment_eval.py score alignment-eval/*/`. Ship as-is if `aligned` beats `whisper` and no excerpt gets worse; if `aligned-guard-1s` or a smoothing arm wins, change the default to match. Ideally repeat with one Hanataz excerpt, which is the audio the feature is for.
+`torchaudio.pipelines.MMS_FA` + star token was spiked first: no new dependency, but CC-BY-NC weights, weaker on crosstalk drift, and torchaudio is in maintenance mode. Use it only if the transformers dependency becomes a problem; recipe in git history (`6286e21`).
 
 ### Risks
 
-- **Whisper text errors** (misheard or hallucinated words) still get placed somewhere. Watch the >1 s shifts in the audit; on podcast audio most >1 s moves were wrong (see Measurement status).
-- **No confidence signal:** Qwen returns bins, not scores, so bad placements can't be filtered. The audit is the only check.
-- **Overlapped speech:** one word timeline can't represent two people talking at once. Alignment only helps the words Whisper transcribed.
-- **CPU-only installs:** ~9 min (M5) to ~20 min per 2.5 h session, which is why `auto` needs a GPU.
-- **VRAM:** the model (~1.2 GB weights; 3–4 GB in use at batch 8) stays resident next to Whisper and pyannote as module globals in the sequential path, plus the batch's activations. Tight on 8 GB cards; batch size and OOM retry handle it.
-- **transformers churn:** `Qwen3ASR*` is new in 5.x, and API names may shift in later releases. Pin a lower bound, test on upgrade, and cover the calls in tests.
-- **Small samples:** the spike used one 10-min excerpt of one session; the Mac measurement is four 3-min excerpts of edited podcast audio.
+- **Whisper text errors** still get placed somewhere, and there's no confidence score to filter bad placements.
+- **Overlapped speech:** one word timeline can't represent two people at once.
+- **VRAM:** the model (~1.2 GB weights; 3–4 GB in use at batch 8) stays resident beside Whisper and pyannote; tight on 8 GB cards (batch halving on OOM helps).
+- **transformers churn:** `Qwen3ASR*` is new in 5.x; names may shift. The lower bound is pinned and the calls are covered by tests.
 
 ---
 
@@ -148,13 +66,6 @@ Shipped in #63; the design is in `architecture.md`. What's left:
 - **Profile cleanup (user action).** Re-enroll every profile after the embedding-model change; delete the `speaker_*` / `SPEAKER_NN` junk and duplicate profiles; enroll Mike and Ben from sessions where they're clearly separated. Consider a `wisper speakers doctor` check that flags identical or near-identical (>0.95) profile embeddings.
 - **Diarization measurement set.** 8–12 hand-corrected excerpts of 2–3 min, stratified by speaker count (2–3 / 4–5 / 6–8), in-room vs remote, low vs high overlap. Report DER split into missed / false alarm / confusion (`pyannote.metrics`) plus JER, and compare configs with a paired bootstrap over recordings (B ≥ 1000). The 0.55 threshold and the community-1 choice rest on one session pair until this exists.
 - **Ruled out for now:** Sortformer (4-speaker cap), DiariZen (CC-BY-NC), NVIDIA Nemotron diarization (no independent validation). Revisit only if community-1 plateaus on the measurement set.
-
----
-
-## Job page progress — known improvements
-
-- **Real Transcribe progress on MLX (Apple Silicon).** The Transcribe stage shows a moving bar but `ETA 0:00`: `_transcribe_mlx()` calls `mlx_whisper.transcribe()` without `verbose`, and the default `verbose=None` disables mlx-whisper's own tqdm bar (`tqdm(total=content_frames, unit="frames", disable=verbose is not False)` in `mlx_whisper/transcribe.py`). With no tqdm data, the job page falls back to the 5 s creep estimator, which was built for LLM steps (`2246e01`); the `0:00` is the extraction bar's last ETA, never replaced. `verbose` has never been set in `transcriber.py` history, so the real bar was never tried, not rejected. Fix: pass `verbose=False`; it advances once per 30 s decoding window, and its ETA/percent flow through the existing tqdm capture. Try on a short clip first; clear the stale ETA when a step changes.
-- **Align stage.** Forced alignment has no stage on the job page: `detectPhase()` maps "align" to Diarize, so the label stays "Diarizing…" and the Aligning bar restarts from 0% inside the Diarize slice (the bar jumps back once). Fix: an Align step between Diarize and Format, shown only when alignment will run, with its own slice.
 
 ---
 

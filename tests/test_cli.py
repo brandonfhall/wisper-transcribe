@@ -1513,3 +1513,16 @@ def test_setup_aligner_download_failure_is_a_warning(tmp_path, monkeypatch):
          patch("huggingface_hub.snapshot_download", side_effect=OSError("offline")):
         result = CliRunner().invoke(main, ["setup"], input="\n\n\n\n")
     assert "alignment model download failed" in result.output
+
+
+@pytest.mark.parametrize("mlx,expected", [(True, "transcription uses MLX"), (False, "install the [macos] extra")])
+def test_setup_mps_note_reflects_mlx(tmp_path, monkeypatch, mlx, expected):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("HUGGINGFACE_TOKEN", "hf_fake")
+    with patch("wisper_transcribe.config.check_ffmpeg"), \
+         patch("wisper_transcribe.config.get_device", return_value="mps"), \
+         patch("wisper_transcribe.transcriber._is_mlx_available", return_value=mlx), \
+         patch("pyannote.audio.Pipeline.from_pretrained"), \
+         patch("huggingface_hub.snapshot_download"):
+        result = CliRunner().invoke(main, ["setup"], input="\n\n\n\n")
+    assert expected in result.output

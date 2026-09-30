@@ -477,3 +477,14 @@ def test_transcribe_reuses_model_on_matching_key():
     cached.transcribe.assert_called_once()
     t._model = None
     t._model_key = None
+
+
+def test_transcribe_mlx_enables_progress_bar():
+    """verbose=False (not None) turns on mlx-whisper's tqdm bar, which the job page parses."""
+    import wisper_transcribe.transcriber as t
+
+    mock_mlx = MagicMock()
+    mock_mlx.transcribe.return_value = {"segments": []}
+    with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+        t._transcribe_mlx(Path("fake.wav"), model_size="medium")
+    assert mock_mlx.transcribe.call_args.kwargs["verbose"] is False

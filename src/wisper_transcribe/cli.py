@@ -232,7 +232,12 @@ def setup():
     labels = {"cuda": "NVIDIA GPU (CUDA)", "mps": "Apple Silicon GPU (MPS)", "cpu": "CPU"}
     click.echo(f"   OK  : {labels.get(device, device)}")
     if device == "mps":
-        click.echo("   Note: transcription uses CPU (CTranslate2 limitation); diarization uses MPS")
+        from .transcriber import _is_mlx_available
+        if _is_mlx_available():
+            click.echo("   Note: transcription uses MLX; diarization and word alignment use MPS")
+        else:
+            click.echo("   Note: transcription uses CPU (install the [macos] extra for MLX); "
+                       "diarization and word alignment use MPS")
 
     # ── HuggingFace token ─────────────────────────────────────────────────────
     click.echo("\n>> Checking HuggingFace token...")

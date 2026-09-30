@@ -50,8 +50,8 @@ Large uploads show a byte-level progress bar ("Uploading… N%", then "Processin
 
 ### Job page
 
-- A progress bar with per-step pills: **T**ranscribe → **D**iarize → **F**ormat, plus **R**efine / **S**ummarize when requested. Enrollment jobs show **E**, journal jobs **J**.
-- A live log, ETA, and speed.
+- A progress bar with per-step pills: **T**ranscribe → **D**iarize → **A**lign → **F**ormat, plus **R**efine / **S**ummarize when requested. **Align** appears only when forced word alignment will run for the job (the setting is fixed when you submit, so changing the Config page while a job is queued doesn't change it). Enrollment jobs show **E**, journal jobs **J**.
+- A live log, ETA, and speed. On Apple Silicon (MLX) the Transcribe ETA updates about every 30 s of audio.
 - **Stop Job** cancels a pending or running job. A running transcription stops at its next progress update; the GPU may finish its current batch first.
 - Failed jobs show a generic message ("Transcription failed — see server logs"). The full error is in the server log (the terminal running `wisper server`, or the `--debug` log file).
 - The job list keeps the 50 most recently finished jobs. Transcripts themselves are never pruned.

@@ -1597,3 +1597,55 @@ def test_append_live_line_under_cap_does_not_trim():
     job.append_live_line({"speaker": "You", "text": "hi", "start_s": 0, "end_s": 1})
     assert len(job.live_lines) == 1
     assert job.live_lines_dropped == 0
+
+
+# ---------------------------------------------------------------------------
+# Forced alignment: frozen setting and the job page's Align step
+# ---------------------------------------------------------------------------
+
+
+def _config(**kw):
+    base = {"forced_alignment": "auto", "hf_token": "hf_fake"}
+    base.update(kw)
+    return base
+
+
+def test_submit_freezes_forced_alignment_setting():
+    q = _make_queue()
+    with patch("wisper_transcribe.config.load_config", return_value=_config(forced_alignment="false")):
+        job = q.submit("/tmp/test.mp3")
+    assert job.kwargs["forced_alignment"] == "false"
+
+
+def test_submit_keeps_explicit_forced_alignment():
+    q = _make_queue()
+    with patch("wisper_transcribe.config.load_config", return_value=_config(forced_alignment="false")):
+        job = q.submit("/tmp/test.mp3", forced_alignment="true")
+    assert job.kwargs["forced_alignment"] == "true"
+
+
+@pytest.mark.parametrize("kwargs,device,config,expected", [
+    ({"device": "mps"}, "mps", _config(), True),
+    ({"device": "cpu"}, "cpu", _config(), False),                       # auto is GPU-only
+    ({"device": "auto"}, "cuda", _config(), True),                      # auto device resolved
+    ({"device": "cpu", "forced_alignment": "true"}, "cpu", _config(), True),
+    ({"device": "mps", "forced_alignment": "false"}, "mps", _config(), False),
+    ({"device": "mps", "no_diarize": True}, "mps", _config(), False),   # no diarization
+    ({"device": "mps"}, "mps", _config(hf_token=""), False),            # no token, no diarization
+])
+def test_will_align(monkeypatch, kwargs, device, config, expected):
+    from wisper_transcribe.web.jobs import JOB_TRANSCRIPTION, Job
+    monkeypatch.delenv("HUGGINGFACE_TOKEN", raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    job = Job(id="j", status="pending", created_at=None, input_path="/tmp/a.mp3",
+              kwargs=kwargs, name="a", job_type=JOB_TRANSCRIPTION)
+    with patch("wisper_transcribe.config.load_config", return_value=config), \
+         patch("wisper_transcribe.config.get_device", return_value=device):
+        assert job.will_align is expected
+
+
+def test_will_align_false_for_other_job_types():
+    from wisper_transcribe.web.jobs import Job
+    job = Job(id="j", status="pending", created_at=None, input_path="/tmp/a.md",
+              kwargs={}, name="a", job_type="refine")
+    assert job.will_align is False

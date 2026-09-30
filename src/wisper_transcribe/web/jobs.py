@@ -438,6 +438,31 @@ class Job:
         self.live_lines_dropped += _append_capped(self.live_lines, line_dict, _MAX_LIVE_LINES)
 
     @property
+    def will_align(self) -> bool:
+        """True when this transcription job runs forced word alignment.
+
+        Mirrors process_file(): only with diarization (not ``no_diarize``, and
+        a HuggingFace token available) and when ``forced_alignment`` resolves
+        on for the device. Drives the job page's Align step.
+        """
+        if self.job_type != JOB_TRANSCRIPTION or self.kwargs.get("no_diarize"):
+            return False
+        import os
+        from wisper_transcribe.config import forced_alignment_enabled, get_device, load_config
+
+        config = load_config()
+        if not (os.environ.get("HUGGINGFACE_TOKEN") or os.environ.get("HF_TOKEN")
+                or config.get("hf_token")):
+            return False
+        device = self.kwargs.get("device") or "auto"
+        if device == "auto":
+            device = get_device()
+        setting = self.kwargs.get("forced_alignment")
+        if setting is None:
+            setting = config.get("forced_alignment", "auto")
+        return forced_alignment_enabled(setting, device)
+
+    @property
     def needs_extraction(self) -> bool:
         """True when the input must be streamed through ffmpeg before transcription.
 
@@ -509,6 +534,12 @@ class JobQueue:
 
         if not original_stem:
             original_stem = Path(input_path).stem
+
+        # Freeze the alignment setting at submit so the job page's Align step
+        # and the run agree even if the config changes while queued.
+        if kwargs.get("forced_alignment") is None:
+            from wisper_transcribe.config import load_config
+            kwargs["forced_alignment"] = load_config().get("forced_alignment", "auto")
 
         # Capture the web-upload marker before the rename strips the
         # "wisper_upload_" prefix; the renamed file is still a temp upload.

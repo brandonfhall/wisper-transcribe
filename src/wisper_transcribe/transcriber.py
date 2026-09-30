@@ -82,6 +82,9 @@ def _transcribe_mlx(
         language=language if language else None,
         word_timestamps=True,
         initial_prompt=effective_prompt or None,
+        # False (not the default None) turns on mlx-whisper's frame-based
+        # tqdm bar, which gives the web job page a real percent and ETA.
+        verbose=False,
     )
 
     segments = []

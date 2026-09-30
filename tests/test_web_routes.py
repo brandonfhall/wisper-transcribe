@@ -3179,3 +3179,16 @@ def test_campaign_page_marks_missing_transcripts(client, tmp_path):
     assert "MISSING" in html
     # Still listed (not pruned), so the remove button can clear it.
     assert 'name="stem" value="gone"' in html
+
+
+@pytest.mark.parametrize("will_align", [True, False])
+def test_job_detail_align_step_only_when_aligning(client, tmp_path, will_align):
+    audio_file = tmp_path / "align_step.mp3"
+    audio_file.write_bytes(b"fake")
+    with open(audio_file, "rb") as f:
+        post = client.post("/transcribe", files={"file": ("align_step.mp3", f, "audio/mpeg")},
+                           data={}, follow_redirects=False)
+    with patch("wisper_transcribe.web.jobs.Job.will_align", new=will_align):
+        html = client.get(post.headers["location"]).text
+    assert ('id="step_align"' in html) is will_align
+    assert ("'align'," in html) is will_align

@@ -107,5 +107,6 @@ python scripts/alignment_eval.py score alignment-eval/*/
 - **Live transcription is local-only.** Discord sessions are transcribed after they stop.
 - **The live preview is a draft.** Lines are labelled "You" or "Other" by comparing mic and system-audio volume, not by voice. The diarized transcript from **Transcribe** is the real one. On CPU-only machines, use `base` or `small` so the preview keeps up.
 - **Live preview waits for other jobs.** Jobs run one at a time, so a job already running when a local session starts delays the preview until it finishes.
+- **Word alignment needs a GPU by default.** On CPU-only machines `forced_alignment = auto` leaves it off (it adds ~10–20 min per 2.5 h session); set it to `true` to use it anyway. It supports 11 languages (English, Chinese, Cantonese, French, German, Italian, Japanese, Korean, Portuguese, Russian, Spanish); others keep Whisper's word timing. It can't split words when two people talk at once.
 - **Cancelling is best-effort.** A cancelled transcription stops at its next progress update; the GPU may finish its current batch first.
 - **No web authentication.** `wisper server` binds `127.0.0.1` by default. With `--host 0.0.0.0`, anyone who can reach the port has full control, including recording — see the [trust model](web-ui.md#trust-model).
