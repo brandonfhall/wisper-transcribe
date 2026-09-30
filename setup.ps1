@@ -68,6 +68,24 @@ try {
     Write-Fail "Python not found. Install Python 3.13+ from https://python.org"
 }
 
+# wisper.db needs SQLite >= 3.43 with FTS5 (full-text search). python.org
+# builds have it; check anyway so setup fails before installing models.
+Write-Step "Checking SQLite..."
+$sqliteProbe = @'
+import sqlite3
+ok = sqlite3.sqlite_version_info >= (3, 43, 0)
+try:
+    sqlite3.connect(":memory:").execute("CREATE VIRTUAL TABLE t USING fts5(x, content='', contentless_delete=1)")
+except sqlite3.Error:
+    ok = False
+print(sqlite3.sqlite_version, "ok" if ok else "bad")
+'@
+$sqlite = ($sqliteProbe | & python - 2>&1 | Out-String).Trim().Split(' ')
+if ($sqlite.Count -lt 2 -or $sqlite[1] -ne 'ok') {
+    Write-Fail "This Python's SQLite ($($sqlite[0])) is older than 3.43 or lacks FTS5. Install Python 3.13+ from https://python.org"
+}
+Write-OK "SQLite $($sqlite[0]) (FTS5)"
+
 # ── Virtual environment ───────────────────────────────────────────────────────
 Write-Step "Setting up virtual environment..."
 if (-not (Test-Path ".venv")) {
