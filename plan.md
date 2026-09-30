@@ -484,7 +484,7 @@ One file, `<data dir>/wisper.db`. The DDL below has been run against SQLite 3.53
 - **No multi-valued columns (1NF).** `devices_json` becomes `recording_devices`. One documented exception: `jobs.params_json`, an audit snapshot of kwargs that is never queried by field, constrained to a JSON object.
 - **Subtypes enforced by the schema.** Discord-only data (`guild_id`, `voice_channel_id`, speakers, rejoins) hangs off `recording_discord`, and local devices off `recording_devices`. Both use a composite FK to `recordings(id, source)`, so a local recording can't have Discord rows and vice versa.
 - **Integrity in the DB, not in app code:** `STRICT` tables, explicit `NOT NULL`, `CHECK` on every enum and on paired-nullable columns (embedding + space, indexed mtime + size), `UNIQUE` for every one-to-one rule the code enforces today (one Discord account per member per campaign — `bind_discord_id`'s loop; one campaign per transcript; one recording per transcript; campaign order positions).
-- **Journal entries must belong to the campaign that holds the transcript:** composite FK to `campaign_transcripts(campaign_id, transcript_id)`. Moving a journaled transcript fails unless its entry is deleted in the same transaction (today's behaviour, now enforced); unassigning it drops the entry, so re-adding it offers the fold again.
+- **Journal entries must belong to the campaign that holds the transcript:** composite FK to `campaign_transcripts(campaign_id, transcript_id)`. Transcripts always move freely: moving, unassigning, or deleting one drops its entry, and a trigger on `journal_entries` deletes (which also fires on cascades) marks the old campaign's journal **stale** (`journal_stale_since`). The journal text is never edited automatically; the user chooses when to rebuild.
 - **Every FK child column is indexed** (SQLite doesn't do this; unindexed children make cascades full scans).
 - **Surrogate integer ids** for everything user-renamable, so a rename is one `UPDATE`. UUIDs stay the key for recordings and jobs (they're already in URLs).
 - **Deliberate non-derivations**, each for a stated reason:
@@ -526,7 +526,8 @@ CREATE TABLE campaigns (
   slug           TEXT NOT NULL UNIQUE,
   display_name   TEXT NOT NULL CHECK (display_name <> ''),
   created_at     TEXT NOT NULL,
-  journal_sha256 TEXT CHECK (journal_sha256 IS NULL OR length(journal_sha256) = 64)
+  journal_sha256 TEXT CHECK (journal_sha256 IS NULL OR length(journal_sha256) = 64),
+  journal_stale_since TEXT                   -- journal text mentions a session that left or changed; cleared by rebuild
 ) STRICT;
 
 CREATE TABLE campaign_members (
@@ -571,6 +572,10 @@ CREATE TABLE journal_entries (
     -- ON UPDATE NO ACTION: moving a journaled transcript fails unless its entry is deleted first
 ) STRICT;
 CREATE INDEX journal_entries_campaign ON journal_entries(campaign_id, transcript_id);
+CREATE TRIGGER journal_entries_ad AFTER DELETE ON journal_entries BEGIN   -- also fires on FK cascades
+  UPDATE campaigns SET journal_stale_since = coalesce(journal_stale_since, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+   WHERE id = old.campaign_id;
+END;
 
 -- Phase 3 ------------------------------------------------------------------
 CREATE TABLE transcript_speakers (
@@ -708,7 +713,7 @@ Rules:
    - Rows are never deleted automatically (decision 5). A missing campaign entry gets a **Relink** action: pick an unregistered `.md` and move the old row's identity onto it, keeping campaign, journal, and speakers.
    - On list pages reconcile does only cheap work (stat, insert, flag). A changed mtime or size marks the row stale for search (Phase 6); the background worker reindexes it, never the request.
 4. **`register(stem, *, origin)`** — `origin` is `job` (the app just wrote the file) or `reconcile` (found on disk):
-   - Live row + `job` (overwrite or re-transcribe): keep the id, campaign position, and journal entries. Replace `transcript_speakers`, the audio path (deleting the old `output`-root copy if it differs), the sidecar, and search blocks. If the transcript was already journaled, the campaign page notes "journal describes the previous version; rebuild to refresh" — no automatic un-fold.
+   - Live row + `job` (overwrite or re-transcribe): keep the id, campaign position, and journal entries. Replace `transcript_speakers`, the audio path (deleting the old `output`-root copy if it differs), the sidecar, and search blocks. If the transcript was already journaled, `register()` sets that campaign's `journal_stale_since` in the same transaction — no automatic un-fold.
    - Missing row + either origin: the file is (re)appearing, so clear `missing_since`; a `job` origin also replaces speakers/audio/search as above and logs "reused stem of a previously missing transcript".
 5. **Name collisions are blocked, with an explicit overwrite** (decided):
    - Web upload: before submitting, the route checks for `<stem>.md` in the output root. If present, the form returns "A transcript named *X* already exists" with **Overwrite** (resubmit with `overwrite=True`) and **Cancel**.
@@ -781,14 +786,15 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
   - `web/routes/transcripts.py`: single delete, bulk delete, list, campaign assign, and Relink; `_delete_transcript_companions()` moves into the store.
   - `web/routes/transcribe.py`: the upload name-collision check with Overwrite/Cancel.
   - `web/routes/record.py`: `_purge_recording_files()`; the re-transcribe confirmation.
-  - `web/routes/campaigns.py`: the missing-entry rendering reads `missing_since`; Relink; the "journal describes the previous version" note.
+  - `web/routes/campaigns.py`: the missing-entry rendering reads `missing_since`; Relink; the stale-journal banner.
   - `pipeline.py`: CLI registration, the `--campaign` rule, and the skip message naming the existing transcript's campaign.
   - `web/jobs.py`: register on completion; the pre-write collision re-check (fail with "Transcript already exists").
   - `recording_manager.py`: interim `clear_transcript_link(stem)` for the delete path (removed in Phase 4).
   - `journal.py`: `unjournalled_sessions()`, `update_journal()`, `rebuild_campaign()`; stop writing `journaled_sessions` into the frontmatter.
   - `cli.py`: `transcripts list/move`, `campaigns journal/reorder`.
-- **Journal write rule.** Body and entries are two stores, and the `.md`-first rule doesn't cover them (body first → a crash folds the session twice; row first → it's silently lost). A fold runs the LLM call outside any transaction, then: (1) writes the new body to a temp file, (2) in one `BEGIN IMMEDIATE` inserts the `journal_entries` row and sets `campaigns.journal_sha256` to the new body's hash, (3) `os.replace`s the temp file into place. A crash before (2) folded nothing and the temp is swept; a crash between (2) and (3) is detected as a hash mismatch with a leftover temp file, which is then moved into place. On read: `journal.md` **missing** → clear that campaign's `journal_entries` (fresh start) and log it; **present but a different hash** → the user edited it in Obsidian, which is allowed, so keep the entries and adopt the new hash. `rebuild_campaign()` clears `journal_entries` in the transaction that records its reset.
-- **Campaign order and moves under the constraints.** SQLite checks `UNIQUE(campaign_id, position)` row by row, so `position = position + 1` collides. Reorder is two steps in one transaction: shift the campaign's rows above the current maximum, then write the final positions. Moving a transcript to another campaign deletes its journal entry in the same transaction (the composite FK refuses the move otherwise); the old journal's text is untouched, as today. When the transcript was journaled, the move asks for confirmation: "This session is already in *A*'s journal. Moving it won't remove it from that journal. Rebuild *A*'s journal to drop it." (Moving it back later offers it for folding again; the confirmation is the one place the user is told.)
+- **Journal write rule.** Body and entries are two stores, and the `.md`-first rule doesn't cover them (body first → a crash folds the session twice; row first → it's silently lost). A fold runs the LLM call outside any transaction, then: (1) writes the new body to a temp file, (2) in one `BEGIN IMMEDIATE` inserts the `journal_entries` row and sets `campaigns.journal_sha256` to the new body's hash, (3) `os.replace`s the temp file into place. A crash before (2) folded nothing and the temp is swept; a crash between (2) and (3) is detected as a hash mismatch with a leftover temp file, which is then moved into place. On read: `journal.md` **missing** → clear that campaign's `journal_entries` and `journal_stale_since` (fresh start) and log it; **present but a different hash** → the user edited it in Obsidian, which is allowed, so keep the entries and adopt the new hash. `rebuild_campaign()` clears `journal_entries` and then `journal_stale_since` in the transaction that records its reset (the trigger sets the flag as the entries go, so the clear must come after).
+- **Campaign order and moves under the constraints.** SQLite checks `UNIQUE(campaign_id, position)` row by row, so `position = position + 1` collides. Reorder is two steps in one transaction: shift the campaign's rows above the current maximum, then write the final positions. Moving a transcript to another campaign never prompts: it deletes the transcript's journal entry in the same transaction (the composite FK refuses the move otherwise), which marks the old campaign's journal stale. Its text is untouched.
+- **Stale journal.** `journal_stale_since` is set when a journaled session leaves the campaign (move, unassign, delete) or is overwritten by a re-transcribe. The campaign page shows "This journal mentions sessions that were moved, removed, or re-transcribed since it was written" with a **Rebuild journal** button (the existing `rebuild_campaign()`, which re-summarizes every session and re-folds them, two LLM calls per session, behind its existing confirmation). `wisper campaigns show` prints the same flag. Nothing is regenerated automatically.
 - **Export with frontmatter:** a download or CLI export of the journal that adds `journaled_sessions` from the DB to its frontmatter. The same export path can later add DB-held metadata (campaign, speakers) to transcript or summary downloads.
 - **Atomic file writes.** New `atomic_write_text(path, text)` helper (temp file in the same dir, then `os.replace()`, the pattern `recording_manager` already uses). Every transcript, summary, sidecar, and journal write goes through it: `pipeline.py` (transcript output), `web/jobs.py` (sidecar, excerpt `.txt`, refine, summarize, live draft), `web/enroll_shared.py` (wizard rewrite), the edit and fix-speaker routes, `speaker_registry._write_sidecar`, `journal.py`. A crash mid-write then leaves the old file or the new one, never a truncated `.md` that reconcile would register and search would index. Temp names get a recognisable prefix so reconcile can sweep leftovers. **Windows:** `os.replace()` raises `PermissionError` while Obsidian or antivirus holds the target open, so the helper retries 5 times with backoff (50 → 800 ms), then falls back to an in-place write, logs a warning, and removes the temp file.
 - **Missing-transcript detection** (scoped in from the open bug): when a transcription job registers its output, it checks the `.md` exists. If not, the job fails with a distinct error ("Transcript file missing after write") instead of reporting success, and the resolved output root goes into the job log. Covers web jobs and the recording hand-off.
@@ -903,7 +909,7 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
   - `foreign_keys` is on for every connection `db.connect()` returns.
   - `BEGIN IMMEDIATE` under two threads: the second waits instead of erroring.
   - One cross-process import race under spawn (the macOS default): exactly one import happens.
-  - **Schema constraints:** one should-fail insert per rule in "Schema principles" (the prototype's checks, kept as tests): subtype FKs, the journal composite FK (including a move that fails until the entry is deleted), each `UNIQUE`, each `CHECK`, `STRICT` type rejection, cascades (including the FTS trigger firing on a cascade), and the two-step reorder under `UNIQUE(campaign_id, position)`.
+  - **Schema constraints:** one should-fail insert per rule in "Schema principles" (the prototype's checks, kept as tests): subtype FKs, the journal composite FK (including a move that fails until the entry is deleted), the stale-journal trigger firing on move, unassign, and cascade delete but cleared by rebuild,, each `UNIQUE`, each `CHECK`, `STRICT` type rejection, cascades (including the FTS trigger firing on a cascade), and the two-step reorder under `UNIQUE(campaign_id, position)`.
   - Enum `CHECK` lists match the Python constants.
   - `foreign_key_check` is empty after every migration on a synthetic legacy import.
 - **Importer tests** use a synthetic legacy data dir built by a frozen copy of today's serializers (`tests/_legacy_store.py`), so the tests don't change when the managers do. Cases: clean import, each dirty-data case, a malformed top-level file (rolls back, version unchanged, backup present), and a re-run.
@@ -919,7 +925,7 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 - `docs/cli-reference.md`: `wisper db`, `wisper search`, the `transcribe --campaign` rule and collision message, `wisper speakers doctor`, `wisper record recover`, `output_dir`.
 - `docs/docker.md`: DB location, backup, CLI and web containers sharing `./data`, `WISPER_OUTPUT_DIR=/app/output`.
 - `docs/scenarios.md`: restore from backup, moving the output dir (`output_dir`), externally deleted or renamed transcripts (Relink), deleting `journal.md`, recovering a crashed recording session.
-- `docs/web-ui.md`: missing transcripts and Relink, the journaled-transcript move confirmation, upload name collisions (Overwrite/Cancel), bulk actions, job history, search.
+- `docs/web-ui.md`: missing transcripts and Relink, the stale-journal banner and rebuild, upload name collisions (Overwrite/Cancel), bulk actions, job history, search.
 - CLAUDE.md: new gotchas (connect only through `db.py`; `BEGIN IMMEDIATE`; no transaction across ML work; delete transcripts only via `transcript_store`; `speaker_map` location; `get_output_dir()` no longer checks the CWD).
 - README: unchanged.
 
@@ -944,7 +950,7 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 17. **Failure handling:** atomic writes for every transcript, summary, sidecar, and journal file, with a Windows retry/fallback (Phase 2); crashed recording sessions recoverable via a Recover button and `wisper record recover` (Phase 4); recordings can't get stuck in `transcribing`, because the state is derived (Phase 4).
 18. **Name collisions:** blocked, with an explicit Overwrite in the web UI; recording re-transcribe overwrites after confirmation; the CLI keeps `--overwrite`. Overwrite keeps the transcript's identity, campaign, and journal entries.
 19. **Profile embeddings in the API:** `SpeakerProfile.embedding_path` → `embedding` (the one Phase 1 API break).
-20. **Journal consistency:** the DB commit is the fold's commit point, with `journal_sha256`; a deleted `journal.md` resets its entries, an edited one keeps them.
+20. **Journal consistency:** the DB commit is the fold's commit point, with `journal_sha256`; a deleted `journal.md` resets its entries, an edited one keeps them. Transcripts move, unassign, and delete freely; a journaled one leaving or being re-transcribed marks the journal stale, and the user chooses whether to rebuild.
 21. **Unbound Discord speakers:** one `recording_speakers` table with NULL profile; deleting a profile unbinds its speakers. Keying by profile-key text (no FK) is dropped.
 22. **Source-audio paths:** relative to the output root (every app-created copy lives there); anything else imports as NULL.
 23. **Schema discipline:** normalized (3NF/BCNF), derived values not stored, `STRICT` tables, DB-enforced constraints and subtypes, indexed FK children, `foreign_key_check` gating every migration. See "Schema principles".
