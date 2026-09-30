@@ -284,3 +284,97 @@ def test_unreadable_journal_frontmatter_imports_no_entries(data_dir):
     path.write_text("---\n: : bad yaml [\n---\n\nbody\n", encoding="utf-8")
     assert journal.journaled_stems("game") == []
     assert "frontmatter" in _report(data_dir)
+
+
+# ---------------------------------------------------------------------------
+# v4: _diar.json speaker data → transcript_speakers + audio_rel_path
+# ---------------------------------------------------------------------------
+
+def _legacy_sidecar(out, stem, **fields):
+    import json
+
+    diar = {"input_path": "", "campaign": None,
+            "diarization_segments": [{"start": 0.0, "end": 4.0, "speaker": "SPEAKER_00"}]}
+    diar.update(fields)
+    path = out / f"{stem}_diar.json"
+    path.write_text(json.dumps(diar), encoding="utf-8")
+    return path
+
+
+def test_sidecar_speakers_import_and_file_is_slimmed(data_dir):
+    import json
+
+    from wisper_transcribe.path_utils import get_output_dir
+    from wisper_transcribe.transcript_store import read_sidecar
+
+    out = get_output_dir()
+    _output_md("s1")
+    audio = out / "s1.wav"
+    audio.write_bytes(b"a")
+    path = _legacy_sidecar(out, "s1", input_path=str(audio),
+                           speaker_map={"SPEAKER_00": "Alice"},
+                           speaker_map_source={"SPEAKER_00": "manual"},
+                           embedding_space=EMBEDDING_SPACE,
+                           speaker_embeddings={"SPEAKER_00": [1.0, 0.0]})
+    diar = read_sidecar(out / "s1.md")
+    assert diar["speaker_map"] == {"SPEAKER_00": "Alice"}
+    assert diar["speaker_map_source"] == {"SPEAKER_00": "manual"}
+    assert diar["speaker_embeddings"] == {"SPEAKER_00": [1.0, 0.0]}
+    assert diar["input_path"].endswith("s1.wav")
+    assert set(json.loads(path.read_text(encoding="utf-8"))) == {"diarization_segments"}
+    (backup,) = (data_dir / "backups").glob("pre-sqlite-v4-*")
+    assert "speaker_map" in (backup / "output" / "s1_diar.json").read_text(encoding="utf-8")
+
+
+def test_sidecar_without_provenance_derives_it(data_dir):
+    from wisper_transcribe.path_utils import get_output_dir
+    from wisper_transcribe.transcript_store import read_sidecar
+
+    out = get_output_dir()
+    _output_md("s1")
+    _legacy_sidecar(out, "s1", speaker_map={"SPEAKER_00": "Alice", "SPEAKER_01": "Unknown Speaker 2"})
+    assert read_sidecar(out / "s1.md")["speaker_map_source"] == {
+        "SPEAKER_00": "manual", "SPEAKER_01": "auto"}
+
+
+def test_sidecar_audio_outside_output_root_imports_as_none(data_dir, tmp_path):
+    from wisper_transcribe.path_utils import get_output_dir
+    from wisper_transcribe.transcript_store import read_sidecar
+
+    out = get_output_dir()
+    _output_md("s1")
+    elsewhere = tmp_path / "upload.mp3"
+    elsewhere.write_bytes(b"a")
+    _legacy_sidecar(out, "s1", input_path=str(elsewhere), speaker_map={"SPEAKER_00": "A"})
+    assert read_sidecar(out / "s1.md")["input_path"] == ""
+    assert "s1" in _v4_report(data_dir)
+
+
+def test_sidecar_campaign_key_associates_unassigned_transcript(data_dir):
+    from wisper_transcribe.path_utils import get_output_dir
+
+    out = get_output_dir()
+    write_campaigns(data_dir, {"game": {"transcripts": []}})
+    _output_md("s1")
+    _legacy_sidecar(out, "s1", campaign="game", speaker_map={"SPEAKER_00": "A"})
+    assert load_campaigns()["game"].transcripts == ["s1"]
+
+
+def test_orphan_and_unreadable_sidecars_left_alone(data_dir):
+    from wisper_transcribe.path_utils import get_output_dir
+
+    out = get_output_dir()
+    orphan = _legacy_sidecar(out, "gone", speaker_map={"SPEAKER_00": "A"})
+    bad = out / "bad_diar.json"
+    bad.write_text("{nope", encoding="utf-8")
+    _output_md("bad")
+    before = orphan.read_text(encoding="utf-8")
+    db.connect().close()
+    assert orphan.read_text(encoding="utf-8") == before
+    assert bad.read_text(encoding="utf-8") == "{nope"
+    assert "bad_diar.json" in _v4_report(data_dir)
+
+
+def _v4_report(data_dir) -> str:
+    reports = list((data_dir / "backups").glob("pre-sqlite-*/import-report.txt"))
+    return "\n".join(r.read_text(encoding="utf-8") for r in reports)

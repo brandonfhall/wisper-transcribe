@@ -192,19 +192,25 @@ class MigrationContext:
         self.report.append(message)
         log.warning("migration v%d: %s", self.version, message)
 
-    def backup_legacy(self, paths: list[Path]) -> Path:
-        """Copy legacy files into a pre-import backup dir before importing."""
+    def backup_legacy(self, paths: list[Path], root: Optional[Path] = None,
+                      into: str = "") -> Path:
+        """Copy legacy files into a pre-import backup dir before importing.
+
+        Paths are kept relative to ``root`` (default: the data dir) under the
+        ``into`` subfolder, e.g. ``root=<output root>, into="output"``.
+        """
         import shutil
 
-        dest = self.data_dir / "backups" / (
+        dest = self.backup_dir or self.data_dir / "backups" / (
             f"pre-sqlite-v{self.version}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
         )
         dest.mkdir(parents=True, exist_ok=True)
+        base = root if root is not None else self.data_dir
         for src in paths:
             if not src.exists():
                 continue
-            rel = src.relative_to(self.data_dir)
-            target = dest / rel
+            rel = src.relative_to(base)
+            target = dest / into / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             if src.is_dir():
                 shutil.copytree(src, target, dirs_exist_ok=True)
@@ -392,10 +398,33 @@ def _v3_import(conn: sqlite3.Connection, ctx: MigrationContext) -> None:
     import_journal_entries(conn, ctx)
 
 
+# --- v4: per-transcript speakers ------------------------------------------
+
+_V4_DDL = """
+CREATE TABLE transcript_speakers (
+  transcript_id   INTEGER NOT NULL REFERENCES transcripts(id) ON DELETE CASCADE,
+  label           TEXT NOT NULL,              -- raw pyannote label
+  display_name    TEXT NOT NULL,              -- the name as rendered in the .md (not a profile FK, by design)
+  source          TEXT NOT NULL CHECK (source IN ('auto', 'manual')),
+  embedding       BLOB,
+  embedding_space TEXT,
+  PRIMARY KEY (transcript_id, label),
+  CHECK ((embedding IS NULL) = (embedding_space IS NULL)),
+  CHECK (embedding IS NULL OR length(embedding) % 4 = 0)
+) STRICT;
+"""
+
+
+def _v4_import(conn: sqlite3.Connection, ctx: MigrationContext) -> None:
+    from .legacy_import import import_diarization_sidecars
+    import_diarization_sidecars(conn, ctx)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "foundation", _V1_DDL, _v1_pin_output_dir),
     Migration(2, "profiles-campaigns", _V2_DDL, _v2_import),
     Migration(3, "journal-entries", _V3_DDL, _v3_import),
+    Migration(4, "transcript-speakers", _V4_DDL, _v4_import),
 )
 LATEST_VERSION = MIGRATIONS[-1].version
 

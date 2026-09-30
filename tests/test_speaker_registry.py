@@ -12,7 +12,7 @@ from wisper_transcribe.config import EMBEDDING_SPACE
 from wisper_transcribe.formatter import to_markdown
 from wisper_transcribe.models import AlignedSegment
 
-from ._seed import seed_profile
+from ._seed import seed_profile, sidecar_data
 
 ALICE = np.array([1.0, 0.0, 0.0, 0.0])
 BOB = np.array([0.0, 1.0, 0.0, 0.0])
@@ -88,7 +88,7 @@ def test_auto_unknown_gets_newly_enrolled_profile(world):
     assert report.transcripts[0].renamed == {"SPEAKER_00": ("Unknown Speaker 1", "Alice")}
     text = md.read_text(encoding="utf-8")
     assert "**Alice**" in text and "Unknown Speaker 1" not in text
-    sidecar = json.loads((out / "s1_diar.json").read_text())
+    sidecar = sidecar_data(out / "s1_diar.json")
     assert sidecar["speaker_map"]["SPEAKER_00"] == "Alice"
     assert sidecar["speaker_map_source"]["SPEAKER_00"] == "auto"
 
@@ -165,7 +165,7 @@ def test_backfills_embeddings_from_durable_audio(world, tmp_path):
 
     mock_extract.assert_called_once()
     assert report.transcripts[0].renamed == {"SPEAKER_00": ("Unknown Speaker 1", "Alice")}
-    sidecar = json.loads((out / "s1_diar.json").read_text())
+    sidecar = sidecar_data(out / "s1_diar.json")
     assert sidecar["embedding_space"] == EMBEDDING_SPACE
     assert sidecar["speaker_embeddings"]["SPEAKER_00"] == pytest.approx(ALICE.tolist())
 

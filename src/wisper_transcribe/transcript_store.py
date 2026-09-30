@@ -37,6 +37,8 @@ log = logging.getLogger(__name__)
 
 # Prefix of atomic-write temp files, so reconcile can sweep crash leftovers.
 TEMP_PREFIX = ".wisper-tmp-"
+# Diarization segments for the enrollment wizard; speakers live in the DB.
+SIDECAR_SUFFIX = "_diar.json"
 
 # os.replace() onto a file another process holds open without
 # FILE_SHARE_DELETE (Obsidian, antivirus, the search indexer) fails on
@@ -197,32 +199,49 @@ def register(stem: str, *, origin: Literal["job", "reconcile"],
                 "WHERE id IN (SELECT campaign_id FROM journal_entries WHERE transcript_id = ?)",
                 (db.now_utc(), row["id"]),
             )
-        return row["id"]
+            # The old run's speakers describe the old text. A web job writes
+            # fresh ones (write_sidecar) right after; a CLI overwrite has none.
+            conn.execute("DELETE FROM transcript_speakers WHERE transcript_id = ?", (row["id"],))
+            stale_sidecar = safe_path(stem, SIDECAR_SUFFIX)
+        else:
+            stale_sidecar = None
+    if stale_sidecar is not None:
+        stale_sidecar.unlink(missing_ok=True)
+    return row["id"]
 
 
 # ---------------------------------------------------------------------------
 # Deletion
 # ---------------------------------------------------------------------------
 
-def _companion_paths(stem: str, output_dir: Path) -> list[Path]:
+def _companion_paths(stem: str, output_dir: Path,
+                     audio_rel_path: Optional[str] = None) -> list[Path]:
     """Every file that belongs to a transcript except its ``.md``.
 
-    The summary, the enrollment sidecar and the audio copy it references
-    (only inside the output root: old sidecars point at temp dirs or user
-    files), and excerpt clips. Read before anything is deleted, because the
-    audio copy's name can't be derived from the stem (collision suffixes).
+    The summary, the enrollment sidecar, the source-audio copy (from the
+    row's ``audio_rel_path``, or an old sidecar's ``input_path``; only inside
+    the output root, since old sidecars point at temp dirs or user files), and
+    excerpt clips. Read before anything is deleted, because the audio copy's
+    name can't be derived from the stem (collision suffixes).
     """
     paths: list[Path] = []
     summary = safe_path(stem, ".summary.md", output_dir)
     if summary is not None:
         paths.append(summary)
-    sidecar = safe_path(stem, "_diar.json", output_dir)
+    sidecar = safe_path(stem, SIDECAR_SUFFIX, output_dir)
     if sidecar is not None:
         paths.append(sidecar)
-        try:
-            stored = json.loads(sidecar.read_text(encoding="utf-8")).get("input_path")
-        except (OSError, ValueError, AttributeError):
-            stored = None
+        stored = None
+        if audio_rel_path:
+            try:
+                stored = str(db.from_rel(audio_rel_path, output_dir))
+            except ValueError:
+                stored = None
+        else:
+            try:
+                stored = json.loads(sidecar.read_text(encoding="utf-8")).get("input_path")
+            except (OSError, ValueError, AttributeError):
+                stored = None
         if stored:
             base = os.path.abspath(str(output_dir))
             if not base.endswith(os.sep):
@@ -259,7 +278,9 @@ def delete_transcript(stem: str, data_dir: Optional[Path] = None,
         return False
     stem = nfc(md.stem)
 
-    companions = _companion_paths(stem, output_dir)
+    with db.connection(data_dir) as conn:
+        row = conn.execute("SELECT audio_rel_path FROM transcripts WHERE stem = ?", (stem,)).fetchone()
+    companions = _companion_paths(stem, output_dir, row[0] if row else None)
     try:
         md.unlink(missing_ok=True)
     except OSError as exc:
@@ -453,3 +474,143 @@ def relink_candidates(data_dir: Optional[Path] = None) -> list[str]:
             "AND NOT EXISTS (SELECT 1 FROM campaign_transcripts ct WHERE ct.transcript_id = t.id) "
             "ORDER BY t.created_at DESC, t.stem"
         )]
+
+
+# ---------------------------------------------------------------------------
+# Diarization sidecar: speakers in the DB, segments in <stem>_diar.json
+# ---------------------------------------------------------------------------
+
+_SPEAKER_FIELDS = ("speaker_map", "speaker_map_source", "speaker_embeddings",
+                   "embedding_space", "input_path", "campaign")
+
+
+def derived_source(name: str) -> str:
+    """Provenance for a label with none recorded (sidecars before
+    ``speaker_map_source``): pipeline-shaped names were automatic, anything
+    else may have been typed by the user."""
+    from .web.enroll_shared import AUTO_NAME_RE
+    return "auto" if AUTO_NAME_RE.match(str(name)) else "manual"
+
+
+def read_sidecar(md_path: Path, data_dir: Optional[Path] = None) -> Optional[dict]:
+    """The transcript's diarization data in the JSON-era sidecar shape, or None.
+
+    ``diarization_segments`` comes from ``<stem>_diar.json`` (its only content
+    now); ``speaker_map``, ``speaker_map_source``, ``speaker_embeddings`` +
+    ``embedding_space``, ``input_path`` (absolute, from the stored relative
+    path), and ``campaign`` come from the database. A sidecar still carrying
+    the old fields (e.g. synced from an older install) is used as a fallback
+    only when the database has nothing for the transcript.
+    """
+    import numpy as np
+
+    path = Path(md_path).with_name(Path(md_path).stem + SIDECAR_SUFFIX)
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    diar: dict = {"diarization_segments": raw.get("diarization_segments") or [], "input_path": ""}
+    for key in _SPEAKER_FIELDS:
+        if key in raw:
+            diar[key] = raw[key]
+
+    with db.connection(data_dir) as conn:
+        row = conn.execute(
+            "SELECT t.id, t.audio_rel_path, c.slug FROM transcripts t "
+            "LEFT JOIN campaign_transcripts ct ON ct.transcript_id = t.id "
+            "LEFT JOIN campaigns c ON c.id = ct.campaign_id WHERE t.stem = ?",
+            (nfc(Path(md_path).stem),),
+        ).fetchone()
+        speakers = conn.execute(
+            "SELECT label, display_name, source, embedding, embedding_space "
+            "FROM transcript_speakers WHERE transcript_id = ? ORDER BY label",
+            (row["id"],),
+        ).fetchall() if row else []
+    if row is None:
+        return diar
+    diar["campaign"] = row["slug"]
+    if not speakers and row["audio_rel_path"] is None:
+        return diar  # nothing stored yet: keep any legacy file fields
+    diar["speaker_map"] = {s["label"]: s["display_name"] for s in speakers}
+    diar["speaker_map_source"] = {s["label"]: s["source"] for s in speakers}
+    embedded = [s for s in speakers if s["embedding"] is not None]
+    diar.pop("speaker_embeddings", None)
+    diar.pop("embedding_space", None)
+    if embedded:
+        diar["embedding_space"] = embedded[0]["embedding_space"]
+        diar["speaker_embeddings"] = {
+            s["label"]: np.frombuffer(s["embedding"], dtype=np.float32).tolist()
+            for s in embedded if s["embedding_space"] == diar["embedding_space"]
+        }
+    diar["input_path"] = (
+        str(db.from_rel(row["audio_rel_path"], Path(md_path).parent))
+        if row["audio_rel_path"] else ""
+    )
+    return diar
+
+
+def write_sidecar(md_path: Path, diar: dict, data_dir: Optional[Path] = None) -> None:
+    """Store a transcript's diarization data (the sidecar-shaped dict).
+
+    Speakers (name, provenance, embedding) and the source-audio path go to the
+    database in one transaction; the segments go to ``<stem>_diar.json``
+    after it (companion files follow the row). The ``campaign`` key is
+    ignored: the campaign is the transcript's ``campaign_transcripts`` row.
+    An audio copy replaced by a different one (re-transcribe) is deleted.
+    """
+    import numpy as np
+
+    md_path = Path(md_path)
+    output_dir = md_path.parent
+    stem = nfc(md_path.stem)
+    speaker_map = {str(k): str(v) for k, v in (diar.get("speaker_map") or {}).items()}
+    sources = dict(diar.get("speaker_map_source") or {})
+    space = diar.get("embedding_space")
+    embeddings = {}
+    if space and isinstance(diar.get("speaker_embeddings"), dict):
+        for label, vec in diar["speaker_embeddings"].items():
+            arr = np.asarray(vec, dtype=np.float32).reshape(-1)
+            if arr.size:
+                embeddings[str(label)] = arr
+    audio_rel = None
+    if diar.get("input_path"):
+        try:
+            audio_rel = db.to_rel(Path(diar["input_path"]), output_dir)
+        except ValueError:
+            audio_rel = None  # outside the output root: not ours to track
+
+    with db.transaction(data_dir) as conn:
+        tid = ensure_row(conn, stem, output_dir)
+        previous = conn.execute(
+            "SELECT audio_rel_path FROM transcripts WHERE id = ?", (tid,)
+        ).fetchone()[0]
+        conn.execute("UPDATE transcripts SET audio_rel_path = ? WHERE id = ?", (audio_rel, tid))
+        conn.execute("DELETE FROM transcript_speakers WHERE transcript_id = ?", (tid,))
+        for label in sorted(set(speaker_map) | set(embeddings)):
+            name = speaker_map.get(label, label)
+            source = sources.get(label)
+            if source not in ("auto", "manual"):
+                source = derived_source(name)
+            emb = embeddings.get(label)
+            conn.execute(
+                "INSERT INTO transcript_speakers (transcript_id, label, display_name, source, "
+                "embedding, embedding_space) VALUES (?, ?, ?, ?, ?, ?)",
+                (tid, label, name, source,
+                 None if emb is None else emb.tobytes(), None if emb is None else space),
+            )
+
+    atomic_write_text(
+        md_path.with_name(md_path.stem + SIDECAR_SUFFIX),
+        json.dumps({"diarization_segments": diar.get("diarization_segments") or []}, indent=2),
+    )
+    if previous and previous != audio_rel:
+        try:
+            old = db.from_rel(previous, output_dir)
+            if old.is_file() and not old.name.endswith(".md"):
+                old.unlink()
+        except (OSError, ValueError):
+            pass

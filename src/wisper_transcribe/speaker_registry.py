@@ -1,8 +1,8 @@
 """Campaign-wide speaker relabelling from per-transcript voice embeddings.
 
-Each web transcript's ``_diar.json`` stores one embedding per raw label
-(``speaker_embeddings``) and where each display name came from
-(``speaker_map_source``: ``auto`` or ``manual``). ``relabel_campaign()``
+Each web transcript stores one embedding per raw label and where each
+display name came from (``auto`` or ``manual``) in ``transcript_speakers``,
+read and written as the sidecar-shaped dict by ``transcript_store``. ``relabel_campaign()``
 re-matches every auto-named label in a campaign against the roster, and gives
 unknown voices that recur across sessions one shared ``Recurring Speaker N``
 name. Naming a person once (and enrolling them) then propagates to every
@@ -10,7 +10,6 @@ session they appear in; names set by hand are never touched.
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -20,7 +19,6 @@ from typing import Callable, Optional
 import numpy as np
 
 from .config import EMBEDDING_SPACE, load_config
-from .transcript_store import atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -129,18 +127,13 @@ def _cluster_unknowns(
 
 
 def _load_sidecar(md_path: Path) -> Optional[dict]:
-    path = md_path.with_name(md_path.stem + "_diar.json")
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
+    from .transcript_store import read_sidecar
+    return read_sidecar(md_path)
 
 
 def _write_sidecar(md_path: Path, diar: dict) -> None:
-    path = md_path.with_name(md_path.stem + "_diar.json")
-    atomic_write_text(path, json.dumps(diar, indent=2))
+    from .transcript_store import write_sidecar
+    write_sidecar(md_path, diar)
 
 
 def _backfill_embeddings(diar: dict, segments: list, device: str) -> Optional[dict[str, np.ndarray]]:

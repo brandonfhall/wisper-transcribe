@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from ._seed import seed_profile
+from ._seed import seed_profile, sidecar_data
 
 
 # ---------------------------------------------------------------------------
@@ -80,12 +81,15 @@ def test_sidecar_written_after_job_completes(tmp_path: Path):
     from datetime import datetime
     import uuid
 
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+
     out_md = tmp_path / "session01.md"
     out_md.write_text("# Session 01", encoding="utf-8")
-
-    # Use the platform-native string form of the path so the assertion
-    # matches the sidecar value on both POSIX and Windows.
-    input_path_str = str(Path("/tmp/session01.mp3"))
+    audio = tmp_path / "session01.mp3"   # the durable copy next to the transcript
+    audio.write_bytes(b"x")
+    input_path_str = str(audio)
+    create_campaign("My Campaign")
+    move_transcript_to_campaign("session01", "my-campaign")
 
     seg = DiarizationSegment(start=1.0, end=5.0, speaker="SPEAKER_00")
     job = Job(
@@ -102,11 +106,24 @@ def test_sidecar_written_after_job_completes(tmp_path: Path):
 
     sidecar = tmp_path / "session01_diar.json"
     assert sidecar.exists()
-    data = json.loads(sidecar.read_text())
-    assert data["input_path"] == input_path_str
-    assert data["campaign"] == "my-campaign"
+    data = sidecar_data(sidecar)
+    assert os.path.realpath(data["input_path"]) == os.path.realpath(input_path_str)
+    assert data["campaign"] == "my-campaign"   # the transcript's campaign, from the DB
     assert len(data["diarization_segments"]) == 1
     assert data["diarization_segments"][0] == {"start": 1.0, "end": 5.0, "speaker": "SPEAKER_00"}
+    # The file itself keeps only the segments.
+    assert set(json.loads(sidecar.read_text(encoding="utf-8"))) == {"diarization_segments"}
+
+
+def test_sidecar_audio_outside_transcript_folder_is_not_tracked(tmp_path: Path):
+    from wisper_transcribe.transcript_store import read_sidecar, write_sidecar
+
+    md = tmp_path / "out" / "s1.md"
+    md.parent.mkdir()
+    md.write_text("x", encoding="utf-8")
+    write_sidecar(md, {"input_path": str(tmp_path / "elsewhere.mp3"),
+                       "diarization_segments": []})
+    assert read_sidecar(md)["input_path"] == ""
 
 
 def test_sidecar_includes_speaker_map_when_job_provides_it(tmp_path: Path):
@@ -135,7 +152,7 @@ def test_sidecar_includes_speaker_map_when_job_provides_it(tmp_path: Path):
 
     _write_enrollment_sidecar(job, out_md)
 
-    sidecar = json.loads((tmp_path / "session01_diar.json").read_text())
+    sidecar = sidecar_data(tmp_path / "session01_diar.json")
     assert sidecar["speaker_map"] == {"SPEAKER_00": "Alice"}
 
 
@@ -166,7 +183,7 @@ def test_sidecar_includes_embeddings_and_auto_source(tmp_path: Path):
 
     _write_enrollment_sidecar(job, out_md)
 
-    sidecar = json.loads((tmp_path / "session01_diar.json").read_text())
+    sidecar = sidecar_data(tmp_path / "session01_diar.json")
     assert sidecar["speaker_map_source"] == {"SPEAKER_00": "auto"}
     assert sidecar["embedding_space"] == EMBEDDING_SPACE
     assert sidecar["speaker_embeddings"]["SPEAKER_00"] == pytest.approx([0.6, 0.8])
@@ -185,9 +202,13 @@ def test_wizard_enroll_propagates_to_campaign(tmp_path: Path):
     audio = tmp_path / "s1.wav"
     audio.write_bytes(b"x")
     (tmp_path / "s1_diar.json").write_text(json.dumps({
-        "input_path": str(audio), "campaign": "game",
+        "input_path": str(audio),
         "diarization_segments": [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"}],
     }), encoding="utf-8")
+    # The campaign comes from the transcript's current campaign row.
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    create_campaign("Game")
+    move_transcript_to_campaign("s1", "game")
     job = Job(id=str(uuid.uuid4()), status=COMPLETED, created_at=datetime.now(),
               input_path=str(md), kwargs={}, job_type=JOB_ENROLL,
               enroll_md_path=str(md), enroll_groups={"Alice": ["SPEAKER_00"]})
@@ -473,7 +494,7 @@ def test_apply_renames_records_name_source(tmp_path: Path):
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
         apply_renames(md, segments, {"SPEAKER_00": "Carol", "SPEAKER_01": "Bob"})
 
-    sources = json.loads(sidecar.read_text())["speaker_map_source"]
+    sources = sidecar_data(sidecar)["speaker_map_source"]
     assert sources == {"SPEAKER_00": "manual", "SPEAKER_01": "auto"}
 
 
@@ -683,7 +704,7 @@ def test_apply_renames_updates_sidecar_speaker_map(tmp_path: Path):
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
         apply_renames(md, segments, {"SPEAKER_00": "Alice"})
 
-    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    sidecar = sidecar_data(sidecar_path)
     assert sidecar["speaker_map"] == {"SPEAKER_00": "Alice"}
 
     # A second call (re-entry) must resolve "Alice" as the current name via

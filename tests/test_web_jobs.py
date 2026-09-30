@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from ._seed import seed_profile
+from ._seed import seed_profile, sidecar_data
 
 
 def _make_queue():
@@ -601,7 +601,7 @@ def test_completed_job_moves_upload_to_output_dir(tmp_path):
 
     sidecar = out_dir / "Session 12_diar.json"
     assert sidecar.exists()
-    data = json.loads(sidecar.read_text(encoding="utf-8"))
+    data = sidecar_data(sidecar)
     assert data["input_path"] == str(durable)
 
 

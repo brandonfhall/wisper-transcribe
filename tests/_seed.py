@@ -51,3 +51,16 @@ def seed_profile(key: str, display_name: Optional[str] = None, *,
 def seed_profiles(*keys: str, data_dir: Optional[Path] = None) -> None:
     for key in keys:
         seed_profile(key, data_dir=data_dir)
+
+
+def sidecar_data(sidecar_path: Path) -> dict:
+    """What a ``<stem>_diar.json`` means now: its segments plus the speaker
+    fields stored in the database (``transcript_store.read_sidecar``)."""
+    from wisper_transcribe.transcript_store import SIDECAR_SUFFIX, read_sidecar
+
+    name = Path(sidecar_path).name
+    assert name.endswith(SIDECAR_SUFFIX), name
+    md = Path(sidecar_path).with_name(name[: -len(SIDECAR_SUFFIX)] + ".md")
+    data = read_sidecar(md)
+    assert data is not None, f"no sidecar for {md.name}"
+    return data

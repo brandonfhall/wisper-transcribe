@@ -166,7 +166,6 @@ def _write_enrollment_sidecar(job: "Job", output_path: "Path") -> None:  # type:
         out = _Path(output_path)
         sidecar = {
             "input_path": str(_Path(job.input_path)),
-            "campaign": job.kwargs.get("campaign"),
             "diarization_segments": [
                 {"start": s.start, "end": s.end, "speaker": s.speaker}
                 for s in job.diarization_segments
@@ -180,10 +179,11 @@ def _write_enrollment_sidecar(job: "Job", output_path: "Path") -> None:  # type:
         if job.speaker_embeddings:
             from wisper_transcribe.speaker_registry import embeddings_to_sidecar
             sidecar.update(embeddings_to_sidecar(job.speaker_embeddings))
-        sidecar_path = out.with_name(out.stem + "_diar.json")
-        atomic_write_text(sidecar_path, _json.dumps(sidecar, indent=2))
+        # Speakers + audio path to the DB, segments to <stem>_diar.json.
+        from wisper_transcribe.transcript_store import write_sidecar
+        write_sidecar(out, sidecar)
     except Exception:
-        pass
+        log.warning("Could not store speaker data for %s", _Path(output_path).name, exc_info=True)
 
 
 def _move_upload_to_output(input_path: str, output_path: "Path") -> str:  # type: ignore[name-defined]
@@ -1390,8 +1390,8 @@ class JobQueue:
             job.finished_at = datetime.now()
             return
 
-        input_path = Path(diar.get("input_path", ""))
-        if not input_path.exists():
+        input_path = Path(diar.get("input_path") or "")
+        if not diar.get("input_path") or not input_path.is_file():
             job.status = FAILED
             job.error = "Source audio not available"
             job.finished_at = datetime.now()
@@ -1403,7 +1403,9 @@ class JobQueue:
             DiarizationSegment(start=s["start"], end=s["end"], speaker=s["speaker"])
             for s in diar.get("diarization_segments", [])
         ]
-        campaign_slug = diar.get("campaign")
+        # The transcript's current campaign, not the one it was transcribed for.
+        from wisper_transcribe.campaign_manager import get_campaign_for_transcript
+        campaign_slug = get_campaign_for_transcript(md_path.stem)
 
         def _progress(msg: str) -> None:
             job.append_log(msg)

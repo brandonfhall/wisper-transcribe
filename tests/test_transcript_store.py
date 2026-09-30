@@ -448,3 +448,106 @@ def test_relink_refuses_present_source_and_linked_target(out, case_sensitive):
         ts.relink("old name", "no such file")
     with pytest.raises(ValueError):
         ts.relink("old name", "../escape")
+
+
+# ---------------------------------------------------------------------------
+# Diarization sidecar: speakers in the DB, segments in the file
+# ---------------------------------------------------------------------------
+
+import numpy as np  # noqa: E402
+
+from wisper_transcribe.config import EMBEDDING_SPACE  # noqa: E402
+
+_SEGS = [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"},
+         {"start": 5.0, "end": 9.0, "speaker": "SPEAKER_01"}]
+
+
+def _full_diar(audio: Path) -> dict:
+    return {
+        "input_path": str(audio),
+        "diarization_segments": _SEGS,
+        "speaker_map": {"SPEAKER_00": "Alice", "SPEAKER_01": "Unknown Speaker 1"},
+        "speaker_map_source": {"SPEAKER_00": "manual", "SPEAKER_01": "auto"},
+        "embedding_space": EMBEDDING_SPACE,
+        "speaker_embeddings": {"SPEAKER_00": [0.6, 0.8], "SPEAKER_01": [1.0, 0.0]},
+    }
+
+
+def test_sidecar_round_trip(out):
+    md = _md(out, "s01")
+    audio = out / "s01_1.wav"
+    audio.write_bytes(b"a")
+    ts.write_sidecar(md, _full_diar(audio))
+
+    assert json.loads((out / "s01_diar.json").read_text(encoding="utf-8")) == {"diarization_segments": _SEGS}
+    diar = ts.read_sidecar(md)
+    assert diar["speaker_map"] == {"SPEAKER_00": "Alice", "SPEAKER_01": "Unknown Speaker 1"}
+    assert diar["speaker_map_source"] == {"SPEAKER_00": "manual", "SPEAKER_01": "auto"}
+    assert diar["embedding_space"] == EMBEDDING_SPACE
+    np.testing.assert_allclose(diar["speaker_embeddings"]["SPEAKER_00"], [0.6, 0.8], rtol=1e-6)
+    assert os.path.realpath(diar["input_path"]) == os.path.realpath(audio)
+    with db.connection() as conn:
+        assert conn.execute("SELECT audio_rel_path FROM transcripts").fetchone()[0] == "s01_1.wav"
+
+
+def test_missing_provenance_is_derived_like_is_relabelable(out):
+    md = _md(out, "s01")
+    ts.write_sidecar(md, {"diarization_segments": _SEGS,
+                          "speaker_map": {"SPEAKER_00": "Alice", "SPEAKER_01": "SPEAKER_01"}})
+    assert ts.read_sidecar(md)["speaker_map_source"] == {"SPEAKER_00": "manual", "SPEAKER_01": "auto"}
+
+
+def test_legacy_sidecar_fields_used_until_db_has_data(out):
+    md = _md(out, "s01")
+    (out / "s01_diar.json").write_text(json.dumps({
+        "diarization_segments": _SEGS, "speaker_map": {"SPEAKER_00": "Bob"},
+        "input_path": "/somewhere/else.mp3"}), encoding="utf-8")
+    diar = ts.read_sidecar(md)
+    assert diar["speaker_map"] == {"SPEAKER_00": "Bob"}
+    ts.write_sidecar(md, diar)          # the next write moves them into the DB
+    raw = json.loads((out / "s01_diar.json").read_text(encoding="utf-8"))
+    assert set(raw) == {"diarization_segments"}
+    assert ts.read_sidecar(md)["speaker_map"] == {"SPEAKER_00": "Bob"}
+
+
+def test_rewrite_with_new_audio_deletes_the_old_copy(out):
+    md = _md(out, "s01")
+    old_audio, new_audio = out / "s01.wav", out / "s01_1.wav"
+    old_audio.write_bytes(b"a")
+    new_audio.write_bytes(b"b")
+    ts.write_sidecar(md, _full_diar(old_audio))
+    ts.write_sidecar(md, _full_diar(new_audio))
+    assert not old_audio.exists() and new_audio.exists()
+
+
+def test_delete_uses_stored_audio_path(out):
+    md = _md(out, "s01")
+    audio = out / "s01_1.wav"
+    audio.write_bytes(b"a")
+    ts.write_sidecar(md, _full_diar(audio))
+    ts.delete_transcript("s01")
+    assert not audio.exists()
+    with db.connection() as conn:
+        assert conn.execute("SELECT count(*) FROM transcript_speakers").fetchone()[0] == 0
+
+
+def test_overwrite_clears_stale_speakers_and_segments(out):
+    md = _md(out, "s01")
+    ts.write_sidecar(md, _full_diar(out / "none.wav"))
+    ts.register("s01", origin="job")      # e.g. `wisper transcribe --overwrite`
+    assert ts.read_sidecar(md) is None
+    with db.connection() as conn:
+        assert conn.execute("SELECT count(*) FROM transcript_speakers").fetchone()[0] == 0
+
+
+def test_speaker_schema_constraints(out):
+    import sqlite3
+
+    md = _md(out, "s01")
+    ts.write_sidecar(md, _full_diar(out / "none.wav"))
+    for sql in ("UPDATE transcript_speakers SET source = 'guess'",
+                "UPDATE transcript_speakers SET embedding_space = NULL",
+                "UPDATE transcript_speakers SET embedding = x'0102'"):
+        with pytest.raises(sqlite3.IntegrityError):
+            with db.transaction() as conn:
+                conn.execute(sql)

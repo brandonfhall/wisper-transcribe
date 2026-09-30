@@ -426,9 +426,9 @@ Nothing else changes; the wire protocol is the stable interface.
 
 ---
 
-## Storage — SQLite migration (in progress: Phases 0–2 done)
+## Storage — SQLite migration (in progress: Phases 0–3 done)
 
-Branch `feat/sqlite-storage`. Phase 0 (`db.py`, `wisper db`, output-root setting, guards, Windows CI job) Phase 1 (profiles, campaigns, transcript registry table, `speakers doctor`), and Phase 2 (transcript store, journal entries, reconcile, collisions) are implemented; Phases 3–7 remain. The schema below is signed off. Decisions are listed under "Decisions" at the end.
+Branch `feat/sqlite-storage`. Phase 0 (`db.py`, `wisper db`, output-root setting, guards, Windows CI job) Phase 1 (profiles, campaigns, transcript registry table, `speakers doctor`), Phase 2 (transcript store, journal entries, reconcile, collisions), and Phase 3 (per-transcript speakers) are implemented; Phases 4–7 remain. The schema below is signed off. Decisions are listed under "Decisions" at the end.
 
 ### Why, and what SQLite does and doesn't fix
 
@@ -844,7 +844,9 @@ Original scope:
 - **Bulk actions UI** on `/transcripts`: row checkboxes plus a toolbar for delete and assign to campaign, wired to the existing `/transcripts/bulk-delete` and `/transcripts/bulk-campaign` routes. Those routes are rewritten in this phase anyway. Delete goes through a confirmation step. Same bulk-select pattern as `/recordings` (a separate hidden form, since rows contain their own forms).
 - Tests: cascade tests for every delete path (including the interim recordings-JSON revert); the missing-file job failure; bulk actions through the UI form fields; reconcile (external delete keeps order; reappearing file clears the flag; case-only rename keeps the row on a case-insensitive FS; NFC and NFD names map to one row); `register()` origin cases; upload collision (form offers Overwrite; overwrite keeps campaign and journal entries; the pre-write re-check fails the job); Relink; journal write rule (crash between each step, deleted `journal.md` resets entries, edited `journal.md` keeps them, rebuild clears them); `atomic_write_text` retry and fallback with `os.replace` mocked to raise; a guard test that no module outside `transcript_store.py` unlinks `*.md` in the output dir.
 
-**Phase 3 — Diarization sidecar data.**
+**Phase 3 — Diarization sidecar data. Done** (migration v4). Notes: callers keep the sidecar-shaped dict through `transcript_store.read_sidecar()`/`write_sidecar()` (a Phase 7 cleanup can narrow it); a sidecar still carrying old fields is read as a fallback until the next write; importers resolve the output root without creating it (an unmounted drive mustn't fail the migration); `register(origin="job")` on an existing row clears its speaker rows and sidecar (a CLI `--overwrite` would otherwise leave the old run's names attached). Dry run on the real-data copy: 14 speaker rows (all with embeddings), 2 sidecars slimmed, integrity/FK ok; the copy's sidecars point at the real data dir's audio, so they imported as "not in the transcripts folder" and were reported — correct for a copy.
+
+Original scope:
 - Import `_diar.json`'s speaker map, provenance, embeddings, and `input_path` into `transcript_speakers` and `transcripts.audio_rel_path` (relative to the output root; a path outside it → NULL, reported). The sidecar is rewritten with only `diarization_segments`.
 - The enroll job's campaign comes from `get_campaign_for_transcript(stem)` instead of the sidecar's `campaign` key (`jobs.py:1381`), so a reassigned transcript uses its current campaign.
 - Changes: `jobs._write_enrollment_sidecar()`, `JobQueue._run_wizard_enroll()` (source audio via `db.from_rel()`, campaign lookup), `web/enroll_shared.py` (`resolve_current_names()`, `apply_renames()`), `speaker_registry.py` (`_load_sidecar`/`_write_sidecar`, `embeddings_to/from_sidecar`), and `web/routes/transcripts.py` and `transcribe.py` (enroll wizard).
@@ -1008,7 +1010,7 @@ Original scope:
 
 ### Open questions
 
-None. Schema signed off (decision 30). Phases 0–2 done; next: Phase 3.
+None. Schema signed off (decision 30). Phases 0–3 done; next: Phase 4.
 
 ---
 

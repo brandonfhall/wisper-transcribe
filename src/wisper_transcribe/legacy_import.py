@@ -77,7 +77,7 @@ def ensure_transcript_row(conn: sqlite3.Connection, stem: str, output_dir: Path)
 
 def import_profiles_and_campaigns(conn: sqlite3.Connection, ctx: MigrationContext) -> None:
     """v2: ``speakers.json`` + ``.npy`` embeddings, and ``campaigns.json``."""
-    from .path_utils import get_output_dir
+    from .config import get_output_root
 
     data_dir = ctx.data_dir
     profiles_dir = data_dir / "profiles"
@@ -124,7 +124,7 @@ def import_profiles_and_campaigns(conn: sqlite3.Connection, ctx: MigrationContex
 
     # --- campaigns --------------------------------------------------------
     if campaigns_json.exists():
-        output_dir = get_output_dir()
+        output_dir = get_output_root()  # not created: a missing folder just flags rows missing
         claimed: dict[str, str] = {}  # stem -> slug that kept it
         for slug, data in _read_store(campaigns_json, ctx).items():
             if not isinstance(data, dict) or not slug:
@@ -259,3 +259,115 @@ def _as_utc(value: object) -> str | None:
     if dt.tzinfo is None:
         dt = dt.astimezone()  # naive = local time, as render_journal() wrote it
     return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def import_diarization_sidecars(conn: sqlite3.Connection, ctx: MigrationContext) -> None:
+    """v4: each ``<stem>_diar.json`` in the output root → ``transcript_speakers``
+    and ``transcripts.audio_rel_path``; the file keeps only its segments.
+
+    The old ``campaign`` key associates a transcript with no campaign when
+    that campaign exists. Sidecars are backed up first and slimmed after the
+    commit. A sidecar with neither a ``.md`` nor a registry row is an orphan
+    and left alone; an unreadable one is skipped. Everything repaired or
+    dropped is reported.
+    """
+    import json
+    import os
+    import re as _re
+
+    from .config import get_output_root
+
+    output_dir = get_output_root()  # never created here: it may be an unmounted drive
+    if not output_dir.is_dir():
+        # Fresh install, or an unmounted drive: read_sidecar() falls back to
+        # the old fields still in each file, and the next write moves them.
+        import logging
+        logging.getLogger(__name__).info("No transcripts folder at %s; no sidecars to import", output_dir)
+        return
+    sidecars = sorted(output_dir.glob("*_diar.json"))
+    if not sidecars:
+        return
+    ctx.backup_legacy(sidecars, root=output_dir, into="output")
+    auto_name = _re.compile(r"^(SPEAKER_\d+|Unknown Speaker \d+|Recurring Speaker \d+)$")
+    root = os.path.realpath(output_dir)
+    slim: list[tuple[Path, list]] = []
+
+    for path in sidecars:
+        stem = unicodedata.normalize("NFC", path.name[: -len("_diar.json")])
+        try:
+            diar = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(diar, dict):
+                raise ValueError("not an object")
+        except (OSError, ValueError):
+            ctx.note(f"sidecar {path.name}: unreadable; skipped (left as it was)")
+            continue
+        row = conn.execute("SELECT id FROM transcripts WHERE stem = ?", (stem,)).fetchone()
+        if row is None:
+            if not (output_dir / f"{stem}.md").is_file():
+                continue  # orphan companion; reconcile's sweep decides
+            row = (ensure_transcript_row(conn, stem, output_dir),)
+        tid = row[0]
+
+        segments = diar.get("diarization_segments")
+        speaker_map = diar.get("speaker_map") or {}
+        sources = diar.get("speaker_map_source") or {}
+        space = diar.get("embedding_space")
+        stored = diar.get("speaker_embeddings") if space else None
+        embeddings: dict[str, np.ndarray] = {}
+        if isinstance(stored, dict):
+            for label, vec in stored.items():
+                try:
+                    arr = np.asarray(vec, dtype=np.float32).reshape(-1)
+                except (TypeError, ValueError):
+                    arr = np.array([], dtype=np.float32)
+                if arr.size:
+                    embeddings[str(label)] = arr
+                else:
+                    ctx.note(f"transcript {stem!r}: speaker {label!r} embedding unreadable; dropped")
+        if not isinstance(speaker_map, dict):
+            speaker_map = {}
+        for label in sorted({str(k) for k in speaker_map} | set(embeddings)):
+            name = str(speaker_map.get(label, label))
+            source = sources.get(label) if isinstance(sources, dict) else None
+            if source not in ("auto", "manual"):
+                source = "auto" if auto_name.match(name) else "manual"
+            emb = embeddings.get(label)
+            conn.execute(
+                "INSERT OR REPLACE INTO transcript_speakers (transcript_id, label, display_name, "
+                "source, embedding, embedding_space) VALUES (?, ?, ?, ?, ?, ?)",
+                (tid, label, name, source,
+                 None if emb is None else emb.tobytes(), None if emb is None else str(space)),
+            )
+
+        input_path = diar.get("input_path")
+        if input_path:
+            real = os.path.realpath(str(input_path))
+            if real.startswith(root + os.sep) and os.path.isfile(real):
+                rel = Path(os.path.relpath(real, root)).as_posix()
+                conn.execute("UPDATE transcripts SET audio_rel_path = ? WHERE id = ?", (rel, tid))
+            else:
+                ctx.note(f"transcript {stem!r}: source audio is not in the transcripts folder "
+                         "(or is gone); speaker enrollment from it is unavailable")
+
+        slug = diar.get("campaign")
+        if slug:
+            in_campaign = conn.execute(
+                "SELECT 1 FROM campaign_transcripts WHERE transcript_id = ?", (tid,)
+            ).fetchone()
+            campaign = conn.execute("SELECT id FROM campaigns WHERE slug = ?", (str(slug),)).fetchone()
+            if in_campaign is None and campaign is not None:
+                conn.execute(
+                    "INSERT INTO campaign_transcripts (transcript_id, campaign_id, position) VALUES "
+                    "(?, ?, (SELECT coalesce(max(position), -1) + 1 FROM campaign_transcripts "
+                    "WHERE campaign_id = ?))",
+                    (tid, campaign[0], campaign[0]),
+                )
+                ctx.note(f"transcript {stem!r}: added to campaign {slug!r} (from its sidecar)")
+        slim.append((path, segments if isinstance(segments, list) else []))
+
+    def _slim() -> None:
+        from .transcript_store import atomic_write_text
+        for path, segments in slim:
+            atomic_write_text(path, json.dumps({"diarization_segments": segments}, indent=2))
+
+    ctx.after_commit.append(_slim)
