@@ -32,6 +32,14 @@ _BASE_CONFIG = {
 
 
 @pytest.fixture(autouse=True)
+def _isolated_data_dir(tmp_path_factory, monkeypatch):
+    """Point WISPER_DATA_DIR at a fresh temp dir so no test reads or writes
+    the developer's real data (campaigns.json, profiles, config). Tests that
+    need a specific dir still set their own (inner setenv/patch wins)."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path_factory.mktemp("wisper_data")))
+
+
+@pytest.fixture(autouse=True)
 def _isolated_pipeline_config():
     """Patch pipeline.load_config so tests never read the real user config."""
     with patch(

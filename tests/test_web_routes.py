@@ -3134,3 +3134,48 @@ def test_config_page_shows_forced_alignment(client):
         resp = client.get("/config")
     assert b'name="forced_alignment"' in resp.content
     assert b'<option value="true" selected>' in resp.content
+
+
+# ---------------------------------------------------------------------------
+# Deleting a transcript unlinks it from its campaign
+# ---------------------------------------------------------------------------
+
+
+def _campaign_with(stems):
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    c = create_campaign("Test Campaign")
+    for s in stems:
+        move_transcript_to_campaign(s, c.slug)
+    return c.slug
+
+
+def test_delete_transcript_removes_campaign_entry(client, tmp_path):
+    from wisper_transcribe.campaign_manager import get_transcripts_for_campaign
+    slug = _campaign_with(["session01", "session02"])
+    (tmp_path / "session01.md").write_text("# s1")
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
+        client.post("/transcripts/session01/delete", follow_redirects=False)
+    assert get_transcripts_for_campaign(slug) == ["session02"]
+
+
+def test_bulk_delete_removes_campaign_entries(client, tmp_path):
+    from wisper_transcribe.campaign_manager import get_transcripts_for_campaign
+    slug = _campaign_with(["a", "b", "c"])
+    for s in "abc":
+        (tmp_path / f"{s}.md").write_text("#")
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
+        client.post("/transcripts/bulk-delete", data={"stems": ["a", "c"]}, follow_redirects=False)
+    assert get_transcripts_for_campaign(slug) == ["b"]
+
+
+def test_campaign_page_marks_missing_transcripts(client, tmp_path):
+    slug = _campaign_with(["present", "gone"])
+    (tmp_path / "present.md").write_text("#")
+    with patch("wisper_transcribe.path_utils.get_output_dir", return_value=tmp_path):
+        resp = client.get(f"/campaigns/{slug}")
+    html = resp.text
+    assert 'href="/transcripts/present"' in html
+    assert 'href="/transcripts/gone"' not in html  # no dead link
+    assert "MISSING" in html
+    # Still listed (not pruned), so the remove button can clear it.
+    assert 'name="stem" value="gone"' in html

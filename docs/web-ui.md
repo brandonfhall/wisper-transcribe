@@ -141,6 +141,8 @@ The Campaign page's **Rolling journal** panel combines session summaries into on
 
 **Episode order:** the ▲/▼ arrows on the Episodes list set the order sessions are folded in. Order is when a transcript was added to the campaign, not its date, so check it before rebuilding.
 
+**Deleted transcripts:** deleting a transcript (or a recording with its files) also removes it from its campaign. Entries left behind by older versions show as **MISSING** on the Campaign page; remove them with ✕.
+
 ---
 
 ## Settings (Config page)

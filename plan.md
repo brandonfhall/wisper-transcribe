@@ -524,6 +524,7 @@ Today files are the database: `speakers.json` + `.npy` embeddings, `campaigns.js
 
 **Why it might be worth it later:**
 - Transactional writes across related data (`campaigns.json` and `speakers.json` can drift on a mid-write crash).
+- Referential integrity: transcripts and campaigns are linked only by stem, so every delete path must remember to unlink. Three didn't (fixed 2026-09-30 with `_delete_transcript_companions()`; the campaign page now marks missing entries). A foreign key would make this class of bug impossible.
 - Persistent job history across restarts.
 - Relational queries ("all transcripts for a speaker", "jobs by campaign").
 - One source of truth instead of a growing set of sidecars.

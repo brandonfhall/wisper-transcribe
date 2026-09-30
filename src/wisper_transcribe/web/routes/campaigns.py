@@ -79,6 +79,16 @@ async def campaign_detail(request: Request, slug: str) -> HTMLResponse:
     journal_exists = bool(jpath and jpath.exists())
     journal_pending = len(unjournalled_sessions(safe))
 
+    # Entries whose transcript is gone (deleted before deletes unlinked
+    # campaigns, or removed by hand). Shown as missing, not pruned: an
+    # unavailable output dir would otherwise wipe every assignment.
+    from wisper_transcribe.path_utils import get_output_dir
+    out_dir = get_output_dir()
+    missing = {
+        stem for stem in campaign.transcripts
+        if os.path.basename(stem) != stem or not (out_dir / f"{stem}.md").exists()
+    }
+
     return templates.TemplateResponse(
         request,
         "campaigns.html",
@@ -90,6 +100,7 @@ async def campaign_detail(request: Request, slug: str) -> HTMLResponse:
             "unenrolled": unenrolled,
             "journal_exists": journal_exists,
             "journal_pending": journal_pending,
+            "missing_transcripts": missing,
         },
     )
 
