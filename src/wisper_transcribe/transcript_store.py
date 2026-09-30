@@ -16,7 +16,9 @@ rule applies everywhere:
 
 Every transcript, summary, sidecar, and journal write goes through
 :func:`atomic_write_text`, so a crash leaves the old file or the new one,
-never a truncated one.
+never a truncated one. Transcript and summary rewrites use
+:func:`save_transcript`/:func:`save_summary`, which also update the search
+index (a test enforces it).
 """
 from __future__ import annotations
 
@@ -32,6 +34,7 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from . import db
+from .search_index import check_freshness, mark_stale, request_backfill
 
 log = logging.getLogger(__name__)
 
@@ -109,6 +112,26 @@ def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
             pass
 
 
+def save_transcript(md_path: Path, text: str) -> None:
+    """Rewrite an existing transcript ``.md`` and reindex it for search.
+
+    For edits (renames, refine). A new transcript is written by the pipeline
+    and indexed by :func:`register`. Files outside the output root are
+    written but not indexed.
+    """
+    from .search_index import reindex_path
+    atomic_write_text(md_path, text)
+    reindex_path(md_path)
+
+
+def save_summary(summary_path: Path, text: str) -> None:
+    """Write a ``<stem>.summary.md`` and reindex its transcript for search."""
+    from .search_index import SUMMARY_SUFFIX, reindex_path
+    atomic_write_text(summary_path, text)
+    if Path(summary_path).name.endswith(SUMMARY_SUFFIX):  # not a custom --output name
+        reindex_path(summary_path)
+
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -181,33 +204,48 @@ def register(stem: str, *, origin: Literal["job", "reconcile"],
     if origin not in ("job", "reconcile"):
         raise ValueError(f"invalid origin: {origin!r}")
     stem = nfc(stem)
+    stale_sidecar = None
     with db.transaction(data_dir) as conn:
         row = conn.execute(
             "SELECT id, missing_since FROM transcripts WHERE stem = ?", (stem,)
         ).fetchone()
         if row is None:
-            return ensure_row(conn, stem)
-        if row["missing_since"] is not None:
-            conn.execute("UPDATE transcripts SET missing_since = NULL WHERE id = ?", (row["id"],))
-            if origin == "job":
-                log.info("Reused the name of a previously missing transcript: %s", stem)
-        if origin == "job":
-            # Overwritten or re-transcribed: a journal that folded the old text
-            # now describes something else. Flag it; never un-fold automatically.
-            conn.execute(
-                "UPDATE campaigns SET journal_stale_since = coalesce(journal_stale_since, ?) "
-                "WHERE id IN (SELECT campaign_id FROM journal_entries WHERE transcript_id = ?)",
-                (db.now_utc(), row["id"]),
-            )
-            # The old run's speakers describe the old text. A web job writes
-            # fresh ones (write_sidecar) right after; a CLI overwrite has none.
-            conn.execute("DELETE FROM transcript_speakers WHERE transcript_id = ?", (row["id"],))
-            stale_sidecar = safe_path(stem, SIDECAR_SUFFIX)
+            tid = ensure_row(conn, stem)
         else:
-            stale_sidecar = None
+            tid = row["id"]
+            if row["missing_since"] is not None:
+                conn.execute("UPDATE transcripts SET missing_since = NULL WHERE id = ?", (tid,))
+                if origin == "job":
+                    log.info("Reused the name of a previously missing transcript: %s", stem)
+            if origin == "job":
+                # Overwritten or re-transcribed: a journal that folded the old
+                # text now describes something else. Flag it; never un-fold
+                # automatically.
+                conn.execute(
+                    "UPDATE campaigns SET journal_stale_since = coalesce(journal_stale_since, ?) "
+                    "WHERE id IN (SELECT campaign_id FROM journal_entries WHERE transcript_id = ?)",
+                    (db.now_utc(), tid),
+                )
+                # The old run's speakers describe the old text. A web job writes
+                # fresh ones (write_sidecar) right after; a CLI overwrite has none.
+                conn.execute("DELETE FROM transcript_speakers WHERE transcript_id = ?", (tid,))
+                stale_sidecar = safe_path(stem, SIDECAR_SUFFIX)
     if stale_sidecar is not None:
         stale_sidecar.unlink(missing_ok=True)
-    return row["id"]
+    # The app just wrote this file: index it now. Files found on disk
+    # (reconcile) are left to the backfill, so no request parses them.
+    if origin == "job":
+        _reindex(stem, data_dir)
+    return tid
+
+
+def _reindex(stem: str, data_dir: Optional[Path]) -> None:
+    """Index a transcript the app just wrote or relinked; never fails the write."""
+    from .search_index import reindex
+    try:
+        reindex(stem, data_dir=data_dir)
+    except Exception:
+        log.warning("Search reindex failed for %s", stem, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +420,7 @@ def reconcile(output_dir: Optional[Path] = None, data_dir: Optional[Path] = None
                 if twin is not None:
                     conn.execute("UPDATE transcripts SET stem = ?, missing_since = NULL WHERE id = ?",
                                  (stem, twin["id"]))
+                    mark_stale(conn, [twin["id"]])  # a different file may carry the name now
                     rows.pop(twin["stem"], None)
                     counts["renamed"] += 1
                 else:
@@ -416,6 +455,13 @@ def reconcile(output_dir: Optional[Path] = None, data_dir: Optional[Path] = None
                 pass
     if any(counts.values()):
         log.info("Transcript reconcile: %s", counts)
+    # Files edited outside wisper get reindexed; new ones get their first index.
+    try:
+        check_freshness(output_dir, data_dir)
+    except Exception:
+        log.warning("Search freshness check failed", exc_info=True)
+    if counts["added"] or counts["renamed"] or counts["restored"]:
+        request_backfill()
     return counts
 
 
@@ -462,6 +508,7 @@ def relink(old_stem: str, new_stem: str, data_dir: Optional[Path] = None,
             conn.execute("DELETE FROM transcripts WHERE id = ?", (new["id"],))
         conn.execute("UPDATE transcripts SET stem = ?, missing_since = NULL WHERE id = ?",
                      (new_stem, old["id"]))
+    _reindex(new_stem, data_dir)  # the old identity's index described the old file
 
 
 def relink_candidates(data_dir: Optional[Path] = None) -> list[str]:

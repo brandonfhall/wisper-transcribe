@@ -42,6 +42,13 @@ def _isolated_data_dir(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_search_backfill_thread(monkeypatch):
+    """The web lifespan would start the search backfill thread, racing tests'
+    DB assertions. Search tests call search_index.run_backfill() directly."""
+    monkeypatch.setattr("wisper_transcribe.search_index.AUTOSTART_WORKER", False)
+
+
+@pytest.fixture(autouse=True)
 def _isolated_pipeline_config():
     """Patch pipeline.load_config so tests never read the real user config."""
     with patch(

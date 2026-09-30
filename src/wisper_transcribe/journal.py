@@ -472,7 +472,7 @@ def _summarize_into_sidecar(stem: str, client: LLMClient,
     """Summarize ``<stem>.md`` into ``<stem>.summary.md``. False = skipped."""
     from .llm.errors import LLMResponseError, LLMUnavailableError
     from .summarize import default_summary_path, render_markdown, summarize_transcript
-    from .transcript_store import atomic_write_text
+    from .transcript_store import save_summary
 
     transcript_path = _transcript_path(stem)
     if not transcript_path.exists():
@@ -489,8 +489,8 @@ def _summarize_into_sidecar(stem: str, client: LLMClient,
         result.skipped.append((stem, str(exc)))
         report(f"Skipping {stem}: summarize failed ({exc})")
         return False
-    atomic_write_text(default_summary_path(transcript_path),
-                      render_markdown(note, profiles=profiles, sections=sections))
+    save_summary(default_summary_path(transcript_path),
+                 render_markdown(note, profiles=profiles, sections=sections))
     result.resummarized.append(stem)
     return True
 

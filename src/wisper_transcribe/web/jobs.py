@@ -25,7 +25,7 @@ from typing import Any, Callable, Optional
 import tqdm as _tqdm_module
 
 from wisper_transcribe.pipeline import process_file
-from wisper_transcribe.transcript_store import atomic_write_text
+from wisper_transcribe.transcript_store import atomic_write_text, save_summary, save_transcript
 
 log = logging.getLogger(__name__)
 
@@ -1560,7 +1560,7 @@ class JobQueue:
             if edits and refined_md != md:
                 backup = transcript_path.with_suffix(transcript_path.suffix + ".bak")
                 atomic_write_text(backup, md)
-                atomic_write_text(transcript_path, refined_md)
+                save_transcript(transcript_path, refined_md)
                 job.append_log(
                     f"Applied {len(edits)} edit(s). Backup: {backup.name}"
                 )
@@ -1587,7 +1587,7 @@ class JobQueue:
                 )
                 out_path = default_summary_path(transcript_path)
                 body = render_markdown(note, profiles=profiles)
-                atomic_write_text(out_path, body)
+                save_summary(out_path, body)
                 job.append_log(f"Summary written: {out_path.name}")
                 job.summary_path = str(out_path)
             except (LLMUnavailableError, LLMResponseError) as exc:

@@ -525,6 +525,45 @@ CREATE INDEX jobs_recording  ON jobs(recording_id);
 """
 
 
+# --- v7: full-text search (derived; rebuildable) ---------------------------
+
+_V7_DDL = """
+CREATE TABLE search_index_state (              -- one row per indexed file; no transcript row = not indexed or stale
+  transcript_id    INTEGER NOT NULL REFERENCES transcripts(id) ON DELETE CASCADE,
+  kind             TEXT NOT NULL CHECK (kind IN ('transcript', 'summary')),   -- <stem>.md / <stem>.summary.md
+  indexed_mtime_ns INTEGER NOT NULL,
+  indexed_size     INTEGER NOT NULL CHECK (indexed_size >= 0),
+  PRIMARY KEY (transcript_id, kind)
+) STRICT;
+
+CREATE TABLE search_blocks (                   -- one speaker block or summary section
+  id            INTEGER PRIMARY KEY,           -- = search_fts.rowid
+  transcript_id INTEGER NOT NULL,
+  kind          TEXT NOT NULL,
+  block_idx     INTEGER NOT NULL CHECK (block_idx >= 0),
+  speaker       TEXT CHECK (speaker IS NULL OR speaker <> ''),
+  start_s       REAL CHECK (start_s IS NULL OR start_s >= 0),
+  CHECK (kind = 'transcript' OR (speaker IS NULL AND start_s IS NULL)),
+  UNIQUE (transcript_id, kind, block_idx),
+  -- A block exists only while the file it came from is indexed: marking a
+  -- transcript stale (deleting its state rows) removes its blocks too.
+  FOREIGN KEY (transcript_id, kind) REFERENCES search_index_state(transcript_id, kind) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX search_blocks_speaker ON search_blocks(speaker);
+
+-- No prefix indexes: measured, they doubled the index for ~10 ms on a
+-- two-letter prefix query over 21 MB of text.
+CREATE VIRTUAL TABLE search_fts USING fts5(
+  text, content='', contentless_delete=1,
+  tokenize='porter unicode61 remove_diacritics 2');
+
+-- FTS tables can't hold foreign keys; this carries cascades into the index.
+CREATE TRIGGER search_blocks_ad AFTER DELETE ON search_blocks BEGIN
+  DELETE FROM search_fts WHERE rowid = old.id;
+END;
+"""
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "foundation", _V1_DDL, _v1_pin_output_dir),
     Migration(2, "profiles-campaigns", _V2_DDL, _v2_import),
@@ -532,6 +571,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(4, "transcript-speakers", _V4_DDL, _v4_import),
     Migration(5, "recordings", _V5_DDL, _v5_import),
     Migration(6, "jobs", _V6_DDL),
+    Migration(7, "search", _V7_DDL),
 )
 LATEST_VERSION = MIGRATIONS[-1].version
 

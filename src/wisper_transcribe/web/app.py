@@ -163,6 +163,11 @@ def create_app() -> FastAPI:
             import logging
             logging.getLogger(__name__).warning("Transcript reconcile failed", exc_info=True)
 
+        # Index transcripts not yet in the search index (first run after the
+        # upgrade, files added while stopped), in the background.
+        from wisper_transcribe import search_index
+        search_index.start_worker()
+
         _build_tailwind()
         job_queue.start()
 
@@ -202,6 +207,7 @@ def create_app() -> FastAPI:
             await asyncio.to_thread(local_capture_manager.stop)
             await bot_manager.stop()
             await job_queue.stop()
+            await asyncio.to_thread(search_index.stop_worker)
             await asyncio.to_thread(heartbeat.stop)
             try:
                 _sj.unlink(missing_ok=True)

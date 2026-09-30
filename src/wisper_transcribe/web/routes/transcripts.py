@@ -427,7 +427,7 @@ async def transcript_edit_save(request: Request, name: str) -> HTMLResponse:
         from wisper_transcribe.formatter import rewrite_transcript_blocks
         content = md_path.read_text(encoding="utf-8")
         content = rewrite_transcript_blocks(content, updated_speakers)
-        transcript_store.atomic_write_text(md_path, content)
+        transcript_store.save_transcript(md_path, content)
 
     return HTMLResponse(
         content="",
@@ -453,7 +453,7 @@ async def fix_speaker(request: Request, name: str) -> HTMLResponse:
         from wisper_transcribe.formatter import update_speaker_names
         content = md_path.read_text(encoding="utf-8")
         content = update_speaker_names(content, old_name, new_name)
-        transcript_store.atomic_write_text(md_path, content)
+        transcript_store.save_transcript(md_path, content)
 
     return HTMLResponse(
         content="",

@@ -438,6 +438,11 @@ Branch `feat/sqlite-storage`, pushed; one PR to `main` at the end (ask the user 
 - **Phase 4 (v5)** recordings with derived status/paths, Recover for crashed sessions. Recording times carry microseconds.
 - **Phase 5 (v6)** job history (`job_history.py`), `/jobs/history`, historical job page, "Jobs" links.
 - **Schema changes after sign-off:** Discord-id CHECKs are digits-only and non-empty (`campaign_members`, `recording_speakers`; the signed-off `GLOB '[0-9]*'` only checked the first character). Recording timestamps have microseconds (still ISO-8601 UTC).
+- **Phase 6 schema changes after sign-off (v7):**
+  - `search_index_state` is keyed `(transcript_id, kind)`, one row per indexed file, not one per transcript. With a single row stat-keyed on the `.md`, an edit to `<stem>.summary.md` (a summarize job or Obsidian) was never detected.
+  - `search_blocks` has a composite FK to `search_index_state(transcript_id, kind)` `ON DELETE CASCADE`, replacing its direct FK to `transcripts`. A block can't outlive the file state it was built from, and marking a transcript stale (deleting its state rows) removes its blocks and, through the trigger, its FTS rows. The cascade chain transcript → state → blocks → trigger → FTS is tested.
+  - Added: `CHECK (kind = 'transcript' OR (speaker IS NULL AND start_s IS NULL))`, `speaker <> ''`, and an index on `search_blocks(speaker)` for the speaker filter.
+  - No prefix indexes. Measured on 21 MB of real text: `prefix='2 3'` made the index 2.3× larger (1.31× vs 0.57× of the text) and saved about 10 ms on a two-letter prefix query. The plan's "a third of the text" estimate was low; without prefix indexes the index is about 0.6× the text, so 500 two-hour sessions come to roughly 30–40 MB.
 - Browser and real-capture checks for all of this are under "Manual verification owed".
 
 ### Before merge
@@ -476,31 +481,10 @@ Branch `feat/sqlite-storage`, pushed; one PR to `main` at the end (ask the user 
 - **Enum CHECKs mirror Python constants** (`JOB_*`, statuses, `SOURCE_AUTO`/`SOURCE_MANUAL`). A test asserts they match, so adding a job type without a migration fails CI.
 
 
-### Phase 6 schema (not yet built)
+### Phase 6 progress
 
-```sql
--- Phase 6 (derived; rebuildable) ------------------------------------------
-CREATE TABLE search_index_state (             -- one row per indexed transcript; no row = not indexed or stale
-  transcript_id    INTEGER PRIMARY KEY REFERENCES transcripts(id) ON DELETE CASCADE,
-  indexed_mtime_ns INTEGER NOT NULL,
-  indexed_size     INTEGER NOT NULL CHECK (indexed_size >= 0)
-) STRICT;
-CREATE TABLE search_blocks (
-  id            INTEGER PRIMARY KEY,           -- = search_fts.rowid
-  transcript_id INTEGER NOT NULL REFERENCES transcripts(id) ON DELETE CASCADE,
-  kind          TEXT NOT NULL CHECK (kind IN ('transcript', 'summary')),
-  block_idx     INTEGER NOT NULL CHECK (block_idx >= 0),
-  speaker       TEXT,                          -- filter + display; NULL for summary sections
-  start_s       REAL CHECK (start_s IS NULL OR start_s >= 0),
-  UNIQUE (transcript_id, kind, block_idx)
-) STRICT;
-CREATE VIRTUAL TABLE search_fts USING fts5(
-  text, content='', contentless_delete=1,
-  tokenize='porter unicode61 remove_diacritics 2', prefix='2 3');
-CREATE TRIGGER search_blocks_ad AFTER DELETE ON search_blocks BEGIN
-  DELETE FROM search_fts WHERE rowid = old.id;
-END;
-```
+- **6a (indexing):** v7 schema, `search_index.py` (reindex, freshness, backfill worker, `search()`), `save_transcript()`/`save_summary()` at every write site, reconcile/relink/register hooks, and the guard test. DDL is in `db.py` (`_V7_DDL`); design is in architecture.md "Search index".
+- **6b (next):** `/search` route, sidebar box, transcript/summary anchors, then **6c:** `wisper search`, `wisper db reindex`, user docs.
 
 ### Remaining phases
 

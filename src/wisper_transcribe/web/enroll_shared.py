@@ -23,7 +23,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
-from wisper_transcribe.transcript_store import atomic_write_text
+from wisper_transcribe.transcript_store import save_transcript
 
 log = logging.getLogger(__name__)
 
@@ -305,7 +305,7 @@ def apply_renames(
         from wisper_transcribe.formatter import rewrite_frontmatter_speakers
         content = rewrite_frontmatter_speakers(content, frontmatter_renames)
 
-    atomic_write_text(md_path, content)
+    save_transcript(md_path, content)
 
     # Record every submitted label's current name so the sidecar stays
     # authoritative for the next visit.
