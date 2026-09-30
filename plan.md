@@ -25,38 +25,18 @@ A local-recording `JOB_TRANSCRIPTION` job reported COMPLETED and logged "Wrote `
 - **Live recording + campaign journal:** `LIVE_AUDIO_TEST_PLAN.md` — real-device capture, live transcript, journal browser flows, bulk delete, busy-queue notice.
 - **Live Discord acceptance test.** The recording pipeline (WAV segments, `__mixed__` combined track, `combined_path` hand-off) is covered by synthesized-PCM tests, but the JDA → socket → Python path needs one real session: record a few minutes with 2+ speakers, play the per-user WAVs, and run Transcribe.
 - **Windows launcher dependency refresh.** `start.bat` reinstalls dependencies when `pyproject.toml` is newer than `.venv\.wisper-deps` (untested on Windows): update an existing install with `git pull`, double-click `start.bat`, confirm the one-time "Dependencies changed" reinstall runs, and that a second launch skips it.
+- **Docker image with forced alignment.** The "Docker Build" workflow is disabled on GitHub, so nothing builds the image automatically. Confirm the CPU and GPU images build with `transformers`, and that a diarized job on the GPU image downloads the alignment model into `./cache/` and logs "Aligned words".
 - **macOS loopback (PR #59).** Record page on a Mac with BlackHole installed: BlackHole appears under System Audio and captures audio.
 
 ---
 
-## Forced word alignment — remaining
+## Forced word alignment — follow-ups
 
-Shipped on `feat/forced-alignment` (design in `architecture.md`, "Forced word alignment"): Qwen3-ForcedAligner-0.6B re-times Whisper's words before speaker assignment; `forced_alignment = auto` (on for CUDA/MPS); Align step on the job page. Phases 3–4 (smoothing re-tune, exclusive diarization) were measured and left unchanged. What's left is confirming it with labels.
+Shipped in #64 (design in `architecture.md`, "Forced word alignment"), default `forced_alignment = auto`. It shipped on spot-check evidence rather than the full labelled gate: on a 2 h episode, aligned and unaligned runs disagreed on 155 of 20,675 words; one-word "islands" inside another speaker's run were 10 (unaligned) vs 3 (aligned); 4 of 4 hand-checked disputed words were right with alignment. The labelling sheets were deleted after merge.
 
-### Gate: needs labels (user action)
-
-- **Podcast excerpts:** `alignment-eval/{e1-64m,e2-03m,e3-09m,e2-128m}/` on the dev Mac. Per excerpt: learn the voices from `speakers.txt`, listen to `clip.wav`, fill `correct_speaker` in `sheet.csv` (the 76 `discriminating` rows first), then `python scripts/alignment_eval.py score alignment-eval/*/`.
-- **Full-episode web UI comparison (E1, 2 h):** `alignment-eval/e1-webui-diff.csv`, 121 places where aligned and unaligned transcripts disagree (155 of 20,675 words). User spot-check so far: aligned right 4/4.
-- **Ship rule:** keep `aligned` if it beats `whisper` and no excerpt gets worse. If `aligned-guard-1s`, `aligned-smooth-1w`/`aligned-nosmooth`, or `aligned-exclusive` wins, change the default to match (all are arms in the script).
-- **Best evidence would be one Hanataz excerpt,** the live-table audio the feature is for.
-
-### Results so far
-
-- **Hanataz spike (2026-09-29, RTX 3090, 10 min):** proxy 90.0% → 97.0%; words moved >1 s: aligned placement heard 28 vs Whisper's 1.
-- **Podcast, M5 (2026-09-30, four 3-min crosstalk excerpts):** proxy 94.6–98.0% → 97.5–98.3% (flat in one excerpt). But words moved >1 s favoured Whisper 8 vs 1 (12 words, 3 changed speaker): edited audio has little drift, so large moves there are mostly the aligner reaching into a neighbour's speech. Hence the `aligned-guard-1s` arm.
-- **Full E1 via web UI:** identical text/diarization/speaker map between runs; one-word "islands" inside another speaker's run: unaligned 10, aligned 3.
-- **Speed (M5):** ~11 s per 10 min on MPS (fp16), 80 s for a 2 h episode; CPU ~22 s per 10 min.
-
-### Fallback engine
-
-`torchaudio.pipelines.MMS_FA` + star token was spiked first: no new dependency, but CC-BY-NC weights, weaker on crosstalk drift, and torchaudio is in maintenance mode. Use it only if the transformers dependency becomes a problem; recipe in git history (`6286e21`).
-
-### Risks
-
-- **Whisper text errors** still get placed somewhere, and there's no confidence score to filter bad placements.
-- **Overlapped speech:** one word timeline can't represent two people at once.
-- **VRAM:** the model (~1.2 GB weights; 3–4 GB in use at batch 8) stays resident beside Whisper and pyannote; tight on 8 GB cards (batch halving on OOM helps).
-- **transformers churn:** `Qwen3ASR*` is new in 5.x; names may shift. The lower bound is pinned and the calls are covered by tests.
+- **If attribution at speaker changes regresses, or before changing the aligner, smoothing thresholds, or the default,** run `scripts/alignment_eval.py` (see `docs/scenarios.md`) on a live-table excerpt and label its sheet. Arms already exist for the open questions: `aligned-guard-1s` (on edited podcast audio, words moved >1 s favoured Whisper 8 vs 1, the opposite of the Hanataz spike's 28 vs 1), `aligned-smooth-1w` / `aligned-nosmooth`, and `aligned-exclusive`.
+- **Fallback engine:** `torchaudio` MMS_FA + star token (no new dependency, but CC-BY-NC weights and weaker on crosstalk). Only if the `transformers` dependency becomes a problem; recipe in git history (`6286e21`).
+- **Watch:** `Qwen3ASR*` is new in transformers 5.x and may be renamed; the calls are covered by tests.
 
 ---
 

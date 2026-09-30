@@ -99,6 +99,8 @@ python scripts/alignment_eval.py score alignment-eval/*/
 
 `run` prints an automatic proxy for each variant (Whisper vs aligned timing, smoothing on/off, regular vs exclusive diarization). `score` reports how often each variant gave the words around speaker changes to the right person, according to your labels.
 
+The sheet lists rows marked `discriminating` first: those are the words where the variants disagree, and they decide the result. The proxy is only a sanity check; trust the labels. Live-table recordings are the best test audio, since edited podcasts have little timing drift to fix.
+
 ## Known Limitations
 
 - **One recording at a time.** Starting a Discord or local recording while either kind is active is rejected.

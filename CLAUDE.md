@@ -66,6 +66,12 @@ wisper server --reload                # dev mode; http://localhost:8080
 python scripts/vendor.py --check    # audit current state
 python scripts/vendor.py            # re-download + rebuild all assets
 # Run when bumping HTMX version or changing font subsets, then commit static/
+
+# Measure forced word alignment on real audio (output: alignment-eval/, gitignored)
+python scripts/alignment_eval.py run <audio> --start <s> --duration 180 --out alignment-eval/<name>
+python scripts/alignment_eval.py audit|sheet alignment-eval/<name>
+python scripts/alignment_eval.py score alignment-eval/*/
+# Re-run before changing the aligner, smoothing thresholds, or the forced_alignment default
 ```
 
 ---

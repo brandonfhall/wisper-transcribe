@@ -80,6 +80,8 @@ src/wisper_transcribe/
         └── config.py        Settings page, provider status and model discovery
 ```
 
+Outside the package, `scripts/` holds maintainer tools: `vendor.py` (refresh vendored web assets) and `alignment_eval.py` (measure forced alignment on real audio; see "Forced word alignment" and `docs/scenarios.md`).
+
 ---
 
 ## Processing Pipeline
@@ -681,7 +683,7 @@ The job page shows step pills and one bar split into equal per-step slices:
 **CI** (`.github/workflows/ci.yml`):
 - Python 3.13 and 3.14, both blocking — the versions shipped (Docker `python:3.14-slim`; `requires-python >= 3.13`).
 - Weekly cron adds a `latest-deps` job (`pip install --upgrade`, 3.14) to catch upstream breakage early.
-- Tailwind staleness check; CodeQL; Docker CPU image smoke build.
+- Tailwind staleness check; CodeQL. The Docker CPU image smoke build (`docker.yml`) is currently disabled on GitHub, so image builds are verified manually.
 - Dependabot watches `pip`, `docker`, and `github-actions` weekly.
 
 ---
