@@ -385,6 +385,12 @@ def test_summary_snippet_drops_markdown(out):
     assert str(group.hits[0].snippet) == "Loot &amp; Inventory Alice — a silver <mark>dagger</mark>"
 
 
+def test_snippet_centers_on_densest_match():
+    text = "your turn begins. " + ("filler words here " * 30) + "you can take your mask off now."
+    html = str(si.snippet(text, si.highlight_pattern("take your mask")))
+    assert "<mark>take</mark> <mark>your</mark> <mark>mask</mark>" in html
+
+
 def test_snippet_windows_long_text():
     text = ("word " * 200) + "needle " + ("tail " * 200)
     html = str(si.snippet(text, si.highlight_pattern("needle")))
@@ -523,3 +529,60 @@ def test_cli_fix_reindexes(out):
     result = CliRunner().invoke(main, ["fix", str(out / "s1.md"), "--speaker", "Bob", "--name", "Ezmerelda"])
     assert result.exit_code == 0, result.output
     assert "Ezmerelda" in si.speakers()
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def _cli(*args: str):
+    from click.testing import CliRunner
+
+    from wisper_transcribe.cli import main
+    return CliRunner().invoke(main, list(args))
+
+
+def test_cli_search_indexes_first_and_prints_hits(out):
+    _write(out, "s1", summary=SUMMARY)  # on disk, never indexed
+    create_campaign("Curse")
+    move_transcript_to_campaign("s1", "curse")
+    result = _cli("search", "fights")
+    assert result.exit_code == 0, result.output
+    assert "Indexing 1 transcript(s)" in result.output
+    assert "s1  [Curse]  (2 matches)" in result.output
+    assert re.search(r"00:05 Alice\s+The party fights Strahd", result.output)
+    assert "01:02:03 Bob" in result.output
+
+
+def test_cli_search_filters_and_summary_label(out):
+    _add(out, "s1", summary=SUMMARY)
+    result = _cli("search", "dagger", "--kind", "summary")
+    assert "summary" in result.output and "silver dagger" in result.output
+    assert "No matches." in _cli("search", "dagger", "--kind", "transcript").output
+    assert "No matches." in _cli("search", "fight", "--speaker", "Nobody").output
+    assert "No matches." in _cli("search", "strahd", "--campaign", "nope").output
+
+
+def test_cli_search_limit_and_more(out):
+    for i in range(3):
+        _add(out, f"s{i}")
+    result = _cli("search", "strahd", "--limit", "2")
+    assert result.output.count("(1 match)") == 2
+    assert "pass --limit 4" in result.output
+
+
+def test_cli_search_rejected_query_is_generic(out, monkeypatch):
+    _add(out, "s1")
+    monkeypatch.setattr(si, "build_match", lambda q: "NEAR(")
+    result = _cli("search", "x")
+    assert result.exit_code != 0
+    assert si.SEARCH_ERROR in result.output and "Traceback" not in result.output
+
+
+def test_cli_db_reindex(out):
+    _add(out, "s1", summary=SUMMARY)
+    _write(out, "s2")
+    result = _cli("db", "reindex")
+    assert result.exit_code == 0, result.output
+    assert "Indexed 2 transcript(s)." in result.output
+    assert si.progress() == (2, 2)

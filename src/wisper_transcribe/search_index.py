@@ -438,14 +438,27 @@ def highlight_pattern(query: str) -> Optional[re.Pattern]:
     return re.compile(rf"\b(?:{alternatives})\w*", re.IGNORECASE)
 
 
+def _densest_match(text: str, pattern: re.Pattern, width: int) -> Optional[int]:
+    """Start of the match that begins the window holding the most distinct
+    query terms (earliest on a tie), so a phrase beats a stray common word."""
+    matches = [(m.start(), m.group(0).lower()) for m in pattern.finditer(text)]
+    best, best_count = None, 0
+    reach = width * 2 // 3
+    for i, (pos, _) in enumerate(matches):
+        count = len({term for p, term in matches[i:] if p - pos <= reach})
+        if count > best_count:
+            best, best_count = pos, count
+    return best
+
+
 def snippet(text: str, pattern: Optional[re.Pattern], width: int = SNIPPET_CHARS) -> Markup:
     """An HTML-safe excerpt of ``text`` around the first match, with matches
     wrapped in ``<mark>``. Every piece of transcript text is escaped; only
     the ``<mark>`` tags are markup."""
-    first = pattern.search(text) if pattern else None
+    anchor = _densest_match(text, pattern, width) if pattern else None
     start = 0
-    if first is not None and first.start() > width // 3:
-        start = text.rfind(" ", 0, first.start() - width // 3) + 1
+    if anchor is not None and anchor > width // 3:
+        start = text.rfind(" ", 0, anchor - width // 3) + 1
     end = min(len(text), start + width)
     if end < len(text):
         space = text.rfind(" ", start, end)

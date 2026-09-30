@@ -32,6 +32,7 @@ Once storage moves to SQLite: with the web server in Docker Desktop (Mac or Wind
 - **Docker image with forced alignment.** Do this in the same session as the SQLite migration's Docker check (CLI and web containers sharing `./data`). The "Docker Build" workflow is disabled on GitHub, so nothing builds the image automatically. Confirm the CPU and GPU images build with `transformers`, and that a diarized job on the GPU image downloads the alignment model into `./cache/` and logs "Aligned words".
 - **SQLite branch capture path (Phase 4).** Record a few minutes (Discord and local), add markers (including two in quick succession), stop, Transcribe, Re-transcribe, then delete the transcript and confirm the recording is transcribable again. Kill the server mid-session once, restart, and use **Recover recording**. The Live Discord acceptance test below covers the JDA half.
 - **SQLite branch UI (Phase 2).** In a browser, with `WISPER_DATA_DIR` pointing at a copy of real data: the stale-journal notice (move a folded session to another campaign) on the Campaign and Journal pages; **Rebuild journal** vs **Rebuild from transcripts** confirmations and their call counts; journal **Download** includes `journaled_sessions`; Job history page, filters, paging, and a historical job's page after a restart; delete a transcript that's in a campaign and on a recording (recording returns to "Awaiting transcription").
+- **SQLite branch search (Phase 6).** Deep links and highlighting were checked in a browser on the dev data. Still to check on a real archive: edit a transcript in Obsidian while the server runs and search for the new words (the result shows "changed — reindexing", then matches after a reload); watch "Indexing N of M" on first start after the upgrade; and run a speaker rename in the wizard, then search by the new name with the speaker filter.
 - **macOS loopback (PR #59).** Record page on a Mac with BlackHole installed: BlackHole appears under System Audio and captures audio.
 
 ---
@@ -425,7 +426,7 @@ Nothing else changes; the wire protocol is the stable interface.
 
 ---
 
-## Storage — SQLite migration (Phases 0–5 done; next: Phase 6)
+## Storage — SQLite migration (Phases 0–6 done; next: Phase 7)
 
 Branch `feat/sqlite-storage`, pushed; one PR to `main` at the end (ask the user before opening it). Resume by reading this section and `git log` on the branch. Dev work uses a copied data dir (`WISPER_DATA_DIR=~/wisper-dev-data`); unmerged builds refuse the default data dir (`db.SCHEMA_FROZEN = False`). How everything works now is in architecture.md ("Database", "Output directory", "Recording layer", Job Queue, LLM journal).
 
@@ -437,6 +438,7 @@ Branch `feat/sqlite-storage`, pushed; one PR to `main` at the end (ask the user 
 - **Phase 3 (v4)** per-transcript speakers (`transcript_speakers`, `audio_rel_path`); `_diar.json` keeps only segments. Callers still use a sidecar-shaped dict via `transcript_store.read_sidecar()`/`write_sidecar()` (narrow in Phase 7).
 - **Phase 4 (v5)** recordings with derived status/paths, Recover for crashed sessions. Recording times carry microseconds.
 - **Phase 5 (v6)** job history (`job_history.py`), `/jobs/history`, historical job page, "Jobs" links.
+- **Phase 6 (v7)** full-text search: `search_index.py`, `/search`, sidebar box, `#b-<index>`/`#s-<n>` deep links with in-page highlighting, `wisper search`, `wisper db reindex`. Differences from the plan: index state is per file (see the schema changes below); stale-marking deletes the blocks along with the state, so a changed transcript drops out of results until the backfill reindexes it (seconds); no prefix indexes; `save_transcript()`/`save_summary()` plus a guard test replace per-site `reindex()` calls; the pipeline's new `.md` is indexed by `register()`; a transcript with neither speakers nor timestamps is indexed per line; snippets center on the densest cluster of query terms, and summary snippets drop markdown markers. `docs/setup.md` now states the SQLite ≥ 3.43/FTS5 requirement (missing since Phase 0).
 - **Schema changes after sign-off:** Discord-id CHECKs are digits-only and non-empty (`campaign_members`, `recording_speakers`; the signed-off `GLOB '[0-9]*'` only checked the first character). Recording timestamps have microseconds (still ISO-8601 UTC).
 - **Phase 6 schema changes after sign-off (v7):**
   - `search_index_state` is keyed `(transcript_id, kind)`, one row per indexed file, not one per transcript. With a single row stat-keyed on the `.md`, an edit to `<stem>.summary.md` (a summarize job or Obsidian) was never detected.
@@ -481,60 +483,7 @@ Branch `feat/sqlite-storage`, pushed; one PR to `main` at the end (ask the user 
 - **Enum CHECKs mirror Python constants** (`JOB_*`, statuses, `SOURCE_AUTO`/`SOURCE_MANUAL`). A test asserts they match, so adding a job type without a migration fails CI.
 
 
-### Phase 6 progress
-
-- **6a (indexing):** v7 schema, `search_index.py` (reindex, freshness, backfill worker, `search()`), `save_transcript()`/`save_summary()` at every write site, reconcile/relink/register hooks, and the guard test. DDL is in `db.py` (`_V7_DDL`); design is in architecture.md "Search index".
-- **6b (web):** `/search` (grouped results, filters, paging, "Indexing N of M", stale state), the sidebar search box, `#b-<index>` spans on transcript pages and `#s-<index>` on summary pages, and in-page highlighting of the query on arrival. Summary snippets drop markdown markers. Checked in a browser against the dev data: transcript and summary deep links both land on the right block.
-- **6c (next):** `wisper search`, `wisper db reindex`, CLI docs.
-
 ### Remaining phases
-
-**Phase 6 — Full-text search** (needs only Phase 2's registry, so it can move earlier).
-
-*What it does:* search every transcript (and its session summary) for words or phrases, e.g. "every session where Strahd comes up". Results show the campaign, session, speaker, timestamp, and a highlighted snippet, and link straight to that moment in the transcript. Filters: campaign, speaker, transcript vs summary.
-
-*Index design:*
-- **One row per speaker block,** not per transcript, so a hit points at a moment rather than a 2-hour file. Blocks come from `formatter.parse_transcript_blocks()`, the parser the rename logic already uses. Summaries are indexed per section.
-- **Contentless FTS5** (`content=''`, `contentless_delete=1`) stores only the index, not a second copy of the text. That keeps the DB small: the index is estimated at roughly a third of the text size (measure in this phase), e.g. ~25 MB for 500 two-hour sessions. The cost is that FTS5 can't produce snippets itself, so the search route reads the matching blocks from the `.md` files (one file read per result transcript on a page of 20) and builds snippets there.
-- **Deletes follow the foreign keys.** FTS tables can't hold foreign keys, so `search_blocks` holds them. Deleting a transcript cascades to `search_blocks`, whose trigger removes the FTS rows. The test suite must confirm the trigger fires on cascade deletes.
-- **One FTS column (`text`).** Speaker lives on `search_blocks`, which the speaker filter joins, so it isn't stored twice.
-- **Tokenizer:** `porter` stemming (so "fights" matches "fight"), accent-insensitive, with prefix indexes so `Stra*` is fast. Fantasy names aren't damaged by stemming because both the query and the text are stemmed the same way.
-
-*Keeping it fresh:*
-- **App writes reindex immediately.** Every path that rewrites a `.md` (wizard renames, the edit page, fix-speaker, refine, summarize, relabel) calls `transcript_store.reindex(stem)`. Indexing one transcript is one short transaction: delete its blocks, insert the new ones, upsert its `search_index_state` row.
-- **External edits** (Obsidian, sync) are caught by reconcile when `indexed_mtime_ns`/`indexed_size` differ from the file's. Reconcile only marks it stale (deletes its `search_index_state` row); the background backfill worker reindexes every transcript without a state row, so no parsing happens in a request.
-- **Initial build** runs as a background backfill after startup, outside the migration transaction, one transcript per transaction, so a large archive doesn't delay startup and a crash resumes where it stopped. The search page shows "Indexing N of M" until the backfill finishes.
-- **The index is disposable.** `wisper db reindex` drops and rebuilds it from the files. A corrupt or stale index is never data loss.
-
-*Query handling:*
-- **Plain input by default:** each word is quoted before `MATCH`, so FTS5 syntax characters (`"`, `*`, `-`, `NEAR`, `:`) are inert and a stray quote can't cause a syntax error. A trailing `*` stays as a prefix search. Phrase search with `"double quotes"` is supported.
-- A query FTS5 still rejects returns a generic "couldn't search for that" message, never exception text.
-- Ranking uses `bm25()`, grouped by transcript on the results page.
-- **Snippets are XSS-safe:** the block text is HTML-escaped first, then the matched terms are wrapped in `<mark>`. No `| safe` on raw transcript text.
-- **Stale snippets:** snippets are rebuilt from the current `.md` by `block_idx`, so before building one the route compares the file's mtime and size to its `search_index_state` row. On a mismatch it shows "Transcript changed — reindexing" without a snippet, links without an anchor, and marks the row stale.
-- **Highlighting is approximate; matching is exact.** Porter matches "fights" to "fight", but Python can't reproduce the stemmer, so each query term is highlighted by prefix: strip a common suffix (`-s`, `-es`, `-ed`, `-ing`), then match `\b<prefix>\w*` case-insensitively over the escaped text. A hit with no highlighted term is acceptable.
-
-*Changes:*
-- `transcript_store.py`: `reindex()`, the backfill, and a `search()` query helper.
-- New route `web/routes/search.py`: `GET /search?q=&campaign=&speaker=&kind=&page=`. Plus a search box in the sidebar.
-- Transcript detail: per-block anchors (`id="b-<index>"`, numbered in the same order as `parse_transcript_blocks()`), so results deep-link with `#b-<index>` and the matched terms are highlighted.
-- CLI: `wisper search "query" [--campaign] [--speaker] [--limit]`, printing stem, timestamp, speaker, and snippet.
-- Every `.md`-rewriting path listed above gains its `reindex()` call.
-
-*Availability:* contentless-delete needs SQLite ≥ 3.43. The shipped platforms have it: this Mac's venv reports 3.53; python.org 3.13+ builds on macOS and Windows, and Debian trixie (the `python:3.14-slim` base) bundle newer. Older SQLite is **not supported** (decided): Phase 0's startup check refuses to start below 3.43 or without FTS5, with a message naming what's missing. `docs/setup.md` lists the requirement. This affects only a local venv on an old Linux system SQLite (e.g. Ubuntu 22.04's 3.37); Docker is unaffected.
-
-*Tests:*
-- Block and summary indexing from synthetic transcripts.
-- Reindex on each app write path.
-- Reconcile marks a row stale on an mtime or size change, and the backfill reindexes it.
-- A snippet for a file changed since indexing shows the "reindexing" state instead of the wrong block.
-- Highlighting: a stemmed match ("fights" → "fight") is highlighted.
-- Transcript delete leaves no `search_fts` rows (the trigger fires on cascade).
-- Query escaping: quotes, `*`, `-`, `NEAR`, and column syntax are inert.
-- XSS: `<script>` in transcript text renders escaped in snippets.
-- Filters, paging, the backfill resuming after an interruption, and CLI output. The capability check (in `test_db.py`) refuses a mocked 3.42 and a mocked missing FTS5.
-
-*Docs:* `docs/web-ui.md` (search page), `docs/cli-reference.md` (`wisper search`, `wisper db reindex`), architecture.md (index design, freshness rules), CLAUDE.md gotcha ("every `.md` rewrite calls `reindex()`").
 
 **Phase 7 — Cleanup.**
 - Remove the remaining JSON code paths (the importers stay, frozen, for old installs).
@@ -597,7 +546,7 @@ Branch `feat/sqlite-storage`, pushed; one PR to `main` at the end (ask the user 
 
 ### Open questions
 
-None. Next step: Phase 6.
+None. Next step: Phase 7.
 
 ---
 

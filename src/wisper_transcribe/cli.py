@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import warnings
 from pathlib import Path
@@ -1899,12 +1900,73 @@ def discord_presets_remove(name: str):
 
 
 # ---------------------------------------------------------------------------
+# wisper search
+# ---------------------------------------------------------------------------
+
+def _terminal_snippet(snippet: str) -> str:
+    """A search snippet (escaped HTML with <mark> tags) as styled terminal text."""
+    import html
+    parts = re.split(r"<mark>(.*?)</mark>", str(snippet))
+    return "".join(
+        click.style(html.unescape(part), bold=True, fg="yellow") if i % 2 else html.unescape(part)
+        for i, part in enumerate(parts)
+    )
+
+
+@main.command("search")
+@click.argument("query")
+@click.option("--campaign", default=None, help="Only transcripts in this campaign (slug)")
+@click.option("--speaker", default=None, help="Only blocks spoken by this name (exact)")
+@click.option("--kind", type=click.Choice(["transcript", "summary"]), default=None,
+              help="Only transcripts or only session summaries")
+@click.option("--limit", type=click.IntRange(1, 200), default=10, show_default=True,
+              help="Maximum number of transcripts to show")
+def search(query: str, campaign: Optional[str], speaker: Optional[str], kind: Optional[str],
+           limit: int):
+    """Search every transcript and session summary for QUERY.
+
+    Words match their other forms ("fights" finds "fight"); "double quotes"
+    match a phrase; a trailing * matches a prefix. Transcripts not yet in the
+    search index are indexed first.
+    """
+    from . import search_index
+    from .transcript_store import reconcile
+
+    reconcile()  # registers new files and marks edited ones for reindexing
+    indexed, total = search_index.progress()
+    if indexed < total:
+        click.echo(f"Indexing {total - indexed} transcript(s)...", err=True)
+        search_index.run_backfill()
+
+    page = search_index.search(query, campaign=campaign, speaker=speaker, kind=kind,
+                               per_page=limit)
+    if page.error:
+        raise click.ClickException(page.error)
+    if not page.groups:
+        click.echo("No matches.")
+        return
+    for group in page.groups:
+        where = f"  [{group.campaign_name}]" if group.campaign_name else ""
+        click.echo(click.style(group.stem, bold=True) + where
+                   + f"  ({group.total_hits} match{'es' if group.total_hits != 1 else ''})")
+        if group.stale:
+            click.echo("  changed since indexing — run the search again")
+            continue
+        for hit in group.hits:
+            label = "summary" if hit.kind == "summary" else " ".join(
+                x for x in (hit.timestamp, hit.speaker or "") if x)
+            click.echo(f"  {label:<24} {_terminal_snippet(hit.snippet)}")
+    if page.has_next:
+        click.echo(f"More results: pass --limit {limit * 2}.")
+
+
+# ---------------------------------------------------------------------------
 # wisper db
 # ---------------------------------------------------------------------------
 
 @main.group("db")
 def db_group():
-    """Inspect, back up, or dump the wisper database."""
+    """Inspect, back up, dump, or reindex the wisper database."""
 
 
 @db_group.command("status")
@@ -1967,6 +2029,26 @@ def db_backup(dest: Optional[Path]):
 
     out = db.backup(dest=dest)
     click.echo(f"Backed up to {out}")
+
+
+@db_group.command("reindex")
+def db_reindex():
+    """Drop and rebuild the full-text search index from the transcript files.
+
+    The index is derived from the files, so this never loses data. The
+    running server's index is rebuilt too (it shares the database).
+    """
+    from . import search_index
+    from .transcript_store import reconcile
+
+    reconcile()
+
+    def report(done: int, todo: int) -> None:
+        if done == todo or done % 25 == 0:
+            click.echo(f"  {done}/{todo}", err=True)
+
+    n = search_index.rebuild(report=report)
+    click.echo(f"Indexed {n} transcript(s).")
 
 
 @db_group.command("dump")

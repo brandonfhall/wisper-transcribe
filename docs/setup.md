@@ -101,7 +101,7 @@ Walks you through provider (Ollama / Ollama Cloud / LM Studio / Anthropic / Open
 
 ## Requirements
 
-- Python 3.13+ (for Option A/C)
+- Python 3.13+ (for Option A/C), whose bundled SQLite is 3.43 or newer with FTS5 full-text search. The python.org installers for macOS and Windows, Homebrew, and the Docker image all qualify. An older Linux system Python (for example Ubuntu 22.04's SQLite 3.37) doesn't: wisper stops at startup and says what's missing. Use Docker, or a newer Python.
 - [ffmpeg](https://ffmpeg.org/download.html) on your PATH
 - A free [HuggingFace token](https://huggingface.co/settings/tokens)
 - GPU recommended but not required (CPU works, just slower). On a GPU (CUDA or Apple Silicon), forced word alignment is on by default and downloads a ~1.7 GB model on first use.

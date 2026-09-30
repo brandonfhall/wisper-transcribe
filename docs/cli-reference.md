@@ -316,6 +316,27 @@ wisper transcripts move session12 --no-campaign            # remove campaign ass
 
 ---
 
+### `wisper search`
+
+Search every transcript and session summary in the transcripts folder:
+
+```bash
+wisper search strahd                               # every block that mentions Strahd
+wisper search "fights the dragon"                  # all three words in one block
+wisper search '"take your mask off"'               # an exact phrase
+wisper search 'Stra*' --campaign curse-of-strahd   # prefix, one campaign
+wisper search loot --kind summary                  # session summaries only
+wisper search castle --speaker "Alice" --limit 20  # one speaker, up to 20 transcripts
+```
+
+Each result prints the transcript name, its campaign, and the number of matches. Up to three blocks follow, each with timestamp, speaker (or `summary`), and a snippet with the matched words highlighted.
+
+- Words match their other forms ("fights" finds "fight") and ignore accents. Every word must appear in the same block. Double quotes match a phrase, and a trailing `*` matches a prefix. Other symbols and words like `OR` or `NEAR` are searched as ordinary text.
+- `--speaker` is the exact name shown in the transcript. `--limit` (default 10) is the number of transcripts shown.
+- Transcripts not yet indexed (added while nothing was running, or just after an upgrade) are indexed before the search runs.
+
+---
+
 ### `wisper fix`
 
 Fix a wrong speaker assignment in an existing transcript:
@@ -451,7 +472,7 @@ Presets are also manageable via the web UI — the Record page has an inline "Sa
 
 ### `wisper db`
 
-Inspect and back up the database (`wisper.db` in the data directory).
+Inspect, back up, and reindex the database (`wisper.db` in the data directory).
 
 ```bash
 wisper db status                  # schema version, integrity and foreign-key checks, runtime leases
@@ -459,9 +480,10 @@ wisper db backup                  # copy to <data dir>/backups/wisper-<time>.db
 wisper db backup ~/wisper.db.bak  # copy to a chosen file (refuses to overwrite)
 wisper db dump                    # whole database as SQL text
 wisper db dump -o dump.sql
+wisper db reindex                 # drop and rebuild the search index from the transcript files
 ```
 
-`status` is read-only: it never upgrades the database, so it also works when startup refuses (for example, a database from a newer wisper). `backup` uses SQLite's backup API and is safe while the server is running.
+`status` is read-only: it never upgrades the database, so it also works when startup refuses (for example, a database from a newer wisper). `backup` uses SQLite's backup API and is safe while the server is running. `reindex` loses nothing: the search index is built from the `.md` files, so rebuilding it fixes a stale or damaged index.
 
 Every command that uses the database stops with a clear message, not a traceback, when it can't: a database newer than this wisper, an unmerged development build pointed at the default data directory, an SQLite older than 3.43 or without FTS5, or a native process while a Docker Desktop container is using the same data directory (see [docker.md](docker.md#one-way-of-running-at-a-time)).
 
