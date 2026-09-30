@@ -486,6 +486,9 @@ Branch `feat/sqlite-storage`, pushed; one PR to `main` at the end (ask the user 
 ### Remaining phases
 
 **Phase 7 — Cleanup.**
+- **Known issues from Phase 6 to resolve here:**
+  - The search progress counter can stick at "Indexing N of M" when a present transcript's `.md` can't be opened by its NFC stem, for example an NFD filename on ext4 (files synced from a Mac into Docker), or a permission error. `reindex()` returns False and the row stays unindexed. First check whether `delete_transcript()` and the other `safe_path(nfc(stem))` readers fail the same way. If so, fix the NFC/NFD handling once for all of them. If not, record an "unindexable" state so the counter excludes it.
+  - `test_recording_manager.py::test_concurrent_appends_are_all_kept` flaked once on the Windows job: 15 threads, 30 hot-path transactions, "database is locked", 11 of 15 kept. The hot path gives up after 500 ms by design. Decide whether the test's contention is realistic (live capture has one writer). Either make the test deterministic, or make the hot path retry a dropped marker, which reconcile can't restore.
 - Remove the remaining JSON code paths (the importers stay, frozen, for old installs).
 - Narrow APIs where the stability shims are no longer needed.
 - **Documentation review, top to bottom.** Read every doc in full, not just the sections each phase touched: README.md, architecture.md, CLAUDE.md, `.claude/rules/`, every file in `docs/`, and the SQLite section of plan.md (removed once merged, per the Documentation Rules). Check each against the merged code for:

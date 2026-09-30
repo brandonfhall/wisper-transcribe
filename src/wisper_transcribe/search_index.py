@@ -51,6 +51,10 @@ KINDS = (KIND_TRANSCRIPT, KIND_SUMMARY)
 SUMMARY_SUFFIX = ".summary.md"
 
 PAGE_SIZE = 20
+# Pause between transcripts in a backfill, so a capture hot-path write
+# (which waits at most recording_manager.HOT_PATH_BUSY_MS, then drops) always
+# finds the lock free between two index transactions.
+BACKFILL_YIELD_S = 0.05
 HITS_PER_TRANSCRIPT = 3
 SNIPPET_CHARS = 240
 
@@ -268,9 +272,11 @@ def progress(data_dir: Optional[Path] = None) -> tuple[int, int]:
 
 def run_backfill(data_dir: Optional[Path] = None, output_dir: Optional[Path] = None, *,
                  report: Optional[Callable[[int, int], None]] = None,
-                 stop: Optional[threading.Event] = None) -> int:
+                 stop: Optional[threading.Event] = None,
+                 yield_s: float = 0.0) -> int:
     """Index every present transcript that has no index yet. Returns how many
-    were indexed. ``report(done, todo)`` is called after each one."""
+    were indexed. ``report(done, todo)`` is called after each one; ``yield_s``
+    is a pause between transcripts (the server's worker sets it)."""
     if output_dir is None:
         from .path_utils import get_output_dir
         output_dir = get_output_dir()
@@ -284,6 +290,8 @@ def run_backfill(data_dir: Optional[Path] = None, output_dir: Optional[Path] = N
     for n, stem in enumerate(todo, 1):
         if stop is not None and stop.is_set():
             break
+        if yield_s and n > 1:
+            (stop or threading.Event()).wait(yield_s)
         try:
             if reindex(stem, data_dir=data_dir, output_dir=output_dir):
                 done += 1
@@ -329,7 +337,7 @@ class _Worker:
             if self._stop.is_set():
                 break
             try:
-                n = run_backfill(stop=self._stop)
+                n = run_backfill(stop=self._stop, yield_s=BACKFILL_YIELD_S)
                 if n:
                     log.info("Search index: indexed %d transcript(s)", n)
             except Exception:
@@ -445,7 +453,12 @@ def _densest_match(text: str, pattern: re.Pattern, width: int) -> Optional[int]:
     best, best_count = None, 0
     reach = width * 2 // 3
     for i, (pos, _) in enumerate(matches):
-        count = len({term for p, term in matches[i:] if p - pos <= reach})
+        terms = set()
+        for p, term in matches[i:]:  # in position order: stop past the window
+            if p - pos > reach:
+                break
+            terms.add(term)
+        count = len(terms)
         if count > best_count:
             best, best_count = pos, count
     return best
