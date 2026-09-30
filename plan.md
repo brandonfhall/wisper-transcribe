@@ -421,7 +421,7 @@ Nothing else changes; the wire protocol is the stable interface.
 
 ## Storage — SQLite migration (plan, awaiting review)
 
-Branch `feat/sqlite-storage`. Plan only. The schema below is a **DRAFT**. Decisions made so far are under "Decisions" at the end; questions 4, 9, and 10 are still open.
+Branch `feat/sqlite-storage`. Plan only. The schema below is a **DRAFT** until signed off. Decisions are listed under "Decisions" at the end.
 
 ### Why, and what SQLite does and doesn't fix
 
@@ -462,10 +462,10 @@ Costs:
 | `<key>.mp3` reference clips | File | Media, served by a route. Stays key-named, and rename moves it as today (after the DB commit, per the ordering rule), so the migration renames no files. |
 | `campaigns.json` | **DB** (`campaigns`, `campaign_members`, `campaign_transcripts`) | The core relational data. |
 | `journal.md` body | File | Obsidian-ready product the user reads. |
-| `journaled_sessions` | **DB** (`journal_entries`) | A stem list, so it becomes a foreign key. The frontmatter copy is open question 10. |
-| `<stem>.md` transcripts | File, plus a DB **registry row** | The file is the product, edited in Obsidian and synced. The row is the identity that links point at. Listing still reads frontmatter from disk, so there is no cached title to go stale. |
+| `journaled_sessions` | **DB** (`journal_entries`) | A stem list, so it becomes a foreign key. No longer written to `journal.md` frontmatter (decided); a journal export adds it back (see Phase 2). |
+| `<stem>.md` transcripts | File, plus a DB **registry row** (full text is **not** stored) | The file is the product, edited in Obsidian and synced. The row is the identity that links point at. Listing still reads frontmatter from disk, so there is no cached title to go stale. If search is ever wanted, an FTS5 index derived from the files (rebuilt by reconcile on mtime change) can be added without making the DB the source of truth. |
 | `.summary.md`, excerpt `.mp3`/`.txt`, source audio copy | File | Product or media. Existence is checked on disk. |
-| `_diar.json` | Split recommended (open question 4) | `speaker_map`, `speaker_map_source`, and per-label embeddings are relational and go to `transcript_speakers`. `diarization_segments` (hundreds of KB, never queried) goes to a JSON column or stays in a slimmed sidecar. |
+| `_diar.json` | **Split** (decided) | `speaker_map`, `speaker_map_source`, per-label embeddings, and the audio-copy path go to the DB. `diarization_segments` (hundreds of KB, only ever read whole) stays in a slimmed `_diar.json`, treated like the other companion files. |
 | `recordings.json` + `metadata.json` | **DB** (`recordings`, `recording_segments`, `recording_markers`) | Kills the `save_recording_merged()` re-read dance, since appends become INSERTs. |
 | WAV segments, `combined.wav`, `live_transcript.md` | File | Media. |
 | Job queue | In-memory runtime, plus a DB **history projection** | Events, closures, and cancel flags can't persist. Same DB file, not a jobs-only store. |
@@ -482,13 +482,13 @@ profiles(id PK, key UNIQUE, display_name, role, notes, enrolled_date,
 campaigns(id PK, slug UNIQUE, display_name, created)
 campaign_members(campaign_id FK→campaigns CASCADE, profile_id FK→profiles CASCADE,
                  role, character, discord_user_id, PK(campaign_id, profile_id))
-transcripts(id PK, stem UNIQUE, created_at, missing_since NULL)   -- stem is relative to the output root
+transcripts(id PK, stem UNIQUE, created_at, missing_since NULL,  -- stem is relative to the output root
+            audio_rel_path NULL)                                -- durable source-audio copy, relative to the output root
 campaign_transcripts(campaign_id FK CASCADE, transcript_id FK CASCADE UNIQUE, position)
                                         -- UNIQUE(transcript_id) = one campaign per transcript
 journal_entries(campaign_id FK CASCADE, transcript_id FK CASCADE, position, folded_at)
 transcript_speakers(transcript_id FK CASCADE, label, display_name, source,
                     embedding BLOB NULL, embedding_space, PK(transcript_id, label))
-transcript_diarization(transcript_id PK FK CASCADE, segments_json, audio_rel_path NULL)
 recordings(id TEXT PK uuid, campaign_id FK SET NULL, transcript_id FK SET NULL, status,
            source, name, started_at, ended_at, voice_channel_id, guild_id, devices_json,
            combined_rel_path, notes)
@@ -502,7 +502,7 @@ jobs(id TEXT PK uuid, type, status, created_at, started_at, finished_at, error_c
      params_json, log_tail)
 ```
 
-Alternatives held open: keep embeddings as `.npy` (drop the BLOB columns); keep `diarization_segments` in the sidecar (drop `transcript_diarization`); key `recording_speakers` by profile key text (no FK). When a transcript is deleted, `recordings.transcript_id` becomes NULL, and app code reverts the status `transcribed` → `completed` in the same transaction, so the Transcribe button comes back (open question 8).
+Alternative held open: key `recording_speakers` by profile key text (no FK). When a transcript is deleted, `recordings.transcript_id` becomes NULL, and app code reverts the status `transcribed` → `completed` in the same transaction, so the Transcribe button comes back (open question 8).
 
 ### Transcript identity (settle before Phase 2)
 
@@ -534,7 +534,7 @@ Proposed rules:
   - A sidecar or metadata file that fails to parse is skipped and reported.
 - **Unparseable top-level JSON** (`speakers.json`, `campaigns.json`) rolls the transaction back, leaves `user_version` unchanged, and stops startup with a message naming the file and the backup. Importing an empty store instead would silently lose data.
 - **Import report** goes to the log and to `import-report.txt` in the backup dir.
-- **Legacy files after import are deleted** once the import transaction has committed (decided). This covers `speakers.json`, `.npy` files, `campaigns.json`, `recordings.json`, `metadata.json`, and `_diar.json` (or its non-segment keys, per question 4). A crash between commit and delete is harmless: the version has already moved, so nothing re-imports, and the next startup deletes files a committed migration already imported.
+- **Legacy files after import are deleted** once the import transaction has committed (decided). This covers `speakers.json`, `.npy` files, `campaigns.json`, `recordings.json`, `metadata.json`, and `_diar.json` (rewritten with only `diarization_segments`). The pre-import copies in `backups/pre-sqlite-*` are kept (decided). A crash between commit and delete is harmless: the version has already moved, so nothing re-imports, and the next startup deletes files a committed migration already imported.
 - **No downgrade support** (decided): no `export-legacy`, no rollback path. The downgrade guard stays because it's a few lines and stops an old build from writing to a newer schema.
 
 ### Concurrency
@@ -576,12 +576,13 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
   - `web/routes/campaigns.py`: the missing-entry rendering reads `missing_since`.
   - `pipeline.py`: CLI registration and the `--campaign` rule.
   - `web/jobs.py`: register on completion.
-  - `journal.py`: `unjournalled_sessions()`, `update_journal()`, `rebuild_campaign()`.
+  - `journal.py`: `unjournalled_sessions()`, `update_journal()`, `rebuild_campaign()`; stop writing `journaled_sessions` into the frontmatter.
+- **Export with frontmatter:** a download or CLI export of the journal that adds `journaled_sessions` from the DB to its frontmatter. The same export path can later add DB-held metadata (campaign, speakers) to transcript or summary downloads.
   - `cli.py`: `transcripts list/move`, `campaigns journal/reorder`.
 - Tests: cascade tests for every delete path; reconcile (external delete keeps order; reappearing file clears the flag; an output-root change doesn't mark rows missing); a guard test that no module outside `transcript_store.py` unlinks `*.md` in the output dir.
 
-**Phase 3 — Diarization sidecar data** (shape pending question 4).
-- Import `_diar.json` into `transcript_speakers`/`transcript_diarization`; the sidecar is slimmed or removed.
+**Phase 3 — Diarization sidecar data.**
+- Import `_diar.json`'s speaker map, provenance, embeddings, and `input_path` into `transcript_speakers` and `transcripts.audio_rel_path`. The sidecar is rewritten with only `diarization_segments`.
 - Changes: `jobs._write_enrollment_sidecar()`, `web/enroll_shared.py` (`resolve_current_names()`, `apply_renames()`), `speaker_registry.py` (`_load_sidecar`/`_write_sidecar`, `embeddings_to/from_sidecar`), and `web/routes/transcripts.py` and `transcribe.py` (enroll wizard).
 - `apply_renames()` rewrites the `.md` and then updates `speaker_map` rows. Under the ordering rule the file comes first. A crash in between leaves the rows stale, so the existing interval-matching fallback stays as the repair path.
 - CLAUDE.md's "`_diar.json` carries the authoritative `speaker_map`" gotcha is rewritten to name the table.
@@ -597,8 +598,8 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 - Write-through from `JobQueue` at submit and at each status transition. On terminal status, store `error_code` (the same generic codes, never exception text) and the last ~200 log lines.
 - `params_json` holds an allowlisted subset of kwargs: no secrets, no temp paths.
 - At startup, pending and running rows become `failed` / "Interrupted by restart". They are never auto-resumed: the uploads are gone and the jobs are multi-hour GPU work.
-- The in-memory 50-job cap stays. The DB keeps every job (decided); list views page through it (question 9).
-- UI: a job-history view on the dashboard or jobs page, and "jobs for this transcript/campaign" links.
+- The in-memory 50-job cap stays. The DB keeps every job (decided).
+- UI (decided): the dashboard keeps its 20 most recent (memory plus DB). A new paginated **Job history** page (50 per page, filter by type and status). "Jobs for this" links on transcript and campaign pages.
 - Changes: `web/jobs.py`, `web/routes/dashboard.py` and `transcribe.py`, `docs/web-ui.md`.
 
 **Phase 6 — Cleanup.**
@@ -637,17 +638,18 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 1. **Output root:** keep the current `./output` vs `data_dir/output` resolution, with the drift warning and reconcile freeze.
 2. **CLI `--campaign` outside the output root:** warn and skip the association.
 3. **Embeddings:** DB BLOBs. Size check: 1 KB per profile and 1 KB per label per transcript. 500 transcripts × 8 labels ≈ 4 MB, which is negligible for SQLite.
+4. **`_diar.json`:** split. Names, provenance, embeddings, and the audio path go to the DB; segments stay in a slim sidecar.
 5. **Missing transcripts:** keep flagged rows until the user removes them.
-6. **Legacy files:** delete them after a committed import. No downgrade support. Pending: whether to keep the `backups/pre-sqlite-*` copy.
+6. **Legacy files:** delete them after a committed import; keep the `backups/pre-sqlite-*` copies. No downgrade support.
 7. **Journal mode:** rollback journal everywhere.
 8. **Deleting a recording's transcript:** revert the recording to `completed`. This applies to every recording, both Discord and local capture.
+9. **Job history:** keep every job; the dashboard shows the 20 most recent, plus a new paginated history page.
+10. **Journal frontmatter:** stop writing `journaled_sessions`; add a journal export that includes it.
 11. **Merge cadence:** stack phase PRs on `feat/sqlite-storage`; one PR to `main` when the feature is complete.
 
 ### Open questions
 
-4. **`_diar.json` shape:** (a) move everything, (b) move the relational parts and keep a segments-only sidecar, or (c) registry row only.
-9. **Job history UI:** the dashboard keeps showing the 20 most recent jobs; a new paginated history page is proposed.
-10. **Journal frontmatter:** stop writing `journaled_sessions`, or keep it as a read-only mirror?
+None. Next step: sign-off on the schema, then Phase 0.
 
 ---
 
