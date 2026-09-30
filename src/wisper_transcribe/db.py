@@ -273,8 +273,104 @@ def _v1_pin_output_dir(conn: sqlite3.Connection, ctx: MigrationContext) -> None:
     ctx.note(f"output_dir pinned to {resolved} (the old working-directory ./output rule)")
 
 
+# --- v2: profiles, campaigns, transcript registry -------------------------
+
+_V2_DDL = """
+CREATE TABLE profiles (
+  id                INTEGER PRIMARY KEY,
+  key               TEXT NOT NULL UNIQUE,      -- alternate key: URL slug + clip filename; set only by rename_profile()
+  display_name      TEXT NOT NULL CHECK (display_name <> ''),
+  role              TEXT NOT NULL DEFAULT '',
+  notes             TEXT NOT NULL DEFAULT '',
+  enrolled_date     TEXT NOT NULL,
+  enrollment_source TEXT NOT NULL,
+  embedding         BLOB,
+  embedding_space   TEXT,
+  CHECK ((embedding IS NULL) = (embedding_space IS NULL)),
+  CHECK (embedding IS NULL OR length(embedding) % 4 = 0)   -- float32 vector
+) STRICT;
+
+CREATE TABLE campaigns (
+  id             INTEGER PRIMARY KEY,
+  slug           TEXT NOT NULL UNIQUE,
+  display_name   TEXT NOT NULL CHECK (display_name <> ''),
+  created_at     TEXT NOT NULL,
+  journal_sha256 TEXT CHECK (journal_sha256 IS NULL OR length(journal_sha256) = 64),
+  journal_stale_since TEXT                   -- journal text mentions a session that left or changed; cleared by rebuild
+) STRICT;
+
+CREATE TABLE campaign_members (
+  campaign_id     INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  profile_id      INTEGER NOT NULL REFERENCES profiles(id)  ON DELETE CASCADE,
+  role            TEXT NOT NULL DEFAULT '',
+  character       TEXT NOT NULL DEFAULT '',
+  discord_user_id TEXT CHECK (discord_user_id IS NULL
+                              OR (discord_user_id <> '' AND discord_user_id NOT GLOB '*[^0-9]*')),
+  PRIMARY KEY (campaign_id, profile_id),
+  UNIQUE (campaign_id, discord_user_id)       -- one member per Discord account per campaign (NULLs allowed)
+) STRICT;
+CREATE INDEX campaign_members_profile ON campaign_members(profile_id);
+
+CREATE TABLE transcripts (
+  id             INTEGER PRIMARY KEY,
+  stem           TEXT NOT NULL UNIQUE CHECK (stem <> '' AND stem NOT GLOB '*[/\\]*'),  -- NFC, relative to the output root
+  created_at     TEXT NOT NULL,
+  missing_since  TEXT,
+  audio_rel_path TEXT CHECK (audio_rel_path IS NULL OR (audio_rel_path NOT GLOB '/*'
+                                                  AND audio_rel_path NOT GLOB '*\\*'
+                                                  AND '/' || audio_rel_path || '/' NOT GLOB '*/../*'))
+) STRICT;
+
+CREATE TABLE campaign_transcripts (           -- 1:N kept as its own relation so "no campaign" needs no NULLs
+  transcript_id INTEGER PRIMARY KEY REFERENCES transcripts(id) ON DELETE CASCADE,   -- one campaign per transcript
+  campaign_id   INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  position      INTEGER NOT NULL CHECK (position >= 0),
+  UNIQUE (campaign_id, position),
+  UNIQUE (campaign_id, transcript_id)         -- target of journal_entries' composite FK
+) STRICT;
+"""
+
+
+# Legacy files each migration imports, relative to the data dir. A crash
+# between an import's commit and its file deletion leaves them behind; the
+# next start deletes them (the committed version means they were imported,
+# and the backup dir holds copies).
+_IMPORTED_LEGACY: dict[int, tuple[str, ...]] = {
+    2: ("profiles/speakers.json", "campaigns/campaigns.json", "profiles/embeddings/*.npy"),
+}
+_cleaned: set[str] = set()
+
+
+def _finish_legacy_cleanup(data_dir: Path) -> None:
+    key = os.path.realpath(data_dir)
+    if key in _cleaned:
+        return
+    _cleaned.add(key)
+    path = data_dir / DB_FILENAME
+    if not path.exists():
+        return
+    with closing(_open(path)) as conn:
+        version = _user_version(conn)
+    for v, patterns in _IMPORTED_LEGACY.items():
+        if version < v:
+            continue
+        for pattern in patterns:
+            for leftover in data_dir.glob(pattern):
+                try:
+                    leftover.unlink()
+                    log.info("Removed already-imported legacy file %s", leftover)
+                except OSError as exc:
+                    log.warning("Could not remove imported legacy file %s: %s", leftover, exc)
+
+
+def _v2_import(conn: sqlite3.Connection, ctx: MigrationContext) -> None:
+    from .legacy_import import import_profiles_and_campaigns
+    import_profiles_and_campaigns(conn, ctx)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "foundation", _V1_DDL, _v1_pin_output_dir),
+    Migration(2, "profiles-campaigns", _V2_DDL, _v2_import),
 )
 LATEST_VERSION = MIGRATIONS[-1].version
 
@@ -456,6 +552,7 @@ def connect(data_dir: Optional[Path] = None, *, migrate_schema: bool = True,
             needs = version < LATEST_VERSION
         if needs:
             migrate(data_dir)
+        _finish_legacy_cleanup(data_dir)
     else:
         data_dir.mkdir(parents=True, exist_ok=True)
     conn = _open(data_dir / DB_FILENAME)

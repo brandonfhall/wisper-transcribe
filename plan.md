@@ -425,9 +425,9 @@ Nothing else changes; the wire protocol is the stable interface.
 
 ---
 
-## Storage — SQLite migration (in progress: Phase 0 done)
+## Storage — SQLite migration (in progress: Phases 0–1 done)
 
-Branch `feat/sqlite-storage`. Phase 0 is implemented (`db.py`, `wisper db`, output-root setting, guards, Windows CI job); Phases 1–7 remain. The schema below is signed off. Decisions are listed under "Decisions" at the end.
+Branch `feat/sqlite-storage`. Phase 0 (`db.py`, `wisper db`, output-root setting, guards, Windows CI job) and Phase 1 (profiles, campaigns, transcript registry table, `speakers doctor`) are implemented; Phases 2–7 remain. The schema below is signed off. Decisions are listed under "Decisions" at the end.
 
 ### Why, and what SQLite does and doesn't fix
 
@@ -554,7 +554,8 @@ CREATE TABLE campaign_members (
   profile_id      INTEGER NOT NULL REFERENCES profiles(id)  ON DELETE CASCADE,
   role            TEXT NOT NULL DEFAULT '',
   character       TEXT NOT NULL DEFAULT '',
-  discord_user_id TEXT CHECK (discord_user_id IS NULL OR discord_user_id GLOB '[0-9]*'),
+  discord_user_id TEXT CHECK (discord_user_id IS NULL
+                              OR (discord_user_id <> '' AND discord_user_id NOT GLOB '*[^0-9]*')),
   PRIMARY KEY (campaign_id, profile_id),
   UNIQUE (campaign_id, discord_user_id)       -- one member per Discord account per campaign (NULLs allowed)
 ) STRICT;
@@ -796,8 +797,17 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 - Tests: `test_db.py`, plus a guard test that no module outside `db.py` calls `sqlite3.connect`, in the spirit of `test_tailwind.py`. Output root: default, config, env override, and the CWD-pinning migration. Dev-data guard: refuses the default dir while unfrozen, allows an override. Runtime guard (with `/.dockerenv` and `/proc/version` mocked): a fresh Docker Desktop container lease refuses a host start and vice versa; a stale lease, or a native-Linux container lease (`crosses_vm = 0`), is allowed.
 - Docs: architecture.md (module map; "Database" replaces "File-store locking"; output-root resolution), `docs/cli-reference.md`, `docs/configuration.md` (data layout, backup, `output_dir`/`WISPER_OUTPUT_DIR`), `docs/docker.md`.
 
-**Phase 1 — Profiles + campaigns** (coupled through `rename_profile()` → `rekey_member()`).
-- Import `speakers.json` and `campaigns.json`. `campaign_transcripts` temporarily holds stem text plus position.
+**Phase 1 — Profiles + campaigns. Done** (migration v2). Implementation notes:
+- The `transcripts` registry table was created here instead of Phase 2, so `campaign_transcripts` references real rows from the start (no temporary stem-text column, no Phase 2 rebuild). Rows are created on demand by campaign association (flagged `missing_since` when the `.md` is absent); `register()`/`reconcile()` remain Phase 2.
+- `rekey_member()` was deleted: memberships reference the profile id, so a rename is one `UPDATE`.
+- The `campaign_members.discord_user_id` CHECK was tightened from `GLOB '[0-9]*'` (which only checks the first character) to digits-only and non-empty. `bind_discord_id()` raises `ValueError` for non-numeric ids; `add_member()` raises `KeyError` for an unknown profile.
+- `save_profiles()`/`save_campaigns()` remain as whole-store replace (upsert by key/slug, delete the rest) for tests and callers; Phase 7 narrows them.
+- `update_embedding()` on an unknown key is now a no-op (it used to write an orphan `.npy`).
+- Dry run on a copy of the real data dir (2026-09-30): 6 profiles (all 256-dim, current space), 1 campaign, 2 transcripts imported; 4 roster entries dropped and reported because their profiles no longer existed (left over from renames before `rekey_member()` existed, and one deleted profile). None had a role, character, or Discord binding.
+- Tests: `tests/_seed.py` (seed profiles directly), `tests/_legacy_store.py` (frozen JSON writers), `tests/test_legacy_import.py`.
+
+Original scope:
+- Import `speakers.json` and `campaigns.json`.
 - Embeddings to BLOB: import `.npy`. **The one API break in Phase 1:** `SpeakerProfile.embedding_path` is replaced by `embedding: Optional[np.ndarray]`, filled by `load_profiles()` in the same query (~1 KB per profile). `load_profile_embedding(profile)` keeps its signature and returns `profile.embedding` after the embedding-space check. `update_embedding()` and `enroll_speaker()` write the column. `pipeline.py:345`'s direct `np.load(embedding_path)` switches to `load_profile_embedding()`. Reference clips stay key-named files, located by a new `reference_clip_path(key, data_dir)` helper.
 - Rename becomes one transaction across profile and memberships.
 - Changes: `speaker_manager.py`, `campaign_manager.py`, `models.py`, `pipeline.py`. `web/routes/speakers.py` and `campaigns.py` change only if an API narrows. ~13 test files reference `embedding_path` (mechanical churn).
@@ -992,7 +1002,7 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 
 ### Open questions
 
-None. Schema signed off (decision 30). Phase 0 done; next: Phase 1.
+None. Schema signed off (decision 30). Phases 0–1 done; next: Phase 2.
 
 ---
 

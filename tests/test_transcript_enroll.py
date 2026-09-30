@@ -8,6 +8,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from ._seed import seed_profile
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -1385,7 +1387,7 @@ def test_enroll_profiles_existing_profile_uses_ema_update(tmp_path: Path):
     segments = [DiarizationSegment(start=0.0, end=5.0, speaker="SPEAKER_00")]
 
     existing_alice = SpeakerProfile(
-        name="alice", display_name="Alice", role="", embedding_path=tmp_path / "alice.npy",
+        name="alice", display_name="Alice", role="", embedding=None,
         enrolled_date="2026-01-01", enrollment_source="old.mp3",
     )
     new_emb = np.ones(4)
@@ -1453,6 +1455,7 @@ def test_enroll_profiles_adds_to_campaign(tmp_path: Path, monkeypatch: pytest.Mo
     from wisper_transcribe.web.enroll_shared import enroll_profiles
 
     create_campaign("D&D Mondays")
+    seed_profile("alice")  # what the (mocked) enroll_speaker would have created
     audio = tmp_path / "session01.mp3"
     audio.write_bytes(b"fake")
     segments = [DiarizationSegment(start=0.0, end=5.0, speaker="SPEAKER_00")]
@@ -1507,6 +1510,7 @@ def test_enroll_profiles_skips_add_member_if_already_in_campaign(
     from wisper_transcribe.web.enroll_shared import enroll_profiles
 
     create_campaign("D&D Mondays")
+    seed_profile("alice")
     add_member("d-d-mondays", "alice", role="player", character="Tika")
 
     audio = tmp_path / "session01.mp3"

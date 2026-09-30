@@ -128,7 +128,7 @@ def test_start_live_transcription_resolves_profile_to_display_name(tmp_path):
 
     fake_profile = SpeakerProfile(
         name="brandon", display_name="Brandon", role="player",
-        embedding_path=tmp_path / "brandon.npy", enrolled_date="2026-01-01",
+        embedding=None, enrolled_date="2026-01-01",
         enrollment_source="test",
     )
     with patch("wisper_transcribe.web.routes.record.load_config", return_value={}), \

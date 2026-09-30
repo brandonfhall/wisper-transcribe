@@ -23,12 +23,16 @@ def _reset_process_state(monkeypatch):
     """Per-process caches must not leak between tests."""
     monkeypatch.setattr(db, "_capable", None)
     monkeypatch.setattr(db, "_lease_refreshed", {})
+    monkeypatch.setattr(db, "_cleaned", set())
     monkeypatch.setattr(db, "detect_runtime", lambda: db.RuntimeInfo("host", False))
 
 
 @pytest.fixture
 def data_dir():
     return db._data_dir(None)
+
+
+NEXT = db.LATEST_VERSION + 1  # version number for fake migrations
 
 
 def _fake_migration(monkeypatch, *extra: db.Migration) -> None:
@@ -145,25 +149,25 @@ def test_failed_migration_rolls_back_everything(monkeypatch, data_dir):
     def boom(conn, ctx):
         raise RuntimeError("import failed")
 
-    _fake_migration(monkeypatch, db.Migration(99, "boom", "CREATE TABLE t99 (x INTEGER) STRICT;", boom))
+    _fake_migration(monkeypatch, db.Migration(NEXT, "boom", "CREATE TABLE t99 (x INTEGER) STRICT;", boom))
     with pytest.raises(RuntimeError, match="import failed"):
         db.migrate()
     with sqlite3.connect(data_dir / db.DB_FILENAME) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == NEXT - 1
         assert conn.execute("SELECT count(*) FROM sqlite_master WHERE name = 't99'").fetchone()[0] == 0
-        assert conn.execute("SELECT max(version) FROM migrations").fetchone()[0] == 1
+        assert conn.execute("SELECT max(version) FROM migrations").fetchone()[0] == NEXT - 1
 
 
 def test_foreign_key_violation_rolls_back(monkeypatch, data_dir):
     ddl = """
-    CREATE TABLE parent (id INTEGER PRIMARY KEY) STRICT;
-    CREATE TABLE child (pid INTEGER NOT NULL REFERENCES parent(id)) STRICT;
+    CREATE TABLE fk_parent (id INTEGER PRIMARY KEY) STRICT;
+    CREATE TABLE fk_child (pid INTEGER NOT NULL REFERENCES fk_parent(id)) STRICT;
     """
 
     def dangling(conn, ctx):
-        conn.execute("INSERT INTO child VALUES (7)")  # deferred: no parent 7
+        conn.execute("INSERT INTO fk_child VALUES (7)")  # deferred: no parent 7
 
-    _fake_migration(monkeypatch, db.Migration(2, "dangling", ddl, dangling))
+    _fake_migration(monkeypatch, db.Migration(NEXT, "dangling", ddl, dangling))
     with pytest.raises(db.MigrationFailed):
         db.migrate()
     with sqlite3.connect(data_dir / db.DB_FILENAME) as conn:
@@ -173,28 +177,28 @@ def test_foreign_key_violation_rolls_back(monkeypatch, data_dir):
 
 def test_deferred_foreign_keys_allow_any_import_order(monkeypatch):
     ddl = """
-    CREATE TABLE parent (id INTEGER PRIMARY KEY) STRICT;
-    CREATE TABLE child (pid INTEGER NOT NULL REFERENCES parent(id)) STRICT;
+    CREATE TABLE fk_parent (id INTEGER PRIMARY KEY) STRICT;
+    CREATE TABLE fk_child (pid INTEGER NOT NULL REFERENCES fk_parent(id)) STRICT;
     """
 
     def child_first(conn, ctx):
-        conn.execute("INSERT INTO child VALUES (1)")
-        conn.execute("INSERT INTO parent VALUES (1)")
+        conn.execute("INSERT INTO fk_child VALUES (1)")
+        conn.execute("INSERT INTO fk_parent VALUES (1)")
 
-    _fake_migration(monkeypatch, db.Migration(2, "order", ddl, child_first))
-    assert db.migrate() == [1, 2]
+    _fake_migration(monkeypatch, db.Migration(NEXT, "order", ddl, child_first))
+    assert db.migrate() == list(range(1, NEXT + 1))
 
 
 def test_upgrade_snapshots_existing_db(monkeypatch, data_dir):
     db.migrate()
-    _fake_migration(monkeypatch, db.Migration(2, "more", "CREATE TABLE t2 (x INTEGER) STRICT;"))
-    assert db.migrate() == [2]
+    _fake_migration(monkeypatch, db.Migration(NEXT, "more", "CREATE TABLE t2 (x INTEGER) STRICT;"))
+    assert db.migrate() == [NEXT]
     with db.connection() as conn:
-        backup_dir = conn.execute("SELECT backup_dir FROM migrations WHERE version = 2").fetchone()[0]
+        backup_dir = conn.execute("SELECT backup_dir FROM migrations WHERE version = ?", (NEXT,)).fetchone()[0]
     snap = data_dir / backup_dir
     assert snap.exists()
     with sqlite3.connect(snap) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == NEXT - 1
 
 
 def test_import_report_and_after_commit(monkeypatch, data_dir):
@@ -207,10 +211,10 @@ def test_import_report_and_after_commit(monkeypatch, data_dir):
         ctx.note("skipped one bad row")
         ctx.after_commit.append(lambda: legacy.unlink())
 
-    _fake_migration(monkeypatch, db.Migration(2, "imp", "", imp))
+    _fake_migration(monkeypatch, db.Migration(NEXT, "imp", "", imp))
     db.migrate()
     assert not legacy.exists()
-    backups = list((data_dir / "backups").glob("pre-sqlite-v2-*"))
+    backups = list((data_dir / "backups").glob(f"pre-sqlite-v{NEXT}-*"))
     assert len(backups) == 1
     assert (backups[0] / "legacy.json").exists()
     assert "skipped one bad row" in (backups[0] / "import-report.txt").read_text(encoding="utf-8")
@@ -399,13 +403,14 @@ def test_detect_runtime(monkeypatch, tmp_path):
     real_exists = Path.exists
     proc_version = tmp_path / "version"
 
+    # Compare as Paths: on Windows str(Path("/.dockerenv")) is "\\.dockerenv".
     def fake_exists(self):
-        return True if str(self) == "/.dockerenv" else real_exists(self)
+        return True if self == Path("/.dockerenv") else real_exists(self)
 
     real_read = Path.read_text
 
     def fake_read(self, *a, **k):
-        return proc_version.read_text() if str(self) == "/proc/version" else real_read(self, *a, **k)
+        return proc_version.read_text() if self == Path("/proc/version") else real_read(self, *a, **k)
 
     monkeypatch.setattr(Path, "exists", fake_exists)
     monkeypatch.setattr(Path, "read_text", fake_read)

@@ -40,31 +40,12 @@ def mock_local_llm_queries():
 # ---------------------------------------------------------------------------
 
 def _make_fake_profile(tmp_path: Path, name: str, display_name: str = "", role: str = "Player") -> str:
-    """Write a fake speaker profile to tmp_path/profiles/ and return the key."""
+    """Insert a fake speaker profile into tmp_path's wisper.db and return the key."""
+    from ._seed import seed_profile
+
     key = name.lower().replace(" ", "_")
-    display = display_name or name
-    profiles_dir = tmp_path / "profiles"
-    emb_dir = profiles_dir / "embeddings"
-    emb_dir.mkdir(parents=True, exist_ok=True)
-
-    npy_path = emb_dir / f"{key}.npy"
-    np.save(str(npy_path), np.zeros(512, dtype=np.float32))
-
-    speakers_json = profiles_dir / "speakers.json"
-    profiles: dict = {}
-    if speakers_json.exists():
-        with open(speakers_json, encoding="utf-8") as f:
-            profiles = json.load(f)
-    profiles[key] = {
-        "display_name": display,
-        "role": role,
-        "embedding_file": f"embeddings/{key}.npy",
-        "enrolled_date": "2026-04-06",
-        "enrollment_source": "test",
-        "notes": "",
-    }
-    with open(speakers_json, "w", encoding="utf-8") as f:
-        json.dump(profiles, f)
+    seed_profile(key, display_name or name, role=role, data_dir=tmp_path,
+                 enrolled_date="2026-04-06", enrollment_source="test")
     return key
 
 
@@ -199,18 +180,18 @@ def test_speakers_remove_success(tmp_path, monkeypatch):
 
 def test_speakers_remove_deletes_reference_clip(tmp_path, monkeypatch):
     """Removing a profile also deletes its .mp3 reference clip, not
-    just the .npy embedding, so the Speakers-page play button doesn't
+    just the profile row, so the Speakers-page play button doesn't
     dangle after a CLI removal."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     _make_fake_profile(tmp_path, "Alice")
     emb_dir = tmp_path / "profiles" / "embeddings"
+    emb_dir.mkdir(parents=True, exist_ok=True)
     clip_path = emb_dir / "alice.mp3"
     clip_path.write_bytes(b"fake mp3")
 
     result = CliRunner().invoke(main, ["speakers", "remove", "Alice"])
     assert result.exit_code == 0
     assert not clip_path.exists()
-    assert not (emb_dir / "alice.npy").exists()
 
 
 def test_speakers_rename_not_found(tmp_path, monkeypatch):
@@ -240,6 +221,7 @@ def test_speakers_rename_moves_reference_clip(tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     _make_fake_profile(tmp_path, "Alice")
     emb_dir = tmp_path / "profiles" / "embeddings"
+    emb_dir.mkdir(parents=True, exist_ok=True)
     old_clip = emb_dir / "alice.mp3"
     old_clip.write_bytes(b"fake mp3")
 
@@ -285,8 +267,8 @@ def test_speakers_rename_rejects_unsafe_new_name(tmp_path, monkeypatch):
     assert result.exit_code != 0
     assert "Invalid speaker name" in result.output
 
-    emb_dir = tmp_path / "profiles" / "embeddings"
-    assert (emb_dir / "alice.npy").exists()
+    from wisper_transcribe.speaker_manager import load_profiles
+    assert set(load_profiles(data_dir=tmp_path)) == {"alice"}
 
 
 def test_speakers_rename_success_without_reference_clip(tmp_path, monkeypatch):
@@ -317,10 +299,8 @@ def test_speakers_rename_refuses_to_overwrite_existing_profile(tmp_path, monkeyp
     assert "bob" in profiles
     assert profiles["alice"].display_name == "Alice"
     assert profiles["bob"].display_name == "Bob"
-
-    emb_dir = tmp_path / "profiles" / "embeddings"
-    assert (emb_dir / "alice.npy").exists()
-    assert (emb_dir / "bob.npy").exists()
+    assert profiles["alice"].embedding is not None
+    assert profiles["bob"].embedding is not None
 
 
 def test_speakers_test_deletes_converted_wav(tmp_path, monkeypatch):
@@ -1286,14 +1266,10 @@ def test_campaigns_add_then_show(tmp_path, monkeypatch):
     # Create a fake enrolled speaker
     from wisper_transcribe.speaker_manager import save_profiles
     from wisper_transcribe.models import SpeakerProfile
-    (tmp_path / "profiles" / "embeddings").mkdir(parents=True)
-    fake_emb = tmp_path / "profiles" / "embeddings" / "alice.npy"
-    import numpy as np
-    np.save(str(fake_emb), np.zeros(512))
     save_profiles(
         {"alice": SpeakerProfile(
             name="alice", display_name="Alice", role="",
-            embedding_path=fake_emb, enrolled_date="2026-04-28",
+            embedding=None, enrolled_date="2026-04-28",
             enrollment_source="test.mp3",
         )},
         data_dir=tmp_path,
@@ -1526,3 +1502,42 @@ def test_setup_mps_note_reflects_mlx(tmp_path, monkeypatch, mlx, expected):
          patch("huggingface_hub.snapshot_download"):
         result = CliRunner().invoke(main, ["setup"], input="\n\n\n\n")
     assert expected in result.output
+
+
+# ---------------------------------------------------------------------------
+# wisper speakers doctor
+# ---------------------------------------------------------------------------
+
+def test_speakers_doctor_reports_duplicates_stale_and_placeholders(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from ._seed import seed_profile
+
+    base = np.zeros(256, dtype=np.float32)
+    base[0] = 1.0
+    near = base.copy()
+    near[1] = 0.1  # cosine ≈ 0.995 with base
+    far = np.zeros(256, dtype=np.float32)
+    far[2] = 1.0
+    seed_profile("alice", "Alice", embedding=base)
+    seed_profile("alice_2", "Alice 2", embedding=near)
+    seed_profile("bob", "Bob", embedding=far)
+    seed_profile("old", "Old", embedding=np.ones(512), embedding_space="")
+    seed_profile("speaker_03", "SPEAKER_03", embedding=-base)
+
+    result = CliRunner().invoke(main, ["speakers", "doctor"])
+    assert result.exit_code == 0, result.output
+    assert "Alice (alice) ≈ Alice 2 (alice_2)" in result.output
+    assert "Bob (bob) ≈" not in result.output
+    assert "Old (old)" in result.output
+    assert "SPEAKER_03 (speaker_03)" in result.output
+
+    from wisper_transcribe.speaker_manager import load_profiles
+    assert len(load_profiles()) == 5  # report only
+
+
+def test_speakers_doctor_clean(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    _make_fake_profile(tmp_path, "Alice")
+    result = CliRunner().invoke(main, ["speakers", "doctor"])
+    assert result.exit_code == 0
+    assert "No problems found in 1 profile(s)." in result.output

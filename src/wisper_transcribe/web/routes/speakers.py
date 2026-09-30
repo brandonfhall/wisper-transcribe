@@ -17,8 +17,8 @@ router = APIRouter(prefix="/speakers")
 
 
 def _clip_path(key: str) -> "Path":
-    from wisper_transcribe.speaker_manager import _get_embeddings_dir
-    return _get_embeddings_dir() / f"{os.path.basename(key)}.mp3"
+    from wisper_transcribe.speaker_manager import get_reference_clips_dir
+    return get_reference_clips_dir() / f"{os.path.basename(key)}.mp3"
 
 
 def _waveform_bars(key: str, count: int = 64) -> list[int]:
@@ -61,8 +61,8 @@ async def speaker_clip(request: Request, key: str) -> Response:
     if safe_key is None:
         return invalid_input_response("Invalid key")
 
-    from wisper_transcribe.speaker_manager import _get_embeddings_dir
-    embeddings_dir = _get_embeddings_dir().resolve()
+    from wisper_transcribe.speaker_manager import get_reference_clips_dir
+    embeddings_dir = get_reference_clips_dir().resolve()
     base_dir = os.path.abspath(str(embeddings_dir))
     if not base_dir.endswith(os.sep):
         base_dir += os.sep

@@ -750,7 +750,7 @@ def test_record_page_shows_this_is_me_dropdown_with_enrolled_profiles(client):
     fake_devices = {"microphones": [], "loopbacks": [], "available": True}
     fake_profile = SpeakerProfile(
         name="brandon", display_name="Brandon", role="player",
-        embedding_path=data_dir / "brandon.npy", enrolled_date="2026-01-01",
+        embedding=None, enrolled_date="2026-01-01",
         enrollment_source="test",
     )
     with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_devices), \
@@ -769,7 +769,7 @@ def test_record_page_preselects_default_mic_profile(client):
     fake_devices = {"microphones": [], "loopbacks": [], "available": True}
     fake_profile = SpeakerProfile(
         name="brandon", display_name="Brandon", role="player",
-        embedding_path=data_dir / "brandon.npy", enrolled_date="2026-01-01",
+        embedding=None, enrolled_date="2026-01-01",
         enrollment_source="test",
     )
     with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_devices), \

@@ -66,12 +66,9 @@ wisper-transcribe/
 ├── wisper.db            database (SQLite)
 ├── backups/             automatic pre-upgrade copies; `wisper db backup` default
 ├── profiles/
-│   ├── speakers.json    speaker registry (global — one entry per person)
 │   └── embeddings/
-│       ├── alice.npy    voice fingerprint
-│       └── bob.npy
+│       └── alice.mp3    short voice sample for the Speakers page (profiles are in wisper.db)
 ├── campaigns/
-│   ├── campaigns.json   campaign rosters (additive layer over global profiles)
 │   └── <slug>/
 │       └── journal.md   rolling campaign journal (`wisper campaigns journal`)
 ├── recordings/          Discord and local recordings (audio + metadata)
@@ -88,7 +85,7 @@ To move your transcripts: stop the server, move the files, then `wisper config s
 
 ### Database and backups
 
-`wisper.db` in the data directory holds wisper's records. It is created on first use and upgraded automatically; before an upgrade changes an existing database, a copy is saved in `backups/`.
+`wisper.db` in the data directory holds speaker profiles (including voice fingerprints), campaigns, and the list of known transcripts. It is created on first use and upgraded automatically; before an upgrade changes an existing database, a copy is saved in `backups/`. Upgrading from a version that stored these as JSON files (`speakers.json`, `campaigns.json`, `.npy` files) imports them once, keeps copies in `backups/pre-sqlite-v2-<time>/`, and lists anything it had to repair or drop (for example a campaign member whose profile no longer exists) in `import-report.txt` there.
 
 - `wisper db status` — schema version, integrity check, and which processes are using it.
 - `wisper db backup [DEST]` — a consistent copy, safe while the server is running.

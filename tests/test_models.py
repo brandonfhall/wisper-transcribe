@@ -31,7 +31,7 @@ def test_speaker_profile():
         name="alice",
         display_name="Alice",
         role="DM",
-        embedding_path=Path("embeddings/alice.npy"),
+        embedding=None,
         enrolled_date="2026-04-05",
         enrollment_source="session01.mp3",
         notes="Game Master",
@@ -45,7 +45,7 @@ def test_speaker_profile_default_notes():
         name="bob",
         display_name="Bob",
         role="Player",
-        embedding_path=Path("embeddings/bob.npy"),
+        embedding=None,
         enrolled_date="2026-04-05",
         enrollment_source="session01.mp3",
     )

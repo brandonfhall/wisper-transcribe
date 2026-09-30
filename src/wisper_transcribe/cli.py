@@ -688,11 +688,57 @@ def speakers_list():
         click.echo(f"{p.display_name:<20} {p.role:<12} {p.enrolled_date:<12} {p.enrollment_source}")
 
 
+@speakers.command("doctor")
+def speakers_doctor():
+    """Report likely problems with enrolled profiles. Changes nothing.
+
+    Flags pairs of profiles that sound like the same person, profiles from an
+    older speaker model, and profiles named like a placeholder.
+    """
+    from .speaker_manager import (
+        DUPLICATE_SIMILARITY, find_duplicate_profiles, load_profiles,
+        placeholder_name_profiles, stale_profile_keys,
+    )
+
+    profiles = load_profiles()
+    if not profiles:
+        click.echo("No speakers enrolled.")
+        return
+
+    problems = 0
+    duplicates = find_duplicate_profiles(profiles)
+    if duplicates:
+        problems += len(duplicates)
+        click.echo(f"Likely duplicates (voice similarity above {DUPLICATE_SIMILARITY:.2f}):")
+        for a, b, sim in duplicates:
+            click.echo(f"  {profiles[a].display_name} ({a}) ≈ {profiles[b].display_name} ({b})  {sim:.2f}")
+        click.echo("  Keep one: wisper speakers remove <name>, then rename the other if needed.")
+
+    stale = stale_profile_keys(profiles)
+    if stale:
+        problems += len(stale)
+        click.echo("Enrolled with an older speaker model, or no voice sample (never matched):")
+        for key in stale:
+            click.echo(f"  {profiles[key].display_name} ({key})")
+        click.echo("  Re-enroll them: wisper enroll <name> --audio <file>")
+
+    placeholders = placeholder_name_profiles(profiles)
+    if placeholders:
+        problems += len(placeholders)
+        click.echo("Named like a placeholder (probably enrolled by accident):")
+        for key in placeholders:
+            click.echo(f"  {profiles[key].display_name} ({key})")
+        click.echo("  Remove or rename: wisper speakers remove <name> / wisper speakers rename <old> <new>")
+
+    if problems == 0:
+        click.echo(f"No problems found in {len(profiles)} profile(s).")
+
+
 @speakers.command("remove")
 @click.argument("name")
 def speakers_remove(name: str):
     """Remove an enrolled speaker profile."""
-    # Shared with the web remove route (locked; removes .npy and .mp3).
+    # Shared with the web remove route (one transaction, then the .mp3 clip).
     from .speaker_manager import remove_profile
 
     key = name.lower().replace(" ", "_")
@@ -708,7 +754,7 @@ def speakers_remove(name: str):
 @click.argument("new_name")
 def speakers_rename(old_name: str, new_name: str):
     """Rename an enrolled speaker."""
-    # Shared with the web rename route (rekeys files and campaign rosters).
+    # Shared with the web rename route (memberships follow the profile id).
     from .speaker_manager import rename_profile
 
     old_key = old_name.lower().replace(" ", "_")

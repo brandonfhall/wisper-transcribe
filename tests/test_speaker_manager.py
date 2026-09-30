@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Optional
 from unittest.mock import MagicMock, patch
@@ -23,26 +22,27 @@ def _write_profile(
     role: str = "Player",
     embedding_space: Optional[str] = EMBEDDING_SPACE,
 ) -> None:
-    """Write a speaker profile and embedding to data_dir for testing."""
-    profiles_dir = data_dir / "profiles"
-    emb_dir = profiles_dir / "embeddings"
-    emb_dir.mkdir(parents=True, exist_ok=True)
+    """Insert a speaker profile (embedding stored as given) into data_dir's DB.
 
-    np.save(str(emb_dir / f"{name}.npy"), embedding)
+    ``embedding_space=None`` is an untagged profile from the old model.
+    """
+    from wisper_transcribe import db
+    from wisper_transcribe.models import SpeakerProfile
+    from wisper_transcribe.speaker_manager import _upsert_profile
 
-    speakers_json = profiles_dir / "speakers.json"
-    existing = json.loads(speakers_json.read_text()) if speakers_json.exists() else {}
-    existing[name] = {
-        "display_name": name.capitalize(),
-        "role": role,
-        "embedding_file": f"embeddings/{name}.npy",
-        "enrolled_date": "2026-04-05",
-        "enrollment_source": "session01.mp3",
-        "notes": "",
-    }
-    if embedding_space is not None:
-        existing[name]["embedding_space"] = embedding_space
-    speakers_json.write_text(json.dumps(existing, indent=2))
+    profile = SpeakerProfile(
+        name=name, display_name=name.capitalize(), role=role,
+        embedding=np.asarray(embedding, dtype=np.float32),
+        enrolled_date="2026-04-05", enrollment_source="session01.mp3", notes="",
+        embedding_space=embedding_space or "",
+    )
+    with db.transaction(data_dir) as conn:
+        _upsert_profile(conn, name, profile)
+
+
+def _stored_embedding(data_dir: Path, name: str) -> np.ndarray:
+    from wisper_transcribe.speaker_manager import load_profiles
+    return load_profiles(data_dir)[name].embedding
 
 
 def _fake_diarization(labels: list[str]) -> list[DiarizationSegment]:
@@ -66,17 +66,13 @@ def test_save_and_load_profiles(tmp_path):
     from wisper_transcribe.models import SpeakerProfile
     from wisper_transcribe.speaker_manager import load_profiles, save_profiles
 
-    emb_dir = tmp_path / "profiles" / "embeddings"
-    emb_dir.mkdir(parents=True)
-    emb_path = emb_dir / "alice.npy"
-    np.save(str(emb_path), np.ones(512))
-
+    vec = np.full(256, 1 / 16, dtype=np.float32)
     profiles = {
         "alice": SpeakerProfile(
             name="alice",
             display_name="Alice",
             role="DM",
-            embedding_path=emb_path,
+            embedding=vec,
             enrolled_date="2026-04-05",
             enrollment_source="session01.mp3",
             notes="Game Master",
@@ -89,6 +85,8 @@ def test_save_and_load_profiles(tmp_path):
     assert loaded["alice"].display_name == "Alice"
     assert loaded["alice"].role == "DM"
     assert loaded["alice"].notes == "Game Master"
+    np.testing.assert_array_equal(loaded["alice"].embedding, vec)
+    assert loaded["alice"].embedding.dtype == np.float32
 
 
 # ---------------------------------------------------------------------------
@@ -362,14 +360,22 @@ def test_match_speakers_multiple_profiles(tmp_path):
 # update_embedding
 # ---------------------------------------------------------------------------
 
-def test_update_embedding_creates_new(tmp_path):
+def test_update_embedding_unknown_profile_is_noop(tmp_path):
+    from wisper_transcribe.speaker_manager import load_profiles, update_embedding
+
+    update_embedding("alice", np.array([1.0, 0.0, 0.0]), data_dir=tmp_path)
+    assert load_profiles(tmp_path) == {}
+
+
+def test_update_embedding_fills_profile_without_embedding(tmp_path):
+    from wisper_transcribe import db
     from wisper_transcribe.speaker_manager import update_embedding
 
-    new_emb = np.array([1.0, 0.0, 0.0])
-    update_embedding("alice", new_emb, data_dir=tmp_path)
-
-    saved = np.load(str(tmp_path / "profiles" / "embeddings" / "alice.npy"))
-    np.testing.assert_array_equal(saved, new_emb)
+    _write_profile(tmp_path, "alice", np.ones(3))
+    with db.transaction(tmp_path) as conn:
+        conn.execute("UPDATE profiles SET embedding = NULL, embedding_space = NULL")
+    update_embedding("alice", np.array([1.0, 0.0, 0.0]), data_dir=tmp_path)
+    np.testing.assert_array_equal(_stored_embedding(tmp_path, "alice"), [1.0, 0.0, 0.0])
 
 
 def test_update_embedding_ema(tmp_path):
@@ -378,13 +384,11 @@ def test_update_embedding_ema(tmp_path):
     existing = np.array([1.0, 0.0, 0.0])
     new_emb = np.array([0.0, 1.0, 0.0])
 
-    emb_dir = tmp_path / "profiles" / "embeddings"
-    emb_dir.mkdir(parents=True)
-    np.save(str(emb_dir / "alice.npy"), existing)
+    _write_profile(tmp_path, "alice", existing)
 
     update_embedding("alice", new_emb, data_dir=tmp_path, alpha=0.3)
 
-    saved = np.load(str(emb_dir / "alice.npy"))
+    saved = _stored_embedding(tmp_path, "alice")
     expected = 0.3 * new_emb + 0.7 * existing
     np.testing.assert_array_almost_equal(saved, expected / np.linalg.norm(expected))
 
@@ -420,9 +424,11 @@ def test_enroll_speaker(tmp_path):
     assert "alice" in loaded
     assert loaded["alice"].display_name == "Alice"
 
-    # Embedding file should exist
-    emb_path = tmp_path / "profiles" / "embeddings" / "alice.npy"
-    assert emb_path.exists()
+    # The unit-length embedding is stored with the profile, no .npy file
+    np.testing.assert_array_almost_equal(
+        loaded["alice"].embedding, np.ones(512) / np.sqrt(512))
+    assert loaded["alice"].embedding_space == EMBEDDING_SPACE
+    assert not list((tmp_path / "profiles").rglob("*.npy"))
 
 
 def test_enroll_speaker_uses_precomputed_embedding_when_given(tmp_path):
@@ -450,7 +456,7 @@ def test_enroll_speaker_uses_precomputed_embedding_when_given(tmp_path):
 
     mock_extract.assert_not_called()
     assert profile.display_name == "Alice"
-    saved = np.load(str(tmp_path / "profiles" / "embeddings" / "alice.npy"))
+    saved = _stored_embedding(tmp_path, "alice")
     np.testing.assert_array_almost_equal(saved, precomputed / np.linalg.norm(precomputed))
     assert "alice" in load_profiles(data_dir=tmp_path)
 
@@ -469,17 +475,16 @@ def test_reset_profiles_removes_all(tmp_path):
 
     assert count == 2
     assert load_profiles(data_dir=tmp_path) == {}
-    assert not (tmp_path / "profiles" / "embeddings" / "alice.npy").exists()
-    assert not (tmp_path / "profiles" / "embeddings" / "bob.npy").exists()
 
 
 def test_reset_profiles_removes_reference_clips(tmp_path):
-    """A full reset must also clear .mp3 reference clips, not just
-    .npy embeddings -- otherwise every enrolled speaker's clip leaks."""
+    """A full reset must also clear .mp3 reference clips, not just the
+    profile rows -- otherwise every enrolled speaker's clip leaks."""
     from wisper_transcribe.speaker_manager import reset_profiles
 
     _write_profile(tmp_path, "alice", np.ones(3))
     emb_dir = tmp_path / "profiles" / "embeddings"
+    emb_dir.mkdir(parents=True, exist_ok=True)
     clip = emb_dir / "alice.mp3"
     clip.write_bytes(b"fake mp3")
 
@@ -753,8 +758,7 @@ def test_enroll_speaker_from_audio_dir_prefers_wav_over_legacy_opus(tmp_path):
     (per_user_dir / "0000.opus").write_bytes(b"not a real opus stream")
 
     fake_emb = np.ones(512)
-    with patch("wisper_transcribe.speaker_manager.extract_embedding", return_value=fake_emb), \
-         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+    with patch("wisper_transcribe.speaker_manager.extract_embedding", return_value=fake_emb):
         profile = enroll_speaker_from_audio_dir(
             name="alice",
             display_name="Alice",
@@ -764,7 +768,7 @@ def test_enroll_speaker_from_audio_dir_prefers_wav_over_legacy_opus(tmp_path):
         )
 
     assert profile.display_name == "Alice"
-    assert (tmp_path / "profiles" / "embeddings" / "alice.npy").exists()
+    assert _stored_embedding(tmp_path, "alice") is not None
 
 
 def test_enroll_speaker_from_audio_dir_legacy_opus_fallback_fails_gracefully(tmp_path):
@@ -850,7 +854,7 @@ def test_enroll_speaker_atomic_under_concurrent_calls(tmp_path):
 def test_remove_profile_and_enroll_speaker_do_not_lose_writes_concurrently(tmp_path):
     """Concurrent remove_profile() (on pre-seeded distinct profiles) and
     enroll_speaker() (adding new distinct profiles) must not clobber each
-    other's write to profiles.json."""
+    other's writes."""
     import threading
 
     from wisper_transcribe.speaker_manager import (
@@ -868,7 +872,7 @@ def test_remove_profile_and_enroll_speaker_do_not_lose_writes_concurrently(tmp_p
             name=f"old_{i:02d}",
             display_name=f"Old {i:02d}",
             role="",
-            embedding_path=tmp_path / "profiles" / "embeddings" / f"old_{i:02d}.npy",
+            embedding=np.ones(4, dtype=np.float32) / 2,
             enrolled_date="2026-01-01",
             enrollment_source="seed",
         )
@@ -898,7 +902,8 @@ def test_remove_profile_and_enroll_speaker_do_not_lose_writes_concurrently(tmp_p
     for t in threads:
         t.start()
     for t in threads:
-        t.join()
+        t.join(timeout=30)
+        assert not t.is_alive()
 
     loaded = load_profiles(data_dir=tmp_path)
     assert len(loaded) == n  # all n "old_*" removed, all n "new_*" added
@@ -978,7 +983,7 @@ def test_update_embedding_replaces_legacy_profile_and_retags(tmp_path):
 
     update_embedding("alice", new, data_dir=tmp_path)
 
-    saved = np.load(str(tmp_path / "profiles" / "embeddings" / "alice.npy"))
+    saved = _stored_embedding(tmp_path, "alice")
     np.testing.assert_array_almost_equal(saved, [0.6, 0.8])
     assert load_profiles(tmp_path)["alice"].embedding_space == EMBEDDING_SPACE
 
@@ -987,9 +992,74 @@ def test_embedding_space_round_trips_through_save(tmp_path):
     from wisper_transcribe.speaker_manager import load_profiles, save_profiles
 
     _write_profile(tmp_path, "alice", np.ones(256))
+    _write_profile(tmp_path, "old", np.ones(512), embedding_space=None)
     save_profiles(load_profiles(tmp_path), tmp_path)
-    raw = json.loads((tmp_path / "profiles" / "speakers.json").read_text())
-    assert raw["alice"]["embedding_space"] == EMBEDDING_SPACE
+    loaded = load_profiles(tmp_path)
+    assert loaded["alice"].embedding_space == EMBEDDING_SPACE
+    assert loaded["old"].embedding_space == ""
+
+
+def test_save_profiles_keeps_ids_and_deletes_absent(tmp_path):
+    from wisper_transcribe import db
+    from wisper_transcribe.speaker_manager import load_profiles, save_profiles
+
+    _write_profile(tmp_path, "alice", np.ones(4))
+    _write_profile(tmp_path, "bob", np.ones(4))
+    with db.connection(tmp_path) as conn:
+        alice_id = conn.execute("SELECT id FROM profiles WHERE key = 'alice'").fetchone()[0]
+    profiles = load_profiles(tmp_path)
+    del profiles["bob"]
+    profiles["alice"].role = "DM"
+    save_profiles(profiles, tmp_path)
+    with db.connection(tmp_path) as conn:
+        rows = conn.execute("SELECT id, key, role FROM profiles").fetchall()
+    assert [tuple(r) for r in rows] == [(alice_id, "alice", "DM")]
+
+
+def test_rename_profile_moves_clip_after_commit(tmp_path):
+    from wisper_transcribe.speaker_manager import load_profiles, reference_clip_path, rename_profile
+
+    _write_profile(tmp_path, "alice", np.ones(4))
+    clip = reference_clip_path("alice", tmp_path)
+    clip.parent.mkdir(parents=True, exist_ok=True)
+    clip.write_bytes(b"mp3")
+    profile = rename_profile("alice", "Alicia Smith", data_dir=tmp_path)
+    assert profile.name == "alicia_smith"
+    assert set(load_profiles(tmp_path)) == {"alicia_smith"}
+    assert reference_clip_path("alicia_smith", tmp_path).read_bytes() == b"mp3"
+    assert not clip.exists()
+
+
+def test_rename_profile_rejects_existing_key_without_changes(tmp_path):
+    from wisper_transcribe.speaker_manager import load_profiles, rename_profile
+
+    _write_profile(tmp_path, "alice", np.ones(4))
+    _write_profile(tmp_path, "bob", np.ones(4))
+    with pytest.raises(ValueError):
+        rename_profile("alice", "Bob", data_dir=tmp_path)
+    assert set(load_profiles(tmp_path)) == {"alice", "bob"}
+
+
+def test_profile_schema_constraints(tmp_path):
+    import sqlite3
+
+    from wisper_transcribe import db
+
+    _write_profile(tmp_path, "alice", np.ones(4))
+    bad_statements = [
+        "INSERT INTO profiles (key, display_name, enrolled_date, enrollment_source) "
+        "VALUES ('alice', 'Dup', '', '')",                                   # UNIQUE key
+        "INSERT INTO profiles (key, display_name, enrolled_date, enrollment_source) "
+        "VALUES ('x', '', '', '')",                                          # empty name
+        "UPDATE profiles SET embedding_space = NULL",                        # paired nullables
+        "UPDATE profiles SET embedding = NULL",
+        "UPDATE profiles SET embedding = x'010203'",                         # not float32-sized
+        "UPDATE profiles SET embedding = 'text'",                            # STRICT
+    ]
+    for sql in bad_statements:
+        with pytest.raises(sqlite3.IntegrityError):
+            with db.transaction(tmp_path) as conn:
+                conn.execute(sql)
 
 
 def test_extract_embedding_normalizes_and_uses_many_segments():

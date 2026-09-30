@@ -26,7 +26,7 @@ from wisper_transcribe.summarize import (
 def _fake_profile(name: str, display: str, role: str = "Player", notes: str = "") -> SpeakerProfile:
     return SpeakerProfile(
         name=name, display_name=display, role=role,
-        embedding_path=Path(f"{name}.npy"),
+        embedding=None,
         enrolled_date="2026-04-05", enrollment_source="test.mp3",
         notes=notes,
     )

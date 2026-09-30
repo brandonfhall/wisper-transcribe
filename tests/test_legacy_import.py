@@ -1,0 +1,228 @@
+"""Importing the JSON-era stores (migration v2) into wisper.db."""
+from __future__ import annotations
+
+import unicodedata
+
+import numpy as np
+import pytest
+
+from wisper_transcribe import db
+from wisper_transcribe.campaign_manager import load_campaigns
+from wisper_transcribe.config import EMBEDDING_SPACE
+from wisper_transcribe.speaker_manager import load_profiles
+
+from ._legacy_store import write_campaigns, write_speakers
+
+
+@pytest.fixture
+def data_dir():
+    d = db._data_dir(None)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+@pytest.fixture(autouse=True)
+def _fresh_process_state(monkeypatch):
+    monkeypatch.setattr(db, "_cleaned", set())
+
+
+def _vec(*xs):
+    v = np.asarray(xs, dtype=np.float32)
+    return v / np.linalg.norm(v)
+
+
+def _report(data_dir) -> str:
+    (backup,) = (data_dir / "backups").glob("pre-sqlite-v2-*")
+    report = backup / "import-report.txt"
+    return report.read_text(encoding="utf-8") if report.exists() else ""
+
+
+def _output_md(stem: str) -> None:
+    from wisper_transcribe.path_utils import get_output_dir
+    (get_output_dir() / f"{stem}.md").write_text("---\ntitle: x\n---\n", encoding="utf-8")
+
+
+def test_clean_import(data_dir):
+    write_speakers(
+        data_dir,
+        {"alice": {"display_name": "Alice", "role": "DM", "notes": "GM"}, "bob": {}},
+        {"alice": _vec(1, 0, 0), "bob": _vec(0, 1, 0)},
+    )
+    write_campaigns(data_dir, {"game": {
+        "display_name": "The Game", "created": "2026-02-03",
+        "members": {"alice": {"role": "DM", "character": "", "discord_user_id": "111"},
+                    "bob": {"role": "Player", "character": "Thorin"}},
+        "transcripts": ["s01", "s02"],
+    }})
+    _output_md("s01")
+    _output_md("s02")
+
+    profiles = load_profiles()
+    assert list(profiles) == ["alice", "bob"]
+    assert profiles["alice"].display_name == "Alice"
+    assert profiles["alice"].role == "DM"
+    assert profiles["alice"].notes == "GM"
+    np.testing.assert_array_almost_equal(profiles["alice"].embedding, _vec(1, 0, 0))
+    assert profiles["alice"].embedding_space == EMBEDDING_SPACE
+
+    game = load_campaigns()["game"]
+    assert game.display_name == "The Game"
+    assert game.created == "2026-02-03"
+    assert game.members["alice"].discord_user_id == "111"
+    assert game.members["bob"].character == "Thorin"
+    assert game.transcripts == ["s01", "s02"]
+
+    # Legacy files deleted after commit; copies kept in the backup dir.
+    assert not (data_dir / "profiles" / "speakers.json").exists()
+    assert not (data_dir / "campaigns" / "campaigns.json").exists()
+    assert not list((data_dir / "profiles" / "embeddings").glob("*.npy"))
+    (backup,) = (data_dir / "backups").glob("pre-sqlite-v2-*")
+    assert (backup / "profiles" / "speakers.json").exists()
+    assert (backup / "campaigns" / "campaigns.json").exists()
+    assert (backup / "profiles" / "embeddings" / "alice.npy").exists()
+    with db.connection() as conn:
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert conn.execute(
+            "SELECT backup_dir FROM migrations WHERE version = 2").fetchone()[0].startswith("backups/")
+
+
+def test_reference_clips_stay_in_place(data_dir):
+    write_speakers(data_dir, {"alice": {}}, {"alice": _vec(1, 0)})
+    clip = data_dir / "profiles" / "embeddings" / "alice.mp3"
+    clip.write_bytes(b"mp3")
+    load_profiles()
+    assert clip.read_bytes() == b"mp3"
+
+
+def test_rerun_imports_nothing_twice(data_dir):
+    write_speakers(data_dir, {"alice": {}}, {"alice": _vec(1, 0)})
+    load_profiles()
+    assert db.migrate() == []
+    assert list(load_profiles()) == ["alice"]
+
+
+def test_untagged_profile_keeps_old_model_marker(data_dir):
+    write_speakers(data_dir, {"old": {"embedding_space": None}}, {"old": np.ones(512)})
+    profile = load_profiles()["old"]
+    assert profile.embedding_space == ""
+    assert profile.embedding.shape == (512,)
+
+
+def test_missing_embedding_imports_without_vector_and_reports(data_dir):
+    write_speakers(data_dir, {"ghost": {}})  # no .npy written
+    profile = load_profiles()["ghost"]
+    assert profile.embedding is None
+    assert "ghost" in _report(data_dir)
+
+
+def test_embedding_file_outside_profiles_dir_is_ignored(data_dir, tmp_path):
+    outside = tmp_path / "elsewhere.npy"
+    np.save(str(outside), np.ones(4, dtype=np.float32))
+    write_speakers(data_dir, {"alice": {"embedding_file": str(outside)}})
+    assert load_profiles()["alice"].embedding is None
+    assert outside.exists()
+
+
+def test_member_without_profile_dropped_and_reported(data_dir):
+    write_speakers(data_dir, {"alice": {}}, {"alice": _vec(1, 0)})
+    write_campaigns(data_dir, {"game": {"members": {"alice": {}, "nobody": {}}}})
+    assert set(load_campaigns()["game"].members) == {"alice"}
+    assert "nobody" in _report(data_dir)
+
+
+def test_members_without_speakers_json(data_dir):
+    write_campaigns(data_dir, {"game": {"members": {"alice": {}}, "transcripts": ["s01"]}})
+    game = load_campaigns()["game"]
+    assert game.members == {}
+    assert game.transcripts == ["s01"]
+
+
+def test_duplicate_discord_id_first_member_keeps_it(data_dir):
+    write_speakers(data_dir, {"alice": {}, "bob": {}}, {"alice": _vec(1, 0), "bob": _vec(0, 1)})
+    write_campaigns(data_dir, {"game": {"members": {
+        "alice": {"discord_user_id": "42"}, "bob": {"discord_user_id": "42"}}}})
+    members = load_campaigns()["game"].members
+    assert members["alice"].discord_user_id == "42"
+    assert members["bob"].discord_user_id is None
+    assert "42" in _report(data_dir)
+
+
+@pytest.mark.parametrize("raw", ["", "  ", "abc", "12x"])
+def test_blank_or_non_numeric_discord_id_imports_as_unbound(data_dir, raw):
+    write_speakers(data_dir, {"alice": {}}, {"alice": _vec(1, 0)})
+    write_campaigns(data_dir, {"game": {"members": {"alice": {"discord_user_id": raw}}}})
+    assert load_campaigns()["game"].members["alice"].discord_user_id is None
+
+
+def test_stem_in_two_campaigns_stays_in_first(data_dir):
+    write_campaigns(data_dir, {
+        "one": {"transcripts": ["s01", "s02"]},
+        "two": {"transcripts": ["s02", "s03"]},
+    })
+    campaigns = load_campaigns()
+    assert campaigns["one"].transcripts == ["s01", "s02"]
+    assert campaigns["two"].transcripts == ["s03"]
+    assert "s02" in _report(data_dir)
+
+
+def test_stem_without_md_is_flagged_missing_and_keeps_order(data_dir):
+    _output_md("s02")
+    write_campaigns(data_dir, {"game": {"transcripts": ["s01", "s02", "s03"]}})
+    assert load_campaigns()["game"].transcripts == ["s01", "s02", "s03"]
+    with db.connection() as conn:
+        missing = dict(conn.execute("SELECT stem, missing_since IS NOT NULL FROM transcripts"))
+    assert missing == {"s01": 1, "s02": 0, "s03": 1}
+
+
+def test_path_like_and_duplicate_stems_dropped(data_dir):
+    write_campaigns(data_dir, {"game": {"transcripts": ["s01", "../x", "a\\b", "s01", ""]}})
+    assert load_campaigns()["game"].transcripts == ["s01"]
+    assert "../x" in _report(data_dir)
+
+
+def test_stems_are_nfc_normalized_on_import(data_dir):
+    nfd = unicodedata.normalize("NFD", "Café")
+    write_campaigns(data_dir, {"game": {"transcripts": [nfd]}})
+    assert load_campaigns()["game"].transcripts == [unicodedata.normalize("NFC", "Café")]
+
+
+def test_bad_created_date_repaired_and_reported(data_dir):
+    write_campaigns(data_dir, {"game": {"created": "last tuesday"}})
+    assert len(load_campaigns()["game"].created) == 10
+    assert "created" in _report(data_dir)
+
+
+@pytest.mark.parametrize("which", ["speakers", "campaigns"])
+def test_unreadable_store_rolls_back_and_names_file(data_dir, which):
+    write_speakers(data_dir, {"alice": {}}, {"alice": _vec(1, 0)})
+    write_campaigns(data_dir, {"game": {}})
+    target = (data_dir / "profiles" / "speakers.json" if which == "speakers"
+              else data_dir / "campaigns" / "campaigns.json")
+    target.write_text("{not json", encoding="utf-8")
+
+    with pytest.raises(db.MigrationFailed, match=target.name) as exc:
+        db.connect()
+    assert "backups" in str(exc.value)
+    with db.connection(migrate_schema=False, claim_runtime=False) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
+    # Nothing deleted: the user can fix the file and start again.
+    assert (data_dir / "profiles" / "speakers.json").exists()
+    assert (data_dir / "profiles" / "embeddings" / "alice.npy").exists()
+
+
+def test_leftover_legacy_files_after_commit_are_removed_next_start(data_dir, monkeypatch):
+    write_speakers(data_dir, {"alice": {}}, {"alice": _vec(1, 0)})
+    backup = data_dir / "profiles" / "speakers.json.keep"
+    backup.write_bytes((data_dir / "profiles" / "speakers.json").read_bytes())
+    load_profiles()
+    # Simulate a crash between commit and delete: the file is back.
+    backup.rename(data_dir / "profiles" / "speakers.json")
+    monkeypatch.setattr(db, "_cleaned", set())  # a new process
+    load_profiles()
+    assert not (data_dir / "profiles" / "speakers.json").exists()
+    assert list(load_profiles()) == ["alice"]
+
+
+def test_fresh_install_has_no_backup(data_dir):
+    load_profiles()
+    assert not (data_dir / "backups").exists()

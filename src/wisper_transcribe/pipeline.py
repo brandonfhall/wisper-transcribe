@@ -341,10 +341,9 @@ def _interactive_enroll(
             # Refresh in-memory dicts so subsequent speakers in this file see
             # the new enrollment in the ranked candidates list.
             existing_profiles[new_profile.name] = new_profile
-            try:
-                enrolled_embeddings[new_profile.name] = np.load(str(new_profile.embedding_path))
-            except Exception:
-                pass
+            emb = load_profile_embedding(new_profile)
+            if emb is not None:
+                enrolled_embeddings[new_profile.name] = emb
 
         speaker_map[label] = name
         speaker_metadata.append({"name": name, "role": role})

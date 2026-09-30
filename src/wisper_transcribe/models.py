@@ -3,9 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, Optional
+from typing import TYPE_CHECKING, Literal, Optional
 
 from .config import EMBEDDING_SPACE
+
+if TYPE_CHECKING:
+    import numpy as np
 
 
 @dataclass
@@ -41,10 +44,10 @@ class AlignedSegment:
 
 @dataclass
 class SpeakerProfile:
-    name: str
+    name: str                         # profile key: URL slug and reference-clip filename
     display_name: str
     role: str
-    embedding_path: Path
+    embedding: Optional["np.ndarray"]  # unit-length float32, loaded with the profile; None if never enrolled
     enrolled_date: str
     enrollment_source: str
     notes: str = ""

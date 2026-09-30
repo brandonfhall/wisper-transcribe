@@ -424,13 +424,11 @@ def test_enroll_pick_existing_speaker_skips_enroll(
     mock_align.return_value = [AlignedSegment(start=0.0, end=5.0, text="Hello", speaker="SPEAKER_00")]
 
     fake_emb = np.zeros(512, dtype=np.float32)
-    npy_path = tmp_path / "alice.npy"
-    np.save(str(npy_path), fake_emb)
 
     existing = {
         "alice": SpeakerProfile(
             name="alice", display_name="Alice", role="DM",
-            embedding_path=npy_path,
+            embedding=fake_emb,
             enrolled_date="2026-01-01", enrollment_source="ep1.mp3",
         )
     }
@@ -474,13 +472,11 @@ def test_enroll_pick_existing_speaker_confirm_yes_updates_embedding(
 
     import numpy as np
     fake_emb = np.zeros(512, dtype=np.float32)
-    npy_path = tmp_path / "alice.npy"
-    np.save(str(npy_path), fake_emb)
 
     existing = {
         "alice": SpeakerProfile(
             name="alice", display_name="Alice", role="DM",
-            embedding_path=npy_path,
+            embedding=fake_emb,
             enrolled_date="2026-01-01", enrollment_source="ep1.mp3",
         )
     }
@@ -530,12 +526,9 @@ def test_enroll_existing_speakers_ranked_by_similarity(
     bob_emb   = np.array([0.0, 1.0, 0.0], dtype=np.float32)
     query_emb = np.array([0.9, 0.1, 0.0], dtype=np.float32)  # closer to Alice
 
-    for name, emb in [("alice", alice_emb), ("bob", bob_emb)]:
-        np.save(str(tmp_path / f"{name}.npy"), emb)
-
     existing = {
-        "alice": SpeakerProfile("alice", "Alice", "DM", tmp_path / "alice.npy", "2026-01-01", "ep1.mp3"),
-        "bob":   SpeakerProfile("bob",   "Bob",   "Player", tmp_path / "bob.npy", "2026-01-01", "ep1.mp3"),
+        "alice": SpeakerProfile("alice", "Alice", "DM", alice_emb, "2026-01-01", "ep1.mp3"),
+        "bob":   SpeakerProfile("bob",   "Bob",   "Player", bob_emb, "2026-01-01", "ep1.mp3"),
     }
 
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value=existing):
@@ -587,14 +580,12 @@ def test_newly_enrolled_speaker_appears_for_subsequent_speakers(
         AlignedSegment(start=5.0, end=10.0, text="Hello from Carol", speaker="SPEAKER_01"),
     ]
 
-    # Pre-create an embedding file that the mock enroll_speaker will point to.
-    brad_npy = tmp_path / "brad.npy"
+    # The embedding the mocked enroll_speaker returns with the new profile.
     brad_emb = np.zeros(512, dtype=np.float32)
-    np.save(str(brad_npy), brad_emb)
 
     brad_profile = SpeakerProfile(
         name="brad", display_name="Brad", role="",
-        embedding_path=brad_npy,
+        embedding=brad_emb,
         enrolled_date="2026-01-01", enrollment_source="session01.mp3",
     )
 
@@ -1229,6 +1220,8 @@ def test_process_file_passes_campaign_profile_filter(
 
     # Create a campaign with alice as sole member
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from ._seed import seed_profile
+    seed_profile("alice", data_dir=tmp_path)
     cm.create_campaign("Test Game", data_dir=tmp_path)
     cm.add_member("test-game", "alice", data_dir=tmp_path)
 
@@ -1551,11 +1544,8 @@ def test_process_file_reports_profiles_from_old_model(
     from wisper_transcribe.pipeline import process_file
 
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-    profiles_dir = tmp_path / "profiles"
-    profiles_dir.mkdir()
-    (profiles_dir / "speakers.json").write_text(json.dumps({
-        "bob": {"display_name": "Bob", "embedding_file": "embeddings/bob.npy"},
-    }))
+    from ._seed import seed_profile
+    seed_profile("bob", "Bob", embedding_space="")  # untagged = older model
 
     audio = tmp_path / "session01.mp3"
     audio.write_bytes(b"fake audio")

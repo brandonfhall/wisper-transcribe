@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 import os
-import threading
 from pathlib import Path
 from typing import Optional
 
@@ -20,16 +18,12 @@ from .config import (
     EMBEDDING_SUBFOLDER,
     get_data_dir,
 )
+from . import db
 from .models import DiarizationSegment, SpeakerProfile
 
 # Embedding-model cache, keyed by device so a different device reloads it.
 _embedding_model = None
 _embedding_device: Optional[str] = None
-
-# Guards every load-modify-save of speakers.json against lost updates from
-# concurrent requests. Never taken inside load_profiles/save_profiles
-# themselves: callers already hold it and would deadlock.
-_profiles_lock = threading.Lock()
 
 
 def _get_profiles_dir(data_dir: Optional[Path] = None) -> Path:
@@ -37,108 +31,110 @@ def _get_profiles_dir(data_dir: Optional[Path] = None) -> Path:
     return base / "profiles"
 
 
-def _get_speakers_json(data_dir: Optional[Path] = None) -> Path:
-    return _get_profiles_dir(data_dir) / "speakers.json"
-
-
-def _get_embeddings_dir(data_dir: Optional[Path] = None) -> Path:
+def get_reference_clips_dir(data_dir: Optional[Path] = None) -> Path:
+    """Directory of the ``<key>.mp3`` reference clips (the pre-SQLite
+    ``embeddings/`` folder; clips kept their location)."""
     return _get_profiles_dir(data_dir) / "embeddings"
 
 
+def reference_clip_path(key: str, data_dir: Optional[Path] = None) -> Path:
+    """Where a profile's ~12 s reference clip lives (it may not exist)."""
+    return get_reference_clips_dir(data_dir) / f"{key}.mp3"
+
+
 # ---------------------------------------------------------------------------
-# Profile CRUD
+# Profile CRUD (table ``profiles`` in wisper.db)
 # ---------------------------------------------------------------------------
+
+def _embedding_to_blob(embedding: Optional[np.ndarray]) -> Optional[bytes]:
+    if embedding is None:
+        return None
+    return np.asarray(embedding, dtype=np.float32).reshape(-1).tobytes()
+
+
+def _blob_to_embedding(blob: Optional[bytes]) -> Optional[np.ndarray]:
+    if blob is None:
+        return None
+    return np.frombuffer(blob, dtype=np.float32).copy()
+
+
+def _row_to_profile(row) -> SpeakerProfile:
+    return SpeakerProfile(
+        name=row["key"],
+        display_name=row["display_name"],
+        role=row["role"],
+        embedding=_blob_to_embedding(row["embedding"]),
+        enrolled_date=row["enrolled_date"],
+        enrollment_source=row["enrollment_source"],
+        notes=row["notes"],
+        # NULL = no embedding; "" = untagged, from the pre-WeSpeaker model.
+        embedding_space=row["embedding_space"] or "",
+    )
+
+
+def _upsert_profile(conn, key: str, p: SpeakerProfile) -> None:
+    """Insert or update by key. Keeps the row id, so memberships survive."""
+    blob = _embedding_to_blob(p.embedding)
+    conn.execute(
+        "INSERT INTO profiles (key, display_name, role, notes, enrolled_date, "
+        "enrollment_source, embedding, embedding_space) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT (key) DO UPDATE SET display_name = excluded.display_name, "
+        "role = excluded.role, notes = excluded.notes, "
+        "enrolled_date = excluded.enrolled_date, "
+        "enrollment_source = excluded.enrollment_source, "
+        "embedding = excluded.embedding, embedding_space = excluded.embedding_space",
+        (
+            key, p.display_name or key, p.role or "", p.notes or "",
+            p.enrolled_date or "", p.enrollment_source or "",
+            blob, None if blob is None else (p.embedding_space or ""),
+        ),
+    )
+
 
 def load_profiles(data_dir: Optional[Path] = None) -> dict[str, SpeakerProfile]:
-    path = _get_speakers_json(data_dir)
-    if not path.exists():
-        return {}
-
-    with open(path, encoding="utf-8") as f:
-        raw = json.load(f)
-
-    profiles: dict[str, SpeakerProfile] = {}
-    for name, data in raw.items():
-        profiles[name] = SpeakerProfile(
-            name=name,
-            display_name=data.get("display_name", name),
-            role=data.get("role", ""),
-            embedding_path=_get_profiles_dir(data_dir) / data["embedding_file"],
-            enrolled_date=data.get("enrolled_date", ""),
-            enrollment_source=data.get("enrollment_source", ""),
-            notes=data.get("notes", ""),
-            # Untagged profiles predate the current embedding model.
-            embedding_space=data.get("embedding_space", ""),
-        )
-    return profiles
+    """All profiles by key, in enrollment order, embeddings included (~1 KB each)."""
+    with db.connection(data_dir) as conn:
+        rows = conn.execute("SELECT * FROM profiles ORDER BY id").fetchall()
+    return {row["key"]: _row_to_profile(row) for row in rows}
 
 
 def save_profiles(profiles: dict[str, SpeakerProfile], data_dir: Optional[Path] = None) -> None:
-    path = _get_speakers_json(data_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    """Make the profile store exactly ``profiles``, in one transaction.
 
-    raw: dict = {}
-    for name, p in profiles.items():
-        raw[name] = {
-            "display_name": p.display_name,
-            "role": p.role,
-            "embedding_file": f"embeddings/{name}.npy",
-            "enrolled_date": p.enrolled_date,
-            "enrollment_source": p.enrollment_source,
-            "notes": p.notes,
-            "embedding_space": p.embedding_space,
-        }
-
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(raw, f, indent=2)
+    Existing keys are updated in place (memberships kept); keys not in
+    ``profiles`` are deleted, which also drops their campaign memberships.
+    Prefer the targeted functions below; this whole-store form remains for
+    callers and tests that build the store directly.
+    """
+    with db.transaction(data_dir) as conn:
+        existing = {r[0] for r in conn.execute("SELECT key FROM profiles")}
+        for key in existing - set(profiles):
+            conn.execute("DELETE FROM profiles WHERE key = ?", (key,))
+        for key, p in profiles.items():
+            _upsert_profile(conn, key, p)
 
 
 def remove_profile_files(key: str, data_dir: Optional[Path] = None) -> None:
-    """Delete a profile's embedding (``.npy``) and reference clip (``.mp3``).
-
-    Both are optional: older profiles or failed clip extraction leave no clip.
-    """
-    emb_dir = _get_embeddings_dir(data_dir)
-    (emb_dir / f"{key}.npy").unlink(missing_ok=True)
-    (emb_dir / f"{key}.mp3").unlink(missing_ok=True)
+    """Delete a profile's reference clip (and a stray pre-SQLite ``.npy``)."""
+    clips = get_reference_clips_dir(data_dir)
+    (clips / f"{key}.mp3").unlink(missing_ok=True)
+    (clips / f"{key}.npy").unlink(missing_ok=True)
 
 
 def remove_profile(key: str, data_dir: Optional[Path] = None) -> None:
-    """Remove a profile's ``speakers.json`` entry and its embedding + clip files.
+    """Delete a profile (its memberships cascade), then its reference clip.
 
     Shared by the CLI and web remove paths. Raises ``KeyError`` if ``key`` is
     not enrolled.
     """
-    with _profiles_lock:
-        profiles = load_profiles(data_dir)
-        if key not in profiles:
+    with db.transaction(data_dir) as conn:
+        if conn.execute("DELETE FROM profiles WHERE key = ?", (key,)).rowcount == 0:
             raise KeyError(f"Speaker profile {key!r} not found")
-        profiles.pop(key)
-        remove_profile_files(key, data_dir)
-        save_profiles(profiles, data_dir)
-
-
-def rename_profile_files(old_key: str, new_key: str, data_dir: Optional[Path] = None) -> Path:
-    """Rename a profile's embedding and reference clip to a new key.
-
-    Returns the new embedding path. The clip may not exist.
-    """
-    emb_dir = _get_embeddings_dir(data_dir)
-    old_npy = emb_dir / f"{old_key}.npy"
-    new_npy = emb_dir / f"{new_key}.npy"
-    if old_npy.exists():
-        old_npy.rename(new_npy)
-
-    old_mp3 = emb_dir / f"{old_key}.mp3"
-    new_mp3 = emb_dir / f"{new_key}.mp3"
-    if old_mp3.exists():
-        old_mp3.rename(new_mp3)
-
-    return new_npy
+    remove_profile_files(key, data_dir)
 
 
 def rename_profile(old_key: str, new_name: str, data_dir: Optional[Path] = None) -> SpeakerProfile:
-    """Rename a speaker: rekey the profile, move its files, update campaigns.
+    """Rename a speaker: rekey the profile, then move its reference clip.
 
     Shared by ``wisper speakers rename`` and the web rename route.
 
@@ -147,65 +143,53 @@ def rename_profile(old_key: str, new_name: str, data_dir: Optional[Path] = None)
        and validation also breaks the CodeQL taint chain for form input.
        Invalid keys raise ``ValueError``.
     2. Renaming onto a different existing key raises ``ValueError``.
-    3. Rekey the entry, update ``name``/``display_name``/``embedding_path``,
-       and move the ``.npy``/``.mp3`` files.
-    4. Rekey campaign membership (roles, characters, Discord bindings).
+    3. One ``UPDATE`` of the key and display name. Campaign memberships
+       (roles, characters, Discord bindings) reference the profile's id, so
+       they follow without being touched.
+    4. After the commit, move the ``.mp3`` clip (file after row).
 
     Raises ``KeyError`` if ``old_key`` isn't enrolled. A same-key rename (case
     change) only updates ``display_name``.
     """
     from .path_utils import validate_path_component
 
-    with _profiles_lock:
-        profiles = load_profiles(data_dir)
-        if old_key not in profiles:
+    new_key = new_name.lower().replace(" ", "_")
+    safe_new_key = validate_path_component(new_key, "_rename_profile_guard")
+    with db.transaction(data_dir) as conn:
+        if conn.execute("SELECT 1 FROM profiles WHERE key = ?", (old_key,)).fetchone() is None:
             raise KeyError(f"Speaker profile {old_key!r} not found")
-
-        new_key = new_name.lower().replace(" ", "_")
-        safe_new_key = validate_path_component(new_key, "_rename_profile_guard")
         if safe_new_key is None:
             raise ValueError("invalid profile name")
-        if safe_new_key != old_key and safe_new_key in profiles:
+        if safe_new_key != old_key and conn.execute(
+            "SELECT 1 FROM profiles WHERE key = ?", (safe_new_key,)
+        ).fetchone() is not None:
             raise ValueError("profile already exists")
+        row = conn.execute(
+            "UPDATE profiles SET key = ?, display_name = ? WHERE key = ? RETURNING *",
+            (safe_new_key, new_name, old_key),
+        ).fetchone()
+        profile = _row_to_profile(row)
 
-        profile = profiles.pop(old_key)
-        profile.name = safe_new_key
-        profile.display_name = new_name
-        if safe_new_key != old_key:
-            profile.embedding_path = rename_profile_files(old_key, safe_new_key, data_dir)
-        profiles[safe_new_key] = profile
-        save_profiles(profiles, data_dir)
-
-        if safe_new_key != old_key:
-            # Lock order is always profiles then campaigns, so this nested
-            # acquire can't deadlock.
-            from .campaign_manager import rekey_member
-            rekey_member(old_key, safe_new_key, data_dir)
-
-        return profile
+    if safe_new_key != old_key:
+        old_clip = reference_clip_path(old_key, data_dir)
+        if old_clip.exists():
+            try:
+                old_clip.rename(reference_clip_path(safe_new_key, data_dir))
+            except OSError:
+                pass  # the clip is a convenience; the rename already committed
+    return profile
 
 
 def reset_profiles(data_dir: Optional[Path] = None) -> int:
-    """Delete all speaker profiles and embeddings. Returns number of speakers removed."""
-    with _profiles_lock:
-        speakers_json = _get_speakers_json(data_dir)
-        emb_dir = _get_embeddings_dir(data_dir)
-
-        count = 0
-        if speakers_json.exists():
-            import json as _json
-            with open(speakers_json, encoding="utf-8") as f:
-                count = len(_json.load(f))
-            speakers_json.unlink()
-
-        if emb_dir.exists():
-            for npy in emb_dir.glob("*.npy"):
-                npy.unlink()
-            # Clear reference clips too.
-            for mp3 in emb_dir.glob("*.mp3"):
-                mp3.unlink()
-
-        return count
+    """Delete all speaker profiles and reference clips. Returns the number removed."""
+    with db.transaction(data_dir) as conn:
+        count = conn.execute("DELETE FROM profiles").rowcount
+    clips = get_reference_clips_dir(data_dir)
+    if clips.exists():
+        for pattern in ("*.mp3", "*.npy"):
+            for f in clips.glob(pattern):
+                f.unlink(missing_ok=True)
+    return count
 
 
 # ---------------------------------------------------------------------------
@@ -367,31 +351,24 @@ def enroll_speaker(
     if embedding is None:
         embedding = extract_embedding(audio_path, segments, speaker_label, device)
 
-    emb_dir = _get_embeddings_dir(data_dir)
-    emb_dir.mkdir(parents=True, exist_ok=True)
-    emb_path = emb_dir / f"{name}.npy"
-    np.save(str(emb_path), _unit(np.asarray(embedding, dtype=np.float32)))
-
     profile = SpeakerProfile(
         name=name,
         display_name=display_name,
         role=role,
-        embedding_path=emb_path,
+        embedding=_unit(np.asarray(embedding, dtype=np.float32).reshape(-1)),
         enrolled_date=datetime.date.today().isoformat(),
         enrollment_source=Path(audio_path).name,
         notes=notes,
     )
+    # Extraction above stays outside the transaction.
+    with db.transaction(data_dir) as conn:
+        _upsert_profile(conn, name, profile)
 
-    # Lock only the store update; extraction and the .npy write above stay
-    # outside so enrollments don't serialize.
-    with _profiles_lock:
-        profiles = load_profiles(data_dir)
-        profiles[name] = profile
-        save_profiles(profiles, data_dir)
-
-    # Save a short reference audio clip alongside the embedding for web playback.
+    # Save a short reference audio clip for web playback (file after row).
     # Failures are silently swallowed — the clip is a convenience, not critical.
-    _save_reference_clip(audio_path, segments, speaker_label, emb_dir / f"{name}.mp3")
+    clip = reference_clip_path(name, data_dir)
+    clip.parent.mkdir(parents=True, exist_ok=True)
+    _save_reference_clip(audio_path, segments, speaker_label, clip)
 
     return profile
 
@@ -504,14 +481,47 @@ def _save_reference_clip(
 
 def load_profile_embedding(profile: SpeakerProfile) -> Optional[np.ndarray]:
     """The profile's embedding, or ``None`` if it's missing or from another model."""
-    if profile.embedding_space != EMBEDDING_SPACE or not profile.embedding_path.exists():
+    if profile.embedding_space != EMBEDDING_SPACE or profile.embedding is None:
         return None
-    return np.load(str(profile.embedding_path))
+    return profile.embedding
 
 
 def stale_profile_keys(profiles: dict[str, SpeakerProfile]) -> list[str]:
     """Keys of profiles enrolled with an older embedding model; they need re-enrolling."""
     return sorted(k for k, p in profiles.items() if p.embedding_space != EMBEDDING_SPACE)
+
+
+# Profiles this similar are almost certainly one person enrolled twice.
+DUPLICATE_SIMILARITY = 0.95
+
+
+def find_duplicate_profiles(
+    profiles: dict[str, SpeakerProfile], threshold: float = DUPLICATE_SIMILARITY,
+) -> list[tuple[str, str, float]]:
+    """Pairs of current-model profiles whose embeddings score above ``threshold``.
+
+    Returns ``(key_a, key_b, similarity)`` sorted most similar first. Profiles
+    from an older model or without an embedding are never compared.
+    """
+    usable = {k: e for k, p in profiles.items() if (e := load_profile_embedding(p)) is not None}
+    keys = sorted(usable)
+    pairs = []
+    for i, a in enumerate(keys):
+        for b in keys[i + 1:]:
+            if usable[a].shape != usable[b].shape:
+                continue
+            sim = _cosine_similarity(usable[a], usable[b])
+            if sim > threshold:
+                pairs.append((a, b, sim))
+    return sorted(pairs, key=lambda t: (-t[2], t[0], t[1]))
+
+
+def placeholder_name_profiles(profiles: dict[str, SpeakerProfile]) -> list[str]:
+    """Keys of profiles named like a pipeline placeholder (``SPEAKER_03``,
+    ``Unknown Speaker 2``) — usually an accidental enrollment."""
+    from .web.enroll_shared import AUTO_NAME_RE
+
+    return sorted(k for k, p in profiles.items() if AUTO_NAME_RE.match(p.display_name))
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -658,23 +668,26 @@ def update_embedding(
 ) -> None:
     """Blend ``new_embedding`` into a profile by exponential moving average.
 
-    A profile from an older embedding model is replaced outright and retagged,
-    since its vector can't be averaged with the new one.
+    A profile from an older embedding model (or with no embedding) is
+    replaced outright and retagged, since its vector can't be averaged with
+    the new one. The read-blend-write is one transaction. An unknown ``name``
+    is a no-op.
     """
-    emb_dir = _get_embeddings_dir(data_dir)
-    emb_dir.mkdir(parents=True, exist_ok=True)
-    emb_path = emb_dir / f"{name}.npy"
-    new_unit = _unit(np.asarray(new_embedding, dtype=np.float32))
+    new_unit = _unit(np.asarray(new_embedding, dtype=np.float32).reshape(-1))
 
-    with _profiles_lock:
-        profiles = load_profiles(data_dir)
-        profile = profiles.get(name)
-        stale = profile is not None and profile.embedding_space != EMBEDDING_SPACE
-        if stale or not emb_path.exists():
-            np.save(str(emb_path), new_unit)
+    with db.transaction(data_dir) as conn:
+        row = conn.execute(
+            "SELECT embedding, embedding_space FROM profiles WHERE key = ?", (name,)
+        ).fetchone()
+        if row is None:
+            return
+        existing = _blob_to_embedding(row["embedding"])
+        if (row["embedding_space"] != EMBEDDING_SPACE or existing is None
+                or existing.shape != new_unit.shape):
+            blended = new_unit
         else:
-            existing = _unit(np.load(str(emb_path)))
-            np.save(str(emb_path), _unit(alpha * new_unit + (1 - alpha) * existing))
-        if stale:
-            profile.embedding_space = EMBEDDING_SPACE
-            save_profiles(profiles, data_dir)
+            blended = _unit(alpha * new_unit + (1 - alpha) * _unit(existing))
+        conn.execute(
+            "UPDATE profiles SET embedding = ?, embedding_space = ? WHERE key = ?",
+            (_embedding_to_blob(blended), EMBEDDING_SPACE, name),
+        )

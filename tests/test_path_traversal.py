@@ -498,24 +498,19 @@ def test_find_excerpt_clip_missing_returns_none(tmp_path):
     "../escape", "a/b", "..", "with space/../x",
 ])
 def test_speakers_rename_new_name_path_guard(client: TestClient, payload: str, tmp_path):
-    """The web rename rekeys the profile (moves .npy/.mp3 files), so the
+    """The web rename rekeys the profile (moves its .mp3 clip), so the
     submitted new name must pass the path-component guard; hostile names are
     refused with a generic error code and never reflected."""
-    import numpy as np
-    from wisper_transcribe.models import SpeakerProfile
-    from wisper_transcribe.speaker_manager import save_profiles
+    from wisper_transcribe.speaker_manager import load_profiles, reference_clip_path
 
-    emb_dir = tmp_path / "profiles" / "embeddings"
-    emb_dir.mkdir(parents=True)
-    np.save(str(emb_dir / "alice.npy"), np.zeros(2))
-    save_profiles({"alice": SpeakerProfile(
-        name="alice", display_name="Alice", role="",
-        embedding_path=emb_dir / "alice.npy",
-        enrolled_date="2026-04-07", enrollment_source="t.mp3",
-    )}, data_dir=tmp_path)
+    from ._seed import seed_profile
 
-    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path), \
-         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path):
+    seed_profile("alice", "Alice", data_dir=tmp_path)
+    clip = reference_clip_path("alice", tmp_path)
+    clip.parent.mkdir(parents=True, exist_ok=True)
+    clip.write_bytes(b"mp3")
+
+    with patch.dict("os.environ", {"WISPER_DATA_DIR": str(tmp_path)}):
         resp = client.post(
             "/speakers/alice/rename",
             data={"new_name": payload},
@@ -524,5 +519,6 @@ def test_speakers_rename_new_name_path_guard(client: TestClient, payload: str, t
 
     assert resp.status_code == 303
     assert resp.headers["location"] == "/speakers?error=rename_failed"
-    # No file escaped or moved
-    assert (emb_dir / "alice.npy").exists()
+    # Nothing renamed, no file escaped or moved
+    assert set(load_profiles(tmp_path)) == {"alice"}
+    assert clip.exists()

@@ -7,6 +7,8 @@ from unittest.mock import patch
 
 import pytest
 
+from ._seed import seed_profile
+
 
 def _make_queue():
     from wisper_transcribe.web.jobs import JobQueue
@@ -1271,8 +1273,9 @@ def test_recording_enroll_job_updates_recording_state(tmp_path):
     job = _make_recording_enroll_job(rec.id)
 
     with patch("wisper_transcribe.config.get_data_dir", return_value=tmp_path), \
-         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path), \
-         patch("wisper_transcribe.speaker_manager.enroll_speaker_from_audio_dir") as mock_enroll:
+         patch.dict("os.environ", {"WISPER_DATA_DIR": str(tmp_path)}), \
+         patch("wisper_transcribe.speaker_manager.enroll_speaker_from_audio_dir",
+               side_effect=lambda **kw: seed_profile(kw["name"], data_dir=tmp_path)) as mock_enroll:
         q._run_job(job)
 
     assert job.status == COMPLETED

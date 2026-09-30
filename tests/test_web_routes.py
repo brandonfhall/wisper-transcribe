@@ -1218,7 +1218,7 @@ def test_speakers_list_flags_profiles_from_old_model(client, tmp_path):
 
     def _p(key, space):
         return SpeakerProfile(name=key, display_name=key.title(), role="",
-                              embedding_path=tmp_path / f"{key}.npy", enrolled_date="",
+                              embedding=None, enrolled_date="",
                               enrollment_source="", embedding_space=space)
 
     profiles = {"alice": _p("alice", EMBEDDING_SPACE), "bob": _p("bob", "")}
@@ -1313,12 +1313,12 @@ def test_speakers_enroll_submit_cleans_up_temp_file_when_submit_fails(client, tm
 
 def test_speakers_remove_redirects(client, tmp_path):
     # Removal goes through speaker_manager.remove_profile(), so test against
-    # the real profiles.json rather than mocking the route module.
+    # the real database rather than mocking the route module.
     from wisper_transcribe.speaker_manager import load_profiles as _load
 
     _seed_profile_store(tmp_path)
 
-    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path):
+    with patch.dict("os.environ", {"WISPER_DATA_DIR": str(tmp_path)}):
         resp = client.post("/speakers/alice/remove", follow_redirects=False)
 
     assert resp.status_code == 303
@@ -1326,52 +1326,41 @@ def test_speakers_remove_redirects(client, tmp_path):
 
 
 def test_speakers_remove_deletes_reference_clip(client, tmp_path):
-    """The web removal route deletes the .mp3 reference clip alongside
-    the .npy embedding, not just the profile entry."""
+    """The web removal route deletes the .mp3 reference clip, not just
+    the profile row."""
     emb_dir = _seed_profile_store(tmp_path)
-    npy_path = emb_dir / "alice.npy"
     mp3_path = emb_dir / "alice.mp3"
-    assert npy_path.exists() and mp3_path.exists()
+    assert mp3_path.exists()
 
-    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path):
+    with patch.dict("os.environ", {"WISPER_DATA_DIR": str(tmp_path)}):
         resp = client.post("/speakers/alice/remove", follow_redirects=False)
 
     assert resp.status_code == 303
-    assert not npy_path.exists()
     assert not mp3_path.exists()
 
 
 def _seed_profile_store(tmp_path, key="alice", display="Alice", with_clip=True):
-    """Write a real speakers.json + embedding files under tmp_path (used as
-    the data dir) and return the embeddings dir."""
-    import numpy as np
-    from wisper_transcribe.models import SpeakerProfile
-    from wisper_transcribe.speaker_manager import save_profiles as _save
+    """Insert a real profile into tmp_path's wisper.db (tmp_path is the data
+    dir), optionally with a reference clip, and return the clips dir."""
+    from ._seed import seed_profile
 
     emb_dir = tmp_path / "profiles" / "embeddings"
     emb_dir.mkdir(parents=True, exist_ok=True)
-    np.save(str(emb_dir / f"{key}.npy"), np.zeros(4))
     if with_clip:
         (emb_dir / f"{key}.mp3").write_bytes(b"fake mp3")
-
-    profile = SpeakerProfile(
-        name=key, display_name=display, role="DM",
-        embedding_path=emb_dir / f"{key}.npy",
-        enrolled_date="2026-04-07", enrollment_source="test.mp3",
-    )
-    _save({key: profile}, data_dir=tmp_path)
+    seed_profile(key, display, role="DM", data_dir=tmp_path,
+                 enrolled_date="2026-04-07", enrollment_source="test.mp3")
     return emb_dir
 
 
 def test_speakers_rename_rekeys_profile_and_moves_files(client, tmp_path):
     """The web rename route adopts the CLI's rekey semantic — the
-    profile key changes and the .npy/.mp3 files move with it."""
+    profile key changes and the .mp3 clip moves with it."""
     from wisper_transcribe.speaker_manager import load_profiles as _load
 
     emb_dir = _seed_profile_store(tmp_path)
 
-    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path), \
-         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path):
+    with patch.dict("os.environ", {"WISPER_DATA_DIR": str(tmp_path)}):
         resp = client.post(
             "/speakers/alice/rename",
             data={"new_name": "Alicia"},
@@ -1384,9 +1373,8 @@ def test_speakers_rename_rekeys_profile_and_moves_files(client, tmp_path):
     assert "alice" not in profiles
     assert "alicia" in profiles
     assert profiles["alicia"].display_name == "Alicia"
-    assert (emb_dir / "alicia.npy").exists()
+    assert profiles["alicia"].embedding is not None
     assert (emb_dir / "alicia.mp3").exists()
-    assert not (emb_dir / "alice.npy").exists()
     assert not (emb_dir / "alice.mp3").exists()
 
 
@@ -1399,8 +1387,7 @@ def test_speakers_rename_updates_campaign_membership(client, tmp_path):
 
     _seed_profile_store(tmp_path)
 
-    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path), \
-         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path):
+    with patch.dict("os.environ", {"WISPER_DATA_DIR": str(tmp_path)}):
         campaign = create_campaign("Test Campaign", data_dir=tmp_path)
         add_member(campaign.slug, "alice", role="player", data_dir=tmp_path)
         bind_discord_id(campaign.slug, "alice", "123456789012345678", data_dir=tmp_path)
@@ -1432,13 +1419,12 @@ def test_speakers_rename_collision_redirects_generic_error(client, tmp_path):
     profiles = _load(data_dir=tmp_path)
     profiles["bob"] = SpeakerProfile(
         name="bob", display_name="Bob", role="",
-        embedding_path=emb_dir / "bob.npy",
+        embedding=None,
         enrolled_date="2026-04-07", enrollment_source="t.mp3",
     )
     _save(profiles, data_dir=tmp_path)
 
-    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path), \
-         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path):
+    with patch.dict("os.environ", {"WISPER_DATA_DIR": str(tmp_path)}):
         resp = client.post(
             "/speakers/alice/rename",
             data={"new_name": "Bob"},
@@ -1456,8 +1442,7 @@ def test_speakers_rename_invalid_key_redirects_generic_error(client, tmp_path):
     refused with a generic error code — never reflected into the redirect."""
     _seed_profile_store(tmp_path)
 
-    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path), \
-         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path):
+    with patch.dict("os.environ", {"WISPER_DATA_DIR": str(tmp_path)}):
         resp = client.post(
             "/speakers/alice/rename",
             data={"new_name": "evil/../../name"},
@@ -1476,8 +1461,7 @@ def test_speakers_rename_display_case_only_keeps_key(client, tmp_path):
 
     emb_dir = _seed_profile_store(tmp_path, display="alice")
 
-    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path), \
-         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path):
+    with patch.dict("os.environ", {"WISPER_DATA_DIR": str(tmp_path)}):
         resp = client.post(
             "/speakers/alice/rename",
             data={"new_name": "Alice"},
@@ -1488,7 +1472,7 @@ def test_speakers_rename_display_case_only_keeps_key(client, tmp_path):
     profiles = _load(data_dir=tmp_path)
     assert "alice" in profiles
     assert profiles["alice"].display_name == "Alice"
-    assert (emb_dir / "alice.npy").exists()
+    assert (emb_dir / "alice.mp3").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1840,7 +1824,7 @@ def test_speakers_rename_empty_name_no_change(client, tmp_path):
 
     _seed_profile_store(tmp_path)
 
-    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path):
+    with patch.dict("os.environ", {"WISPER_DATA_DIR": str(tmp_path)}):
         resp = client.post(
             "/speakers/alice/rename",
             data={"new_name": ""},
@@ -1953,16 +1937,13 @@ def test_campaign_add_member_persists(client, tmp_path, monkeypatch):
 
     # Create real campaign + profile
     (tmp_path / "profiles" / "embeddings").mkdir(parents=True)
-    fake_emb = tmp_path / "profiles" / "embeddings" / "alice.npy"
-    np.save(str(fake_emb), np.zeros(512))
-
     from wisper_transcribe.campaign_manager import create_campaign
     from wisper_transcribe.speaker_manager import save_profiles
     create_campaign("Test Game", data_dir=tmp_path)
     save_profiles(
         {"alice": SpeakerProfile(
             name="alice", display_name="Alice", role="",
-            embedding_path=fake_emb, enrolled_date="2026-04-28",
+            embedding=np.ones(4, dtype=np.float32) / 2, enrolled_date="2026-04-28",
             enrollment_source="test.mp3",
         )},
         data_dir=tmp_path,
@@ -2006,12 +1987,10 @@ def test_campaign_remove_member_does_not_delete_profile(client, tmp_path, monkey
     from wisper_transcribe.speaker_manager import save_profiles
 
     (tmp_path / "profiles" / "embeddings").mkdir(parents=True)
-    fake_emb = tmp_path / "profiles" / "embeddings" / "alice.npy"
-    np.save(str(fake_emb), np.zeros(512))
     save_profiles(
         {"alice": SpeakerProfile(
             name="alice", display_name="Alice", role="",
-            embedding_path=fake_emb, enrolled_date="2026-04-28",
+            embedding=np.ones(4, dtype=np.float32) / 2, enrolled_date="2026-04-28",
             enrollment_source="test.mp3",
         )},
         data_dir=tmp_path,
@@ -2022,7 +2001,8 @@ def test_campaign_remove_member_does_not_delete_profile(client, tmp_path, monkey
     resp = client.post("/campaigns/test-game/members/alice/remove", follow_redirects=False)
     assert resp.status_code == 303
     # Profile and embedding must still exist
-    assert fake_emb.exists()
+    from wisper_transcribe.speaker_manager import load_profiles
+    assert load_profiles(tmp_path)["alice"].embedding is not None
     from wisper_transcribe.campaign_manager import get_campaign_profile_keys
     assert "alice" not in get_campaign_profile_keys("test-game", data_dir=tmp_path)
 
@@ -2914,7 +2894,7 @@ def test_unchanged_name_with_existing_profile_skips_enroll(client, tmp_path, mon
     client.app.state.job_queue._jobs[job.id] = job
 
     existing_alice = SpeakerProfile(
-        name="alice", display_name="Alice", role="", embedding_path=tmp_path / "alice.npy",
+        name="alice", display_name="Alice", role="", embedding=None,
         enrolled_date="2026-01-01", enrollment_source="old.mp3",
     )
 

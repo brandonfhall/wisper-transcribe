@@ -195,11 +195,14 @@ Options:
 ```bash
 wisper speakers list                    # show all enrolled profiles
 wisper speakers remove "Alice"          # delete a profile
-wisper speakers rename "Alice" "Alicia" # rename a profile
+wisper speakers rename "Alice" "Alicia" # rename a profile (campaign roles and Discord bindings follow)
+wisper speakers doctor                  # report likely duplicates, old-model and placeholder-named profiles
 wisper speakers reset                   # delete ALL profiles and embeddings (with confirmation)
 wisper speakers test session03.mp3                         # preview match results without writing output
 wisper speakers test session03.mp3 --campaign d-d-mondays  # restrict to campaign roster
 ```
+
+`speakers doctor` only reports; it never changes profiles. It lists pairs of profiles whose voices score above 0.95 similarity (probably one person enrolled twice), profiles from an older speaker model or with no voice sample (never matched until re-enrolled), and profiles named like a placeholder (`SPEAKER_03`, `Unknown Speaker 2`).
 
 `speakers test` prints each label's similarity score, or for an unmatched label the closest profile and its score (e.g. `SPEAKER_03 → Unknown Speaker 1 (closest: Ben 0.48)`). Use it to tune `similarity_threshold`.
 

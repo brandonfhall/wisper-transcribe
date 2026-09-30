@@ -12,6 +12,8 @@ from wisper_transcribe.config import EMBEDDING_SPACE
 from wisper_transcribe.formatter import to_markdown
 from wisper_transcribe.models import AlignedSegment
 
+from ._seed import seed_profile
+
 ALICE = np.array([1.0, 0.0, 0.0, 0.0])
 BOB = np.array([0.0, 1.0, 0.0, 0.0])
 GUEST = np.array([0.0, 0.0, 1.0, 0.0])
@@ -19,14 +21,7 @@ OTHER = np.array([0.0, 0.0, 0.0, 1.0])
 
 
 def _profile(data_dir: Path, key: str, emb: np.ndarray) -> None:
-    emb_dir = data_dir / "profiles" / "embeddings"
-    emb_dir.mkdir(parents=True, exist_ok=True)
-    np.save(str(emb_dir / f"{key}.npy"), emb)
-    path = data_dir / "profiles" / "speakers.json"
-    raw = json.loads(path.read_text()) if path.exists() else {}
-    raw[key] = {"display_name": key.title(), "embedding_file": f"embeddings/{key}.npy",
-                "embedding_space": EMBEDDING_SPACE}
-    path.write_text(json.dumps(raw))
+    seed_profile(key, key.title(), data_dir=data_dir, embedding=emb)
 
 
 def _transcript(out_dir: Path, stem: str, names: dict[str, str], embeddings=None,
@@ -203,13 +198,14 @@ def test_unknown_campaign_raises(world):
 
 
 def test_path_like_stem_is_refused(world):
+    """A path-like stem can't reach the relabel pass: the transcript
+    registry's CHECK rejects it before it is stored."""
+    import sqlite3
+
     data, out = world
     import wisper_transcribe.campaign_manager as cm
 
     campaigns = cm.load_campaigns(data)
     campaigns["game"].transcripts.append("../escape")
-    cm.save_campaigns(campaigns, data)
-
-    report = _run(data, out)
-
-    assert report.transcripts[-1].skipped == "invalid transcript name"
+    with pytest.raises(sqlite3.IntegrityError):
+        cm.save_campaigns(campaigns, data)

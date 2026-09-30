@@ -34,16 +34,17 @@ src/wisper_transcribe/
 ├── diarizer.py          pyannote pipeline wrapper, lazy pipeline cache
 ├── word_alignment.py    Forced word alignment: re-time Whisper words with Qwen3-ForcedAligner (see "Forced word alignment")
 ├── aligner.py           Merge transcription words with diarization turns (see "Alignment")
-├── speaker_manager.py   Profile CRUD, embedding extraction, cosine matching, EMA updates, rename
+├── speaker_manager.py   Profile CRUD (table profiles, embeddings as BLOBs), embedding extraction, cosine matching, EMA updates, rename, doctor checks
 ├── speaker_registry.py  Campaign-wide relabel pass from per-transcript sidecar embeddings
 ├── formatter.py         Markdown + YAML frontmatter output; per-block parse/rewrite for speaker edits
 ├── audio_utils.py       validate_audio(), convert_to_wav(), get_duration(), load_wav_as_tensor()
 ├── time_utils.py        format_timestamp(), format_duration()
 ├── path_utils.py        validate_path_component() (CodeQL-safe guard), get_output_dir()
+├── legacy_import.py     Frozen importers for the JSON-era stores (run inside their migration)
 ├── db.py                SQLite: connect()/transaction(), migrations, capability/dev-data/runtime guards, to_rel()/from_rel() (see "Database")
 ├── config.py            Config load/save, device detection, HF token and LLM key lookup, provider metadata
 ├── models.py            Dataclasses shared across modules (segments, profiles, campaigns, recordings, LLM results)
-├── campaign_manager.py  Campaign CRUD, rosters, Discord ID binding, transcript association and order
+├── campaign_manager.py  Campaign CRUD, rosters, Discord ID binding, transcript association and order (tables campaigns, campaign_members, campaign_transcripts)
 ├── recording_manager.py Recording CRUD, segment manifest, markers, crash recovery
 ├── refine.py            LLM vocabulary correction + unknown-speaker suggestions
 ├── summarize.py         LLM session notes → Obsidian-ready `.summary.md` sidecar
@@ -178,7 +179,7 @@ Ties sort by label then profile name for determinism.
 
 ### Campaign scoping
 
-Campaigns are an **additive roster layer** over one global profile store. Embeddings in `profiles/embeddings/` stay global so the same person is recognized across campaigns without re-enrolling. Passing `campaign=<slug>` restricts `match_speakers()` candidates to that roster via `profile_filter`; `None` matches globally. Deleting a campaign never touches profiles or embeddings.
+Campaigns are an **additive roster layer** over one global profile store. Embeddings (the `profiles.embedding` column) stay global so the same person is recognized across campaigns without re-enrolling. Passing `campaign=<slug>` restricts `match_speakers()` candidates to that roster via `profile_filter`; `None` matches globally. Deleting a campaign never touches profiles or embeddings.
 
 ### Campaign relabel (`speaker_registry.py`)
 
@@ -210,7 +211,7 @@ Solo segments are preferred because cross-talk and background music bleed into t
 
 ### Embedding spaces
 
-Embeddings from different models aren't comparable (and differ in dimension), so each profile records `embedding_space` in `speakers.json`. `config.EMBEDDING_SPACE` is the current tag; a missing tag means the old 512-dim `pyannote/embedding`.
+Embeddings from different models aren't comparable (and differ in dimension), so each profile records `embedding_space`. `config.EMBEDDING_SPACE` is the current tag; an empty tag means the old 512-dim `pyannote/embedding`. A profile with no embedding at all loads with an empty tag too, so it is listed as needing re-enrollment.
 
 - `load_profile_embedding()` returns `None` for any profile not in the current space; `match_speakers()` and the CLI ranking only compare through it.
 - `stale_profile_keys()` lists old-space profiles. The pipeline logs them as skipped, the Speakers page badges them, and the CLI ranking lists them unscored.
@@ -221,16 +222,18 @@ Embeddings from different models aren't comparable (and differ in dimension), so
 1. After diarization, each `SPEAKER_XX` label is shown with a sample quote; `--play-audio` plays a clip via `ffplay` (ships with ffmpeg; no Python audio backend needed). `r` replays.
 2. Existing profiles are ranked by cosine similarity to this label, with `★` above threshold.
 3. The user picks a number to reuse a profile (optionally blending this episode in via EMA) or types a new name.
-4. New profiles save `profiles/embeddings/<key>.npy` + metadata in `speakers.json`.
+4. New profiles are one `profiles` row (embedding included) plus a `profiles/embeddings/<key>.mp3` reference clip.
 
 `_interactive_enroll()` caches each label's embedding for the pass, since ranking, EMA update, and new-profile enrollment would otherwise extract it up to three times.
 
 ### Profiles on disk
 
-- `<key>.npy` — embedding. `<key>.mp3` — ~12 s reference clip for playback on the Speakers page.
-- Removal, rename, and reset handle `.npy` and `.mp3` together so the play button never dangles.
-- **EMA update** (`--update`): `stored = unit(0.7 * unit(stored) + 0.3 * unit(new))`, under `_profiles_lock` because it may retag the profile.
-- Profile key is `name.lower().replace(" ", "_")` — both filename and URL slug.
+- A profile is one `profiles` row: display name, role, notes, enrollment metadata, and the embedding as a float32 BLOB (~1 KB) with its `embedding_space`. `load_profiles()` returns them in one query, so `SpeakerProfile.embedding` is always loaded and `load_profile_embedding()` does no I/O.
+- `profiles/embeddings/<key>.mp3` is the ~12 s reference clip for playback on the Speakers page (`reference_clip_path()`). It is the only per-profile file; the folder name predates the database.
+- Removal and reset delete the row(s) first, then the clip, so the play button never dangles. Memberships cascade.
+- **EMA update** (`--update`): `stored = unit(0.7 * unit(stored) + 0.3 * unit(new))`, a read-blend-write in one transaction because it may also retag the profile.
+- Profile key is `name.lower().replace(" ", "_")` — both clip filename and URL slug. It is an alternate key; campaign memberships reference the row id.
+- `wisper speakers doctor` reports likely duplicates (`find_duplicate_profiles()`, cosine above 0.95), old-model profiles, and placeholder-named profiles (`AUTO_NAME_RE`). It changes nothing.
 
 ### Rename
 
@@ -238,10 +241,10 @@ Embeddings from different models aren't comparable (and differ in dimension), so
 
 1. Derives the new key and validates it with `validate_path_component()` (it becomes a filename; this also breaks the CodeQL taint chain for the web route).
 2. Rejects a collision with a different existing key.
-3. Rekeys `speakers.json`, moves `.npy`/`.mp3`, and rekeys campaign rosters via `campaign_manager.rekey_member()` (roles, characters, and Discord bindings follow).
-4. A same-key rename (case tweak) skips the file move and rekey.
+3. One `UPDATE` of the key and display name. Campaign memberships reference the profile id, so roles, characters, and Discord bindings follow without being touched.
+4. After the commit, moves the `.mp3` clip (row first, then file). A same-key rename (case tweak) moves nothing.
 
-Not rekeyed: `recordings.json` `discord_speakers` values and display names already written into transcripts.
+Not rekeyed yet: `recordings.json` `discord_speakers` values (the SQLite migration's Phase 4 fixes this) and display names already written into transcripts.
 
 ---
 
@@ -326,14 +329,7 @@ Worker functions are module-level so they pickle. With `--workers N`, total proc
 `torch>=2.8.0` (pyannote 4.x minimum). CUDA builds come from `https://download.pytorch.org/whl/cu126`; PyPI only ships CPU builds.
 
 ### File-store locking
-JSON stores are guarded against lost updates from concurrent writers:
-- `speaker_manager._profiles_lock` around every load-modify-save of `speakers.json` (not around embedding extraction).
-- `campaign_manager._campaigns_lock` around every load-modify-save of `campaigns.json`.
-- A per-recording mutex in `recording_manager` (see "Recording layer").
-
-`load_*()`/`save_*()` never take the lock themselves; callers that already hold it would deadlock.
-
-These locks only cover threads in one process. The SQLite migration (plan.md) moves each store into the database, and its transactions replace the locks.
+Profiles and campaigns live in the database, where each change is one `db.transaction()` (see "Database"). Recordings are still JSON, guarded by a per-recording mutex in `recording_manager` (see "Recording layer"); it only covers threads in one process, and the SQLite migration's Phase 4 replaces it.
 
 ### Database (`db.py`)
 `<data dir>/wisper.db`, stdlib `sqlite3`, no ORM. The SQLite migration moves the JSON stores in phases (see plan.md); Phase 0 adds only the foundation.
@@ -345,6 +341,8 @@ These locks only cover threads in one process. The SQLite migration (plan.md) mo
   - Downgrade: a DB newer than the code refuses; an old build must not write a newer schema.
   - Dev data: while `SCHEMA_FROZEN` is `False` (unmerged branch, migrations still edited in place), migrating the platform-default data dir is refused. Branch work uses a copied `WISPER_DATA_DIR`; flipping the flag is on the merge checklist, and `test_schema_frozen_on_main` fails on `main` or a PR into it otherwise.
   - Runtime lease (`runtime_leases`): a host process and a Docker Desktop container writing one DB corrupts it (file locks don't cross the VM). `connect()` records a `host` or `container` lease (container = `/.dockerenv`; `crosses_vm` = `/proc/version` contains `linuxkit`) and refreshes it at most every 30 s; the server also runs `db.Heartbeat` every 60 s. Startup refuses only when the *other* runtime's lease is under 2 minutes old and the container lease crosses the VM, so native Linux Docker is never blocked. Advisory: two processes starting in the same second could both pass.
+- **Schema so far** (full target DDL and rules in plan.md): v1 `migrations`, `runtime_leases`; v2 `profiles`, `campaigns`, `campaign_members`, `transcripts` (the registry: one row per stem under the output root, `missing_since` when its `.md` is absent), `campaign_transcripts` (one campaign per transcript, `UNIQUE(campaign_id, position)`). Every table is `STRICT`; enums, paired nullables, and Discord ids (digits only) have `CHECK`s. Reordering writes positions in two steps (shift above the max, then final values) because `UNIQUE` is checked row by row. Stems are NFC-normalized.
+- **Legacy import** (`legacy_import.py`, v2): `speakers.json` + `.npy` files and `campaigns.json` are copied to `backups/pre-sqlite-v2-<time>/`, imported, and deleted after the commit (a leftover after a crash is deleted on the next start). Dirty data is repaired or dropped and listed in `import-report.txt` there: members without a profile, duplicate or non-numeric Discord ids, a stem in two campaigns or with a path separator, missing embeddings, bad dates. An unreadable top-level file aborts the migration, naming the file.
 - **Stored paths** are relative to the output root and POSIX-separated. `db.to_rel()`/`from_rel()` are the only converters; they resolve symlinks on both sides and reject absolute paths, backslashes, and `..`.
 - **Inspection:** `wisper db status` (read-only: never migrates or claims a lease) reports version, `integrity_check`, `foreign_key_check`, leases, and schema drift (the live schema compared with this build's DDL replayed in memory — a DB made by an older branch build shows as drift). `wisper db backup`, `wisper db dump`.
 
@@ -400,12 +398,9 @@ All user data lives in the OS user data dir unless `WISPER_DATA_DIR` is set. `co
 ├── backups/                         pre-migration DB snapshots and legacy-file copies; `wisper db backup` default
 ├── server.json                      bind address of a running `wisper server` (read by `wisper record`)
 ├── profiles/
-│   ├── speakers.json                profile key → SpeakerProfile (global)
 │   └── embeddings/
-│       ├── <key>.npy                unit-length float32 voice embedding (256-dim; 512 for untagged legacy)
-│       └── <key>.mp3                ~12 s reference clip
+│       └── <key>.mp3                ~12 s reference clip (profiles themselves are in wisper.db)
 ├── campaigns/
-│   ├── campaigns.json               slug → Campaign (roster + ordered transcripts)
 │   └── <slug>/journal.md            rolling campaign journal
 ├── recordings/
 │   ├── recordings.json              index of recording ids
@@ -703,7 +698,7 @@ The job page shows step pills and one bar split into equal per-step slices:
 
 **CI** (`.github/workflows/ci.yml`):
 - Python 3.13 and 3.14, both blocking — the versions shipped (Docker `python:3.14-slim`; `requires-python >= 3.13`).
-- A `windows-latest` job (3.13) runs the storage tests (`test_db.py`, `test_path_utils.py`) on a real Windows filesystem. While the SQLite branch is open, `push` also triggers on `feat/sqlite-storage`; remove that at merge.
+- A `windows-latest` job (3.13) runs the storage tests (`test_db.py`, `test_path_utils.py`, `test_legacy_import.py`, `test_speaker_manager.py`, `test_campaign_manager.py`) on a real Windows filesystem. While the SQLite branch is open, `push` also triggers on `feat/sqlite-storage`; remove that at merge.
 - Weekly cron adds a `latest-deps` job (`pip install --upgrade`, 3.14) to catch upstream breakage early.
 - Tailwind staleness check; CodeQL. The Docker CPU image smoke build (`docker.yml`) is currently disabled on GitHub, so image builds are verified manually.
 - Dependabot watches `pip`, `docker`, and `github-actions` weekly.
