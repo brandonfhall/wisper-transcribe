@@ -1271,8 +1271,12 @@ def transcripts_list(campaign: Optional[str]):
             raise click.ClickException("Invalid campaign slug")
 
     out_dir = get_output_dir()
+    from .transcript_store import reconcile
+    reconcile(out_dir)  # register new files, flag ones deleted outside wisper
 
-    all_stems = sorted(p.stem for p in out_dir.glob("*.md") if not p.stem.endswith(".summary"))
+    all_stems = sorted(p.stem for p in out_dir.glob("*.md")
+                       if not p.stem.endswith(".summary") and not p.name.startswith("."))
+    present = set(all_stems)
 
     campaigns = load_campaigns()
 
@@ -1282,24 +1286,27 @@ def transcripts_list(campaign: Optional[str]):
         for stem in c.transcripts:
             stem_to_campaign[stem] = slug
 
+    def _label(stem: str) -> str:
+        return stem if stem in present else f"{stem}  (missing — file not found)"
+
     if campaign:
-        stems = [s for s in all_stems if stem_to_campaign.get(s) == campaign]
+        # Campaign order, including entries whose file is missing.
+        stems = campaigns[campaign].transcripts if campaign in campaigns else []
         if not stems:
             click.echo(f"No transcripts found for campaign {campaign!r}.")
             return
         for stem in stems:
-            click.echo(stem)
+            click.echo(_label(stem))
         return
 
-    # Grouped output
+    # Grouped output, each campaign in its fold order
     printed_any = False
     for slug, c in campaigns.items():
-        campaign_stems = [s for s in all_stems if stem_to_campaign.get(s) == slug]
-        if not campaign_stems:
+        if not c.transcripts:
             continue
         click.echo(f"\n📁 {c.display_name} [{slug}]")
-        for stem in campaign_stems:
-            click.echo(f"   {stem}")
+        for stem in c.transcripts:
+            click.echo(f"   {_label(stem)}")
         printed_any = True
 
     uncampaigned = [s for s in all_stems if s not in stem_to_campaign]

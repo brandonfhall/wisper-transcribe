@@ -401,6 +401,7 @@ def process_file(
     job_id: Optional[str] = None,
     title: Optional[str] = None,
     forced_alignment: Optional[str] = None,
+    skip_existing: bool = True,
     _result_store: Optional[dict] = None,
 ) -> Path:
     """Run the full pipeline on one audio file and return the output .md path.
@@ -425,6 +426,12 @@ def process_file(
     ``forced_alignment`` is ``"auto"``/``"true"``/``"false"`` (``None`` = config).
     It only applies when diarization runs, since word timing only matters for
     speaker attribution.
+
+    An existing output is never replaced without ``overwrite``. With
+    ``skip_existing`` (the CLI) it is skipped up front and its path returned;
+    without it (web jobs) ``TranscriptExistsError`` is raised instead, so a
+    job can't report success on a transcript it didn't write. The check runs
+    again just before writing, since a long job can race another writer.
     """
     from .config import resolve_compute_type
 
@@ -470,7 +477,11 @@ def process_file(
     out_path = out_dir / (path.stem + ".md")
 
     if out_path.exists() and not overwrite:
-        tqdm.write(f"  Skipping {path.name} — already processed (use --overwrite to re-run)")
+        from .transcript_store import TranscriptExistsError
+        if not skip_existing:
+            raise TranscriptExistsError(out_path.stem)
+        tqdm.write(f"  Skipping {path.name} — already processed{_campaign_note(out_path)} "
+                   "(use --overwrite to re-run)")
         return out_path
 
     resolved_ct = resolve_compute_type(compute_type, device)
@@ -654,7 +665,9 @@ def process_file(
             include_timestamps=include_timestamps,
         )
 
-        from .transcript_store import atomic_write_text, register
+        from .transcript_store import TranscriptExistsError, atomic_write_text, register
+        if out_path.exists() and not overwrite:
+            raise TranscriptExistsError(out_path.stem)  # appeared while we worked
         atomic_write_text(out_path, content)
         tqdm.write(f"  Wrote {out_path.name}")
 
@@ -679,6 +692,18 @@ def process_file(
     finally:
         if wav_path != path:
             wav_path.unlink(missing_ok=True)
+
+
+def _campaign_note(out_path: Path) -> str:
+    """`` (in campaign <slug>)`` for an existing transcript that belongs to one."""
+    if not _under_output_root(out_path):
+        return ""
+    try:
+        from .campaign_manager import get_campaign_for_transcript
+        slug = get_campaign_for_transcript(out_path.stem)
+    except Exception:
+        return ""
+    return f" (in campaign {slug!r})" if slug else ""
 
 
 def _under_output_root(out_path: Path) -> bool:

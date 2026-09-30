@@ -969,6 +969,11 @@ def _submit_recording_transcription(recording, request: Request, data_dir: Path)
         output_dir=str(output_dir),
         campaign=recording.campaign_slug or "",
         title=recording.name,
+        # The output is <recording-id>.md, which only this recording ever
+        # writes, so re-transcribing replaces its own transcript (keeping the
+        # transcript's identity and campaign; a folded journal goes stale).
+        # The page asks for confirmation first.
+        overwrite=True,
         on_complete=_on_complete,
         on_error=_on_error,
     )

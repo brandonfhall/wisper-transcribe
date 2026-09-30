@@ -62,6 +62,10 @@ _GENERIC_JOB_ERRORS = {
 }
 
 
+class TranscriptMissingError(RuntimeError):
+    """The pipeline reported a transcript path, but no file is there."""
+
+
 def _set_job_error(job: "Job", exc: BaseException) -> None:
     """Set a generic, path-free error on *job* and log the real exception.
 
@@ -71,6 +75,13 @@ def _set_job_error(job: "Job", exc: BaseException) -> None:
         job.error = "Cancelled"
         return
     log.error("Job %s (%s) failed", job.id, job.job_type, exc_info=exc)
+    from wisper_transcribe.transcript_store import TranscriptExistsError
+    if isinstance(exc, TranscriptExistsError):
+        job.error = "Transcript already exists"
+        return
+    if isinstance(exc, TranscriptMissingError):
+        job.error = "Transcript file missing after write"
+        return
     if isinstance(exc, FileNotFoundError):
         # Known input error — short, safe text with no path reflected.
         job.error = "Input file not found"
@@ -1102,7 +1113,12 @@ class JobQueue:
         _tqdm_module.tqdm.__init__ = capturing_init  # type: ignore[method-assign]
         try:
             _result_store: dict = {}
-            output_path = process_file(Path(job.input_path), _result_store=_result_store, job_id=job.id, **job.kwargs)
+            output_path = process_file(Path(job.input_path), _result_store=_result_store,
+                                       job_id=job.id, skip_existing=False, **job.kwargs)
+            if not Path(output_path).is_file():
+                from wisper_transcribe.path_utils import get_output_dir
+                job.append_log(f"Transcripts folder: {get_output_dir()}")
+                raise TranscriptMissingError(Path(output_path).name)
             job.diarization_segments = _result_store.get("diarization_segments", [])
             job.speaker_map = _result_store.get("speaker_map", {})
             job.speaker_embeddings = _result_store.get("speaker_embeddings", {})

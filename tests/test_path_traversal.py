@@ -535,3 +535,35 @@ def test_speakers_rename_new_name_path_guard(client: TestClient, payload: str, t
     # Nothing renamed, no file escaped or moved
     assert set(load_profiles(tmp_path)) == {"alice"}
     assert clip.exists()
+
+
+@pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS + [
+    "../escape.mp3", "../../etc/passwd", "a/b.mp3", "evil\r\nLocation: x.mp3",
+])
+def test_transcribe_name_check_never_escapes_output_dir(client, payload, tmp_path, monkeypatch):
+    """The name check resolves only inside the output dir and echoes nothing."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (tmp_path / "escape.md").write_text("outside", encoding="utf-8")
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    resp = client.get("/transcribe/name-check", params={"filename": payload})
+    assert resp.status_code == 200
+    assert resp.json() == {"exists": False, "campaign": None}
+    assert payload not in resp.text
+
+
+@pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS + [
+    "../escape", "../../etc/passwd", "a/b", "..", "evil\r\nLocation: x",
+])
+def test_campaign_relink_rejects_unsafe_stems(client, payload, tmp_path, monkeypatch):
+    """Relink takes two stems from form data; neither may leave the output dir,
+    and neither is ever reflected into the redirect."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    create_campaign("Game")
+    for form in ({"old_stem": payload, "new_stem": "x"}, {"old_stem": "x", "new_stem": payload}):
+        resp = client.post("/campaigns/game/transcripts/relink", data=form, follow_redirects=False)
+        assert resp.status_code in (303, 400, 422)
+        location = resp.headers.get("location", "")
+        assert location in ("", "/campaigns/game?error=relink_failed")

@@ -309,3 +309,142 @@ def test_only_transcript_store_deletes_transcripts():
         if rel != "transcript_store.py" and suspicious.search(line)
     ]
     assert offenders == [], "use transcript_store.delete_transcript():\n" + "\n".join(offenders)
+
+
+# ---------------------------------------------------------------------------
+# reconcile
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def case_sensitive(monkeypatch):
+    monkeypatch.setattr(ts, "_is_case_insensitive", lambda d: False)
+
+
+def test_reconcile_registers_new_files(out, case_sensitive):
+    _md(out, "s01")
+    (out / "s01.summary.md").write_text("x", encoding="utf-8")  # not a transcript
+    assert ts.reconcile(out)["added"] == 1
+    assert _rows() == {"s01": False}
+
+
+def test_reconcile_flags_missing_keeps_order_and_restores(out, case_sensitive):
+    create_campaign("Game")
+    for stem in ("s01", "s02", "s03"):
+        _md(out, stem)
+        ts.register(stem, origin="job")
+        move_transcript_to_campaign(stem, "game")
+    companion = out / "s02.summary.md"
+    companion.write_text("x", encoding="utf-8")
+
+    (out / "s02.md").unlink()   # deleted in Finder / sync hiccup
+    ts.reconcile(out, sweep=True)
+    assert _rows() == {"s01": False, "s02": True, "s03": False}
+    assert get_transcripts_for_campaign("game") == ["s01", "s02", "s03"]
+    assert companion.exists()  # kept: the row still exists
+
+    _md(out, "s02")             # it comes back
+    assert ts.reconcile(out)["restored"] == 1
+    assert _rows()["s02"] is False
+
+
+def test_reconcile_case_only_rename_keeps_row(out, monkeypatch):
+    monkeypatch.setattr(ts, "_is_case_insensitive", lambda d: True)
+    create_campaign("Game")
+    _md(out, "session one")
+    ts.register("session one", origin="job")
+    move_transcript_to_campaign("session one", "game")
+
+    (out / "session one.md").rename(out / "Session One.md")
+    counts = ts.reconcile(out)
+    assert counts["renamed"] == 1 and counts["added"] == 0
+    assert _rows() == {"Session One": False}
+    assert get_transcripts_for_campaign("game") == ["Session One"]
+
+
+def test_reconcile_maps_nfd_filenames_to_nfc_rows(out, case_sensitive):
+    import unicodedata
+
+    nfc_name = unicodedata.normalize("NFC", "Café")
+    ts.register(nfc_name, origin="job")
+    _md(out, unicodedata.normalize("NFD", "Café"))
+    counts = ts.reconcile(out)
+    assert counts["added"] == 0
+    assert _rows() == {nfc_name: False}
+
+
+def test_reconcile_sweeps_only_true_orphans_and_old_temps(out, case_sensitive):
+    import time as _time
+
+    _md(out, "kept")
+    ts.register("kept", origin="job")
+    files = {
+        "kept.summary.md": True,          # has a .md
+        "gone_diar.json": False,          # no .md, no row
+        "gone_excerpt_SPEAKER_00.mp3": False,
+        "gone.summary.md": False,
+        "random-audio.wav": True,         # never a generic audio file
+    }
+    for name in files:
+        (out / name).write_text("x", encoding="utf-8")
+    old_temp = out / f"{ts.TEMP_PREFIX}kept.md.1-1"
+    new_temp = out / f"{ts.TEMP_PREFIX}kept.md.2-2"
+    old_temp.write_text("x", encoding="utf-8")
+    new_temp.write_text("x", encoding="utf-8")
+    stale = _time.time() - ts._TEMP_MAX_AGE_S - 60
+    os.utime(old_temp, (stale, stale))
+
+    ts.reconcile(out)                     # list pages: no sweep
+    assert all((out / n).exists() for n in files)
+    ts.reconcile(out, sweep=True)         # startup
+    for name, keep in files.items():
+        assert (out / name).exists() == keep, name
+    assert not old_temp.exists() and new_temp.exists()
+
+
+def test_case_probe_leaves_no_file(out):
+    ts._case_insensitive.clear()
+    ts._is_case_insensitive(out)
+    assert not list(out.glob(f"{ts.TEMP_PREFIX}*"))
+
+
+# ---------------------------------------------------------------------------
+# relink
+# ---------------------------------------------------------------------------
+
+def _missing_entry(out):
+    create_campaign("Game")
+    _md(out, "old name")
+    ts.register("old name", origin="job")
+    move_transcript_to_campaign("old name", "game")
+    (out / "old name.md").rename(out / "new name.md")
+    ts.reconcile(out)  # old flagged missing, new registered
+
+
+def test_relink_moves_identity_to_new_file(out, case_sensitive):
+    _missing_entry(out)
+    with db.connection() as conn:
+        old_id = conn.execute("SELECT id FROM transcripts WHERE stem = 'old name'").fetchone()[0]
+    assert ts.relink_candidates() == ["new name"]
+
+    ts.relink("old name", "new name")
+
+    with db.connection() as conn:
+        rows = [tuple(r) for r in conn.execute("SELECT id, stem, missing_since FROM transcripts")]
+    assert rows == [(old_id, "new name", None)]
+    assert get_transcripts_for_campaign("game") == ["new name"]
+    assert ts.relink_candidates() == []
+
+
+def test_relink_refuses_present_source_and_linked_target(out, case_sensitive):
+    _missing_entry(out)
+    _md(out, "present")
+    ts.register("present", origin="job")
+    with pytest.raises(ValueError):
+        ts.relink("present", "new name")          # not missing
+    move_transcript_to_campaign("new name", "game")
+    with pytest.raises(ValueError):
+        ts.relink("old name", "new name")         # target already in a campaign
+    with pytest.raises(KeyError):
+        ts.relink("old name", "no such file")
+    with pytest.raises(ValueError):
+        ts.relink("old name", "../escape")

@@ -202,6 +202,7 @@ def _pending_recordings(data_dir: Path) -> tuple[list, set[str]]:
 @router.get("", response_class=HTMLResponse)
 async def transcripts_list(request: Request) -> HTMLResponse:
     out_dir = get_output_dir()
+    transcript_store.reconcile(out_dir)  # register new files, flag deleted ones
     # Exclude .summary.md sidecars — they are shown via the transcript detail page
     files = sorted(
         [f for f in out_dir.glob("*.md") if not f.name.endswith(".summary.md")],

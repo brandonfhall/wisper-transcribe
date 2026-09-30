@@ -154,11 +154,16 @@ wisper transcribe <path>
                            Overrides hotwords stored in config.
   --initial-prompt TEXT    Text prepended as prior context to guide transcription style
                            and vocabulary. Alternative to --vocab-file for short hints.
-  --overwrite              Re-process files that already have output
+  --overwrite              Re-process files that already have output. Without it an existing
+                           transcript is skipped ("already processed (in campaign 'x')"); with it
+                           the transcript keeps its campaign place, and a folded journal is
+                           marked as needing a rebuild.
   --workers INT            Parallel workers for folder processing — CPU only;
                            clamped to 1 on GPU (default: 1)
-  --campaign SLUG          Restrict speaker matching to this campaign's roster.
-                           Run `wisper campaigns list` to see available slugs.
+  --campaign SLUG          Restrict speaker matching to this campaign's roster, and add the
+                           transcript to the campaign. Run `wisper campaigns list` for slugs.
+                           Only when the output lands in the transcripts folder (-o omitted or
+                           pointing there); elsewhere it prints a note and skips the association.
   --verbose                Show detailed progress; surfaces ML library log output
                            (pyannote, faster-whisper) on the console at DEBUG level
   --debug                  Write a full timestamped log to ./logs/wisper_<timestamp>.log
@@ -294,6 +299,8 @@ To find a Discord user ID: enable Developer Mode in Discord → right-click the 
 ---
 
 ### `wisper transcripts`
+
+`list` shows each campaign's transcripts in fold order; an entry whose file isn't in the transcripts folder is marked `(missing — file not found)` (relink it on the web Campaign page, or remove it). Listing also registers `.md` files you added to the folder yourself.
 
 Organize and view transcript-to-campaign associations from the command line:
 

@@ -1541,3 +1541,20 @@ def test_speakers_doctor_clean(tmp_path, monkeypatch):
     result = CliRunner().invoke(main, ["speakers", "doctor"])
     assert result.exit_code == 0
     assert "No problems found in 1 profile(s)." in result.output
+
+
+def test_transcripts_list_marks_missing_entries_in_campaign_order(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    from wisper_transcribe.path_utils import get_output_dir
+
+    out = get_output_dir()
+    create_campaign("Game")
+    for stem in ("s02", "s01"):
+        (out / f"{stem}.md").write_text("x", encoding="utf-8")
+        move_transcript_to_campaign(stem, "game")
+    (out / "s02.md").unlink()
+
+    result = CliRunner().invoke(main, ["transcripts", "list", "--campaign", "game"])
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines() == ["s02  (missing — file not found)", "s01"]

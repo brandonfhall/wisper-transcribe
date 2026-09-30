@@ -1652,3 +1652,42 @@ def test_will_align_false_for_other_job_types():
     job = Job(id="j", status="pending", created_at=None, input_path="/tmp/a.md",
               kwargs={}, name="a", job_type="refine")
     assert job.will_align is False
+
+
+# ---------------------------------------------------------------------------
+# Transcription jobs never report success on a transcript they didn't write
+# ---------------------------------------------------------------------------
+
+def _transcription_job(tmp_path):
+    from wisper_transcribe.web.jobs import JobQueue
+
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    q = JobQueue()
+    return q, q.submit(str(audio), output_dir=str(tmp_path))
+
+
+def test_job_fails_when_transcript_already_exists(tmp_path):
+    from wisper_transcribe.transcript_store import TranscriptExistsError
+    from wisper_transcribe.web.jobs import FAILED
+
+    q, job = _transcription_job(tmp_path)
+    with patch("wisper_transcribe.web.jobs.process_file",
+               side_effect=TranscriptExistsError("session")) as mock_pf:
+        with pytest.raises(TranscriptExistsError):
+            q._run_transcription_job(job)
+    assert mock_pf.call_args.kwargs["skip_existing"] is False
+    assert job.status == FAILED
+    assert job.error == "Transcript already exists"
+
+
+def test_job_fails_when_reported_transcript_is_missing(tmp_path):
+    from wisper_transcribe.web.jobs import FAILED, TranscriptMissingError
+
+    q, job = _transcription_job(tmp_path)
+    with patch("wisper_transcribe.web.jobs.process_file", return_value=tmp_path / "nowhere.md"):
+        with pytest.raises(TranscriptMissingError):
+            q._run_transcription_job(job)
+    assert job.status == FAILED
+    assert job.error == "Transcript file missing after write"
+    assert any("Transcripts folder:" in line for line in job.log_lines)

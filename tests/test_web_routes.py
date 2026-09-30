@@ -3256,3 +3256,124 @@ def test_job_detail_align_step_only_when_aligning(client, will_align):
         html = client.get(f"/transcribe/jobs/{job.id}").text
     assert ('id="step_align"' in html) is will_align
     assert ("'align'," in html) is will_align
+
+
+# ---------------------------------------------------------------------------
+# Upload name collisions: never silently reuse or replace a transcript
+# ---------------------------------------------------------------------------
+
+def _post_upload(client, out_dir, **data):
+    from wisper_transcribe.web.jobs import Job
+    import uuid
+
+    fake_job = MagicMock(spec=Job)
+    fake_job.id = str(uuid.uuid4())
+    with patch("wisper_transcribe.web.routes.transcribe.get_output_dir", return_value=out_dir), \
+         patch.object(client.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
+        resp = client.post(
+            "/transcribe",
+            files={"file": ("session.mp3", b"fake audio", "audio/mpeg")},
+            data=data, follow_redirects=False,
+        )
+    return resp, mock_submit
+
+
+def test_upload_with_taken_name_is_refused(client, tmp_path):
+    (tmp_path / "session.md").write_text("old", encoding="utf-8")
+    resp, mock_submit = _post_upload(client, tmp_path)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/transcribe?error=name_exists"
+    mock_submit.assert_not_called()
+    assert (tmp_path / "session.md").read_text(encoding="utf-8") == "old"
+
+
+def test_upload_with_taken_name_and_overwrite_submits(client, tmp_path):
+    (tmp_path / "session.md").write_text("old", encoding="utf-8")
+    resp, mock_submit = _post_upload(client, tmp_path, overwrite="on")
+    assert resp.status_code == 303
+    assert mock_submit.call_args.kwargs["overwrite"] is True
+
+
+def test_upload_with_new_name_does_not_overwrite(client, tmp_path):
+    resp, mock_submit = _post_upload(client, tmp_path)
+    assert mock_submit.call_args.kwargs["overwrite"] is False
+
+
+def test_name_exists_error_is_explained(client):
+    resp = client.get("/transcribe?error=name_exists")
+    assert "already exists, so nothing was started" in resp.text
+
+
+def test_name_check_reports_existing_transcript_and_campaign(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+
+    (out / "session 1.md").write_text("x", encoding="utf-8")
+    create_campaign("The Game")
+    move_transcript_to_campaign("session 1", "the-game")
+
+    data = client.get("/transcribe/name-check", params={"filename": "session 1.mp3"}).json()
+    assert data == {"exists": True, "campaign": "The Game"}
+    data = client.get("/transcribe/name-check", params={"filename": "other.mp3"}).json()
+    assert data == {"exists": False, "campaign": None}
+
+
+def test_campaign_page_offers_relink_and_relink_route(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    from wisper_transcribe import transcript_store as ts
+    from wisper_transcribe.campaign_manager import (
+        create_campaign, get_transcripts_for_campaign, move_transcript_to_campaign,
+    )
+
+    monkeypatch.setattr(ts, "_is_case_insensitive", lambda d: False)
+    create_campaign("Game")
+    (out / "s01.md").write_text("x", encoding="utf-8")
+    ts.register("s01", origin="job")
+    move_transcript_to_campaign("s01", "game")
+    (out / "s01.md").rename(out / "Session 01 renamed.md")
+
+    resp = client.get("/campaigns/game")
+    assert "MISSING" in resp.text
+    assert 'data-testid="relink-form"' in resp.text
+    assert "Session 01 renamed" in resp.text
+
+    resp = client.post("/campaigns/game/transcripts/relink",
+                       data={"old_stem": "s01", "new_stem": "Session 01 renamed"},
+                       follow_redirects=False)
+    assert resp.status_code == 303 and resp.headers["location"] == "/campaigns/game"
+    assert get_transcripts_for_campaign("game") == ["Session 01 renamed"]
+
+    resp = client.post("/campaigns/game/transcripts/relink",
+                       data={"old_stem": "s01", "new_stem": "Session 01 renamed"},
+                       follow_redirects=False)
+    assert resp.headers["location"] == "/campaigns/game?error=relink_failed"
+
+
+def test_transcripts_page_has_bulk_actions_wired_to_routes(client, tmp_path, monkeypatch):
+    """The bulk bar posts `stems` (+ `campaign`) to the existing bulk routes."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    create_campaign("Game")
+    (out / "s01.md").write_text("---\ntitle: Session One\n---\n\nx\n", encoding="utf-8")
+    resp = client.get("/transcripts")
+    assert 'data-testid="bulk-transcripts-bar"' in resp.text
+    assert 'class="transcript-select" value="s01"' in resp.text
+    assert 'action="/transcripts/bulk-delete"' in resp.text
+    assert 'action="/transcripts/bulk-campaign"' in resp.text
+    assert "input.name = 'stems'" in resp.text
+    assert '<option value="game">Game</option>' in resp.text
+
+    resp = client.post("/transcripts/bulk-campaign", data={"stems": ["s01"], "campaign": "game"},
+                       follow_redirects=False)
+    from wisper_transcribe.campaign_manager import get_transcripts_for_campaign
+    assert get_transcripts_for_campaign("game") == ["s01"]

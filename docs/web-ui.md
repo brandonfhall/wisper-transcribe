@@ -26,7 +26,7 @@ The web UI is a **single-user tool with no authentication and no CSRF protection
 |------|-----|--------------|
 | Dashboard | `/` | Job queue, system status (device, model, HF token, LLM provider), quick upload |
 | Transcribe | `/transcribe` | Upload and transcribe (see below) |
-| Transcripts | `/transcripts` | Recordings awaiting transcription; browse, read, download, edit, and delete transcripts |
+| Transcripts | `/transcripts` | Recordings awaiting transcription; browse, read, download, edit, and delete transcripts; tick rows to delete them or move them to a campaign in bulk |
 | Speakers | `/speakers` | Enroll, rename, and remove speaker profiles; play reference clips. Profiles from an older speaker model show **NEEDS RE-ENROLL** |
 | Campaigns | `/campaigns` | Campaigns, rosters, episode order, and the rolling journal |
 | Record | `/record` | Start and stop Discord or local recording sessions |
@@ -48,6 +48,8 @@ Drag a file onto `/transcribe` and choose options:
 
 Large uploads show a byte-level progress bar ("Uploading… N%", then "Processing…") before the job page opens.
 
+**Name already taken:** the transcript is named after the file. If a transcript with that name exists, the page says so as soon as you pick the file (and which campaign it's in), before anything uploads. Tick **Overwrite it** to replace it — it keeps its campaign place, and if it was folded into the campaign journal the journal is marked as needing a rebuild — or **Cancel** and rename the file. A job never reports success without writing its transcript: if a same-named transcript appears while the job runs, the job fails with "Transcript already exists", and a job whose transcript file isn't there afterwards fails with "Transcript file missing after write" (the job log shows the transcripts folder it used).
+
 ### Job page
 
 - A progress bar with per-step pills: **T**ranscribe → **D**iarize → **A**lign → **F**ormat, plus **R**efine / **S**ummarize when requested. **Align** appears only when forced word alignment will run for the job (the setting is fixed when you submit, so changing the Config page while a job is queued doesn't change it). Enrollment jobs show **E**, journal jobs **J**.
@@ -56,7 +58,7 @@ Large uploads show a byte-level progress bar ("Uploading… N%", then "Processin
 - Failed jobs show a generic message ("Transcription failed — see server logs"). The full error is in the server log (the terminal running `wisper server`, or the `--debug` log file).
 - The job list keeps the 50 most recently finished jobs. Transcripts themselves are never pruned.
 
-Transcripts are written to `./output/` (or `<data dir>/output`) and appear on the Transcripts page as soon as the job finishes.
+Transcripts are written to the transcripts folder (`output/` in the data directory unless `output_dir` / `WISPER_OUTPUT_DIR` says otherwise; see [configuration.md](configuration.md#transcripts-folder)) and appear on the Transcripts page as soon as the job finishes. Files you add to that folder yourself appear too.
 
 ---
 
@@ -116,6 +118,8 @@ If another job is already running when you start, the Record page warns that the
 ### After recording
 
 - Stopping never starts transcription automatically. Click **Transcribe** on the recording (or from **Transcripts → Awaiting transcription**) to run the full diarized pass. The live draft stays on the recording's detail page until then.
+- **Re-transcribe** asks first, then replaces the recording's transcript (same name, same campaign place).
+- Deleting a recording's transcript from `/transcripts` puts the recording back under **Awaiting transcription**.
 - **Deleting a recording is permanent.** Single delete and **Delete selected** both remove the audio and, if it was transcribed, the transcript and its sidecars. Active sessions can't be deleted.
 
 ---
@@ -145,7 +149,7 @@ The Campaign page's **Rolling journal** panel combines session summaries into on
 
 **Episode order:** the ▲/▼ arrows on the Episodes list set the order sessions are folded in. Order is when a transcript was added to the campaign, not its date, so check it before rebuilding.
 
-**Deleted transcripts:** deleting a transcript (or a recording with its files) also removes it from its campaign. Entries left behind by older versions show as **MISSING** on the Campaign page; remove them with ✕.
+**Deleted transcripts:** deleting a transcript in wisper (single, **Delete selected**, or a recording with its files) removes it from its campaign and its companion files (summary, speaker clips, audio copy). A transcript file that disappears some other way — deleted in Finder, renamed in Obsidian, a sync still in progress, an unplugged drive — keeps its place and shows as **MISSING** on the Campaign page. If the file comes back, the flag clears on its own. If it was renamed, pick the new file in the **Relink** dropdown next to it: the session keeps its place, journal entry, and speaker names. Otherwise remove it with ✕.
 
 ---
 

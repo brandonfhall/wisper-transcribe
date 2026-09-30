@@ -74,16 +74,19 @@ async def campaign_detail(request: Request, slug: str) -> HTMLResponse:
     # Profiles not yet in this campaign (for the add-member dropdown)
     unenrolled = {k: v for k, v in profiles.items() if k not in campaign.members}
 
+    from wisper_transcribe import transcript_store
+    from wisper_transcribe.path_utils import get_output_dir
+    transcript_store.reconcile(get_output_dir())  # flag externally deleted/renamed files
+
     from wisper_transcribe.journal import journal_path, journal_stale_since, unjournalled_sessions
     journal_pending = len(unjournalled_sessions(safe))  # also syncs file ↔ DB
     jpath = journal_path(safe)
     journal_exists = bool(jpath and jpath.exists())
     journal_stale = journal_stale_since(safe) if journal_exists else None
 
-    # Entries whose transcript is gone (deleted before deletes unlinked
-    # campaigns, or removed by hand). Shown as missing, not pruned: an
+    # Entries whose transcript is gone (deleted outside wisper, renamed, or
+    # on an unmounted drive). Shown as missing with Relink, never pruned: an
     # unavailable output dir would otherwise wipe every assignment.
-    from wisper_transcribe.path_utils import get_output_dir
     base_dir = os.path.abspath(str(get_output_dir()))
     if not base_dir.endswith(os.sep):
         base_dir += os.sep
@@ -115,6 +118,7 @@ async def campaign_detail(request: Request, slug: str) -> HTMLResponse:
             "journal_stale": journal_stale,
             "sessions_needing_summary": len(campaign.transcripts) - summarized,
             "missing_transcripts": missing,
+            "relink_candidates": transcript_store.relink_candidates() if missing else [],
         },
     )
 
@@ -432,3 +436,39 @@ async def campaign_journal_download(slug: str) -> Response:
         # campaign.slug comes from the database, not the URL.
         headers={"Content-Disposition": f'attachment; filename="{campaign.slug}-journal.md"'},
     )
+
+
+@router.post("/{slug}/transcripts/relink", response_class=HTMLResponse)
+async def campaign_relink_transcript(
+    request: Request,
+    slug: str,
+    old_stem: Annotated[str, Form()],
+    new_stem: Annotated[str, Form()],
+) -> RedirectResponse:
+    """Point a missing campaign entry at a transcript file under a new name.
+
+    The entry keeps its position, journal entry, and speakers
+    (``transcript_store.relink``). Both stems are path-guarded here and again
+    in the store.
+    """
+    safe_slug = _validate_campaign_slug(slug)
+    if safe_slug is None:
+        return invalid_input_response("Invalid campaign slug")
+    campaign = load_campaigns().get(safe_slug)
+    if campaign is None:
+        return error_redirect("/campaigns", "not_found")
+
+    from wisper_transcribe import transcript_store
+    from wisper_transcribe.path_utils import get_output_dir
+
+    out_dir = get_output_dir()
+    old_md = transcript_store.safe_path(old_stem, ".md", out_dir)
+    new_md = transcript_store.safe_path(new_stem, ".md", out_dir)
+    if old_md is None or new_md is None or old_md.stem not in campaign.transcripts:
+        return RedirectResponse(url=f"/campaigns/{campaign.slug}?error=relink_failed", status_code=303)
+    try:
+        transcript_store.relink(old_md.stem, new_md.stem, output_dir=out_dir)
+    except (KeyError, ValueError):
+        return RedirectResponse(url=f"/campaigns/{campaign.slug}?error=relink_failed", status_code=303)
+    # campaign.slug comes from the database, not the URL.
+    return RedirectResponse(url=f"/campaigns/{campaign.slug}", status_code=303)

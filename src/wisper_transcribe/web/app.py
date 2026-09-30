@@ -146,6 +146,15 @@ def create_app() -> FastAPI:
             raise
         heartbeat = db.Heartbeat().start()
 
+        # Register transcripts added while the server was down, flag deleted
+        # ones, and sweep crash leftovers (temp files, orphaned companions).
+        try:
+            from wisper_transcribe import transcript_store
+            transcript_store.reconcile(sweep=True)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning("Transcript reconcile failed", exc_info=True)
+
         _build_tailwind()
         job_queue.start()
 

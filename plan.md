@@ -426,9 +426,9 @@ Nothing else changes; the wire protocol is the stable interface.
 
 ---
 
-## Storage — SQLite migration (in progress: Phases 0–1 done)
+## Storage — SQLite migration (in progress: Phases 0–2 done)
 
-Branch `feat/sqlite-storage`. Phase 0 (`db.py`, `wisper db`, output-root setting, guards, Windows CI job) and Phase 1 (profiles, campaigns, transcript registry table, `speakers doctor`) are implemented; Phases 2–7 remain. The schema below is signed off. Decisions are listed under "Decisions" at the end.
+Branch `feat/sqlite-storage`. Phase 0 (`db.py`, `wisper db`, output-root setting, guards, Windows CI job) Phase 1 (profiles, campaigns, transcript registry table, `speakers doctor`), and Phase 2 (transcript store, journal entries, reconcile, collisions) are implemented; Phases 3–7 remain. The schema below is signed off. Decisions are listed under "Decisions" at the end.
 
 ### Why, and what SQLite does and doesn't fix
 
@@ -815,10 +815,10 @@ Original scope:
 - **`wisper speakers doctor`** (scoped in from "Speaker consistency"): lists profile pairs whose embeddings score above 0.95 cosine (likely duplicates), profiles in an old embedding space, and pipeline-shaped junk names (`AUTO_NAME_RE`: `SPEAKER_NN`, `Unknown Speaker N`). Report only, no automatic fixes; it points at `wisper speakers remove`/`rename`.
 - Tests: rewrite `test_speaker_manager.py`/`test_campaign_manager.py` internals, plus importer tests (including the dirty-data cases above), plus `speakers doctor` on synthetic near-duplicate embeddings.
 
-**Phase 2 — Transcript registry and links (fixes the #64 class).** In progress, committed in three slices so a fresh session can resume:
+**Phase 2 — Transcript registry and links (fixes the #64 class). Done**, in three commits:
 - [x] **2a — store and delete paths.** `transcript_store.py` (`register()`, `ensure_row()`, `delete_transcript()`, `atomic_write_text()` with the Windows retry/fallback); single, bulk, and recording-purge deletes rewired; interim `recording_manager.clear_transcript_link()`; every transcript/summary/sidecar/journal write made atomic; `process_file()` registers output in the output root and applies the `--campaign`-outside-the-root rule; guard tests; `test_transcript_store.py` on the Windows job. Runtime row creation moved out of the frozen importer (`legacy_import` keeps its own copy).
 - [x] **2b — journal (migration v3).** Done as below, plus: `migrate()` writes one combined `import-report.txt` per run (in the run's legacy-backup dir, else `backups/import-report-<time>.txt`), since v3 has no backup dir of its own; `/campaigns/{slug}/journal/download` serves the export; the rebuild confirmation shows the refold call count (sessions + unsummarized sessions). Planned: `journal_entries` + trigger; import `journaled_sessions` (drop and report stems not in that campaign's `campaign_transcripts`); journal write rule with a deterministic per-campaign temp file whose hash must equal `journal_sha256` before it is promoted (a non-matching temp predates the commit and is deleted); `refold_campaign()`; stale banner; CLI `--rebuild` / `--resummarize`; `register(origin="job")` marks a journaled transcript's journal stale. **`campaign_manager._write_order()` must stop upserting `campaign_id`** once the composite FK exists: rows already in the campaign get a position-only `UPDATE`, rows from another campaign `DELETE` + `INSERT` (so the cascade and trigger fire). Test: reorder with a journaled session keeps the entry and leaves `journal_stale_since` NULL; a move sets it.
-- [ ] **2c — reconcile and collisions.** Reconcile (`missing_since`, case-insensitive FS, NFC, temp sweep), Relink, upload Overwrite/Cancel, the job's pre-write re-check, recording re-transcribe with `overwrite=True` after confirmation (today it hits the silent skip at `pipeline.py:473` because the stem is the recording id), the CLI skip message naming the campaign, missing-file detection, bulk-actions UI, `wisper transcripts list/move`. New routes that take a stem get the path guard plus null-byte/regex/CRLF cases in `test_path_traversal.py`.
+- [x] **2c — reconcile and collisions.** Done. Notes: the upload collision check happens when the file is picked (`GET /transcribe/name-check`), so nobody re-uploads a large file to confirm; the server still refuses a taken name without `overwrite=on`. `process_file(skip_existing=False)` for web jobs. The reconcile sweep runs only at startup; list pages do the cheap pass. Planned: Reconcile (`missing_since`, case-insensitive FS, NFC, temp sweep), Relink, upload Overwrite/Cancel, the job's pre-write re-check, recording re-transcribe with `overwrite=True` after confirmation (today it hits the silent skip at `pipeline.py:473` because the stem is the recording id), the CLI skip message naming the campaign, missing-file detection, bulk-actions UI, `wisper transcripts list/move`. New routes that take a stem get the path guard plus null-byte/regex/CRLF cases in `test_path_traversal.py`.
 
 Original scope:
 - New `transcript_store.py`: `register()` (the origin rules in "Transcript identity"), `reconcile()`, `relink()`, and `delete_transcript()` as the only delete path, following the ordering rule. Everything that unlinks a `.md` calls it.
@@ -1008,7 +1008,7 @@ Original scope:
 
 ### Open questions
 
-None. Schema signed off (decision 30). Phases 0–1 done; next: Phase 2.
+None. Schema signed off (decision 30). Phases 0–2 done; next: Phase 3.
 
 ---
 

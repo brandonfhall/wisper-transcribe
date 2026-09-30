@@ -101,6 +101,22 @@ python scripts/alignment_eval.py score alignment-eval/*/
 
 The sheet lists rows marked `discriminating` first: those are the words where the variants disagree, and they decide the result. The proxy is only a sanity check; trust the labels. Live-table recordings are the best test audio, since edited podcasts have little timing drift to fix.
 
+## A transcript was renamed or deleted outside wisper
+
+wisper keeps a record of every transcript in the transcripts folder. If a file vanishes (deleted or renamed in Finder or Obsidian, a sync that hasn't finished, a drive that isn't connected), its campaign entry stays in place and shows **MISSING** instead of being dropped.
+
+- **It comes back** (sync finishes, drive reconnected): nothing to do; the flag clears the next time you open the Campaign or Transcripts page.
+- **It was renamed:** on the Campaign page, choose the new name in the **Relink** dropdown next to the missing entry. The session keeps its place in the episode order, its journal entry, and its speaker names. Renaming only the capitalization (e.g. `session 1` → `Session 1`) is picked up automatically on macOS and Windows.
+- **It's really gone:** remove it from the campaign with ✕. If it had been folded into the journal, the journal is marked as needing a rebuild.
+
+`wisper transcripts list` shows missing entries too.
+
+## Starting the campaign journal over
+
+- **Rebuild journal** (web) or `wisper campaigns journal <slug> --rebuild` re-folds every session's existing summary: one LLM call per session, and your edits to summaries are kept.
+- **Rebuild from transcripts** / `--rebuild --resummarize` re-summarizes every session first (two calls per session). Use it after switching LLM model or when the summaries are poor.
+- Deleting `journal.md` from `campaigns/<slug>/` also starts over: every summarized session becomes pending again. Editing `journal.md` by hand is fine; later folds build on your version.
+
 ## Known Limitations
 
 - **One recording at a time.** Starting a Discord or local recording while either kind is active is rejected.

@@ -121,7 +121,8 @@
           {%- set stem = recording.transcript_path.stem -%}
           <a href="/transcripts/{{ stem | urlencode }}" class="btn btn-primary">View transcript</a>
           {% endif %}
-          <form method="post" action="/recordings/{{ recording.id }}/transcribe" style="display:inline">
+          <form method="post" action="/recordings/{{ recording.id }}/transcribe" style="display:inline"
+                onsubmit="return confirm('Re-transcribe this recording? Its current transcript is replaced (it stays in its campaign). If it was folded into the campaign journal, the journal is marked as needing a rebuild.')">
             <button type="submit" class="btn btn-secondary">Re-transcribe</button>
           </form>
         </div>

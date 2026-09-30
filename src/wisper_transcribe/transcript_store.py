@@ -47,6 +47,14 @@ _REPLACE_FIRST_DELAY_S = 0.01
 _IS_WINDOWS = os.name == "nt"
 
 
+class TranscriptExistsError(FileExistsError):
+    """A transcript with this name already exists and overwrite wasn't chosen."""
+
+    def __init__(self, stem: str) -> None:
+        super().__init__(f"A transcript named {stem!r} already exists")
+        self.stem = stem
+
+
 # ---------------------------------------------------------------------------
 # Atomic writes
 # ---------------------------------------------------------------------------
@@ -270,3 +278,178 @@ def delete_transcript(stem: str, data_dir: Optional[Path] = None,
         except OSError:
             pass
     return True
+
+
+# ---------------------------------------------------------------------------
+# Reconcile: the registry vs. what's on disk
+# ---------------------------------------------------------------------------
+
+# Leftover atomic-write temp files older than this are crash debris.
+_TEMP_MAX_AGE_S = 600
+_case_insensitive: dict[str, bool] = {}
+
+
+def _is_case_insensitive(directory: Path) -> bool:
+    """Probe (once per directory) whether names differing only in case collide."""
+    key = os.path.realpath(directory)
+    if key not in _case_insensitive:
+        import tempfile
+
+        fd, probe = tempfile.mkstemp(prefix=f"{TEMP_PREFIX}case-probe-", dir=directory)
+        os.close(fd)
+        try:
+            head, tail = os.path.split(probe)
+            _case_insensitive[key] = os.path.exists(os.path.join(head, tail.upper()))
+        finally:
+            os.unlink(probe)
+    return _case_insensitive[key]
+
+
+def _transcript_files(output_dir: Path) -> dict[str, Path]:
+    """NFC stem → path for every transcript ``.md`` in the output root."""
+    found: dict[str, Path] = {}
+    for md in output_dir.glob("*.md"):
+        if md.name.endswith(".summary.md") or md.name.startswith(TEMP_PREFIX):
+            continue
+        found[nfc(md.stem)] = md
+    return found
+
+
+def _companion_stem(name: str) -> Optional[str]:
+    """The transcript stem a pattern-identifiable companion file belongs to."""
+    if name.endswith(".summary.md"):
+        return name[: -len(".summary.md")]
+    if name.endswith("_diar.json"):
+        return name[: -len("_diar.json")]
+    if "_excerpt_" in name and name.endswith((".mp3", ".txt")):
+        return name.rsplit("_excerpt_", 1)[0]
+    return None
+
+
+def reconcile(output_dir: Optional[Path] = None, data_dir: Optional[Path] = None,
+              *, sweep: bool = False) -> dict[str, int]:
+    """Bring the registry in line with the ``.md`` files on disk.
+
+    - An unregistered ``.md`` gets a row.
+    - A row whose ``.md`` is gone is flagged ``missing_since`` but kept, with
+      its campaign position and companions: the file may come back (a sync,
+      an unmounted drive). A reappearing file clears the flag.
+    - On a case-insensitive filesystem, a ``.md`` whose name differs from a
+      missing row's only in case renames that row, keeping its links.
+
+    Rows are never deleted here. With ``sweep`` (server startup), also delete
+    stale atomic-write temp files and pattern-identifiable companions
+    (summary, sidecar, excerpt clips) that have neither a ``.md`` nor a row.
+    Only cheap work: no file is parsed. Returns counts for logging.
+    """
+    if output_dir is None:
+        from .path_utils import get_output_dir
+        output_dir = get_output_dir()
+    files = _transcript_files(output_dir)
+    fold = _is_case_insensitive(output_dir)
+    counts = {"added": 0, "missing": 0, "restored": 0, "renamed": 0, "swept": 0}
+    now = db.now_utc()
+
+    with db.transaction(data_dir) as conn:
+        rows = {r["stem"]: r for r in conn.execute("SELECT id, stem, missing_since FROM transcripts")}
+        missing_by_fold = {
+            stem.casefold(): r for stem, r in rows.items() if stem not in files
+        } if fold else {}
+        for stem, md in files.items():
+            row = rows.get(stem)
+            if row is None:
+                twin = missing_by_fold.pop(stem.casefold(), None)
+                if twin is not None:
+                    conn.execute("UPDATE transcripts SET stem = ?, missing_since = NULL WHERE id = ?",
+                                 (stem, twin["id"]))
+                    rows.pop(twin["stem"], None)
+                    counts["renamed"] += 1
+                else:
+                    ensure_row(conn, stem, output_dir)
+                    counts["added"] += 1
+            elif row["missing_since"] is not None:
+                conn.execute("UPDATE transcripts SET missing_since = NULL WHERE id = ?", (row["id"],))
+                counts["restored"] += 1
+        for stem, row in rows.items():
+            if stem not in files and row["missing_since"] is None:
+                conn.execute("UPDATE transcripts SET missing_since = ? WHERE id = ?", (now, row["id"]))
+                counts["missing"] += 1
+        registered = {r[0] for r in conn.execute("SELECT stem FROM transcripts")}
+
+    if sweep:
+        cutoff = time.time() - _TEMP_MAX_AGE_S
+        for entry in output_dir.iterdir():
+            try:
+                if entry.name.startswith(TEMP_PREFIX):
+                    if entry.stat().st_mtime < cutoff:
+                        entry.unlink()
+                        counts["swept"] += 1
+                    continue
+                owner = _companion_stem(entry.name)
+                if owner is None or not entry.is_file():
+                    continue
+                owner = nfc(owner)
+                if owner not in files and owner not in registered:
+                    entry.unlink()
+                    counts["swept"] += 1
+            except OSError:
+                pass
+    if any(counts.values()):
+        log.info("Transcript reconcile: %s", counts)
+    return counts
+
+
+def relink(old_stem: str, new_stem: str, data_dir: Optional[Path] = None,
+           output_dir: Optional[Path] = None) -> None:
+    """Give a missing transcript's identity to a file under a new name.
+
+    ``old_stem`` must be flagged missing; ``<new_stem>.md`` must exist and
+    must not be linked to anything yet (no campaign, no journal entry). The
+    old row takes the new name, so its campaign position, journal entry, and
+    speakers are kept; the new name's own row (reconcile may have created one)
+    is removed.
+
+    Raises ValueError (unsafe name, not missing, or target already linked)
+    or KeyError (no such transcript).
+    """
+    if output_dir is None:
+        from .path_utils import get_output_dir
+        output_dir = get_output_dir()
+    old_md = safe_path(old_stem, ".md", output_dir)
+    new_md = safe_path(new_stem, ".md", output_dir)
+    if old_md is None or new_md is None:
+        raise ValueError("invalid transcript name")
+    old_stem, new_stem = nfc(old_md.stem), nfc(new_md.stem)
+    if not new_md.is_file():
+        raise KeyError(f"No transcript file named {new_stem!r}")
+    with db.transaction(data_dir) as conn:
+        old = conn.execute(
+            "SELECT id, missing_since FROM transcripts WHERE stem = ?", (old_stem,)
+        ).fetchone()
+        if old is None:
+            raise KeyError(f"No transcript named {old_stem!r}")
+        if old["missing_since"] is None:
+            raise ValueError(f"{old_stem!r} is not missing")
+        new = conn.execute("SELECT id FROM transcripts WHERE stem = ?", (new_stem,)).fetchone()
+        if new is not None:
+            linked = conn.execute(
+                "SELECT 1 FROM campaign_transcripts WHERE transcript_id = ? "
+                "UNION SELECT 1 FROM journal_entries WHERE transcript_id = ?",
+                (new["id"], new["id"]),
+            ).fetchone()
+            if linked:
+                raise ValueError(f"{new_stem!r} already belongs to a campaign")
+            conn.execute("DELETE FROM transcripts WHERE id = ?", (new["id"],))
+        conn.execute("UPDATE transcripts SET stem = ?, missing_since = NULL WHERE id = ?",
+                     (new_stem, old["id"]))
+
+
+def relink_candidates(data_dir: Optional[Path] = None) -> list[str]:
+    """Present transcripts not linked to any campaign, newest first — the
+    files a missing campaign entry can be relinked to."""
+    with db.connection(data_dir) as conn:
+        return [r[0] for r in conn.execute(
+            "SELECT t.stem FROM transcripts t WHERE t.missing_since IS NULL "
+            "AND NOT EXISTS (SELECT 1 FROM campaign_transcripts ct WHERE ct.transcript_id = t.id) "
+            "ORDER BY t.created_at DESC, t.stem"
+        )]

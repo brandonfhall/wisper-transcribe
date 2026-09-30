@@ -69,13 +69,24 @@ async def start_transcribe(
     post_summarize: Annotated[Optional[str], Form()] = None,
     campaign: Annotated[Optional[str], Form()] = None,
     vocab_file: Annotated[Optional[UploadFile], File()] = None,
+    overwrite: Annotated[Optional[str], Form()] = None,
 ) -> RedirectResponse:
-    """Accept an uploaded audio file, save it to a temp location, enqueue job."""
+    """Accept an uploaded audio file, save it to a temp location, enqueue job.
+
+    A transcript with the same name is never replaced silently: without
+    ``overwrite`` the upload is refused (``?error=name_exists``). The page
+    checks the name when a file is picked (``/transcribe/name-check``) and
+    offers Overwrite or Cancel before anything is uploaded.
+    """
     # Validate enums before any file I/O so a bad value never orphans a temp
     # upload. Never echo the value back.
     from wisper_transcribe.config import COMPUTE_TYPES, DEVICES, MODEL_SIZES
     if model_size not in MODEL_SIZES or device not in DEVICES or compute_type not in COMPUTE_TYPES:
         return error_redirect("/transcribe", "invalid_option")
+
+    replace_existing = overwrite == "on"
+    if not replace_existing and _existing_transcript(file.filename) is not None:
+        return error_redirect("/transcribe", "name_exists")
 
     # Save uploaded file to a persistent temp location (job must outlive request)
     suffix = Path(file.filename or "audio.mp3").suffix or ".mp3"
@@ -147,9 +158,40 @@ async def start_transcribe(
         post_summarize=bool(post_summarize),
         campaign=safe_campaign,
         hotwords=hotwords,
+        overwrite=replace_existing,
     )
 
     return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
+
+
+def _existing_transcript(filename: Optional[str]) -> Optional[Path]:
+    """The transcript an upload named ``filename`` would replace, if any."""
+    from wisper_transcribe.transcript_store import safe_path
+
+    stem = Path(os.path.basename(filename or "upload")).stem
+    md = safe_path(stem, ".md", get_output_dir())
+    return md if md is not None and md.is_file() else None
+
+
+@router.get("/name-check")
+async def name_check(filename: str = "") -> Response:
+    """Whether uploading ``filename`` would replace an existing transcript.
+
+    Returns ``{"exists": bool, "campaign": <display name> | null}``; the
+    filename is never echoed back.
+    """
+    from wisper_transcribe.campaign_manager import get_campaign_for_transcript
+
+    md = _existing_transcript(filename)
+    campaign_name = None
+    if md is not None:
+        slug = get_campaign_for_transcript(md.stem)
+        campaign = load_campaigns().get(slug) if slug else None
+        campaign_name = campaign.display_name if campaign else None
+    return Response(
+        content=json.dumps({"exists": md is not None, "campaign": campaign_name}),
+        media_type="application/json",
+    )
 
 
 @router.post("/jobs/{job_id}/cancel")

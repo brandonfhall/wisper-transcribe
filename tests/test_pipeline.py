@@ -1667,13 +1667,14 @@ _PIPELINE_PATCHES = [
 ]
 
 
-def _run_process_file(audio, **kwargs):
+def _run_process_file(audio, extra_patches=(), **kwargs):
+    """process_file with ML mocked; ``extra_patches`` are applied last, so they win."""
     import contextlib
 
     from wisper_transcribe.pipeline import process_file
 
     with contextlib.ExitStack() as stack:
-        for p in _PIPELINE_PATCHES:
+        for p in [*_PIPELINE_PATCHES, *extra_patches]:
             stack.enter_context(p)
         stack.enter_context(patch("wisper_transcribe.pipeline.convert_to_wav", return_value=audio))
         return process_file(audio, device="cpu", no_diarize=True, **kwargs)
@@ -1710,3 +1711,67 @@ def test_output_outside_root_skips_campaign_with_note(tmp_path, capsys):
     with db.connection() as conn:
         assert conn.execute("SELECT count(*) FROM transcripts").fetchone()[0] == 0
     assert "outside the transcripts folder" in capsys.readouterr().out
+
+
+def test_existing_output_fails_for_web_jobs(tmp_path):
+    from wisper_transcribe.path_utils import get_output_dir
+    from wisper_transcribe.transcript_store import TranscriptExistsError
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    existing = get_output_dir() / "session01.md"
+    existing.write_text("old", encoding="utf-8")
+    with pytest.raises(TranscriptExistsError):
+        _run_process_file(audio, output_dir=get_output_dir(), skip_existing=False)
+    assert existing.read_text(encoding="utf-8") == "old"
+
+
+def test_cli_skip_message_names_the_campaign(tmp_path, capsys):
+    import wisper_transcribe.campaign_manager as cm
+    from wisper_transcribe.path_utils import get_output_dir
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    (get_output_dir() / "session01.md").write_text("old", encoding="utf-8")
+    cm.create_campaign("Game")
+    cm.move_transcript_to_campaign("session01", "game")
+    out = _run_process_file(audio, output_dir=get_output_dir())
+    assert out.read_text(encoding="utf-8") == "old"
+    assert "already processed (in campaign 'game')" in capsys.readouterr().out
+
+
+def test_output_appearing_during_the_run_is_not_clobbered(tmp_path):
+    """The pre-write re-check: another writer created the file mid-job."""
+    from wisper_transcribe.path_utils import get_output_dir
+    from wisper_transcribe.transcript_store import TranscriptExistsError
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    target = get_output_dir() / "session01.md"
+
+    def transcribe_then_race(*a, **k):
+        target.write_text("someone else's", encoding="utf-8")
+        return FAKE_SEGMENTS
+
+    race = patch("wisper_transcribe.pipeline.transcribe", side_effect=transcribe_then_race)
+    with pytest.raises(TranscriptExistsError):
+        _run_process_file(audio, extra_patches=[race], output_dir=get_output_dir(),
+                          skip_existing=False)
+    assert target.read_text(encoding="utf-8") == "someone else's"
+
+
+def test_overwrite_keeps_transcript_identity_and_campaign(tmp_path):
+    import wisper_transcribe.campaign_manager as cm
+    from wisper_transcribe import db
+    from wisper_transcribe.path_utils import get_output_dir
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    cm.create_campaign("Game")
+    _run_process_file(audio, output_dir=get_output_dir(), campaign="game")
+    with db.connection() as conn:
+        first_id = conn.execute("SELECT id FROM transcripts").fetchone()[0]
+    _run_process_file(audio, output_dir=get_output_dir(), overwrite=True)
+    with db.connection() as conn:
+        assert conn.execute("SELECT id FROM transcripts").fetchall()[0][0] == first_id
+    assert cm.get_transcripts_for_campaign("game") == ["session01"]

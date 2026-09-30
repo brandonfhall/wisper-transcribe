@@ -1488,6 +1488,8 @@ def test_transcribe_recording_passes_name_as_title(client):
 
     _, kwargs = mock_submit.call_args
     assert kwargs["title"] == "Session 14 — the ambush"
+    # Re-transcribing replaces the recording's own <id>.md, never skips it.
+    assert kwargs["overwrite"] is True
 
 
 def test_transcribe_recording_no_name_passes_none_title(client):
