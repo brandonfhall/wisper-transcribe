@@ -589,6 +589,7 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
   - `journal.py`: `unjournalled_sessions()`, `update_journal()`, `rebuild_campaign()`; stop writing `journaled_sessions` into the frontmatter.
 - **Export with frontmatter:** a download or CLI export of the journal that adds `journaled_sessions` from the DB to its frontmatter. The same export path can later add DB-held metadata (campaign, speakers) to transcript or summary downloads.
   - `cli.py`: `transcripts list/move`, `campaigns journal/reorder`.
+- **Atomic file writes.** New `atomic_write_text(path, text)` helper (temp file in the same dir, then `os.replace()`, the pattern `recording_manager` already uses). Every transcript, summary, sidecar, and journal write goes through it: `pipeline.py` (transcript output), `web/jobs.py` (sidecar, excerpt `.txt`, refine, summarize, live draft), `web/enroll_shared.py` (wizard rewrite), the edit and fix-speaker routes, `speaker_registry._write_sidecar`, `journal.py`. A crash mid-write then leaves the old file or the new one, never a truncated `.md` that reconcile would register and search would index. Temp names get a recognisable prefix so reconcile can sweep leftovers.
 - **Missing-transcript detection** (scoped in from the open bug): when a transcription job registers its output, it checks the `.md` exists. If not, the job fails with a distinct error ("Transcript file missing after write") instead of reporting success, and the resolved output root goes into the job log. Covers web jobs and the recording hand-off.
 - **Bulk actions UI** on `/transcripts`: row checkboxes plus a toolbar for delete and assign to campaign, wired to the existing `/transcripts/bulk-delete` and `/transcripts/bulk-campaign` routes. Those routes are rewritten in this phase anyway. Delete goes through a confirmation step. Same bulk-select pattern as `/recordings` (a separate hidden form, since rows contain their own forms).
 - Tests: cascade tests for every delete path; the missing-file job failure; bulk actions through the UI form fields; reconcile (external delete keeps order; reappearing file clears the flag; an output-root change doesn't mark rows missing); a guard test that no module outside `transcript_store.py` unlinks `*.md` in the output dir.
@@ -603,8 +604,9 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 **Phase 4 — Recordings.**
 - Import `recordings.json`, each `metadata.json`, and `discord_speakers` → `recording_speakers.profile_id`, which fixes rename-not-rekeying for free.
 - Delete `save_recording_merged()` and the per-recording mutex; `reconcile_on_startup()` becomes one `UPDATE`.
+- **Recover crashed sessions.** Today a session interrupted by a crash is marked `failed` with no `combined.wav`, so it never gets a Transcribe button even though its segments are on disk. Startup keeps marking it `failed` (fast, no file work) and sets `recoverable` when combined segments exist. A **Recover** button on the recording page and `wisper record recover <id>` join the segments with the existing `concat_wav_segments()` (off the request thread), set `combined_rel_path`, and mark the recording `completed` with `recovered_at` set. It then shows under "Awaiting transcription" like any other, and the detail page notes it was recovered and may be missing the last partial minute. Segments are self-contained WAVs (file-format invariant 1), so recovery needs no repair step. Schema: `recordings += recovered_at NULL`; `recoverable` is derived, not stored.
 - Changes: `recording_manager.py`, `web/discord_bot.py`, `web/local_capture.py` (hot-path contract above), `web/routes/record.py`, and the `wisper record` CLI.
-- Tests: `test_recording_manager.py`, record routes, and a hot-path test with the DB held busy.
+- Tests: `test_recording_manager.py`, record routes, a hot-path test with the DB held busy, and recovery: a crashed session with synthetic segments becomes `completed` and transcribable; a crashed session with no segments isn't offered recovery; recovery refuses an active session.
 
 **Phase 5 — Job history.**
 - Write-through from `JobQueue` at submit and at each status transition. On terminal status, store `error_code` (the same generic codes, never exception text) and the last ~200 log lines.
@@ -672,7 +674,7 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
   - `BEGIN IMMEDIATE` under two threads: the second waits instead of erroring.
   - One cross-process import race under spawn (the macOS default): exactly one import happens.
 - **Importer tests** use a synthetic legacy data dir built by a frozen copy of today's serializers (`tests/_legacy_store.py`), so the tests don't change when the managers do. Cases: clean import, each dirty-data case, a malformed top-level file (rolls back, version unchanged, backup present), and a re-run.
-- **Invariant guards:** no raw `sqlite3.connect` outside `db.py`, no `.md` unlink outside `transcript_store.py`, and (Phase 6) every function that writes a transcript `.md` calls `reindex()`.
+- **Invariant guards:** no raw `sqlite3.connect` outside `db.py`, no `.md` unlink outside `transcript_store.py`, no plain `write_text()` on transcript, summary, sidecar, or journal paths outside `atomic_write_text()`, and (Phase 6) every function that writes a transcript `.md` calls `reindex()`.
 - **Cross-platform paths:** relative-path round-trips through `PureWindowsPath`/`PurePosixPath`, so the Windows logic is tested on macOS and Linux CI.
 - No CI change: `sqlite3` is stdlib, and the bundled SQLite on 3.13/3.14 (macOS, Windows, and Debian slim) supports `RETURNING`, `DROP COLUMN`, and `STRICT`.
 - Existing test rules still hold: no GPU, network, or real audio, and synthetic data only.
@@ -681,9 +683,9 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 - architecture.md: Module Map; Data Storage tree and "Output directory"; "File-store locking" → "Database"; Job Queue ("Nothing persists across restarts" changes in Phase 5); Test Strategy; Known Constraints (host-plus-container DB writes, WAL).
 - `docs/configuration.md`: data layout, backups, the `WISPER_DATA_DIR` + synced-folder warning.
 - `docs/setup.md`: the SQLite ≥ 3.43 requirement.
-- `docs/cli-reference.md`: `wisper db`, `wisper search`, and the `transcribe --campaign` rule, `wisper speakers doctor`.
+- `docs/cli-reference.md`: `wisper db`, `wisper search`, and the `transcribe --campaign` rule, `wisper speakers doctor`, `wisper record recover`.
 - `docs/docker.md`: DB location, backup, CLI and web containers sharing `./data`.
-- `docs/scenarios.md`: restore from backup, moved output dir, externally deleted transcripts.
+- `docs/scenarios.md`: restore from backup, moved output dir, externally deleted transcripts, recovering a crashed recording session.
 - `docs/web-ui.md`: missing transcripts, bulk actions, job history, search.
 - CLAUDE.md: new gotchas (connect only through `db.py`; `BEGIN IMMEDIATE`; no transaction across ML work; delete transcripts only via `transcript_store`; `speaker_map` location).
 - README: unchanged.
@@ -706,6 +708,7 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 14. **Stemming:** `porter`.
 15. **SQLite < 3.43:** unsupported; startup refuses with a clear message.
 16. **Scoped in from elsewhere in this file:** missing-transcript detection (Phases 2 and 5), `wisper speakers doctor` (Phase 1), the bulk-actions UI on `/transcripts` (Phase 2), and the Docker alignment check done alongside the Docker DB check.
+17. **Failure handling:** atomic writes for every transcript, summary, sidecar, and journal file (Phase 2); crashed recording sessions recoverable via a Recover button and `wisper record recover` (Phase 4).
 
 ### Open questions
 
