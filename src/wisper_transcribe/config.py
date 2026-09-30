@@ -101,6 +101,9 @@ EMBEDDING_SUBFOLDER = "embedding"
 # Stored on each profile. Profiles tagged otherwise (or untagged, from the old
 # pyannote/embedding model) are incomparable and never matched.
 EMBEDDING_SPACE = "wespeaker-resnet34"
+# Re-times Whisper's words against the audio before speaker assignment.
+# Apache-2.0 and ungated, so no token is needed.
+FORCED_ALIGNMENT_MODEL = "Qwen/Qwen3-ForcedAligner-0.6B-hf"
 
 # Allowed values, shared by CLI click.Choice lists and web-form validation.
 MODEL_SIZES = ("tiny", "base", "small", "medium", "large-v3", "large-v3-turbo")

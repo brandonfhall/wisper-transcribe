@@ -28,7 +28,7 @@ A local-recording `JOB_TRANSCRIPTION` job reported COMPLETED and logged "Wrote `
 
 ---
 
-## Forced word alignment (planned — next)
+## Forced word alignment (in progress)
 
 Speaker identity is now consistent (#63); the remaining attribution error is **timing**. `aligner.py` gives each word to the diarization turn it overlaps most, using faster-whisper's word timestamps. Those are a by-product of decoding, not a measurement, and at speaker changes they put words in the neighbouring turn. `_smooth_word_speakers` (fold runs of ≤2 words or <1 s into the neighbours) papers over this and also swallows genuine one-word interjections.
 
@@ -41,30 +41,9 @@ Run through the native `transformers` implementation (`Qwen/Qwen3-ForcedAligner-
 - **License:** Apache-2.0 weights and code. No sign-off needed, and weights may be baked into Docker images.
 - **How it works:** non-autoregressive. The processor splits the transcript into words, puts two `<timestamp>` slots after each, and the model classifies every slot into an 80 ms bin in one forward pass. `decode_forced_alignment` repairs non-monotonic bins. There's no acoustic model or CTC path, so there's no untranscribed-speech drift to absorb (MMS_FA needed a star token for that).
 - **Dependency:** new direct dependency `transformers>=5.17`. It fits the current environment: needs `huggingface_hub>=1.5` (venv 1.23) and `tokenizers>=0.23.1` (venv 0.23.1); faster-whisper allows `tokenizers<1`. torch stays as is; transformers only needs `torch>=2.5`.
-- **Model:** 0.6B params, ~1.8 GB bf16 on GPU. Downloaded from the HF hub into the HF cache (ungated, no token), which Docker already persists via `./cache:/root/.cache/huggingface`.
+- **Model:** 0.6B params, ~1.7 GB download. Downloaded from the HF hub into the HF cache (ungated, no token), which Docker already persists via `./cache:/root/.cache/huggingface`.
 - **Languages:** 11 (zh, en, yue, fr, de, it, ja, ko, pt, ru, es). The model never sees the language; it only picks the word splitter. Space-delimited and CJK text use the default splitter. Japanese and Korean need `nagisa` / `soynlp`, and `prepare_forced_aligner_inputs` raises on a language outside the 11.
 - **Limits:** 180 s per input (per-segment crops are far below that); 80 ms timestamp resolution.
-
-**Verified call sequence** (ran on the spike clip with transformers 5.17 + torch 2.13):
-
-```python
-from transformers import AutoProcessor, AutoModelForTokenClassification
-REPO = "Qwen/Qwen3-ForcedAligner-0.6B-hf"
-proc = AutoProcessor.from_pretrained(REPO)
-model = AutoModelForTokenClassification.from_pretrained(REPO, dtype=torch.bfloat16).to("cuda").eval()
-# crops: list of 1-D float32 numpy arrays at 16 kHz; texts: list of " ".join(w.text for w in seg.words)
-inputs, word_lists = proc.prepare_forced_aligner_inputs(audio=crops, transcript=texts, language="English")
-inputs = {k: (v.to(dev).to(model.dtype) if v.is_floating_point() else v.to(dev)) for k, v in inputs.items()}
-with torch.inference_mode():
-    logits = model(**inputs).logits
-items = proc.decode_forced_alignment(logits, inputs["input_ids"], word_lists, model.config.timestamp_token_id)
-# items[i] = [{"text", "start_time", "end_time"}, ...] in seconds relative to crop i
-```
-
-- Use `.to(device)`, not `device_map=`: `device_map` needs `accelerate`, which isn't installed.
-- Only floating tensors get the model dtype; `input_ids` and the masks must stay integer.
-- `language` takes a name ("English") or a code ("en"). wisper's config/CLI can hold `"auto"` or empty; map both to `None`.
-- On CPU, load in float32 (`model.float()`); bf16 on CPU is slow.
 
 ### Test results (2026-09-29, real session audio)
 
@@ -89,6 +68,23 @@ items = proc.decode_forced_alignment(logits, inputs["input_ids"], word_lists, mo
 - **Native vs `qwen-asr` package:** same results except 6 of 1369 words (word-splitting differences).
 - **Alignment confidence:** not exposed. The decoder takes `argmax` over bins; `decode_forced_alignment` returns no scores.
 
+### Apple Silicon results (2026-09-30, M5, 32 GB)
+
+10-min excerpt of an `example-file/` podcast episode (Impossible Landscapes S1E2, 30:00–40:00; edited audio, 6 speakers), MLX large-v3-turbo transcription + community-1 diarization on MPS.
+
+| | MLX Whisper times | Qwen3-FA |
+|---|---|---|
+| Proxy | 94.9% | 99.0% |
+| Micro-runs (≤2 words, before smoothing) | 6 | 9 |
+| Words shifted >1 s | – | 3 |
+| Time per 10 min, MPS, batch 8 | – | 10.6 s fp16 · 11.2 s bf16 · 16.5 s fp32; bf16 batch 1 22 s, batch 16 8 s |
+| Time per 10 min, CPU fp32, batch 8 | – | 35.5 s unsorted; 22.5 s with segments sorted by length |
+| MPS driver memory, batch 8 | – | 4.2 GB fp16/bf16 · 7.7 GB fp32 |
+
+- fp16 on MPS matched fp32 to the 80 ms bin on every word; bf16 differed on 1–2. The module uses fp16 on MPS.
+- MPS is ~2–3× CPU speed, so `auto` keeps MPS. ~3 min per 2.5 h session.
+- Edited podcast audio has less crosstalk than a live table, so the Whisper baseline is higher than the Hanataz clip's 90%.
+
 ### MMS_FA (evaluated, not chosen)
 
 `torchaudio.pipelines.MMS_FA` + `forced_align` with a star token was the first spike. No new dependency and ~1 GB fp16, but:
@@ -103,26 +99,16 @@ Others ruled out: nyra-forced-aligner (non-commercial licence, English only, abs
 ### Decisions
 
 - **No crop padding:** each Whisper segment is aligned against exactly `[seg.start, seg.end]`.
-- **Batching:** segments go through in batches (processor pads). Batch size is a constant chosen in phase 1 for VRAM: batch 1 = 2 GB/17 s per 10 min, batch 16 = 5.6 GB/2.4 s. Something like 8 on CUDA, smaller on MPS/CPU; halve and retry on CUDA OOM.
+- **Batching:** 8 on CUDA/MPS, 4 on CPU, segments sorted by length; an OOM batch is split in half and retried.
 - **Language:** no detected-language plumbing. `transcribe()` discards `info.language`, so pass the configured language when it's set explicitly (mapping unsupported ones to "skip alignment, keep Whisper times"), and `None` (default splitter) under auto-detect. Japanese/Korean alignment needs the optional `nagisa`/`soynlp`; without them, keep Whisper times for that job and log it.
-- **Default:** config key `forced_alignment` = `auto` | `true` | `false`. `auto` aligns when diarization runs on a GPU, CUDA or MPS, since CPU adds ~20 min per 2.5 h session. Never with `--no-diarize`; timing only matters for speaker attribution. MPS speed is untested; if it turns out close to CPU speed, drop MPS from `auto`.
+- **Default:** config key `forced_alignment` = `auto` | `true` | `false`. `auto` aligns when diarization runs on a GPU, CUDA or MPS, since CPU adds ~20 min per 2.5 h session. Never with `--no-diarize`; timing only matters for speaker attribution. MPS measured at ~2–3× CPU on an M5, so it stays in `auto`.
 - **Measurement scripts:** the spike scripts are throwaway (hardcoded scratchpad paths, pickled inputs, MMS-specific). Phase 2 writes the proxy and the large-shift audit as documented scripts under `scripts/` against the real `word_alignment` module, with outputs kept out of git.
 
 ### Phases
 
-1. **`word_alignment.py` module + tests.**
-   - `align_words(wav_path, segments, device, language=None) -> list[TranscriptionSegment]`: crop each segment `[start, end]` from `audio_utils.load_wav_as_tensor()` (never `torchaudio.load`, per the torchcodec/Windows constraint). Batch crops through `Qwen3ASRProcessor.prepare_forced_aligner_inputs` → `Qwen3ASRForTokenClassification` (bf16 on CUDA) → `decode_forced_alignment`. Offset results by the crop start.
-   - Map returned items back to Whisper `Word`s in order by normalized text (the splitter drops punctuation and keeps letters, digits and `'`). Words with nothing alignable keep Whisper times, clamped between their re-timed neighbours.
-   - Cross-segment order: clamp a segment's first word start to the previous word's end.
-   - Any per-batch failure (exception, OOM after retry, >180 s crop, item/word mismatch) keeps those segments' Whisper times. Alignment never fails the job.
-   - Lazy model/processor cache as module globals (`_fa_model`, `_fa_processor`, `_fa_device`) like `diarizer._pipeline`; covered by the one-job-at-a-time invariant; tests reset them.
-   - The batch loop runs under a tqdm bar ("Aligning"), like "Transcribing". Web job cancellation and the SSE log only see tqdm writes, so a single summary line at the end would leave up to ~20 min (CPU) that can't be cancelled.
-   - Import `transformers` lazily inside the loader (like `faster_whisper` in `transcriber`), so importing `word_alignment` stays cheap and tests patch the loader instead of the library.
-   - Tests with a mocked processor/model: item → word mapping (punctuation, hyphens, digits, contractions), offsetting, clamping, batch failure fallback, unsupported-language skip, monotonic output across segments.
-   - Dependency: add `transformers>=5.17` to `pyproject.toml`; check `setup.sh`/`setup.ps1` and the Docker image pick it up.
+1. **Done:** `word_alignment.py` + `tests/test_word_alignment.py`; design in `architecture.md` ("Forced word alignment"). `align_words()` returns `(segments, AlignmentStats)` and logs the summary line itself. Words map to items exactly through the processor's own per-word split instead of fuzzy text matching.
 2. **Pipeline + config wiring.**
    - `pipeline.process_file()`: after transcription, before `align()`, when diarization ran and `forced_alignment` resolves on. In `parallel_stages` mode it runs in the main process after both futures return (it needs only the WAV and the segments).
-   - After the progress bar, log one summary line: words re-timed, words kept, time taken.
    - The MLX path (Apple Silicon) yields the same `Word` objects; alignment runs on MPS.
    - Config key, web Config page field, `wisper transcribe --forced-align/--no-forced-align`. `wisper setup` pre-downloads the model when enabled.
    - Measurement scripts in `scripts/` (see Decisions), documented in `docs/`.
