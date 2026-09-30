@@ -419,25 +419,221 @@ Nothing else changes; the wire protocol is the stable interface.
 
 ---
 
-## Storage — SQLite migration (future consideration)
+## Storage — SQLite migration (plan, awaiting review)
 
-Today files are the database: `speakers.json` + `.npy` embeddings, `campaigns.json`, `recordings.json`, `.md` transcripts with `.summary.md` / `_diar.json` / excerpt sidecars, and an in-memory job queue.
+Branch `feat/sqlite-storage`. Plan only. The schema below is a **DRAFT**; nothing is final until the open questions at the end are answered.
 
-**Why it might be worth it later:**
-- Transactional writes across related data (`campaigns.json` and `speakers.json` can drift on a mid-write crash).
-- Referential integrity: transcripts and campaigns are linked only by stem, so every delete path must remember to unlink. Three didn't (fixed 2026-09-30 with `_delete_transcript_companions()`; the campaign page now marks missing entries). A foreign key would make this class of bug impossible.
-- Persistent job history across restarts.
-- Relational queries ("all transcripts for a speaker", "jobs by campaign").
-- One source of truth instead of a growing set of sidecars.
+### Why, and what SQLite does and doesn't fix
 
-**Why not now:**
-- Needs a one-time migration for existing installs.
-- `.npy` embeddings stay on disk regardless.
-- Loses "just open the file" inspectability.
-- Schema migrations become ongoing maintenance.
-- A jobs-only SQLite hybrid was rejected: two storage patterns is worse than one.
+Transcripts, campaigns, recordings, and journals are linked by transcript stem across separate files, so every delete path has to remember every link. #64 fixed three that didn't. Other links nothing cleans up today:
+- `Recording.transcript_path` (absolute path) and status `transcribed` survive a delete from `/transcripts`.
+- `journaled_sessions` in `campaigns/<slug>/journal.md` frontmatter keeps deleted stems.
+- `recordings.json` `discord_speakers` values aren't rekeyed by profile rename.
+- `pipeline.py` associates a campaign with a stem written to *any* `-o` directory, so the web UI, which only sees `get_output_dir()`, shows it as missing.
 
-**Revisit when:** multi-user or multi-process writes are needed, job history across restarts becomes a user need, or another cross-cutting JSON file appears.
+Other gains:
+- **Cross-process safety.** `_campaigns_lock`, `_profiles_lock`, and the per-recording mutex are `threading.Lock`s, so a CLI process and the server (or `--workers N`) can already lose each other's updates. `campaigns.json` and `speakers.json` are also written in place, not atomically. SQLite transactions fix both.
+- **Job history across restarts,** which also keeps the evidence the open "missing transcript file" bug lost on restart.
+- **Relational queries** without loading and scanning every JSON file.
+
+**Foreign keys alone don't close the bug class:**
+1. SQLite ships with `PRAGMA foreign_keys` **off**, and it is set per connection. Every connection must go through one `db.connect()` that turns it on, and a test must enforce that.
+2. Files are deleted out of band: Finder, Obsidian, a different launch CWD, an unmounted Docker volume. A foreign key can't see that, so a **reconcile pass** is still needed (see "Transcript identity").
+3. A write that touches both a row and a file can't be atomic. One ordering rule applies everywhere: **the `.md` is the existence marker, the row follows it, and companion files follow the row.** Deleting a transcript: unlink the `.md`, delete the row in one transaction (the cascade removes campaign, journal, and speaker rows and nulls recording and job links), then unlink companions best-effort. Companions a crash leaves behind are swept by reconcile.
+
+Costs:
+- A one-time import on every existing install.
+- Ongoing schema migrations.
+- Losing "just open the JSON" inspectability (partly restored by `wisper db dump`).
+- Hybrid storage between phases (see "Phases").
+
+### What moves and what stays
+
+| Data | Decision | Why |
+|------|----------|-----|
+| `speakers.json` | **DB** (`profiles`) | Relational: rosters, Discord bindings, and recordings reference it. |
+| `.npy` embeddings (256 float32, 1 KB) | **DB BLOB** recommended (open question 3) | Keeps vector, `embedding_space` tag, and EMA update atomic with the row. Rename stops moving files. |
+| `<key>.mp3` reference clips | File | Media, served by a route. Keyed by profile id, so rename doesn't move it. |
+| `campaigns.json` | **DB** (`campaigns`, `campaign_members`, `campaign_transcripts`) | The core relational data. |
+| `journal.md` body | File | Obsidian-ready product the user reads. |
+| `journaled_sessions` | **DB** (`journal_entries`) | A stem list, so it becomes a foreign key. The frontmatter copy is open question 10. |
+| `<stem>.md` transcripts | File, plus a DB **registry row** | The file is the product, edited in Obsidian and synced. The row is the identity that links point at. Listing still reads frontmatter from disk, so there is no cached title to go stale. |
+| `.summary.md`, excerpt `.mp3`/`.txt`, source audio copy | File | Product or media. Existence is checked on disk. |
+| `_diar.json` | Split recommended (open question 4) | `speaker_map`, `speaker_map_source`, and per-label embeddings are relational and go to `transcript_speakers`. `diarization_segments` (hundreds of KB, never queried) goes to a JSON column or stays in a slimmed sidecar. |
+| `recordings.json` + `metadata.json` | **DB** (`recordings`, `recording_segments`, `recording_markers`) | Kills the `save_recording_merged()` re-read dance, since appends become INSERTs. |
+| WAV segments, `combined.wav`, `live_transcript.md` | File | Media. |
+| Job queue | In-memory runtime, plus a DB **history projection** | Events, closures, and cancel flags can't persist. Same DB file, not a jobs-only store. |
+| `config.toml`, `server.json` | File | Hand-edited, holds secrets, or is a runtime pointer. Out of scope. |
+
+### Schema (DRAFT, for discussion)
+
+One file, `<data dir>/wisper.db`. Surrogate integer ids for everything user-renamable, so a rename is one `UPDATE`. Every stored path is **relative, POSIX-separated, and resolved against a named root**, never absolute, so the same DB works on host and Docker and on Windows.
+
+```
+meta(key PK, value)                     -- output_root_hint, imported_at, …
+profiles(id PK, key UNIQUE, display_name, role, notes, enrolled_date,
+         enrollment_source, embedding BLOB NULL, embedding_space)
+campaigns(id PK, slug UNIQUE, display_name, created)
+campaign_members(campaign_id FK→campaigns CASCADE, profile_id FK→profiles CASCADE,
+                 role, character, discord_user_id, PK(campaign_id, profile_id))
+transcripts(id PK, stem UNIQUE, created_at, missing_since NULL)   -- stem is relative to the output root
+campaign_transcripts(campaign_id FK CASCADE, transcript_id FK CASCADE UNIQUE, position)
+                                        -- UNIQUE(transcript_id) = one campaign per transcript
+journal_entries(campaign_id FK CASCADE, transcript_id FK CASCADE, position, folded_at)
+transcript_speakers(transcript_id FK CASCADE, label, display_name, source,
+                    embedding BLOB NULL, embedding_space, PK(transcript_id, label))
+transcript_diarization(transcript_id PK FK CASCADE, segments_json, audio_rel_path NULL)
+recordings(id TEXT PK uuid, campaign_id FK SET NULL, transcript_id FK SET NULL, status,
+           source, name, started_at, ended_at, voice_channel_id, guild_id, devices_json,
+           combined_rel_path, notes)
+recording_speakers(recording_id FK CASCADE, discord_user_id, profile_id FK SET NULL NULL)
+                                        -- NULL profile = unbound speaker
+recording_segments(recording_id FK CASCADE, idx, stream, started_at, duration_s, rel_path, finalized)
+recording_markers(recording_id FK CASCADE, timestamp, elapsed_s)
+recording_rejoins(recording_id FK CASCADE, timestamp, close_code, attempt_number)
+jobs(id TEXT PK uuid, type, status, created_at, started_at, finished_at, error_code,
+     transcript_id FK SET NULL, campaign_id FK SET NULL, recording_id FK SET NULL,
+     params_json, log_tail)
+```
+
+Alternatives held open: keep embeddings as `.npy` (drop the BLOB columns); keep `diarization_segments` in the sidecar (drop `transcript_diarization`); key `recording_speakers` by profile key text (no FK). When a transcript is deleted, `recordings.transcript_id` becomes NULL, and app code reverts the status `transcribed` → `completed` in the same transaction, so the Transcribe button comes back (open question 8).
+
+### Transcript identity (settle before Phase 2)
+
+Today "a transcript" is `get_output_dir()/<stem>.md`. That resolves to `./output` relative to the **CWD** when that directory exists, and to `data_dir/output` otherwise. In Docker it is `/app/output`, a different bind mount from `/data`. So the same DB can see different transcript roots depending on where it was launched.
+
+Proposed rules:
+1. The registry holds only transcripts under the resolved output root, keyed by stem. That is the web UI's scope today, and stems are unique there.
+2. `meta.output_root_hint` records the resolved root. When a later launch resolves a different root, the app logs a warning and shows a banner. It **never** marks rows missing because of the change, so launching from another directory can't wipe campaign associations.
+3. **Reconcile** (at startup and on list pages, which already glob): an unregistered `.md` gets a new row; a row whose `.md` is gone gets `missing_since` set but keeps its campaign position (the campaign page already renders missing entries). A reappearing file clears the flag. Orphaned companions with no `.md` are deleted. Rows are never deleted automatically (open question 5).
+4. `wisper transcribe -o elsewhere --campaign X`: register and associate only when the output lands under the output root. Otherwise warn that the web UI won't see it (open question 2).
+
+### Migrating existing installs
+
+- **Mechanism.** `db.py` holds an ordered list of Python migration functions, versioned by `PRAGMA user_version`. The stdlib `sqlite3` module is enough: no ORM, no Alembic, no new dependency. Connections use Python 3.12+ `autocommit=True` with an explicit `BEGIN IMMEDIATE`, avoiding the legacy implicit-transaction mode.
+- **Each phase is one migration:** create its tables, then import its legacy files if present, in **the same `BEGIN IMMEDIATE` transaction that bumps `user_version`**. The result is all or nothing.
+- **Idempotency.** Re-running is a no-op because the version already moved. If the server and a CLI command start at the same moment, the second blocks on the write lock, then sees the new version and skips.
+- **Downgrade guard.** A DB whose `user_version` is newer than the code knows makes the app refuse to start, with a clear message. An old build must not write to a newer schema.
+- **Backup.** Before a migration that imports legacy data, copy those legacy files into `<data dir>/backups/pre-sqlite-v<N>-<timestamp>/`. Before any later schema migration, snapshot `wisper.db` with the sqlite3 backup API. Audio is never copied.
+- **Dirty data** (existing installs contain exactly what foreign keys forbid), handled without aborting:
+  - A campaign stem with no `.md` is imported as a registry row with `missing_since` set, so order is kept.
+  - A stem listed in two campaigns stays in the first; the rest are reported.
+  - A member whose profile key isn't in `speakers.json` is dropped and reported.
+  - `journaled_sessions` entries with no transcript are dropped and reported.
+  - A sidecar or metadata file that fails to parse is skipped and reported.
+- **Unparseable top-level JSON** (`speakers.json`, `campaigns.json`) rolls the transaction back, leaves `user_version` unchanged, and stops startup with a message naming the file and the backup. Importing an empty store instead would silently lose data.
+- **Import report** goes to the log and to `import-report.txt` in the backup dir.
+- **Legacy files after import:** rename them to `*.imported` (recommended) or leave them in place (open question 6). If they stay, a downgraded build silently runs on stale data and later writes are lost. If they're renamed, it sees an empty store, which is loud.
+- **Rollback:** restore the backup dir and reinstall the old version. Changes made after the migration are lost unless `wisper db export-legacy` exists (open question 6).
+
+### Concurrency
+
+- **Connection per unit of work.** `with db.transaction(data_dir) as conn:` opens, sets pragmas (`foreign_keys=ON`, `busy_timeout=5000`), runs, commits, closes. There is no module-level cached connection, so `WISPER_DATA_DIR` and the per-test data dir keep working, and threads never share a connection (event loop, `to_thread` worker, capture threads, tick thread).
+- **Every load-modify-save uses `BEGIN IMMEDIATE`.** A deferred read-then-write gets `SQLITE_BUSY` on lock upgrade without waiting on `busy_timeout`. The `threading.Lock`s go away; the DB lock also covers other processes.
+- **Never hold a write transaction across ML or LLM work.** This is today's "not around embedding extraction" rule, generalized. For example, `relabel_campaign()` computes first, then writes renames in one short transaction.
+- **Capture hot path.** `record_completed_wav_segment()` and marker appends are single-row autocommit INSERTs, once per 60 s rotation. They keep the "never raises" contract: if busy past a short timeout, log and continue, and startup reconcile rebuilds the manifest from the `NNNN.wav` files on disk.
+- **The one-job-at-a-time invariant is unchanged.** It protects the model globals, not storage, and the DB neither needs nor relaxes it. The worker writes job transitions (pending → running → terminal) as short transactions.
+- **Async routes** call sync `sqlite3` inline. That costs about the same as today's inline JSON reads (sub-millisecond at this scale). Revisit only if a query gets slow.
+- **Journal mode.** Rollback journal (`DELETE`) is recommended as the default. Write volume is tiny, it works on any filesystem, and WAL needs shared memory that can misbehave on network or virtualized filesystems. WAL is the upgrade if read/write contention is ever observed (open question 7).
+- **Docker.** The DB lives in `/data`, next to `config.toml`. Transcripts stay on the `/app/output` mount and recordings on the nested `/data/recordings` mount, which is why stored paths are relative to a named root. Needs verification, not assumption: a `docker compose run wisper …` CLI container and `wisper-web` sharing `./data`, on Linux and on Docker Desktop for Mac. A host process and a container writing the same bind-mounted DB at once is unsupported; the docs will say so.
+- **Windows.** An open DB holds a file lock, so docs note "stop the server before moving or restoring the data dir". Stored relative paths use POSIX separators and are converted with `pathlib` on read. `%APPDATA%` is local, not a synced folder, but a data dir redirected into OneDrive via `WISPER_DATA_DIR` gets a docs warning.
+
+### Phases (each merges separately and ships its migration, tests, and docs)
+
+Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → `dict[str, SpeakerProfile]`, `load_campaigns()`, `get_transcripts_for_campaign()`, `load_recordings()`, …). Routes, the CLI, and the CLAUDE.md mock targets therefore barely change in the early phases, and most of the ~200 test references keep working. Internals switch from JSON to SQL. A later cleanup phase can narrow the APIs (e.g. drop whole-store `save_*`).
+
+**Phase 0 — Foundation (no data moves).**
+- New `db.py`: `connect()`, `transaction()`, migrations runner, downgrade guard, backup helper.
+- `wisper db status | backup | dump`.
+- Migrations run on first `connect()`; startup in `web/app.py` calls it early so a failure is reported before serving.
+- Tests: `test_db.py`, plus a guard test that no module outside `db.py` calls `sqlite3.connect`, in the spirit of `test_tailwind.py`.
+- Docs: architecture.md (module map; "Database" replaces "File-store locking"), `docs/cli-reference.md`, `docs/configuration.md` (data layout, backup).
+
+**Phase 1 — Profiles + campaigns** (coupled through `rename_profile()` → `rekey_member()`).
+- Import `speakers.json` and `campaigns.json`. `campaign_transcripts` temporarily holds stem text plus position.
+- Embeddings to BLOB, if open question 3 says yes: import `.npy`, and `load_profile_embedding()`/`update_embedding()` read and write the column.
+- Rename becomes one transaction across profile and memberships.
+- Changes: `speaker_manager.py`, `campaign_manager.py`. `web/routes/speakers.py` and `campaigns.py` change only if an API narrows.
+- Tests: rewrite `test_speaker_manager.py`/`test_campaign_manager.py` internals, plus importer tests (including the dirty-data cases above).
+
+**Phase 2 — Transcript registry and links (fixes the #64 class).**
+- New `transcript_store.py`: `register()`, `reconcile()`, and `delete_transcript()` as the only delete path, following the ordering rule. Everything that unlinks a `.md` calls it.
+- Migration rebuilds `campaign_transcripts` onto `transcript_id`, imports `journaled_sessions` into `journal_entries`, and links recordings' `transcript_path` if Phase 4 has landed (otherwise Phase 4 does it).
+- Changes:
+  - `web/routes/transcripts.py`: single delete, bulk delete, list, and campaign assign; `_delete_transcript_companions()` moves into the store.
+  - `web/routes/record.py`: `_purge_recording_files()`.
+  - `web/routes/campaigns.py`: the missing-entry rendering reads `missing_since`.
+  - `pipeline.py`: CLI registration and the `--campaign` rule.
+  - `web/jobs.py`: register on completion.
+  - `journal.py`: `unjournalled_sessions()`, `update_journal()`, `rebuild_campaign()`.
+  - `cli.py`: `transcripts list/move`, `campaigns journal/reorder`.
+- Tests: cascade tests for every delete path; reconcile (external delete keeps order; reappearing file clears the flag; an output-root change doesn't mark rows missing); a guard test that no module outside `transcript_store.py` unlinks `*.md` in the output dir.
+
+**Phase 3 — Diarization sidecar data** (shape decided by open question 4).
+- Import `_diar.json` into `transcript_speakers`/`transcript_diarization`; the sidecar is slimmed or removed.
+- Changes: `jobs._write_enrollment_sidecar()`, `web/enroll_shared.py` (`resolve_current_names()`, `apply_renames()`), `speaker_registry.py` (`_load_sidecar`/`_write_sidecar`, `embeddings_to/from_sidecar`), and `web/routes/transcripts.py` and `transcribe.py` (enroll wizard).
+- `apply_renames()` rewrites the `.md` and then updates `speaker_map` rows. Under the ordering rule the file comes first. A crash in between leaves the rows stale, so the existing interval-matching fallback stays as the repair path.
+- CLAUDE.md's "`_diar.json` carries the authoritative `speaker_map`" gotcha is rewritten to name the table.
+- Tests: the largest fixture churn (36 direct `_diar.json` writes across 6 test files), moved to a helper that seeds the DB.
+
+**Phase 4 — Recordings.**
+- Import `recordings.json`, each `metadata.json`, and `discord_speakers` → `recording_speakers.profile_id`, which fixes rename-not-rekeying for free.
+- Delete `save_recording_merged()` and the per-recording mutex; `reconcile_on_startup()` becomes one `UPDATE`.
+- Changes: `recording_manager.py`, `web/discord_bot.py`, `web/local_capture.py` (hot-path contract above), `web/routes/record.py`, and the `wisper record` CLI.
+- Tests: `test_recording_manager.py`, record routes, and a hot-path test with the DB held busy.
+
+**Phase 5 — Job history.**
+- Write-through from `JobQueue` at submit and at each status transition. On terminal status, store `error_code` (the same generic codes, never exception text) and the last ~200 log lines.
+- `params_json` holds an allowlisted subset of kwargs: no secrets, no temp paths.
+- At startup, pending and running rows become `failed` / "Interrupted by restart". They are never auto-resumed: the uploads are gone and the jobs are multi-hour GPU work.
+- The in-memory 50-job cap stays; DB retention is open question 9.
+- UI: a job-history view on the dashboard or jobs page, and "jobs for this transcript/campaign" links.
+- Changes: `web/jobs.py`, `web/routes/dashboard.py` and `transcribe.py`, `docs/web-ui.md`.
+
+**Phase 6 — Cleanup.**
+- Remove the remaining JSON code paths (the importers stay, frozen, for old installs).
+- Narrow APIs where the stability shims are no longer needed.
+- Final pass over architecture.md, `docs/`, and CLAUDE.md.
+
+### Test strategy
+
+- The autouse `_isolated_data_dir` fixture already gives each test its own `WISPER_DATA_DIR`, so each test gets its own `wisper.db` for free, provided `db.py` caches nothing across calls. The cost is migrations on first connect in each test (a few ms). If the suite slows noticeably, add a session-scoped template DB that is copied per test.
+- **`test_db.py`:**
+  - Fresh install migrates to the latest version.
+  - A re-run is a no-op.
+  - The downgrade guard refuses a newer DB.
+  - `foreign_keys` is on for every connection `db.connect()` returns.
+  - `BEGIN IMMEDIATE` under two threads: the second waits instead of erroring.
+  - One cross-process import race under spawn (the macOS default): exactly one import happens.
+- **Importer tests** use a synthetic legacy data dir built by a frozen copy of today's serializers (`tests/_legacy_store.py`), so the tests don't change when the managers do. Cases: clean import, each dirty-data case, a malformed top-level file (rolls back, version unchanged, backup present), and a re-run.
+- **Invariant guards:** no raw `sqlite3.connect` outside `db.py`, and no `.md` unlink outside `transcript_store.py`.
+- **Cross-platform paths:** relative-path round-trips through `PureWindowsPath`/`PurePosixPath`, so the Windows logic is tested on macOS and Linux CI.
+- No CI change: `sqlite3` is stdlib, and the bundled SQLite on 3.13/3.14 (macOS, Windows, and Debian slim) supports `RETURNING`, `DROP COLUMN`, and `STRICT`.
+- Existing test rules still hold: no GPU, network, or real audio, and synthetic data only.
+
+**Docs touched across the phases:**
+- architecture.md: Module Map; Data Storage tree and "Output directory"; "File-store locking" → "Database"; Job Queue ("Nothing persists across restarts" changes in Phase 5); Test Strategy; Known Constraints (host-plus-container DB writes, WAL).
+- `docs/configuration.md`: data layout, backups, the `WISPER_DATA_DIR` + synced-folder warning.
+- `docs/cli-reference.md`: `wisper db`, and the `transcribe --campaign` rule.
+- `docs/docker.md`: DB location, backup, CLI and web containers sharing `./data`.
+- `docs/scenarios.md`: restore from backup, moved output dir, externally deleted transcripts.
+- `docs/web-ui.md`: missing transcripts, job history.
+- CLAUDE.md: new gotchas (connect only through `db.py`; `BEGIN IMMEDIATE`; no transaction across ML work; delete transcripts only via `transcript_store`; `speaker_map` location).
+- README: unchanged.
+
+### Open questions
+
+1. **Output root.** Keep the CWD-dependent `./output` vs `data_dir/output` resolution with the drift warning (recommended for now), or make the output dir an explicit config key? The config key is a behaviour change, but it removes the ambiguity for good.
+2. **CLI `--campaign` outside the output root.** Warn and skip the association (recommended), or register external transcripts with an absolute path the web UI can't serve?
+3. **Embeddings.** Move them into the DB as BLOBs (recommended), or keep `.npy` files as the old plan assumed?
+4. **`_diar.json`.** (a) Move everything, with segments as a JSON column. (b) Move `speaker_map`, provenance, and embeddings; keep a slim segments-only sidecar (recommended). (c) Leave the sidecar and only add the registry row.
+5. **Missing transcripts.** Keep flagged rows until the user removes them (recommended), auto-purge after N days, or offer a "remove missing" button on the campaign page as well?
+6. **Legacy JSON after import.** Rename to `*.imported` (recommended) or leave in place? Is `wisper db export-legacy` (write the old JSON layout back, for downgrade and inspection) worth building, or is restore-from-backup enough?
+7. **Journal mode.** Rollback journal everywhere (recommended), or WAL once the Docker Desktop check passes?
+8. **Deleting a recording's transcript.** Revert the recording to `completed` so it can be re-transcribed (recommended), or keep `transcribed` with no link?
+9. **Job history retention.** Keep all, the last N (e.g. 500), or the last 90 days? Store the log tail, or only status and error code?
+10. **Journal frontmatter.** Once `journal_entries` is authoritative, stop writing `journaled_sessions` into `journal.md`, or keep writing it as a read-only mirror for Obsidian readers?
+11. **Merge cadence.** Phases 1–5 each leave `main` in a hybrid state, which is the "two patterns" cost. Merge each phase to `main` as it lands, or stack phase PRs onto `feat/sqlite-storage` and merge to `main` once Phase 2 (the bug-class fix) or Phase 4 is done?
 
 ---
 
