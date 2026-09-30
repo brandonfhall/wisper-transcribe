@@ -188,6 +188,21 @@ def test_undecodable_file_is_indexed_once(out):
     assert si.run_backfill() == 0
 
 
+def test_unreadable_file_is_indexed_empty(out, monkeypatch):
+    _write(out, "s1")
+    ts.reconcile(out)
+    real = Path.read_text
+
+    def locked(self, *a, **k):
+        if self.name == "s1.md":
+            raise PermissionError("denied")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", locked)
+    assert si.run_backfill() == 1
+    assert si.progress() == (1, 1) and _count("search_blocks") == 0
+
+
 def test_delete_cascades_to_fts(out):
     _add(out, "s1", summary=SUMMARY)
     _add(out, "s2")

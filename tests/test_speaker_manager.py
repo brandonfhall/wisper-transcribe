@@ -64,7 +64,8 @@ def test_load_profiles_empty(tmp_path):
 
 def test_save_and_load_profiles(tmp_path):
     from wisper_transcribe.models import SpeakerProfile
-    from wisper_transcribe.speaker_manager import load_profiles, save_profiles
+    from wisper_transcribe.speaker_manager import load_profiles
+    from tests._seed import save_profiles
 
     vec = np.full(256, 1 / 16, dtype=np.float32)
     profiles = {
@@ -861,8 +862,8 @@ def test_remove_profile_and_enroll_speaker_do_not_lose_writes_concurrently(tmp_p
         enroll_speaker,
         load_profiles,
         remove_profile,
-        save_profiles,
     )
+    from tests._seed import save_profiles
     from wisper_transcribe.models import SpeakerProfile
 
     n = 10
@@ -989,7 +990,8 @@ def test_update_embedding_replaces_legacy_profile_and_retags(tmp_path):
 
 
 def test_embedding_space_round_trips_through_save(tmp_path):
-    from wisper_transcribe.speaker_manager import load_profiles, save_profiles
+    from wisper_transcribe.speaker_manager import load_profiles
+    from tests._seed import save_profiles
 
     _write_profile(tmp_path, "alice", np.ones(256))
     _write_profile(tmp_path, "old", np.ones(512), embedding_space=None)
@@ -1001,7 +1003,8 @@ def test_embedding_space_round_trips_through_save(tmp_path):
 
 def test_save_profiles_keeps_ids_and_deletes_absent(tmp_path):
     from wisper_transcribe import db
-    from wisper_transcribe.speaker_manager import load_profiles, save_profiles
+    from wisper_transcribe.speaker_manager import load_profiles
+    from tests._seed import save_profiles
 
     _write_profile(tmp_path, "alice", np.ones(4))
     _write_profile(tmp_path, "bob", np.ones(4))

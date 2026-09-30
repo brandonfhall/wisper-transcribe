@@ -181,7 +181,8 @@ def _get_safe_content_path(name: str, suffix: str) -> Path | None:
     if not base_dir.endswith(os.sep):
         base_dir += os.sep
 
-    target_path = os.path.abspath(os.path.join(str(out_dir), f"{safe_name}{suffix}"))
+    target_path = transcript_store.existing_form(
+        os.path.abspath(os.path.join(str(out_dir), f"{safe_name}{suffix}")))
     if not target_path.startswith(base_dir):
         return None
 

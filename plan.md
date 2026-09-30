@@ -486,11 +486,14 @@ Branch `feat/sqlite-storage`, pushed; one PR to `main` at the end (ask the user 
 ### Remaining phases
 
 **Phase 7 — Cleanup.**
-- **Known issues from Phase 6 to resolve here:**
-  - The search progress counter can stick at "Indexing N of M" when a present transcript's `.md` can't be opened by its NFC stem, for example an NFD filename on ext4 (files synced from a Mac into Docker), or a permission error. `reindex()` returns False and the row stays unindexed. First check whether `delete_transcript()` and the other `safe_path(nfc(stem))` readers fail the same way. If so, fix the NFC/NFD handling once for all of them. If not, record an "unindexable" state so the counter excludes it.
-  - `test_recording_manager.py::test_concurrent_appends_are_all_kept` flaked once on the Windows job: 15 threads, 30 hot-path transactions, "database is locked", 11 of 15 kept. The hot path gives up after 500 ms by design. Decide whether the test's contention is realistic (live capture has one writer). Either make the test deterministic, or make the hot path retry a dropped marker, which reconcile can't restore.
-- Remove the remaining JSON code paths (the importers stay, frozen, for old installs).
-- Narrow APIs where the stability shims are no longer needed.
+- **7a (code cleanup, done):**
+  - Whole-store `save_profiles()`/`save_campaigns()` moved to `tests/_seed.py`; they had no app callers.
+  - Wizard renames use `set_speaker_names()` and the relabel backfill uses `set_speaker_embeddings()`, instead of rewriting every speaker row, embedding, and the segments file through `write_sidecar()`.
+  - Capture code (Discord, local, the bind-speaker job step) no longer calls whole-object `save_recording()`, which could revert name or notes edited mid-session. It uses `update_recording_status()`, the new `bind_recording_speaker()`, and `append_rejoin()`, and a guard test enforces this.
+  - `append_marker()` waits the normal busy timeout (a web request; a dropped marker can't be restored). The flaky Windows concurrency test now asserts that markers are all kept and that segment rows dropped on the hot path are restored by startup reconcile.
+  - NFD filenames on ext4: `transcript_store.existing_form()` in both path guards. An unreadable transcript is indexed as empty, so the counter can't stick.
+  - Kept on purpose: `read_sidecar()`'s old-field fallback and `_companion_paths()`'s `input_path` fallback. They are the only copy of speaker data when v4 ran with the transcripts drive unmounted. Stale JSON-era comments fixed.
+  - Found by the new test order: `_silence_logger()` skipped a second call entirely once its filter was attached, so after torch's import reset the `torch` level, child loggers leaked WARNINGs (a test-order failure, also possible at runtime). Every call now reasserts the level.
 - **Documentation review, top to bottom.** Read every doc in full, not just the sections each phase touched: README.md, architecture.md, CLAUDE.md, `.claude/rules/`, every file in `docs/`, and the SQLite section of plan.md (removed once merged, per the Documentation Rules). Check each against the merged code for:
   - stale JSON-era descriptions: `speakers.json`, `campaigns.json`, `recordings.json`, `_diar.json` as the source of truth, `journaled_sessions` frontmatter, `threading.Lock` file-store locking, the CWD `./output` rule, "nothing persists across restarts";
   - wrong paths, commands, flags, config keys, and env vars;

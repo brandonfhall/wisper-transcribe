@@ -1424,7 +1424,8 @@ def test_speakers_rename_collision_redirects_generic_error(client, tmp_path):
     """Renaming onto an existing key fails with a generic error code —
     the CLI's collision guard, without reflecting the submitted name."""
     from wisper_transcribe.models import SpeakerProfile
-    from wisper_transcribe.speaker_manager import load_profiles as _load, save_profiles as _save
+    from wisper_transcribe.speaker_manager import load_profiles as _load
+    from tests._seed import save_profiles as _save
 
     emb_dir = _seed_profile_store(tmp_path)
     profiles = _load(data_dir=tmp_path)
@@ -1949,7 +1950,7 @@ def test_campaign_add_member_persists(client, tmp_path, monkeypatch):
     # Create real campaign + profile
     (tmp_path / "profiles" / "embeddings").mkdir(parents=True)
     from wisper_transcribe.campaign_manager import create_campaign
-    from wisper_transcribe.speaker_manager import save_profiles
+    from tests._seed import save_profiles
     create_campaign("Test Game", data_dir=tmp_path)
     save_profiles(
         {"alice": SpeakerProfile(
@@ -1995,7 +1996,7 @@ def test_campaign_remove_member_does_not_delete_profile(client, tmp_path, monkey
     import numpy as np
     from wisper_transcribe.models import SpeakerProfile
     from wisper_transcribe.campaign_manager import create_campaign, add_member
-    from wisper_transcribe.speaker_manager import save_profiles
+    from tests._seed import save_profiles
 
     (tmp_path / "profiles" / "embeddings").mkdir(parents=True)
     save_profiles(

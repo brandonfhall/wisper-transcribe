@@ -169,40 +169,6 @@ def load_campaigns(data_dir: Optional[Path] = None) -> dict[str, Campaign]:
     return campaigns
 
 
-def save_campaigns(campaigns: dict[str, Campaign], data_dir: Optional[Path] = None) -> None:
-    """Make the campaign store exactly ``campaigns``, in one transaction.
-
-    Campaigns are matched by slug and updated in place; slugs not in
-    ``campaigns`` are deleted. Members must be existing profiles (``KeyError``
-    otherwise); a transcript listed here moves out of any other campaign.
-    Prefer the targeted functions below; this whole-store form remains for
-    callers and tests that build the store directly.
-    """
-    with db.transaction(data_dir) as conn:
-        existing = {r[0] for r in conn.execute("SELECT slug FROM campaigns")}
-        for slug in existing - set(campaigns):
-            conn.execute("DELETE FROM campaigns WHERE slug = ?", (slug,))
-        for slug, c in campaigns.items():
-            created = c.created if len(c.created or "") > 10 else (
-                f"{c.created}T00:00:00Z" if c.created else db.now_utc()
-            )
-            cid = conn.execute(
-                "INSERT INTO campaigns (slug, display_name, created_at) VALUES (?, ?, ?) "
-                "ON CONFLICT (slug) DO UPDATE SET display_name = excluded.display_name, "
-                "created_at = excluded.created_at RETURNING id",
-                (slug, c.display_name or slug, created),
-            ).fetchone()[0]
-            conn.execute("DELETE FROM campaign_members WHERE campaign_id = ?", (cid,))
-            for key, m in c.members.items():
-                conn.execute(
-                    "INSERT INTO campaign_members (campaign_id, profile_id, role, character, "
-                    "discord_user_id) VALUES (?, ?, ?, ?, ?)",
-                    (cid, _profile_id(conn, key), m.role or "", m.character or "",
-                     m.discord_user_id or None),
-                )
-            _write_order(conn, cid, [_transcript_id(conn, st) for st in c.transcripts])
-
-
 # ---------------------------------------------------------------------------
 # CRUD
 # ---------------------------------------------------------------------------

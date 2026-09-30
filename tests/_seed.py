@@ -8,7 +8,8 @@ import numpy as np
 
 from wisper_transcribe import db
 from wisper_transcribe.config import EMBEDDING_SPACE
-from wisper_transcribe.models import SpeakerProfile
+from wisper_transcribe import campaign_manager as cm, speaker_manager as sm
+from wisper_transcribe.models import Campaign, SpeakerProfile
 
 
 def unit(vec) -> np.ndarray:
@@ -112,3 +113,53 @@ def seed_recording(data_dir: Optional[Path] = None, *, status: str = "completed"
         update_recording_status(rec.id, status, data_dir,
                                 ended_at=datetime.now(timezone.utc))
     return load_recording(rec.id, data_dir)
+
+
+# Whole-store replace, for tests that build a store directly.
+
+def save_profiles(profiles: dict[str, SpeakerProfile], data_dir: Optional[Path] = None) -> None:
+    """Make the profile store exactly ``profiles``, in one transaction.
+
+    Existing keys are updated in place (memberships kept); keys not in
+    ``profiles`` are deleted, which also drops their campaign memberships.
+    Test seeding only; the app uses the targeted functions.
+    """
+    with db.transaction(data_dir) as conn:
+        existing = {r[0] for r in conn.execute("SELECT key FROM profiles")}
+        for key in existing - set(profiles):
+            conn.execute("DELETE FROM profiles WHERE key = ?", (key,))
+        for key, p in profiles.items():
+            sm._upsert_profile(conn, key, p)
+
+
+def save_campaigns(campaigns: dict[str, Campaign], data_dir: Optional[Path] = None) -> None:
+    """Make the campaign store exactly ``campaigns``, in one transaction.
+
+    Campaigns are matched by slug and updated in place; slugs not in
+    ``campaigns`` are deleted. Members must be existing profiles (``KeyError``
+    otherwise); a transcript listed here moves out of any other campaign.
+    Test seeding only; the app uses the targeted functions.
+    """
+    with db.transaction(data_dir) as conn:
+        existing = {r[0] for r in conn.execute("SELECT slug FROM campaigns")}
+        for slug in existing - set(campaigns):
+            conn.execute("DELETE FROM campaigns WHERE slug = ?", (slug,))
+        for slug, c in campaigns.items():
+            created = c.created if len(c.created or "") > 10 else (
+                f"{c.created}T00:00:00Z" if c.created else db.now_utc()
+            )
+            cid = conn.execute(
+                "INSERT INTO campaigns (slug, display_name, created_at) VALUES (?, ?, ?) "
+                "ON CONFLICT (slug) DO UPDATE SET display_name = excluded.display_name, "
+                "created_at = excluded.created_at RETURNING id",
+                (slug, c.display_name or slug, created),
+            ).fetchone()[0]
+            conn.execute("DELETE FROM campaign_members WHERE campaign_id = ?", (cid,))
+            for key, m in c.members.items():
+                conn.execute(
+                    "INSERT INTO campaign_members (campaign_id, profile_id, role, character, "
+                    "discord_user_id) VALUES (?, ?, ?, ?, ?)",
+                    (cid, cm._profile_id(conn, key), m.role or "", m.character or "",
+                     m.discord_user_id or None),
+                )
+            cm._write_order(conn, cid, [cm._transcript_id(conn, st) for st in c.transcripts])

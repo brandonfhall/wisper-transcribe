@@ -309,18 +309,23 @@ def test_stale_save_keeps_markers_segments_and_rejoins_appended_meanwhile(tmp_pa
 
 
 def test_concurrent_appends_are_all_kept(tmp_path):
+    """Markers wait out contention and are all kept. A segment row the hot
+    path drops after its short busy timeout is restored from the file on
+    disk by startup reconcile, so every segment ends up recorded either way."""
     rec = _make_recording(tmp_path)
+    for i in range(15):
+        _write_wav(rm.segment_path_for(rec.id, i, tmp_path))
 
     def _append(i):
-        append_segment(rec.id, SegmentRecord(
-            index=i, stream="mixed", started_at=datetime.now(timezone.utc), duration_s=60.0,
-            path=rm.segment_path_for(rec.id, i, tmp_path), finalized=True), tmp_path)
+        rm.record_completed_wav_segment(rec.id, rm.segment_path_for(rec.id, i, tmp_path),
+                                        datetime.now(timezone.utc), finalized=True,
+                                        data_dir=tmp_path)
         append_marker(rec.id, tmp_path)
 
     _join([threading.Thread(target=_append, args=(i,)) for i in range(15)])
-    r = load_recordings(tmp_path)[rec.id]
-    assert len(r.segment_manifest) == 15
-    assert len(r.markers) == 15
+    assert len(load_recordings(tmp_path)[rec.id].markers) == 15
+    rm.reconcile_on_startup(tmp_path)
+    assert len(load_recordings(tmp_path)[rec.id].segment_manifest) == 15
 
 
 # ---------------------------------------------------------------------------
@@ -477,3 +482,44 @@ def test_recover_refuses_an_active_session(tmp_path):
 def test_recover_unknown_recording(tmp_path):
     with pytest.raises(KeyError):
         rm.recover_recording("00000000-0000-4000-8000-000000000000", tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Targeted writers used by capture code
+# ---------------------------------------------------------------------------
+
+def test_bind_recording_speaker_never_unbinds(tmp_path):
+    from ._seed import seed_profile
+    seed_profile("alice", data_dir=tmp_path)
+    rec = _make_recording(tmp_path)
+    rm.bind_recording_speaker(rec.id, "111", "", tmp_path)
+    assert load_recordings(tmp_path)[rec.id].unbound_speakers == ["111"]
+    rm.bind_recording_speaker(rec.id, "111", "alice", tmp_path)
+    rm.bind_recording_speaker(rec.id, "111", "", tmp_path)  # rejoin, unresolved
+    r = load_recordings(tmp_path)[rec.id]
+    assert r.discord_speakers == {"111": "alice"} and r.unbound_speakers == []
+    rm.bind_recording_speaker(rec.id, "not-a-number", "alice", tmp_path)
+    assert set(load_recordings(tmp_path)[rec.id].discord_speakers) == {"111"}
+
+
+def test_capture_writes_keep_edits_made_during_recording(tmp_path):
+    """The capture object is long-lived; its writes must not revert a name or
+    notes edited in the UI mid-session."""
+    rec = _make_recording(tmp_path, name="Session")
+    edited = load_recordings(tmp_path)[rec.id]
+    edited.notes = "the party split up"
+    edited.name = "Session 12"
+    save_recording(edited, tmp_path)
+    rm.bind_recording_speaker(rec.id, "111", "", tmp_path)
+    rm.append_rejoin(rec.id, RejoinAttempt(timestamp=datetime.now(timezone.utc), close_code=4000,
+                                           attempt_number=1), tmp_path)
+    rm.update_recording_status(rec.id, "completed", tmp_path, ended_at=datetime.now(timezone.utc))
+    r = load_recordings(tmp_path)[rec.id]
+    assert (r.name, r.notes, r.status) == ("Session 12", "the party split up", "completed")
+
+
+def test_capture_code_uses_targeted_writers():
+    src = Path(__file__).parent.parent / "src" / "wisper_transcribe" / "web"
+    offenders = [f.name for f in (src / "discord_bot.py", src / "local_capture.py", src / "jobs.py")
+                 if "save_recording(" in f.read_text(encoding="utf-8")]
+    assert offenders == []

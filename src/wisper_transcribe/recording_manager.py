@@ -263,6 +263,12 @@ def save_recording(recording: Recording, data_dir: Optional[Path] = None) -> Non
     """Persist a recording's own fields; add (never remove) its segment,
     marker, and rejoin rows.
 
+    For creating a recording and for edits made from a freshly loaded
+    object. Capture code holds a long-lived ``Recording`` whose name and notes
+    may be stale, so it uses the targeted writers instead
+    (``update_recording_status``, ``bind_recording_speaker``,
+    ``append_rejoin``, ``append_segment``, ``append_marker``); a test enforces it.
+
     Raises ValueError for values that are derived, not stored (a
     ``combined_path`` or segment path off the fixed layout).
     """
@@ -470,15 +476,38 @@ def append_marker(recording_id: str, data_dir: Optional[Path] = None) -> Marker:
 
     `elapsed_s` is derived from `started_at` (which never changes). Marker
     times carry microseconds, so two clicks in one second are two markers.
+    Not on the capture hot path (it's a web request), so it waits the normal
+    busy timeout: unlike a segment row, a dropped marker can't be restored.
     """
     now = datetime.now(timezone.utc)
-    with db.transaction(data_dir, busy_timeout_ms=HOT_PATH_BUSY_MS) as conn:
+    with db.transaction(data_dir) as conn:
         row = conn.execute("SELECT started_at FROM recordings WHERE id = ?", (recording_id,)).fetchone()
         if row is None:
             raise KeyError(f"Recording {recording_id!r} not found")
         conn.execute("INSERT OR IGNORE INTO recording_markers (recording_id, marked_at) VALUES (?, ?)",
                      (recording_id, _ts(now)))
     return Marker(timestamp=now, elapsed_s=(now - _dt(row["started_at"])).total_seconds())
+
+
+def bind_recording_speaker(recording_id: str, discord_user_id: str, profile_key: str = "",
+                           data_dir: Optional[Path] = None) -> None:
+    """Record that a Discord user was heard, bound to ``profile_key`` if given.
+
+    A binding is never undone: an empty ``profile_key`` leaves an existing
+    one in place. Unknown profile keys count as unbound. Runs on the capture
+    hot path (short busy timeout).
+    """
+    uid = str(discord_user_id)
+    if not uid.isdigit():
+        log.warning("Ignoring non-numeric Discord user id on recording %s", recording_id)
+        return
+    with db.transaction(data_dir, busy_timeout_ms=HOT_PATH_BUSY_MS) as conn:
+        conn.execute(
+            "INSERT INTO recording_speakers (recording_id, discord_user_id, profile_id) "
+            "VALUES (?, ?, ?) ON CONFLICT (recording_id, discord_user_id) DO UPDATE SET "
+            "profile_id = coalesce(excluded.profile_id, recording_speakers.profile_id)",
+            (recording_id, uid, _profile_id(conn, profile_key)),
+        )
 
 
 def append_rejoin(recording_id: str, attempt: RejoinAttempt, data_dir: Optional[Path] = None) -> None:

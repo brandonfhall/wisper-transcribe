@@ -8,6 +8,8 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
+from tests._seed import save_campaigns as _seed_save_campaigns
+
 from wisper_transcribe.config import EMBEDDING_SPACE
 from wisper_transcribe.formatter import to_markdown
 from wisper_transcribe.models import AlignedSegment
@@ -208,4 +210,4 @@ def test_path_like_stem_is_refused(world):
     campaigns = cm.load_campaigns(data)
     campaigns["game"].transcripts.append("../escape")
     with pytest.raises(sqlite3.IntegrityError):
-        cm.save_campaigns(campaigns, data)
+        _seed_save_campaigns(campaigns, data)

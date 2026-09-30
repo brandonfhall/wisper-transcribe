@@ -143,9 +143,9 @@ def reindex(stem: str, *, data_dir: Optional[Path] = None,
     One short transaction. Each file is stat'ed *before* it is read, and that
     stat is what's stored: a write landing in between leaves a mismatch that
     the next freshness check catches, never fresh-looking state over old
-    blocks. Undecodable bytes are replaced rather than failing, so a bad file
-    is indexed once instead of being retried forever. Returns False when the
-    transcript isn't registered or its ``.md`` is gone.
+    blocks. Undecodable bytes are replaced, and an unreadable file is indexed
+    as empty, so a bad file is indexed once instead of being retried forever.
+    Returns False when the transcript isn't registered or its ``.md`` is gone.
     """
     from .transcript_store import nfc
 
@@ -160,8 +160,11 @@ def reindex(stem: str, *, data_dir: Optional[Path] = None,
             continue
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
+        except OSError as exc:
+            # Indexed as empty rather than retried forever (the progress
+            # counter would never finish); a later change to it reindexes.
+            log.warning("Search index: can't read %s (%s); indexing it as empty", path.name, exc)
+            text = ""
         files[kind] = (st, _blocks_for(kind, text))
     if KIND_TRANSCRIPT not in files:
         return False

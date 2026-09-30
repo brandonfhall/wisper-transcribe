@@ -1362,16 +1362,11 @@ class JobQueue:
                 bind_discord_id,
                 load_campaigns,
             )
-            from wisper_transcribe.recording_manager import load_recordings, save_recording
+            from wisper_transcribe.recording_manager import bind_recording_speaker, load_recording
 
-            recordings = load_recordings(data_dir)
-            rec = recordings.get(p["recording_id"])
+            rec = load_recording(p["recording_id"], data_dir)
             if rec is not None:
-                rec.unbound_speakers = [
-                    uid for uid in rec.unbound_speakers if uid != p["discord_uid"]
-                ]
-                rec.discord_speakers[p["discord_uid"]] = p["profile_key"]
-                save_recording(rec, data_dir)
+                bind_recording_speaker(rec.id, p["discord_uid"], p["profile_key"], data_dir)
 
                 if rec.campaign_slug:
                     campaigns = load_campaigns(data_dir)

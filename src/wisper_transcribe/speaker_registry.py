@@ -131,11 +131,6 @@ def _load_sidecar(md_path: Path) -> Optional[dict]:
     return read_sidecar(md_path)
 
 
-def _write_sidecar(md_path: Path, diar: dict) -> None:
-    from .transcript_store import write_sidecar
-    write_sidecar(md_path, diar)
-
-
 def _backfill_embeddings(diar: dict, segments: list, device: str) -> Optional[dict[str, np.ndarray]]:
     """Extract per-label embeddings from the transcript's durable audio, if it still exists."""
     from .audio_utils import convert_to_wav
@@ -201,7 +196,7 @@ def relabel_campaign(
     for stem in get_transcripts_for_campaign(slug, data_dir):
         item = TranscriptRelabel(stem=stem)
         report.transcripts.append(item)
-        # Stems come from campaigns.json; refuse anything path-like.
+        # Stems come from the database; refuse anything path-like.
         if os.path.basename(stem) != stem or stem in ("", ".", ".."):
             item.skipped = "invalid transcript name"
             continue
@@ -221,7 +216,8 @@ def relabel_campaign(
             embeddings = _backfill_embeddings(diar, segments, device)
             if embeddings is not None and not dry_run:
                 diar.update(embeddings_to_sidecar(embeddings))
-                _write_sidecar(md_path, diar)
+                from .transcript_store import set_speaker_embeddings
+                set_speaker_embeddings(md_path, embeddings, EMBEDDING_SPACE)
         if embeddings is None:
             item.skipped = "no stored voice data and the source audio is gone"
             continue

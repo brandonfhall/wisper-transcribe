@@ -317,13 +317,12 @@ def apply_renames(
         for raw, new in valid.items():
             if new != old_names[raw]:
                 sources[raw] = source
-        if sources:
-            diar["speaker_map_source"] = sources
+        diar["speaker_map_source"] = sources
         # The .md is rewritten first (above), then the speaker rows. A crash
         # in between leaves the rows stale; interval matching repairs that.
         try:
-            from wisper_transcribe.transcript_store import write_sidecar
-            write_sidecar(md_path, diar)
+            from wisper_transcribe.transcript_store import set_speaker_names
+            set_speaker_names(md_path, updated_map, sources)
         except Exception:
             log.warning("Could not record speaker names for %s", md_path.name, exc_info=True)
 

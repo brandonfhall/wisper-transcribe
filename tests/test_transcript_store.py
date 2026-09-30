@@ -553,3 +553,69 @@ def test_speaker_schema_constraints(out):
         with pytest.raises(sqlite3.IntegrityError):
             with db.transaction() as conn:
                 conn.execute(sql)
+
+
+# ---------------------------------------------------------------------------
+# Narrow speaker writers
+# ---------------------------------------------------------------------------
+
+def _speaker_rows(stem: str) -> dict:
+    with db.connection() as conn:
+        return {r["label"]: (r["display_name"], r["source"], r["embedding"] is not None)
+                for r in conn.execute(
+                    "SELECT s.* FROM transcript_speakers s JOIN transcripts t ON t.id = s.transcript_id "
+                    "WHERE t.stem = ?", (stem,))}
+
+
+def test_set_speaker_names_keeps_embeddings_and_segments(out):
+    md = _md(out, "s01")
+    ts.write_sidecar(md, {"diarization_segments": [{"start": 0, "end": 1, "speaker": "SPEAKER_00"}],
+                          "speaker_map": {"SPEAKER_00": "Unknown Speaker 1"},
+                          "speaker_map_source": {"SPEAKER_00": "auto"},
+                          "embedding_space": "x", "speaker_embeddings": {"SPEAKER_00": [1.0, 0.0]}})
+    sidecar = out / "s01_diar.json"
+    before = sidecar.read_bytes(), sidecar.stat().st_mtime_ns
+    ts.set_speaker_names(md, {"SPEAKER_00": "Alice", "SPEAKER_01": "Bob"}, {"SPEAKER_00": "manual"})
+    assert _speaker_rows("s01") == {"SPEAKER_00": ("Alice", "manual", True),
+                                    "SPEAKER_01": ("Bob", "manual", False)}
+    assert (sidecar.read_bytes(), sidecar.stat().st_mtime_ns) == before
+    assert ts.read_sidecar(md)["speaker_embeddings"]["SPEAKER_00"] == [1.0, 0.0]
+
+
+def test_set_speaker_embeddings_keeps_names(out):
+    md = _md(out, "s01")
+    ts.set_speaker_names(md, {"SPEAKER_00": "Alice"}, {"SPEAKER_00": "manual"})
+    ts.set_speaker_embeddings(md, {"SPEAKER_00": [0.5, 0.5], "SPEAKER_03": [1.0, 0.0]}, "space-a")
+    assert _speaker_rows("s01") == {"SPEAKER_00": ("Alice", "manual", True),
+                                    "SPEAKER_03": ("SPEAKER_03", "auto", True)}
+
+
+# ---------------------------------------------------------------------------
+# NFD filenames on normalization-sensitive filesystems
+# ---------------------------------------------------------------------------
+
+def test_existing_form_falls_back_to_nfd(monkeypatch, tmp_path):
+    import unicodedata
+    nfc_path = str(tmp_path / unicodedata.normalize("NFC", "Café.md"))
+    nfd_path = str(tmp_path / unicodedata.normalize("NFD", "Café.md"))
+    monkeypatch.setattr(os.path, "exists", lambda p: p == nfd_path)  # ext4-like
+    assert ts.existing_form(nfc_path) == nfd_path
+    monkeypatch.setattr(os.path, "exists", lambda p: False)  # neither: write NFC
+    assert ts.existing_form(nfc_path) == nfc_path
+    assert ts.existing_form(str(tmp_path / "plain.md")) == str(tmp_path / "plain.md")
+
+
+def test_nfd_file_is_found_indexed_and_deleted(out):
+    """On Linux (ext4) this exercises the real fallback; on APFS/NTFS the
+    filesystem already treats both spellings as one file."""
+    import unicodedata
+    from wisper_transcribe import search_index
+    nfd = unicodedata.normalize("NFD", "Café night")
+    (out / f"{nfd}.md").write_text("**A** *(00:01)*: croissants for everyone\n", encoding="utf-8")
+    ts.reconcile(out)
+    assert search_index.run_backfill() == 1
+    assert search_index.progress() == (1, 1)
+    assert [g.stem for g in search_index.search("croissants").groups] == [
+        unicodedata.normalize("NFC", "Café night")]
+    ts.delete_transcript(unicodedata.normalize("NFC", "Café night"))
+    assert not any(p.suffix == ".md" for p in out.iterdir())

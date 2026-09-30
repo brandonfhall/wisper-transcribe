@@ -98,22 +98,6 @@ def load_profiles(data_dir: Optional[Path] = None) -> dict[str, SpeakerProfile]:
     return {row["key"]: _row_to_profile(row) for row in rows}
 
 
-def save_profiles(profiles: dict[str, SpeakerProfile], data_dir: Optional[Path] = None) -> None:
-    """Make the profile store exactly ``profiles``, in one transaction.
-
-    Existing keys are updated in place (memberships kept); keys not in
-    ``profiles`` are deleted, which also drops their campaign memberships.
-    Prefer the targeted functions below; this whole-store form remains for
-    callers and tests that build the store directly.
-    """
-    with db.transaction(data_dir) as conn:
-        existing = {r[0] for r in conn.execute("SELECT key FROM profiles")}
-        for key in existing - set(profiles):
-            conn.execute("DELETE FROM profiles WHERE key = ?", (key,))
-        for key, p in profiles.items():
-            _upsert_profile(conn, key, p)
-
-
 def remove_profile_files(key: str, data_dir: Optional[Path] = None) -> None:
     """Delete a profile's reference clip (and a stray pre-SQLite ``.npy``)."""
     clips = get_reference_clips_dir(data_dir)

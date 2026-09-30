@@ -92,7 +92,7 @@ async def campaign_detail(request: Request, slug: str) -> HTMLResponse:
         base_dir += os.sep
 
     def _transcript_missing(stem: str) -> bool:
-        # Stems come from campaigns.json; same basename + abspath guard as routes.
+        # Stems come from the database; same basename + abspath guard as routes.
         safe = os.path.basename(stem)
         candidate = os.path.abspath(os.path.join(base_dir, safe + ".md"))
         return safe != stem or not candidate.startswith(base_dir) or not os.path.exists(candidate)
@@ -250,8 +250,8 @@ async def campaign_remove_transcript(
         return invalid_input_response("Invalid campaign slug")
 
     # Stem validation: no null bytes, no path separators, not empty, not a dot path.
-    # The stem is used only for list membership removal in campaigns.json — no file
-    # paths are constructed from it — but we still reject traversal-style payloads.
+    # The stem only selects a campaign_transcripts row — no file paths are
+    # constructed from it — but we still reject traversal-style payloads.
     if (
         not stem
         or "\x00" in stem
@@ -289,8 +289,8 @@ async def campaign_reorder_transcript(
         return invalid_input_response("Invalid campaign slug")
 
     # Same stem-validation as /transcripts/remove: never used in a file path
-    # (only list membership in campaigns.json), but still reject
-    # traversal-style payloads defensively.
+    # (only a campaign_transcripts row), but still reject traversal-style
+    # payloads defensively.
     if (
         not stem
         or "\x00" in stem

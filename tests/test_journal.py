@@ -765,7 +765,8 @@ def test_move_to_other_campaign_drops_entry_and_marks_stale(tmp_path, out_dir):
 
 
 def test_save_campaigns_move_marks_stale(tmp_path, out_dir):
-    from wisper_transcribe.campaign_manager import load_campaigns, save_campaigns
+    from wisper_transcribe.campaign_manager import load_campaigns
+    from tests._seed import save_campaigns
 
     _folded_game(tmp_path, out_dir)
     create_campaign("Other", data_dir=tmp_path)

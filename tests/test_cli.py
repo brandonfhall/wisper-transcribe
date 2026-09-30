@@ -1264,7 +1264,7 @@ def test_campaigns_add_then_show(tmp_path, monkeypatch):
     runner = CliRunner()
 
     # Create a fake enrolled speaker
-    from wisper_transcribe.speaker_manager import save_profiles
+    from tests._seed import save_profiles
     from wisper_transcribe.models import SpeakerProfile
     save_profiles(
         {"alice": SpeakerProfile(

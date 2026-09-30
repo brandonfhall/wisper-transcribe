@@ -21,13 +21,12 @@ from wisper_transcribe.campaign_manager import (
     remove_member,
     remove_transcript_from_campaign,
     reorder_campaign_transcript,
-    save_campaigns,
     set_campaign_transcript_order,
 )
 from wisper_transcribe import db
 from wisper_transcribe.models import Campaign, CampaignMember
 
-from ._seed import seed_profiles
+from ._seed import save_campaigns, seed_profiles
 
 
 @pytest.fixture(autouse=True)

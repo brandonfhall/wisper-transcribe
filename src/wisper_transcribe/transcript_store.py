@@ -140,6 +140,20 @@ def nfc(stem: str) -> str:
     return unicodedata.normalize("NFC", stem)
 
 
+def existing_form(target: str) -> str:
+    """``target``, or its NFD spelling when only that exists on disk.
+
+    Stems are stored NFC. On a normalization-sensitive filesystem (ext4, e.g.
+    Docker) a file synced from a Mac can carry the NFD bytes, so the NFC path
+    misses it. New files are still written NFC.
+    """
+    if target.isascii() or os.path.exists(target):
+        return target
+    head, tail = os.path.split(target)
+    alt = os.path.join(head, unicodedata.normalize("NFD", tail))
+    return alt if alt != target and os.path.exists(alt) else target
+
+
 def safe_path(stem: str, suffix: str, output_dir: Optional[Path] = None) -> Optional[Path]:
     """``<output root>/<stem><suffix>``, or None if ``stem`` could escape it.
 
@@ -157,7 +171,7 @@ def safe_path(stem: str, suffix: str, output_dir: Optional[Path] = None) -> Opti
     base = os.path.abspath(str(output_dir))
     if not base.endswith(os.sep):
         base += os.sep
-    target = os.path.abspath(os.path.join(base, f"{safe}{suffix}"))
+    target = existing_form(os.path.abspath(os.path.join(base, f"{safe}{suffix}")))
     if not target.startswith(base):
         return None
     return Path(target)
@@ -660,3 +674,49 @@ def write_sidecar(md_path: Path, diar: dict, data_dir: Optional[Path] = None) ->
                 old.unlink()
         except (OSError, ValueError):
             pass
+
+
+def set_speaker_names(md_path: Path, names: dict[str, str], sources: dict[str, str],
+                      data_dir: Optional[Path] = None) -> None:
+    """Record each label's current display name and provenance (wizard renames).
+
+    Only the given labels' names and sources change; embeddings, the audio
+    path, and the segments file are left alone. A label with no row yet gets
+    one without an embedding. A missing or invalid source is derived from the
+    name (see :func:`derived_source`).
+    """
+    md_path = Path(md_path)
+    with db.transaction(data_dir) as conn:
+        tid = ensure_row(conn, nfc(md_path.stem), md_path.parent)
+        for label, name in names.items():
+            source = sources.get(label)
+            if source not in ("auto", "manual"):
+                source = derived_source(name)
+            conn.execute(
+                "INSERT INTO transcript_speakers (transcript_id, label, display_name, source) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT (transcript_id, label) DO UPDATE SET "
+                "display_name = excluded.display_name, source = excluded.source",
+                (tid, str(label), str(name), source),
+            )
+
+
+def set_speaker_embeddings(md_path: Path, embeddings: dict, space: str,
+                           data_dir: Optional[Path] = None) -> None:
+    """Store per-label voice embeddings (the campaign relabel backfill).
+
+    Names are kept; a label with no row yet is named after itself.
+    """
+    import numpy as np
+
+    md_path = Path(md_path)
+    with db.transaction(data_dir) as conn:
+        tid = ensure_row(conn, nfc(md_path.stem), md_path.parent)
+        for label, vec in embeddings.items():
+            blob = np.asarray(vec, dtype=np.float32).reshape(-1).tobytes()
+            conn.execute(
+                "INSERT INTO transcript_speakers (transcript_id, label, display_name, source, "
+                "embedding, embedding_space) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (transcript_id, label) DO UPDATE SET "
+                "embedding = excluded.embedding, embedding_space = excluded.embedding_space",
+                (tid, str(label), str(label), derived_source(str(label)), blob, space),
+            )
