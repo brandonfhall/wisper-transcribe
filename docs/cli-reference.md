@@ -143,10 +143,11 @@ wisper transcribe <path>
   --compute-type TYPE      CTranslate2 dtype: auto|float16|int8_float16|int8|float32
                            (default: auto → float16 on CUDA, int8 on CPU)
   --vad / --no-vad         Voice activity detection — skips silence before transcription
+                           (default: from config, on; improves speed and accuracy on
+                           audio with pauses)
   --forced-align / --no-forced-align
                            Re-time words against the audio before speaker assignment
                            (default: from config; auto = on when diarizing on a GPU)
-                           (default: on; improves speed and accuracy on audio with pauses)
   --vocab-file FILE        Text file of custom words/names (one per line) to boost accuracy.
                            Useful for character names, locations, and game-specific terms
                            that Whisper might not recognize (e.g. "Kyra", "Golarion").
@@ -162,8 +163,10 @@ wisper transcribe <path>
                            clamped to 1 on GPU (default: 1)
   --campaign SLUG          Restrict speaker matching to this campaign's roster, and add the
                            transcript to the campaign. Run `wisper campaigns list` for slugs.
-                           Only when the output lands in the transcripts folder (-o omitted or
-                           pointing there); elsewhere it prints a note and skips the association.
+                           Only when the output lands in the transcripts folder (the default
+                           output is next to the input, so pass -o <transcripts folder> unless
+                           the audio is already there); elsewhere it prints a note and skips the
+                           association. Transcripts written there are also indexed for search.
   --verbose                Show detailed progress; surfaces ML library log output
                            (pyannote, faster-whisper) on the console at DEBUG level
   --debug                  Write a full timestamped log to ./logs/wisper_<timestamp>.log
@@ -523,7 +526,7 @@ All formats are converted to 16kHz mono WAV internally before transcription.
 
 ## Output Format
 
-Each audio file produces a `.md` file in the same directory (or `--output` dir):
+`wisper transcribe` writes one `.md` per audio file next to the input (or in `--output`); web uploads and recordings go to the transcripts folder ([configuration.md](configuration.md#transcripts-folder)). Timestamps are `mm:ss`, or `hh:mm:ss` past the first hour:
 
 ```markdown
 ---
@@ -540,12 +543,12 @@ speakers:
 
 # Session 01 - The Dragon's Keep
 
-**Alice** *(00:00:12)*: Welcome back everyone. Last session you had just entered
+**Alice** *(00:12)*: Welcome back everyone. Last session you had just entered
 the ruins of Khar'zul.
 
-**Bob** *(00:00:18)*: Right, I want to check for traps before we go further in.
+**Bob** *(00:18)*: Right, I want to check for traps before we go further in.
 
-**Alice** *(00:00:23)*: Go ahead and roll a perception check.
+**Alice** *(00:23)*: Go ahead and roll a perception check.
 ```
 
 The YAML frontmatter makes these files easy to ingest into NotebookLM or query with scripts.

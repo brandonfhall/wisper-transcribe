@@ -102,8 +102,9 @@ sidecar (`wisper summarize`, or "Generate campaign summary" at upload).
 - [ ] Running it again reports nothing pending.
 - [ ] `--all` folds every pending session, oldest first.
 - [ ] `--session <stem>` folds one specific session.
-- [ ] `journal.md` frontmatter lists `journaled_sessions:`; the body has Story
-      So Far / Active Threads / NPCs / Party & Decisions / Loot & Resources.
+- [ ] The `journal.md` body has Story So Far / Active Threads / NPCs /
+      Party & Decisions / Loot & Resources. Folded sessions are tracked in the
+      database; `--export` prints the journal with `journaled_sessions:` added.
 
 ### 2b. Web
 

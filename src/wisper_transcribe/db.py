@@ -19,8 +19,9 @@ lease on.
 Migrations are versioned by ``PRAGMA user_version``. Each one is DDL plus an
 optional import step and runs, with the ``user_version`` bump, in one
 ``BEGIN IMMEDIATE`` transaction that ``PRAGMA foreign_key_check`` must pass.
-While the SQLite branch is unmerged the migrations are edited in place, so
-:data:`SCHEMA_FROZEN` is ``False`` and the default data dir is refused.
+Shipped migrations are frozen: a schema change is a new version. A branch
+that must reshape unreleased migrations in place sets :data:`SCHEMA_FROZEN`
+to ``False``, which makes that build refuse the default data dir.
 """
 from __future__ import annotations
 
@@ -43,9 +44,9 @@ DB_FILENAME = "wisper.db"
 BUSY_TIMEOUT_MS = 5000
 MIN_SQLITE = (3, 43, 0)
 
-# False while migrations may still be edited in place (unmerged branch).
-# Flipping it to True is on the merge checklist; test_db fails on main if not.
-SCHEMA_FROZEN = False
+# False only on a branch that edits unreleased migrations in place; such a
+# build refuses the default data dir. test_db fails on main unless True.
+SCHEMA_FROZEN = True
 
 # Runtime lease: a lease older than this is treated as abandoned.
 LEASE_TTL_S = 120

@@ -16,7 +16,7 @@ Pick the path that fits you. All three end up at the same web UI on `http://loca
 
 The first run takes 5–10 minutes (creates a virtualenv and installs ~2 GB of ML models). Subsequent launches are instant.
 
-**Updating:** after `git pull` (or unpacking a new release over the old folder), just launch as usual. When `pyproject.toml` has changed since the last launch, the launcher reinstalls dependencies once before starting. If that fails (e.g. offline), it starts anyway and retries next launch; running `setup.sh` / `setup.ps1` also works. CLI-only installs: `pip install -e .` after pulling.
+**Updating:** after `git pull` (or unpacking a new release over the old folder), just launch as usual. When `pyproject.toml` has changed since the last launch, the launcher reinstalls dependencies once before starting. If that fails (e.g. offline), it starts anyway and retries next launch; running `setup.sh` / `setup.ps1` also works. CLI-only installs: `pip install -e .` after pulling. The first start after upgrading from a version without `wisper.db` moves your profiles, campaigns, and recordings into the database, keeping copies in `backups/` (see [Database and backups](configuration.md#database-and-backups)).
 
 After the server starts, your browser opens automatically to `http://localhost:8080`. Press `Ctrl+C` in the terminal to stop.
 

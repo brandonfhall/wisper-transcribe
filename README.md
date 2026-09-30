@@ -2,7 +2,7 @@
 
 Local transcription with automatic speaker identification. Built for tabletop RPG actual-play recordings (D&D, Pathfinder, etc.) with 5–8 speakers, but works for any multi-speaker audio.
 
-Transcribe files, or record a Discord voice channel or your own mic + system audio, from a browser UI or the CLI. Output is markdown ready for NotebookLM or Obsidian. Transcription runs entirely on your machine; optional LLM summaries and campaign journals can use a local model (Ollama, LM Studio) or a cloud provider.
+Transcribe files, or record a Discord voice channel or your own mic + system audio, from a browser UI or the CLI. Output is markdown ready for NotebookLM or Obsidian, and every transcript and session summary is full-text searchable. Transcription runs entirely on your machine; optional LLM summaries and campaign journals can use a local model (Ollama, LM Studio) or a cloud provider.
 
 ---
 
@@ -35,9 +35,9 @@ The first run takes 5–10 minutes to download ~2 GB of ML models. Subsequent la
 Each audio file produces a `.md` transcript with speaker labels and timestamps:
 
 ```markdown
-**Alice** *(00:00:12)*: Welcome back everyone. Last session you had just entered the ruins of Khar'zul.
+**Alice** *(00:12)*: Welcome back everyone. Last session you had just entered the ruins of Khar'zul.
 
-**Bob** *(00:00:18)*: Right, I want to check for traps before we go further in.
+**Bob** *(00:18)*: Right, I want to check for traps before we go further in.
 ```
 
 YAML frontmatter (title, date, speakers, duration) makes these files easy to ingest into NotebookLM or Obsidian.

@@ -15,7 +15,7 @@ name: wisper-transcribe
 # Shared volume and env blocks reused by every service
 x-volumes: &volumes
   - ./cache:/root/.cache/huggingface   # HF model cache
-  - ./data:/data                       # config + speaker profiles
+  - ./data:/data                       # config, wisper.db, voice samples, journals
   - ./input:/app/input                 # audio input
   - ./output:/app/output               # transcript output
   - ./recordings:/data/recordings      # Discord recording storage

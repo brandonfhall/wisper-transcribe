@@ -26,6 +26,7 @@ The web UI is a **single-user tool with no authentication and no CSRF protection
 |------|-----|--------------|
 | Dashboard | `/` | Job queue, system status (device, model, HF token, LLM provider), quick upload |
 | Transcribe | `/transcribe` | Upload and transcribe (see below) |
+| Job history | `/jobs/history` | Every job ever run, filterable, with each job's settings, result, and last log lines (see [Job page](#job-page)) |
 | Transcripts | `/transcripts` | Recordings awaiting transcription; browse, read, download, edit, and delete transcripts; tick rows to delete them or move them to a campaign in bulk |
 | Speakers | `/speakers` | Enroll, rename, and remove speaker profiles; play reference clips. Profiles from an older speaker model show **NEEDS RE-ENROLL** |
 | Search | `/search` | Full-text search over every transcript and session summary (see below). The box at the top of the sidebar searches from any page |

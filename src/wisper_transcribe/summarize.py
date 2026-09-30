@@ -303,7 +303,7 @@ def _link_terms(profiles: dict[str, SpeakerProfile]) -> set[str]:
         if p.notes:
             for part in p.notes.replace(";", ",").split(","):
                 token = part.strip()
-                # Strip a `voice_of:` prefix if present (Approach 1 in plan.md).
+                # Skip `voice_of:` entries: they note who a player voices, not a term to link.
                 if token.lower().startswith("voice_of:"):
                     continue
                 if token and len(token) > 1:

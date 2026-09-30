@@ -52,7 +52,7 @@ Stored in `config.toml`. View with `wisper config show`, change with `wisper con
 
 ## Where Data Is Stored
 
-Speaker profiles and config are stored in your OS user data directory — separate from the project folder so they persist across updates.
+The database, settings, voice samples, journals, and recordings are stored in your OS user data directory — separate from the project folder so they persist across updates.
 
 | Platform | Path |
 |----------|------|
@@ -71,7 +71,7 @@ wisper-transcribe/
 ├── campaigns/
 │   └── <slug>/
 │       └── journal.md   rolling campaign journal (`wisper campaigns journal`)
-├── recordings/          Discord and local recordings (audio + metadata)
+├── recordings/          Discord and local recording audio (recording details are in wisper.db)
 └── output/              transcripts (unless `output_dir` / `WISPER_OUTPUT_DIR` points elsewhere)
 ```
 
@@ -85,11 +85,14 @@ To move your transcripts: stop the server, move the files, then `wisper config s
 
 ### Database and backups
 
-`wisper.db` in the data directory holds speaker profiles (including voice fingerprints), campaigns, and the list of known transcripts. It is created on first use and upgraded automatically; before an upgrade changes an existing database, a copy is saved in `backups/`. Upgrading from a version that stored these as JSON files (`speakers.json`, `campaigns.json`, `.npy` files) imports them once, keeps copies in `backups/pre-sqlite-v2-<time>/`, and lists anything it had to repair or drop (for example a campaign member whose profile no longer exists) in `import-report.txt` there.
+`wisper.db` in the data directory holds speaker profiles (including voice fingerprints), campaigns and their session order, the list of known transcripts with each one's speaker names, which sessions each journal has folded in, recordings, job history, and the search index. Transcripts, summaries, journals, and audio stay ordinary files you can open and edit. The database is created on first use and upgraded automatically; before an upgrade changes an existing database, a copy is saved in `backups/`.
+
+Upgrading from a version that stored these as JSON files (`speakers.json`, `campaigns.json`, `.npy` voice files, `recordings.json` and each recording's `metadata.json`, and the speaker data in each transcript's `_diar.json`) imports them once on first start. Copies of the originals go to `backups/pre-sqlite-v<N>-<time>/`, and anything that had to be repaired or dropped (for example a campaign member whose profile no longer exists) is listed in `import-report.txt` there. The JSON files are then deleted; each `_diar.json` keeps only its speaker timings.
 
 - `wisper db status` — schema version, integrity check, and which processes are using it.
 - `wisper db backup [DEST]` — a consistent copy, safe while the server is running.
 - `wisper db dump` — the whole database as SQL text.
+- `wisper db reindex` — rebuild the search index from the transcript files (never loses data).
 
 To restore, stop the server and replace `wisper.db` with the backup. On Windows the database file is locked while wisper runs, so stop the server before moving or restoring the data directory.
 

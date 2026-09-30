@@ -553,7 +553,7 @@ def derived_source(name: str) -> str:
 
 
 def read_sidecar(md_path: Path, data_dir: Optional[Path] = None) -> Optional[dict]:
-    """The transcript's diarization data in the JSON-era sidecar shape, or None.
+    """The transcript's diarization data as one dict (the sidecar shape), or None.
 
     ``diarization_segments`` comes from ``<stem>_diar.json`` (its only content
     now); ``speaker_map``, ``speaker_map_source``, ``speaker_embeddings`` +

@@ -67,10 +67,10 @@ docker compose run wisper wisper transcribe /app/input/session01.mp3 --enroll-sp
 | Local path | Container path | Contents |
 |-----------|---------------|----------|
 | `./cache/` | `/root/.cache/huggingface` | Downloaded models (~2 GB, persisted) |
-| `./data/` | `/data` | `config.toml`, `wisper.db`, speaker profiles |
+| `./data/` | `/data` | `config.toml`, `wisper.db` (profiles, campaigns, recordings, jobs, search index), voice samples, journals, `backups/` |
 | `./input/` | `/app/input` | Your audio files |
 | `./output/` | `/app/output` | Transcribed `.md` files |
-| `./recordings/` | `/data/recordings` | Discord recordings |
+| `./recordings/` | `/data/recordings` | Discord recording audio |
 
 All directories are created automatically on first run and persist across container restarts. The compose file sets `WISPER_DATA_DIR=/data` and `WISPER_OUTPUT_DIR=/app/output`.
 

@@ -5,9 +5,7 @@ permissions:
 
 on:
   push:
-    # feat/sqlite-storage: long-lived branch, so the Windows storage job runs
-    # before the PR exists. Remove it at merge (with the SCHEMA_FROZEN flip).
-    branches: [main, feat/sqlite-storage]
+    branches: [main]
   pull_request:
     branches: [main]
   schedule:

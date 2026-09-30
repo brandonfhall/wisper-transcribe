@@ -322,7 +322,7 @@ def test_dev_guard_allows_override(monkeypatch, tmp_path, default_data_dir):
 
 
 def test_schema_frozen_on_main():
-    """Flipping SCHEMA_FROZEN is on the merge checklist; main must never ship False."""
+    """main must never ship SCHEMA_FROZEN = False (a branch-only escape hatch)."""
     base = os.environ.get("GITHUB_BASE_REF", "")
     ref = os.environ.get("GITHUB_REF", "")
     if base != "main" and ref != "refs/heads/main":
