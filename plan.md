@@ -565,6 +565,7 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 - New `db.py`: `connect()`, `transaction()`, migrations runner, downgrade guard, backup helper.
 - `wisper db status | backup | dump`.
 - Migrations run on first `connect()`; startup in `web/app.py` calls it early so a failure is reported before serving.
+- Minimum SQLite version check (3.43, for Phase 6's contentless FTS5), so an unsupported system fails at startup instead of mid-migration.
 - Tests: `test_db.py`, plus a guard test that no module outside `db.py` calls `sqlite3.connect`, in the spirit of `test_tailwind.py`.
 - Docs: architecture.md (module map; "Database" replaces "File-store locking"), `docs/cli-reference.md`, `docs/configuration.md` (data layout, backup).
 
@@ -639,7 +640,7 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 - CLI: `wisper search "query" [--campaign] [--speaker] [--limit]`, printing stem, timestamp, speaker, and snippet.
 - Every `.md`-rewriting path listed above gains its `reindex()` call.
 
-*Availability:* contentless-delete needs SQLite ≥ 3.43. The shipped platforms have it: this Mac's venv reports 3.53; python.org 3.13+ builds on macOS and Windows, and Debian trixie (the `python:3.14-slim` base) bundle newer. On an older system SQLite (e.g. Ubuntu 22.04's 3.37 in a local venv), search is disabled with a notice and everything else works.
+*Availability:* contentless-delete needs SQLite ≥ 3.43. The shipped platforms have it: this Mac's venv reports 3.53; python.org 3.13+ builds on macOS and Windows, and Debian trixie (the `python:3.14-slim` base) bundle newer. Older SQLite is **not supported** (decided): Phase 0's `db.connect()` checks `sqlite3.sqlite_version` and refuses to start below 3.43, with a message naming the version found. `docs/setup.md` lists the requirement. This affects only a local venv on an old Linux system SQLite (e.g. Ubuntu 22.04's 3.37); Docker is unaffected.
 
 *Tests:*
 - Block and summary indexing from synthetic transcripts.
@@ -648,7 +649,7 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 - Transcript delete leaves no `search_fts` rows (the trigger fires on cascade).
 - Query escaping: quotes, `*`, `-`, `NEAR`, and column syntax are inert.
 - XSS: `<script>` in transcript text renders escaped in snippets.
-- Filters, paging, the backfill resuming after an interruption, the disabled-search path on an old SQLite version (mocked), and CLI output.
+- Filters, paging, the backfill resuming after an interruption, and CLI output. The version check (in `test_db.py`) refuses a mocked 3.42.
 
 *Docs:* `docs/web-ui.md` (search page), `docs/cli-reference.md` (`wisper search`, `wisper db reindex`), architecture.md (index design, freshness rules), CLAUDE.md gotcha ("every `.md` rewrite calls `reindex()`").
 
@@ -676,6 +677,7 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 **Docs touched across the phases:**
 - architecture.md: Module Map; Data Storage tree and "Output directory"; "File-store locking" → "Database"; Job Queue ("Nothing persists across restarts" changes in Phase 5); Test Strategy; Known Constraints (host-plus-container DB writes, WAL).
 - `docs/configuration.md`: data layout, backups, the `WISPER_DATA_DIR` + synced-folder warning.
+- `docs/setup.md`: the SQLite ≥ 3.43 requirement.
 - `docs/cli-reference.md`: `wisper db`, `wisper search`, and the `transcribe --campaign` rule.
 - `docs/docker.md`: DB location, backup, CLI and web containers sharing `./data`.
 - `docs/scenarios.md`: restore from backup, moved output dir, externally deleted transcripts.
@@ -697,16 +699,13 @@ Manager **public APIs stay stable** through Phases 1–4 (`load_profiles()` → 
 10. **Journal frontmatter:** stop writing `journaled_sessions`; add a journal export that includes it.
 11. **Merge cadence:** stack phase PRs on `feat/sqlite-storage`; one PR to `main` when the feature is complete.
 12. **Full-text search:** added as Phase 6, as a derived contentless FTS5 index over transcript blocks and summaries.
+13. **Search summaries:** yes, with a transcript/summary filter.
+14. **Stemming:** `porter`.
+15. **SQLite < 3.43:** unsupported; startup refuses with a clear message.
 
 ### Open questions
 
-Search (Phase 6), each with a recommendation:
-
-1. **Index summaries too?** Recommended yes, so loot, NPC, and follow-up notes are searchable, with a transcript/summary filter.
-2. **Stemming:** `porter` (recommended; "fights" finds "fight") or exact words only?
-3. **Old SQLite (< 3.43):** disable search with a notice (recommended), or fall back to a regular FTS5 table that stores a copy of the text?
-
-After these: sign-off on the schema, then Phase 0.
+None. Next step: sign-off on the schema, then Phase 0.
 
 ---
 
