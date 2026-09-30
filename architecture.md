@@ -245,7 +245,7 @@ Embeddings from different models aren't comparable (and differ in dimension), so
 3. One `UPDATE` of the key and display name. Campaign memberships reference the profile id, so roles, characters, and Discord bindings follow without being touched.
 4. After the commit, moves the `.mp3` clip (row first, then file). A same-key rename (case tweak) moves nothing.
 
-Not rekeyed yet: `recordings.json` `discord_speakers` values (the SQLite migration's Phase 4 fixes this) and display names already written into transcripts.
+Recording speakers reference the profile id too, so they follow a rename. Not rekeyed: display names already written into transcripts.
 
 ---
 
@@ -330,7 +330,7 @@ Worker functions are module-level so they pickle. With `--workers N`, total proc
 `torch>=2.8.0` (pyannote 4.x minimum). CUDA builds come from `https://download.pytorch.org/whl/cu126`; PyPI only ships CPU builds.
 
 ### File-store locking
-Profiles and campaigns live in the database, where each change is one `db.transaction()` (see "Database"). Recordings are still JSON, guarded by a per-recording mutex in `recording_manager` (see "Recording layer"); it only covers threads in one process, and the SQLite migration's Phase 4 replaces it.
+There is no file-store locking any more: profiles, campaigns, transcripts, journals, and recordings live in the database, where each change is one `db.transaction()` (`BEGIN IMMEDIATE`), which also covers other processes (see "Database").
 
 ### Database (`db.py`)
 `<data dir>/wisper.db`, stdlib `sqlite3`, no ORM. The SQLite migration moves the JSON stores in phases (see plan.md); Phase 0 adds only the foundation.
@@ -408,9 +408,7 @@ All user data lives in the OS user data dir unless `WISPER_DATA_DIR` is set. `co
 ├── campaigns/
 │   └── <slug>/journal.md            rolling campaign journal
 ├── recordings/
-│   ├── recordings.json              index of recording ids
-│   └── <recording_id>/
-│       ├── metadata.json            Recording dataclass (segment manifest, markers, …)
+│   └── <recording_id>/                recording rows are in wisper.db; paths below are fixed
 │       ├── per-user/<track>/NNNN.wav  60 s segments per Discord user id, or `mic` / `system`
 │       ├── combined/NNNN.wav        60 s segments of the mixed track
 │       ├── combined.wav             concatenated at session end
@@ -459,15 +457,15 @@ output/
 Two managers write the same on-disk layout: `BotManager` (Discord, via a Java sidecar) and `LocalCaptureManager` (local mic + system audio). Only one session may be active across both (`_other_session_active()` → 409).
 
 ### Recording layer (`recording_manager.py`)
-- **Atomic saves:** temp file in the same dir + `os.replace()`, unique temp name per call.
-- **Per-recording mutex:** `append_segment()`, `append_marker()`, and `record_completed_wav_segment()` share a lock keyed by recording id.
-- **`save_recording_merged()`:** the managers hold one long-lived `Recording` for a session. A plain save from it would overwrite markers/segments appended meanwhile from routes or the tick loop, so every manager save re-reads `markers`/`segment_manifest` under the same lock first.
-- **Segment manifest:** `record_completed_wav_segment()` runs whenever the combined writer rotates and once at finalise. Only the mixed stream is tracked (the detail page shows only that). Zero-frame or unreadable segments are skipped. `duration_s` is wall-clock-derived. It never raises, since it runs on the capture hot path.
-- **Markers:** `Marker(timestamp, elapsed_s)`, no label, any source.
-- **Crash recovery:** `reconcile_on_startup()` marks `recording`/`degraded` sessions `failed`; audio stays on disk.
+- **Tables** (migration v5): `recordings` (id, source, name, notes, campaign, transcript, `capture_status`, times, `recovered_at`); the subtypes `recording_discord` (guild, channel) and `recording_devices` (local mic/system names) with a composite FK to `recordings(id, source)`, so a local recording can't get Discord rows and vice versa; `recording_speakers` (Discord user → profile id, NULL = unbound), `recording_segments`, `recording_markers`, `recording_rejoins`. Times are ISO-8601 UTC with microseconds, so two markers in one second are two rows.
+- **Derived, not stored:** `combined_path` (`recordings/<id>/combined.wav` if it exists), `per_user_dir`, segment paths (`combined/NNNN.wav`; only the mixed stream is tracked), marker `elapsed_s` (`marked_at − started_at`), `unbound_speakers` (speakers with no profile), `recoverable`, and **status**: `transcribed` = has a transcript (`transcript_id`, `ON DELETE SET NULL`, so deleting the transcript makes the recording transcribable again), `transcribing` = the job queue has a pending or running job for it (`set_job_lookup()`, registered by `JobQueue`; `Job.recording_id`), else the stored capture state. A restart has no active job, so nothing can be stuck in `transcribing`, and a failed or cancelled job needs no status revert. `save_recording()` raises `ValueError` for a `combined_path` or segment path off the layout, and ignores `transcribing`/`transcribed` (the stored capture state stays).
+- **No lost updates:** the managers hold one long-lived `Recording` per session while routes and the tick loop append markers and segments. `save_recording()` updates the recording's own fields and only *inserts* missing segment/marker/rejoin rows (a segment's `finalized` can only go up); a save never unbinds a Discord speaker. `append_segment()`, `append_marker()`, `append_rejoin()` are single-row inserts.
+- **Capture hot path:** `record_completed_wav_segment()` runs whenever the combined writer rotates and once at finalise, with a 500 ms busy timeout instead of 5 s. Zero-frame or unreadable segments are skipped; `duration_s` is wall-clock-derived. It never raises: if the database stays busy the row is skipped and logged, and startup restores it.
+- **Crash recovery:** `reconcile_on_startup()` marks `recording`/`degraded` sessions `failed` (audio stays on disk) and restores segment rows missing for `combined/NNNN.wav` files. A failed session with segments and no `combined.wav` is `recoverable`: **Recover recording** on its page (or `wisper record recover <id>`, via `POST /api/recordings/{id}/recover`) joins the segments with `concat_wav_segments()` off the request thread (segments are self-contained WAVs, so no repair step) and marks it `completed` with `recovered_at`; the page then notes the last partial minute may be missing.
+- **Import** (v5): `recordings.json` + each `metadata.json`, backed up and deleted after commit. `transcribing`/`transcribed` import as `completed`, active states as `failed`; `transcript_path` links by stem only under the output root (first recording keeps a shared one); an unknown campaign, a missing profile, Discord speakers on a local session, non-numeric ids, and off-layout segments are repaired or dropped and reported.
 - **Ids:** `_validate_recording_id()` uses the four-step CodeQL pattern.
-- **Fields:** `source` (`discord`|`local`) and `devices` (display names only, never paths) default for older metadata. `name` is a display-only session title (trimmed, ≤200 chars); `id` (uuid4) backs the directory, so `name` needs no path guard.
-- `delete_recording()` removes only the index entry; route-level `_purge_recording_files()` removes files (see "Record routes").
+- **Fields:** `source` (`discord`|`local`) and `devices` (display names only, never paths). `name` is a display-only session title (trimmed, ≤200 chars); `id` (uuid4) backs the directory, so `name` needs no path guard.
+- `delete_recording()` removes only the rows (children cascade); route-level `_purge_recording_files()` removes files (see "Record routes").
 
 ### Audio writer (`web/audio_writer.py`)
 - **`SegmentedWavWriter`:** rotating self-contained 16 kHz mono 16-bit WAVs via stdlib `wave`. Rotation is by sample count (media time), so faster-than-real-time tests work. Resumes at the next index on construction. `writeframes()` rewrites header sizes on each call and `write()` flushes, so a crash leaves a readable segment.
@@ -542,8 +540,8 @@ Two managers write the same on-disk layout: `BotManager` (Discord, via a Java si
 ### Transcribe hand-off
 `POST /recordings/{id}/transcribe` copies `combined.wav` to the output dir and submits a normal transcription job with `original_stem=recording.id`, `title=recording.name`, and the recording's campaign. `title` is separate from the stem because a free-text name must never become a filename.
 
-- `on_complete` sets status `transcribed`, records `transcript_path`, and associates the transcript with the campaign.
-- `on_error` reverts the status to its pre-attempt value (`completed` or `transcribed`) so the Transcribe button reappears.
+- The job carries `recording_id`, which is what makes the recording read as `transcribing` while it is pending or running. `process_file()` associates the transcript with the recording's campaign; `on_complete` links it (`link_transcript()`), so the recording reads as `transcribed`. Nothing needs undoing on failure or cancellation.
+- `overwrite=True`: the output is `<recording-id>.md`, only ever written by that recording, so Re-transcribe (behind a confirmation) replaces it and keeps its campaign place.
 - Stopping a session never auto-queues a transcribe.
 
 `/transcripts` lists `completed` recordings with audio on disk under "Awaiting transcription", each with a Transcribe button.
@@ -708,7 +706,7 @@ The job page shows step pills and one bar split into equal per-step slices:
 
 **CI** (`.github/workflows/ci.yml`):
 - Python 3.13 and 3.14, both blocking — the versions shipped (Docker `python:3.14-slim`; `requires-python >= 3.13`).
-- A `windows-latest` job (3.13) runs the storage tests (`test_db.py`, `test_path_utils.py`, `test_legacy_import.py`, `test_speaker_manager.py`, `test_campaign_manager.py`, `test_transcript_store.py` with a real locked-file `os.replace`, `test_journal.py`) on a real Windows filesystem. While the SQLite branch is open, `push` also triggers on `feat/sqlite-storage`; remove that at merge.
+- A `windows-latest` job (3.13) runs the storage tests (`test_db.py`, `test_path_utils.py`, `test_legacy_import.py`, `test_speaker_manager.py`, `test_campaign_manager.py`, `test_transcript_store.py` with a real locked-file `os.replace`, `test_journal.py`, `test_recording_manager.py`) on a real Windows filesystem. While the SQLite branch is open, `push` also triggers on `feat/sqlite-storage`; remove that at merge.
 - Weekly cron adds a `latest-deps` job (`pip install --upgrade`, 3.14) to catch upstream breakage early.
 - Tailwind staleness check; CodeQL. The Docker CPU image smoke build (`docker.yml`) is currently disabled on GitHub, so image builds are verified manually.
 - Dependabot watches `pip`, `docker`, and `github-actions` weekly.

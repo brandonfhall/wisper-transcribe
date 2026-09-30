@@ -378,3 +378,101 @@ def test_orphan_and_unreadable_sidecars_left_alone(data_dir):
 def _v4_report(data_dir) -> str:
     reports = list((data_dir / "backups").glob("pre-sqlite-*/import-report.txt"))
     return "\n".join(r.read_text(encoding="utf-8") for r in reports)
+
+
+# ---------------------------------------------------------------------------
+# v5: recordings.json + metadata.json → recordings tables
+# ---------------------------------------------------------------------------
+
+from ._legacy_store import write_recording  # noqa: E402
+
+RID = "11111111-2222-4333-8444-555555555555"
+RID2 = "66666666-7777-4888-8999-000000000000"
+
+
+def _recordings():
+    from wisper_transcribe.recording_manager import load_recordings
+    return load_recordings()
+
+
+def test_recording_import_full(data_dir):
+    from wisper_transcribe.path_utils import get_output_dir
+
+    write_speakers(data_dir, {"alice": {}}, {"alice": _vec(1, 0)})
+    write_campaigns(data_dir, {"game": {}})
+    md = get_output_dir() / f"{RID}.md"
+    md.write_text("x", encoding="utf-8")
+    rec_dir = write_recording(
+        data_dir, RID, campaign_slug="game", status="transcribed", name="Session 3",
+        transcript_path=str(md),
+        discord_speakers={"111": "alice", "222": ""}, unbound_speakers=["222", "333"],
+        segment_manifest=[{"index": 0, "stream": "mixed", "started_at": "2026-03-01T19:00:00.000000+0000",
+                           "duration_s": 60.0, "path": str(data_dir / "recordings" / RID / "combined" / "0000.wav"),
+                           "finalized": True}],
+        markers=[{"timestamp": "2026-03-01T19:05:00.000000+0000", "elapsed_s": 300.0}],
+        rejoin_log=[{"timestamp": "2026-03-01T19:10:00.000000+0000", "close_code": 4006, "attempt_number": 1}],
+        job_id="stale-job",
+    )
+    r = _recordings()[RID]
+    assert r.status == "transcribed" and r.transcript_path == md
+    assert r.campaign_slug == "game" and r.name == "Session 3"
+    assert r.discord_speakers == {"111": "alice", "222": "", "333": ""}
+    assert r.unbound_speakers == ["222", "333"]
+    assert [s.index for s in r.segment_manifest] == [0]
+    assert r.markers[0].elapsed_s == 300.0
+    assert r.rejoin_log[0].close_code == 4006
+    assert r.job_id is None                       # derived, never imported
+    assert not (rec_dir / "metadata.json").exists()
+    assert not (data_dir / "recordings" / "recordings.json").exists()
+    (backup,) = (data_dir / "backups").glob("pre-sqlite-v5-*")
+    assert (backup / "recordings" / RID / "metadata.json").exists()
+
+
+def test_recording_status_mapping(data_dir):
+    write_recording(data_dir, RID, status="transcribing")
+    write_recording(data_dir, RID2, status="recording", ended_at=None)
+    recs = _recordings()
+    assert recs[RID].status == "completed"        # no transcript, no active job
+    assert recs[RID2].status == "failed" and recs[RID2].ended_at is not None
+    assert "marked failed" in _v4_report(data_dir)
+
+
+def test_recording_dirty_fields_repaired_and_reported(data_dir, tmp_path):
+    write_speakers(data_dir, {"alice": {}}, {"alice": _vec(1, 0)})
+    write_recording(data_dir, RID, campaign_slug="gone", discord_speakers={"111": "deleted_profile"},
+                    transcript_path=str(tmp_path / "elsewhere" / "x.md"))
+    write_recording(data_dir, RID2, source="local", devices={"mic": "USB Mic", "bogus": "x"},
+                    discord_speakers={"111": ""},
+                    segment_manifest=[{"index": 0, "stream": "444", "started_at": "2026-03-01T19:00:00.000000+0000",
+                                       "duration_s": 1.0, "path": "/tmp/0000.wav", "finalized": True}])
+    recs = _recordings()
+    assert recs[RID].campaign_slug is None
+    assert recs[RID].unbound_speakers == ["111"]
+    assert recs[RID].transcript_path is None
+    assert recs[RID2].devices == {"mic": "USB Mic"}
+    assert recs[RID2].discord_speakers == {} and recs[RID2].segment_manifest == []
+    report = _v4_report(data_dir)
+    for fragment in ("no longer exists", "missing profile", "outside the transcripts folder",
+                     "local session listed Discord speakers", "off the standard layout"):
+        assert fragment in report, fragment
+
+
+def test_recording_shared_transcript_goes_to_first(data_dir):
+    from wisper_transcribe.path_utils import get_output_dir
+
+    md = get_output_dir() / "shared.md"
+    md.write_text("x", encoding="utf-8")
+    write_recording(data_dir, RID, status="transcribed", transcript_path=str(md))
+    write_recording(data_dir, RID2, status="transcribed", transcript_path=str(md))
+    recs = _recordings()
+    assert [recs[i].status for i in (RID, RID2)] == ["transcribed", "completed"]
+    assert "already belongs" in _v4_report(data_dir)
+
+
+def test_recording_bad_id_and_unreadable_metadata_skipped(data_dir):
+    write_recording(data_dir, "not-a-uuid")
+    write_recording(data_dir, RID)
+    (data_dir / "recordings" / RID / "metadata.json").write_text("{bad", encoding="utf-8")
+    assert _recordings() == {}
+    report = _v4_report(data_dir)
+    assert "not-a-uuid" in report and RID in report

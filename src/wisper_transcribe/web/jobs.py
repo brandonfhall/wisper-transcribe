@@ -405,6 +405,9 @@ class Job:
     # from the original basename at submit, before the friendly-name rename.
     # Only these files are ever moved or deleted by the job.
     is_web_upload: bool = False
+    # Transcription of a recording's combined track: which recording. The
+    # recording's "transcribing" status and job link are derived from this.
+    recording_id: Optional[str] = None
     # JOB_ENROLL: transcript path. The runner re-reads its _diar.json sidecar
     # rather than carrying segments on the job.
     enroll_md_path: Optional[str] = None
@@ -496,6 +499,21 @@ class JobQueue:
         self._worker_task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
         self._on_complete_callbacks: dict[str, Callable[["Job"], None]] = {}
         self._on_error_callbacks: dict[str, Callable[["Job"], None]] = {}
+        # Recordings derive "transcribing" from this queue's jobs.
+        from wisper_transcribe.recording_manager import set_job_lookup
+        set_job_lookup(self.find_job_for_recording)
+
+    def find_job_for_recording(self, recording_id: str) -> Optional[tuple[str, bool]]:
+        """The newest transcription job for a recording, as ``(job id,
+        is_active)``, or None. Active means pending or running."""
+        latest: Optional[Job] = None
+        for job in list(self._jobs.values()):
+            if job.job_type == JOB_TRANSCRIPTION and job.recording_id == recording_id:
+                if latest is None or job.created_at >= latest.created_at:
+                    latest = job
+        if latest is None:
+            return None
+        return latest.id, latest.status in (PENDING, RUNNING)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -541,6 +559,7 @@ class JobQueue:
         import shutil
 
         original_stem: str = kwargs.pop("original_stem", "")
+        recording_id: Optional[str] = kwargs.pop("recording_id", None)
         post_refine: bool = bool(kwargs.pop("post_refine", False))
         post_summarize: bool = bool(kwargs.pop("post_summarize", False))
 
@@ -575,6 +594,7 @@ class JobQueue:
             post_refine=post_refine,
             post_summarize=post_summarize,
             is_web_upload=is_web_upload,
+            recording_id=recording_id,
         )
         self._jobs[job.id] = job
         if on_complete is not None:

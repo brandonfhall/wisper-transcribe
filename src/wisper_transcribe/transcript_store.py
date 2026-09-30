@@ -288,10 +288,9 @@ def delete_transcript(stem: str, data_dir: Optional[Path] = None,
         return True  # the file is still there, so the row stays too
 
     with db.transaction(data_dir) as conn:
+        # Cascades to campaign/journal/speaker rows; a recording that produced
+        # it goes back to "completed" (recordings.transcript_id SET NULL).
         conn.execute("DELETE FROM transcripts WHERE stem = ?", (stem,))
-    # Recordings are still JSON until the SQLite migration's Phase 4.
-    from .recording_manager import clear_transcript_link
-    clear_transcript_link(stem, data_dir)
 
     for path in companions:
         try:

@@ -943,17 +943,19 @@ def test_recordings_list_handles_null_started_at(client):
     that raises TypeError (None vs datetime comparison) as soon as any
     recording has started_at=None, 500ing the whole /recordings page."""
     c, tmp_path = client
+    import sqlite3
     from wisper_transcribe.recording_manager import create_recording, save_recording
 
     rec_with_time = create_recording("VC1", "G1", data_dir=tmp_path)
     rec_no_time = create_recording("VC2", "G1", data_dir=tmp_path)
     rec_no_time.started_at = None
-    save_recording(rec_no_time, data_dir=tmp_path)
+    # A recording without a start time can no longer be stored at all.
+    with pytest.raises(sqlite3.IntegrityError):
+        save_recording(rec_no_time, data_dir=tmp_path)
 
     resp = c.get("/recordings")
     assert resp.status_code == 200
     assert rec_with_time.id[:8] in resp.text
-    assert rec_no_time.id[:8] in resp.text
 
 
 def test_recording_detail_returns_200(client):
@@ -969,9 +971,14 @@ def test_recording_detail_shows_retranscribe_button_when_transcribed(client):
     """The Re-transcribe button appears when status is 'transcribed'."""
     c, tmp_path = client
     from wisper_transcribe.recording_manager import create_recording, save_recording
-    rec = create_recording("VC1", "G1", data_dir=tmp_path)
-    rec.status = "transcribed"
-    save_recording(rec, tmp_path)
+    from wisper_transcribe.path_utils import get_output_dir
+    from wisper_transcribe.recording_manager import link_transcript
+    from ._seed import seed_recording
+
+    rec = seed_recording(tmp_path)
+    md = get_output_dir() / f"{rec.id}.md"
+    md.write_text("x", encoding="utf-8")
+    link_transcript(rec.id, md, tmp_path)   # "transcribed" = has a transcript
     resp = c.get(f"/recordings/{rec.id}")
     assert resp.status_code == 200
     assert "Re-transcribe" in resp.text
@@ -1411,6 +1418,17 @@ def test_enroll_already_bound_speaker_returns_409(client):
 # ---------------------------------------------------------------------------
 
 
+def _queue_fake_job(queue, fake_job):
+    """Stand-in for JobQueue.submit that still registers the job, so the
+    recording's derived status and job link see it."""
+    def _submit(input_path, **kwargs):
+        fake_job.recording_id = kwargs.get("recording_id")
+        fake_job.job_type = "transcription"
+        queue._jobs[fake_job.id] = fake_job
+        return fake_job
+    return _submit
+
+
 def test_transcribe_recording_handoff(client):
     """POST /recordings/{id}/transcribe queues a transcription job and updates status."""
     from wisper_transcribe.recording_manager import (
@@ -1421,10 +1439,12 @@ def test_transcribe_recording_handoff(client):
     )
 
     c, tmp_path = client
+    from wisper_transcribe.campaign_manager import create_campaign
+    create_campaign("My Game", data_dir=tmp_path)
     rec = create_recording("VC1", "G1", campaign_slug="my-game", data_dir=tmp_path)
 
     # Simulate a completed recording with a combined.wav on disk
-    combined = tmp_path / "recordings" / rec.id / "final" / "combined.wav"
+    combined = tmp_path / "recordings" / rec.id / "combined.wav"
     combined.parent.mkdir(parents=True, exist_ok=True)
     combined.write_bytes(b"fake wav data")
     rec.combined_path = combined
@@ -1442,9 +1462,8 @@ def test_transcribe_recording_handoff(client):
         kwargs={},
         name=rec.id,
     )
-    with patch.object(
-        c.app.state.job_queue, "submit", return_value=fake_job
-    ) as mock_submit:
+    queue = c.app.state.job_queue
+    with patch.object(queue, "submit", side_effect=_queue_fake_job(queue, fake_job)) as mock_submit:
         resp = c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
 
     assert resp.status_code == 303
@@ -1470,7 +1489,7 @@ def test_transcribe_recording_passes_name_as_title(client):
 
     c, tmp_path = client
     rec = create_recording("VC1", "G1", data_dir=tmp_path, name="Session 14 — the ambush")
-    combined = tmp_path / "recordings" / rec.id / "final" / "combined.wav"
+    combined = tmp_path / "recordings" / rec.id / "combined.wav"
     combined.parent.mkdir(parents=True, exist_ok=True)
     combined.write_bytes(b"fake wav data")
     rec.combined_path = combined
@@ -1500,7 +1519,7 @@ def test_transcribe_recording_no_name_passes_none_title(client):
 
     c, tmp_path = client
     rec = create_recording("VC1", "G1", data_dir=tmp_path)
-    combined = tmp_path / "recordings" / rec.id / "final" / "combined.wav"
+    combined = tmp_path / "recordings" / rec.id / "combined.wav"
     combined.parent.mkdir(parents=True, exist_ok=True)
     combined.write_bytes(b"fake wav data")
     rec.combined_path = combined
@@ -1520,75 +1539,54 @@ def test_transcribe_recording_no_name_passes_none_title(client):
     assert kwargs["title"] is None
 
 
-def test_transcribe_recording_reverts_status_on_job_failure(client):
-    """A failed transcription job (on_error callback) reverts the recording
-    back to its pre-transcribe status instead of leaving it stuck at
-    'transcribing' forever with no retry path in the UI."""
-    from wisper_transcribe.recording_manager import create_recording, load_recordings, save_recording
+def test_failed_transcription_leaves_recording_transcribable(client):
+    """"transcribing" is derived from an active job, so a failed or cancelled
+    job needs no status revert: the recording is transcribable again."""
+    from wisper_transcribe.web.jobs import FAILED, Job as JobCls
+    import uuid as _uuid
+
+    from ._seed import seed_recording
 
     c, tmp_path = client
-    rec = create_recording("VC1", "G1", data_dir=tmp_path)
-    combined = tmp_path / "recordings" / rec.id / "final" / "combined.wav"
-    combined.parent.mkdir(parents=True, exist_ok=True)
-    combined.write_bytes(b"fake wav data")
-    rec.combined_path = combined
-    rec.status = "completed"
-    save_recording(rec, tmp_path)
-
-    from wisper_transcribe.web.jobs import Job as JobCls, FAILED
-    import uuid as _uuid
+    rec = seed_recording(tmp_path)
     fake_job = JobCls(
         id=str(_uuid.uuid4()), status="pending", created_at=rec.started_at,
         input_path=str(tmp_path / "output" / f"{rec.id}.wav"), kwargs={}, name=rec.id,
     )
-
-    with patch.object(c.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
-        resp = c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
-    assert resp.status_code == 303
-
-    loaded = load_recordings(tmp_path)[rec.id]
-    assert loaded.status == "transcribing"
-
-    # Simulate the job failing: invoke the on_error callback the route wired up.
-    on_error = mock_submit.call_args.kwargs["on_error"]
-    fake_job.status = FAILED
-    on_error(fake_job)
-
-    reverted = load_recordings(tmp_path)[rec.id]
-    assert reverted.status == "completed"
-
-
-def test_retranscribe_recording_reverts_to_transcribed_on_job_failure(client):
-    """A failed re-transcribe (starting from 'transcribed', not 'completed')
-    reverts back to 'transcribed' -- keeping the existing transcript's
-    View/Re-transcribe actions available -- not to a bare 'completed'."""
-    from wisper_transcribe.recording_manager import create_recording, load_recordings, save_recording
-
-    c, tmp_path = client
-    rec = create_recording("VC1", "G1", data_dir=tmp_path)
-    combined = tmp_path / "recordings" / rec.id / "final" / "combined.wav"
-    combined.parent.mkdir(parents=True, exist_ok=True)
-    combined.write_bytes(b"fake wav data")
-    rec.combined_path = combined
-    rec.status = "transcribed"
-    save_recording(rec, tmp_path)
-
-    from wisper_transcribe.web.jobs import Job as JobCls, FAILED
-    import uuid as _uuid
-    fake_job = JobCls(
-        id=str(_uuid.uuid4()), status="pending", created_at=rec.started_at,
-        input_path=str(tmp_path / "output" / f"{rec.id}.wav"), kwargs={}, name=rec.id,
-    )
-
-    with patch.object(c.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
+    queue = c.app.state.job_queue
+    with patch.object(queue, "submit", side_effect=_queue_fake_job(queue, fake_job)):
         c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
+    from wisper_transcribe.recording_manager import load_recordings
+    assert load_recordings(tmp_path)[rec.id].status == "transcribing"
 
-    on_error = mock_submit.call_args.kwargs["on_error"]
     fake_job.status = FAILED
-    on_error(fake_job)
+    loaded = load_recordings(tmp_path)[rec.id]
+    assert loaded.status == "completed"
+    assert loaded.job_id == fake_job.id   # the failed job stays linked for its log
 
-    reverted = load_recordings(tmp_path)[rec.id]
-    assert reverted.status == "transcribed"
+
+def test_failed_retranscribe_keeps_the_existing_transcript(client):
+    from wisper_transcribe.path_utils import get_output_dir
+    from wisper_transcribe.recording_manager import link_transcript, load_recordings
+    from wisper_transcribe.web.jobs import FAILED, Job as JobCls
+    import uuid as _uuid
+
+    from ._seed import seed_recording
+
+    c, tmp_path = client
+    rec = seed_recording(tmp_path)
+    md = get_output_dir() / f"{rec.id}.md"
+    md.write_text("x", encoding="utf-8")
+    link_transcript(rec.id, md, tmp_path)
+    fake_job = JobCls(
+        id=str(_uuid.uuid4()), status="pending", created_at=rec.started_at,
+        input_path=str(tmp_path / "output" / f"{rec.id}.wav"), kwargs={}, name=rec.id,
+    )
+    queue = c.app.state.job_queue
+    with patch.object(queue, "submit", side_effect=_queue_fake_job(queue, fake_job)):
+        c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
+    fake_job.status = FAILED
+    assert load_recordings(tmp_path)[rec.id].status == "transcribed"
 
 
 def test_transcribe_recording_not_completed_rejects(client):
@@ -1696,8 +1694,10 @@ def test_api_recordings_list_empty(client):
 
 def test_api_recordings_list_returns_recordings(client):
     c, tmp_path = client
+    from wisper_transcribe.campaign_manager import create_campaign
     from wisper_transcribe.recording_manager import create_recording
 
+    create_campaign("My Game", data_dir=tmp_path)
     rec = create_recording("VC1", "G1", campaign_slug="my-game", data_dir=tmp_path)
     resp = c.get("/api/recordings")
     assert resp.status_code == 200
@@ -1714,8 +1714,11 @@ def test_api_recordings_list_returns_recordings(client):
 
 def test_api_recordings_list_filters_by_campaign(client):
     c, tmp_path = client
+    from wisper_transcribe.campaign_manager import create_campaign
     from wisper_transcribe.recording_manager import create_recording
 
+    create_campaign("Game A", data_dir=tmp_path)
+    create_campaign("Game B", data_dir=tmp_path)
     rec1 = create_recording("VC1", "G1", campaign_slug="game-a", data_dir=tmp_path)
     create_recording("VC2", "G1", campaign_slug="game-b", data_dir=tmp_path)
 
@@ -1774,9 +1777,11 @@ def test_api_recording_transcribe_handoff(client):
     import uuid as _uuid
 
     c, tmp_path = client
+    from wisper_transcribe.campaign_manager import create_campaign
+    create_campaign("My Game", data_dir=tmp_path)
     rec = create_recording("VC1", "G1", campaign_slug="my-game", data_dir=tmp_path)
 
-    combined = tmp_path / "recordings" / rec.id / "final" / "combined.wav"
+    combined = tmp_path / "recordings" / rec.id / "combined.wav"
     combined.parent.mkdir(parents=True, exist_ok=True)
     combined.write_bytes(b"fake wav data")
     rec.combined_path = combined
@@ -1791,7 +1796,8 @@ def test_api_recording_transcribe_handoff(client):
         kwargs={},
         name=rec.id,
     )
-    with patch.object(c.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
+    queue = c.app.state.job_queue
+    with patch.object(queue, "submit", side_effect=_queue_fake_job(queue, fake_job)) as mock_submit:
         resp = c.post(f"/api/recordings/{rec.id}/transcribe")
 
     assert resp.status_code == 202
@@ -1852,3 +1858,44 @@ def test_recording_purge_removes_campaign_entry(client):
     c.post(f"/recordings/{rec.id}/delete", follow_redirects=False)
 
     assert get_transcripts_for_campaign(camp.slug) == []
+
+
+def test_recover_button_and_route(client):
+    import wave as _wave
+
+    from wisper_transcribe.recording_manager import create_recording, load_recordings, reconcile_on_startup
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    seg = tmp_path / "recordings" / rec.id / "combined" / "0000.wav"
+    seg.parent.mkdir(parents=True, exist_ok=True)
+    with _wave.open(str(seg), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(b"\x00\x00" * 1600)
+    reconcile_on_startup(tmp_path)
+
+    page = c.get(f"/recordings/{rec.id}")
+    assert 'data-testid="recover-offer"' in page.text
+
+    resp = c.post(f"/recordings/{rec.id}/recover", follow_redirects=False)
+    assert resp.status_code == 303 and resp.headers["location"] == f"/recordings/{rec.id}"
+    assert load_recordings(tmp_path)[rec.id].status == "completed"
+    page = c.get(f"/recordings/{rec.id}")
+    assert 'data-testid="recovered-note"' in page.text
+    assert "Transcribe" in page.text
+
+    resp = c.post(f"/api/recordings/{rec.id}/recover")     # nothing left to recover
+    assert resp.status_code == 409 and resp.json() == {"error": "not_recoverable"}
+
+
+@pytest.mark.parametrize("payload", ["../etc", "a b", "x\x00y", "id!@#"])
+def test_recover_routes_reject_bad_ids(client, payload):
+    from urllib.parse import quote
+
+    c, _ = client
+    resp = c.post(f"/recordings/{quote(payload, safe='')}/recover", follow_redirects=False)
+    assert resp.status_code in (400, 404)
+    resp = c.post(f"/api/recordings/{quote(payload, safe='')}/recover")
+    assert resp.status_code in (400, 404)

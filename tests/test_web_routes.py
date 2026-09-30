@@ -452,12 +452,25 @@ def test_pending_recordings_excludes_non_completed_statuses(tmp_path):
 
     from wisper_transcribe.web.routes.transcripts import _pending_recordings
 
-    for status in ("recording", "transcribing", "transcribed", "failed", "degraded"):
+    from wisper_transcribe import recording_manager as rm
+    from wisper_transcribe.path_utils import get_output_dir
+
+    for status in ("recording", "failed", "degraded"):
         rec = _seed_completed_recording(tmp_path, name=f"rec-{status}")
         rec.status = status
         save_recording(rec, tmp_path)
+    transcribed = _seed_completed_recording(tmp_path, name="rec-transcribed")
+    md = get_output_dir() / f"{transcribed.id}.md"
+    md.write_text("x", encoding="utf-8")
+    rm.link_transcript(transcribed.id, md, tmp_path)
+    busy = _seed_completed_recording(tmp_path, name="rec-transcribing")
 
-    pending, _ = _pending_recordings(tmp_path)
+    real_lookup = rm._job_lookup
+    rm.set_job_lookup(lambda rid: ("job", True) if rid == busy.id else None)
+    try:
+        pending, _ = _pending_recordings(tmp_path)
+    finally:
+        rm.set_job_lookup(real_lookup)
     assert pending == []
 
 

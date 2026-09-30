@@ -64,3 +64,33 @@ def sidecar_data(sidecar_path: Path) -> dict:
     data = read_sidecar(md)
     assert data is not None, f"no sidecar for {md.name}"
     return data
+
+
+def seed_recording(data_dir: Optional[Path] = None, *, status: str = "completed",
+                   with_audio: bool = True, **kwargs):
+    """A recording in ``status`` with the real on-disk layout: when
+    ``with_audio``, ``recordings/<id>/combined.wav`` exists (a tiny valid WAV),
+    so the derived ``combined_path`` resolves. Returns the loaded Recording."""
+    import wave
+    from datetime import datetime, timezone
+
+    from wisper_transcribe.recording_manager import (
+        combined_path_for, create_recording, load_recording, update_recording_status,
+    )
+
+    rec = create_recording(
+        kwargs.pop("voice_channel_id", "VC1"), kwargs.pop("guild_id", "G1"),
+        data_dir=data_dir, **kwargs,
+    )
+    if with_audio:
+        path = combined_path_for(rec.id, data_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(path), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(b"\x00\x00" * 160)
+    if status != "recording":
+        update_recording_status(rec.id, status, data_dir,
+                                ended_at=datetime.now(timezone.utc))
+    return load_recording(rec.id, data_dir)

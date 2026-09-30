@@ -58,3 +58,27 @@ def write_campaigns(data_dir: Path, campaigns: dict[str, dict]) -> None:
             "transcripts": list(c.get("transcripts", [])),
         }
     path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+
+
+def write_recording(data_dir: Path, rid: str, **fields) -> Path:
+    """``recordings/<id>/metadata.json`` (+ index entry), JSON-era shape."""
+    import json
+
+    rec_dir = data_dir / "recordings" / rid
+    rec_dir.mkdir(parents=True, exist_ok=True)
+    meta = {
+        "id": rid, "campaign_slug": None,
+        "started_at": "2026-03-01T19:00:00.000000+0000", "ended_at": "2026-03-01T22:00:00.000000+0000",
+        "status": "completed", "voice_channel_id": "VC1", "guild_id": "G1",
+        "discord_speakers": {}, "segment_manifest": [],
+        "combined_path": str(rec_dir / "combined.wav"), "per_user_dir": str(rec_dir / "per-user"),
+        "transcript_path": None, "rejoin_log": [], "notes": None, "unbound_speakers": [],
+        "job_id": None, "source": "discord", "devices": {}, "name": None, "markers": [],
+    }
+    meta.update(fields)
+    (rec_dir / "metadata.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    index_path = data_dir / "recordings" / "recordings.json"
+    index = json.loads(index_path.read_text(encoding="utf-8")) if index_path.exists() else {}
+    index[rid] = True
+    index_path.write_text(json.dumps(index, indent=2), encoding="utf-8")
+    return rec_dir

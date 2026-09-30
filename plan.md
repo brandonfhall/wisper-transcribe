@@ -32,6 +32,7 @@ Once storage moves to SQLite: with the web server in Docker Desktop (Mac or Wind
 - **Live Discord acceptance test.** The recording pipeline (WAV segments, `__mixed__` combined track, `combined_path` hand-off) is covered by synthesized-PCM tests, but the JDA → socket → Python path needs one real session: record a few minutes with 2+ speakers, play the per-user WAVs, and run Transcribe.
 - **Windows launcher dependency refresh.** `start.bat` reinstalls dependencies when `pyproject.toml` is newer than `.venv\.wisper-deps` (untested on Windows): update an existing install with `git pull`, double-click `start.bat`, confirm the one-time "Dependencies changed" reinstall runs, and that a second launch skips it.
 - **Docker image with forced alignment.** Do this in the same session as the SQLite migration's Docker check (CLI and web containers sharing `./data`). The "Docker Build" workflow is disabled on GitHub, so nothing builds the image automatically. Confirm the CPU and GPU images build with `transformers`, and that a diarized job on the GPU image downloads the alignment model into `./cache/` and logs "Aligned words".
+- **SQLite branch capture path (Phase 4).** Record a few minutes (Discord and local), add markers (including two in quick succession), stop, Transcribe, Re-transcribe, then delete the transcript and confirm the recording is transcribable again. Kill the server mid-session once, restart, and use **Recover recording**. The Live Discord acceptance test below covers the JDA half.
 - **SQLite branch UI (Phase 2).** In a browser, with `WISPER_DATA_DIR` pointing at a copy of real data: the stale-journal notice (move a folded session to another campaign) on the Campaign and Journal pages; **Rebuild journal** vs **Rebuild from transcripts** confirmations and their call counts; journal **Download** includes `journaled_sessions`; delete a transcript that's in a campaign and on a recording (recording returns to "Awaiting transcription").
 - **macOS loopback (PR #59).** Record page on a Mac with BlackHole installed: BlackHole appears under System Audio and captures audio.
 
@@ -426,9 +427,9 @@ Nothing else changes; the wire protocol is the stable interface.
 
 ---
 
-## Storage — SQLite migration (in progress: Phases 0–3 done)
+## Storage — SQLite migration (in progress: Phases 0–4 done)
 
-Branch `feat/sqlite-storage`. Phase 0 (`db.py`, `wisper db`, output-root setting, guards, Windows CI job) Phase 1 (profiles, campaigns, transcript registry table, `speakers doctor`), Phase 2 (transcript store, journal entries, reconcile, collisions), and Phase 3 (per-transcript speakers) are implemented; Phases 4–7 remain. The schema below is signed off. Decisions are listed under "Decisions" at the end.
+Branch `feat/sqlite-storage`. Phase 0 (`db.py`, `wisper db`, output-root setting, guards, Windows CI job) Phase 1 (profiles, campaigns, transcript registry table, `speakers doctor`), Phase 2 (transcript store, journal entries, reconcile, collisions), Phase 3 (per-transcript speakers), and Phase 4 (recordings, derived status, Recover) are implemented; Phases 5–7 remain. The schema below is signed off. Decisions are listed under "Decisions" at the end.
 
 ### Why, and what SQLite does and doesn't fix
 
@@ -854,7 +855,9 @@ Original scope:
 - CLAUDE.md's "`_diar.json` carries the authoritative `speaker_map`" gotcha is rewritten to name the table.
 - Tests: the largest fixture churn (36 `_diar.json` references across 6 test files), moved to a helper that seeds the DB.
 
-**Phase 4 — Recordings.**
+**Phase 4 — Recordings. Done** (migration v5). Notes: done as one commit (manager rewrite, derived status, and routes together, since the old routes' `status = "transcribing"` writes had no meaning against the new save). Recording times carry microseconds (two markers in one second would otherwise collide on the primary key); still ISO-8601 UTC. `recording_speakers.discord_user_id` got the digits-only CHECK too. `transcribing` comes from the job queue via `recording_manager.set_job_lookup()` (`Job.recording_id`), not an in-memory set, so a cancelled pending job can't leave a recording stuck; Phase 5 swaps the lookup for the `jobs` table. `save_recording()` only inserts child rows and never unbinds a speaker, so `save_recording_merged()` and the per-recording mutex are gone; it raises on off-layout paths. The hot path uses a 500 ms busy timeout and startup restores segment rows from disk. Recover shipped (`recover_recording()`, button, `POST /api/recordings/{id}/recover`, `wisper record recover`). Dry run on the real-data copy: 1 local recording (failed, no segments) imported cleanly.
+
+Original scope:
 - Import `recordings.json`, each `metadata.json`, `discord_speakers` → `recording_speakers.profile_id`, and `unbound_speakers` → `recording_speakers` rows with NULL profile. This fixes rename-not-rekeying for free. Discord fields go to `recording_discord`, `devices` to `recording_devices`. `status` splits: capture states import into `capture_status`; `transcribed` and `transcribing` import as `completed` (their meaning now comes from `transcript_id` and the job). `transcript_path` links to `transcript_id`. `job_id`, `combined_path`, `per_user_dir`, segment `path`/`stream`, and marker `elapsed_s` are not imported: they're derived (see "Schema principles"). `Recording` keeps these as computed properties, so routes and templates barely change. `Recording.status` is computed in `load_recordings()`'s SQL (`transcript_id IS NOT NULL`, plus `EXISTS` on a `pending`/`running` job for `transcribing`), not by a dataclass property reaching into `web/jobs.py`. Between Phases 4 and 5 an in-memory `JobQueue.find_active_job_for_recording(id)` stands in; it's branch-only and never ships (decision 11).
 - **Legacy manifest check (done 2026-09-30):** nothing wrote `segment_manifest` before #58, and since then only `record_completed_wav_segment()` writes it, always `stream="mixed"` under `recordings/<id>/combined/`. So dropping the stream and path columns loses nothing. A non-`mixed` or off-layout entry, if one ever turns up, is skipped and reported. An empty-string `discord_user_id` (in members or `discord_speakers`) imports as NULL / unbound.
 - Delete `save_recording_merged()`, the per-recording mutex, and Phase 2's interim `clear_transcript_link()` (`ON DELETE SET NULL` on `recordings.transcript_id` replaces it); `reconcile_on_startup()` becomes one `UPDATE`.
@@ -1010,7 +1013,7 @@ Original scope:
 
 ### Open questions
 
-None. Schema signed off (decision 30). Phases 0–3 done; next: Phase 4.
+None. Schema signed off (decision 30). Phases 0–4 done; next: Phase 5.
 
 ---
 

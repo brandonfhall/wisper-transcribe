@@ -18,6 +18,7 @@ import sqlite3
 import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -371,3 +372,193 @@ def import_diarization_sidecars(conn: sqlite3.Connection, ctx: MigrationContext)
             atomic_write_text(path, json.dumps({"diarization_segments": segments}, indent=2))
 
     ctx.after_commit.append(_slim)
+
+
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _legacy_time(value: object) -> Optional[str]:
+    """A metadata.json datetime string as the recordings' microsecond UTC form."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        dt = datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%f%z")
+    except ValueError:
+        try:
+            dt = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def import_recordings(conn: sqlite3.Connection, ctx: MigrationContext) -> None:
+    """v5: ``recordings/recordings.json`` + each ``<id>/metadata.json``.
+
+    Status splits: capture states are stored; ``transcribing`` and
+    ``transcribed`` import as ``completed`` (their meaning now comes from the
+    transcript link and the job queue), and an active state at import means
+    a crash, so it becomes ``failed`` as startup would. ``transcript_path``
+    links by stem only under the output root (first recording wins a shared
+    one). Derived fields (paths, ``job_id``, marker ``elapsed_s``) are not
+    imported. Every repair is reported.
+    """
+    import json
+
+    from .config import get_output_root
+
+    rec_root = ctx.data_dir / "recordings"
+    index_path = rec_root / "recordings.json"
+    metas = sorted(rec_root.glob("*/metadata.json"))
+    legacy = ([index_path] if index_path.exists() else []) + metas
+    if not legacy:
+        return
+    ctx.backup_legacy(legacy)
+    index: list[str] = []
+    if index_path.exists():
+        try:
+            raw = json.loads(index_path.read_text(encoding="utf-8"))
+            index = list(raw) if isinstance(raw, (dict, list)) else []
+        except (OSError, ValueError):
+            ctx.note("recordings.json unreadable; importing every recordings/<id>/metadata.json found")
+    ids = list(dict.fromkeys(index + [m.parent.name for m in metas]))
+    output_root = os.path.realpath(get_output_root())
+
+    for rid in ids:
+        meta_path = rec_root / str(rid) / "metadata.json"
+        if not _UUID_RE.match(str(rid)):
+            ctx.note(f"recording {rid!r}: not a valid id; skipped")
+            continue
+        try:
+            d = json.loads(meta_path.read_text(encoding="utf-8"))
+            if not isinstance(d, dict):
+                raise ValueError("not an object")
+        except (OSError, ValueError):
+            ctx.note(f"recording {rid}: metadata.json missing or unreadable; skipped")
+            continue
+
+        source = d.get("source") if d.get("source") in ("discord", "local") else "discord"
+        started = _legacy_time(d.get("started_at"))
+        if started is None:
+            ctx.note(f"recording {rid}: no valid start time; skipped")
+            continue
+        status = d.get("status")
+        ended = _legacy_time(d.get("ended_at"))
+        if status in ("transcribing", "transcribed"):
+            capture = "completed"
+        elif status in ("recording", "degraded"):
+            capture = "failed"
+            ended = ended or db_now()
+            ctx.note(f"recording {rid}: was still {status} (the server stopped mid-session); marked failed")
+        elif status in ("completed", "failed"):
+            capture = status
+        else:
+            capture = "failed"
+            ctx.note(f"recording {rid}: unknown status {status!r}; marked failed")
+
+        campaign_id = None
+        if d.get("campaign_slug"):
+            row = conn.execute("SELECT id FROM campaigns WHERE slug = ?", (str(d["campaign_slug"]),)).fetchone()
+            if row:
+                campaign_id = row[0]
+            else:
+                ctx.note(f"recording {rid}: campaign {d['campaign_slug']!r} no longer exists; unassigned")
+
+        transcript_id = None
+        tpath = d.get("transcript_path")
+        if tpath:
+            parent = os.path.realpath(os.path.dirname(str(tpath)))
+            stem = unicodedata.normalize("NFC", Path(str(tpath)).stem)
+            if parent != output_root:
+                ctx.note(f"recording {rid}: transcript is outside the transcripts folder; not linked")
+            else:
+                transcript_id = ensure_transcript_row(conn, stem, Path(output_root))
+                taken = conn.execute("SELECT id FROM recordings WHERE transcript_id = ?",
+                                     (transcript_id,)).fetchone()
+                if taken:
+                    ctx.note(f"recording {rid}: transcript {stem!r} already belongs to recording "
+                             f"{taken[0]}; not linked")
+                    transcript_id = None
+
+        conn.execute(
+            "INSERT INTO recordings (id, source, name, notes, campaign_id, transcript_id, "
+            "capture_status, started_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (rid, source, d.get("name") or None, d.get("notes") or None, campaign_id,
+             transcript_id, capture, started, ended),
+        )
+
+        if source == "discord":
+            conn.execute(
+                "INSERT INTO recording_discord (recording_id, guild_id, voice_channel_id) VALUES (?, ?, ?)",
+                (rid, str(d.get("guild_id") or ""), str(d.get("voice_channel_id") or "")),
+            )
+            speakers = dict(d.get("discord_speakers") or {})
+            for uid in d.get("unbound_speakers") or []:
+                speakers.setdefault(uid, "")
+            for uid, key in speakers.items():
+                uid = str(uid).strip()
+                if not _DIGITS_RE.match(uid):
+                    ctx.note(f"recording {rid}: Discord id {uid!r} is not numeric; dropped")
+                    continue
+                pid = None
+                if key:
+                    row = conn.execute("SELECT id FROM profiles WHERE key = ?", (str(key),)).fetchone()
+                    if row:
+                        pid = row[0]
+                    else:
+                        ctx.note(f"recording {rid}: speaker {uid} was bound to missing profile "
+                                 f"{key!r}; now unbound")
+                conn.execute(
+                    "INSERT OR IGNORE INTO recording_speakers (recording_id, discord_user_id, profile_id) "
+                    "VALUES (?, ?, ?)", (rid, uid, pid))
+            for j in d.get("rejoin_log") or []:
+                at = _legacy_time((j or {}).get("timestamp"))
+                if at is None:
+                    continue
+                conn.execute(
+                    "INSERT OR IGNORE INTO recording_rejoins (recording_id, attempted_at, close_code, "
+                    "attempt_number) VALUES (?, ?, ?, ?)",
+                    (rid, at, int(j.get("close_code") or 0), max(1, int(j.get("attempt_number") or 1))))
+        else:
+            if d.get("discord_speakers") or d.get("unbound_speakers"):
+                ctx.note(f"recording {rid}: local session listed Discord speakers; dropped")
+            for role, name in (d.get("devices") or {}).items():
+                if role in ("mic", "system") and name:
+                    conn.execute(
+                        "INSERT INTO recording_devices (recording_id, role, device_name) VALUES (?, ?, ?)",
+                        (rid, role, str(name)))
+
+        combined_dir = os.path.realpath(rec_root / str(rid) / "combined")
+        for seg in d.get("segment_manifest") or []:
+            try:
+                idx = int(seg["index"])
+                path_ok = (seg.get("stream") == "mixed"
+                           and os.path.realpath(os.path.dirname(str(seg.get("path", "")))) == combined_dir
+                           and Path(str(seg["path"])).name == f"{idx:04d}.wav")
+            except (KeyError, TypeError, ValueError):
+                path_ok = False
+            seg_start = _legacy_time((seg or {}).get("started_at")) if isinstance(seg, dict) else None
+            if not path_ok or seg_start is None:
+                ctx.note(f"recording {rid}: segment entry off the standard layout; skipped")
+                continue
+            conn.execute(
+                "INSERT OR IGNORE INTO recording_segments (recording_id, idx, started_at, duration_s, "
+                "finalized) VALUES (?, ?, ?, ?, ?)",
+                (rid, idx, seg_start, max(0.0, float(seg.get("duration_s") or 0.0)),
+                 int(bool(seg.get("finalized")))))
+        for m in d.get("markers") or []:
+            at = _legacy_time((m or {}).get("timestamp")) if isinstance(m, dict) else None
+            if at:
+                conn.execute("INSERT OR IGNORE INTO recording_markers (recording_id, marked_at) VALUES (?, ?)",
+                             (rid, at))
+
+    def _delete_legacy() -> None:
+        for path in legacy:
+            path.unlink(missing_ok=True)
+
+    ctx.after_commit.append(_delete_legacy)
+
+
+def db_now() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")

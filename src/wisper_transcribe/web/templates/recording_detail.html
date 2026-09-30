@@ -105,6 +105,17 @@
       </div>
       {% endif %}
 
+      {% if request.query_params.get('error') == 'recover_failed' %}
+      <div style="padding:12px 14px;background:#e88b8b15;border:1px solid #e88b8b40;border-radius:4px;font-size:12.5px;color:var(--color-signal-rose);margin-bottom:14px">
+        Couldn't recover this recording: no readable audio segments were found.
+      </div>
+      {% endif %}
+      {% if recording.recovered_at %}
+      <div data-testid="recovered-note" style="font-size:12.5px;color:var(--color-signal-amber);margin-bottom:14px">
+        Recovered after the session stopped unexpectedly; the last partial minute may be missing.
+      </div>
+      {% endif %}
+
       <div style="border-top:1px solid var(--color-rule);padding-top:14px;margin-bottom:28px">
         {% if recording.status == 'completed' %}
         <form method="post" action="/recordings/{{ recording.id }}/transcribe" style="display:inline">
@@ -128,6 +139,13 @@
         </div>
         {% elif recording.status == 'recording' %}
         <a href="/record" class="btn btn-primary">{{ icon("record", 10, "var(--color-ink-800)") }} Open live view</a>
+        {% elif recording.recoverable %}
+        <div data-testid="recover-offer" style="display:flex;flex-wrap:wrap;gap:12px;align-items:center">
+          <form method="post" action="/recordings/{{ recording.id }}/recover" style="display:inline">
+            <button type="submit" class="btn btn-primary">Recover recording</button>
+          </form>
+          <span style="font-size:13px;color:var(--color-paper-dim)">This session stopped unexpectedly, but its audio is on disk. Recover it to transcribe it; the last partial minute may be missing.</span>
+        </div>
         {% else %}
         <span style="font-size:13px;color:var(--color-paper-faint)">Transcription available when recording is completed.</span>
         {% endif %}

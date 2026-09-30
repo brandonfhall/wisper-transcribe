@@ -1,22 +1,24 @@
-"""Tests for recording_manager.py."""
+"""Tests for recording_manager.py (recordings in wisper.db)."""
 from __future__ import annotations
 
-import json
+import sqlite3
 import threading
-from datetime import datetime, timezone
+import wave
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from wisper_transcribe.models import Recording, SegmentRecord
+from wisper_transcribe import db
+from wisper_transcribe import recording_manager as rm
+from wisper_transcribe.models import RejoinAttempt, SegmentRecord
 from wisper_transcribe.recording_manager import (
     _validate_recording_id,
     append_marker,
     append_segment,
     create_recording,
     delete_recording,
-    get_metadata_path,
-    get_recordings_index_path,
+    link_transcript,
     load_recordings,
     reconcile_on_startup,
     record_completed_wav_segment,
@@ -24,256 +26,27 @@ from wisper_transcribe.recording_manager import (
     update_recording_status,
 )
 
+from ._seed import seed_profile
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
-def _make_recording(tmp_path: Path, **kwargs) -> Recording:
+@pytest.fixture(autouse=True)
+def _no_job_lookup(monkeypatch):
+    monkeypatch.setattr(rm, "_job_lookup", None)
+
+
+def _make_recording(tmp_path: Path, **kwargs):
     return create_recording(
         voice_channel_id=kwargs.get("voice_channel_id", "VC1"),
         guild_id=kwargs.get("guild_id", "G1"),
-        campaign_slug=kwargs.get("campaign_slug", None),
+        campaign_slug=kwargs.get("campaign_slug"),
         data_dir=tmp_path,
+        source=kwargs.get("source", "discord"),
+        devices=kwargs.get("devices"),
+        name=kwargs.get("name"),
     )
-
-
-# ---------------------------------------------------------------------------
-# Load / save round-trip
-# ---------------------------------------------------------------------------
-
-def test_load_save_roundtrip(tmp_path):
-    rec = _make_recording(tmp_path)
-    loaded = load_recordings(tmp_path)
-    assert rec.id in loaded
-    r = loaded[rec.id]
-    assert r.voice_channel_id == "VC1"
-    assert r.guild_id == "G1"
-    assert r.status == "recording"
-    assert isinstance(r.started_at, datetime)
-
-
-def test_create_recording_defaults_to_discord_source(tmp_path):
-    rec = _make_recording(tmp_path)
-    assert rec.source == "discord"
-    assert rec.devices == {}
-
-
-def test_create_recording_local_source_and_devices_roundtrip(tmp_path):
-    rec = create_recording(
-        voice_channel_id="",
-        guild_id="",
-        data_dir=tmp_path,
-        source="local",
-        devices={"mic": "Built-in Microphone", "system": "Speakers (loopback)"},
-    )
-    loaded = load_recordings(tmp_path)
-    r = loaded[rec.id]
-    assert r.source == "local"
-    assert r.devices == {"mic": "Built-in Microphone", "system": "Speakers (loopback)"}
-    assert r.voice_channel_id == ""
-    assert r.guild_id == ""
-
-
-def test_load_legacy_json_without_source_defaults_to_discord(tmp_path):
-    """A metadata.json written before source/devices existed must still load."""
-    rec = _make_recording(tmp_path)
-    meta_path = get_metadata_path(rec.id, tmp_path)
-    data = json.loads(meta_path.read_text(encoding="utf-8"))
-    assert "source" in data and "devices" in data  # sanity: current writer includes them
-    del data["source"]
-    del data["devices"]
-    meta_path.write_text(json.dumps(data), encoding="utf-8")
-
-    loaded = load_recordings(tmp_path)
-    r = loaded[rec.id]
-    assert r.source == "discord"
-    assert r.devices == {}
-
-
-def test_create_recording_generates_uuid(tmp_path):
-    r1 = _make_recording(tmp_path)
-    r2 = _make_recording(tmp_path)
-    assert r1.id != r2.id
-    assert len(r1.id) == 36   # uuid4 with dashes
-
-
-def test_create_recording_name_roundtrips(tmp_path):
-    rec = create_recording(
-        voice_channel_id="", guild_id="", data_dir=tmp_path, source="local",
-        name="Session 14 — the ambush",
-    )
-    loaded = load_recordings(tmp_path)
-    assert loaded[rec.id].name == "Session 14 — the ambush"
-
-
-def test_create_recording_defaults_name_to_none(tmp_path):
-    rec = _make_recording(tmp_path)
-    assert rec.name is None
-    loaded = load_recordings(tmp_path)
-    assert loaded[rec.id].name is None
-
-
-def test_load_legacy_json_without_name_defaults_to_none(tmp_path):
-    """A metadata.json written before `name` existed must still load."""
-    rec = _make_recording(tmp_path)
-    meta_path = get_metadata_path(rec.id, tmp_path)
-    data = json.loads(meta_path.read_text(encoding="utf-8"))
-    assert "name" in data  # sanity: current writer includes it
-    del data["name"]
-    meta_path.write_text(json.dumps(data), encoding="utf-8")
-
-    loaded = load_recordings(tmp_path)
-    assert loaded[rec.id].name is None
-
-
-# ---------------------------------------------------------------------------
-# Markers ("Add marker" button on /record)
-# ---------------------------------------------------------------------------
-
-def test_append_marker_roundtrips(tmp_path):
-    rec = _make_recording(tmp_path)
-    marker = append_marker(rec.id, tmp_path)
-
-    assert marker.elapsed_s >= 0.0
-    loaded = load_recordings(tmp_path)
-    assert len(loaded[rec.id].markers) == 1
-    assert loaded[rec.id].markers[0].elapsed_s == marker.elapsed_s
-
-
-def test_append_marker_computes_elapsed_since_started_at(tmp_path):
-    from datetime import timedelta
-
-    rec = _make_recording(tmp_path)
-    rec.started_at = datetime.now(timezone.utc) - timedelta(seconds=90)
-    save_recording(rec, tmp_path)
-
-    marker = append_marker(rec.id, tmp_path)
-    assert 89.0 <= marker.elapsed_s <= 91.0
-
-
-def test_append_marker_multiple_calls_accumulate(tmp_path):
-    rec = _make_recording(tmp_path)
-    append_marker(rec.id, tmp_path)
-    append_marker(rec.id, tmp_path)
-    append_marker(rec.id, tmp_path)
-
-    loaded = load_recordings(tmp_path)
-    assert len(loaded[rec.id].markers) == 3
-
-
-def test_append_marker_unknown_id_raises(tmp_path):
-    with pytest.raises(KeyError):
-        append_marker("does-not-exist", tmp_path)
-
-
-def test_append_marker_atomic_under_concurrent_calls(tmp_path):
-    rec = _make_recording(tmp_path)
-    n = 20
-
-    threads = [threading.Thread(target=append_marker, args=(rec.id, tmp_path)) for _ in range(n)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    loaded = load_recordings(tmp_path)
-    assert len(loaded[rec.id].markers) == n
-
-
-def test_create_recording_defaults_markers_to_empty_list(tmp_path):
-    rec = _make_recording(tmp_path)
-    assert rec.markers == []
-
-
-def test_load_legacy_json_without_markers_defaults_to_empty_list(tmp_path):
-    """A metadata.json written before `markers` existed must still load."""
-    rec = _make_recording(tmp_path)
-    meta_path = get_metadata_path(rec.id, tmp_path)
-    data = json.loads(meta_path.read_text(encoding="utf-8"))
-    assert "markers" in data  # sanity: current writer includes it
-    del data["markers"]
-    meta_path.write_text(json.dumps(data), encoding="utf-8")
-
-    loaded = load_recordings(tmp_path)
-    assert loaded[rec.id].markers == []
-
-
-def test_load_returns_empty_when_no_file(tmp_path):
-    assert load_recordings(tmp_path) == {}
-
-
-def test_load_returns_empty_on_corrupt_index(tmp_path):
-    idx = get_recordings_index_path(tmp_path)
-    idx.parent.mkdir(parents=True, exist_ok=True)
-    idx.write_text("NOT JSON", encoding="utf-8")
-    assert load_recordings(tmp_path) == {}
-
-
-def test_load_skips_recording_with_missing_metadata(tmp_path):
-    rec = _make_recording(tmp_path)
-    # Remove the metadata file but keep the index entry
-    get_metadata_path(rec.id, tmp_path).unlink()
-    loaded = load_recordings(tmp_path)
-    assert rec.id not in loaded
-
-
-def test_update_recording_status(tmp_path):
-    rec = _make_recording(tmp_path)
-    update_recording_status(rec.id, "completed", tmp_path,
-                            ended_at=datetime.now(timezone.utc))
-    loaded = load_recordings(tmp_path)
-    assert loaded[rec.id].status == "completed"
-    assert loaded[rec.id].ended_at is not None
-
-
-def test_update_recording_status_raises_for_unknown(tmp_path):
-    with pytest.raises(KeyError):
-        update_recording_status("no-such-id", "failed", tmp_path)
-
-
-def test_delete_recording_removes_from_index(tmp_path):
-    rec = _make_recording(tmp_path)
-    delete_recording(rec.id, tmp_path)
-    assert rec.id not in load_recordings(tmp_path)
-
-
-# ---------------------------------------------------------------------------
-# Segment manifest
-# ---------------------------------------------------------------------------
-
-def test_append_segment_atomic_under_concurrent_calls(tmp_path):
-    rec = _make_recording(tmp_path)
-    n = 20
-
-    def _append(i):
-        seg = SegmentRecord(
-            index=i,
-            stream="mixed",
-            started_at=datetime.now(timezone.utc),
-            duration_s=60.0,
-            path=Path(f"/tmp/fake/{i:04d}.opus"),
-            finalized=True,
-        )
-        append_segment(rec.id, seg, tmp_path)
-
-    threads = [threading.Thread(target=_append, args=(i,)) for i in range(n)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    loaded = load_recordings(tmp_path)
-    assert len(loaded[rec.id].segment_manifest) == n
 
 
 def _write_wav(path: Path, n_frames: int = 320) -> None:
-    """Write a minimal real 16 kHz mono 16-bit WAV file with `n_frames`
-    samples of silence (or a 0-byte-data file when n_frames == 0), so
-    record_completed_wav_segment()'s frame-count check has a real file to
-    inspect instead of a fabricated path."""
-    import wave
-
     path.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(path), "wb") as wf:
         wf.setnchannels(1)
@@ -282,30 +55,294 @@ def _write_wav(path: Path, n_frames: int = 320) -> None:
         wf.writeframes(b"\x00\x00" * n_frames)
 
 
+def _join(threads):
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+        assert not t.is_alive()
+
+
+# ---------------------------------------------------------------------------
+# Create / load / save
+# ---------------------------------------------------------------------------
+
+def test_load_save_roundtrip(tmp_path):
+    rec = _make_recording(tmp_path, name="Session 14 — the ambush")
+    r = load_recordings(tmp_path)[rec.id]
+    assert r.voice_channel_id == "VC1"
+    assert r.guild_id == "G1"
+    assert r.status == "recording"
+    assert r.source == "discord"
+    assert r.name == "Session 14 — the ambush"
+    assert r.started_at == rec.started_at  # microseconds and timezone survive
+    assert r.per_user_dir == tmp_path / "recordings" / rec.id / "per-user"
+    assert r.combined_path is None and r.markers == [] and r.devices == {}
+
+
+def test_local_source_and_devices_roundtrip(tmp_path):
+    rec = _make_recording(tmp_path, source="local", voice_channel_id="", guild_id="",
+                          devices={"mic": "USB Mic", "system": "BlackHole 2ch"})
+    r = load_recordings(tmp_path)[rec.id]
+    assert r.source == "local"
+    assert r.devices == {"mic": "USB Mic", "system": "BlackHole 2ch"}
+
+
+def test_create_recording_generates_uuid(tmp_path):
+    import uuid
+
+    rec = _make_recording(tmp_path)
+    assert uuid.UUID(rec.id).version == 4
+
+
+def test_load_is_in_creation_order(tmp_path):
+    ids = [_make_recording(tmp_path).id for _ in range(3)]
+    assert list(load_recordings(tmp_path)) == ids
+
+
+def test_load_returns_empty_when_none(tmp_path):
+    assert load_recordings(tmp_path) == {}
+
+
+def test_update_recording_status(tmp_path):
+    rec = _make_recording(tmp_path)
+    ended = datetime.now(timezone.utc)
+    update_recording_status(rec.id, "completed", tmp_path, ended_at=ended)
+    r = load_recordings(tmp_path)[rec.id]
+    assert r.status == "completed" and r.ended_at == ended
+
+
+def test_update_recording_status_raises_for_unknown(tmp_path):
+    with pytest.raises(KeyError):
+        update_recording_status("00000000-0000-4000-8000-000000000000", "failed", tmp_path)
+
+
+def test_update_recording_status_refuses_derived_states(tmp_path):
+    rec = _make_recording(tmp_path)
+    with pytest.raises(ValueError):
+        update_recording_status(rec.id, "transcribed", tmp_path)
+
+
+def test_delete_recording_removes_rows_not_files(tmp_path):
+    rec = _make_recording(tmp_path)
+    audio = tmp_path / "recordings" / rec.id / "combined" / "0000.wav"
+    _write_wav(audio)
+    delete_recording(rec.id, tmp_path)
+    assert rec.id not in load_recordings(tmp_path)
+    assert audio.exists()
+
+
+# ---------------------------------------------------------------------------
+# Derived fields
+# ---------------------------------------------------------------------------
+
+def test_combined_path_is_derived_from_the_layout(tmp_path):
+    rec = _make_recording(tmp_path)
+    combined = tmp_path / "recordings" / rec.id / "combined.wav"
+    _write_wav(combined)
+    assert load_recordings(tmp_path)[rec.id].combined_path == combined
+
+
+def test_save_refuses_off_layout_paths(tmp_path):
+    rec = _make_recording(tmp_path)
+    rec.combined_path = tmp_path / "elsewhere.wav"
+    with pytest.raises(ValueError, match="combined_path"):
+        save_recording(rec, tmp_path)
+    rec.combined_path = None
+    rec.segment_manifest = [SegmentRecord(0, "mixed", rec.started_at, 1.0, tmp_path / "x.wav")]
+    with pytest.raises(ValueError, match="segment"):
+        save_recording(rec, tmp_path)
+
+
+def test_marker_elapsed_is_derived_from_started_at(tmp_path):
+    rec = _make_recording(tmp_path)
+    marker = append_marker(rec.id, tmp_path)
+    [loaded] = load_recordings(tmp_path)[rec.id].markers
+    assert loaded.timestamp == marker.timestamp
+    assert loaded.elapsed_s == pytest.approx((marker.timestamp - rec.started_at).total_seconds())
+
+
+def test_markers_in_the_same_second_are_kept(tmp_path):
+    rec = _make_recording(tmp_path)
+    append_marker(rec.id, tmp_path)
+    append_marker(rec.id, tmp_path)
+    assert len(load_recordings(tmp_path)[rec.id].markers) == 2
+
+
+def test_append_marker_unknown_id_raises(tmp_path):
+    with pytest.raises(KeyError):
+        append_marker("00000000-0000-4000-8000-000000000000", tmp_path)
+
+
+def test_transcribed_follows_the_transcript_link(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe import transcript_store
+    from wisper_transcribe.path_utils import get_output_dir
+
+    rec = _make_recording(tmp_path)
+    update_recording_status(rec.id, "completed", tmp_path)
+    md = get_output_dir() / f"{rec.id}.md"
+    md.write_text("x", encoding="utf-8")
+    link_transcript(rec.id, md, tmp_path)
+    r = load_recordings(tmp_path)[rec.id]
+    assert r.status == "transcribed" and r.transcript_path == md
+
+    transcript_store.delete_transcript(rec.id)       # ON DELETE SET NULL
+    r = load_recordings(tmp_path)[rec.id]
+    assert r.status == "completed" and r.transcript_path is None
+
+
+def test_transcribing_only_while_a_job_is_active(tmp_path, monkeypatch):
+    rec = _make_recording(tmp_path)
+    update_recording_status(rec.id, "completed", tmp_path)
+    state = {"job": ("job-1", True)}
+    monkeypatch.setattr(rm, "_job_lookup", lambda rid: state["job"] if rid == rec.id else None)
+    r = load_recordings(tmp_path)[rec.id]
+    assert r.status == "transcribing" and r.job_id == "job-1"
+    state["job"] = ("job-1", False)                  # finished, failed, or cancelled
+    r = load_recordings(tmp_path)[rec.id]
+    assert r.status == "completed" and r.job_id == "job-1"
+    monkeypatch.setattr(rm, "_job_lookup", None)     # a restart: no queue memory
+    assert load_recordings(tmp_path)[rec.id].status == "completed"
+
+
+def test_saving_a_derived_status_keeps_the_capture_state(tmp_path):
+    rec = _make_recording(tmp_path)
+    update_recording_status(rec.id, "completed", tmp_path)
+    rec = load_recordings(tmp_path)[rec.id]
+    rec.status = "transcribing"                      # as a stale object might carry
+    save_recording(rec, tmp_path)
+    assert load_recordings(tmp_path)[rec.id].status == "completed"
+
+
+# ---------------------------------------------------------------------------
+# Discord speakers
+# ---------------------------------------------------------------------------
+
+def test_unbound_speakers_are_rows_without_a_profile(tmp_path):
+    seed_profile("alice", data_dir=tmp_path)
+    rec = _make_recording(tmp_path)
+    rec.discord_speakers = {"111": "alice", "222": ""}
+    rec.unbound_speakers = ["222", "333"]
+    save_recording(rec, tmp_path)
+    r = load_recordings(tmp_path)[rec.id]
+    assert r.discord_speakers == {"111": "alice", "222": "", "333": ""}
+    assert r.unbound_speakers == ["222", "333"]
+
+
+def test_deleting_a_profile_unbinds_its_speakers(tmp_path):
+    from wisper_transcribe.speaker_manager import remove_profile
+
+    seed_profile("alice", data_dir=tmp_path)
+    rec = _make_recording(tmp_path)
+    rec.discord_speakers = {"111": "alice"}
+    save_recording(rec, tmp_path)
+    remove_profile("alice", tmp_path)
+    r = load_recordings(tmp_path)[rec.id]
+    assert r.unbound_speakers == ["111"]
+
+
+def test_profile_rename_follows_into_recordings(tmp_path):
+    from wisper_transcribe.speaker_manager import rename_profile
+
+    seed_profile("alice", data_dir=tmp_path)
+    rec = _make_recording(tmp_path)
+    rec.discord_speakers = {"111": "alice"}
+    save_recording(rec, tmp_path)
+    rename_profile("alice", "Alicia", tmp_path)
+    assert load_recordings(tmp_path)[rec.id].discord_speakers == {"111": "alicia"}
+
+
+def test_stale_save_never_unbinds_a_speaker(tmp_path):
+    seed_profile("bob", data_dir=tmp_path)
+    rec = _make_recording(tmp_path)
+    rec.unbound_speakers = ["222"]
+    save_recording(rec, tmp_path)
+    fresh = load_recordings(tmp_path)[rec.id]
+    fresh.discord_speakers["222"] = "bob"            # the enroll job binds him
+    fresh.unbound_speakers = []
+    save_recording(fresh, tmp_path)
+    save_recording(rec, tmp_path)                    # the capture manager's stale copy
+    assert load_recordings(tmp_path)[rec.id].discord_speakers == {"222": "bob"}
+
+
+def test_subtype_constraints(tmp_path):
+    local = _make_recording(tmp_path, source="local", voice_channel_id="", guild_id="")
+    discord = _make_recording(tmp_path)
+    bad = [
+        ("INSERT INTO recording_discord (recording_id, guild_id, voice_channel_id) VALUES (?, 'g', 'c')",
+         local.id),
+        ("INSERT INTO recording_devices (recording_id, role, device_name) VALUES (?, 'mic', 'x')",
+         discord.id),
+        ("INSERT INTO recording_speakers (recording_id, discord_user_id) VALUES (?, '1')", local.id),
+        ("INSERT INTO recording_rejoins (recording_id, attempted_at, close_code, attempt_number) "
+         "VALUES (?, 'x', 1, 1)", local.id),
+        ("UPDATE recordings SET capture_status = 'recording', ended_at = 'x' WHERE id = ?", discord.id),
+        ("UPDATE recordings SET recovered_at = 'x', capture_status = 'failed' WHERE id = ?", discord.id),
+        ("UPDATE recordings SET capture_status = 'transcribed' WHERE id = ?", discord.id),
+    ]
+    for sql, rid in bad:
+        with pytest.raises(sqlite3.IntegrityError):
+            with db.transaction(tmp_path) as conn:
+                conn.execute(sql, (rid,))
+
+
+# ---------------------------------------------------------------------------
+# Concurrency: appends are never lost to a stale save
+# ---------------------------------------------------------------------------
+
+def test_stale_save_keeps_markers_segments_and_rejoins_appended_meanwhile(tmp_path):
+    rec = _make_recording(tmp_path)                  # long-lived capture object
+    seg_path = tmp_path / "recordings" / rec.id / "combined" / "0000.wav"
+    _write_wav(seg_path)
+
+    def other_writers():
+        append_marker(rec.id, tmp_path)
+        record_completed_wav_segment(rec.id, seg_path, rec.started_at, finalized=True, data_dir=tmp_path)
+        rm.append_rejoin(rec.id, RejoinAttempt(datetime.now(timezone.utc), 4006, 1), tmp_path)
+
+    _join([threading.Thread(target=other_writers)])
+    rec.status = "completed"
+    rec.ended_at = datetime.now(timezone.utc)
+    save_recording(rec, tmp_path)
+
+    r = load_recordings(tmp_path)[rec.id]
+    assert len(r.markers) == 1 and len(r.segment_manifest) == 1 and len(r.rejoin_log) == 1
+    assert r.status == "completed"
+
+
+def test_concurrent_appends_are_all_kept(tmp_path):
+    rec = _make_recording(tmp_path)
+
+    def _append(i):
+        append_segment(rec.id, SegmentRecord(
+            index=i, stream="mixed", started_at=datetime.now(timezone.utc), duration_s=60.0,
+            path=rm.segment_path_for(rec.id, i, tmp_path), finalized=True), tmp_path)
+        append_marker(rec.id, tmp_path)
+
+    _join([threading.Thread(target=_append, args=(i,)) for i in range(15)])
+    r = load_recordings(tmp_path)[rec.id]
+    assert len(r.segment_manifest) == 15
+    assert len(r.markers) == 15
+
+
+# ---------------------------------------------------------------------------
+# Capture hot path
+# ---------------------------------------------------------------------------
+
 def test_record_completed_wav_segment_appends_and_returns_new_started_at(tmp_path):
-    """record_completed_wav_segment() is the shared helper BotManager/
-    LocalCaptureManager call whenever their combined-track writer rotates
-    or finalizes; it populates segment_manifest."""
     rec = _make_recording(tmp_path)
     started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
     path = tmp_path / "recordings" / rec.id / "combined" / "0000.wav"
     _write_wav(path)
 
-    new_started_at = record_completed_wav_segment(
-        rec.id, path, started_at, finalized=True, data_dir=tmp_path
-    )
+    new_started_at = record_completed_wav_segment(rec.id, path, started_at, finalized=True,
+                                                  data_dir=tmp_path)
 
-    loaded = load_recordings(tmp_path)
-    manifest = loaded[rec.id].segment_manifest
-    assert len(manifest) == 1
-    seg = manifest[0]
-    assert seg.index == 0
-    assert seg.stream == "mixed"
-    assert seg.started_at == started_at
+    [seg] = load_recordings(tmp_path)[rec.id].segment_manifest
+    assert (seg.index, seg.stream, seg.started_at, seg.path, seg.finalized) == (
+        0, "mixed", started_at, path, True)
     assert seg.duration_s > 0
-    assert seg.path == path
-    assert seg.finalized is True
-    # Returned timestamp is the next segment's start, strictly after this one.
     assert new_started_at > started_at
 
 
@@ -313,130 +350,133 @@ def test_record_completed_wav_segment_parses_index_from_filename(tmp_path):
     rec = _make_recording(tmp_path)
     path = tmp_path / "recordings" / rec.id / "combined" / "0042.wav"
     _write_wav(path)
-
-    record_completed_wav_segment(
-        rec.id, path, datetime.now(timezone.utc), finalized=False, data_dir=tmp_path
-    )
-
-    manifest = load_recordings(tmp_path)[rec.id].segment_manifest
-    assert manifest[0].index == 42
-    assert manifest[0].finalized is False
+    record_completed_wav_segment(rec.id, path, datetime.now(timezone.utc), finalized=False,
+                                 data_dir=tmp_path)
+    [seg] = load_recordings(tmp_path)[rec.id].segment_manifest
+    assert seg.index == 42 and seg.finalized is False
 
 
-def test_record_completed_wav_segment_skips_zero_frame_segment(tmp_path):
-    """A session that starts and stops with no audio ever received still
-    gets one empty (0-frame) segment out of SegmentedWavWriter.finalize().
-    Without this skip, segment_manifest would show a phantom entry while
-    combined_path correctly stays None / ?error=no_audio -- a
-    contradictory UI state."""
+def test_record_completed_wav_segment_skips_zero_frame_and_unreadable(tmp_path):
     rec = _make_recording(tmp_path)
-    path = tmp_path / "recordings" / rec.id / "combined" / "0000.wav"
-    _write_wav(path, n_frames=0)
-
-    record_completed_wav_segment(
-        rec.id, path, datetime.now(timezone.utc), finalized=True, data_dir=tmp_path
-    )
-
-    manifest = load_recordings(tmp_path)[rec.id].segment_manifest
-    assert manifest == []
-
-
-def test_record_completed_wav_segment_skips_unreadable_file(tmp_path):
-    """A corrupt/unreadable segment file (matches concat_wav_segments'
-    own tolerance for this) is skipped rather than raising."""
-    rec = _make_recording(tmp_path)
-    path = tmp_path / "recordings" / rec.id / "combined" / "0000.wav"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"not a real wav file")
-
-    new_started_at = record_completed_wav_segment(
-        rec.id, path, datetime.now(timezone.utc), finalized=True, data_dir=tmp_path
-    )
-
-    assert new_started_at is not None
-    manifest = load_recordings(tmp_path)[rec.id].segment_manifest
-    assert manifest == []
+    empty = tmp_path / "recordings" / rec.id / "combined" / "0000.wav"
+    _write_wav(empty, n_frames=0)
+    junk = tmp_path / "recordings" / rec.id / "combined" / "0001.wav"
+    junk.write_bytes(b"not a wav")
+    for p in (empty, junk):
+        record_completed_wav_segment(rec.id, p, datetime.now(timezone.utc), finalized=True,
+                                     data_dir=tmp_path)
+    assert load_recordings(tmp_path)[rec.id].segment_manifest == []
 
 
 def test_record_completed_wav_segment_swallows_errors_for_unknown_recording(tmp_path):
-    """Never raises -- a bookkeeping failure must not interrupt the hot
-    capture write path that calls this."""
-    new_started_at = record_completed_wav_segment(
-        "no-such-recording",
-        tmp_path / "0000.wav",
-        datetime.now(timezone.utc),
-        finalized=True,
-        data_dir=tmp_path,
-    )
-    assert new_started_at is not None
+    path = tmp_path / "0000.wav"
+    _write_wav(path)
+    result = record_completed_wav_segment("00000000-0000-4000-8000-000000000000", path,
+                                          datetime.now(timezone.utc), finalized=True, data_dir=tmp_path)
+    assert isinstance(result, datetime)
 
 
-# ---------------------------------------------------------------------------
-# Crash recovery
-# ---------------------------------------------------------------------------
+def test_hot_path_gives_up_quickly_when_the_database_is_busy(tmp_path):
+    """A writer holding the lock must not stall capture for the full 5 s."""
+    import time
 
-def test_reconcile_on_startup_clean_completion(tmp_path):
     rec = _make_recording(tmp_path)
-    update_recording_status(rec.id, "completed", tmp_path)
-    reconcile_on_startup(tmp_path)
-    # Completed recordings are left alone
-    assert load_recordings(tmp_path)[rec.id].status == "completed"
-
-
-def test_reconcile_on_startup_orphaned_segment_marked_failed(tmp_path):
-    rec = _make_recording(tmp_path)
-    assert load_recordings(tmp_path)[rec.id].status == "recording"
-    reconcile_on_startup(tmp_path)
-    assert load_recordings(tmp_path)[rec.id].status == "failed"
-
-
-def test_reconcile_on_startup_degraded_marked_failed(tmp_path):
-    rec = _make_recording(tmp_path)
-    update_recording_status(rec.id, "degraded", tmp_path)
-    reconcile_on_startup(tmp_path)
-    assert load_recordings(tmp_path)[rec.id].status == "failed"
-
-
-def test_reconcile_on_startup_corrupt_recordings_json_logs_and_returns(tmp_path, caplog):
-    idx = get_recordings_index_path(tmp_path)
-    idx.parent.mkdir(parents=True, exist_ok=True)
-    idx.write_text("{bad json", encoding="utf-8")
-    import logging
-    with caplog.at_level(logging.WARNING, logger="wisper_transcribe.recording_manager"):
-        reconcile_on_startup(tmp_path)   # must not raise
+    path = tmp_path / "recordings" / rec.id / "combined" / "0000.wav"
+    _write_wav(path)
+    holder = db.connect(tmp_path)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        t0 = time.monotonic()
+        record_completed_wav_segment(rec.id, path, datetime.now(timezone.utc), finalized=True,
+                                     data_dir=tmp_path)
+        assert time.monotonic() - t0 < 2.5
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    assert load_recordings(tmp_path)[rec.id].segment_manifest == []
+    reconcile_on_startup(tmp_path)                   # restored from the file on disk
+    [seg] = load_recordings(tmp_path)[rec.id].segment_manifest
+    assert seg.index == 0 and seg.duration_s == pytest.approx(320 / 16000)
 
 
 # ---------------------------------------------------------------------------
-# _validate_recording_id — security (CodeQL Pattern 2)
+# Startup reconcile
 # ---------------------------------------------------------------------------
 
-_TRAVERSAL_PAYLOADS = [
-    "\x00",
-    "some\x00name",
-    "../evil",
-    "../../etc/passwd",
-    "invalid*name",
-    "invalid+name",
-    "id/with/slashes",
-    "",
-    ".",
-    "..",
-]
+def test_reconcile_on_startup_marks_active_sessions_failed(tmp_path):
+    active = _make_recording(tmp_path)
+    degraded = _make_recording(tmp_path)
+    update_recording_status(degraded.id, "degraded", tmp_path)
+    done = _make_recording(tmp_path)
+    update_recording_status(done.id, "completed", tmp_path, ended_at=datetime.now(timezone.utc))
 
-_VALID_IDS = [
-    "550e8400-e29b-41d4-a716-446655440000",
-    "abc123",
-    "my-recording-01",
-]
+    reconcile_on_startup(tmp_path)
+
+    loaded = load_recordings(tmp_path)
+    assert loaded[active.id].status == "failed" and loaded[active.id].ended_at is not None
+    assert loaded[degraded.id].status == "failed"
+    assert loaded[done.id].status == "completed"
 
 
-@pytest.mark.parametrize("payload", _TRAVERSAL_PAYLOADS)
+# ---------------------------------------------------------------------------
+# Recording ID validation
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("payload", ["../etc", "a/b", "", "\x00", "..", "id with spaces"])
 def test_validate_recording_id_rejects_traversal_payloads(payload):
     assert _validate_recording_id(payload) is None
 
 
-@pytest.mark.parametrize("valid_id", _VALID_IDS)
+@pytest.mark.parametrize("valid_id", ["550e8400-e29b-41d4-a716-446655440000", "abc-123"])
 def test_validate_recording_id_accepts_valid_ids(valid_id):
-    result = _validate_recording_id(valid_id)
-    assert result is not None
-    assert result == valid_id
+    assert _validate_recording_id(valid_id) == valid_id
+
+
+def test_timestamps_round_trip_with_microseconds():
+    dt = datetime(2026, 9, 30, 12, 0, 0, 123456, tzinfo=timezone(timedelta(hours=-4)))
+    assert rm._dt(rm._ts(dt)) == dt
+    assert rm._ts(dt).endswith("Z")
+
+
+# ---------------------------------------------------------------------------
+# Recover crashed sessions
+# ---------------------------------------------------------------------------
+
+def _crashed_session(tmp_path, n_segments=2):
+    rec = _make_recording(tmp_path)
+    for i in range(n_segments):
+        _write_wav(tmp_path / "recordings" / rec.id / "combined" / f"{i:04d}.wav", n_frames=1600)
+    reconcile_on_startup(tmp_path)                   # the restart after the crash
+    return rec
+
+
+def test_crashed_session_with_segments_is_recoverable(tmp_path):
+    rec = _crashed_session(tmp_path)
+    r = load_recordings(tmp_path)[rec.id]
+    assert r.status == "failed" and r.recoverable is True and r.combined_path is None
+
+    recovered = rm.recover_recording(rec.id, tmp_path)
+
+    assert recovered.status == "completed" and recovered.recovered_at is not None
+    assert recovered.combined_path is not None and recovered.recoverable is False
+    with wave.open(str(recovered.combined_path), "rb") as wf:
+        assert wf.getnframes() == 3200
+
+
+def test_crashed_session_without_segments_is_not_recoverable(tmp_path):
+    rec = _crashed_session(tmp_path, n_segments=0)
+    assert load_recordings(tmp_path)[rec.id].recoverable is False
+    with pytest.raises(ValueError):
+        rm.recover_recording(rec.id, tmp_path)
+
+
+def test_recover_refuses_an_active_session(tmp_path):
+    rec = _make_recording(tmp_path)
+    _write_wav(tmp_path / "recordings" / rec.id / "combined" / "0000.wav")
+    with pytest.raises(ValueError, match="still recording"):
+        rm.recover_recording(rec.id, tmp_path)
+
+
+def test_recover_unknown_recording(tmp_path):
+    with pytest.raises(KeyError):
+        rm.recover_recording("00000000-0000-4000-8000-000000000000", tmp_path)

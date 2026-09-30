@@ -343,6 +343,7 @@ CREATE TABLE campaign_transcripts (           -- 1:N kept as its own relation so
 # and the backup dir holds copies).
 _IMPORTED_LEGACY: dict[int, tuple[str, ...]] = {
     2: ("profiles/speakers.json", "campaigns/campaigns.json", "profiles/embeddings/*.npy"),
+    5: ("recordings/recordings.json", "recordings/*/metadata.json"),
 }
 _cleaned: set[str] = set()
 
@@ -420,11 +421,87 @@ def _v4_import(conn: sqlite3.Connection, ctx: MigrationContext) -> None:
     import_diarization_sidecars(conn, ctx)
 
 
+# --- v5: recordings ---------------------------------------------------------
+
+_V5_DDL = """
+CREATE TABLE recordings (
+  id             TEXT PRIMARY KEY CHECK (length(id) = 36),   -- uuid4
+  source         TEXT NOT NULL CHECK (source IN ('discord', 'local')),
+  name           TEXT,
+  notes          TEXT,
+  campaign_id    INTEGER REFERENCES campaigns(id) ON DELETE SET NULL,
+  transcript_id  INTEGER UNIQUE REFERENCES transcripts(id) ON DELETE SET NULL,
+  capture_status TEXT NOT NULL CHECK (capture_status IN ('recording', 'degraded', 'completed', 'failed')),
+  started_at     TEXT NOT NULL,
+  ended_at       TEXT,
+  recovered_at   TEXT,
+  UNIQUE (id, source),                        -- target of the subtype FKs below
+  CHECK (capture_status NOT IN ('recording', 'degraded') OR ended_at IS NULL),
+  CHECK (recovered_at IS NULL OR capture_status = 'completed')
+) STRICT;
+CREATE INDEX recordings_campaign ON recordings(campaign_id);
+
+CREATE TABLE recording_discord (              -- subtype: Discord-only attributes
+  recording_id     TEXT PRIMARY KEY,
+  source           TEXT NOT NULL DEFAULT 'discord' CHECK (source = 'discord'),
+  guild_id         TEXT NOT NULL,
+  voice_channel_id TEXT NOT NULL,
+  FOREIGN KEY (recording_id, source) REFERENCES recordings(id, source) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE recording_devices (              -- subtype: local-capture devices (display only)
+  recording_id TEXT NOT NULL,
+  source       TEXT NOT NULL DEFAULT 'local' CHECK (source = 'local'),
+  role         TEXT NOT NULL CHECK (role IN ('mic', 'system')),
+  device_name  TEXT NOT NULL,
+  PRIMARY KEY (recording_id, role),
+  FOREIGN KEY (recording_id, source) REFERENCES recordings(id, source) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE recording_speakers (             -- Discord users heard; NULL profile = unbound
+  recording_id    TEXT NOT NULL REFERENCES recording_discord(recording_id) ON DELETE CASCADE,
+  discord_user_id TEXT NOT NULL CHECK (discord_user_id <> '' AND discord_user_id NOT GLOB '*[^0-9]*'),
+  profile_id      INTEGER REFERENCES profiles(id) ON DELETE SET NULL,
+  PRIMARY KEY (recording_id, discord_user_id)
+) STRICT;
+CREATE INDEX recording_speakers_profile ON recording_speakers(profile_id);
+
+CREATE TABLE recording_segments (             -- path derived: recordings/<id>/combined/<idx:04d>.wav
+  recording_id TEXT NOT NULL REFERENCES recordings(id) ON DELETE CASCADE,
+  idx          INTEGER NOT NULL CHECK (idx >= 0),
+  started_at   TEXT NOT NULL,
+  duration_s   REAL NOT NULL CHECK (duration_s >= 0),
+  finalized    INTEGER NOT NULL CHECK (finalized IN (0, 1)),
+  PRIMARY KEY (recording_id, idx)
+) STRICT;
+
+CREATE TABLE recording_markers (              -- elapsed = marked_at - recordings.started_at (derived)
+  recording_id TEXT NOT NULL REFERENCES recordings(id) ON DELETE CASCADE,
+  marked_at    TEXT NOT NULL,
+  PRIMARY KEY (recording_id, marked_at)
+) STRICT;
+
+CREATE TABLE recording_rejoins (
+  recording_id   TEXT NOT NULL REFERENCES recording_discord(recording_id) ON DELETE CASCADE,
+  attempted_at   TEXT NOT NULL,
+  close_code     INTEGER NOT NULL,
+  attempt_number INTEGER NOT NULL CHECK (attempt_number >= 1),
+  PRIMARY KEY (recording_id, attempted_at)
+) STRICT;
+"""
+
+
+def _v5_import(conn: sqlite3.Connection, ctx: MigrationContext) -> None:
+    from .legacy_import import import_recordings
+    import_recordings(conn, ctx)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "foundation", _V1_DDL, _v1_pin_output_dir),
     Migration(2, "profiles-campaigns", _V2_DDL, _v2_import),
     Migration(3, "journal-entries", _V3_DDL, _v3_import),
     Migration(4, "transcript-speakers", _V4_DDL, _v4_import),
+    Migration(5, "recordings", _V5_DDL, _v5_import),
 )
 LATEST_VERSION = MIGRATIONS[-1].version
 
@@ -584,18 +661,19 @@ def _user_version(conn: sqlite3.Connection) -> int:
 # Connections
 # ---------------------------------------------------------------------------
 
-def _open(path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(path, autocommit=True, timeout=BUSY_TIMEOUT_MS / 1000)
+def _open(path: Path, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite3.Connection:
+    conn = sqlite3.connect(path, autocommit=True, timeout=busy_timeout_ms / 1000)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+    conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
     if conn.execute("PRAGMA journal_mode").fetchone()[0].lower() != "delete":
         conn.execute("PRAGMA journal_mode=DELETE")
     return conn
 
 
 def connect(data_dir: Optional[Path] = None, *, migrate_schema: bool = True,
-            claim_runtime: bool = True) -> sqlite3.Connection:
+            claim_runtime: bool = True,
+            busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite3.Connection:
     """Open ``wisper.db`` with the standard pragmas. The caller closes it.
 
     Migrates first when the schema is behind and records this process's
@@ -618,7 +696,7 @@ def connect(data_dir: Optional[Path] = None, *, migrate_schema: bool = True,
         _finish_legacy_cleanup(data_dir)
     else:
         data_dir.mkdir(parents=True, exist_ok=True)
-    conn = _open(data_dir / DB_FILENAME)
+    conn = _open(data_dir / DB_FILENAME, busy_timeout_ms)
     if claim_runtime and migrate_schema:
         try:
             _refresh_lease(conn, data_dir)
@@ -639,13 +717,15 @@ def connection(data_dir: Optional[Path] = None, **kwargs) -> Iterator[sqlite3.Co
 
 
 @contextmanager
-def transaction(data_dir: Optional[Path] = None) -> Iterator[sqlite3.Connection]:
+def transaction(data_dir: Optional[Path] = None, *,
+                busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> Iterator[sqlite3.Connection]:
     """``BEGIN IMMEDIATE`` … ``COMMIT`` on a fresh connection, closed on exit.
 
     Rolls back on any exception. Never hold one across ML or LLM work:
-    compute first, then write in a short transaction.
+    compute first, then write in a short transaction. The capture hot path
+    passes a short ``busy_timeout_ms`` so a busy database can't stall audio.
     """
-    conn = connect(data_dir)
+    conn = connect(data_dir, busy_timeout_ms=busy_timeout_ms)
     try:
         conn.execute("BEGIN IMMEDIATE")
         try:

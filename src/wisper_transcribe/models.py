@@ -114,6 +114,9 @@ class Marker:
 
 @dataclass
 class Recording:
+    """A recording session. Stored in wisper.db by ``recording_manager``;
+    ``status``, ``combined_path``, ``per_user_dir``, segment paths, marker
+    ``elapsed_s``, ``unbound_speakers``, and ``job_id`` are derived on load."""
     id: str                        # uuid4
     campaign_slug: Optional[str]
     started_at: datetime
@@ -134,6 +137,8 @@ class Recording:
     devices: dict = field(default_factory=dict)  # local: {"mic": "<device name>", "system": "<device name>"} — display-only, never used in a file path
     name: Optional[str] = None     # user-supplied session name, set at start; display-only, never used in a file path
     markers: list = field(default_factory=list)  # list[Marker] -- user-flagged moments, "Add marker" button on /record
+    recovered_at: Optional[datetime] = None  # set when a crashed session's segments were joined into combined.wav
+    recoverable: bool = False      # derived: failed, no combined.wav, but combined segments on disk
 
 
 # ---------------------------------------------------------------------------

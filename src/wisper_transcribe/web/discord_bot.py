@@ -27,7 +27,7 @@ from wisper_transcribe.recording_manager import (
     create_recording,
     load_recordings,
     record_completed_wav_segment,
-    save_recording_merged,
+    save_recording,
 )
 from wisper_transcribe.web.audio_writer import (
     SegmentedWavWriter,
@@ -361,7 +361,7 @@ class BotManager:
                 )
                 recording.status = "failed"
                 recording.ended_at = datetime.now(timezone.utc)
-                save_recording_merged(recording, self._data_dir)
+                save_recording(recording, self._data_dir)
                 return None
             return "__test_token__"  # non-production source factory; token unused by sidecar
         return token
@@ -437,7 +437,7 @@ class BotManager:
                 recording.discord_speakers[user_id] = profile_key
                 if not profile_key and user_id not in recording.unbound_speakers:
                     recording.unbound_speakers.append(user_id)
-                save_recording_merged(recording, self._data_dir)
+                save_recording(recording, self._data_dir)
 
         self._writers[user_id].write(mono_16k)
 
@@ -452,7 +452,7 @@ class BotManager:
             )
             recording.status = "failed"
             recording.ended_at = datetime.now(timezone.utc)
-            save_recording_merged(recording, self._data_dir)
+            save_recording(recording, self._data_dir)
             return False
 
         if attempt >= len(self._backoff):
@@ -461,7 +461,7 @@ class BotManager:
                 len(self._backoff), recording.id,
             )
             recording.status = "degraded"
-            save_recording_merged(recording, self._data_dir)
+            save_recording(recording, self._data_dir)
             return False
 
         delay = self._backoff[attempt]
@@ -475,7 +475,7 @@ class BotManager:
             attempt_number=attempt + 1,
         )
         recording.rejoin_log.append(rejoin)
-        save_recording_merged(recording, self._data_dir)
+        save_recording(recording, self._data_dir)
 
         if delay > 0:
             await asyncio.sleep(delay)
@@ -533,6 +533,6 @@ class BotManager:
         # Always persist — combined_path (and, when applicable, the
         # completed-status transition) must survive even if an earlier
         # disconnect handler already saved a terminal status (failed/degraded).
-        save_recording_merged(recording, self._data_dir)
+        save_recording(recording, self._data_dir)
         if became_completed:
             log.info("Recording %s finalised as completed", recording.id)

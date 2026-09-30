@@ -236,13 +236,15 @@ def test_delete_refuses_unsafe_stem(bad):
 
 
 def test_delete_reverts_recording_link(out):
-    from wisper_transcribe.recording_manager import create_recording, load_recordings, save_recording
+    from wisper_transcribe.recording_manager import (
+        create_recording, link_transcript, load_recordings, update_recording_status,
+    )
 
     rec = create_recording("VC1", "G1")
-    rec.status = "transcribed"
-    rec.transcript_path = _md(out, rec.id)
-    save_recording(rec)
+    update_recording_status(rec.id, "completed")
     ts.register(rec.id, origin="job")
+    link_transcript(rec.id, _md(out, rec.id))
+    assert load_recordings()[rec.id].status == "transcribed"
 
     ts.delete_transcript(rec.id)
 

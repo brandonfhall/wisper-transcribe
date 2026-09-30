@@ -38,7 +38,7 @@ from wisper_transcribe.models import Recording
 from wisper_transcribe.recording_manager import (
     create_recording,
     record_completed_wav_segment,
-    save_recording_merged,
+    save_recording,
 )
 from wisper_transcribe.web.audio_writer import (
     SegmentedWavWriter,
@@ -437,7 +437,7 @@ class LocalCaptureManager:
             return
         try:
             recording.status = "degraded"
-            save_recording_merged(recording, self._data_dir)
+            save_recording(recording, self._data_dir)
         except Exception:
             log.warning("Failed to mark recording %s degraded", recording.id, exc_info=True)
 
@@ -560,6 +560,6 @@ class LocalCaptureManager:
             recording.status = "completed"
             recording.ended_at = datetime.now(timezone.utc)
 
-        save_recording_merged(recording, self._data_dir)
+        save_recording(recording, self._data_dir)
         if became_completed:
             log.info("Local recording %s finalised as completed", recording.id)

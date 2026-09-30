@@ -1660,12 +1660,12 @@ def _get_server_url() -> str:
         raise click.ClickException(f"Could not read server.json: {exc}")
 
 
-def _record_request(method: str, path: str, **kwargs) -> dict:
+def _record_request(method: str, path: str, timeout: float = 10, **kwargs) -> dict:
     """Make an HTTP request to the running wisper server. Returns parsed JSON."""
     import httpx
     url = _get_server_url().rstrip("/") + path
     try:
-        resp = httpx.request(method, url, timeout=10, **kwargs)
+        resp = httpx.request(method, url, timeout=timeout, **kwargs)
         resp.raise_for_status()
         return resp.json()
     except httpx.ConnectError:
@@ -1781,6 +1781,18 @@ def record_delete(recording_id: str):
     if not _validate_recording_id(recording_id):
         raise click.ClickException(f"Invalid recording ID: {recording_id!r}")
     result = _record_request("POST", f"/api/recordings/{recording_id}/delete?purge=true")
+    click.echo(result)
+
+
+@record.command("recover")
+@click.argument("recording_id")
+def record_recover(recording_id: str):
+    """Rebuild a crashed session's audio from its segments so it can be transcribed."""
+    from .recording_manager import _validate_recording_id
+    if not _validate_recording_id(recording_id):
+        raise click.ClickException(f"Invalid recording ID: {recording_id!r}")
+    # Joining hours of segments can take a while.
+    result = _record_request("POST", f"/api/recordings/{recording_id}/recover", timeout=600)
     click.echo(result)
 
 

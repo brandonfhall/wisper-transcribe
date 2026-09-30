@@ -1691,3 +1691,24 @@ def test_job_fails_when_reported_transcript_is_missing(tmp_path):
     assert job.status == FAILED
     assert job.error == "Transcript file missing after write"
     assert any("Transcripts folder:" in line for line in job.log_lines)
+
+
+def test_recording_is_transcribing_only_while_its_job_is_pending_or_running(tmp_path):
+    """A cancelled pending job never runs its callbacks; the recording must
+    still come back as transcribable (status is derived from the queue)."""
+    from wisper_transcribe.recording_manager import load_recordings
+    from wisper_transcribe.web.jobs import JobQueue
+
+    from ._seed import seed_recording
+
+    rec = seed_recording()
+    q = JobQueue()
+    job = q.submit(str(rec.combined_path), original_stem=rec.id, recording_id=rec.id,
+                   output_dir=str(tmp_path))
+    loaded = load_recordings()[rec.id]
+    assert loaded.status == "transcribing" and loaded.job_id == job.id
+
+    q.cancel(job.id)
+    loaded = load_recordings()[rec.id]
+    assert loaded.status == "completed"
+    assert loaded.job_id == job.id

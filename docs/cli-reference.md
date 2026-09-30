@@ -431,6 +431,7 @@ wisper record list                                              # list all recor
 wisper record show <recording_id>                               # show metadata for a recording
 wisper record transcribe <recording_id>                         # re-queue transcription
 wisper record delete <recording_id>                             # delete recording + its files on disk (permanent)
+wisper record recover <recording_id>                            # rebuild a crashed session's audio so it can be transcribed
 ```
 
 `record start` resolves the guild and channel from: explicit flags → `--preset` → the `discord_default_guild`/`discord_default_channel` config keys (set via `wisper config discord`, also used by the web Record page).

@@ -111,6 +111,10 @@ wisper keeps a record of every transcript in the transcripts folder. If a file v
 
 `wisper transcripts list` shows missing entries too.
 
+## A recording stopped unexpectedly
+
+If wisper crashes or the machine loses power mid-session, the recording shows **FAILED** after the restart, but everything captured up to the last minute is still on disk. Open the recording and click **Recover recording** (or run `wisper record recover <recording_id>` while `wisper server` runs). The saved pieces are joined into one file, the recording becomes **COMPLETED**, and **Transcribe** works as usual. Expect up to the final minute to be missing.
+
 ## Starting the campaign journal over
 
 - **Rebuild journal** (web) or `wisper campaigns journal <slug> --rebuild` re-folds every session's existing summary: one LLM call per session, and your edits to summaries are kept.
