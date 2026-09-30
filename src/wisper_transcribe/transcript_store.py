@@ -171,7 +171,11 @@ def safe_path(stem: str, suffix: str, output_dir: Optional[Path] = None) -> Opti
     base = os.path.abspath(str(output_dir))
     if not base.endswith(os.sep):
         base += os.sep
-    target = existing_form(os.path.abspath(os.path.join(base, f"{safe}{suffix}")))
+    target = os.path.abspath(os.path.join(base, f"{safe}{suffix}"))
+    if not target.startswith(base):
+        return None
+    # Only a path already inside the base is probed on disk; re-checked after.
+    target = existing_form(target)
     if not target.startswith(base):
         return None
     return Path(target)
