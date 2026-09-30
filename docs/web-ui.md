@@ -28,6 +28,7 @@ The web UI is a **single-user tool with no authentication and no CSRF protection
 | Transcribe | `/transcribe` | Upload and transcribe (see below) |
 | Transcripts | `/transcripts` | Recordings awaiting transcription; browse, read, download, edit, and delete transcripts; tick rows to delete them or move them to a campaign in bulk |
 | Speakers | `/speakers` | Enroll, rename, and remove speaker profiles; play reference clips. Profiles from an older speaker model show **NEEDS RE-ENROLL** |
+| Search | `/search` | Full-text search over every transcript and session summary (see below). The box at the top of the sidebar searches from any page |
 | Campaigns | `/campaigns` | Campaigns, rosters, episode order, and the rolling journal |
 | Record | `/record` | Start and stop Discord or local recording sessions |
 | Recordings | `/recordings` | Browse recordings by campaign; detail, transcribe, and delete |
@@ -59,6 +60,18 @@ Large uploads show a byte-level progress bar ("Uploading… N%", then "Processin
 - The dashboard shows the 20 newest jobs, including ones from before a restart. **all jobs →** opens **Job history** (`/jobs/history`): every job ever run, 50 per page, filterable by type and status, with each job's settings, result, and last log lines. Transcript and campaign pages have a **Jobs** button that filters it to that transcript or campaign. Jobs that were queued or running when the server stopped show as "Interrupted by restart"; they are not resumed.
 
 Transcripts are written to the transcripts folder (`output/` in the data directory unless `output_dir` / `WISPER_OUTPUT_DIR` says otherwise; see [configuration.md](configuration.md#transcripts-folder)) and appear on the Transcripts page as soon as the job finishes. Files you add to that folder yourself appear too.
+
+---
+
+## Searching
+
+Type in the sidebar box or open `/search`. Every transcript and its session summary are searched.
+
+- **Matching.** Words match their other forms ("fights" finds "fight"), and accents are ignored ("cafe" finds "café"). Every word must appear in the same speaker block or summary section. Put `"double quotes"` around a phrase, and end a word with `*` to match a prefix (`Stra*`). Anything else, including `-`, `OR`, `NEAR`, and `:`, is searched as ordinary text.
+- **Results** are grouped by transcript, best match first, 20 transcripts per page, with up to three matching blocks each. Each block shows the speaker, the timestamp, and a snippet with the matched words highlighted. Highlighting is approximate; a result can match on a word form that isn't highlighted.
+- **Filters:** campaign, speaker, and transcripts or summaries only.
+- **Opening a result** jumps to that block in the transcript, or that section of the summary, and highlights the words there.
+- **Indexing.** Transcripts written or edited in the web UI or CLI are searchable immediately. After an upgrade, or when files are added while the server is stopped, they are indexed in the background, and the page header shows **INDEXING N OF M** until that finishes. Files edited outside wisper (for example in Obsidian) are reindexed when the Transcripts or Campaign page next loads, or when a search result shows **Transcript changed — reindexing**. Transcripts flagged missing aren't searched.
 
 ---
 

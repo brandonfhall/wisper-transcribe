@@ -4,6 +4,7 @@ from __future__ import annotations
 import html as _html_module
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
@@ -126,6 +127,40 @@ def _parse_frontmatter(content: str) -> tuple[dict, str]:
             except Exception:
                 pass
     return {}, content
+
+
+def _anchor_blocks(body: str) -> str:
+    """Wrap each transcript block in ``<span id="b-<index>">`` so search
+    results can deep-link to it. Numbered by ``searchable_blocks()``, the same
+    numbering the search index stores."""
+    from wisper_transcribe.formatter import searchable_blocks
+
+    lines = body.splitlines()
+    for lineno, block in searchable_blocks(body):
+        lines[lineno] = (f'<span id="b-{block["index"]}" class="block-anchor">'
+                         f'{lines[lineno].strip()}</span>')
+    return "\n".join(lines)
+
+
+def _anchor_sections(html: str) -> str:
+    """Give the summary's ``<h2>`` sections ids ``s-1``, ``s-2``, … and the top
+    ``s-0``, matching ``search_index.summary_sections()``."""
+    count = 0
+
+    def number(_match) -> str:
+        nonlocal count
+        count += 1
+        return f'<h2 id="s-{count}" class="block-anchor">'
+
+    return '<span id="s-0" class="block-anchor"></span>' + re.sub(r"<h2>", number, html)
+
+
+def _highlight(q: str) -> str | None:
+    """The JS-compatible highlight regex for a search query, or None."""
+    from wisper_transcribe.search_index import highlight_pattern
+
+    pattern = highlight_pattern(q[:500]) if q else None
+    return pattern.pattern if pattern else None
 
 
 def _get_safe_content_path(name: str, suffix: str) -> Path | None:
@@ -294,7 +329,7 @@ async def bulk_assign_campaign(request: Request) -> HTMLResponse:
 
 
 @router.get("/{name}", response_class=HTMLResponse)
-async def transcript_detail(request: Request, name: str) -> HTMLResponse:
+async def transcript_detail(request: Request, name: str, q: str = "") -> HTMLResponse:
     md_path = _get_safe_content_path(name, ".md")
     if not md_path:
         return invalid_input_response("Invalid name")
@@ -305,7 +340,7 @@ async def transcript_detail(request: Request, name: str) -> HTMLResponse:
     meta, body = _parse_frontmatter(content)
 
     import markdown as _md
-    html_body = _sanitize_html(_md.markdown(body, extensions=["nl2br"]))
+    html_body = _sanitize_html(_md.markdown(_anchor_blocks(body), extensions=["nl2br"]))
 
     # Check for summary sidecar
     summary_path = _get_safe_content_path(name, ".summary.md")
@@ -339,6 +374,7 @@ async def transcript_detail(request: Request, name: str) -> HTMLResponse:
             "llm_model": llm_model,
             "campaigns": campaigns,
             "current_campaign_slug": current_campaign_slug,
+            "highlight": _highlight(q),
         },
     )
 
@@ -513,7 +549,7 @@ async def post_summarize(request: Request, name: str) -> HTMLResponse:
 
 
 @router.get("/{name}/summary", response_class=HTMLResponse)
-async def summary_detail(request: Request, name: str) -> HTMLResponse:
+async def summary_detail(request: Request, name: str, q: str = "") -> HTMLResponse:
     """Render the campaign-notes summary for a transcript."""
     md_path = _get_safe_content_path(name, ".md")
     if not md_path:
@@ -527,7 +563,7 @@ async def summary_detail(request: Request, name: str) -> HTMLResponse:
     meta, body = _parse_frontmatter(content)
 
     import markdown as _md
-    html_body = _sanitize_html(_md.markdown(body, extensions=["nl2br"]))
+    html_body = _anchor_sections(_sanitize_html(_md.markdown(body, extensions=["nl2br"])))
 
     return templates.TemplateResponse(
         request,
@@ -538,6 +574,7 @@ async def summary_detail(request: Request, name: str) -> HTMLResponse:
             "meta": meta,
             "html_body": html_body,
             "title": meta.get("title", f"{name} — Campaign Notes"),
+            "highlight": _highlight(q),
         },
     )
 

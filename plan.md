@@ -484,7 +484,8 @@ Branch `feat/sqlite-storage`, pushed; one PR to `main` at the end (ask the user 
 ### Phase 6 progress
 
 - **6a (indexing):** v7 schema, `search_index.py` (reindex, freshness, backfill worker, `search()`), `save_transcript()`/`save_summary()` at every write site, reconcile/relink/register hooks, and the guard test. DDL is in `db.py` (`_V7_DDL`); design is in architecture.md "Search index".
-- **6b (next):** `/search` route, sidebar box, transcript/summary anchors, then **6c:** `wisper search`, `wisper db reindex`, user docs.
+- **6b (web):** `/search` (grouped results, filters, paging, "Indexing N of M", stale state), the sidebar search box, `#b-<index>` spans on transcript pages and `#s-<index>` on summary pages, and in-page highlighting of the query on arrival. Summary snippets drop markdown markers. Checked in a browser against the dev data: transcript and summary deep links both land on the right block.
+- **6c (next):** `wisper search`, `wisper db reindex`, CLI docs.
 
 ### Remaining phases
 

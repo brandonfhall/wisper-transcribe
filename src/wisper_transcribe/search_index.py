@@ -463,6 +463,17 @@ def snippet(text: str, pattern: Optional[re.Pattern], width: int = SNIPPET_CHARS
     return Markup("").join(out)
 
 
+_MD_LINE_PREFIX_RE = re.compile(r"^\s*(?:#{1,6}\s+|[-*]\s+(?:\[[ xX]\]\s+)?|\d+\.\s+)", re.MULTILINE)
+_MD_INLINE_RE = re.compile(r"\*\*|__|\[\[|\]\]")
+
+
+def _plain(markdown_text: str) -> str:
+    """Summary markdown as readable snippet text: no heading or list markers,
+    bold, or ``[[wiki links]]``; lines joined with spaces."""
+    text = _MD_INLINE_RE.sub("", _MD_LINE_PREFIX_RE.sub("", markdown_text))
+    return " ".join(text.split())
+
+
 @dataclass
 class Hit:
     kind: str
@@ -619,7 +630,8 @@ def search(query: str, *, campaign: Optional[str] = None, speaker: Optional[str]
             if hit.block_idx >= len(blocks) or blocks[hit.block_idx].idx != hit.block_idx:
                 group.stale = True
                 break
-            hit.snippet = snippet(blocks[hit.block_idx].text, pattern)
+            text = blocks[hit.block_idx].text
+            hit.snippet = snippet(_plain(text) if hit.kind == KIND_SUMMARY else text, pattern)
         if group.stale:
             stale_ids.append(tid)
     if stale_ids:

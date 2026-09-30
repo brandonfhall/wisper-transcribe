@@ -379,6 +379,12 @@ def test_snippet_escapes_html(out):
     assert "<mark>Strahd</mark>" in html
 
 
+def test_summary_snippet_drops_markdown(out):
+    _add(out, "s1", summary=SUMMARY.replace("a silver dagger", "**a silver** [[dagger]]"))
+    (group,) = si.search("dagger").groups
+    assert str(group.hits[0].snippet) == "Loot &amp; Inventory Alice — a silver <mark>dagger</mark>"
+
+
 def test_snippet_windows_long_text():
     text = ("word " * 200) + "needle " + ("tail " * 200)
     html = str(si.snippet(text, si.highlight_pattern("needle")))

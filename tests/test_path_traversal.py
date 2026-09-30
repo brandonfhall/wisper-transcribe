@@ -567,3 +567,22 @@ def test_campaign_relink_rejects_unsafe_stems(client, payload, tmp_path, monkeyp
         assert resp.status_code in (303, 400, 422)
         location = resp.headers.get("location", "")
         assert location in ("", "/campaigns/game?error=relink_failed")
+
+
+@pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS + ["\x00", "a\x00b", "\r\nSet-Cookie: x=1"])
+def test_search_params_are_inert(client: TestClient, payload: str):
+    """/search reads no files and never redirects: every parameter is either a
+    search term or ignored unless it exactly matches a dropdown value."""
+    r = client.get("/search", params={"q": payload, "campaign": payload, "speaker": payload,
+                                      "kind": payload})
+    assert r.status_code == 200
+    assert "Set-Cookie" not in r.headers
+    assert "Traceback" not in r.text
+
+
+@pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS + ["\x00", '"</script>'])
+def test_transcript_highlight_param_is_inert(client: TestClient, payload: str):
+    """The ?q= highlight parameter on transcript and summary pages is never a path."""
+    for url in ("/transcripts/nope", "/transcripts/nope/summary"):
+        r = client.get(url, params={"q": payload})
+        assert r.status_code in (400, 404)

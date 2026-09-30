@@ -234,6 +234,7 @@ def create_app() -> FastAPI:
     from .routes import config as config_router
     from .routes import dashboard as dashboard_router
     from .routes import record as record_router
+    from .routes import search as search_router
     from .routes import speakers as speakers_router
     from .routes import transcribe as transcribe_router
     from .routes import transcripts as transcripts_router
@@ -245,6 +246,7 @@ def create_app() -> FastAPI:
     app.include_router(config_router.router)
     app.include_router(campaigns_router.router)
     app.include_router(record_router.router)
+    app.include_router(search_router.router)
 
     return app
 
