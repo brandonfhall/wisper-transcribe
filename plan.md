@@ -149,6 +149,13 @@ Shipped in #63; the design is in `architecture.md`. What's left:
 
 ---
 
+## Job page progress — known improvements
+
+- **Real Transcribe progress on MLX (Apple Silicon).** The Transcribe stage shows a moving bar but `ETA 0:00`: `_transcribe_mlx()` calls `mlx_whisper.transcribe()` without `verbose`, and the default `verbose=None` disables mlx-whisper's own tqdm bar (`tqdm(total=content_frames, unit="frames", disable=verbose is not False)` in `mlx_whisper/transcribe.py`). With no tqdm data, the job page falls back to the 5 s creep estimator, which was built for LLM steps (`2246e01`); the `0:00` is the extraction bar's last ETA, never replaced. `verbose` has never been set in `transcriber.py` history, so the real bar was never tried, not rejected. Fix: pass `verbose=False`; it advances once per 30 s decoding window, and its ETA/percent flow through the existing tqdm capture. Try on a short clip first; clear the stale ETA when a step changes.
+- **Align stage.** Forced alignment has no stage on the job page: `detectPhase()` maps "align" to Diarize, so the label stays "Diarizing…" and the Aligning bar restarts from 0% inside the Diarize slice (the bar jumps back once). Fix: an Align step between Diarize and Format, shown only when alignment will run, with its own slice.
+
+---
+
 ## Live recording — feature requests
 
 - **Change input devices mid-session.** `LocalCaptureManager.start_session()` binds both capture threads to fixed device IDs; switching today means Stop + Start (a new `Recording` and a gap in the transcript). Needs capture threads that can restart against a new device while the tick thread, segment writers, and `Recording` keep running. Needs a design pass first.
