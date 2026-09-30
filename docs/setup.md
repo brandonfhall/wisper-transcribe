@@ -102,7 +102,7 @@ Walks you through provider (Ollama / Ollama Cloud / LM Studio / Anthropic / Open
 - Python 3.13+ (for Option A/C)
 - [ffmpeg](https://ffmpeg.org/download.html) on your PATH
 - A free [HuggingFace token](https://huggingface.co/settings/tokens)
-- GPU recommended but not required (CPU works, just slower)
+- GPU recommended but not required (CPU works, just slower). On a GPU (CUDA or Apple Silicon), forced word alignment is on by default and downloads a ~1.7 GB model on first use.
 - **Discord recording bot:** Java 25+ ([Adoptium](https://adoptium.net/) or `apt-get install openjdk-25-jre-headless`)
 
 **Windows CUDA:**

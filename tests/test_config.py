@@ -165,3 +165,19 @@ def test_custom_similarity_threshold_is_kept(tmp_path):
 
         save_config({"similarity_threshold": 0.6})
         assert load_config()["similarity_threshold"] == 0.6
+
+
+@pytest.mark.parametrize("setting,device,expected", [
+    ("auto", "cuda", True), ("auto", "mps", True), ("auto", "cpu", False),
+    ("true", "cpu", True), ("false", "cuda", False),
+    (True, "cpu", True), (False, "cuda", False),  # hand-edited TOML booleans
+    ("TRUE", "cpu", True), ("", "cuda", True), ("", "cpu", False),
+])
+def test_forced_alignment_enabled(setting, device, expected):
+    from wisper_transcribe.config import forced_alignment_enabled
+    assert forced_alignment_enabled(setting, device) is expected
+
+
+def test_forced_alignment_default_is_auto():
+    from wisper_transcribe.config import DEFAULTS
+    assert DEFAULTS["forced_alignment"] == "auto"

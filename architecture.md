@@ -107,7 +107,9 @@ Audio file
     │                                               │
     └──────────────────┬────────────────────────────┘
                        ▼
-               5. ALIGN      aligner.align() — words → speaker runs (see "Alignment")
+               5. ALIGN      word_alignment.align_words() — re-time words (when forced_alignment
+                             resolves on; see "Forced word alignment")
+                             aligner.align() — words → speaker runs (see "Alignment")
                        ▼
                6. IDENTIFY   speaker_manager.match_speakers() — labels → names
                        ▼
@@ -148,6 +150,8 @@ Whisper's word timestamps are a by-product of decoding, and at speaker changes t
 - **Never fails the job.** Any failure (model load, OOM at batch 1, a crop over the model's 180 s limit, an unsupported language, a non-16 kHz WAV) keeps Whisper times for the affected segments. `InterruptedError` is re-raised so web cancellation still works; the "Aligning" tqdm bar is what gives cancellation a check point.
 - **Ordering.** Items within a crop are monotonic (the processor repairs out-of-order bins); across segments, a segment's first word is clamped to start no earlier than the previous word's end.
 - **Dtype.** bf16 on CUDA, fp16 on MPS (matched fp32 exactly and ran faster than bf16), fp32 on CPU.
+- **When it runs.** `process_file()` calls it right before `align()`, in the main process on both the sequential and `parallel_stages` paths (it needs only the WAV and the segments). `config.forced_alignment_enabled()` resolves the `forced_alignment` setting: `auto` = CUDA or MPS, since CPU costs ~9–20 min per 2.5 h session. Never without diarization; timing only matters for speaker attribution.
+- **Measurement.** `scripts/alignment_eval.py` runs the production path on an excerpt and compares arms (Whisper vs aligned timing, smoothing variants, regular vs exclusive turns) by an automatic proxy, a re-transcription audit of >1 s shifts, and a blind labelling sheet scored per arm.
 - **Language.** The model never sees the language; it only picks the word splitter. `auto`/empty uses the default splitter; an explicit language outside the 11 supported ones skips alignment. Japanese and Korean need `nagisa`/`soynlp`; without them alignment is skipped for that job.
 
 ---
@@ -413,11 +417,11 @@ output/
 - Excerpt clip globs are `glob.escape()`-d so a stem like `mix*` can't match another transcript's clips.
 
 ### Config keys
-`model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`, `hotwords`, `use_mlx`, `parallel_stages`, `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`, `ollama_cloud_api_key`, `discord_bot_token`, `discord_default_guild`, `discord_default_channel`, `discord_presets`.
+`model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`, `hotwords`, `use_mlx`, `forced_alignment`, `parallel_stages`, `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`, `ollama_cloud_api_key`, `discord_bot_token`, `discord_default_guild`, `discord_default_channel`, `discord_presets`.
 
 `default_mic_profile_key` is also stored, written by the Record page (not in `DEFAULTS`, so not settable via `config set`).
 
-`wisper config set` rejects keys not in `DEFAULTS` and coerces values to the default's type: bool → int → float → comma-list → string (bool first, since `bool` subclasses `int`).
+`wisper config set` rejects keys not in `DEFAULTS` and coerces values to the default's type: bool → int → float → comma-list → string (bool first, since `bool` subclasses `int`). Keys in `config.CONFIG_CHOICES` must be one of their values; the web Config page applies the same rule to its `str` fields with options.
 
 `omegaconf` is declared explicitly in `pyproject.toml`: pyannote imports it but doesn't list it.
 

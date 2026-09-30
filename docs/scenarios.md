@@ -85,6 +85,20 @@ The `--vocab-file` flag takes precedence over the stored config when both are pr
 
 ---
 
+## Checking word alignment on your own audio
+
+Forced alignment re-times each word before it's given to a speaker. To see what it changes on one of your recordings, run the measurement script on a short excerpt with crosstalk (output goes to `alignment-eval/`, which is gitignored):
+
+```bash
+python scripts/alignment_eval.py run session.mp3 --start 1800 --duration 180 --out alignment-eval/s1
+python scripts/alignment_eval.py audit alignment-eval/s1   # re-listens to words moved >1 s
+python scripts/alignment_eval.py sheet alignment-eval/s1   # blind labelling sheet
+# listen to alignment-eval/s1/clip.wav and fill correct_speaker in sheet.csv
+python scripts/alignment_eval.py score alignment-eval/*/
+```
+
+`run` prints an automatic proxy for each variant (Whisper vs aligned timing, smoothing on/off, regular vs exclusive diarization). `score` reports how often each variant gave the words around speaker changes to the right person, according to your labels.
+
 ## Known Limitations
 
 - **One recording at a time.** Starting a Discord or local recording while either kind is active is rejected.

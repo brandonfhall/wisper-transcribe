@@ -3105,3 +3105,32 @@ def test_build_tailwind_missing_input_css_does_not_raise(tmp_path, monkeypatch):
     # Should not raise, and should fall through to attempt (and gracefully
     # fail) the subprocess rebuild rather than crashing on the stat() call.
     app_module._build_tailwind()
+
+
+def _post_config(client, data, stored=None):
+    captured = {}
+    with patch("wisper_transcribe.web.routes.config.load_config", return_value=dict(stored or {})), \
+         patch("wisper_transcribe.web.routes.config.save_config", side_effect=captured.update):
+        client.post("/config", data=data, follow_redirects=False)
+    return captured
+
+
+def test_config_post_forced_alignment_saved(client):
+    assert _post_config(client, {"forced_alignment": "false"})["forced_alignment"] == "false"
+
+
+def test_config_post_rejects_value_outside_choices(client):
+    saved = _post_config(client, {"forced_alignment": "sometimes", "device": "tpu"},
+                         stored={"forced_alignment": "auto", "device": "cpu"})
+    assert saved["forced_alignment"] == "auto"
+    assert saved["device"] == "cpu"
+
+
+def test_config_page_shows_forced_alignment(client):
+    with patch("wisper_transcribe.web.routes.config.load_config",
+               return_value={"forced_alignment": "true"}), \
+         patch("wisper_transcribe.web.routes.config.get_config_path",
+               return_value=Path("/tmp/config.toml")):
+        resp = client.get("/config")
+    assert b'name="forced_alignment"' in resp.content
+    assert b'<option value="true" selected>' in resp.content

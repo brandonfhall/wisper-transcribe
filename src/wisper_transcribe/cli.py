@@ -62,6 +62,9 @@ def main():
               help="CTranslate2 quantization (auto=float16 on CUDA, int8 on CPU)")
 @click.option("--vad/--no-vad", default=None,
               help="Voice activity detection to skip silence (default: on, from config)")
+@click.option("--forced-align/--no-forced-align", "forced_align", default=None,
+              help="Re-time words against the audio before speaker assignment "
+                   "(default: from config; auto = on when diarizing on a GPU)")
 @click.option("--vocab-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None,
               help="Text file of custom words/names (one per line) to boost transcription accuracy")
 @click.option("--initial-prompt", default=None,
@@ -89,6 +92,7 @@ def transcribe(
     play_audio: bool,
     compute_type: str,
     vad: Optional[bool],
+    forced_align: Optional[bool],
     vocab_file: Optional[Path],
     initial_prompt: Optional[str],
     workers: int,
@@ -133,6 +137,7 @@ def transcribe(
         initial_prompt=initial_prompt,
         hotwords=hotwords,
         campaign=campaign,
+        forced_alignment=None if forced_align is None else str(forced_align).lower(),
     )
 
     if path.is_dir():
@@ -263,6 +268,18 @@ def setup():
         except Exception as e:
             click.echo(f"   WARN: model download failed: {e}", err=True)
             click.echo("   Models will download automatically on first transcription run.")
+
+    cfg = _config.load_config()
+    if _config.forced_alignment_enabled(cfg.get("forced_alignment", "auto"), _config.get_device()):
+        click.echo(f"\n>> Pre-downloading the word alignment model ({_config.FORCED_ALIGNMENT_MODEL}, ~1.7 GB)...")
+        try:
+            from huggingface_hub import snapshot_download
+
+            snapshot_download(_config.FORCED_ALIGNMENT_MODEL)
+            click.echo("   OK  : alignment model cached")
+        except Exception as e:
+            click.echo(f"   WARN: alignment model download failed: {e}", err=True)
+            click.echo("   It will download automatically on first transcription run.")
 
     # ── LLM post-processing (opt-in) ──────────────────────────────────────────
     click.echo("\n>> LLM post-processing (wisper refine / wisper summarize)")
@@ -400,11 +417,15 @@ def config_show():
 @click.argument("value")
 def config_set(key: str, value: str):
     """Set a configuration value."""
-    from .config import DEFAULTS, load_config, save_config
+    from .config import CONFIG_CHOICES, DEFAULTS, load_config, save_config
 
     if key not in DEFAULTS:
         raise click.ClickException(
             f"Unknown config key {key!r}; run `wisper config show` to list keys."
+        )
+    if key in CONFIG_CHOICES and value not in CONFIG_CHOICES[key]:
+        raise click.ClickException(
+            f"Invalid value {value!r} for {key}; choose from: {', '.join(CONFIG_CHOICES[key])}."
         )
 
     cfg = load_config()

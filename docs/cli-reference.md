@@ -102,7 +102,7 @@ Guided first-run wizard. Run this once after installation:
 wisper setup
 ```
 
-Checks ffmpeg, detects your GPU (CUDA/MPS/CPU), prompts for your HuggingFace token, and pre-downloads all pyannote models (~700 MB, cached permanently).
+Checks ffmpeg, detects your GPU (CUDA/MPS/CPU), prompts for your HuggingFace token, and pre-downloads all pyannote models (~700 MB, cached permanently). When forced alignment will be on for your device (see `forced_alignment`), it also pre-downloads the word alignment model (~1.7 GB).
 
 ---
 
@@ -143,6 +143,9 @@ wisper transcribe <path>
   --compute-type TYPE      CTranslate2 dtype: auto|float16|int8_float16|int8|float32
                            (default: auto → float16 on CUDA, int8 on CPU)
   --vad / --no-vad         Voice activity detection — skips silence before transcription
+  --forced-align / --no-forced-align
+                           Re-time words against the audio before speaker assignment
+                           (default: from config; auto = on when diarizing on a GPU)
                            (default: on; improves speed and accuracy on audio with pauses)
   --vocab-file FILE        Text file of custom words/names (one per line) to boost accuracy.
                            Useful for character names, locations, and game-specific terms
@@ -385,7 +388,7 @@ wisper config path                        # show where config.toml lives
 wisper config llm                         # interactive wizard: provider + model + key/endpoint
 ```
 
-`wisper config set` rejects unknown keys and converts the value to the key's type (bool, int, float, or a comma-separated list such as `hotwords`). See [configuration.md](configuration.md#config-keys) for every key.
+`wisper config set` rejects unknown keys and converts the value to the key's type (bool, int, float, or a comma-separated list such as `hotwords`). Choice keys (`model`, `device`, `compute_type`, `forced_alignment`) reject values outside their list. See [configuration.md](configuration.md#config-keys) for every key.
 
 **`wisper config llm`** is the recommended way to configure `refine` / `summarize`. It walks you through the provider (Ollama / Ollama Cloud / LM Studio / Anthropic / OpenAI / Google), endpoint (local providers), model name, and API key (cloud providers) in one flow. For Ollama and LM Studio the wizard lists installed/loaded models so you can pick by number.
 

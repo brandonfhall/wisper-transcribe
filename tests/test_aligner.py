@@ -549,3 +549,12 @@ def test_assign_word_speakers_no_words():
     assert _assign_word_speakers(
         [], [DiarizationSegment(start=0.0, end=1.0, speaker="A")]
     ) == []
+
+
+def test_smooth_word_speakers_thresholds_are_parameters():
+    from wisper_transcribe.aligner import _smooth_word_speakers
+
+    words = [Word(i, i + 0.9, f"w{i}") for i in range(7)]
+    speakers = ["A", "A", "B", "B", "A", "A", "A"]  # 2-word, 1.9 s interjection
+    assert _smooth_word_speakers(words, speakers) == ["A"] * 7
+    assert _smooth_word_speakers(words, speakers, max_words=1, max_seconds=0.5) == speakers

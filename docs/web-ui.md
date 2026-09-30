@@ -145,7 +145,7 @@ The Campaign page's **Rolling journal** panel combines session summaries into on
 
 ## Settings (Config page)
 
-- All `config.toml` settings, including the LLM provider, model, and API keys. A blank API-key field keeps the stored key; env vars take precedence.
+- All `config.toml` settings, including forced word alignment (`auto` / `true` / `false`), the LLM provider, model, and API keys. Choice fields ignore values outside their list. A blank API-key field keeps the stored key; env vars take precedence.
 - The model field lists installed models for Ollama and LM Studio, the Ollama Cloud catalog, and (once a key is entered) Anthropic, OpenAI, and Google models.
 - Discord bot token, default guild/channel, and presets.
 - **Open data folder** opens the data directory in your file manager.

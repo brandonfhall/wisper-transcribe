@@ -32,6 +32,7 @@ _CONFIG_FIELDS = [
     ("similarity_threshold","float", "Speaker matching similarity threshold (0–1)", None),
     ("min_speakers",        "int",   "Minimum number of speakers for diarization", None),
     ("max_speakers",        "int",   "Maximum number of speakers for diarization", None),
+    ("forced_alignment",    "str",   "Forced word alignment (auto = on when diarizing on a GPU)", ["auto", "true", "false"]),
     ("hf_token",            "secret","HuggingFace access token", None),
 ]
 
@@ -340,7 +341,7 @@ async def config_show(request: Request) -> HTMLResponse:
 
 def _apply_fields(config: dict, form, fields) -> None:
     """Write validated form values into *config* in-place."""
-    for key, type_, _desc, _choices in fields:
+    for key, type_, _desc, choices in fields:
         raw = form.get(key)
         if raw is None:
             if type_ == "bool":
@@ -363,6 +364,8 @@ def _apply_fields(config: dict, form, fields) -> None:
             # Never overwrite an existing secret with an empty submission
             if raw:
                 config[key] = raw
+        elif type_ == "str" and choices and raw not in choices:
+            continue  # ignore values outside the offered options
         else:
             config[key] = raw
 

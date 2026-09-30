@@ -62,3 +62,6 @@ logs/
 # Gradle build cache
 discord-bot/.gradle/
 .claude/settings.json
+
+# Forced-alignment measurement output (scripts/alignment_eval.py); holds real audio
+alignment-eval/

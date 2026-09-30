@@ -102,16 +102,11 @@ Others ruled out: nyra-forced-aligner (non-commercial licence, English only, abs
 - **Batching:** 8 on CUDA/MPS, 4 on CPU, segments sorted by length; an OOM batch is split in half and retried.
 - **Language:** no detected-language plumbing. `transcribe()` discards `info.language`, so pass the configured language when it's set explicitly (mapping unsupported ones to "skip alignment, keep Whisper times"), and `None` (default splitter) under auto-detect. Japanese/Korean alignment needs the optional `nagisa`/`soynlp`; without them, keep Whisper times for that job and log it.
 - **Default:** config key `forced_alignment` = `auto` | `true` | `false`. `auto` aligns when diarization runs on a GPU, CUDA or MPS, since CPU adds ~20 min per 2.5 h session. Never with `--no-diarize`; timing only matters for speaker attribution. MPS measured at ~2–3× CPU on an M5, so it stays in `auto`.
-- **Measurement scripts:** the spike scripts are throwaway (hardcoded scratchpad paths, pickled inputs, MMS-specific). Phase 2 writes the proxy and the large-shift audit as documented scripts under `scripts/` against the real `word_alignment` module, with outputs kept out of git.
 
 ### Phases
 
 1. **Done:** `word_alignment.py` + `tests/test_word_alignment.py`; design in `architecture.md` ("Forced word alignment"). `align_words()` returns `(segments, AlignmentStats)` and logs the summary line itself. Words map to items exactly through the processor's own per-word split instead of fuzzy text matching.
-2. **Pipeline + config wiring.**
-   - `pipeline.process_file()`: after transcription, before `align()`, when diarization ran and `forced_alignment` resolves on. In `parallel_stages` mode it runs in the main process after both futures return (it needs only the WAV and the segments).
-   - The MLX path (Apple Silicon) yields the same `Word` objects; alignment runs on MPS.
-   - Config key, web Config page field, `wisper transcribe --forced-align/--no-forced-align`. `wisper setup` pre-downloads the model when enabled.
-   - Measurement scripts in `scripts/` (see Decisions), documented in `docs/`.
+2. **Done:** wired into `process_file()` (both paths), `forced_alignment` config key (`auto` default), Config page field, `--forced-align/--no-forced-align`, `wisper setup` pre-download. `wisper config set` and the Config page now reject values outside a choice key's list. `scripts/alignment_eval.py` (`run` / `audit` / `sheet` / `score`) is the measurement tool, documented in `docs/scenarios.md`.
 3. **Re-tune smoothing.** With aligned words, reduce `_MICRO_RUN_MAX_WORDS` / `_MICRO_RUN_MAX_SECONDS`, or skip smoothing for aligned segments, so real interjections survive. Decide from the measurement below.
 4. **Optional: `exclusive_speaker_diarization` for word assignment.** community-1's exclusive view is built for reconciling with transcripts. Try it as a measurement arm: aligned words × {regular, exclusive} turns. Embedding and excerpt selection keep the regular, overlap-aware view either way.
 

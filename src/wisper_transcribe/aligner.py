@@ -163,7 +163,12 @@ def _find_runs(speakers: list[str]) -> list[tuple[int, int, str]]:
     return runs
 
 
-def _smooth_word_speakers(words: list[Word], speakers: list[str]) -> list[str]:
+def _smooth_word_speakers(
+    words: list[Word],
+    speakers: list[str],
+    max_words: int = _MICRO_RUN_MAX_WORDS,
+    max_seconds: float = _MICRO_RUN_MAX_SECONDS,
+) -> list[str]:
     """Absorb sandwiched micro-runs into the surrounding speaker.
 
     Diarization boundaries jitter by a word or two, e.g. A("The quick brown")
@@ -171,8 +176,7 @@ def _smooth_word_speakers(words: list[Word], speakers: list[str]) -> list[str]:
     - it has runs on both sides (edge runs always survive),
     - both neighbours are the same speaker, different from this run's
       (an interjection between two different speakers is kept), and
-    - it is at most ``_MICRO_RUN_MAX_WORDS`` words OR shorter than
-      ``_MICRO_RUN_MAX_SECONDS``.
+    - it is at most ``max_words`` words OR shorter than ``max_seconds``.
 
     Repeats to a fixpoint, since one absorption can expose another
     (``A B A B A`` collapses to one A run).
@@ -196,7 +200,7 @@ def _smooth_word_speakers(words: list[Word], speakers: list[str]) -> list[str]:
 
             word_count = end_idx - start_idx + 1
             span = words[end_idx].end - words[start_idx].start
-            if word_count <= _MICRO_RUN_MAX_WORDS or span < _MICRO_RUN_MAX_SECONDS:
+            if word_count <= max_words or span < max_seconds:
                 for j in range(start_idx, end_idx + 1):
                     speakers[j] = prev_speaker
                 changed = True

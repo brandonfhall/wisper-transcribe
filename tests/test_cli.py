@@ -1441,3 +1441,75 @@ def test_campaigns_relabel_unknown_campaign(tmp_path, monkeypatch):
     result = CliRunner().invoke(main, ["campaigns", "relabel", "ghost"])
     assert result.exit_code != 0
     assert "not found" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Forced word alignment
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("flag,expected", [
+    ([], None), (["--forced-align"], "true"), (["--no-forced-align"], "false"),
+])
+def test_transcribe_cli_forced_align_flag(tmp_path, flag, expected):
+    audio = tmp_path / "test.mp3"
+    audio.write_bytes(b"fake")
+    with patch("wisper_transcribe.pipeline.process_file", return_value=tmp_path / "test.md") as mock_pf:
+        CliRunner().invoke(main, ["transcribe", str(audio), *flag])
+    assert mock_pf.call_args.kwargs["forced_alignment"] == expected
+
+
+def test_config_set_forced_alignment(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    result = CliRunner().invoke(main, ["config", "set", "forced_alignment", "false"])
+    assert result.exit_code == 0
+    from wisper_transcribe.config import load_config
+    assert load_config()["forced_alignment"] == "false"
+
+
+def test_config_set_rejects_value_outside_choices(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    result = CliRunner().invoke(main, ["config", "set", "forced_alignment", "maybe"])
+    assert result.exit_code != 0
+    assert "choose from: auto, true, false" in result.output
+    result = CliRunner().invoke(main, ["config", "set", "device", "tpu"])
+    assert result.exit_code != 0
+
+
+def _run_setup_with_device(tmp_path, monkeypatch, device, forced_alignment="auto"):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("HUGGINGFACE_TOKEN", "hf_fake")
+    from wisper_transcribe.config import load_config, save_config
+    cfg = load_config()
+    cfg["forced_alignment"] = forced_alignment
+    save_config(cfg)
+    with patch("wisper_transcribe.config.check_ffmpeg"), \
+         patch("wisper_transcribe.config.get_device", return_value=device), \
+         patch("pyannote.audio.Pipeline.from_pretrained"), \
+         patch("huggingface_hub.snapshot_download") as mock_dl:
+        result = CliRunner().invoke(main, ["setup"], input="\n\n\n\n")
+    return result, mock_dl
+
+
+def test_setup_predownloads_aligner_on_gpu(tmp_path, monkeypatch):
+    from wisper_transcribe.config import FORCED_ALIGNMENT_MODEL
+    result, mock_dl = _run_setup_with_device(tmp_path, monkeypatch, "cuda")
+    mock_dl.assert_called_once_with(FORCED_ALIGNMENT_MODEL)
+    assert "alignment model cached" in result.output
+
+
+def test_setup_skips_aligner_when_disabled(tmp_path, monkeypatch):
+    _, mock_dl = _run_setup_with_device(tmp_path, monkeypatch, "cpu")
+    mock_dl.assert_not_called()
+    _, mock_dl = _run_setup_with_device(tmp_path, monkeypatch, "cuda", forced_alignment="false")
+    mock_dl.assert_not_called()
+
+
+def test_setup_aligner_download_failure_is_a_warning(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("HUGGINGFACE_TOKEN", "hf_fake")
+    with patch("wisper_transcribe.config.check_ffmpeg"), \
+         patch("wisper_transcribe.config.get_device", return_value="cuda"), \
+         patch("pyannote.audio.Pipeline.from_pretrained"), \
+         patch("huggingface_hub.snapshot_download", side_effect=OSError("offline")):
+        result = CliRunner().invoke(main, ["setup"], input="\n\n\n\n")
+    assert "alignment model download failed" in result.output

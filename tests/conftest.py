@@ -25,6 +25,9 @@ _BASE_CONFIG = {
     "use_mlx": "false",
     "parallel_stages": False,
     "similarity_threshold": 0.55,
+    # Off so no test loads the real aligner on a GPU machine; forced-alignment
+    # tests set it explicitly.
+    "forced_alignment": "false",
 }
 
 

@@ -1574,3 +1574,88 @@ def test_score_note_formats_match_and_miss():
     assert _score_note("Alice", ("Alice", 0.723)) == " (0.72)"
     assert _score_note("Unknown Speaker 1", ("Ben", 0.481)) == " (closest: Ben 0.48)"
     assert _score_note("Unknown Speaker 1", None) == ""
+
+
+# ---------------------------------------------------------------------------
+# Forced word alignment wiring
+# ---------------------------------------------------------------------------
+
+_ALIGNED_WORDS = [TranscriptionSegment(start=0.0, end=5.0, text="retimed")]
+
+
+def _run_with_alignment(tmp_path, *, setting=None, config_value="auto", device="cuda",
+                        no_diarize=False, parallel=False, hf_token="fake-token", language="en"):
+    """Run process_file with every ML stage mocked; return (align_words mock, align mock)."""
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    config = {
+        "model": "medium", "language": language, "compute_type": "auto", "vad_filter": True,
+        "hotwords": [], "use_mlx": "false", "parallel_stages": parallel,
+        "similarity_threshold": 0.55, "forced_alignment": config_value,
+    }
+    with patch("wisper_transcribe.pipeline.check_ffmpeg"), \
+         patch("wisper_transcribe.pipeline.validate_audio"), \
+         patch("wisper_transcribe.pipeline.convert_to_wav", return_value=audio), \
+         patch("wisper_transcribe.pipeline.get_duration", return_value=10.0), \
+         patch("wisper_transcribe.pipeline.get_hf_token", return_value=hf_token), \
+         patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS), \
+         patch("wisper_transcribe.pipeline._run_parallel_transcribe_diarize",
+               return_value=(FAKE_SEGMENTS, [])), \
+         patch("wisper_transcribe.diarizer.diarize", return_value=[]), \
+         patch("wisper_transcribe.word_alignment.align_words",
+               return_value=(_ALIGNED_WORDS, None)) as mock_align_words, \
+         patch("wisper_transcribe.aligner.align", return_value=[]) as mock_align, \
+         patch("wisper_transcribe.speaker_manager.match_speakers", return_value={}), \
+         patch("wisper_transcribe.pipeline.load_config", return_value=config):
+        from wisper_transcribe.pipeline import process_file
+        process_file(audio, output_dir=tmp_path, device=device, no_diarize=no_diarize,
+                     forced_alignment=setting)
+    return mock_align_words, mock_align
+
+
+def test_forced_alignment_runs_before_align_on_gpu(tmp_path):
+    align_words, align = _run_with_alignment(tmp_path, device="cuda")
+    align_words.assert_called_once()
+    args = align_words.call_args.args
+    assert args[1] == FAKE_SEGMENTS and args[2] == "cuda" and args[3] == "en"
+    # align() gets the re-timed segments, not Whisper's.
+    assert align.call_args.args[0] == _ALIGNED_WORDS
+
+
+def test_forced_alignment_auto_on_mps(tmp_path):
+    align_words, _ = _run_with_alignment(tmp_path, device="mps")
+    align_words.assert_called_once()
+
+
+def test_forced_alignment_auto_off_on_cpu(tmp_path):
+    align_words, align = _run_with_alignment(tmp_path, device="cpu")
+    align_words.assert_not_called()
+    assert align.call_args.args[0] == FAKE_SEGMENTS
+
+
+def test_forced_alignment_true_runs_on_cpu(tmp_path):
+    align_words, _ = _run_with_alignment(tmp_path, device="cpu", config_value="true")
+    align_words.assert_called_once()
+
+
+def test_forced_alignment_argument_overrides_config(tmp_path):
+    align_words, _ = _run_with_alignment(tmp_path, device="cuda", config_value="true", setting="false")
+    align_words.assert_not_called()
+
+
+def test_forced_alignment_never_without_diarization(tmp_path):
+    align_words, _ = _run_with_alignment(tmp_path, config_value="true", no_diarize=True)
+    align_words.assert_not_called()
+    align_words, _ = _run_with_alignment(tmp_path, config_value="true", hf_token="")
+    align_words.assert_not_called()
+
+
+def test_forced_alignment_runs_in_parallel_stages_path(tmp_path):
+    align_words, align = _run_with_alignment(tmp_path, device="cuda", parallel=True)
+    align_words.assert_called_once()
+    assert align.call_args.args[0] == _ALIGNED_WORDS
+
+
+def test_forced_alignment_auto_language_passes_none(tmp_path):
+    align_words, _ = _run_with_alignment(tmp_path, device="cuda", language="auto")
+    assert align_words.call_args.args[3] is None
