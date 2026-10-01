@@ -64,7 +64,13 @@ ENV WISPER_DATA_DIR=/data
 # ── cpu target ────────────────────────────────────────────────────────────────
 FROM base AS cpu
 
-RUN pip install --no-cache-dir -e . \
+# CPU torch/torchaudio first: on PyPI, Linux torch wheels depend on ~3 GB of
+# nvidia-* CUDA libraries, which the package install would otherwise pull in.
+RUN pip install --no-cache-dir \
+        "torch>=2.8.0" \
+        "torchaudio>=2.8.0" \
+        --index-url https://download.pytorch.org/whl/cpu \
+ && pip install --no-cache-dir -e . \
  # Download vendored HTMX so wisper server works fully offline
  && curl -sL "https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js" \
          -o /app/src/wisper_transcribe/static/htmx.min.js \
