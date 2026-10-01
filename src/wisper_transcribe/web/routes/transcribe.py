@@ -247,12 +247,16 @@ async def job_detail(request: Request, job_id: str) -> HTMLResponse:
 
 
 @router.get("/jobs/{job_id}/stream")
-async def job_stream(request: Request, job_id: str) -> StreamingResponse:
-    """Server-Sent Events stream: streams log lines and final status."""
+async def job_stream(request: Request, job_id: str, after: int = 0) -> StreamingResponse:
+    """Server-Sent Events stream: streams log lines and final status.
+
+    ``after`` is how many log lines the page already rendered (absolute, so
+    counting dropped ones); the stream starts there instead of repeating them.
+    """
     queue = _get_queue(request)
 
     async def event_generator():
-        last_line_idx = 0
+        last_line_idx = max(0, after)
         last_progress = None
         last_channel_progress: dict[str, str] = {}
         while True:

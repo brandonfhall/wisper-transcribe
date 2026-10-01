@@ -254,6 +254,31 @@ def test_job_stream_serves_lines_after_log_trimming(client, tmp_path):
     assert '"status": "completed"' in body
 
 
+def test_job_page_stream_starts_after_rendered_lines(client, tmp_path):
+    """The job page renders the log it has, so its stream must not resend
+    those lines (opening a running job showed the log twice)."""
+    from wisper_transcribe.web.jobs import Job, COMPLETED, RUNNING
+    from datetime import datetime
+
+    job = Job(id="after-test-job", status=RUNNING, created_at=datetime.now(),
+              input_path=str(tmp_path / "audio.mp3"), kwargs={})
+    job.log_lines = ["line 5", "line 6", "line 7"]
+    job.log_lines_dropped = 5
+    client.app.state.job_queue._jobs[job.id] = job
+
+    page = client.get(f"/transcribe/jobs/{job.id}").text
+    assert f"/transcribe/jobs/{job.id}/stream?after=8" in page
+
+    job.status = COMPLETED  # so the streams below end
+
+    with client.stream("GET", f"/transcribe/jobs/{job.id}/stream?after=7") as resp:
+        body = "".join(resp.iter_text())
+    assert '"line 7"' in body and '"line 6"' not in body
+    with client.stream("GET", f"/transcribe/jobs/{job.id}/stream?after=8") as resp:
+        body = "".join(resp.iter_text())
+    assert '"type": "log"' not in body and '"status": "completed"' in body
+
+
 def test_transcribe_post_empty_upload_still_queues(client, tmp_path):
     """An empty upload is still accepted at the route layer (the chunked
     read loop must not choke on an immediate EOF) -- validation of the

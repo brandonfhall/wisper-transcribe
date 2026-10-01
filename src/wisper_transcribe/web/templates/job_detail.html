@@ -259,7 +259,7 @@
     else if (lo.includes('converting audio') || lo.includes('extracting embedding')) { const i = STEPS.indexOf('enroll'); if (i>=0) activateStep(i); }
   }
 
-  const es = new EventSource('/transcribe/jobs/{{ job.id }}/stream');
+  const es = new EventSource('/transcribe/jobs/{{ job.id }}/stream?after={{ job.log_lines_dropped + job.log_lines | length }}');
 
   es.onmessage = function(e) {
     const evt = JSON.parse(e.data);
