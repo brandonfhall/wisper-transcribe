@@ -83,10 +83,9 @@ CMD ["--help"]
 # ── gpu target ────────────────────────────────────────────────────────────────
 FROM base AS gpu
 
-# CUDA 12.6 torch/torchaudio first, then the package (as setup.ps1 does).
-# Installing the package first pulled PyPI's Linux torch with its own CUDA
-# 13 nvidia-* libraries; swapping torch afterwards left that second CUDA
-# behind, unused.
+# CUDA 12.6 torch/torchaudio before the package (as setup.ps1 does): PyPI's
+# Linux torch carries its own CUDA 13 nvidia-* libraries, which would be
+# installed alongside and never used.
 RUN pip install --no-cache-dir \
         "torch>=2.8.0" \
         "torchaudio>=2.8.0" \

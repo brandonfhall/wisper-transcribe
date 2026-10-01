@@ -960,8 +960,7 @@ class JobQueue:
                 await asyncio.to_thread(self._run_job, job)
             except asyncio.CancelledError:
                 # Server shutdown (stop()). The job thread can't be stopped and
-                # dies with the process; without this the finally below would
-                # record the half-done job as completed.
+                # dies with the process, so the job is interrupted, not done.
                 from wisper_transcribe.job_history import INTERRUPTED
                 job.status = FAILED
                 job.error = INTERRUPTED

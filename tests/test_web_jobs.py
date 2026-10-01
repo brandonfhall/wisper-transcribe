@@ -179,9 +179,8 @@ async def test_worker_does_not_revive_cancelled_pending_job():
 
 @pytest.mark.anyio
 async def test_server_shutdown_mid_job_records_it_interrupted_not_completed(tmp_path):
-    """stop() cancels the worker while a job thread runs. The job must be
-    recorded failed (interrupted) with its temp upload removed -- a half-done
-    transcription was being recorded as completed with no transcript."""
+    """stop() cancels the worker while a job thread runs: the job is recorded
+    failed (interrupted) and its temp upload removed."""
     import threading
 
     from wisper_transcribe import db

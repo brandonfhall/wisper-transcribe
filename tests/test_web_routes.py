@@ -255,8 +255,8 @@ def test_job_stream_serves_lines_after_log_trimming(client, tmp_path):
 
 
 def test_job_page_stream_starts_after_rendered_lines(client, tmp_path):
-    """The job page renders the log it has, so its stream must not resend
-    those lines (opening a running job showed the log twice)."""
+    """The job page renders the log it has, so its stream starts after those
+    lines."""
     from wisper_transcribe.web.jobs import Job, COMPLETED, RUNNING
     from datetime import datetime
 
