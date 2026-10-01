@@ -48,6 +48,17 @@ example-file/*
 # Speaker embeddings (voice biometric data — keep out of repo)
 *.npy
 
+# Docker bind mounts (docker-compose.yml): wisper.db holds voice embeddings,
+# output/ holds transcripts
+/data/
+/cache/
+/input/
+/output/
+/recordings/
+*.db
+*.db-wal
+*.db-shm
+
 # Audio files accidentally placed in repo root
 *.mp3
 *.wav

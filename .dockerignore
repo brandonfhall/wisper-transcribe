@@ -25,3 +25,5 @@ data/
 cache/
 input/
 output/
+recordings/
+*.db
