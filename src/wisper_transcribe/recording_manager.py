@@ -70,7 +70,7 @@ def segment_path_for(recording_id: str, idx: int, data_dir: Optional[Path] = Non
 
 
 # ---------------------------------------------------------------------------
-# Security: recording ID validation (CodeQL Pattern 2)
+# Security: recording ID validation (regex + os.path round-trip; .claude/rules/web-security.md)
 # ---------------------------------------------------------------------------
 
 def _validate_recording_id(recording_id: str) -> Optional[str]:

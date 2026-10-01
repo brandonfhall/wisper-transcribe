@@ -938,7 +938,7 @@ def test_excerpt_serves_clip(client: TestClient, tmp_path: Path):
 
 
 def test_excerpt_falls_back_to_legacy_display_name(client: TestClient, tmp_path: Path):
-    """Pre-fix transcripts saved excerpt files keyed by display name (e.g.
+    """Older transcripts have excerpt files keyed by display name (e.g.
     'Unknown_Speaker_1') instead of the raw pyannote label. The wizard +
     excerpt route must locate them via timestamp-matched markdown parsing
     so users don't have to re-transcribe."""

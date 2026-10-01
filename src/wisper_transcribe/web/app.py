@@ -163,8 +163,8 @@ def create_app() -> FastAPI:
             import logging
             logging.getLogger(__name__).warning("Transcript reconcile failed", exc_info=True)
 
-        # Index transcripts not yet in the search index (first run after the
-        # upgrade, files added while stopped), in the background.
+        # Index transcripts not yet in the search index (an existing archive,
+        # files added while stopped), in the background.
         from wisper_transcribe import search_index
         search_index.start_worker()
 

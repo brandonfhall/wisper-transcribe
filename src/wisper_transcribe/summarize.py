@@ -293,8 +293,8 @@ def _link_terms(profiles: dict[str, SpeakerProfile]) -> set[str]:
     """Return the set of names that should be wrapped in [[...]] on render.
 
     Includes every enrolled profile's display_name, and any comma-separated
-    name mentioned in a profile's `notes` field (character names are commonly
-    stored there per CLAUDE.md).
+    name mentioned in a profile's `notes` field (where character names are
+    kept).
     """
     terms: set[str] = set()
     for p in profiles.values():

@@ -102,7 +102,7 @@ Guided first-run wizard. Run this once after installation:
 wisper setup
 ```
 
-Checks ffmpeg, detects your GPU (CUDA/MPS/CPU), prompts for your HuggingFace token, and pre-downloads all pyannote models (~700 MB, cached permanently). When forced alignment will be on for your device (see `forced_alignment`), it also pre-downloads the word alignment model (~1.7 GB).
+Checks ffmpeg, detects your GPU (CUDA/MPS/CPU), prompts for your HuggingFace token, and pre-downloads the pyannote diarization model (~30 MB, cached permanently). Whisper models download on first transcription. When forced alignment will be on for your device (see `forced_alignment`), it also pre-downloads the word alignment model (~1.7 GB).
 
 ---
 
@@ -248,7 +248,7 @@ wisper campaigns relabel d-d-mondays --no-backfill  # only use voice data alread
 - Automatically assigned names are matched against the campaign roster again, so a player enrolled after a session was transcribed gets named in it.
 - An unknown voice heard in two or more sessions gets one shared name, `Recurring Speaker N`. Name them once in any session's wizard and the others follow.
 - Names you set by hand are never changed.
-- Sessions transcribed before this feature have no stored voice data; it is re-extracted from the saved source audio when that still exists (web uploads keep it next to the transcript). Sessions without either are skipped and listed.
+- Sessions with no stored voice data have it re-extracted from the saved source audio when that still exists (web uploads keep it next to the transcript). Sessions without either are skipped and listed.
 
 ```
 Options:
@@ -273,7 +273,7 @@ wisper campaigns journal d-d-mondays --export         # print it with the folded
 wisper campaigns journal d-d-mondays --export -o journal.md
 ```
 
-A session is "pending" once it has a `.summary.md`. With no flags the command folds the single oldest unjournalled session; re-run (or use `--all`) to catch up the rest. Sessions already folded are tracked in wisper's database and skipped. `--export` adds that list back as `journaled_sessions:` in the frontmatter (the file itself no longer carries it).
+A session is "pending" once it has a `.summary.md`. With no flags the command folds the single oldest unjournalled session; re-run (or use `--all`) to catch up the rest. Sessions already folded are tracked in wisper's database and skipped. `--export` adds that list back as `journaled_sessions:` in the frontmatter (`journal.md` itself doesn't carry it).
 
 `--rebuild` starts the journal over from each session's existing `.summary.md`, in campaign order — one LLM call per session, plus one for any session that has no summary yet. Your edits to summaries are kept. Add `--resummarize` to re-summarize every transcript first, overwriting the summaries (two calls per session) — for when the summaries themselves are bad. Both ask for confirmation, showing the call count, unless `--yes` is passed. Sessions whose transcript is missing or whose summary fails are skipped and reported. `--session`, `--all`, `--rebuild`, and `--export` are mutually exclusive.
 
@@ -349,7 +349,7 @@ wisper fix session05.md --speaker "Unknown Speaker 1" --name "Frank"
 wisper fix session03.md --speaker "Alice" --name "Diana"
 ```
 
-Add `--re-enroll` to also update the voice profile (currently prompts manual steps).
+`--re-enroll` prints the `wisper enroll <name> --audio <file> --update` command that updates the voice profile; it doesn't run it.
 
 ---
 
@@ -380,7 +380,7 @@ Generate campaign notes from a transcript — a session recap, loot/inventory ch
 ```bash
 wisper summarize session05.md                        # writes session05.summary.md
 wisper summarize session05.md --overwrite            # replace existing sidecar
-wisper summarize session05.md --refine               # refine-then-summarize (atomic)
+wisper summarize session05.md --refine               # refine in place, then summarize
 wisper summarize session05.md --sections summary,loot  # only these sections
 wisper summarize session05.md --output recap.md      # custom output path
 wisper summarize session05.md --provider openai --model gpt-4o-mini

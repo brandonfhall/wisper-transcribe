@@ -2,7 +2,7 @@
 
 The index is derived from the ``.md`` files and disposable: ``wisper db
 reindex`` drops and rebuilds it, so a stale or damaged index is never data
-loss. Three tables (migration v7):
+loss. Tables (migrations v7 and v8):
 
 - ``search_index_state``: one row per indexed file (``<stem>.md`` and, if it
   existed, ``<stem>.summary.md``) with the ``mtime_ns``/size it had when
@@ -12,6 +12,8 @@ loss. Three tables (migration v7):
   removes its blocks too.
 - ``search_fts``: contentless FTS5 over the block text (no second copy of the
   text), kept in step with ``search_blocks`` by a delete trigger.
+- ``transcript_titles``: FTS5 over ``transcripts.stem``, kept in step by
+  triggers on ``transcripts``, so titles never need reindexing.
 
 Freshness:
 
@@ -563,8 +565,9 @@ def search(query: str, *, campaign: Optional[str] = None, speaker: Optional[str]
     ``campaign`` is a slug, ``speaker`` an exact display name (transcript
     blocks only), ``kind`` ``"transcript"`` or ``"summary"``. A match on a
     transcript's title is a ``"title"`` hit, ranked first; the speaker and
-    summary filters leave titles out. Missing transcripts are left out. A result whose file changed since indexing is
-    returned ``stale`` and queued for reindexing.
+    summary filters leave titles out. Missing transcripts are left out. A
+    result whose file changed since indexing is returned ``stale`` and queued
+    for reindexing.
     """
     page = max(1, page)
     match = build_match(query)

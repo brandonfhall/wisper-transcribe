@@ -1,6 +1,6 @@
 """Transcript refinement — vocabulary correction and unknown-speaker ID.
 
-Design tenets (see CLAUDE.md + the approved plan):
+Design tenets:
 - YAML frontmatter is never sent to the LLM and is never modified.
 - Vocabulary edits are validated against a known-term list by edit-distance;
   freeform LLM rewrites are rejected.

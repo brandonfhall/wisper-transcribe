@@ -143,11 +143,11 @@ If wisper crashes or the machine loses power mid-session, the recording shows **
 
 - **One recording at a time.** Starting a Discord or local recording while either kind is active is rejected.
 - **One voice channel per Discord session.** No multi-guild or multi-channel recording.
-- **Discord recording needs Java.** Discord encrypts voice end-to-end (DAVE), and only the Java JDA + JDAVE sidecar can decrypt it today. It will move to Python once a stable Python library supports DAVE receive.
+- **Discord recording needs Java.** Discord encrypts voice end-to-end (DAVE); the Java JDA + JDAVE sidecar decrypts it, since no stable Python library supports DAVE receive.
 - **Live transcription is local-only.** Discord sessions are transcribed after they stop.
 - **The live preview is a draft.** Lines are labelled "You" or "Other" by comparing mic and system-audio volume, not by voice. The diarized transcript from **Transcribe** is the real one. On CPU-only machines, use `base` or `small` so the preview keeps up.
 - **Live preview waits for other jobs.** Jobs run one at a time, so a job already running when a local session starts delays the preview until it finishes.
-- **Word alignment needs a GPU by default.** On CPU-only machines `forced_alignment = auto` leaves it off (it adds ~10–20 min per 2.5 h session); set it to `true` to use it anyway. It supports 11 languages (English, Chinese, Cantonese, French, German, Italian, Japanese, Korean, Portuguese, Russian, Spanish); others keep Whisper's word timing. It can't split words when two people talk at once.
+- **Word alignment needs a GPU by default.** On CPU-only machines `forced_alignment = auto` leaves it off (it adds ~9–20 min per 2.5 h session); set it to `true` to use it anyway. It supports 11 languages (English, Chinese, Cantonese, French, German, Italian, Japanese, Korean, Portuguese, Russian, Spanish); others keep Whisper's word timing. It can't split words when two people talk at once.
 - **Cancelling is best-effort.** A cancelled transcription stops at its next progress update; the GPU may finish its current batch first.
 - **Search highlighting is approximate.** Matching understands word forms ("fights" finds "fight"), but the highlighter only guesses at them, so occasionally a result shows no highlighted word.
 - **One way of running per data folder on Mac/Windows.** Don't run the native CLI or server against a data folder that a Docker Desktop container is using at the same time; wisper refuses the second one (see [docker.md](docker.md#one-way-of-running-at-a-time)).

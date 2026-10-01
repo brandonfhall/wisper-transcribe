@@ -303,7 +303,7 @@ def test_file_writes_are_atomic():
 
 def test_only_transcript_store_deletes_transcripts():
     """Deleting a transcript .md anywhere but transcript_store skips the row
-    and its links (the #64 bug class)."""
+    and its links."""
     suspicious = re.compile(r"(md_path|transcript_path|transcript|\.md\b)[^\n]*\.unlink\(|\.unlink\([^\n]*\.md\b")
     offenders = [
         f"{rel}:{no}: {line.strip()}"

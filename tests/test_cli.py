@@ -477,9 +477,8 @@ def test_config_set_int_coercion(tmp_path, monkeypatch):
 
 def test_config_set_int_coercion_recovers_from_bad_stored_type(tmp_path, monkeypatch):
     """Coercion must key off DEFAULTS[key]'s schema type, not
-    cfg[key]'s current runtime type. If a prior bug (or manual config.toml
-    edit) already stored min_speakers as a string, isinstance(cfg[key], int)
-    would miss and silently re-store it as a string forever. Simulate that
+    cfg[key]'s current runtime type. If config.toml holds min_speakers as a
+    string (e.g. hand-edited), isinstance(cfg[key], int) would miss and silently re-store it as a string forever. Simulate that
     by pre-seeding a string value, then confirm `config set` self-heals it
     to int."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))

@@ -604,7 +604,7 @@ async def record_page(request: Request) -> HTMLResponse:
 
 @router.get("/record/sse")
 async def record_sse(request: Request) -> StreamingResponse:
-    """SSE stream of live recording session status (Pattern 6)."""
+    """SSE stream of live recording session status."""
 
     async def event_generator():
         while True:

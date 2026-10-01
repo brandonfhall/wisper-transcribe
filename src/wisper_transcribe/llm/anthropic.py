@@ -1,8 +1,7 @@
 """Anthropic Claude client.
 
-Uses the Messages API. For JSON output, uses tool-use with a forced tool
-(strict schema adherence) — the most reliable way to get structured output
-from Claude as of the anthropic SDK >=0.39.
+Uses the Messages API. For JSON output, uses tool-use with a forced tool, so
+the reply is held to the schema.
 """
 from __future__ import annotations
 

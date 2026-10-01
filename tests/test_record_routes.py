@@ -949,7 +949,7 @@ def test_recordings_list_handles_null_started_at(client):
     rec_with_time = create_recording("VC1", "G1", data_dir=tmp_path)
     rec_no_time = create_recording("VC2", "G1", data_dir=tmp_path)
     rec_no_time.started_at = None
-    # A recording without a start time can no longer be stored at all.
+    # The schema rejects a recording without a start time.
     with pytest.raises(sqlite3.IntegrityError):
         save_recording(rec_no_time, data_dir=tmp_path)
 

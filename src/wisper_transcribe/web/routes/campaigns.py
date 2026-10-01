@@ -52,7 +52,7 @@ async def campaigns_create_post(
     except ValueError:
         return error_redirect("/campaigns", "create_failed")
 
-    # Use the server-generated slug (from uuid4-like derivation), not the raw form value.
+    # Redirect with the stored slug (from the database), not the raw form value.
     safe = _validate_campaign_slug(campaign.slug)
     if safe is None:
         return error_redirect("/campaigns", "create_failed")

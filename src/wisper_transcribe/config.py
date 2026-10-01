@@ -45,7 +45,7 @@ DEFAULTS = {
     # (word_alignment.py). "auto" aligns when diarization runs on a GPU
     # (CUDA or MPS); CPU adds ~9-20 min per 2.5 h session.
     "forced_alignment": "auto",
-    # LLM post-processing (wisper refine / wisper summarize). Opt-in, CLI-only MVP.
+    # LLM post-processing (refine, summarize, campaign journal). Opt-in.
     # Default provider is local Ollama; cloud providers require explicit config + key.
     "llm_provider": "ollama",                 # ollama | anthropic | openai | google
     "llm_model": "",                          # blank → per-provider default via resolve_llm_model()

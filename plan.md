@@ -29,14 +29,13 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 - **Live recording + campaign journal:** `LIVE_AUDIO_TEST_PLAN.md` — real-device capture, live transcript, journal browser flows, bulk delete, busy-queue notice.
 - **Live Discord acceptance test.** The recording pipeline (WAV segments, `__mixed__` combined track, `combined_path` hand-off) is covered by synthesized-PCM tests, but the JDA → socket → Python path needs one real session: record a few minutes with 2+ speakers, play the per-user WAVs, and run Transcribe.
 - **Windows launcher dependency refresh.** `start.bat` reinstalls dependencies when `pyproject.toml` is newer than `.venv\.wisper-deps` (untested on Windows): update an existing install with `git pull`, double-click `start.bat`, confirm the one-time "Dependencies changed" reinstall runs, and that a second launch skips it.
-- **Docker image with forced alignment and the database.** The "Docker Build" workflow is disabled on GitHub, so nothing builds the image automatically. Confirm the CPU and GPU images build with `transformers`; a diarized job on the GPU image downloads the alignment model into `./cache/` and logs "Aligned words"; and CLI and web containers sharing `./data` both work against one `wisper.db` (the first start migrates an existing JSON-era `./data`).
+- **GPU Docker image on an NVIDIA host.** The "Docker Build" workflow is disabled on GitHub, and the GPU image can only be built (not run) without NVIDIA hardware. Confirm a diarized job on the GPU image downloads the alignment model into `./cache/` and logs "Aligned words".
 - **SQLite storage in a browser and on real capture** (automated coverage: `test_e2e.py`, `test_schema.py`). With `WISPER_DATA_DIR` pointing at a copy of real data:
-  - First start on a JSON-era data dir: the import report, `backups/pre-sqlite-*`, and "Indexing N of M" on the Search page finishing.
   - Journal: the stale-journal notice (move a folded session to another campaign) on the Campaign and Journal pages; **Rebuild journal** vs **Rebuild from transcripts** confirmations and their call counts; journal **Download** includes `journaled_sessions`.
   - Job history page, filters, paging, and a historical job's page after a restart.
   - Recording: record a few minutes (Discord and local), add markers (including two in quick succession), edit the notes mid-session, stop, Transcribe, Re-transcribe, then delete the transcript and confirm the recording is back under "Awaiting transcription" with its notes intact. Kill the server mid-session once, restart, and use **Recover recording**.
   - Search: edit a transcript in Obsidian while the server runs and search for the new words (the result shows "changed — reindexing", then matches after a reload); rename a speaker in the wizard, then search by the new name with the speaker filter.
-- **macOS loopback (PR #59).** Record page on a Mac with BlackHole installed: BlackHole appears under System Audio and captures audio.
+- **macOS loopback.** Record page on a Mac with BlackHole installed: BlackHole appears under System Audio and captures audio.
 
 ---
 
@@ -48,7 +47,7 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 
 ## Forced word alignment — follow-ups
 
-Shipped in #64 (design in `architecture.md`, "Forced word alignment"), default `forced_alignment = auto`. It shipped on spot-check evidence rather than the full labelled gate: on a 2 h episode, aligned and unaligned runs disagreed on 155 of 20,675 words; one-word "islands" inside another speaker's run were 10 (unaligned) vs 3 (aligned); 4 of 4 hand-checked disputed words were right with alignment. The labelling sheets were deleted after merge.
+Design in `architecture.md` ("Forced word alignment"). The `forced_alignment = auto` default rests on spot-check evidence, not a full labelled set: on a 2 h episode, aligned and unaligned runs disagreed on 155 of 20,675 words; one-word "islands" inside another speaker's run were 10 (unaligned) vs 3 (aligned); 4 of 4 hand-checked disputed words were right with alignment.
 
 - **If attribution at speaker changes regresses, or before changing the aligner, smoothing thresholds, or the default,** run `scripts/alignment_eval.py` (see `docs/scenarios.md`) on a live-table excerpt and label its sheet. Arms already exist for the open questions: `aligned-guard-1s` (on edited podcast audio, words moved >1 s favoured Whisper 8 vs 1, the opposite of the Hanataz spike's 28 vs 1), `aligned-smooth-1w` / `aligned-nosmooth`, and `aligned-exclusive`.
 - **Fallback engine:** `torchaudio` MMS_FA + star token (no new dependency, but CC-BY-NC weights and weaker on crosstalk). Only if the `transformers` dependency becomes a problem; recipe in git history (`6286e21`).
@@ -58,7 +57,7 @@ Shipped in #64 (design in `architecture.md`, "Forced word alignment"), default `
 
 ## Speaker consistency — remaining
 
-Shipped in #63; the design is in `architecture.md`. What's left:
+Design in `architecture.md`. Open items:
 
 - **Profile cleanup (user action).** `wisper speakers doctor` lists the candidates. Re-enroll every profile after the embedding-model change; delete the `speaker_*` / `SPEAKER_NN` junk and duplicate profiles; enroll Mike and Ben from sessions where they're clearly separated.
 - **Diarization measurement set.** 8–12 hand-corrected excerpts of 2–3 min, stratified by speaker count (2–3 / 4–5 / 6–8), in-room vs remote, low vs high overlap. Report DER split into missed / false alarm / confusion (`pyannote.metrics`) plus JER, and compare configs with a paired bootstrap over recordings (B ≥ 1000). The 0.55 threshold and the community-1 choice rest on one session pair until this exists.
@@ -315,8 +314,6 @@ FROM base AS intel
 RUN pip install --no-cache-dir -e ".[intel]" \
  && pip install --no-cache-dir --upgrade "torch>=2.8.0" "torchaudio>=2.8.0" \
         --index-url https://download.pytorch.org/whl/xpu \
- && curl -sL "https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js" \
-         -o /app/src/wisper_transcribe/static/htmx.min.js \
  && python -m wisper_transcribe.tailwind
 ENTRYPOINT ["wisper"]
 CMD ["--help"]
@@ -437,7 +434,7 @@ Nothing else changes; the wire protocol is the stable interface.
 
 ## Campaign-level LLM summaries (DM tools)
 
-The rolling campaign journal shipped first and set the pattern: slug-scoped storage under `campaigns/<slug>/`, `.summary.md` discovery via `unjournalled_sessions()`, and `JobQueue.submit_journal` / `_run_journal_job` as the template for new `JOB_CAMPAIGN_*` types on the standard SSE progress page. All three features below read the same `.summary.md` sidecars (`SummaryNote` already carries loot, NPCs, and follow-ups). Campaigns with no summarized sessions hide or disable the buttons.
+The rolling campaign journal sets the pattern: slug-scoped storage under `campaigns/<slug>/`, `.summary.md` discovery via `unjournalled_sessions()`, and `JobQueue.submit_journal` / `_run_journal_job` as the template for new `JOB_CAMPAIGN_*` types on the standard SSE progress page. All three features below read the same `.summary.md` sidecars (`SummaryNote` already carries loot, NPCs, and follow-ups). Campaigns with no summarized sessions hide or disable the buttons.
 
 **Build on the database:** the transcript registry and `journal_entries`, not stem lists or frontmatter. Combined-summary and recap outputs get their own table with FKs to the campaign (and the sessions they cover), so deletes cascade; add it as a new migration and extend `test_schema.py`. The search index could cover them too (a new `search_index_state.kind`).
 

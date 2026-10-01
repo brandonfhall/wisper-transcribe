@@ -1,4 +1,4 @@
-"""Shared path-component validation — see CLAUDE.md Web Route Security Standards.
+"""Shared path-component validation — see .claude/rules/web-security.md.
 
 Do not simplify validate_path_component. The os.path abspath/startswith round-trip
 is the CodeQL-recognised taint-chain breaker for py/path-injection and

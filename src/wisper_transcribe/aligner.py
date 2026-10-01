@@ -54,7 +54,7 @@ def _nearest_speaker(midpoint: float, diarization: list[DiarizationSegment]) -> 
 def _assign_word_speakers_bruteforce(
     words: list[Word], diarization: list[DiarizationSegment]
 ) -> list[str]:
-    """Original O(words * turns) implementation -- the correctness reference.
+    """Brute-force O(words * turns) implementation -- the correctness reference.
 
     Kept as the unconditional fallback for `_assign_word_speakers()` below
     when its sweep's sortedness precondition doesn't hold, so identity with

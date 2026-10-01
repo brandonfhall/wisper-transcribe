@@ -405,7 +405,7 @@ def import_recordings(conn: sqlite3.Connection, ctx: MigrationContext) -> None:
     """v5: ``recordings/recordings.json`` + each ``<id>/metadata.json``.
 
     Status splits: capture states are stored; ``transcribing`` and
-    ``transcribed`` import as ``completed`` (their meaning now comes from the
+    ``transcribed`` import as ``completed`` (both are derived from the
     transcript link and the job queue), and an active state at import means
     a crash, so it becomes ``failed`` as startup would. ``transcript_path``
     links by stem only under the output root (first recording wins a shared

@@ -1360,7 +1360,7 @@ def transcripts_move(stem: str, campaign: Optional[str], unlink: bool):
 @click.argument("transcript", type=click.Path(exists=True, path_type=Path))
 @click.option("--speaker", required=True, help="Current speaker name to replace")
 @click.option("--name", "new_name", required=True, help="Correct name")
-@click.option("--re-enroll", is_flag=True, default=False, help="Also update voice embedding from original audio")
+@click.option("--re-enroll", is_flag=True, default=False, help="Print the command that re-enrolls the voice from the original audio")
 def fix(transcript: Path, speaker: str, new_name: str, re_enroll: bool):
     """Fix a speaker name in an existing transcript."""
     from .formatter import update_speaker_names
@@ -1371,8 +1371,8 @@ def fix(transcript: Path, speaker: str, new_name: str, re_enroll: bool):
     click.echo(f"Updated {transcript.name}: {speaker!r} → {new_name!r}")
 
     if re_enroll:
-        click.echo("Re-enrollment from fix is not yet automated. "
-                   "Run: wisper enroll <name> --audio <original_file> --update")
+        click.echo("To re-enroll the voice, run: "
+                   "wisper enroll <name> --audio <original_file> --update")
 
 
 # ---------------------------------------------------------------------------
@@ -1454,7 +1454,7 @@ def refine(transcript: Path, tasks_raw: str, provider: Optional[str],
     cfg = load_config()
     hotwords: list[str] = list(cfg.get("hotwords", []) or [])
     profiles = load_profiles()
-    # Character names are conventionally stored in profile.notes (CLAUDE.md).
+    # Character names come from profile.notes (comma- or semicolon-separated).
     character_names: list[str] = []
     for p in profiles.values():
         if p.notes:

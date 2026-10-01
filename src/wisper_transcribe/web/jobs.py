@@ -1,6 +1,7 @@
 """In-process job queue for transcription, LLM, enrollment, journal, and live jobs.
 
-- Jobs live in memory (dict keyed by UUID); nothing persists across restarts.
+- Jobs live in memory (dict keyed by UUID) and never resume after a restart;
+  ``job_history`` records every state change in the ``jobs`` table.
 - One asyncio task drains a FIFO queue and runs each job in a thread via
   asyncio.to_thread(), so the event loop stays responsive.
 - Exactly one job runs at a time: the transcriber/diarizer/embedding model
@@ -157,7 +158,8 @@ class _StderrCapture:
 
 
 def _write_enrollment_sidecar(job: "Job", output_path: "Path") -> None:  # type: ignore[name-defined]
-    """Write <stem>_diar.json next to the transcript.
+    """Store the job's diarization data with ``transcript_store.write_sidecar``:
+    speakers and the audio path in the database, segments in ``<stem>_diar.json``.
 
     Lets the enrollment wizard work after a restart. Failures are swallowed:
     the transcript is already written.
@@ -374,7 +376,7 @@ class Job:
     kwargs: dict[str, Any]
     # Human-readable name shown in the UI (defaults to input filename stem)
     name: str = ""
-    # "transcription" | "refine" | "summarize"
+    # one of the JOB_* constants
     job_type: str = JOB_TRANSCRIPTION
     output_path: Optional[str] = None
     error: Optional[str] = None
@@ -1202,7 +1204,7 @@ class JobQueue:
         """Chain refine and/or summarize after a completed transcription job.
 
         Called from within _run_transcription_job, still in the job thread.
-        sys.stderr is redirected to capture Ollama status messages.
+        sys.stderr is redirected to capture the LLM client's status messages.
         """
         from pathlib import Path
 

@@ -822,7 +822,7 @@ async def transcript_excerpt(request: Request, name: str, speaker_name: str):
     from fastapi.responses import FileResponse
 
     # Try the raw label first; fall back to the legacy display-name file
-    # (pre-fix transcripts keyed excerpts by display name).
+    # (older transcripts key excerpts by display name).
     candidates: list[str] = [safe_sp]
     diar = _load_diar_sidecar(md_path)
     if diar:

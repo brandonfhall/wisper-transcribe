@@ -79,7 +79,7 @@ Override the storage path with `WISPER_DATA_DIR` (set automatically in Docker). 
 
 ### Transcripts folder
 
-Transcripts go to the output root: `WISPER_OUTPUT_DIR` if set, else the `output_dir` setting, else `output/` in the data directory. Older versions used `./output` in whatever directory wisper was started from when that folder existed; that check is gone, so the folder no longer depends on where you launch wisper. When you upgrade, an existing install that was using a working-directory `./output` has that path saved into `output_dir` automatically.
+Transcripts go to the output root: `WISPER_OUTPUT_DIR` if set, else the `output_dir` setting, else `output/` in the data directory. It never depends on the directory you launch wisper from. An install whose transcripts are in a `./output` folder next to where wisper was started gets that path saved into `output_dir` the first time it runs with the database.
 
 To move your transcripts: stop the server, move the files, then `wisper config set output_dir <new path>`.
 

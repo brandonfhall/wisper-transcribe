@@ -2,7 +2,7 @@ name: Docker Build
 
 # Builds the CPU target of the Dockerfile on every push to main and on PRs
 # that touch Docker-related files. The GPU target is not built in CI because
-# it requires CUDA wheels (~8 GB) — verify GPU builds manually.
+# its CUDA wheels add several GB — verify GPU builds manually.
 #
 # Layer caching via GitHub Actions cache keeps repeat builds fast (~1–2 min
 # after the first cold run).

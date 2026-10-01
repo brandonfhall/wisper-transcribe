@@ -572,7 +572,7 @@ def test_select_embedding_segments_band_fallback_to_all_solo():
 
 def test_select_embedding_segments_no_solo_falls_back_to_longest_overall():
     """When every SPEAKER_00 segment overlaps another speaker, fall back to
-    the longest speaker_segs regardless of overlap (today's old behavior)."""
+    the longest speaker_segs regardless of overlap."""
     from wisper_transcribe.speaker_manager import _select_embedding_segments
 
     segments = [

@@ -1595,7 +1595,7 @@ async def test_worker_fails_live_job_stopped_before_it_reached_front_of_queue(tm
 
 
 def test_worker_runs_live_job_normally_when_stop_event_not_yet_set(tmp_path):
-    """Sanity check for the fix above: a JOB_LIVE job that reaches the front
+    """Counterpart of the test above: a JOB_LIVE job that reaches the front
     of the queue before its session is stopped must still run normally."""
     from wisper_transcribe.web.jobs import COMPLETED, JobQueue
 

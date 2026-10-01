@@ -227,7 +227,7 @@ def enumerate_devices() -> dict:
 def resolve_device_name(devices: list, device_id: str) -> str:
     """Look up `device_id` in an `enumerate_devices()` list; falls back to
     echoing the id itself when not found (device ids are never used in a
-    file path, so this is safe -- see CLAUDE.md's web route security rules)."""
+    file path, so this is safe -- see .claude/rules/web-security.md)."""
     for d in devices:
         if d.get("id") == device_id:
             return d.get("name", device_id)

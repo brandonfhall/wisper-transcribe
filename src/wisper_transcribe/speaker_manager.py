@@ -32,8 +32,8 @@ def _get_profiles_dir(data_dir: Optional[Path] = None) -> Path:
 
 
 def get_reference_clips_dir(data_dir: Optional[Path] = None) -> Path:
-    """Directory of the ``<key>.mp3`` reference clips (the pre-SQLite
-    ``embeddings/`` folder; clips kept their location)."""
+    """Directory of the ``<key>.mp3`` reference clips. It keeps the
+    ``embeddings/`` name so existing data dirs need no move."""
     return _get_profiles_dir(data_dir) / "embeddings"
 
 

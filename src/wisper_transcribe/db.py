@@ -255,9 +255,9 @@ _LEGACY_MARKERS = ("config.toml", "speakers.json", "campaigns.json", "recordings
 def _v1_pin_output_dir(conn: sqlite3.Connection, ctx: MigrationContext) -> None:
     """Keep an existing install's CWD ``./output`` as the output root.
 
-    ``get_output_dir()`` used to prefer ``./output`` in the working directory.
-    It no longer looks at the CWD, so on upgrade an install whose transcripts
-    live in a CWD ``./output`` gets that path pinned into ``output_dir``.
+    ``get_output_dir()`` never looks at the working directory, so an existing
+    install whose transcripts live in a CWD ``./output`` gets that path pinned
+    into ``output_dir``; otherwise its transcripts would not be found.
     """
     from .config import load_config, save_config
 

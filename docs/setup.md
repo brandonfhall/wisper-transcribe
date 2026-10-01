@@ -85,7 +85,7 @@ $env:HF_TOKEN="hf_abc123..."          # Windows PowerShell
 wisper config set hf_token hf_abc123...
 ```
 
-> **Upgrading from an older version?** Diarization and voice profiles now use `pyannote/speaker-diarization-community-1` (previously `speaker-diarization-3.1` + `pyannote/embedding`). Accept its terms at the link above once, or diarization fails with a message pointing there. Existing voice profiles must be re-enrolled — see [Re-enrolling after the speaker-model upgrade](scenarios.md#re-enrolling-after-the-speaker-model-upgrade).
+> **Profiles from `pyannote/embedding`:** diarization and voice profiles use `pyannote/speaker-diarization-community-1`, whose terms are accepted separately (diarization fails with a message pointing to the link above until you do). Profiles enrolled with the earlier `pyannote/embedding` model can't be matched and must be re-enrolled — see [Re-enrolling after the speaker-model upgrade](scenarios.md#re-enrolling-after-the-speaker-model-upgrade).
 
 **Optional — configure an LLM for `refine` / `summarize`:**
 

@@ -231,7 +231,7 @@ def test_downgrade_guard_refuses_newer_db(data_dir):
 
 
 # ---------------------------------------------------------------------------
-# Schema constraints (Phase 0 tables)
+# Schema constraints (foundation tables)
 # ---------------------------------------------------------------------------
 
 def test_runtime_leases_constraints():

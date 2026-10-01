@@ -559,8 +559,8 @@ def derived_source(name: str) -> str:
 def read_sidecar(md_path: Path, data_dir: Optional[Path] = None) -> Optional[dict]:
     """The transcript's diarization data as one dict (the sidecar shape), or None.
 
-    ``diarization_segments`` comes from ``<stem>_diar.json`` (its only content
-    now); ``speaker_map``, ``speaker_map_source``, ``speaker_embeddings`` +
+    ``diarization_segments`` comes from ``<stem>_diar.json`` (its only
+    content); ``speaker_map``, ``speaker_map_source``, ``speaker_embeddings`` +
     ``embedding_space``, ``input_path`` (absolute, from the stored relative
     path), and ``campaign`` come from the database. A sidecar still carrying
     the old fields (e.g. synced from an older install) is used as a fallback
