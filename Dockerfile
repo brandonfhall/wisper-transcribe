@@ -83,14 +83,15 @@ CMD ["--help"]
 # ── gpu target ────────────────────────────────────────────────────────────────
 FROM base AS gpu
 
-# Install the package (brings in CPU torch as a transitive dep via PyPI),
-# then upgrade torch/torchaudio to the CUDA 12.6 builds.
-# --upgrade replaces the CPU wheels without touching other installed packages.
-RUN pip install --no-cache-dir -e . \
- && pip install --no-cache-dir --upgrade \
+# CUDA 12.6 torch/torchaudio first, then the package (as setup.ps1 does).
+# Installing the package first pulled PyPI's Linux torch with its own CUDA
+# 13 nvidia-* libraries; swapping torch afterwards left that second CUDA
+# behind, unused.
+RUN pip install --no-cache-dir \
         "torch>=2.8.0" \
         "torchaudio>=2.8.0" \
         --index-url https://download.pytorch.org/whl/cu126 \
+ && pip install --no-cache-dir -e . \
  # Download vendored HTMX so wisper server works fully offline
  && curl -sL "https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js" \
          -o /app/src/wisper_transcribe/static/htmx.min.js \
