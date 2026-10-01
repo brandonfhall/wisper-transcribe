@@ -1236,6 +1236,19 @@ def test_speakers_list_flags_profiles_from_old_model(client, tmp_path):
     assert "1 profile(s) were enrolled with an older speaker model" in resp.text
 
 
+def test_speakers_list_shows_sessions_and_last_heard(client):
+    from ._seed import seed_profile
+
+    seed_profile("alice", "Alice", enrolled_date="2026-01-02")
+    with patch("wisper_transcribe.web.routes.speakers.profile_activity",
+               return_value={"alice": (4, "2026-03-05T19:00:00Z")}):
+        resp = client.get("/speakers")
+    assert resp.status_code == 200
+    assert 'data-testid="speaker-sessions">4<' in resp.text
+    assert "2026-03-05" in resp.text and "2026-01-02" in resp.text
+    assert "SIM" not in resp.text  # no stored data behind it
+
+
 def test_speakers_enroll_form_returns_200(client):
     resp = client.get("/speakers/enroll")
     assert resp.status_code == 200

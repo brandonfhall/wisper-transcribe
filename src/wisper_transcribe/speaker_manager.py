@@ -98,6 +98,22 @@ def load_profiles(data_dir: Optional[Path] = None) -> dict[str, SpeakerProfile]:
     return {row["key"]: _row_to_profile(row) for row in rows}
 
 
+def profile_activity(data_dir: Optional[Path] = None) -> dict[str, tuple[int, Optional[str]]]:
+    """Per profile key: (transcripts that name the speaker, latest such transcript's date).
+
+    A transcript names a profile when one of its speaker rows carries the
+    profile's display name; transcripts whose ``.md`` is missing don't count.
+    """
+    with db.connection(data_dir) as conn:
+        rows = conn.execute(
+            "SELECT p.key, COUNT(DISTINCT t.id), MAX(t.created_at) FROM profiles p "
+            "LEFT JOIN transcript_speakers ts ON ts.display_name = p.display_name "
+            "LEFT JOIN transcripts t ON t.id = ts.transcript_id AND t.missing_since IS NULL "
+            "GROUP BY p.key"
+        ).fetchall()
+    return {key: (count, last) for key, count, last in rows}
+
+
 def remove_profile_files(key: str, data_dir: Optional[Path] = None) -> None:
     """Delete a profile's reference clip (and a stray pre-SQLite ``.npy``)."""
     clips = get_reference_clips_dir(data_dir)

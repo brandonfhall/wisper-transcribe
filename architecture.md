@@ -233,7 +233,7 @@ Embeddings from different models aren't comparable (and differ in dimension), so
 
 ### Profiles on disk
 
-- A profile is one `profiles` row: display name, role, notes, enrollment metadata, and the embedding as a float32 BLOB (~1 KB) with its `embedding_space`. `load_profiles()` returns them in one query, so `SpeakerProfile.embedding` is always loaded and `load_profile_embedding()` does no I/O.
+- A profile is one `profiles` row: display name, role, notes, enrollment metadata, and the embedding as a float32 BLOB (~1 KB) with its `embedding_space`. `load_profiles()` returns them in one query, so `SpeakerProfile.embedding` is always loaded and `load_profile_embedding()` does no I/O. The Speakers page's Sessions and Last heard come from `profile_activity()`: transcripts (with their `.md` present) that have a `transcript_speakers` row carrying the profile's display name.
 - `profiles/embeddings/<key>.mp3` is the ~12 s reference clip for playback on the Speakers page (`reference_clip_path()`). It is the only per-profile file; the folder name predates the database.
 - Removal and reset delete the row(s) first, then the clip, so the play button never dangles. Memberships cascade.
 - **EMA update** (`--update`): `stored = unit(0.7 * unit(stored) + 0.3 * unit(new))`, a read-blend-write in one transaction because it may also retag the profile.

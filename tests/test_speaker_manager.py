@@ -1090,3 +1090,41 @@ def test_default_threshold_is_calibrated_value():
 
     assert DEFAULT_SIMILARITY_THRESHOLD == 0.55
     assert inspect.signature(match_speakers).parameters["threshold"].default == DEFAULT_SIMILARITY_THRESHOLD
+
+
+# ---------------------------------------------------------------------------
+# profile_activity — the Sessions / Last heard figures on the Speakers page
+# ---------------------------------------------------------------------------
+
+def _named_transcript(stem: str, names: dict[str, str]) -> Path:
+    from wisper_transcribe.path_utils import get_output_dir
+
+    from ._seed import seed_sidecar
+
+    md = get_output_dir() / f"{stem}.md"
+    md.parent.mkdir(parents=True, exist_ok=True)
+    md.write_text("x", encoding="utf-8")
+    seed_sidecar(md, {"input_path": "", "diarization_segments": [], "speaker_map": names})
+    return md
+
+
+def test_profile_activity_counts_transcripts_naming_the_speaker():
+    from wisper_transcribe import transcript_store
+    from wisper_transcribe.speaker_manager import profile_activity
+
+    from ._seed import seed_profile
+
+    seed_profile("alice", "Alice")
+    seed_profile("bob", "Bob")
+    seed_profile("carol", "Carol")
+    _named_transcript("s1", {"SPEAKER_00": "Alice", "SPEAKER_01": "Alice", "SPEAKER_02": "Bob"})
+    _named_transcript("s2", {"SPEAKER_00": "Alice"})
+    gone = _named_transcript("s3", {"SPEAKER_00": "Bob"})
+    gone.unlink()
+    transcript_store.reconcile()  # s3's .md is missing: it no longer counts
+
+    activity = profile_activity()
+    assert activity["alice"][0] == 2  # two labels in s1 count once
+    assert activity["bob"][0] == 1
+    assert activity["carol"] == (0, None)
+    assert activity["alice"][1] is not None

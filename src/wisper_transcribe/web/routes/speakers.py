@@ -10,7 +10,9 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Resp
 
 from . import get_queue as _get_queue, templates
 from wisper_transcribe.path_utils import validate_path_component
-from wisper_transcribe.speaker_manager import load_profiles, remove_profile, stale_profile_keys
+from wisper_transcribe.speaker_manager import (
+    load_profiles, profile_activity, remove_profile, stale_profile_keys,
+)
 from wisper_transcribe.web._responses import error_redirect, invalid_input_response
 
 router = APIRouter(prefix="/speakers")
@@ -50,7 +52,8 @@ async def speakers_list(request: Request) -> HTMLResponse:
         request,
         "speakers.html",
         {"request": request, "profiles": profiles, "has_clip": has_clip,
-         "waveforms": waveforms, "stale": set(stale_profile_keys(profiles))},
+         "waveforms": waveforms, "stale": set(stale_profile_keys(profiles)),
+         "activity": profile_activity()},
     )
 
 
