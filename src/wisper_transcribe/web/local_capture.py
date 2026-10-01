@@ -364,6 +364,9 @@ class LocalCaptureManager:
             self._level_peaks = {"mic": 0.0, "system": 0.0}
 
         self._stop_event = threading.Event()
+        # Published before any thread starts: a device that fails at once
+        # calls _mark_degraded(), which needs the active recording.
+        self._active_recording = recording
         self._capture_threads = [
             threading.Thread(
                 target=self._capture_loop,
@@ -387,8 +390,6 @@ class LocalCaptureManager:
             daemon=True,
         )
         self._tick_thread.start()
-
-        self._active_recording = recording
         log.info("Local capture session started: %s", recording.id)
         return recording
 
