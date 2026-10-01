@@ -246,18 +246,19 @@ def test_runtime_leases_constraints():
 
 def test_every_table_is_strict():
     """Every ordinary table is STRICT. FTS5's virtual and shadow tables
-    (``search_fts*``) can't be, and PRAGMA table_list types them apart."""
+    (``search_fts*``, ``transcript_titles*``) can't be, and PRAGMA
+    table_list types them apart."""
     with db.connection() as conn:
         rows = conn.execute(
             "SELECT name, type, strict FROM pragma_table_list WHERE schema = 'main' "
             "AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
-    assert {r["name"] for r in rows if r["type"] == "virtual"} == {"search_fts"}
+    assert {r["name"] for r in rows if r["type"] == "virtual"} == {"search_fts", "transcript_titles"}
     for r in rows:
         if r["type"] == "table":
             assert r["strict"] == 1, r["name"]
         else:
-            assert r["name"].startswith("search_fts"), r["name"]
+            assert r["name"].startswith(("search_fts", "transcript_titles")), r["name"]
 
 
 # ---------------------------------------------------------------------------

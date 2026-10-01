@@ -565,6 +565,31 @@ END;
 """
 
 
+# --- v8: transcript titles in search ---------------------------------------
+
+# A title isn't a block of the transcript's text (block anchors are #b-<n>), so
+# it gets its own index over transcripts.stem, kept in step by triggers and
+# filled from the existing rows here, so no reindex is needed.
+_V8_DDL = """
+CREATE VIRTUAL TABLE transcript_titles USING fts5(
+  stem, content='transcripts', content_rowid='id',
+  tokenize='porter unicode61 remove_diacritics 2');
+
+CREATE TRIGGER transcript_titles_ai AFTER INSERT ON transcripts BEGIN
+  INSERT INTO transcript_titles (rowid, stem) VALUES (new.id, new.stem);
+END;
+CREATE TRIGGER transcript_titles_ad AFTER DELETE ON transcripts BEGIN
+  INSERT INTO transcript_titles (transcript_titles, rowid, stem) VALUES ('delete', old.id, old.stem);
+END;
+CREATE TRIGGER transcript_titles_au AFTER UPDATE OF stem ON transcripts BEGIN
+  INSERT INTO transcript_titles (transcript_titles, rowid, stem) VALUES ('delete', old.id, old.stem);
+  INSERT INTO transcript_titles (rowid, stem) VALUES (new.id, new.stem);
+END;
+
+INSERT INTO transcript_titles (transcript_titles) VALUES ('rebuild');
+"""
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "foundation", _V1_DDL, _v1_pin_output_dir),
     Migration(2, "profiles-campaigns", _V2_DDL, _v2_import),
@@ -573,6 +598,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(5, "recordings", _V5_DDL, _v5_import),
     Migration(6, "jobs", _V6_DDL),
     Migration(7, "search", _V7_DDL),
+    Migration(8, "search-titles", _V8_DDL),
 )
 LATEST_VERSION = MIGRATIONS[-1].version
 

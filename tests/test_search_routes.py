@@ -59,6 +59,14 @@ def test_results_link_to_block_with_query(out, client):
     assert "00:05" in r.text and "Alice" in r.text
 
 
+def test_title_hit_links_to_the_transcript_top(out, client):
+    _add(out, "Cumstone - Year One")
+    page = client.get("/search", params={"q": "cumstone"}).text
+    assert "TITLE" in page
+    assert 'href="/transcripts/Cumstone%20-%20Year%20One?q=cumstone"' in page
+    assert "<mark>Cumstone</mark>" in page
+
+
 def test_query_with_ampersand_is_encoded_in_links(out, client):
     _add(out, "s1")
     r = client.get("/search", params={"q": "strahd & castle"})

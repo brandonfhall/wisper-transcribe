@@ -66,10 +66,10 @@ Transcripts are written to the transcripts folder (`output/` in the data directo
 
 ## Searching
 
-Type in the sidebar box or open `/search`. Every transcript and its session summary are searched.
+Type in the sidebar box or open `/search`. Every transcript's title and text, and its session summary, are searched.
 
 - **Matching.** Words match their other forms ("fights" finds "fight"), and accents are ignored ("cafe" finds "café"). Every word must appear in the same speaker block or summary section. Put `"double quotes"` around a phrase, and end a word with `*` to match a prefix (`Stra*`). Anything else, including `-`, `OR`, `NEAR`, and `:`, is searched as ordinary text.
-- **Results** are grouped by transcript, best match first, 20 transcripts per page, with up to three matching blocks each. Each block shows the speaker, the timestamp, and a snippet with the matched words highlighted. Highlighting is approximate; a result can match on a word form that isn't highlighted.
+- **Results** are grouped by transcript, best match first, 20 transcripts per page, with up to three matching blocks each. Each block shows the speaker, the timestamp, and a snippet with the matched words highlighted. Transcripts whose title matches come first, with a **TITLE** row that opens the transcript at the top. Highlighting is approximate; a result can match on a word form that isn't highlighted.
 - **Filters:** campaign, speaker, and transcripts or summaries only.
 - **Opening a result** jumps to that block in the transcript, or that section of the summary, and highlights the words there.
 - **Indexing.** Transcripts written or edited in the web UI or CLI are searchable immediately. After an upgrade, or when files are added while the server is stopped, they are indexed in the background, and the page header shows **INDEXING N OF M** until that finishes. Files edited outside wisper (for example in Obsidian) are reindexed when the Transcripts or Campaign page next loads, or when a search result shows **Transcript changed — reindexing**. Transcripts flagged missing aren't searched.

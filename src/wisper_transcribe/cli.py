@@ -1923,7 +1923,7 @@ def _terminal_snippet(snippet: str) -> str:
               help="Maximum number of transcripts to show")
 def search(query: str, campaign: Optional[str], speaker: Optional[str], kind: Optional[str],
            limit: int):
-    """Search every transcript and session summary for QUERY.
+    """Search every transcript's title and text, and every session summary, for QUERY.
 
     Words match their other forms ("fights" finds "fight"); "double quotes"
     match a phrase; a trailing * matches a prefix. Transcripts not yet in the
@@ -1953,7 +1953,7 @@ def search(query: str, campaign: Optional[str], speaker: Optional[str], kind: Op
             click.echo("  changed since indexing — run the search again")
             continue
         for hit in group.hits:
-            label = "summary" if hit.kind == "summary" else " ".join(
+            label = hit.kind if hit.kind in ("summary", "title") else " ".join(
                 x for x in (hit.timestamp, hit.speaker or "") if x)
             click.echo(f"  {label:<24} {_terminal_snippet(hit.snippet)}")
     if page.has_next:

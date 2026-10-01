@@ -183,6 +183,21 @@ def test_transcript_delete_cascades_and_marks_journal_stale(conn):
     assert _one(conn, f"SELECT transcript_id FROM jobs WHERE id = '{J}'") is None  # history kept
 
 
+def test_title_index_follows_transcript_insert_rename_delete(conn):
+    def titles(term):
+        return [r[0] for r in conn.execute(
+            "SELECT rowid FROM transcript_titles WHERE transcript_titles MATCH ? ORDER BY rowid", (term,))]
+
+    assert titles("s1") == [1]
+    conn.execute("INSERT INTO transcripts (id, stem, created_at) VALUES (9, 'Kings and Queens', 'now')")
+    assert titles("king") == [9]  # porter: "kings" -> "king"
+    conn.execute("UPDATE transcripts SET stem = 'Remove Your Mask' WHERE id = 9")
+    assert titles("king") == [] and titles("mask") == [9]
+    conn.execute("DELETE FROM transcripts WHERE id IN (1, 9)")
+    assert titles("s1") == [] and titles("mask") == []
+    conn.execute("INSERT INTO transcript_titles (transcript_titles, rank) VALUES ('integrity-check', 1)")
+
+
 def test_deleting_recordings_transcript_makes_it_transcribable_again(conn):
     conn.execute("DELETE FROM transcripts WHERE id = 3")
     assert _one(conn, f"SELECT transcript_id FROM recordings WHERE id = '{R}'") is None

@@ -48,6 +48,12 @@ log = logging.getLogger(__name__)
 KIND_TRANSCRIPT = "transcript"
 KIND_SUMMARY = "summary"
 KINDS = (KIND_TRANSCRIPT, KIND_SUMMARY)
+# A match on the transcript's title (its stem, transcript_titles). Not a
+# filter value: the "transcript" filter includes title matches.
+KIND_TITLE = "title"
+# Title matches rank above text matches: bm25 scores from two FTS tables
+# aren't comparable, and naming an episode should find that episode first.
+TITLE_BOOST = 1e6
 SUMMARY_SUFFIX = ".summary.md"
 
 PAGE_SIZE = 20
@@ -311,6 +317,7 @@ def rebuild(data_dir: Optional[Path] = None, output_dir: Optional[Path] = None, 
     with db.transaction(data_dir) as conn:
         conn.execute("DELETE FROM search_index_state")
         conn.execute("INSERT INTO search_fts (search_fts) VALUES ('delete-all')")
+        conn.execute("INSERT INTO transcript_titles (transcript_titles) VALUES ('rebuild')")
     done = run_backfill(data_dir, output_dir, report=report)
     with db.transaction(data_dir) as conn:
         conn.execute("INSERT INTO search_fts (search_fts) VALUES ('optimize')")
@@ -513,6 +520,8 @@ class Hit:
 
     @property
     def anchor(self) -> str:
+        if self.kind == KIND_TITLE:
+            return ""
         return f"b-{self.block_idx}" if self.kind == KIND_TRANSCRIPT else f"s-{self.block_idx}"
 
     @property
@@ -552,8 +561,9 @@ def search(query: str, *, campaign: Optional[str] = None, speaker: Optional[str]
     with up to :data:`HITS_PER_TRANSCRIPT` hits each; paging is by transcript.
 
     ``campaign`` is a slug, ``speaker`` an exact display name (transcript
-    blocks only), ``kind`` ``"transcript"`` or ``"summary"``. Missing
-    transcripts are left out. A result whose file changed since indexing is
+    blocks only), ``kind`` ``"transcript"`` or ``"summary"``. A match on a
+    transcript's title is a ``"title"`` hit, ranked first; the speaker and
+    summary filters leave titles out. Missing transcripts are left out. A result whose file changed since indexing is
     returned ``stale`` and queued for reindexing.
     """
     page = max(1, page)
@@ -565,6 +575,8 @@ def search(query: str, *, campaign: Optional[str] = None, speaker: Optional[str]
         output_dir = get_output_dir()
 
     filters, params = ["search_fts MATCH ?", "t.missing_since IS NULL"], [match]
+    campaign_filter = ("t.id IN (SELECT ct.transcript_id FROM campaign_transcripts ct "
+                       "JOIN campaigns c ON c.id = ct.campaign_id WHERE c.slug = ?)")
     if kind:
         filters.append("b.kind = ?")
         params.append(kind)
@@ -572,9 +584,21 @@ def search(query: str, *, campaign: Optional[str] = None, speaker: Optional[str]
         filters.append("b.speaker = ?")
         params.append(speaker)
     if campaign:
-        filters.append("t.id IN (SELECT ct.transcript_id FROM campaign_transcripts ct "
-                       "JOIN campaigns c ON c.id = ct.campaign_id WHERE c.slug = ?)")
+        filters.append(campaign_filter)
         params.append(campaign)
+    titles = ""
+    if speaker is None and kind in (None, KIND_TRANSCRIPT):
+        title_filters = ["transcript_titles MATCH ?", "t.missing_since IS NULL"]
+        params.append(match)
+        if campaign:
+            title_filters.append(campaign_filter)
+            params.append(campaign)
+        titles = f"""
+          UNION ALL
+          SELECT t.id, '{KIND_TITLE}', 0, NULL, NULL, bm25(transcript_titles) - {TITLE_BOOST}
+          FROM transcript_titles
+          JOIN transcripts t ON t.id = transcript_titles.rowid
+          WHERE {' AND '.join(title_filters)}"""
     # MATERIALIZED: flattened into the outer query, bm25() leaves the FTS
     # scan's context and SQLite rejects it once the filters add joins.
     sql = f"""
@@ -584,7 +608,7 @@ def search(query: str, *, campaign: Optional[str] = None, speaker: Optional[str]
           FROM search_fts
           JOIN search_blocks b ON b.id = search_fts.rowid
           JOIN transcripts t ON t.id = b.transcript_id
-          WHERE {' AND '.join(filters)}
+          WHERE {' AND '.join(filters)}{titles}
         ), groups AS (
           SELECT transcript_id, min(score) AS best, count(*) AS n FROM hits
           GROUP BY transcript_id ORDER BY best, transcript_id LIMIT ? OFFSET ?
@@ -634,7 +658,7 @@ def search(query: str, *, campaign: Optional[str] = None, speaker: Optional[str]
     for tid, group in groups.items():
         paths = _paths(group.stem, output_dir)
         texts: dict[str, list[Block]] = {}
-        for k in {h.kind for h in group.hits}:
+        for k in {h.kind for h in group.hits} - {KIND_TITLE}:
             path = paths[k] if paths else None
             st = _stat(path) if path else None
             if st is None or st != indexed.get((tid, k)):
@@ -655,6 +679,9 @@ def search(query: str, *, campaign: Optional[str] = None, speaker: Optional[str]
             stale_ids.append(tid)
             continue
         for hit in group.hits:
+            if hit.kind == KIND_TITLE:
+                hit.snippet = snippet(group.stem, pattern)
+                continue
             blocks = texts[hit.kind]
             if hit.block_idx >= len(blocks) or blocks[hit.block_idx].idx != hit.block_idx:
                 group.stale = True

@@ -45,7 +45,7 @@
 
   {% if results is none %}
   <div style="color:var(--color-paper-faint);font-size:13px;line-height:1.7">
-    Searches every transcript and session summary. Words match their other forms
+    Searches every transcript's title and text, and every session summary. Words match their other forms
     ("fights" finds "fight"), <span style="font-family:var(--font-mono)">"double quotes"</span> match a phrase,
     and a trailing <span style="font-family:var(--font-mono)">*</span> matches a prefix.
   </div>
@@ -63,7 +63,9 @@
       <div data-testid="search-stale" style="font-size:12px;color:var(--color-paper-faint);font-style:italic">Transcript changed — reindexing. Search again in a moment.</div>
       {% else %}
       {% for h in g.hits %}
-      {%- if h.kind == 'summary' -%}
+      {%- if h.kind == 'title' -%}
+        {%- set href = '/transcripts/' ~ (g.stem | urlencode) ~ '?q=' ~ (q | urlencode) -%}
+      {%- elif h.kind == 'summary' -%}
         {%- set href = '/transcripts/' ~ (g.stem | urlencode) ~ '/summary?q=' ~ (q | urlencode) ~ '#' ~ h.anchor -%}
       {%- else -%}
         {%- set href = '/transcripts/' ~ (g.stem | urlencode) ~ '?q=' ~ (q | urlencode) ~ '#' ~ h.anchor -%}
@@ -71,7 +73,8 @@
       <a href="{{ href }}" data-testid="search-hit"
          style="display:grid;grid-template-columns:130px 1fr;gap:14px;padding:6px 0;text-decoration:none;color:inherit">
         <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim);line-height:1.6">
-          {% if h.kind == 'summary' %}<span style="color:var(--color-accent)">SUMMARY</span>
+          {% if h.kind == 'title' %}<span style="color:var(--color-accent)">TITLE</span>
+          {% elif h.kind == 'summary' %}<span style="color:var(--color-accent)">SUMMARY</span>
           {% else %}{{ h.speaker or '' }}{% if h.timestamp %}<div style="color:var(--color-paper-faint)">{{ h.timestamp }}</div>{% endif %}{% endif %}
         </div>
         <div class="search-snippet" style="font-family:var(--font-serif);font-size:15px;line-height:1.55;color:var(--color-paper)">{{ h.snippet }}</div>

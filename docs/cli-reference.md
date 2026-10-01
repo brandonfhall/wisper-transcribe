@@ -321,7 +321,7 @@ wisper transcripts move session12 --no-campaign            # remove campaign ass
 
 ### `wisper search`
 
-Search every transcript and session summary in the transcripts folder:
+Search every transcript's title and text, and every session summary, in the transcripts folder:
 
 ```bash
 wisper search strahd                               # every block that mentions Strahd
@@ -332,7 +332,7 @@ wisper search loot --kind summary                  # session summaries only
 wisper search castle --speaker "Alice" --limit 20  # one speaker, up to 20 transcripts
 ```
 
-Each result prints the transcript name, its campaign, and the number of matches. Up to three blocks follow, each with timestamp, speaker (or `summary`), and a snippet with the matched words highlighted.
+Each result prints the transcript name, its campaign, and the number of matches. Up to three blocks follow, each with timestamp, speaker (or `summary`, or `title` for a match on the transcript's name, listed first), and a snippet with the matched words highlighted.
 
 - Words match their other forms ("fights" finds "fight") and ignore accents. Every word must appear in the same block. Double quotes match a phrase, and a trailing `*` matches a prefix. Other symbols and words like `OR` or `NEAR` are searched as ordinary text.
 - `--speaker` is the exact name shown in the transcript. `--limit` (default 10) is the number of transcripts shown.

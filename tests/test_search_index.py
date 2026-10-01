@@ -432,6 +432,58 @@ def test_filters_campaign_speaker_kind(out):
     assert _stems(every) == ["s1"] and every.error is None
 
 
+def test_title_match_finds_transcript_without_the_word_in_its_text(out):
+    _add(out, "Episode 2 — Cumstone - Year One")  # body never says "cumstone"
+    _add(out, "s2")
+    (group,) = si.search("cumstone").groups
+    assert group.stem == "Episode 2 — Cumstone - Year One"
+    (hit,) = group.hits
+    assert (hit.kind, hit.anchor) == ("title", "")
+    assert "<mark>Cumstone</mark>" in str(hit.snippet)
+
+
+def test_title_match_ranks_first_and_leads_its_group(out):
+    _add(out, "s1")                                   # "strahd" in the text only
+    _add(out, "Strahd returns")                       # in the title and the text
+    page = si.search("strahd")
+    assert _stems(page) == ["Strahd returns", "s1"]
+    assert [h.kind for h in page.groups[0].hits][0] == "title"
+    assert page.groups[0].total_hits == 2             # the title + the one block
+
+
+def test_title_matches_follow_filters(out):
+    _add(out, "Cumstone one")
+    _add(out, "Cumstone two")
+    create_campaign("Curse")
+    move_transcript_to_campaign("Cumstone one", "curse")
+    assert _stems(si.search("cumstone", campaign="curse")) == ["Cumstone one"]
+    assert len(si.search("cumstone", kind="transcript").groups) == 2
+    assert si.search("cumstone", kind="summary").groups == []
+    assert si.search("cumstone", speaker="Alice").groups == []  # titles have no speaker
+
+
+def test_title_index_follows_register_rename_and_delete(out):
+    md = _add(out, "Old name")
+    assert _stems(si.search("old")) == ["Old name"]
+    md.rename(out / "New name.md")
+    ts.reconcile(out)                                 # Old name missing, New name registered
+    ts.delete_transcript("New name")                  # drop the new row so relink can take it
+    (out / "New name.md").write_text(TRANSCRIPT, encoding="utf-8")
+    ts.relink("Old name", "New name")                 # UPDATE transcripts SET stem
+    assert si.search("old").groups == [] and _stems(si.search("new")) == ["New name"]
+    ts.delete_transcript("New name")
+    assert si.search("new").groups == []
+    with db.connection() as conn:
+        conn.execute("INSERT INTO transcript_titles (transcript_titles, rank) VALUES ('integrity-check', 1)")
+
+
+def test_missing_transcript_title_is_not_searched(out):
+    md = _add(out, "Cumstone")
+    md.unlink()
+    ts.reconcile(out)
+    assert si.search("cumstone").groups == []
+
+
 def test_paging_by_transcript(out):
     for i in range(5):
         _add(out, f"s{i}")
