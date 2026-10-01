@@ -45,7 +45,7 @@ DEFAULTS = {
     # (word_alignment.py). "auto" aligns when diarization runs on a GPU
     # (CUDA or MPS); CPU adds ~9-20 min per 2.5 h session.
     "forced_alignment": "auto",
-    # LLM post-processing (wisper refine / wisper summarize). Opt-in, CLI-only MVP.
+    # LLM post-processing (refine, summarize, campaign journal). Opt-in.
     # Default provider is local Ollama; cloud providers require explicit config + key.
     "llm_provider": "ollama",                 # ollama | anthropic | openai | google
     "llm_model": "",                          # blank → per-provider default via resolve_llm_model()
@@ -60,6 +60,9 @@ DEFAULTS = {
     "discord_default_guild": "",
     "discord_default_channel": "",
     "discord_presets": [],                    # [{"name": "...", "guild_id": "...", "channel_id": "..."}]
+    # Where transcripts live (the web UI's scope). Blank → <data dir>/output.
+    # env WISPER_OUTPUT_DIR takes precedence.
+    "output_dir": "",
 }
 
 LLM_PROVIDERS = ("ollama", "ollama-cloud", "lmstudio", "anthropic", "openai", "google")
@@ -136,6 +139,28 @@ def get_data_dir() -> Path:
     if override:
         return Path(override)
     return Path(platformdirs.user_data_dir(APP_NAME))
+
+
+def get_output_root(config: Optional[dict] = None) -> Path:
+    """Resolve the transcript output root without creating it.
+
+    ``WISPER_OUTPUT_DIR``, then the ``output_dir`` setting, then
+    ``<data dir>/output``. The working directory is never consulted: the
+    database records which transcripts exist, so the root must not change
+    with where wisper was launched. A relative setting is relative to the
+    data dir.
+    """
+    import os
+    override = os.environ.get("WISPER_OUTPUT_DIR")
+    if override:
+        return Path(override).expanduser()
+    if config is None:
+        config = load_config()
+    configured = str(config.get("output_dir") or "").strip()
+    if configured:
+        path = Path(configured).expanduser()
+        return path if path.is_absolute() else get_data_dir() / path
+    return get_data_dir() / "output"
 
 
 def get_config_path() -> Path:

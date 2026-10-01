@@ -11,6 +11,10 @@
     <span style="color:var(--color-paper)">Journal</span>
   </div>
   <div style="display:flex;gap:8px">
+    {% if has_journal %}
+    <a href="/campaigns/{{ slug }}/journal/download" class="btn btn-secondary btn-sm"
+       title="Download journal.md with the list of folded sessions in its frontmatter">Download</a>
+    {% endif %}
     {% if pending %}
     <form method="post" action="/campaigns/{{ slug }}/journal" style="display:inline">
       <input type="hidden" name="mode" value="next"/>
@@ -37,6 +41,13 @@
     </div>
     {% endif %}
   </div>
+
+  {% if journal_stale %}
+  <div data-testid="journal-stale" style="border:1px solid var(--color-signal-amber);border-radius:8px;padding:12px 16px;margin-bottom:24px;max-width:820px;font-size:13.5px;color:var(--color-signal-amber)">
+    This journal mentions sessions that were moved, removed, or re-transcribed since it was written.
+    <a href="/campaigns/{{ slug }}" style="color:var(--color-paper)">Rebuild it from the campaign page</a>.
+  </div>
+  {% endif %}
 
   {% if has_journal %}
   <div style="font-family:var(--font-serif);font-size:17px;line-height:1.65;color:var(--color-paper);max-width:820px">

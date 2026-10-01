@@ -26,8 +26,10 @@ The web UI is a **single-user tool with no authentication and no CSRF protection
 |------|-----|--------------|
 | Dashboard | `/` | Job queue, system status (device, model, HF token, LLM provider), quick upload |
 | Transcribe | `/transcribe` | Upload and transcribe (see below) |
-| Transcripts | `/transcripts` | Recordings awaiting transcription; browse, read, download, edit, and delete transcripts |
-| Speakers | `/speakers` | Enroll, rename, and remove speaker profiles; play reference clips. Profiles from an older speaker model show **NEEDS RE-ENROLL** |
+| Job history | `/jobs/history` | Every job ever run, filterable, with each job's settings, result, and last log lines (see [Job page](#job-page)) |
+| Transcripts | `/transcripts` | Recordings awaiting transcription; browse, read, download, edit, and delete transcripts; tick rows to delete them or move them to a campaign in bulk |
+| Speakers | `/speakers` | Enroll, rename, and remove speaker profiles; play reference clips. Each card shows how many transcripts name the speaker, when they were last heard, and when the profile was enrolled. Profiles from an older speaker model show **NEEDS RE-ENROLL** |
+| Search | `/search` | Full-text search over every transcript and session summary (see below). The box at the top of the sidebar searches from any page |
 | Campaigns | `/campaigns` | Campaigns, rosters, episode order, and the rolling journal |
 | Record | `/record` | Start and stop Discord or local recording sessions |
 | Recordings | `/recordings` | Browse recordings by campaign; detail, transcribe, and delete |
@@ -48,15 +50,29 @@ Drag a file onto `/transcribe` and choose options:
 
 Large uploads show a byte-level progress bar ("Uploading… N%", then "Processing…") before the job page opens.
 
+**Name already taken:** the transcript is named after the file. If a transcript with that name exists, the page says so as soon as you pick the file (and which campaign it's in), before anything uploads. Tick **Overwrite it** to replace it — it keeps its campaign place, and if it was folded into the campaign journal the journal is marked as needing a rebuild — or **Cancel** and rename the file. A job never reports success without writing its transcript: if a same-named transcript appears while the job runs, the job fails with "Transcript already exists", and a job whose transcript file isn't there afterwards fails with "Transcript file missing after write" (the job log shows the transcripts folder it used).
+
 ### Job page
 
 - A progress bar with per-step pills: **T**ranscribe → **D**iarize → **A**lign → **F**ormat, plus **R**efine / **S**ummarize when requested. **Align** appears only when forced word alignment will run for the job (the setting is fixed when you submit, so changing the Config page while a job is queued doesn't change it). Enrollment jobs show **E**, journal jobs **J**.
 - A live log, ETA, and speed. On Apple Silicon (MLX) the Transcribe ETA updates about every 30 s of audio.
 - **Stop Job** cancels a pending or running job. A running transcription stops at its next progress update; the GPU may finish its current batch first.
 - Failed jobs show a generic message ("Transcription failed — see server logs"). The full error is in the server log (the terminal running `wisper server`, or the `--debug` log file).
-- The job list keeps the 50 most recently finished jobs. Transcripts themselves are never pruned.
+- The dashboard shows the 20 newest jobs, including ones from before a restart, each with its campaign (the campaign its transcript is in now, else the one it was submitted with). **all jobs →** opens **Job history** (`/jobs/history`): every job ever run, 50 per page, filterable by type and status, with each job's settings, result, and last log lines. Transcript and campaign pages have a **Jobs** button that filters it to that transcript or campaign; a campaign's list includes the transcriptions of its sessions. Jobs that were queued or running when the server stopped show as "Interrupted by restart"; they are not resumed.
 
-Transcripts are written to `./output/` (or `<data dir>/output`) and appear on the Transcripts page as soon as the job finishes.
+Transcripts are written to the transcripts folder (`output/` in the data directory unless `output_dir` / `WISPER_OUTPUT_DIR` says otherwise; see [configuration.md](configuration.md#transcripts-folder)) and appear on the Transcripts page as soon as the job finishes. Files you add to that folder yourself appear too.
+
+---
+
+## Searching
+
+Type in the sidebar box or open `/search`. Every transcript's title and text, and its session summary, are searched.
+
+- **Matching.** Words match their other forms ("fights" finds "fight"), and accents are ignored ("cafe" finds "café"). Every word must appear in the same speaker block or summary section. Put `"double quotes"` around a phrase, and end a word with `*` to match a prefix (`Stra*`). Anything else, including `-`, `OR`, `NEAR`, and `:`, is searched as ordinary text.
+- **Results** are grouped by transcript, best match first, 20 transcripts per page, with up to three matching blocks each. Each block shows the speaker, the timestamp, and a snippet with the matched words highlighted. Transcripts whose title matches come first, with a **TITLE** row that opens the transcript at the top. Highlighting is approximate; a result can match on a word form that isn't highlighted.
+- **Filters:** campaign, speaker, and transcripts or summaries only.
+- **Opening a result** jumps to that block in the transcript, or that section of the summary, and highlights the words there.
+- **Indexing.** Transcripts written or edited in the web UI or CLI are searchable immediately. After an upgrade, or when files are added while the server is stopped, they are indexed in the background, and the page header shows **INDEXING N OF M** until that finishes. Files edited outside wisper (for example in Obsidian) are reindexed when the Transcripts or Campaign page next loads, or when a search result shows **Transcript changed — reindexing**. Transcripts flagged missing aren't searched.
 
 ---
 
@@ -71,7 +87,7 @@ After a transcription, click **Name Speakers** on the job page, or **Name speake
 
 For web uploads, the source audio is kept next to its transcript in the output folder so the wizard works after a server restart; it's deleted with the transcript. If that audio is missing, renames still apply and a notice says voice enrollment was skipped.
 
-**Across a campaign:** naming someone in one session's wizard also renames them in the campaign's other sessions wherever their name was assigned automatically. Names you typed are never changed. The Campaign page's **Re-match speakers** button runs the full pass as a job: it re-matches every session against the roster (re-extracting voice data from the saved audio for sessions transcribed before this feature), and gives an unknown voice heard in two or more sessions one shared name, **Recurring Speaker N**. Name them once and the other sessions follow.
+**Across a campaign:** naming someone in one session's wizard also renames them in the campaign's other sessions wherever their name was assigned automatically. Names you typed are never changed. The Campaign page's **Re-match speakers** button runs the full pass as a job: it re-matches every session against the roster (re-extracting voice data from the saved audio for sessions that have none stored), and gives an unknown voice heard in two or more sessions one shared name, **Recurring Speaker N**. Name them once and the other sessions follow.
 
 **Standalone enrollment** (`/speakers` → Enroll) takes a clean reference clip for one speaker and runs as a background job.
 
@@ -116,6 +132,9 @@ If another job is already running when you start, the Record page warns that the
 ### After recording
 
 - Stopping never starts transcription automatically. Click **Transcribe** on the recording (or from **Transcripts → Awaiting transcription**) to run the full diarized pass. The live draft stays on the recording's detail page until then.
+- **Re-transcribe** asks first, then replaces the recording's transcript (same name, same campaign place). If a transcription fails or you stop it, the recording is simply transcribable again.
+- **Recover recording:** if wisper stopped unexpectedly mid-session (crash, power loss, killed process), the recording shows **FAILED** but its audio is still on disk. Its page offers **Recover recording**, which stitches the saved one-minute pieces back together; the recording then shows **COMPLETED** and can be transcribed. The last partial minute may be missing.
+- Deleting a recording's transcript from `/transcripts` puts the recording back under **Awaiting transcription**.
 - **Deleting a recording is permanent.** Single delete and **Delete selected** both remove the audio and, if it was transcribed, the transcript and its sidecars. Active sessions can't be deleted.
 
 ---
@@ -137,11 +156,15 @@ The Campaign page's **Rolling journal** panel combines session summaries into on
 - A session is ready to fold in once it has a `.summary.md`.
 - **Update journal** folds the next session; **Fold all** folds every pending one. Each fold is a job.
 - **View journal** shows the rendered result.
-- **Rebuild journal** re-summarizes every session and rebuilds the journal from scratch — two LLM calls per session, so it asks for confirmation. Use it after changing model or provider.
+- **View journal** also has **Download**, which saves `journal.md` with the list of folded sessions added to its frontmatter.
+- **Rebuild journal** starts the journal over from each session's existing summary — one LLM call per session (plus one for any session not yet summarized). Your edits to summaries are kept. It asks for confirmation, showing the call count.
+- **Rebuild from transcripts** re-summarizes every session first, overwriting the summaries, then rebuilds — two LLM calls per session. Use it after changing model or provider, or when the summaries themselves are bad.
+- **Stale journal:** moving a folded session to another campaign, removing it, deleting it, or re-transcribing it leaves the journal text alone and shows an amber notice ("This journal mentions sessions that were moved, removed, or re-transcribed…") on the Campaign and Journal pages. **Rebuild journal** is highlighted until you rebuild. Nothing is regenerated automatically.
+- Editing `journal.md` yourself (e.g. in Obsidian) is fine; later folds build on your edits. Deleting it starts a fresh journal.
 
 **Episode order:** the ▲/▼ arrows on the Episodes list set the order sessions are folded in. Order is when a transcript was added to the campaign, not its date, so check it before rebuilding.
 
-**Deleted transcripts:** deleting a transcript (or a recording with its files) also removes it from its campaign. Entries left behind by older versions show as **MISSING** on the Campaign page; remove them with ✕.
+**Deleted transcripts:** deleting a transcript in wisper (single, **Delete selected**, or a recording with its files) removes it from its campaign and its companion files (summary, speaker clips, audio copy). A transcript file that disappears some other way — deleted in Finder, renamed in Obsidian, a sync still in progress, an unplugged drive — keeps its place and shows as **MISSING** on the Campaign page. If the file comes back, the flag clears on its own. If it was renamed, pick the new file in the **Relink** dropdown next to it: the session keeps its place, journal entry, and speaker names. Otherwise remove it with ✕.
 
 ---
 

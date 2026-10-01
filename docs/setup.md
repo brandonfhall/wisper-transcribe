@@ -16,7 +16,7 @@ Pick the path that fits you. All three end up at the same web UI on `http://loca
 
 The first run takes 5–10 minutes (creates a virtualenv and installs ~2 GB of ML models). Subsequent launches are instant.
 
-**Updating:** after `git pull` (or unpacking a new release over the old folder), just launch as usual. When `pyproject.toml` has changed since the last launch, the launcher reinstalls dependencies once before starting. If that fails (e.g. offline), it starts anyway and retries next launch; running `setup.sh` / `setup.ps1` also works. CLI-only installs: `pip install -e .` after pulling.
+**Updating:** after `git pull` (or unpacking a new release over the old folder), just launch as usual. When `pyproject.toml` has changed since the last launch, the launcher reinstalls dependencies once before starting. If that fails (e.g. offline), it starts anyway and retries next launch; running `setup.sh` / `setup.ps1` also works. CLI-only installs: `pip install -e .` after pulling. The first start after upgrading from a version without `wisper.db` moves your profiles, campaigns, and recordings into the database, keeping copies in `backups/` (see [Database and backups](configuration.md#database-and-backups)).
 
 After the server starts, your browser opens automatically to `http://localhost:8080`. Press `Ctrl+C` in the terminal to stop.
 
@@ -85,7 +85,7 @@ $env:HF_TOKEN="hf_abc123..."          # Windows PowerShell
 wisper config set hf_token hf_abc123...
 ```
 
-> **Upgrading from an older version?** Diarization and voice profiles now use `pyannote/speaker-diarization-community-1` (previously `speaker-diarization-3.1` + `pyannote/embedding`). Accept its terms at the link above once, or diarization fails with a message pointing there. Existing voice profiles must be re-enrolled — see [Re-enrolling after the speaker-model upgrade](scenarios.md#re-enrolling-after-the-speaker-model-upgrade).
+> **Profiles from `pyannote/embedding`:** diarization and voice profiles use `pyannote/speaker-diarization-community-1`, whose terms are accepted separately (diarization fails with a message pointing to the link above until you do). Profiles enrolled with the earlier `pyannote/embedding` model can't be matched and must be re-enrolled — see [Re-enrolling after the speaker-model upgrade](scenarios.md#re-enrolling-after-the-speaker-model-upgrade).
 
 **Optional — configure an LLM for `refine` / `summarize`:**
 
@@ -101,7 +101,7 @@ Walks you through provider (Ollama / Ollama Cloud / LM Studio / Anthropic / Open
 
 ## Requirements
 
-- Python 3.13+ (for Option A/C)
+- Python 3.13+ (for Option A/C), whose bundled SQLite is 3.43 or newer with FTS5 full-text search. The python.org installers for macOS and Windows, Homebrew, and the Docker image all qualify. An older Linux system Python (for example Ubuntu 22.04's SQLite 3.37) doesn't: wisper stops at startup and says what's missing. Use Docker, or a newer Python.
 - [ffmpeg](https://ffmpeg.org/download.html) on your PATH
 - A free [HuggingFace token](https://huggingface.co/settings/tokens)
 - GPU recommended but not required (CPU works, just slower). On a GPU (CUDA or Apple Silicon), forced word alignment is on by default and downloads a ~1.7 GB model on first use.

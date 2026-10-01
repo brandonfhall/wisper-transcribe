@@ -31,3 +31,12 @@ class TestFormatDuration:
 
     def test_complex_duration(self):
         assert format_duration(3725) == "1:02:05"
+
+
+def test_parse_timestamp():
+    from wisper_transcribe.time_utils import parse_timestamp
+    assert parse_timestamp("00:05") == 5.0
+    assert parse_timestamp("01:02:03") == 3723.0
+    assert parse_timestamp(format_timestamp(4000)) == 4000.0
+    for bad in ("", "5", "a:b", "1:2:3:4", "-1:00", "01: 02"):
+        assert parse_timestamp(bad) is None

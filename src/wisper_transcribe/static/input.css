@@ -438,6 +438,20 @@
     margin-top: 6px;
   }
 
+  /* ── Search: matched terms, and the block a result links to ── */
+  .search-snippet mark, mark.search-mark {
+    background: #e4b57233;
+    color: var(--color-paper);
+    border-radius: 2px;
+    padding: 0 1px;
+  }
+  .block-anchor { scroll-margin-top: 96px; }
+  .search-target {
+    background: #5fd4e710;
+    box-shadow: 0 0 0 6px #5fd4e710;
+    border-radius: 2px;
+  }
+
   /* ── Preserved legacy classes (used by htmx partials) ── */
   .badge-pending   { @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium; background: var(--color-ink-700); color: var(--color-paper-dim); border: 1px solid var(--color-rule); }
   .badge-running   { @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium; background: #5fd4e712; color: var(--color-accent); border: 1px solid #5fd4e740; }

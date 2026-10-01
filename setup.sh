@@ -64,6 +64,24 @@ else
     fail "Python 3 not found. Install from https://python.org or: brew install python"
 fi
 
+# wisper.db needs SQLite >= 3.43 with FTS5 (full-text search); an old system
+# Python (e.g. Ubuntu 22.04's SQLite 3.37) would install fine, then refuse to start.
+step "Checking SQLite..."
+read -r SQLITE_VER SQLITE_OK < <(python3 - <<'PY'
+import sqlite3
+ok = sqlite3.sqlite_version_info >= (3, 43, 0)
+try:
+    sqlite3.connect(":memory:").execute("CREATE VIRTUAL TABLE t USING fts5(x, content='', contentless_delete=1)")
+except sqlite3.Error:
+    ok = False
+print(sqlite3.sqlite_version, "ok" if ok else "bad")
+PY
+)
+if [ "$SQLITE_OK" != "ok" ]; then
+    fail "This Python's SQLite ($SQLITE_VER) is older than 3.43 or lacks FTS5. Install Python 3.13+ from https://python.org (or Homebrew), or use Docker (docs/setup.md)"
+fi
+ok "SQLite $SQLITE_VER (FTS5)"
+
 # ── Virtual environment ───────────────────────────────────────────────────────
 step "Setting up virtual environment..."
 if [ ! -d ".venv" ]; then

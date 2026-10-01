@@ -1,5 +1,6 @@
-"""Tests for campaign_manager — pure disk I/O, no ML mocking required."""
-import json
+"""Tests for campaign_manager — wisper.db only, no ML mocking required."""
+import sqlite3
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -13,7 +14,6 @@ from wisper_transcribe.campaign_manager import (
     delete_campaign,
     get_campaign_for_transcript,
     get_campaign_profile_keys,
-    get_campaigns_path,
     get_transcripts_for_campaign,
     load_campaigns,
     lookup_profile_by_discord_id,
@@ -21,10 +21,18 @@ from wisper_transcribe.campaign_manager import (
     remove_member,
     remove_transcript_from_campaign,
     reorder_campaign_transcript,
-    save_campaigns,
     set_campaign_transcript_order,
 )
+from wisper_transcribe import db
 from wisper_transcribe.models import Campaign, CampaignMember
+
+from ._seed import save_campaigns, seed_profiles
+
+
+@pytest.fixture(autouse=True)
+def _profiles(tmp_path):
+    """Members must be real profiles now (campaign_members has a foreign key)."""
+    seed_profiles("alice", "bob", data_dir=tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -105,18 +113,17 @@ def test_create_campaign_persists_created_date(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_delete_campaign_removes_entry_only(tmp_path):
-    # Create a fake .npy to confirm it is never touched
-    profiles_dir = tmp_path / "profiles" / "embeddings"
-    profiles_dir.mkdir(parents=True)
-    fake_npy = profiles_dir / "alice.npy"
-    fake_npy.write_bytes(b"fake")
-
     create_campaign("Test Campaign", data_dir=tmp_path)
+    add_member("test-campaign", "alice", data_dir=tmp_path)
+    move_transcript_to_campaign("s01", "test-campaign", data_dir=tmp_path)
     delete_campaign("test-campaign", data_dir=tmp_path)
 
-    loaded = load_campaigns(tmp_path)
-    assert "test-campaign" not in loaded
-    assert fake_npy.exists(), "delete_campaign must not touch embeddings"
+    assert "test-campaign" not in load_campaigns(tmp_path)
+    from wisper_transcribe.speaker_manager import load_profiles
+    assert "alice" in load_profiles(tmp_path), "delete_campaign must not touch profiles"
+    with db.connection(tmp_path) as conn:
+        assert conn.execute("SELECT count(*) FROM campaign_members").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM transcripts WHERE stem = 's01'").fetchone()[0] == 1
 
 
 def test_delete_campaign_raises_keyerror_if_missing(tmp_path):
@@ -407,13 +414,11 @@ def test_bind_discord_id_overwrites_previous_binding(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# rekey_member — campaign membership follows a profile rename
+# Profile rename / removal — memberships reference the profile's id
 # ---------------------------------------------------------------------------
 
-def test_rekey_member_updates_all_campaigns(tmp_path):
-    from wisper_transcribe.campaign_manager import (
-        add_member, bind_discord_id, create_campaign, load_campaigns, rekey_member,
-    )
+def test_profile_rename_keeps_memberships_in_every_campaign(tmp_path):
+    from wisper_transcribe.speaker_manager import rename_profile
 
     c1 = create_campaign("Campaign One", data_dir=tmp_path)
     c2 = create_campaign("Campaign Two", data_dir=tmp_path)
@@ -421,9 +426,8 @@ def test_rekey_member_updates_all_campaigns(tmp_path):
     add_member(c2.slug, "alice", role="player", data_dir=tmp_path)
     bind_discord_id(c1.slug, "alice", "123456789012345678", data_dir=tmp_path)
 
-    changed = rekey_member("alice", "alicia", data_dir=tmp_path)
+    rename_profile("alice", "Alicia", data_dir=tmp_path)
 
-    assert changed == 2
     campaigns = load_campaigns(data_dir=tmp_path)
     m1 = campaigns[c1.slug].members
     m2 = campaigns[c2.slug].members
@@ -435,11 +439,119 @@ def test_rekey_member_updates_all_campaigns(tmp_path):
     assert m2["alicia"].role == "player"
 
 
-def test_rekey_member_noop_when_absent(tmp_path):
-    from wisper_transcribe.campaign_manager import create_campaign, rekey_member
+def test_profile_removal_drops_its_memberships(tmp_path):
+    from wisper_transcribe.speaker_manager import remove_profile
 
-    create_campaign("Campaign One", data_dir=tmp_path)
-    assert rekey_member("ghost", "spectre", data_dir=tmp_path) == 0
+    create_campaign("Test", data_dir=tmp_path)
+    add_member("test", "alice", data_dir=tmp_path)
+    add_member("test", "bob", data_dir=tmp_path)
+    remove_profile("alice", data_dir=tmp_path)
+    assert set(load_campaigns(tmp_path)["test"].members) == {"bob"}
+
+
+# ---------------------------------------------------------------------------
+# Constraints the schema now enforces
+# ---------------------------------------------------------------------------
+
+def test_add_member_requires_existing_profile(tmp_path):
+    create_campaign("Test", data_dir=tmp_path)
+    with pytest.raises(KeyError, match="ghost"):
+        add_member("test", "ghost", data_dir=tmp_path)
+
+
+def test_add_member_again_resets_discord_binding(tmp_path):
+    create_campaign("Test", data_dir=tmp_path)
+    add_member("test", "alice", data_dir=tmp_path)
+    bind_discord_id("test", "alice", "42", data_dir=tmp_path)
+    add_member("test", "alice", role="DM", data_dir=tmp_path)
+    member = load_campaigns(tmp_path)["test"].members["alice"]
+    assert member.role == "DM" and member.discord_user_id is None
+
+
+def test_bind_discord_id_rejects_non_numeric(tmp_path):
+    create_campaign("Test", data_dir=tmp_path)
+    add_member("test", "alice", data_dir=tmp_path)
+    with pytest.raises(ValueError):
+        bind_discord_id("test", "alice", "12ab", data_dir=tmp_path)
+
+
+def test_schema_rejects_duplicate_discord_id_in_campaign(tmp_path):
+    create_campaign("Test", data_dir=tmp_path)
+    add_member("test", "alice", data_dir=tmp_path)
+    add_member("test", "bob", data_dir=tmp_path)
+    bind_discord_id("test", "alice", "42", data_dir=tmp_path)
+    with pytest.raises(sqlite3.IntegrityError):
+        with db.transaction(tmp_path) as conn:
+            conn.execute("UPDATE campaign_members SET discord_user_id = '42' "
+                         "WHERE profile_id = (SELECT id FROM profiles WHERE key = 'bob')")
+
+
+def test_schema_rejects_discord_id_with_non_digits(tmp_path):
+    create_campaign("Test", data_dir=tmp_path)
+    add_member("test", "alice", data_dir=tmp_path)
+    for bad in ("", "1a", "a1", " 1"):
+        with pytest.raises(sqlite3.IntegrityError):
+            with db.transaction(tmp_path) as conn:
+                conn.execute("UPDATE campaign_members SET discord_user_id = ?", (bad,))
+
+
+def test_transcript_belongs_to_one_campaign_in_schema(tmp_path):
+    create_campaign("Alpha", data_dir=tmp_path)
+    create_campaign("Beta", data_dir=tmp_path)
+    move_transcript_to_campaign("s01", "alpha", data_dir=tmp_path)
+    with pytest.raises(sqlite3.IntegrityError):
+        with db.transaction(tmp_path) as conn:
+            conn.execute(
+                "INSERT INTO campaign_transcripts (transcript_id, campaign_id, position) "
+                "SELECT t.id, c.id, 5 FROM transcripts t, campaigns c "
+                "WHERE t.stem = 's01' AND c.slug = 'beta'")
+
+
+def test_reorder_rewrites_positions_under_unique_constraint(tmp_path):
+    create_campaign("Alpha", data_dir=tmp_path)
+    stems = [f"s{i:02d}" for i in range(6)]
+    for st in stems:
+        move_transcript_to_campaign(st, "alpha", data_dir=tmp_path)
+    set_campaign_transcript_order("alpha", list(reversed(stems)), data_dir=tmp_path)
+    assert get_transcripts_for_campaign("alpha", data_dir=tmp_path) == list(reversed(stems))
+    reorder_campaign_transcript("alpha", "s00", "up", data_dir=tmp_path)
+    assert get_transcripts_for_campaign("alpha", data_dir=tmp_path)[-2:] == ["s00", "s01"]
+    with db.connection(tmp_path) as conn:
+        positions = [r[0] for r in conn.execute(
+            "SELECT position FROM campaign_transcripts ORDER BY position")]
+    assert positions == list(range(6))
+
+
+def test_move_appends_to_end_of_target(tmp_path):
+    create_campaign("Alpha", data_dir=tmp_path)
+    create_campaign("Beta", data_dir=tmp_path)
+    move_transcript_to_campaign("b1", "beta", data_dir=tmp_path)
+    move_transcript_to_campaign("a1", "alpha", data_dir=tmp_path)
+    move_transcript_to_campaign("a2", "alpha", data_dir=tmp_path)
+    move_transcript_to_campaign("a1", "beta", data_dir=tmp_path)
+    assert get_transcripts_for_campaign("beta", data_dir=tmp_path) == ["b1", "a1"]
+    assert get_transcripts_for_campaign("alpha", data_dir=tmp_path) == ["a2"]
+
+
+def test_stems_are_nfc_normalized(tmp_path):
+    create_campaign("Alpha", data_dir=tmp_path)
+    nfd = unicodedata.normalize("NFD", "Café Session")
+    move_transcript_to_campaign(nfd, "alpha", data_dir=tmp_path)
+    nfc = unicodedata.normalize("NFC", "Café Session")
+    assert get_campaign_for_transcript(nfc, data_dir=tmp_path) == "alpha"
+    assert get_transcripts_for_campaign("alpha", data_dir=tmp_path) == [nfc]
+
+
+def test_transcript_without_md_is_registered_missing(tmp_path):
+    from wisper_transcribe.path_utils import get_output_dir
+
+    (get_output_dir() / "present.md").write_text("x", encoding="utf-8")
+    create_campaign("Alpha", data_dir=tmp_path)
+    move_transcript_to_campaign("present", "alpha", data_dir=tmp_path)
+    move_transcript_to_campaign("absent", "alpha", data_dir=tmp_path)
+    with db.connection(tmp_path) as conn:
+        flags = dict(conn.execute("SELECT stem, missing_since IS NOT NULL FROM transcripts"))
+    assert flags == {"present": 0, "absent": 1}
 
 
 # ---------------------------------------------------------------------------
@@ -447,12 +559,13 @@ def test_rekey_member_noop_when_absent(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_add_member_atomic_under_concurrent_calls(tmp_path):
-    """Concurrent add_member() calls against the shared campaigns.json must
+    """Concurrent add_member() calls (each its own BEGIN IMMEDIATE) must
     not lose writes."""
     import threading
 
     campaign = create_campaign("Concurrency Test", data_dir=tmp_path)
     n = 20
+    seed_profiles(*(f"member_{i:02d}" for i in range(n)), data_dir=tmp_path)
 
     def _add(i):
         add_member(campaign.slug, f"member_{i:02d}", data_dir=tmp_path)
@@ -461,7 +574,8 @@ def test_add_member_atomic_under_concurrent_calls(tmp_path):
     for t in threads:
         t.start()
     for t in threads:
-        t.join()
+        t.join(timeout=30)
+        assert not t.is_alive()
 
     loaded = load_campaigns(tmp_path)
     assert len(loaded[campaign.slug].members) == n

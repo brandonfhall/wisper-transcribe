@@ -330,6 +330,20 @@ def test_capture_thread_failure_marks_recording_degraded(tmp_path):
     mgr.stop_session()  # cleanup
 
 
+def test_device_failing_before_start_session_returns_still_marks_degraded(tmp_path, monkeypatch):
+    """Worst case of the race above: each thread runs to completion inside
+    Thread.start(), so the device fails before start_session() returns."""
+    import threading
+
+    monkeypatch.setattr(threading.Thread, "start", lambda self: self.run())
+    monkeypatch.setattr(threading.Thread, "join", lambda self, timeout=None: None)
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path, capture_factory=_raising_capture_factory, ticker=instant_ticker(0),
+    )
+    rec = mgr.start_session(None, "mic-dev", "sys-dev")
+    assert rec.status == "degraded"
+
+
 def test_mark_degraded_noop_when_no_active_recording(tmp_path):
     mgr = LocalCaptureManager(
         data_dir=tmp_path, capture_factory=scripted_capture_factory({}), ticker=instant_ticker(0),

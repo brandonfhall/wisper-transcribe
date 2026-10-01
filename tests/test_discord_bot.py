@@ -19,6 +19,8 @@ from tests._discord_fakes import (
     scripted_source,
 )
 
+from ._seed import seed_profiles
+
 pytestmark = pytest.mark.anyio
 
 
@@ -176,6 +178,7 @@ async def test_stop_session_sets_completed_status(tmp_path):
 async def test_known_discord_id_tagged_automatically_in_manifest(tmp_path):
     """When a speaker's Discord ID is bound in the campaign roster, their first
     audio frame tags recording.discord_speakers with their profile key."""
+    seed_profiles("alice", "bob", data_dir=tmp_path)
     create_campaign("dnd-mondays", data_dir=tmp_path)
     add_member("dnd-mondays", "alice", data_dir=tmp_path)
     bind_discord_id("dnd-mondays", "alice", "123456789012345678", data_dir=tmp_path)
@@ -194,6 +197,7 @@ async def test_known_discord_id_tagged_automatically_in_manifest(tmp_path):
 
 async def test_unknown_discord_id_not_tagged(tmp_path):
     """A Discord ID with no roster binding gets an empty string in discord_speakers."""
+    seed_profiles("alice", "bob", data_dir=tmp_path)
     create_campaign("dnd-mondays", data_dir=tmp_path)
     add_member("dnd-mondays", "alice", data_dir=tmp_path)
     # alice has no discord_user_id bound
@@ -212,6 +216,7 @@ async def test_unknown_discord_id_not_tagged(tmp_path):
 
 async def test_unknown_speaker_added_to_unbound_list(tmp_path):
     """A Discord ID with no roster binding is appended to recording.unbound_speakers."""
+    seed_profiles("alice", "bob", data_dir=tmp_path)
     create_campaign("dnd-mondays", data_dir=tmp_path)
     add_member("dnd-mondays", "alice", data_dir=tmp_path)
     # alice has no discord_user_id bound
@@ -230,6 +235,7 @@ async def test_unknown_speaker_added_to_unbound_list(tmp_path):
 
 async def test_known_speaker_not_added_to_unbound_list(tmp_path):
     """A Discord ID bound in the campaign roster is NOT added to unbound_speakers."""
+    seed_profiles("alice", "bob", data_dir=tmp_path)
     create_campaign("dnd-mondays", data_dir=tmp_path)
     add_member("dnd-mondays", "alice", data_dir=tmp_path)
     bind_discord_id("dnd-mondays", "alice", "123456789012345678", data_dir=tmp_path)
@@ -297,6 +303,7 @@ async def test_multiple_unknown_speakers_all_in_unbound(tmp_path):
 
 async def test_simultaneous_known_and_unknown_speakers(tmp_path):
     """Known speakers tag immediately; unknown speakers land in unbound list."""
+    seed_profiles("alice", "bob", data_dir=tmp_path)
     create_campaign("dnd-mondays", data_dir=tmp_path)
     add_member("dnd-mondays", "alice", data_dir=tmp_path)
     add_member("dnd-mondays", "bob", data_dir=tmp_path)

@@ -1,6 +1,7 @@
 """In-process job queue for transcription, LLM, enrollment, journal, and live jobs.
 
-- Jobs live in memory (dict keyed by UUID); nothing persists across restarts.
+- Jobs live in memory (dict keyed by UUID) and never resume after a restart;
+  ``job_history`` records every state change in the ``jobs`` table.
 - One asyncio task drains a FIFO queue and runs each job in a thread via
   asyncio.to_thread(), so the event loop stays responsive.
 - Exactly one job runs at a time: the transcriber/diarizer/embedding model
@@ -25,6 +26,7 @@ from typing import Any, Callable, Optional
 import tqdm as _tqdm_module
 
 from wisper_transcribe.pipeline import process_file
+from wisper_transcribe.transcript_store import atomic_write_text, save_summary, save_transcript
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +63,16 @@ _GENERIC_JOB_ERRORS = {
 }
 
 
+def _record_history(job: "Job") -> None:
+    """Write the job's current state to the ``jobs`` table (never raises)."""
+    from wisper_transcribe import job_history
+    job_history.record(job)
+
+
+class TranscriptMissingError(RuntimeError):
+    """The pipeline reported a transcript path, but no file is there."""
+
+
 def _set_job_error(job: "Job", exc: BaseException) -> None:
     """Set a generic, path-free error on *job* and log the real exception.
 
@@ -70,6 +82,13 @@ def _set_job_error(job: "Job", exc: BaseException) -> None:
         job.error = "Cancelled"
         return
     log.error("Job %s (%s) failed", job.id, job.job_type, exc_info=exc)
+    from wisper_transcribe.transcript_store import TranscriptExistsError
+    if isinstance(exc, TranscriptExistsError):
+        job.error = "Transcript already exists"
+        return
+    if isinstance(exc, TranscriptMissingError):
+        job.error = "Transcript file missing after write"
+        return
     if isinstance(exc, FileNotFoundError):
         # Known input error — short, safe text with no path reflected.
         job.error = "Input file not found"
@@ -139,7 +158,8 @@ class _StderrCapture:
 
 
 def _write_enrollment_sidecar(job: "Job", output_path: "Path") -> None:  # type: ignore[name-defined]
-    """Write <stem>_diar.json next to the transcript.
+    """Store the job's diarization data with ``transcript_store.write_sidecar``:
+    speakers and the audio path in the database, segments in ``<stem>_diar.json``.
 
     Lets the enrollment wizard work after a restart. Failures are swallowed:
     the transcript is already written.
@@ -154,7 +174,6 @@ def _write_enrollment_sidecar(job: "Job", output_path: "Path") -> None:  # type:
         out = _Path(output_path)
         sidecar = {
             "input_path": str(_Path(job.input_path)),
-            "campaign": job.kwargs.get("campaign"),
             "diarization_segments": [
                 {"start": s.start, "end": s.end, "speaker": s.speaker}
                 for s in job.diarization_segments
@@ -168,10 +187,11 @@ def _write_enrollment_sidecar(job: "Job", output_path: "Path") -> None:  # type:
         if job.speaker_embeddings:
             from wisper_transcribe.speaker_registry import embeddings_to_sidecar
             sidecar.update(embeddings_to_sidecar(job.speaker_embeddings))
-        sidecar_path = out.with_name(out.stem + "_diar.json")
-        sidecar_path.write_text(_json.dumps(sidecar, indent=2), encoding="utf-8")
+        # Speakers + audio path to the DB, segments to <stem>_diar.json.
+        from wisper_transcribe.transcript_store import write_sidecar
+        write_sidecar(out, sidecar)
     except Exception:
-        pass
+        log.warning("Could not store speaker data for %s", _Path(output_path).name, exc_info=True)
 
 
 def _move_upload_to_output(input_path: str, output_path: "Path") -> str:  # type: ignore[name-defined]
@@ -342,7 +362,7 @@ def _extract_speaker_excerpts(job: "Job", output_path: "Path",  # type: ignore[n
         # Persist the transcript snippet to disk so it survives server restarts.
         text_path = out_dir / f"{stem}_excerpt_{safe_name}.txt"
         try:
-            text_path.write_text(text, encoding="utf-8")
+            atomic_write_text(text_path, text)
         except Exception:
             pass
 
@@ -356,7 +376,7 @@ class Job:
     kwargs: dict[str, Any]
     # Human-readable name shown in the UI (defaults to input filename stem)
     name: str = ""
-    # "transcription" | "refine" | "summarize"
+    # one of the JOB_* constants
     job_type: str = JOB_TRANSCRIPTION
     output_path: Optional[str] = None
     error: Optional[str] = None
@@ -367,6 +387,7 @@ class Job:
     progress: Optional[str] = None
     # Parallel mode: per-channel progress strings keyed by channel name
     progress_channels: dict[str, str] = field(default_factory=dict)
+    started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     # Set after transcription completes when enroll flow is needed
     diarization_labels: list[str] = field(default_factory=list)
@@ -393,6 +414,9 @@ class Job:
     # from the original basename at submit, before the friendly-name rename.
     # Only these files are ever moved or deleted by the job.
     is_web_upload: bool = False
+    # Transcription of a recording's combined track: which recording. The
+    # recording's "transcribing" status and job link are derived from this.
+    recording_id: Optional[str] = None
     # JOB_ENROLL: transcript path. The runner re-reads its _diar.json sidecar
     # rather than carrying segments on the job.
     enroll_md_path: Optional[str] = None
@@ -485,6 +509,12 @@ class JobQueue:
         self._on_complete_callbacks: dict[str, Callable[["Job"], None]] = {}
         self._on_error_callbacks: dict[str, Callable[["Job"], None]] = {}
 
+    def _enqueue(self, job: Job) -> None:
+        """Track a new job, record it in history, and queue it."""
+        self._jobs[job.id] = job
+        _record_history(job)
+        self._queue.put_nowait(job.id)
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -529,6 +559,7 @@ class JobQueue:
         import shutil
 
         original_stem: str = kwargs.pop("original_stem", "")
+        recording_id: Optional[str] = kwargs.pop("recording_id", None)
         post_refine: bool = bool(kwargs.pop("post_refine", False))
         post_summarize: bool = bool(kwargs.pop("post_summarize", False))
 
@@ -563,13 +594,13 @@ class JobQueue:
             post_refine=post_refine,
             post_summarize=post_summarize,
             is_web_upload=is_web_upload,
+            recording_id=recording_id,
         )
-        self._jobs[job.id] = job
         if on_complete is not None:
             self._on_complete_callbacks[job.id] = on_complete
         if on_error is not None:
             self._on_error_callbacks[job.id] = on_error
-        self._queue.put_nowait(job.id)
+        self._enqueue(job)
         return job
 
     def submit_llm(
@@ -593,8 +624,7 @@ class JobQueue:
             job_type=job_type,
             llm_transcript_path=transcript_path,
         )
-        self._jobs[job.id] = job
-        self._queue.put_nowait(job.id)
+        self._enqueue(job)
         return job
 
     def submit_enroll(
@@ -622,8 +652,7 @@ class JobQueue:
             enroll_groups=groups,
             enroll_device=device,
         )
-        self._jobs[job.id] = job
-        self._queue.put_nowait(job.id)
+        self._enqueue(job)
         return job
 
     def submit_standalone_enroll(
@@ -669,8 +698,7 @@ class JobQueue:
                 "update": bool(update),
             },
         )
-        self._jobs[job.id] = job
-        self._queue.put_nowait(job.id)
+        self._enqueue(job)
         return job
 
     def submit_recording_enroll(
@@ -704,8 +732,7 @@ class JobQueue:
                 "display_name": display_name,
             },
         )
-        self._jobs[job.id] = job
-        self._queue.put_nowait(job.id)
+        self._enqueue(job)
         return job
 
     def submit_live(
@@ -753,8 +780,7 @@ class JobQueue:
             live_ring_buffer=LiveRingBuffer(),
             live_output_path=output_path,
         )
-        self._jobs[job.id] = job
-        self._queue.put_nowait(job.id)
+        self._enqueue(job)
         return job
 
     def submit_journal(
@@ -764,11 +790,15 @@ class JobQueue:
         session_stem: Optional[str] = None,
         fold_all: bool = False,
         rebuild: bool = False,
+        resummarize: bool = False,
     ) -> Job:
         """Enqueue a rolling-journal job for a campaign.
 
-        ``rebuild=True`` re-summarizes every session and rebuilds the journal
-        from scratch. The route must get the user's confirmation first.
+        ``rebuild=True`` resets the journal and re-folds every session's
+        existing summary (one LLM call each; ``journal.refold_campaign``).
+        With ``resummarize=True`` too, every session is re-summarized first
+        (two calls each; ``journal.rebuild_campaign``). The route must get the
+        user's confirmation first.
         """
         job = Job(
             id=str(uuid.uuid4()),
@@ -776,12 +806,12 @@ class JobQueue:
             created_at=datetime.now(),
             input_path="",
             kwargs={"slug": slug, "session_stem": session_stem,
-                    "fold_all": fold_all, "rebuild": rebuild},
+                    "fold_all": fold_all, "rebuild": rebuild,
+                    "resummarize": resummarize},
             name=name or (f"Rebuild journal: {slug}" if rebuild else f"Journal: {slug}"),
             job_type=JOB_CAMPAIGN_JOURNAL,
         )
-        self._jobs[job.id] = job
-        self._queue.put_nowait(job.id)
+        self._enqueue(job)
         return job
 
     def submit_relabel(self, slug: str, name: str = "") -> Job:
@@ -795,8 +825,7 @@ class JobQueue:
             name=name or f"Re-match speakers: {slug}",
             job_type=JOB_SPEAKER_RELABEL,
         )
-        self._jobs[job.id] = job
-        self._queue.put_nowait(job.id)
+        self._enqueue(job)
         return job
 
     def set_live_noise_floor(self, job_id: str, noise_floor: float) -> bool:
@@ -863,6 +892,7 @@ class JobQueue:
             job.status = FAILED
             job.error = "Cancelled"
             job.finished_at = datetime.now()
+            _record_history(job)
             self._prune_finished_jobs()
             return True
         if job.status == RUNNING:
@@ -921,12 +951,24 @@ class JobQueue:
                 job.status = FAILED
                 job.error = "Live transcript never started -- the job queue was busy for the whole session"
                 job.finished_at = datetime.now()
+                _record_history(job)
                 self._prune_finished_jobs()
                 self._queue.task_done()
                 continue
             job.status = RUNNING
+            job.started_at = datetime.now()
+            await asyncio.to_thread(_record_history, job)
             try:
                 await asyncio.to_thread(self._run_job, job)
+            except asyncio.CancelledError:
+                # Server shutdown (stop()). The job thread can't be stopped and
+                # dies with the process, so the job is interrupted, not done.
+                from wisper_transcribe.job_history import INTERRUPTED
+                job.status = FAILED
+                job.error = INTERRUPTED
+                job.finished_at = datetime.now()
+                _delete_temp_upload(job)
+                raise
             except Exception as exc:
                 job.status = FAILED
                 # Keep the runner's generic message; never use exception text.
@@ -935,6 +977,11 @@ class JobQueue:
                 job.finished_at = datetime.now()
             finally:
                 # Runs exactly once per processed job, however it ended.
+                if job.status in (PENDING, RUNNING):   # a runner that forgot its terminal state
+                    job.status = COMPLETED if not job.error else FAILED
+                if job.finished_at is None:
+                    job.finished_at = datetime.now()
+                await asyncio.to_thread(_record_history, job)
                 self._prune_finished_jobs()
                 self._queue.task_done()
 
@@ -978,7 +1025,9 @@ class JobQueue:
         refine/summarize LLM jobs — safe because the queue is single-worker).
         """
         from wisper_transcribe.config import load_config
-        from wisper_transcribe.journal import rebuild_campaign, unjournalled_sessions, update_journal
+        from wisper_transcribe.journal import (
+            rebuild_campaign, refold_campaign, unjournalled_sessions, update_journal,
+        )
         from wisper_transcribe.llm import get_client
         from wisper_transcribe.speaker_manager import load_profiles
 
@@ -986,6 +1035,7 @@ class JobQueue:
         session_stem = job.kwargs.get("session_stem")
         fold_all = bool(job.kwargs.get("fold_all", False))
         rebuild = bool(job.kwargs.get("rebuild", False))
+        resummarize = bool(job.kwargs.get("resummarize", False))
 
         old_stderr = _sys.stderr
         _sys.stderr = _StderrCapture(job)
@@ -996,9 +1046,9 @@ class JobQueue:
             profiles = load_profiles()
 
             if rebuild:
-                result = rebuild_campaign(slug, client, profiles,
-                                          on_progress=job.append_log)
-                job.append_log(f"Re-summarized: {len(result.resummarized)}")
+                rebuild_fn = rebuild_campaign if resummarize else refold_campaign
+                result = rebuild_fn(slug, client, profiles, on_progress=job.append_log)
+                job.append_log(f"Summarized: {len(result.resummarized)}")
                 if result.skipped:
                     job.append_log(f"Skipped: {len(result.skipped)}")
                     for stem, reason in result.skipped:
@@ -1093,7 +1143,12 @@ class JobQueue:
         _tqdm_module.tqdm.__init__ = capturing_init  # type: ignore[method-assign]
         try:
             _result_store: dict = {}
-            output_path = process_file(Path(job.input_path), _result_store=_result_store, job_id=job.id, **job.kwargs)
+            output_path = process_file(Path(job.input_path), _result_store=_result_store,
+                                       job_id=job.id, skip_existing=False, **job.kwargs)
+            if not Path(output_path).is_file():
+                from wisper_transcribe.path_utils import get_output_dir
+                job.append_log(f"Transcripts folder: {get_output_dir()}")
+                raise TranscriptMissingError(Path(output_path).name)
             job.diarization_segments = _result_store.get("diarization_segments", [])
             job.speaker_map = _result_store.get("speaker_map", {})
             job.speaker_embeddings = _result_store.get("speaker_embeddings", {})
@@ -1149,7 +1204,7 @@ class JobQueue:
         """Chain refine and/or summarize after a completed transcription job.
 
         Called from within _run_transcription_job, still in the job thread.
-        sys.stderr is redirected to capture Ollama status messages.
+        sys.stderr is redirected to capture the LLM client's status messages.
         """
         from pathlib import Path
 
@@ -1318,16 +1373,11 @@ class JobQueue:
                 bind_discord_id,
                 load_campaigns,
             )
-            from wisper_transcribe.recording_manager import load_recordings, save_recording
+            from wisper_transcribe.recording_manager import bind_recording_speaker, load_recording
 
-            recordings = load_recordings(data_dir)
-            rec = recordings.get(p["recording_id"])
+            rec = load_recording(p["recording_id"], data_dir)
             if rec is not None:
-                rec.unbound_speakers = [
-                    uid for uid in rec.unbound_speakers if uid != p["discord_uid"]
-                ]
-                rec.discord_speakers[p["discord_uid"]] = p["profile_key"]
-                save_recording(rec, data_dir)
+                bind_recording_speaker(rec.id, p["discord_uid"], p["profile_key"], data_dir)
 
                 if rec.campaign_slug:
                     campaigns = load_campaigns(data_dir)
@@ -1365,8 +1415,8 @@ class JobQueue:
             job.finished_at = datetime.now()
             return
 
-        input_path = Path(diar.get("input_path", ""))
-        if not input_path.exists():
+        input_path = Path(diar.get("input_path") or "")
+        if not diar.get("input_path") or not input_path.is_file():
             job.status = FAILED
             job.error = "Source audio not available"
             job.finished_at = datetime.now()
@@ -1378,7 +1428,9 @@ class JobQueue:
             DiarizationSegment(start=s["start"], end=s["end"], speaker=s["speaker"])
             for s in diar.get("diarization_segments", [])
         ]
-        campaign_slug = diar.get("campaign")
+        # The transcript's current campaign, not the one it was transcribed for.
+        from wisper_transcribe.campaign_manager import get_campaign_for_transcript
+        campaign_slug = get_campaign_for_transcript(md_path.stem)
 
         def _progress(msg: str) -> None:
             job.append_log(msg)
@@ -1513,8 +1565,8 @@ class JobQueue:
                 refined_md, edits = md, []
             if edits and refined_md != md:
                 backup = transcript_path.with_suffix(transcript_path.suffix + ".bak")
-                backup.write_text(md, encoding="utf-8")
-                transcript_path.write_text(refined_md, encoding="utf-8")
+                atomic_write_text(backup, md)
+                save_transcript(transcript_path, refined_md)
                 job.append_log(
                     f"Applied {len(edits)} edit(s). Backup: {backup.name}"
                 )
@@ -1541,7 +1593,7 @@ class JobQueue:
                 )
                 out_path = default_summary_path(transcript_path)
                 body = render_markdown(note, profiles=profiles)
-                out_path.write_text(body, encoding="utf-8")
+                save_summary(out_path, body)
                 job.append_log(f"Summary written: {out_path.name}")
                 job.summary_path = str(out_path)
             except (LLMUnavailableError, LLMResponseError) as exc:

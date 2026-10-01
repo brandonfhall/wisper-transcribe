@@ -341,10 +341,9 @@ def _interactive_enroll(
             # Refresh in-memory dicts so subsequent speakers in this file see
             # the new enrollment in the ranked candidates list.
             existing_profiles[new_profile.name] = new_profile
-            try:
-                enrolled_embeddings[new_profile.name] = np.load(str(new_profile.embedding_path))
-            except Exception:
-                pass
+            emb = load_profile_embedding(new_profile)
+            if emb is not None:
+                enrolled_embeddings[new_profile.name] = emb
 
         speaker_map[label] = name
         speaker_metadata.append({"name": name, "role": role})
@@ -402,6 +401,7 @@ def process_file(
     job_id: Optional[str] = None,
     title: Optional[str] = None,
     forced_alignment: Optional[str] = None,
+    skip_existing: bool = True,
     _result_store: Optional[dict] = None,
 ) -> Path:
     """Run the full pipeline on one audio file and return the output .md path.
@@ -426,6 +426,12 @@ def process_file(
     ``forced_alignment`` is ``"auto"``/``"true"``/``"false"`` (``None`` = config).
     It only applies when diarization runs, since word timing only matters for
     speaker attribution.
+
+    An existing output is never replaced without ``overwrite``. With
+    ``skip_existing`` (the CLI) it is skipped up front and its path returned;
+    without it (web jobs) ``TranscriptExistsError`` is raised instead, so a
+    job can't report success on a transcript it didn't write. The check runs
+    again just before writing, since a long job can race another writer.
     """
     from .config import resolve_compute_type
 
@@ -471,7 +477,11 @@ def process_file(
     out_path = out_dir / (path.stem + ".md")
 
     if out_path.exists() and not overwrite:
-        tqdm.write(f"  Skipping {path.name} — already processed (use --overwrite to re-run)")
+        from .transcript_store import TranscriptExistsError
+        if not skip_existing:
+            raise TranscriptExistsError(out_path.stem)
+        tqdm.write(f"  Skipping {path.name} — already processed{_campaign_note(out_path)} "
+                   "(use --overwrite to re-run)")
         return out_path
 
     resolved_ct = resolve_compute_type(compute_type, device)
@@ -655,21 +665,53 @@ def process_file(
             include_timestamps=include_timestamps,
         )
 
-        out_path.write_text(content, encoding="utf-8")
+        from .transcript_store import TranscriptExistsError, atomic_write_text, register
+        if out_path.exists() and not overwrite:
+            raise TranscriptExistsError(out_path.stem)  # appeared while we worked
+        atomic_write_text(out_path, content)
         tqdm.write(f"  Wrote {out_path.name}")
 
-        # Associate transcript with campaign so the list view can group it.
-        if campaign:
-            try:
-                from .campaign_manager import move_transcript_to_campaign
-                move_transcript_to_campaign(out_path.stem, campaign)
-            except Exception:
-                pass  # Non-fatal — transcript is still written
+        # Register it (the .md first, then the row) and associate its
+        # campaign — only under the output root, the web UI's scope.
+        if _under_output_root(out_path):
+            register(out_path.stem, origin="job")
+            if campaign:
+                try:
+                    from .campaign_manager import move_transcript_to_campaign
+                    move_transcript_to_campaign(out_path.stem, campaign)
+                except Exception:
+                    tqdm.write(f"  Warning: could not add it to campaign {campaign!r}")
+        elif campaign:
+            tqdm.write(
+                f"  Note: not added to campaign {campaign!r} — {out_path.parent} is outside "
+                "the transcripts folder, so the web UI won't see it "
+                "(see `wisper config set output_dir`)."
+            )
 
         return out_path
     finally:
         if wav_path != path:
             wav_path.unlink(missing_ok=True)
+
+
+def _campaign_note(out_path: Path) -> str:
+    """`` (in campaign <slug>)`` for an existing transcript that belongs to one."""
+    if not _under_output_root(out_path):
+        return ""
+    try:
+        from .campaign_manager import get_campaign_for_transcript
+        slug = get_campaign_for_transcript(out_path.stem)
+    except Exception:
+        return ""
+    return f" (in campaign {slug!r})" if slug else ""
+
+
+def _under_output_root(out_path: Path) -> bool:
+    """True when ``out_path`` is directly in the transcript output root."""
+    import os
+
+    from .path_utils import get_output_dir
+    return os.path.realpath(out_path.parent) == os.path.realpath(get_output_dir())
 
 
 def _folder_output_path(input_path: Path, output_dir: Optional[Path], folder: Path) -> Path:

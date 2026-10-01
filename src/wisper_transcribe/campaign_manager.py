@@ -1,29 +1,26 @@
-"""Campaign manager — CRUD for per-campaign speaker rosters.
+"""Campaign manager — campaigns, rosters, and transcript order.
 
-Campaigns are an optional layer over the global speaker profile store.
-Voice embeddings remain global (one .npy per person); campaigns hold
-roster references with per-campaign role/character overrides.
+Campaigns are an optional layer over the global speaker profiles: a roster of
+profiles with per-campaign role/character overrides and Discord bindings, plus
+the ordered list of the campaign's transcripts.
 
-Data lives at:
-    $DATA_DIR/campaigns/campaigns.json
+Data lives in ``wisper.db`` (tables ``campaigns``, ``campaign_members``,
+``campaign_transcripts``); each campaign's journal stays a file under
+``$DATA_DIR/campaigns/<slug>/``. Every change is one ``db.transaction()``, so
+concurrent requests and processes can't lose each other's updates.
 """
 from __future__ import annotations
 
-import json
 import re
-import threading
-from datetime import date
+import sqlite3
+import unicodedata
 from pathlib import Path
 from typing import Optional
 
+from . import db
 from .config import get_data_dir
 from .models import Campaign, CampaignMember
 from .path_utils import validate_path_component
-
-# Guards every load-modify-save of campaigns.json against lost updates from
-# concurrent requests. Readers and save_campaigns() itself don't take it:
-# callers already hold it and would deadlock.
-_campaigns_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -31,12 +28,9 @@ _campaigns_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 
 def get_campaigns_dir(data_dir: Optional[Path] = None) -> Path:
+    """Parent of the per-campaign ``<slug>/`` folders (journals)."""
     base = Path(data_dir) if data_dir else get_data_dir()
     return base / "campaigns"
-
-
-def get_campaigns_path(data_dir: Optional[Path] = None) -> Path:
-    return get_campaigns_dir(data_dir) / "campaigns.json"
 
 
 # ---------------------------------------------------------------------------
@@ -56,62 +50,123 @@ def _validate_profile_key(profile_key: str) -> Optional[str]:
     return validate_path_component(profile_key, "_guard")
 
 
+def _nfc(stem: str) -> str:
+    return unicodedata.normalize("NFC", stem)
+
+
+# ---------------------------------------------------------------------------
+# Row helpers (all take an open connection)
+# ---------------------------------------------------------------------------
+
+def _campaign_id(conn: sqlite3.Connection, slug: str) -> int:
+    row = conn.execute("SELECT id FROM campaigns WHERE slug = ?", (slug,)).fetchone()
+    if row is None:
+        raise KeyError(f"Campaign {slug!r} not found")
+    return row[0]
+
+
+def _profile_id(conn: sqlite3.Connection, key: str) -> int:
+    row = conn.execute("SELECT id FROM profiles WHERE key = ?", (key,)).fetchone()
+    if row is None:
+        raise KeyError(f"Speaker profile {key!r} not found")
+    return row[0]
+
+
+def _transcript_id(conn: sqlite3.Connection, stem: str) -> int:
+    """The registry row for ``stem``, created if absent."""
+    from .transcript_store import ensure_row
+
+    return ensure_row(conn, stem)
+
+
+def _write_order(conn: sqlite3.Connection, campaign_id: int, transcript_ids: list[int]) -> None:
+    """Set the campaign's rows to exactly ``transcript_ids``, in that order.
+
+    ``UNIQUE(campaign_id, position)`` is checked row by row, so positions are
+    written in two steps: shift every row above the current maximum, then
+    write the final positions.
+    """
+    keep = set(transcript_ids)
+    for (tid,) in conn.execute(
+        "SELECT transcript_id FROM campaign_transcripts WHERE campaign_id = ?", (campaign_id,)
+    ).fetchall():
+        if tid not in keep:
+            conn.execute("DELETE FROM campaign_transcripts WHERE transcript_id = ?", (tid,))
+    top = conn.execute(
+        "SELECT coalesce(max(position), -1) + 1 FROM campaign_transcripts WHERE campaign_id = ?",
+        (campaign_id,),
+    ).fetchone()[0]
+    offset = top + len(transcript_ids)
+    conn.execute(
+        "UPDATE campaign_transcripts SET position = position + ? WHERE campaign_id = ?",
+        (offset, campaign_id),
+    )
+    for pos, tid in enumerate(transcript_ids):
+        current = conn.execute(
+            "SELECT campaign_id FROM campaign_transcripts WHERE transcript_id = ?", (tid,)
+        ).fetchone()
+        if current is not None and current[0] == campaign_id:
+            # Already here: position only. Never rewrite campaign_id in place —
+            # journal_entries' composite FK refuses that.
+            conn.execute(
+                "UPDATE campaign_transcripts SET position = ? WHERE transcript_id = ?", (pos, tid)
+            )
+            continue
+        # Moving in from another campaign (one campaign per transcript): delete
+        # and insert, so the old campaign's journal entry cascades and its
+        # journal is marked stale.
+        conn.execute("DELETE FROM campaign_transcripts WHERE transcript_id = ?", (tid,))
+        conn.execute(
+            "INSERT INTO campaign_transcripts (transcript_id, campaign_id, position) VALUES (?, ?, ?)",
+            (tid, campaign_id, pos),
+        )
+
+
+def _stems(conn: sqlite3.Connection, campaign_id: int) -> list[str]:
+    return [r[0] for r in conn.execute(
+        "SELECT t.stem FROM campaign_transcripts ct JOIN transcripts t ON t.id = ct.transcript_id "
+        "WHERE ct.campaign_id = ? ORDER BY ct.position",
+        (campaign_id,),
+    )]
+
+
 # ---------------------------------------------------------------------------
 # Load / save
 # ---------------------------------------------------------------------------
 
 def load_campaigns(data_dir: Optional[Path] = None) -> dict[str, Campaign]:
-    """Load all campaigns from campaigns.json. Returns {} when file is absent."""
-    path = get_campaigns_path(data_dir)
-    if not path.exists():
-        return {}
+    """All campaigns by slug, with rosters and ordered transcript stems."""
+    with db.connection(data_dir) as conn:
+        rows = conn.execute("SELECT * FROM campaigns ORDER BY id").fetchall()
+        members = conn.execute(
+            "SELECT m.campaign_id, p.key, m.role, m.character, m.discord_user_id "
+            "FROM campaign_members m JOIN profiles p ON p.id = m.profile_id ORDER BY m.rowid"
+        ).fetchall()
+        transcripts = conn.execute(
+            "SELECT ct.campaign_id, t.stem FROM campaign_transcripts ct "
+            "JOIN transcripts t ON t.id = ct.transcript_id ORDER BY ct.campaign_id, ct.position"
+        ).fetchall()
 
-    with open(path, encoding="utf-8") as f:
-        raw = json.load(f)
-
+    by_id: dict[int, Campaign] = {}
     campaigns: dict[str, Campaign] = {}
-    for slug, data in raw.items():
-        members: dict[str, CampaignMember] = {}
-        for profile_key, mdata in data.get("members", {}).items():
-            members[profile_key] = CampaignMember(
-                profile_key=profile_key,
-                role=mdata.get("role", ""),
-                character=mdata.get("character", ""),
-                discord_user_id=mdata.get("discord_user_id"),
-            )
-        campaigns[slug] = Campaign(
-            slug=slug,
-            display_name=data.get("display_name", slug),
-            created=data.get("created", ""),
-            members=members,
-            transcripts=list(data.get("transcripts", [])),
+    for r in rows:
+        c = Campaign(
+            slug=r["slug"],
+            display_name=r["display_name"],
+            created=r["created_at"][:10],
+            members={},
+            transcripts=[],
         )
+        by_id[r["id"]] = c
+        campaigns[c.slug] = c
+    for m in members:
+        by_id[m["campaign_id"]].members[m["key"]] = CampaignMember(
+            profile_key=m["key"], role=m["role"], character=m["character"],
+            discord_user_id=m["discord_user_id"],
+        )
+    for t in transcripts:
+        by_id[t["campaign_id"]].transcripts.append(t["stem"])
     return campaigns
-
-
-def save_campaigns(campaigns: dict[str, Campaign], data_dir: Optional[Path] = None) -> None:
-    """Persist campaigns to campaigns.json, creating parent directories as needed."""
-    path = get_campaigns_path(data_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    raw: dict = {}
-    for slug, campaign in campaigns.items():
-        raw[slug] = {
-            "display_name": campaign.display_name,
-            "created": campaign.created,
-            "members": {
-                key: {
-                    "role": m.role,
-                    "character": m.character,
-                    "discord_user_id": m.discord_user_id,
-                }
-                for key, m in campaign.members.items()
-            },
-            "transcripts": list(campaign.transcripts),
-        }
-
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(raw, f, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -128,30 +183,25 @@ def create_campaign(display_name: str, data_dir: Optional[Path] = None) -> Campa
     if not slug:
         raise ValueError(f"Cannot derive a valid slug from name: {display_name!r}")
 
-    with _campaigns_lock:
-        campaigns = load_campaigns(data_dir)
-        if slug in campaigns:
+    created = db.now_utc()
+    with db.transaction(data_dir) as conn:
+        if conn.execute("SELECT 1 FROM campaigns WHERE slug = ?", (slug,)).fetchone():
             raise ValueError(f"Campaign with slug {slug!r} already exists")
-
-        campaign = Campaign(
-            slug=slug,
-            display_name=display_name,
-            created=date.today().isoformat(),
-            members={},
+        conn.execute(
+            "INSERT INTO campaigns (slug, display_name, created_at) VALUES (?, ?, ?)",
+            (slug, display_name, created),
         )
-        campaigns[slug] = campaign
-        save_campaigns(campaigns, data_dir)
-        return campaign
+    return Campaign(slug=slug, display_name=display_name, created=created[:10], members={})
 
 
 def delete_campaign(slug: str, data_dir: Optional[Path] = None) -> None:
-    """Delete a campaign. Raises KeyError if not found. Never touches profiles or embeddings."""
-    with _campaigns_lock:
-        campaigns = load_campaigns(data_dir)
-        if slug not in campaigns:
+    """Delete a campaign and its roster and order. Raises KeyError if not found.
+
+    Profiles and transcripts are untouched.
+    """
+    with db.transaction(data_dir) as conn:
+        if conn.execute("DELETE FROM campaigns WHERE slug = ?", (slug,)).rowcount == 0:
             raise KeyError(f"Campaign {slug!r} not found")
-        del campaigns[slug]
-        save_campaigns(campaigns, data_dir)
 
 
 def add_member(
@@ -161,59 +211,41 @@ def add_member(
     character: str = "",
     data_dir: Optional[Path] = None,
 ) -> None:
-    """Add or update a profile's membership in a campaign. Raises KeyError if campaign missing."""
-    with _campaigns_lock:
-        campaigns = load_campaigns(data_dir)
-        if slug not in campaigns:
-            raise KeyError(f"Campaign {slug!r} not found")
-        campaigns[slug].members[profile_key] = CampaignMember(
-            profile_key=profile_key,
-            role=role,
-            character=character,
-        )
-        save_campaigns(campaigns, data_dir)
+    """Add or replace a profile's membership in a campaign.
 
-
-def rekey_member(old_key: str, new_key: str, data_dir: Optional[Path] = None) -> int:
-    """Rekey a profile in every campaign roster it appears in.
-
-    Called by ``speaker_manager.rename_profile()`` so roster entries (Discord
-    binding, role, character) follow the profile. If an entry already exists
-    under ``new_key``, it wins and the old one is dropped.
-
-    Returns the number of campaigns updated.
+    Replacing resets the Discord binding, as re-adding always has. Raises
+    KeyError if the campaign or the profile doesn't exist.
     """
-    with _campaigns_lock:
-        campaigns = load_campaigns(data_dir)
-        changed = 0
-        for campaign in campaigns.values():
-            if old_key in campaign.members:
-                member = campaign.members.pop(old_key)
-                if new_key not in campaign.members:
-                    member.profile_key = new_key
-                    campaign.members[new_key] = member
-                changed += 1
-        if changed:
-            save_campaigns(campaigns, data_dir)
-        return changed
+    with db.transaction(data_dir) as conn:
+        cid = _campaign_id(conn, slug)
+        pid = _profile_id(conn, profile_key)
+        conn.execute(
+            "INSERT INTO campaign_members (campaign_id, profile_id, role, character) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT (campaign_id, profile_id) DO UPDATE SET "
+            "role = excluded.role, character = excluded.character, discord_user_id = NULL",
+            (cid, pid, role, character),
+        )
 
 
 def remove_member(slug: str, profile_key: str, data_dir: Optional[Path] = None) -> None:
     """Remove a profile from a campaign roster. No-op if profile not in roster."""
-    with _campaigns_lock:
-        campaigns = load_campaigns(data_dir)
-        if slug not in campaigns:
-            raise KeyError(f"Campaign {slug!r} not found")
-        campaigns[slug].members.pop(profile_key, None)
-        save_campaigns(campaigns, data_dir)
+    with db.transaction(data_dir) as conn:
+        cid = _campaign_id(conn, slug)
+        conn.execute(
+            "DELETE FROM campaign_members WHERE campaign_id = ? AND profile_id = "
+            "(SELECT id FROM profiles WHERE key = ?)",
+            (cid, profile_key),
+        )
 
 
 def get_campaign_profile_keys(slug: str, data_dir: Optional[Path] = None) -> set[str]:
     """Return the set of profile keys enrolled in a campaign. Empty set if slug unknown."""
-    campaigns = load_campaigns(data_dir)
-    if slug not in campaigns:
-        return set()
-    return set(campaigns[slug].members.keys())
+    with db.connection(data_dir) as conn:
+        return {r[0] for r in conn.execute(
+            "SELECT p.key FROM campaign_members m JOIN profiles p ON p.id = m.profile_id "
+            "JOIN campaigns c ON c.id = m.campaign_id WHERE c.slug = ?",
+            (slug,),
+        )}
 
 
 # ---------------------------------------------------------------------------
@@ -229,25 +261,34 @@ def bind_discord_id(
     """Bind or clear the Discord user ID for a campaign member.
 
     Enforces one-to-one mapping: if discord_user_id is already bound to another
-    member in the same campaign, that existing binding is cleared first.
+    member in the same campaign, that existing binding is cleared first
+    (``UNIQUE(campaign_id, discord_user_id)`` backs this up).
     Pass discord_user_id=None to clear the binding.
-    Raises KeyError if the campaign or member is not found.
+    Raises KeyError if the campaign or member is not found, ValueError if the
+    id isn't a numeric Discord snowflake.
     """
-    with _campaigns_lock:
-        campaigns = load_campaigns(data_dir)
-        if slug not in campaigns:
-            raise KeyError(f"Campaign {slug!r} not found")
-        if profile_key not in campaigns[slug].members:
+    discord_user_id = discord_user_id or None
+    if discord_user_id is not None and not discord_user_id.isdigit():
+        raise ValueError("Discord user id must be numeric")
+    with db.transaction(data_dir) as conn:
+        cid = _campaign_id(conn, slug)
+        row = conn.execute(
+            "SELECT m.profile_id FROM campaign_members m JOIN profiles p ON p.id = m.profile_id "
+            "WHERE m.campaign_id = ? AND p.key = ?",
+            (cid, profile_key),
+        ).fetchone()
+        if row is None:
             raise KeyError(f"Member {profile_key!r} not in campaign {slug!r}")
-
-        if discord_user_id:
-            # Clear any existing binding for this discord_user_id (one-to-one)
-            for key, member in campaigns[slug].members.items():
-                if member.discord_user_id == discord_user_id and key != profile_key:
-                    member.discord_user_id = None
-
-        campaigns[slug].members[profile_key].discord_user_id = discord_user_id or None
-        save_campaigns(campaigns, data_dir)
+        if discord_user_id is not None:
+            conn.execute(
+                "UPDATE campaign_members SET discord_user_id = NULL "
+                "WHERE campaign_id = ? AND discord_user_id = ? AND profile_id <> ?",
+                (cid, discord_user_id, row[0]),
+            )
+        conn.execute(
+            "UPDATE campaign_members SET discord_user_id = ? WHERE campaign_id = ? AND profile_id = ?",
+            (discord_user_id, cid, row[0]),
+        )
 
 
 def lookup_profile_by_discord_id(
@@ -256,13 +297,13 @@ def lookup_profile_by_discord_id(
     data_dir: Optional[Path] = None,
 ) -> Optional[str]:
     """Return the profile_key bound to discord_user_id in the given campaign, or None."""
-    campaigns = load_campaigns(data_dir)
-    if slug not in campaigns:
-        return None
-    for profile_key, member in campaigns[slug].members.items():
-        if member.discord_user_id == discord_user_id:
-            return profile_key
-    return None
+    with db.connection(data_dir) as conn:
+        row = conn.execute(
+            "SELECT p.key FROM campaign_members m JOIN profiles p ON p.id = m.profile_id "
+            "JOIN campaigns c ON c.id = m.campaign_id WHERE c.slug = ? AND m.discord_user_id = ?",
+            (slug, discord_user_id),
+        ).fetchone()
+    return row[0] if row else None
 
 
 # ---------------------------------------------------------------------------
@@ -273,35 +314,37 @@ def lookup_profile_by_discord_id(
 def move_transcript_to_campaign(
     stem: str, slug: str, data_dir: Optional[Path] = None
 ) -> None:
-    """Associate a transcript stem with a campaign.
+    """Associate a transcript stem with a campaign, appended at the end.
 
-    Removes the stem from any other campaign first (one transcript → one campaign).
+    Removes it from any other campaign first (one transcript → one campaign;
+    the schema enforces it). A no-op if it's already in this campaign.
     Raises KeyError if the target campaign slug is not found.
     """
-    with _campaigns_lock:
-        campaigns = load_campaigns(data_dir)
-        if slug not in campaigns:
-            raise KeyError(f"Campaign {slug!r} not found")
-        # Remove from any existing campaign first
-        for s, c in campaigns.items():
-            if stem in c.transcripts and s != slug:
-                c.transcripts.remove(stem)
-        if stem not in campaigns[slug].transcripts:
-            campaigns[slug].transcripts.append(stem)
-        save_campaigns(campaigns, data_dir)
+    with db.transaction(data_dir) as conn:
+        cid = _campaign_id(conn, slug)
+        tid = _transcript_id(conn, stem)
+        current = conn.execute(
+            "SELECT campaign_id FROM campaign_transcripts WHERE transcript_id = ?", (tid,)
+        ).fetchone()
+        if current is not None and current[0] == cid:
+            return
+        conn.execute("DELETE FROM campaign_transcripts WHERE transcript_id = ?", (tid,))
+        conn.execute(
+            "INSERT INTO campaign_transcripts (transcript_id, campaign_id, position) "
+            "VALUES (?, ?, (SELECT coalesce(max(position), -1) + 1 FROM campaign_transcripts "
+            "WHERE campaign_id = ?))",
+            (tid, cid, cid),
+        )
 
 
 def remove_transcript_from_campaign(stem: str, data_dir: Optional[Path] = None) -> None:
     """Disassociate a transcript stem from whichever campaign it belongs to (no-op if none)."""
-    with _campaigns_lock:
-        campaigns = load_campaigns(data_dir)
-        changed = False
-        for c in campaigns.values():
-            if stem in c.transcripts:
-                c.transcripts.remove(stem)
-                changed = True
-        if changed:
-            save_campaigns(campaigns, data_dir)
+    with db.transaction(data_dir) as conn:
+        conn.execute(
+            "DELETE FROM campaign_transcripts WHERE transcript_id = "
+            "(SELECT id FROM transcripts WHERE stem = ?)",
+            (_nfc(stem),),
+        )
 
 
 def reorder_campaign_transcript(
@@ -323,19 +366,17 @@ def reorder_campaign_transcript(
     if direction not in ("up", "down"):
         raise ValueError(f"Invalid direction: {direction!r} (must be 'up' or 'down')")
 
-    with _campaigns_lock:
-        campaigns = load_campaigns(data_dir)
-        if slug not in campaigns:
-            raise KeyError(f"Campaign {slug!r} not found")
-        transcripts = campaigns[slug].transcripts
-        if stem not in transcripts:
+    stem = _nfc(stem)
+    with db.transaction(data_dir) as conn:
+        cid = _campaign_id(conn, slug)
+        stems = _stems(conn, cid)
+        if stem not in stems:
             raise ValueError(f"Transcript {stem!r} is not in campaign {slug!r}")
-
-        idx = transcripts.index(stem)
+        idx = stems.index(stem)
         swap_idx = idx - 1 if direction == "up" else idx + 1
-        if 0 <= swap_idx < len(transcripts):
-            transcripts[idx], transcripts[swap_idx] = transcripts[swap_idx], transcripts[idx]
-            save_campaigns(campaigns, data_dir)
+        if 0 <= swap_idx < len(stems):
+            stems[idx], stems[swap_idx] = stems[swap_idx], stems[idx]
+            _write_order(conn, cid, [_transcript_id(conn, s) for s in stems])
 
 
 def set_campaign_transcript_order(
@@ -354,31 +395,31 @@ def set_campaign_transcript_order(
         KeyError: campaign not found.
         ValueError: ``order`` is not a permutation of the current transcripts.
     """
-    with _campaigns_lock:
-        campaigns = load_campaigns(data_dir)
-        if slug not in campaigns:
-            raise KeyError(f"Campaign {slug!r} not found")
-        current = campaigns[slug].transcripts
+    order = [_nfc(s) for s in order]
+    with db.transaction(data_dir) as conn:
+        cid = _campaign_id(conn, slug)
+        current = _stems(conn, cid)
         if sorted(order) != sorted(current):
             raise ValueError(
                 "order must be a permutation of the campaign's current transcripts "
                 f"(got {sorted(order)!r}, expected {sorted(current)!r})"
             )
-        campaigns[slug].transcripts = list(order)
-        save_campaigns(campaigns, data_dir)
+        _write_order(conn, cid, [_transcript_id(conn, s) for s in order])
 
 
 def get_campaign_for_transcript(stem: str, data_dir: Optional[Path] = None) -> Optional[str]:
     """Return the slug of the campaign that owns this transcript stem, or None."""
-    for slug, c in load_campaigns(data_dir).items():
-        if stem in c.transcripts:
-            return slug
-    return None
+    with db.connection(data_dir) as conn:
+        row = conn.execute(
+            "SELECT c.slug FROM transcripts t JOIN campaign_transcripts ct ON ct.transcript_id = t.id "
+            "JOIN campaigns c ON c.id = ct.campaign_id WHERE t.stem = ?",
+            (_nfc(stem),),
+        ).fetchone()
+    return row[0] if row else None
 
 
 def get_transcripts_for_campaign(slug: str, data_dir: Optional[Path] = None) -> list[str]:
-    """Return the list of transcript stems for a campaign. Empty list if slug unknown."""
-    campaigns = load_campaigns(data_dir)
-    if slug not in campaigns:
-        return []
-    return list(campaigns[slug].transcripts)
+    """Return the ordered transcript stems for a campaign. Empty list if slug unknown."""
+    with db.connection(data_dir) as conn:
+        row = conn.execute("SELECT id FROM campaigns WHERE slug = ?", (slug,)).fetchone()
+        return _stems(conn, row[0]) if row else []

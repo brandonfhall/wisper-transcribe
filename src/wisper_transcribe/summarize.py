@@ -293,8 +293,8 @@ def _link_terms(profiles: dict[str, SpeakerProfile]) -> set[str]:
     """Return the set of names that should be wrapped in [[...]] on render.
 
     Includes every enrolled profile's display_name, and any comma-separated
-    name mentioned in a profile's `notes` field (character names are commonly
-    stored there per CLAUDE.md).
+    name mentioned in a profile's `notes` field (where character names are
+    kept).
     """
     terms: set[str] = set()
     for p in profiles.values():
@@ -303,7 +303,7 @@ def _link_terms(profiles: dict[str, SpeakerProfile]) -> set[str]:
         if p.notes:
             for part in p.notes.replace(";", ",").split(","):
                 token = part.strip()
-                # Strip a `voice_of:` prefix if present (Approach 1 in plan.md).
+                # Skip `voice_of:` entries: they note who a player voices, not a term to link.
                 if token.lower().startswith("voice_of:"):
                     continue
                 if token and len(token) > 1:

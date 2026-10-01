@@ -216,3 +216,16 @@ def test_suppress_called_at_module_level_in_speaker_manager():
         "torch logger not silenced after importing speaker_manager — "
         "_suppress() call is missing or mis-ordered in speaker_manager.py"
     )
+
+
+def test_suppress_reasserts_level_after_a_package_resets_it(monkeypatch):
+    """Importing torch resets the "torch" logger's level; a later suppress
+    call must restore ERROR even though the filter is already attached."""
+    monkeypatch.delenv("WISPER_DEBUG", raising=False)
+    from wisper_transcribe._noise_suppress import suppress_third_party_noise
+
+    suppress_third_party_noise()
+    logging.getLogger("torch").setLevel(logging.NOTSET)  # what torch's import does
+    suppress_third_party_noise()
+    assert logging.getLogger("torch").level == logging.ERROR
+    assert not logging.getLogger("torch.utils.flop_counter").isEnabledFor(logging.WARNING)

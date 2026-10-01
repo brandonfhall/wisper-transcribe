@@ -67,12 +67,18 @@ docker compose run wisper wisper transcribe /app/input/session01.mp3 --enroll-sp
 | Local path | Container path | Contents |
 |-----------|---------------|----------|
 | `./cache/` | `/root/.cache/huggingface` | Downloaded models (~2 GB, persisted) |
-| `./data/` | `/data` | `config.toml` + speaker profiles |
+| `./data/` | `/data` | `config.toml`, `wisper.db` (profiles, campaigns, recordings, jobs, search index), voice samples, journals, `backups/` |
 | `./input/` | `/app/input` | Your audio files |
 | `./output/` | `/app/output` | Transcribed `.md` files |
-| `./recordings/` | `/data/recordings` | Discord recordings |
+| `./recordings/` | `/data/recordings` | Discord recording audio |
 
-All directories are created automatically on first run and persist across container restarts.
+All directories are created automatically on first run and persist across container restarts. The compose file sets `WISPER_DATA_DIR=/data` and `WISPER_OUTPUT_DIR=/app/output`.
+
+Back up the database with `docker compose run wisper-cpu wisper db backup` (written to `./data/backups/`).
+
+### One way of running at a time
+
+Use **either** Docker for everything (web UI and CLI both via `docker compose`) **or** the native CLI with a local `wisper server` — not a native CLI against `./data` while a container is running. On Docker Desktop (Mac and Windows), file locks don't cross into the container's VM, so a host process and a container writing `wisper.db` at the same time corrupts it. wisper records which side is using the database and refuses to start the other side with a message naming the running process; stop the container (or the host server) first. Several containers sharing `./data` (e.g. `wisper-cpu` CLI runs alongside `wisper-cpu-web`) are safe, and Docker on native Linux isn't affected.
 
 ### Verify GPU Passthrough
 

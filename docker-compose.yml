@@ -7,7 +7,7 @@ name: wisper-transcribe
 #
 # Local bind-mount directories (created automatically by Docker on first run):
 #   ./cache/   — HuggingFace model downloads (~2 GB; ~3.7 GB on GPU with word alignment; persisted across restarts)
-#   ./data/    — wisper config.toml + speaker profiles (persisted)
+#   ./data/    — wisper config.toml, wisper.db, speaker profiles (persisted)
 #   ./input/   — place your audio files here before running
 #   ./output/  — transcribed .md files appear here
 # ─────────────────────────────────────────────────────────────────────────────
@@ -15,13 +15,14 @@ name: wisper-transcribe
 # Shared volume and env blocks reused by every service
 x-volumes: &volumes
   - ./cache:/root/.cache/huggingface   # HF model cache
-  - ./data:/data                       # config + speaker profiles
+  - ./data:/data                       # config, wisper.db, voice samples, journals
   - ./input:/app/input                 # audio input
   - ./output:/app/output               # transcript output
   - ./recordings:/data/recordings      # Discord recording storage
 
 x-env: &env
   WISPER_DATA_DIR: /data
+  WISPER_OUTPUT_DIR: /app/output         # transcripts (the ./output mount)
   # Token and API keys are read from .env (copy .env.example → .env)
   HF_TOKEN: ${HF_TOKEN:-}
   HUGGINGFACE_TOKEN: ${HF_TOKEN:-}

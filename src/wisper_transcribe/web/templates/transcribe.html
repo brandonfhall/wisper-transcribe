@@ -57,6 +57,18 @@
       <button type="button" onclick="wisperClearFile()" style="background:none;border:none;color:var(--color-paper-faint);font-size:14px;padding:0 4px;line-height:1">✕</button>
     </div>
 
+    <!-- Name collision: shown when a transcript with this file's name exists -->
+    <div id="name-collision" data-testid="name-collision" style="display:none;margin-top:12px;padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:6px;font-size:12.5px;color:var(--color-signal-amber)">
+      <div id="name-collision-text">A transcript with this name already exists.</div>
+      <div style="display:flex;gap:14px;align-items:center;margin-top:10px">
+        <label style="display:flex;gap:6px;align-items:center;color:var(--color-paper);cursor:pointer">
+          <input type="checkbox" id="overwrite-input" name="overwrite" value="on"/>
+          Overwrite it (keeps its campaign; the old text is replaced)
+        </label>
+        <button type="button" class="btn btn-secondary btn-sm" onclick="wisperClearFile()">Cancel</button>
+      </div>
+    </div>
+
     <!-- Upload progress (shown once the form is submitted; tracks bytes sent, not job progress) -->
     <div id="upload-progress" style="display:none;margin-top:12px">
       <div style="height:3px;background:var(--color-ink-900);border-radius:2px;overflow:hidden;margin-bottom:6px">
@@ -68,7 +80,12 @@
       </div>
     </div>
 
-    {% if request.query_params.get('error') %}
+    {% if request.query_params.get('error') == 'name_exists' %}
+    <div style="margin-top:12px;padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber)">
+      A transcript with that file's name already exists, so nothing was started. Pick the file again and tick
+      <strong>Overwrite it</strong>, or rename the file.
+    </div>
+    {% elif request.query_params.get('error') %}
     <div style="margin-top:12px;padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber)">
       Upload error: {{ request.query_params.get('error') }}. Please try again.
     </div>
@@ -212,11 +229,40 @@ function wisperFileSelected(input) {
     document.getElementById('sel-size').textContent = f.name;
     document.getElementById('sel-mb').textContent = (f.size / 1048576).toFixed(1) + ' MB';
   }
+  wisperCheckName(f.name);
+}
+// Name collision: ask before uploading, not after. The server refuses a
+// taken name without overwrite=on anyway (?error=name_exists).
+var wisperNameTaken = false;
+function wisperCheckName(filename) {
+  wisperNameTaken = false;
+  wisperShowCollision(false, null);
+  fetch('/transcribe/name-check?filename=' + encodeURIComponent(filename))
+    .then(function(r) { return r.ok ? r.json() : {exists: false}; })
+    .then(function(data) {
+      wisperNameTaken = !!data.exists;
+      wisperShowCollision(wisperNameTaken, data.campaign);
+    })
+    .catch(function() {});
+}
+function wisperShowCollision(show, campaign) {
+  var box = document.getElementById('name-collision');
+  var cb = document.getElementById('overwrite-input');
+  if (!box) return;
+  box.style.display = show ? 'block' : 'none';
+  if (cb) cb.checked = false;
+  var text = document.getElementById('name-collision-text');
+  if (text) {
+    text.textContent = 'A transcript with this name already exists' +
+      (campaign ? ' (in campaign "' + campaign + '")' : '') + '.';
+  }
 }
 function wisperClearFile() {
   document.getElementById('file-input').value = '';
   var el = document.getElementById('selected-file');
   if (el) el.style.display = 'none';
+  wisperNameTaken = false;
+  wisperShowCollision(false, null);
 }
 function wisperModelSelect(radio) {
   document.querySelectorAll('.model-label').forEach(function(s) {
@@ -307,6 +353,13 @@ function wisperToggleDiarize(wrap, evt) {
 
   form.addEventListener('submit', function(evt) {
     evt.preventDefault();
+
+    var overwrite = document.getElementById('overwrite-input');
+    if (wisperNameTaken && !(overwrite && overwrite.checked)) {
+      var box = document.getElementById('name-collision');
+      if (box) box.scrollIntoView({block: 'center'});
+      return;  // don't upload a file the server will refuse
+    }
 
     if (progressWrap)  progressWrap.style.display = 'block';
     if (progressBar)   { progressBar.style.width = '0%'; progressBar.style.background = 'var(--color-accent)'; }

@@ -94,6 +94,24 @@
   {%- set assigned = transcripts | selectattr('campaign_slug') | list -%}
   {%- set unassigned = transcripts | rejectattr('campaign_slug') | list -%}
 
+  <!-- Bulk actions: shown once a row is selected. Separate hidden forms,
+       since the rows are links. -->
+  <div id="bulk-transcripts-bar" data-testid="bulk-transcripts-bar" style="display:none;align-items:center;gap:12px;margin-bottom:16px;padding:10px 16px;background:var(--color-ink-900);border:1px solid var(--color-rule);border-radius:6px;position:sticky;top:0;z-index:5">
+    <label style="display:flex;align-items:center;gap:6px;font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">
+      <input type="checkbox" id="select-all-transcripts" onchange="wisperToggleAllTranscripts(this)" style="cursor:pointer"/>
+      <span id="bulk-transcripts-count"></span>
+    </label>
+    <div style="flex:1"></div>
+    <select id="bulk-campaign-select" aria-label="Campaign" style="background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:5px 8px;border-radius:4px;font-size:12px">
+      {% for slug, c in campaigns.items() %}<option value="{{ slug }}">{{ c.display_name }}</option>{% endfor %}
+      <option value="">(no campaign)</option>
+    </select>
+    <button type="button" class="btn btn-secondary btn-sm" onclick="wisperBulkAssignCampaign()">Move to campaign</button>
+    <button type="button" class="btn btn-secondary btn-sm" style="color:var(--color-signal-rose)" onclick="wisperBulkDeleteTranscripts()">Delete selected</button>
+  </div>
+  <form id="bulk-delete-transcripts-form" method="post" action="/transcripts/bulk-delete" style="display:none"></form>
+  <form id="bulk-campaign-form" method="post" action="/transcripts/bulk-campaign" style="display:none"></form>
+
   <!-- Campaign groups -->
   {% for slug, c in campaigns.items() %}
   {%- set items = transcripts | selectattr('campaign_slug', 'equalto', slug) | list -%}
@@ -120,7 +138,8 @@
        data-title="{{ t.title | lower }}" data-campaign="{{ slug }}"
        style="display:grid;grid-template-columns:14px 2fr 80px 80px 80px 110px 60px;gap:16px;padding:14px 16px;border-bottom:1px solid var(--color-rule);align-items:center;text-decoration:none;
               {% if loop.last %}border-bottom:none;{% endif %}">
-      {{ icon("scroll", 11, "var(--color-paper-faint)") }}
+      <input type="checkbox" class="transcript-select" value="{{ t.stem }}" aria-label="Select {{ t.title }}"
+             onclick="event.stopPropagation()" onchange="wisperUpdateTranscriptSelection()" style="cursor:pointer;margin:0"/>
       <div>
         <div style="font-family:var(--font-serif);font-size:16px;color:var(--color-paper)">{{ t.title }}</div>
       </div>
@@ -153,7 +172,8 @@
     <a href="/transcripts/{{ t.stem | urlencode }}"
        data-title="{{ t.title | lower }}" data-campaign=""
        style="display:grid;grid-template-columns:14px 2fr 80px 110px 60px;gap:16px;padding:14px 16px;border-bottom:{% if not loop.last %}1px solid var(--color-rule){% else %}none{% endif %};align-items:center;text-decoration:none">
-      {{ icon("scroll", 11, "var(--color-paper-faint)") }}
+      <input type="checkbox" class="transcript-select" value="{{ t.stem }}" aria-label="Select {{ t.title }}"
+             onclick="event.stopPropagation()" onchange="wisperUpdateTranscriptSelection()" style="cursor:pointer;margin:0"/>
       <div style="font-family:var(--font-serif);font-size:16px;color:var(--color-paper)">{{ t.title }}</div>
       <div style="font-family:var(--font-mono);font-size:11.5px;color:var(--color-paper-dim);text-align:right">{{ t.duration or '—' }}</div>
       <div style="display:flex;align-items:center;gap:6px">
@@ -175,6 +195,48 @@
 </div>
 
 <script>
+function wisperSelectedTranscripts() {
+  return Array.prototype.slice.call(document.querySelectorAll('.transcript-select:checked'))
+    .map(function(cb) { return cb.value; });
+}
+function wisperUpdateTranscriptSelection() {
+  var selected = wisperSelectedTranscripts();
+  var total = document.querySelectorAll('.transcript-select').length;
+  document.getElementById('bulk-transcripts-bar').style.display = selected.length ? 'flex' : 'none';
+  document.getElementById('bulk-transcripts-count').textContent = selected.length + ' selected';
+  document.getElementById('select-all-transcripts').checked = total > 0 && selected.length === total;
+}
+function wisperToggleAllTranscripts(cb) {
+  document.querySelectorAll('.transcript-select').forEach(function(el) { el.checked = cb.checked; });
+  wisperUpdateTranscriptSelection();
+}
+function wisperSubmitStems(formId, stems, extra) {
+  var form = document.getElementById(formId);
+  form.innerHTML = '';
+  stems.forEach(function(stem) {
+    var input = document.createElement('input');
+    input.type = 'hidden'; input.name = 'stems'; input.value = stem;
+    form.appendChild(input);
+  });
+  Object.keys(extra || {}).forEach(function(k) {
+    var input = document.createElement('input');
+    input.type = 'hidden'; input.name = k; input.value = extra[k];
+    form.appendChild(input);
+  });
+  form.submit();
+}
+function wisperBulkDeleteTranscripts() {
+  var stems = wisperSelectedTranscripts();
+  if (!stems.length) return;
+  if (!confirm('Delete ' + stems.length + ' transcript(s)? This removes each transcript, its summary, speaker clips, and audio copy, and takes it out of its campaign. This can\'t be undone.')) return;
+  wisperSubmitStems('bulk-delete-transcripts-form', stems);
+}
+function wisperBulkAssignCampaign() {
+  var stems = wisperSelectedTranscripts();
+  if (!stems.length) return;
+  wisperSubmitStems('bulk-campaign-form', stems,
+                    {campaign: document.getElementById('bulk-campaign-select').value});
+}
 function wisperCampaignFilter(btn, slug) {
   document.querySelectorAll('.filter-pill').forEach(function(b) { b.classList.remove('active'); });
   btn.classList.add('active');

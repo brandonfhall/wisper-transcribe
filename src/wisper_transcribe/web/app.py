@@ -136,6 +136,38 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[misc]
+        # Migrate (or refuse) before serving anything.
+        from wisper_transcribe import db
+        try:
+            db.connect().close()
+        except db.DatabaseError as exc:
+            import logging
+            logging.getLogger(__name__).error("%s", exc)
+            raise
+        heartbeat = db.Heartbeat().start()
+
+        # Jobs left pending/running died with the last process.
+        try:
+            from wisper_transcribe import job_history
+            job_history.mark_interrupted()
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning("Could not mark interrupted jobs", exc_info=True)
+
+        # Register transcripts added while the server was down, flag deleted
+        # ones, and sweep crash leftovers (temp files, orphaned companions).
+        try:
+            from wisper_transcribe import transcript_store
+            transcript_store.reconcile(sweep=True)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning("Transcript reconcile failed", exc_info=True)
+
+        # Index transcripts not yet in the search index (an existing archive,
+        # files added while stopped), in the background.
+        from wisper_transcribe import search_index
+        search_index.start_worker()
+
         _build_tailwind()
         job_queue.start()
 
@@ -175,6 +207,8 @@ def create_app() -> FastAPI:
             await asyncio.to_thread(local_capture_manager.stop)
             await bot_manager.stop()
             await job_queue.stop()
+            await asyncio.to_thread(search_index.stop_worker)
+            await asyncio.to_thread(heartbeat.stop)
             try:
                 _sj.unlink(missing_ok=True)
             except OSError:
@@ -200,6 +234,7 @@ def create_app() -> FastAPI:
     from .routes import config as config_router
     from .routes import dashboard as dashboard_router
     from .routes import record as record_router
+    from .routes import search as search_router
     from .routes import speakers as speakers_router
     from .routes import transcribe as transcribe_router
     from .routes import transcripts as transcripts_router
@@ -211,6 +246,7 @@ def create_app() -> FastAPI:
     app.include_router(config_router.router)
     app.include_router(campaigns_router.router)
     app.include_router(record_router.router)
+    app.include_router(search_router.router)
 
     return app
 

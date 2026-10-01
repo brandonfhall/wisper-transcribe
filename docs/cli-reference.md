@@ -102,7 +102,7 @@ Guided first-run wizard. Run this once after installation:
 wisper setup
 ```
 
-Checks ffmpeg, detects your GPU (CUDA/MPS/CPU), prompts for your HuggingFace token, and pre-downloads all pyannote models (~700 MB, cached permanently). When forced alignment will be on for your device (see `forced_alignment`), it also pre-downloads the word alignment model (~1.7 GB).
+Checks ffmpeg, detects your GPU (CUDA/MPS/CPU), prompts for your HuggingFace token, and pre-downloads the pyannote diarization model (~30 MB, cached permanently). Whisper models download on first transcription. When forced alignment will be on for your device (see `forced_alignment`), it also pre-downloads the word alignment model (~1.7 GB).
 
 ---
 
@@ -143,10 +143,11 @@ wisper transcribe <path>
   --compute-type TYPE      CTranslate2 dtype: auto|float16|int8_float16|int8|float32
                            (default: auto → float16 on CUDA, int8 on CPU)
   --vad / --no-vad         Voice activity detection — skips silence before transcription
+                           (default: from config, on; improves speed and accuracy on
+                           audio with pauses)
   --forced-align / --no-forced-align
                            Re-time words against the audio before speaker assignment
                            (default: from config; auto = on when diarizing on a GPU)
-                           (default: on; improves speed and accuracy on audio with pauses)
   --vocab-file FILE        Text file of custom words/names (one per line) to boost accuracy.
                            Useful for character names, locations, and game-specific terms
                            that Whisper might not recognize (e.g. "Kyra", "Golarion").
@@ -154,11 +155,18 @@ wisper transcribe <path>
                            Overrides hotwords stored in config.
   --initial-prompt TEXT    Text prepended as prior context to guide transcription style
                            and vocabulary. Alternative to --vocab-file for short hints.
-  --overwrite              Re-process files that already have output
+  --overwrite              Re-process files that already have output. Without it an existing
+                           transcript is skipped ("already processed (in campaign 'x')"); with it
+                           the transcript keeps its campaign place, and a folded journal is
+                           marked as needing a rebuild.
   --workers INT            Parallel workers for folder processing — CPU only;
                            clamped to 1 on GPU (default: 1)
-  --campaign SLUG          Restrict speaker matching to this campaign's roster.
-                           Run `wisper campaigns list` to see available slugs.
+  --campaign SLUG          Restrict speaker matching to this campaign's roster, and add the
+                           transcript to the campaign. Run `wisper campaigns list` for slugs.
+                           Only when the output lands in the transcripts folder (the default
+                           output is next to the input, so pass -o <transcripts folder> unless
+                           the audio is already there); elsewhere it prints a note and skips the
+                           association. Transcripts written there are also indexed for search.
   --verbose                Show detailed progress; surfaces ML library log output
                            (pyannote, faster-whisper) on the console at DEBUG level
   --debug                  Write a full timestamped log to ./logs/wisper_<timestamp>.log
@@ -195,11 +203,14 @@ Options:
 ```bash
 wisper speakers list                    # show all enrolled profiles
 wisper speakers remove "Alice"          # delete a profile
-wisper speakers rename "Alice" "Alicia" # rename a profile
+wisper speakers rename "Alice" "Alicia" # rename a profile (campaign roles and Discord bindings follow)
+wisper speakers doctor                  # report likely duplicates, old-model and placeholder-named profiles
 wisper speakers reset                   # delete ALL profiles and embeddings (with confirmation)
 wisper speakers test session03.mp3                         # preview match results without writing output
 wisper speakers test session03.mp3 --campaign d-d-mondays  # restrict to campaign roster
 ```
+
+`speakers doctor` only reports; it never changes profiles. It lists pairs of profiles whose voices score above 0.95 similarity (probably one person enrolled twice), profiles from an older speaker model or with no voice sample (never matched until re-enrolled), and profiles named like a placeholder (`SPEAKER_03`, `Unknown Speaker 2`).
 
 `speakers test` prints each label's similarity score, or for an unmatched label the closest profile and its score (e.g. `SPEAKER_03 → Unknown Speaker 1 (closest: Ben 0.48)`). Use it to tune `similarity_threshold`.
 
@@ -237,7 +248,7 @@ wisper campaigns relabel d-d-mondays --no-backfill  # only use voice data alread
 - Automatically assigned names are matched against the campaign roster again, so a player enrolled after a session was transcribed gets named in it.
 - An unknown voice heard in two or more sessions gets one shared name, `Recurring Speaker N`. Name them once in any session's wizard and the others follow.
 - Names you set by hand are never changed.
-- Sessions transcribed before this feature have no stored voice data; it is re-extracted from the saved source audio when that still exists (web uploads keep it next to the transcript). Sessions without either are skipped and listed.
+- Sessions with no stored voice data have it re-extracted from the saved source audio when that still exists (web uploads keep it next to the transcript). Sessions without either are skipped and listed.
 
 ```
 Options:
@@ -255,13 +266,18 @@ wisper campaigns journal d-d-mondays                  # fold the next unjournall
 wisper campaigns journal d-d-mondays --all            # fold every pending session (oldest first)
 wisper campaigns journal d-d-mondays --session s05    # fold a specific session stem
 wisper campaigns journal d-d-mondays --provider openai --model gpt-4o-mini
-wisper campaigns journal d-d-mondays --rebuild        # redrive the whole campaign (asks to confirm)
+wisper campaigns journal d-d-mondays --rebuild        # start over from the existing summaries (asks to confirm)
 wisper campaigns journal d-d-mondays --rebuild --yes  # same, skip the confirmation prompt
+wisper campaigns journal d-d-mondays --rebuild --resummarize  # re-summarize every transcript first
+wisper campaigns journal d-d-mondays --export         # print it with the folded-session list
+wisper campaigns journal d-d-mondays --export -o journal.md
 ```
 
-A session is "pending" once it has a `.summary.md`. With no flags the command folds the single oldest unjournalled session; re-run (or use `--all`) to catch up the rest. Sessions already folded are tracked in the journal's `journaled_sessions:` frontmatter and skipped.
+A session is "pending" once it has a `.summary.md`. With no flags the command folds the single oldest unjournalled session; re-run (or use `--all`) to catch up the rest. Sessions already folded are tracked in wisper's database and skipped. `--export` adds that list back as `journaled_sessions:` in the frontmatter (`journal.md` itself doesn't carry it).
 
-`--rebuild` re-summarizes every session transcript (overwriting its `.summary.md`) and rebuilds the journal from scratch, in order — two LLM calls per session, so it asks for confirmation unless `--yes` is passed. Sessions whose transcript is missing or whose summary fails are skipped and reported. `--session`, `--all`, and `--rebuild` are mutually exclusive.
+`--rebuild` starts the journal over from each session's existing `.summary.md`, in campaign order — one LLM call per session, plus one for any session that has no summary yet. Your edits to summaries are kept. Add `--resummarize` to re-summarize every transcript first, overwriting the summaries (two calls per session) — for when the summaries themselves are bad. Both ask for confirmation, showing the call count, unless `--yes` is passed. Sessions whose transcript is missing or whose summary fails are skipped and reported. `--session`, `--all`, `--rebuild`, and `--export` are mutually exclusive.
+
+**Stale journal:** moving a folded session to another campaign, removing it from the campaign, deleting it, or re-transcribing it never edits the journal text; it marks the journal stale instead. `wisper campaigns show <slug>` prints `Journal: STALE since …` with the rebuild command. Deleting `journal.md` by hand starts a fresh journal (every session becomes pending again); editing it by hand is fine, and later folds build on your edits.
 
 **Scoping transcription to a campaign:**
 
@@ -287,6 +303,8 @@ To find a Discord user ID: enable Developer Mode in Discord → right-click the 
 
 ### `wisper transcripts`
 
+`list` shows each campaign's transcripts in fold order; an entry whose file isn't in the transcripts folder is marked `(missing — file not found)` (relink it on the web Campaign page, or remove it). Listing also registers `.md` files you added to the folder yourself.
+
 Organize and view transcript-to-campaign associations from the command line:
 
 ```bash
@@ -301,6 +319,27 @@ wisper transcripts move session12 --no-campaign            # remove campaign ass
 
 ---
 
+### `wisper search`
+
+Search every transcript's title and text, and every session summary, in the transcripts folder:
+
+```bash
+wisper search strahd                               # every block that mentions Strahd
+wisper search "fights the dragon"                  # all three words in one block
+wisper search '"take your mask off"'               # an exact phrase
+wisper search 'Stra*' --campaign curse-of-strahd   # prefix, one campaign
+wisper search loot --kind summary                  # session summaries only
+wisper search castle --speaker "Alice" --limit 20  # one speaker, up to 20 transcripts
+```
+
+Each result prints the transcript name, its campaign, and the number of matches. Up to three blocks follow, each with timestamp, speaker (or `summary`, or `title` for a match on the transcript's name, listed first), and a snippet with the matched words highlighted.
+
+- Words match their other forms ("fights" finds "fight") and ignore accents. Every word must appear in the same block. Double quotes match a phrase, and a trailing `*` matches a prefix. Other symbols and words like `OR` or `NEAR` are searched as ordinary text.
+- `--speaker` is the exact name shown in the transcript. `--limit` (default 10) is the number of transcripts shown.
+- Transcripts not yet indexed (added while nothing was running, or just after an upgrade) are indexed before the search runs.
+
+---
+
 ### `wisper fix`
 
 Fix a wrong speaker assignment in an existing transcript:
@@ -310,7 +349,7 @@ wisper fix session05.md --speaker "Unknown Speaker 1" --name "Frank"
 wisper fix session03.md --speaker "Alice" --name "Diana"
 ```
 
-Add `--re-enroll` to also update the voice profile (currently prompts manual steps).
+`--re-enroll` prints the `wisper enroll <name> --audio <file> --update` command that updates the voice profile; it doesn't run it.
 
 ---
 
@@ -341,7 +380,7 @@ Generate campaign notes from a transcript — a session recap, loot/inventory ch
 ```bash
 wisper summarize session05.md                        # writes session05.summary.md
 wisper summarize session05.md --overwrite            # replace existing sidecar
-wisper summarize session05.md --refine               # refine-then-summarize (atomic)
+wisper summarize session05.md --refine               # refine in place, then summarize
 wisper summarize session05.md --sections summary,loot  # only these sections
 wisper summarize session05.md --output recap.md      # custom output path
 wisper summarize session05.md --provider openai --model gpt-4o-mini
@@ -385,6 +424,7 @@ wisper config set similarity_threshold 0.60  # stricter speaker matching
 wisper config set min_speakers 2          # min speaker count when diarizing (int)
 wisper config set max_speakers 8          # max speaker count when diarizing (int)
 wisper config path                        # show where config.toml lives
+wisper config set output_dir ~/Transcripts  # transcripts folder (stored as an absolute path)
 wisper config llm                         # interactive wizard: provider + model + key/endpoint
 ```
 
@@ -415,6 +455,7 @@ wisper record list                                              # list all recor
 wisper record show <recording_id>                               # show metadata for a recording
 wisper record transcribe <recording_id>                         # re-queue transcription
 wisper record delete <recording_id>                             # delete recording + its files on disk (permanent)
+wisper record recover <recording_id>                            # rebuild a crashed session's audio so it can be transcribed
 ```
 
 `record start` resolves the guild and channel from: explicit flags → `--preset` → the `discord_default_guild`/`discord_default_channel` config keys (set via `wisper config discord`, also used by the web Record page).
@@ -429,6 +470,25 @@ wisper config discord-presets remove "Weekly D&D"
 ```
 
 Presets are also manageable via the web UI — the Record page has an inline "Save as preset" form.
+
+---
+
+### `wisper db`
+
+Inspect, back up, and reindex the database (`wisper.db` in the data directory).
+
+```bash
+wisper db status                  # schema version, integrity and foreign-key checks, runtime leases
+wisper db backup                  # copy to <data dir>/backups/wisper-<time>.db
+wisper db backup ~/wisper.db.bak  # copy to a chosen file (refuses to overwrite)
+wisper db dump                    # whole database as SQL text
+wisper db dump -o dump.sql
+wisper db reindex                 # drop and rebuild the search index from the transcript files
+```
+
+`status` is read-only: it never upgrades the database, so it also works when startup refuses (for example, a database from a newer wisper). `backup` uses SQLite's backup API and is safe while the server is running. `reindex` loses nothing: the search index is built from the `.md` files, so rebuilding it fixes a stale or damaged index.
+
+Every command that uses the database stops with a clear message, not a traceback, when it can't: a database newer than this wisper, an unmerged development build pointed at the default data directory, an SQLite older than 3.43 or without FTS5, or a native process while a Docker Desktop container is using the same data directory (see [docker.md](docker.md#one-way-of-running-at-a-time)).
 
 ---
 
@@ -466,7 +526,7 @@ All formats are converted to 16kHz mono WAV internally before transcription.
 
 ## Output Format
 
-Each audio file produces a `.md` file in the same directory (or `--output` dir):
+`wisper transcribe` writes one `.md` per audio file next to the input (or in `--output`); web uploads and recordings go to the transcripts folder ([configuration.md](configuration.md#transcripts-folder)). Timestamps are `mm:ss`, or `hh:mm:ss` past the first hour:
 
 ```markdown
 ---
@@ -483,12 +543,12 @@ speakers:
 
 # Session 01 - The Dragon's Keep
 
-**Alice** *(00:00:12)*: Welcome back everyone. Last session you had just entered
+**Alice** *(00:12)*: Welcome back everyone. Last session you had just entered
 the ruins of Khar'zul.
 
-**Bob** *(00:00:18)*: Right, I want to check for traps before we go further in.
+**Bob** *(00:18)*: Right, I want to check for traps before we go further in.
 
-**Alice** *(00:00:23)*: Go ahead and roll a perception check.
+**Alice** *(00:23)*: Go ahead and roll a perception check.
 ```
 
 The YAML frontmatter makes these files easy to ingest into NotebookLM or query with scripts.

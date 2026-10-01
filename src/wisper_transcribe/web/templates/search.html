@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}{% if q %}{{ q }} — {% endif %}Search{% endblock %}
+
+{%- set select_style = "background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:5px 8px;border-radius:4px;font-size:12px" -%}
+{%- set qs = 'q=' ~ (q | urlencode) ~ '&campaign=' ~ (campaign_filter | urlencode) ~ '&speaker=' ~ (speaker_filter | urlencode) ~ '&kind=' ~ (kind_filter | urlencode) -%}
+
+{% block toolbar %}
+<div class="toolbar">
+  <div>
+    <div class="toolbar-kicker">Archive</div>
+    <div style="display:flex;align-items:baseline;gap:12px">
+      <span class="toolbar-title">Search</span>
+      {% if indexed < total %}
+      <span class="toolbar-sub" data-testid="search-indexing">INDEXING {{ indexed }} OF {{ total }}</span>
+      {% else %}
+      <span class="toolbar-sub">{{ total }} TRANSCRIPTS</span>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block page %}
+<div class="studio-page">
+  <form method="get" action="/search" role="search" data-testid="search-form"
+        style="display:flex;gap:10px;align-items:center;margin-bottom:22px;flex-wrap:wrap">
+    <input type="search" name="q" value="{{ q }}" autofocus
+           placeholder='Words, "a phrase", or a prefix like Stra*' aria-label="Search transcripts"
+           style="flex:1;min-width:240px;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:7px 10px;border-radius:4px;font-size:14px"/>
+    <select name="campaign" aria-label="Campaign" style="{{ select_style }}">
+      <option value="">All campaigns</option>
+      {% for slug, c in campaigns.items() %}<option value="{{ slug }}" {% if slug == campaign_filter %}selected{% endif %}>{{ c.display_name }}</option>{% endfor %}
+    </select>
+    <select name="speaker" aria-label="Speaker" style="{{ select_style }}">
+      <option value="">All speakers</option>
+      {% for s in speakers %}<option value="{{ s }}" {% if s == speaker_filter %}selected{% endif %}>{{ s }}</option>{% endfor %}
+    </select>
+    <select name="kind" aria-label="Transcripts or summaries" style="{{ select_style }}">
+      <option value="">Transcripts + summaries</option>
+      <option value="transcript" {% if kind_filter == 'transcript' %}selected{% endif %}>Transcripts only</option>
+      <option value="summary" {% if kind_filter == 'summary' %}selected{% endif %}>Summaries only</option>
+    </select>
+    <button type="submit" class="btn btn-primary btn-sm">Search</button>
+  </form>
+
+  {% if results is none %}
+  <div style="color:var(--color-paper-faint);font-size:13px;line-height:1.7">
+    Searches every transcript's title and text, and every session summary. Words match their other forms
+    ("fights" finds "fight"), <span style="font-family:var(--font-mono)">"double quotes"</span> match a phrase,
+    and a trailing <span style="font-family:var(--font-mono)">*</span> matches a prefix.
+  </div>
+  {% elif results.error %}
+  <div data-testid="search-error" style="color:var(--color-signal-amber);font-size:13px">{{ results.error }}</div>
+  {% else %}
+    {% for g in results.groups %}
+    <section data-testid="search-group" style="padding:16px 0;border-top:1px solid var(--color-rule)">
+      <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:8px">
+        <a href="/transcripts/{{ g.stem | urlencode }}" style="font-family:var(--font-serif);font-size:17px;color:var(--color-paper);text-decoration:none">{{ g.stem }}</a>
+        {% if g.campaign_name %}<span class="pill pill-dim">{{ g.campaign_name }}</span>{% endif %}
+        <span style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);letter-spacing:0.1em">{{ g.total_hits }} MATCH{{ 'ES' if g.total_hits != 1 }}</span>
+      </div>
+      {% if g.stale %}
+      <div data-testid="search-stale" style="font-size:12px;color:var(--color-paper-faint);font-style:italic">Transcript changed — reindexing. Search again in a moment.</div>
+      {% else %}
+      {% for h in g.hits %}
+      {%- if h.kind == 'title' -%}
+        {%- set href = '/transcripts/' ~ (g.stem | urlencode) ~ '?q=' ~ (q | urlencode) -%}
+      {%- elif h.kind == 'summary' -%}
+        {%- set href = '/transcripts/' ~ (g.stem | urlencode) ~ '/summary?q=' ~ (q | urlencode) ~ '#' ~ h.anchor -%}
+      {%- else -%}
+        {%- set href = '/transcripts/' ~ (g.stem | urlencode) ~ '?q=' ~ (q | urlencode) ~ '#' ~ h.anchor -%}
+      {%- endif -%}
+      <a href="{{ href }}" data-testid="search-hit"
+         style="display:grid;grid-template-columns:130px 1fr;gap:14px;padding:6px 0;text-decoration:none;color:inherit">
+        <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim);line-height:1.6">
+          {% if h.kind == 'title' %}<span style="color:var(--color-accent)">TITLE</span>
+          {% elif h.kind == 'summary' %}<span style="color:var(--color-accent)">SUMMARY</span>
+          {% else %}{{ h.speaker or '' }}{% if h.timestamp %}<div style="color:var(--color-paper-faint)">{{ h.timestamp }}</div>{% endif %}{% endif %}
+        </div>
+        <div class="search-snippet" style="font-family:var(--font-serif);font-size:15px;line-height:1.55;color:var(--color-paper)">{{ h.snippet }}</div>
+      </a>
+      {% endfor %}
+      {% endif %}
+    </section>
+    {% else %}
+    <div data-testid="search-empty" style="padding:24px 0;color:var(--color-paper-faint);font-size:13px;font-style:italic">
+      No matches.{% if indexed < total %} {{ total - indexed }} transcript{{ 's' if total - indexed != 1 }} still being indexed.{% endif %}
+    </div>
+    {% endfor %}
+
+    {% if page > 1 or results.has_next %}
+    <div style="display:flex;gap:14px;align-items:center;margin-top:18px;font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">
+      {% if page > 1 %}<a href="/search?{{ qs }}&page={{ page - 1 }}" style="color:var(--color-accent)">← previous</a>{% endif %}
+      <span>page {{ page }}</span>
+      {% if results.has_next %}<a href="/search?{{ qs }}&page={{ page + 1 }}" style="color:var(--color-accent)">next →</a>{% endif %}
+    </div>
+    {% endif %}
+  {% endif %}
+</div>
+{% endblock %}

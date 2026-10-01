@@ -24,10 +24,12 @@ from typing import AsyncIterator, Callable, Optional
 from wisper_transcribe.campaign_manager import lookup_profile_by_discord_id
 from wisper_transcribe.models import Recording, RejoinAttempt
 from wisper_transcribe.recording_manager import (
+    append_rejoin,
+    bind_recording_speaker,
     create_recording,
     load_recordings,
     record_completed_wav_segment,
-    save_recording_merged,
+    update_recording_status,
 )
 from wisper_transcribe.web.audio_writer import (
     SegmentedWavWriter,
@@ -361,7 +363,8 @@ class BotManager:
                 )
                 recording.status = "failed"
                 recording.ended_at = datetime.now(timezone.utc)
-                save_recording_merged(recording, self._data_dir)
+                update_recording_status(recording.id, "failed", self._data_dir,
+                                        ended_at=recording.ended_at)
                 return None
             return "__test_token__"  # non-production source factory; token unused by sidecar
         return token
@@ -437,7 +440,11 @@ class BotManager:
                 recording.discord_speakers[user_id] = profile_key
                 if not profile_key and user_id not in recording.unbound_speakers:
                     recording.unbound_speakers.append(user_id)
-                save_recording_merged(recording, self._data_dir)
+                try:
+                    bind_recording_speaker(recording.id, user_id, profile_key or "", self._data_dir)
+                except Exception:
+                    log.warning("Could not record speaker %s on recording %s", user_id,
+                                recording.id, exc_info=True)
 
         self._writers[user_id].write(mono_16k)
 
@@ -452,7 +459,8 @@ class BotManager:
             )
             recording.status = "failed"
             recording.ended_at = datetime.now(timezone.utc)
-            save_recording_merged(recording, self._data_dir)
+            update_recording_status(recording.id, "failed", self._data_dir,
+                                    ended_at=recording.ended_at)
             return False
 
         if attempt >= len(self._backoff):
@@ -461,7 +469,7 @@ class BotManager:
                 len(self._backoff), recording.id,
             )
             recording.status = "degraded"
-            save_recording_merged(recording, self._data_dir)
+            update_recording_status(recording.id, "degraded", self._data_dir)
             return False
 
         delay = self._backoff[attempt]
@@ -475,7 +483,10 @@ class BotManager:
             attempt_number=attempt + 1,
         )
         recording.rejoin_log.append(rejoin)
-        save_recording_merged(recording, self._data_dir)
+        try:
+            append_rejoin(recording.id, rejoin, self._data_dir)
+        except Exception:
+            log.warning("Could not log rejoin on recording %s", recording.id, exc_info=True)
 
         if delay > 0:
             await asyncio.sleep(delay)
@@ -530,9 +541,10 @@ class BotManager:
             recording.status = "completed"
             recording.ended_at = datetime.now(timezone.utc)
 
-        # Always persist — combined_path (and, when applicable, the
-        # completed-status transition) must survive even if an earlier
-        # disconnect handler already saved a terminal status (failed/degraded).
-        save_recording_merged(recording, self._data_dir)
+        # combined.wav's path is derived from the layout, so only a status
+        # change needs writing; a terminal status saved by a disconnect
+        # handler (failed/degraded) is kept.
         if became_completed:
+            update_recording_status(recording.id, "completed", self._data_dir,
+                                    ended_at=recording.ended_at)
             log.info("Recording %s finalised as completed", recording.id)

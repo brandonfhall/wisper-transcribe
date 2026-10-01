@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import warnings
 from pathlib import Path
@@ -35,9 +36,22 @@ _ensure_utf8_stdio()
 
 from . import __version__
 from . import config as _config
+from .transcript_store import atomic_write_text, save_summary, save_transcript
 
 
-@click.group()
+class _WisperGroup(click.Group):
+    """Report database refusals (too-new schema, dev data dir, runtime
+    conflict, old SQLite) as a clean error instead of a traceback."""
+
+    def invoke(self, ctx):
+        from .db import DatabaseError
+        try:
+            return super().invoke(ctx)
+        except DatabaseError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+
+@click.group(cls=_WisperGroup)
 @click.version_option(__version__, prog_name="wisper")
 def main():
     """wisper-transcribe: Podcast transcription with speaker diarization."""
@@ -190,6 +204,11 @@ def server(host: str, port: int, reload: bool, debug: bool) -> None:
             "uvicorn is required to run the web server.  "
             "Install with: pip install 'wisper-transcribe[web]' or pip install uvicorn"
         )
+    # Fail before serving if the database can't be used (the lifespan checks
+    # again for `uvicorn` launched directly and --reload subprocesses).
+    from . import db
+    db.connect().close()
+
     # Publish bind address so app.py can write server.json for CLI discovery.
     os.environ["WISPER_BIND"] = f"{host}:{port}"
 
@@ -447,6 +466,9 @@ def config_set(key: str, value: str):
     elif isinstance(schema_value, list):
         # Accept comma-separated input: "Kyra, Golarion, Zeldris" → ["Kyra", "Golarion", "Zeldris"]
         coerced = [w.strip() for w in value.split(",") if w.strip()]
+    elif key == "output_dir" and value.strip():
+        # Store an absolute path so the root doesn't depend on the CWD.
+        coerced = str(Path(value.strip()).expanduser().resolve())
     else:
         coerced = value
     cfg[key] = coerced
@@ -668,11 +690,57 @@ def speakers_list():
         click.echo(f"{p.display_name:<20} {p.role:<12} {p.enrolled_date:<12} {p.enrollment_source}")
 
 
+@speakers.command("doctor")
+def speakers_doctor():
+    """Report likely problems with enrolled profiles. Changes nothing.
+
+    Flags pairs of profiles that sound like the same person, profiles from an
+    older speaker model, and profiles named like a placeholder.
+    """
+    from .speaker_manager import (
+        DUPLICATE_SIMILARITY, find_duplicate_profiles, load_profiles,
+        placeholder_name_profiles, stale_profile_keys,
+    )
+
+    profiles = load_profiles()
+    if not profiles:
+        click.echo("No speakers enrolled.")
+        return
+
+    problems = 0
+    duplicates = find_duplicate_profiles(profiles)
+    if duplicates:
+        problems += len(duplicates)
+        click.echo(f"Likely duplicates (voice similarity above {DUPLICATE_SIMILARITY:.2f}):")
+        for a, b, sim in duplicates:
+            click.echo(f"  {profiles[a].display_name} ({a}) ≈ {profiles[b].display_name} ({b})  {sim:.2f}")
+        click.echo("  Keep one: wisper speakers remove <name>, then rename the other if needed.")
+
+    stale = stale_profile_keys(profiles)
+    if stale:
+        problems += len(stale)
+        click.echo("Enrolled with an older speaker model, or no voice sample (never matched):")
+        for key in stale:
+            click.echo(f"  {profiles[key].display_name} ({key})")
+        click.echo("  Re-enroll them: wisper enroll <name> --audio <file>")
+
+    placeholders = placeholder_name_profiles(profiles)
+    if placeholders:
+        problems += len(placeholders)
+        click.echo("Named like a placeholder (probably enrolled by accident):")
+        for key in placeholders:
+            click.echo(f"  {profiles[key].display_name} ({key})")
+        click.echo("  Remove or rename: wisper speakers remove <name> / wisper speakers rename <old> <new>")
+
+    if problems == 0:
+        click.echo(f"No problems found in {len(profiles)} profile(s).")
+
+
 @speakers.command("remove")
 @click.argument("name")
 def speakers_remove(name: str):
     """Remove an enrolled speaker profile."""
-    # Shared with the web remove route (locked; removes .npy and .mp3).
+    # Shared with the web remove route (one transaction, then the .mp3 clip).
     from .speaker_manager import remove_profile
 
     key = name.lower().replace(" ", "_")
@@ -688,7 +756,7 @@ def speakers_remove(name: str):
 @click.argument("new_name")
 def speakers_rename(old_name: str, new_name: str):
     """Rename an enrolled speaker."""
-    # Shared with the web rename route (rekeys files and campaign rosters).
+    # Shared with the web rename route (memberships follow the profile id).
     from .speaker_manager import rename_profile
 
     old_key = old_name.lower().replace(" ", "_")
@@ -868,6 +936,17 @@ def campaigns_show(slug: str):
 
     click.echo(f"Campaign: {campaign.display_name} (slug: {campaign.slug})")
     click.echo(f"Created:  {campaign.created}")
+    from .journal import journal_path, journal_stale_since, sync_journal
+    sync_journal(safe)
+    jpath = journal_path(safe)
+    if jpath is not None and jpath.exists():
+        stale = journal_stale_since(safe)
+        if stale:
+            click.echo(f"Journal:  STALE since {stale} — it mentions sessions that were moved, "
+                       "removed, or re-transcribed.")
+            click.echo(f"          Rebuild it: wisper campaigns journal {safe} --rebuild")
+        else:
+            click.echo("Journal:  up to date")
     click.echo("")
 
     if not campaign.members:
@@ -1034,10 +1113,18 @@ def campaigns_relabel(slug: str, dry_run: bool, no_backfill: bool, device: str):
 @click.option("--all", "fold_all", is_flag=True, default=False,
               help="Fold every pending session in one run (oldest first)")
 @click.option("--rebuild", is_flag=True, default=False,
-              help="Redrive the whole campaign: re-summarize every session "
-                   "transcript from scratch and rebuild the journal from a "
-                   "clean start. A lot of LLM calls -- asks for confirmation "
-                   "unless --yes is also passed.")
+              help="Start the journal over from each session's existing "
+                   "summary (one LLM call per session; summaries and your "
+                   "edits to them are kept). Asks for confirmation unless "
+                   "--yes is also passed.")
+@click.option("--resummarize", is_flag=True, default=False,
+              help="With --rebuild: re-summarize every session transcript "
+                   "first, overwriting the summaries (two LLM calls per session).")
+@click.option("--export", "export", is_flag=True, default=False,
+              help="Print the journal with its folded-session list in the "
+                   "frontmatter (no LLM call). Use -o to write a file.")
+@click.option("-o", "--output", "output", type=click.Path(dir_okay=False, path_type=Path),
+              default=None, help="With --export: write to this file")
 @click.option("--yes", is_flag=True, default=False,
               help="Skip the --rebuild confirmation prompt")
 @click.option("--provider", default=None, type=_LLM_PROVIDER_CHOICE,
@@ -1045,7 +1132,8 @@ def campaigns_relabel(slug: str, dry_run: bool, no_backfill: bool, device: str):
 @click.option("--model", default=None, help="Model override (default: llm_model from config)")
 @click.option("--endpoint", default=None, help="Ollama endpoint override")
 def campaigns_journal(slug: str, session: Optional[str], fold_all: bool,
-                      rebuild: bool, yes: bool,
+                      rebuild: bool, resummarize: bool, export: bool,
+                      output: Optional[Path], yes: bool,
                       provider: Optional[str], model: Optional[str],
                       endpoint: Optional[str]):
     """Fold session summaries into a rolling campaign journal.
@@ -1054,11 +1142,16 @@ def campaigns_journal(slug: str, session: Optional[str], fold_all: bool,
     ``campaigns/<slug>/journal.md`` that the LLM rewrites as each new session
     is folded in. With no flags it folds the next unjournalled session (one
     that has a ``.summary.md`` from `wisper summarize`). Pass ``--all`` to fold
-    every pending session, ``--session <stem>`` to fold a specific one, or
-    ``--rebuild`` to redrive the entire campaign from its transcripts.
+    every pending session, ``--session <stem>`` to fold a specific one,
+    ``--rebuild`` to start the journal over from the existing summaries
+    (add ``--resummarize`` to re-summarize the transcripts first), or
+    ``--export`` to print it with its folded-session list.
     """
     from .campaign_manager import _validate_campaign_slug, get_transcripts_for_campaign, load_campaigns
-    from .journal import rebuild_campaign, unjournalled_sessions, update_journal
+    from .journal import (
+        export_journal, rebuild_campaign, refold_campaign, unjournalled_sessions, update_journal,
+    )
+    from .path_utils import get_output_dir
     from .llm.errors import LLMResponseError, LLMUnavailableError
     from .speaker_manager import load_profiles
 
@@ -1068,30 +1161,54 @@ def campaigns_journal(slug: str, session: Optional[str], fold_all: bool,
     if safe not in load_campaigns():
         raise click.ClickException(f"Campaign {safe!r} not found.")
 
-    exclusive = [session is not None, fold_all, rebuild]
+    exclusive = [session is not None, fold_all, rebuild, export]
     if sum(exclusive) > 1:
-        raise click.ClickException("--session, --all, and --rebuild are mutually exclusive.")
+        raise click.ClickException("--session, --all, --rebuild, and --export are mutually exclusive.")
+    if resummarize and not rebuild:
+        raise click.ClickException("--resummarize only applies with --rebuild.")
+    if output is not None and not export:
+        raise click.ClickException("-o/--output only applies with --export.")
+
+    if export:
+        text = export_journal(safe)
+        if text is None:
+            raise click.ClickException(f"Campaign {safe!r} has no journal yet.")
+        if output is None:
+            click.echo(text, nl=False)
+        else:
+            output.write_bytes(text.encode("utf-8"))
+            click.echo(f"Wrote {output}")
+        return
 
     if rebuild:
-        transcript_count = len(get_transcripts_for_campaign(safe))
+        stems = get_transcripts_for_campaign(safe)
+        transcript_count = len(stems)
         if transcript_count == 0:
             click.echo(f"Campaign {safe!r} has no transcripts to rebuild from.")
             return
+        if resummarize:
+            calls = transcript_count * 2
+            question = (f"Rebuild {safe!r} from transcripts: re-summarize all {transcript_count} "
+                        f"session(s), overwriting their summaries, and regenerate the journal "
+                        f"from scratch? This is {calls} LLM calls.")
+        else:
+            out_dir = get_output_dir()
+            unsummarized = sum(1 for st in stems if not (out_dir / f"{st}.summary.md").exists())
+            calls = transcript_count + unsummarized
+            extra = f" ({unsummarized} need a summary first)" if unsummarized else ""
+            question = (f"Rebuild {safe!r}: start the journal over from the {transcript_count} "
+                        f"sessions' existing summaries{extra}? About {calls} LLM calls.")
         if not yes:
-            click.confirm(
-                f"Rebuild {safe!r}: re-summarize all {transcript_count} session "
-                f"transcript(s) and regenerate the journal from scratch? "
-                f"This is {transcript_count * 2} LLM calls.",
-                abort=True,
-            )
+            click.confirm(question, abort=True)
         client = _get_llm_client(provider, model, endpoint)
         click.echo(f"Rebuilding {safe!r} with {client.provider} / {client.model} "
                    f"({transcript_count} session(s)) ...", err=True)
-        result = rebuild_campaign(
+        rebuild_fn = rebuild_campaign if resummarize else refold_campaign
+        result = rebuild_fn(
             safe, client, load_profiles(), data_dir=None,
             on_progress=lambda msg: click.echo(f"  {msg}", err=True),
         )
-        click.echo(f"Re-summarized: {len(result.resummarized)}")
+        click.echo(f"Summarized: {len(result.resummarized)}")
         if result.skipped:
             click.echo(f"Skipped: {len(result.skipped)}")
             for stem, reason in result.skipped:
@@ -1155,8 +1272,12 @@ def transcripts_list(campaign: Optional[str]):
             raise click.ClickException("Invalid campaign slug")
 
     out_dir = get_output_dir()
+    from .transcript_store import reconcile
+    reconcile(out_dir)  # register new files, flag ones deleted outside wisper
 
-    all_stems = sorted(p.stem for p in out_dir.glob("*.md") if not p.stem.endswith(".summary"))
+    all_stems = sorted(p.stem for p in out_dir.glob("*.md")
+                       if not p.stem.endswith(".summary") and not p.name.startswith("."))
+    present = set(all_stems)
 
     campaigns = load_campaigns()
 
@@ -1166,24 +1287,27 @@ def transcripts_list(campaign: Optional[str]):
         for stem in c.transcripts:
             stem_to_campaign[stem] = slug
 
+    def _label(stem: str) -> str:
+        return stem if stem in present else f"{stem}  (missing — file not found)"
+
     if campaign:
-        stems = [s for s in all_stems if stem_to_campaign.get(s) == campaign]
+        # Campaign order, including entries whose file is missing.
+        stems = campaigns[campaign].transcripts if campaign in campaigns else []
         if not stems:
             click.echo(f"No transcripts found for campaign {campaign!r}.")
             return
         for stem in stems:
-            click.echo(stem)
+            click.echo(_label(stem))
         return
 
-    # Grouped output
+    # Grouped output, each campaign in its fold order
     printed_any = False
     for slug, c in campaigns.items():
-        campaign_stems = [s for s in all_stems if stem_to_campaign.get(s) == slug]
-        if not campaign_stems:
+        if not c.transcripts:
             continue
         click.echo(f"\n📁 {c.display_name} [{slug}]")
-        for stem in campaign_stems:
-            click.echo(f"   {stem}")
+        for stem in c.transcripts:
+            click.echo(f"   {_label(stem)}")
         printed_any = True
 
     uncampaigned = [s for s in all_stems if s not in stem_to_campaign]
@@ -1236,19 +1360,19 @@ def transcripts_move(stem: str, campaign: Optional[str], unlink: bool):
 @click.argument("transcript", type=click.Path(exists=True, path_type=Path))
 @click.option("--speaker", required=True, help="Current speaker name to replace")
 @click.option("--name", "new_name", required=True, help="Correct name")
-@click.option("--re-enroll", is_flag=True, default=False, help="Also update voice embedding from original audio")
+@click.option("--re-enroll", is_flag=True, default=False, help="Print the command that re-enrolls the voice from the original audio")
 def fix(transcript: Path, speaker: str, new_name: str, re_enroll: bool):
     """Fix a speaker name in an existing transcript."""
     from .formatter import update_speaker_names
 
     content = transcript.read_text(encoding="utf-8")
     updated = update_speaker_names(content, speaker, new_name)
-    transcript.write_text(updated, encoding="utf-8")
+    save_transcript(transcript, updated)
     click.echo(f"Updated {transcript.name}: {speaker!r} → {new_name!r}")
 
     if re_enroll:
-        click.echo("Re-enrollment from fix is not yet automated. "
-                   "Run: wisper enroll <name> --audio <original_file> --update")
+        click.echo("To re-enroll the voice, run: "
+                   "wisper enroll <name> --audio <original_file> --update")
 
 
 # ---------------------------------------------------------------------------
@@ -1330,7 +1454,7 @@ def refine(transcript: Path, tasks_raw: str, provider: Optional[str],
     cfg = load_config()
     hotwords: list[str] = list(cfg.get("hotwords", []) or [])
     profiles = load_profiles()
-    # Character names are conventionally stored in profile.notes (CLAUDE.md).
+    # Character names come from profile.notes (comma- or semicolon-separated).
     character_names: list[str] = []
     for p in profiles.values():
         if p.notes:
@@ -1382,8 +1506,8 @@ def refine(transcript: Path, tasks_raw: str, provider: Optional[str],
         return
 
     backup = transcript.with_suffix(transcript.suffix + ".bak")
-    backup.write_text(original, encoding="utf-8")
-    transcript.write_text(refined_md, encoding="utf-8")
+    atomic_write_text(backup, original)
+    save_transcript(transcript, refined_md)
     click.echo(f"\nWrote {transcript}. Backup at {backup}.")
 
 
@@ -1475,8 +1599,8 @@ def summarize(transcript: Path, provider: Optional[str], model: Optional[str],
 
         if applied_edits and refined_md != current_md:
             backup = transcript.with_suffix(transcript.suffix + ".bak")
-            backup.write_text(current_md, encoding="utf-8")
-            transcript.write_text(refined_md, encoding="utf-8")
+            atomic_write_text(backup, current_md)
+            save_transcript(transcript, refined_md)
             click.echo(f"Refine applied {len(applied_edits)} edit(s). "
                        f"Backup: {backup}")
             current_md = refined_md
@@ -1498,7 +1622,7 @@ def summarize(transcript: Path, provider: Optional[str], model: Optional[str],
         raise click.ClickException(str(exc))
 
     body = render_markdown(note, profiles=profiles, sections=sections)
-    out_path.write_text(body, encoding="utf-8")
+    save_summary(out_path, body)
     click.echo(f"Wrote {out_path}")
     click.echo(
         f"  sections: {', '.join(sections)} | "
@@ -1537,12 +1661,12 @@ def _get_server_url() -> str:
         raise click.ClickException(f"Could not read server.json: {exc}")
 
 
-def _record_request(method: str, path: str, **kwargs) -> dict:
+def _record_request(method: str, path: str, timeout: float = 10, **kwargs) -> dict:
     """Make an HTTP request to the running wisper server. Returns parsed JSON."""
     import httpx
     url = _get_server_url().rstrip("/") + path
     try:
-        resp = httpx.request(method, url, timeout=10, **kwargs)
+        resp = httpx.request(method, url, timeout=timeout, **kwargs)
         resp.raise_for_status()
         return resp.json()
     except httpx.ConnectError:
@@ -1661,6 +1785,18 @@ def record_delete(recording_id: str):
     click.echo(result)
 
 
+@record.command("recover")
+@click.argument("recording_id")
+def record_recover(recording_id: str):
+    """Rebuild a crashed session's audio from its segments so it can be transcribed."""
+    from .recording_manager import _validate_recording_id
+    if not _validate_recording_id(recording_id):
+        raise click.ClickException(f"Invalid recording ID: {recording_id!r}")
+    # Joining hours of segments can take a while.
+    result = _record_request("POST", f"/api/recordings/{recording_id}/recover", timeout=600)
+    click.echo(result)
+
+
 # ---------------------------------------------------------------------------
 # wisper config discord
 # ---------------------------------------------------------------------------
@@ -1761,3 +1897,173 @@ def discord_presets_remove(name: str):
     cfg["discord_presets"] = new_presets
     save_config(cfg)
     click.echo(f"Removed preset {name!r}.")
+
+
+# ---------------------------------------------------------------------------
+# wisper search
+# ---------------------------------------------------------------------------
+
+def _terminal_snippet(snippet: str) -> str:
+    """A search snippet (escaped HTML with <mark> tags) as styled terminal text."""
+    import html
+    parts = re.split(r"<mark>(.*?)</mark>", str(snippet))
+    return "".join(
+        click.style(html.unescape(part), bold=True, fg="yellow") if i % 2 else html.unescape(part)
+        for i, part in enumerate(parts)
+    )
+
+
+@main.command("search")
+@click.argument("query")
+@click.option("--campaign", default=None, help="Only transcripts in this campaign (slug)")
+@click.option("--speaker", default=None, help="Only blocks spoken by this name (exact)")
+@click.option("--kind", type=click.Choice(["transcript", "summary"]), default=None,
+              help="Only transcripts or only session summaries")
+@click.option("--limit", type=click.IntRange(1, 200), default=10, show_default=True,
+              help="Maximum number of transcripts to show")
+def search(query: str, campaign: Optional[str], speaker: Optional[str], kind: Optional[str],
+           limit: int):
+    """Search every transcript's title and text, and every session summary, for QUERY.
+
+    Words match their other forms ("fights" finds "fight"); "double quotes"
+    match a phrase; a trailing * matches a prefix. Transcripts not yet in the
+    search index are indexed first.
+    """
+    from . import search_index
+    from .transcript_store import reconcile
+
+    reconcile()  # registers new files and marks edited ones for reindexing
+    indexed, total = search_index.progress()
+    if indexed < total:
+        click.echo(f"Indexing {total - indexed} transcript(s)...", err=True)
+        search_index.run_backfill()
+
+    page = search_index.search(query, campaign=campaign, speaker=speaker, kind=kind,
+                               per_page=limit)
+    if page.error:
+        raise click.ClickException(page.error)
+    if not page.groups:
+        click.echo("No matches.")
+        return
+    for group in page.groups:
+        where = f"  [{group.campaign_name}]" if group.campaign_name else ""
+        click.echo(click.style(group.stem, bold=True) + where
+                   + f"  ({group.total_hits} match{'es' if group.total_hits != 1 else ''})")
+        if group.stale:
+            click.echo("  changed since indexing — run the search again")
+            continue
+        for hit in group.hits:
+            label = hit.kind if hit.kind in ("summary", "title") else " ".join(
+                x for x in (hit.timestamp, hit.speaker or "") if x)
+            click.echo(f"  {label:<24} {_terminal_snippet(hit.snippet)}")
+    if page.has_next:
+        click.echo(f"More results: pass --limit {limit * 2}.")
+
+
+# ---------------------------------------------------------------------------
+# wisper db
+# ---------------------------------------------------------------------------
+
+@main.group("db")
+def db_group():
+    """Inspect, back up, dump, or reindex the wisper database."""
+
+
+@db_group.command("status")
+def db_status():
+    """Show schema version, integrity checks, and runtime leases.
+
+    Read-only: never migrates, so it also works on a database that startup
+    refuses.
+    """
+    from . import db
+
+    st = db.status()
+    click.echo(f"Database       : {st.path}")
+    click.echo(f"SQLite         : {st.sqlite_version}")
+    if st.capability_error:
+        click.echo(f"  ! {st.capability_error}")
+    if not st.exists:
+        click.echo("Not created yet (it is created on first use).")
+        return
+    click.echo(f"Size           : {st.size_bytes / 1024:.1f} KB")
+    click.echo(f"Schema version : {st.version} (this build: {st.latest})")
+    if st.version > st.latest:
+        click.echo("  ! Newer than this build; upgrade wisper before using it.")
+    elif st.version < st.latest:
+        click.echo("  Migrations pending; they run on next start.")
+    integrity_ok = st.integrity == ["ok"]
+    click.echo(f"Integrity      : {'ok' if integrity_ok else 'FAILED'}")
+    for line in ([] if integrity_ok else st.integrity[:20]):
+        click.echo(f"  {line}")
+    click.echo(f"Foreign keys   : {'ok' if st.fk_violations == 0 else f'{st.fk_violations} violation(s)'}")
+    if st.schema_drift:
+        click.echo(
+            "  ! Schema differs from what this build creates at this version. "
+            "The database was probably created by an unmerged development build."
+        )
+    if not st.frozen:
+        click.echo("Build          : unmerged development build (schema not frozen)")
+    for m in st.migrations:
+        backup = f", backup {m['backup_dir']}" if m["backup_dir"] else ""
+        click.echo(f"  v{m['version']} applied {m['applied_at']}{backup}")
+    if st.leases:
+        click.echo("Runtime leases :")
+        for lease in st.leases:
+            vm = " (Docker Desktop VM)" if lease["crosses_vm"] else ""
+            state = "active" if lease["age_s"] < db.LEASE_TTL_S else "expired"
+            click.echo(
+                f"  {lease['runtime']:<9} {lease['holder']}{vm} "
+                f"— heartbeat {lease['heartbeat_at']} ({state})"
+            )
+
+
+@db_group.command("backup")
+@click.argument("dest", required=False, type=click.Path(dir_okay=False, path_type=Path))
+def db_backup(dest: Optional[Path]):
+    """Copy the database to DEST (default: <data dir>/backups/wisper-<time>.db).
+
+    Uses SQLite's backup API, so it is consistent even while the server runs.
+    """
+    from . import db
+
+    out = db.backup(dest=dest)
+    click.echo(f"Backed up to {out}")
+
+
+@db_group.command("reindex")
+def db_reindex():
+    """Drop and rebuild the full-text search index from the transcript files.
+
+    The index is derived from the files, so this never loses data. The
+    running server's index is rebuilt too (it shares the database).
+    """
+    from . import search_index
+    from .transcript_store import reconcile
+
+    reconcile()
+
+    def report(done: int, todo: int) -> None:
+        if done == todo or done % 25 == 0:
+            click.echo(f"  {done}/{todo}", err=True)
+
+    n = search_index.rebuild(report=report)
+    click.echo(f"Indexed {n} transcript(s).")
+
+
+@db_group.command("dump")
+@click.option("-o", "--output", "output", type=click.Path(dir_okay=False, path_type=Path),
+              default=None, help="Write to a file instead of stdout")
+def db_dump(output: Optional[Path]):
+    """Print the whole database as SQL text."""
+    from . import db
+
+    lines = db.dump()
+    if output is None:
+        for line in lines:
+            click.echo(line)
+        return
+    with open(output, "w", encoding="utf-8") as fh:
+        for line in lines:
+            fh.write(line + "\n")
+    click.echo(f"Wrote {output}")

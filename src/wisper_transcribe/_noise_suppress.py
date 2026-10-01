@@ -38,12 +38,13 @@ def _silence_logger(name: str) -> None:
     'no handlers found' warning.
     """
     logger = logging.getLogger(name)
-    # Idempotent: skip if already silenced.
-    if any(isinstance(f, _SilenceFilter) for f in logger.filters):
-        return
+    # The level and propagate flag are reasserted on every call: importing
+    # torch resets the "torch" logger's level, so a second call after that
+    # import must still restore ERROR. Only the filter/handler are added once.
     logger.setLevel(logging.ERROR)
-    logger.addFilter(_SilenceFilter())
     logger.propagate = False
+    if not any(isinstance(f, _SilenceFilter) for f in logger.filters):
+        logger.addFilter(_SilenceFilter())
     if not logger.handlers:
         logger.addHandler(logging.NullHandler())
 

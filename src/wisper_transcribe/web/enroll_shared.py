@@ -23,6 +23,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
+from wisper_transcribe.transcript_store import save_transcript
 
 log = logging.getLogger(__name__)
 
@@ -62,14 +63,12 @@ def find_excerpt_clip(out_dir: Path, stem: str, candidates: list[str]) -> Option
 
 
 def _load_diar_sidecar(md_path: Path) -> Optional[dict]:
-    """Load the enrollment sidecar for a transcript, or None if absent/corrupt."""
-    import json as _json
+    """The transcript's diarization data (``transcript_store.read_sidecar``),
+    or None if it has no sidecar or it's corrupt."""
+    from wisper_transcribe.transcript_store import read_sidecar
 
-    sidecar_path = md_path.with_name(md_path.stem + "_diar.json")
-    if not sidecar_path.exists():
-        return None
     try:
-        return _json.loads(sidecar_path.read_text(encoding="utf-8"))
+        return read_sidecar(md_path)
     except Exception:
         return None
 
@@ -306,7 +305,7 @@ def apply_renames(
         from wisper_transcribe.formatter import rewrite_frontmatter_speakers
         content = rewrite_frontmatter_speakers(content, frontmatter_renames)
 
-    md_path.write_text(content, encoding="utf-8")
+    save_transcript(md_path, content)
 
     # Record every submitted label's current name so the sidecar stays
     # authoritative for the next visit.
@@ -318,13 +317,14 @@ def apply_renames(
         for raw, new in valid.items():
             if new != old_names[raw]:
                 sources[raw] = source
-        if sources:
-            diar["speaker_map_source"] = sources
+        diar["speaker_map_source"] = sources
+        # The .md is rewritten first (above), then the speaker rows. A crash
+        # in between leaves the rows stale; interval matching repairs that.
         try:
-            sidecar_path = md_path.with_name(md_path.stem + "_diar.json")
-            sidecar_path.write_text(_json.dumps(diar, indent=2), encoding="utf-8")
+            from wisper_transcribe.transcript_store import set_speaker_names
+            set_speaker_names(md_path, updated_map, sources)
         except Exception:
-            pass
+            log.warning("Could not record speaker names for %s", md_path.name, exc_info=True)
 
     if not segments:
         return RenameResult(current_names, groups={})

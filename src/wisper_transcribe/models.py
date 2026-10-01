@@ -3,9 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, Optional
+from typing import TYPE_CHECKING, Literal, Optional
 
 from .config import EMBEDDING_SPACE
+
+if TYPE_CHECKING:
+    import numpy as np
 
 
 @dataclass
@@ -41,10 +44,10 @@ class AlignedSegment:
 
 @dataclass
 class SpeakerProfile:
-    name: str
+    name: str                         # profile key: URL slug and reference-clip filename
     display_name: str
     role: str
-    embedding_path: Path
+    embedding: Optional["np.ndarray"]  # unit-length float32, loaded with the profile; None if never enrolled
     enrolled_date: str
     enrollment_source: str
     notes: str = ""
@@ -111,6 +114,9 @@ class Marker:
 
 @dataclass
 class Recording:
+    """A recording session. Stored in wisper.db by ``recording_manager``;
+    ``status``, ``combined_path``, ``per_user_dir``, segment paths, marker
+    ``elapsed_s``, ``unbound_speakers``, and ``job_id`` are derived on load."""
     id: str                        # uuid4
     campaign_slug: Optional[str]
     started_at: datetime
@@ -127,10 +133,12 @@ class Recording:
     notes: Optional[str] = None
     unbound_speakers: list = field(default_factory=list)  # discord_user_ids heard but not bound
     job_id: Optional[str] = None  # JobQueue job.id when transcription is in progress or done
-    source: str = "discord"        # "discord" | "local" — default keeps legacy JSON loading unchanged
+    source: str = "discord"        # "discord" | "local"
     devices: dict = field(default_factory=dict)  # local: {"mic": "<device name>", "system": "<device name>"} — display-only, never used in a file path
     name: Optional[str] = None     # user-supplied session name, set at start; display-only, never used in a file path
     markers: list = field(default_factory=list)  # list[Marker] -- user-flagged moments, "Add marker" button on /record
+    recovered_at: Optional[datetime] = None  # set when a crashed session's segments were joined into combined.wav
+    recoverable: bool = False      # derived: failed, no combined.wav, but combined segments on disk
 
 
 # ---------------------------------------------------------------------------

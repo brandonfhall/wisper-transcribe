@@ -424,13 +424,11 @@ def test_enroll_pick_existing_speaker_skips_enroll(
     mock_align.return_value = [AlignedSegment(start=0.0, end=5.0, text="Hello", speaker="SPEAKER_00")]
 
     fake_emb = np.zeros(512, dtype=np.float32)
-    npy_path = tmp_path / "alice.npy"
-    np.save(str(npy_path), fake_emb)
 
     existing = {
         "alice": SpeakerProfile(
             name="alice", display_name="Alice", role="DM",
-            embedding_path=npy_path,
+            embedding=fake_emb,
             enrolled_date="2026-01-01", enrollment_source="ep1.mp3",
         )
     }
@@ -474,13 +472,11 @@ def test_enroll_pick_existing_speaker_confirm_yes_updates_embedding(
 
     import numpy as np
     fake_emb = np.zeros(512, dtype=np.float32)
-    npy_path = tmp_path / "alice.npy"
-    np.save(str(npy_path), fake_emb)
 
     existing = {
         "alice": SpeakerProfile(
             name="alice", display_name="Alice", role="DM",
-            embedding_path=npy_path,
+            embedding=fake_emb,
             enrolled_date="2026-01-01", enrollment_source="ep1.mp3",
         )
     }
@@ -530,12 +526,9 @@ def test_enroll_existing_speakers_ranked_by_similarity(
     bob_emb   = np.array([0.0, 1.0, 0.0], dtype=np.float32)
     query_emb = np.array([0.9, 0.1, 0.0], dtype=np.float32)  # closer to Alice
 
-    for name, emb in [("alice", alice_emb), ("bob", bob_emb)]:
-        np.save(str(tmp_path / f"{name}.npy"), emb)
-
     existing = {
-        "alice": SpeakerProfile("alice", "Alice", "DM", tmp_path / "alice.npy", "2026-01-01", "ep1.mp3"),
-        "bob":   SpeakerProfile("bob",   "Bob",   "Player", tmp_path / "bob.npy", "2026-01-01", "ep1.mp3"),
+        "alice": SpeakerProfile("alice", "Alice", "DM", alice_emb, "2026-01-01", "ep1.mp3"),
+        "bob":   SpeakerProfile("bob",   "Bob",   "Player", bob_emb, "2026-01-01", "ep1.mp3"),
     }
 
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value=existing):
@@ -587,14 +580,12 @@ def test_newly_enrolled_speaker_appears_for_subsequent_speakers(
         AlignedSegment(start=5.0, end=10.0, text="Hello from Carol", speaker="SPEAKER_01"),
     ]
 
-    # Pre-create an embedding file that the mock enroll_speaker will point to.
-    brad_npy = tmp_path / "brad.npy"
+    # The embedding the mocked enroll_speaker returns with the new profile.
     brad_emb = np.zeros(512, dtype=np.float32)
-    np.save(str(brad_npy), brad_emb)
 
     brad_profile = SpeakerProfile(
         name="brad", display_name="Brad", role="",
-        embedding_path=brad_npy,
+        embedding=brad_emb,
         enrolled_date="2026-01-01", enrollment_source="session01.mp3",
     )
 
@@ -1229,6 +1220,8 @@ def test_process_file_passes_campaign_profile_filter(
 
     # Create a campaign with alice as sole member
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from ._seed import seed_profile
+    seed_profile("alice", data_dir=tmp_path)
     cm.create_campaign("Test Game", data_dir=tmp_path)
     cm.add_member("test-game", "alice", data_dir=tmp_path)
 
@@ -1551,11 +1544,8 @@ def test_process_file_reports_profiles_from_old_model(
     from wisper_transcribe.pipeline import process_file
 
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-    profiles_dir = tmp_path / "profiles"
-    profiles_dir.mkdir()
-    (profiles_dir / "speakers.json").write_text(json.dumps({
-        "bob": {"display_name": "Bob", "embedding_file": "embeddings/bob.npy"},
-    }))
+    from ._seed import seed_profile
+    seed_profile("bob", "Bob", embedding_space="")  # untagged = older model
 
     audio = tmp_path / "session01.mp3"
     audio.write_bytes(b"fake audio")
@@ -1659,3 +1649,129 @@ def test_forced_alignment_runs_in_parallel_stages_path(tmp_path):
 def test_forced_alignment_auto_language_passes_none(tmp_path):
     align_words, _ = _run_with_alignment(tmp_path, device="cuda", language="auto")
     assert align_words.call_args.args[3] is None
+
+
+# ---------------------------------------------------------------------------
+# Registration: output under the output root is registered and associated
+# ---------------------------------------------------------------------------
+
+_PIPELINE_PATCHES = [
+    patch("wisper_transcribe.pipeline.check_ffmpeg"),
+    patch("wisper_transcribe.pipeline.validate_audio"),
+    patch("wisper_transcribe.pipeline.get_duration", return_value=60.0),
+    patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS),
+    patch("wisper_transcribe.pipeline.get_hf_token", return_value="fake-token"),
+    patch("wisper_transcribe.diarizer.diarize", return_value=[]),
+    patch("wisper_transcribe.aligner.align", return_value=[]),
+    patch("wisper_transcribe.speaker_manager.match_speakers", return_value={}),
+]
+
+
+def _run_process_file(audio, extra_patches=(), **kwargs):
+    """process_file with ML mocked; ``extra_patches`` are applied last, so they win."""
+    import contextlib
+
+    from wisper_transcribe.pipeline import process_file
+
+    with contextlib.ExitStack() as stack:
+        for p in [*_PIPELINE_PATCHES, *extra_patches]:
+            stack.enter_context(p)
+        stack.enter_context(patch("wisper_transcribe.pipeline.convert_to_wav", return_value=audio))
+        return process_file(audio, device="cpu", no_diarize=True, **kwargs)
+
+
+def test_output_in_root_is_registered_and_joins_campaign(tmp_path, capsys):
+    from wisper_transcribe import db
+    import wisper_transcribe.campaign_manager as cm
+    from wisper_transcribe.path_utils import get_output_dir
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    cm.create_campaign("Game")
+    out = _run_process_file(audio, output_dir=get_output_dir(), campaign="game")
+
+    assert out.exists()
+    with db.connection() as conn:
+        rows = conn.execute("SELECT stem, missing_since FROM transcripts").fetchall()
+    assert [tuple(r) for r in rows] == [("session01", None)]
+    assert cm.get_transcripts_for_campaign("game") == ["session01"]
+
+
+def test_output_outside_root_skips_campaign_with_note(tmp_path, capsys):
+    from wisper_transcribe import db
+    import wisper_transcribe.campaign_manager as cm
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    elsewhere = tmp_path / "elsewhere"
+    cm.create_campaign("Game")
+    _run_process_file(audio, output_dir=elsewhere, campaign="game")
+
+    assert cm.get_transcripts_for_campaign("game") == []
+    with db.connection() as conn:
+        assert conn.execute("SELECT count(*) FROM transcripts").fetchone()[0] == 0
+    assert "outside the transcripts folder" in capsys.readouterr().out
+
+
+def test_existing_output_fails_for_web_jobs(tmp_path):
+    from wisper_transcribe.path_utils import get_output_dir
+    from wisper_transcribe.transcript_store import TranscriptExistsError
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    existing = get_output_dir() / "session01.md"
+    existing.write_text("old", encoding="utf-8")
+    with pytest.raises(TranscriptExistsError):
+        _run_process_file(audio, output_dir=get_output_dir(), skip_existing=False)
+    assert existing.read_text(encoding="utf-8") == "old"
+
+
+def test_cli_skip_message_names_the_campaign(tmp_path, capsys):
+    import wisper_transcribe.campaign_manager as cm
+    from wisper_transcribe.path_utils import get_output_dir
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    (get_output_dir() / "session01.md").write_text("old", encoding="utf-8")
+    cm.create_campaign("Game")
+    cm.move_transcript_to_campaign("session01", "game")
+    out = _run_process_file(audio, output_dir=get_output_dir())
+    assert out.read_text(encoding="utf-8") == "old"
+    assert "already processed (in campaign 'game')" in capsys.readouterr().out
+
+
+def test_output_appearing_during_the_run_is_not_clobbered(tmp_path):
+    """The pre-write re-check: another writer created the file mid-job."""
+    from wisper_transcribe.path_utils import get_output_dir
+    from wisper_transcribe.transcript_store import TranscriptExistsError
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    target = get_output_dir() / "session01.md"
+
+    def transcribe_then_race(*a, **k):
+        target.write_text("someone else's", encoding="utf-8")
+        return FAKE_SEGMENTS
+
+    race = patch("wisper_transcribe.pipeline.transcribe", side_effect=transcribe_then_race)
+    with pytest.raises(TranscriptExistsError):
+        _run_process_file(audio, extra_patches=[race], output_dir=get_output_dir(),
+                          skip_existing=False)
+    assert target.read_text(encoding="utf-8") == "someone else's"
+
+
+def test_overwrite_keeps_transcript_identity_and_campaign(tmp_path):
+    import wisper_transcribe.campaign_manager as cm
+    from wisper_transcribe import db
+    from wisper_transcribe.path_utils import get_output_dir
+
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake audio")
+    cm.create_campaign("Game")
+    _run_process_file(audio, output_dir=get_output_dir(), campaign="game")
+    with db.connection() as conn:
+        first_id = conn.execute("SELECT id FROM transcripts").fetchone()[0]
+    _run_process_file(audio, output_dir=get_output_dir(), overwrite=True)
+    with db.connection() as conn:
+        assert conn.execute("SELECT id FROM transcripts").fetchall()[0][0] == first_id
+    assert cm.get_transcripts_for_campaign("game") == ["session01"]

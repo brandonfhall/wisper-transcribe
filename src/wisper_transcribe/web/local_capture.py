@@ -38,7 +38,7 @@ from wisper_transcribe.models import Recording
 from wisper_transcribe.recording_manager import (
     create_recording,
     record_completed_wav_segment,
-    save_recording_merged,
+    update_recording_status,
 )
 from wisper_transcribe.web.audio_writer import (
     SegmentedWavWriter,
@@ -227,7 +227,7 @@ def enumerate_devices() -> dict:
 def resolve_device_name(devices: list, device_id: str) -> str:
     """Look up `device_id` in an `enumerate_devices()` list; falls back to
     echoing the id itself when not found (device ids are never used in a
-    file path, so this is safe -- see CLAUDE.md's web route security rules)."""
+    file path, so this is safe -- see .claude/rules/web-security.md)."""
     for d in devices:
         if d.get("id") == device_id:
             return d.get("name", device_id)
@@ -364,6 +364,9 @@ class LocalCaptureManager:
             self._level_peaks = {"mic": 0.0, "system": 0.0}
 
         self._stop_event = threading.Event()
+        # Published before any thread starts: a device that fails at once
+        # calls _mark_degraded(), which needs the active recording.
+        self._active_recording = recording
         self._capture_threads = [
             threading.Thread(
                 target=self._capture_loop,
@@ -387,8 +390,6 @@ class LocalCaptureManager:
             daemon=True,
         )
         self._tick_thread.start()
-
-        self._active_recording = recording
         log.info("Local capture session started: %s", recording.id)
         return recording
 
@@ -437,7 +438,7 @@ class LocalCaptureManager:
             return
         try:
             recording.status = "degraded"
-            save_recording_merged(recording, self._data_dir)
+            update_recording_status(recording.id, "degraded", self._data_dir)
         except Exception:
             log.warning("Failed to mark recording %s degraded", recording.id, exc_info=True)
 
@@ -560,6 +561,9 @@ class LocalCaptureManager:
             recording.status = "completed"
             recording.ended_at = datetime.now(timezone.utc)
 
-        save_recording_merged(recording, self._data_dir)
+        # combined.wav's path is derived from the layout; only the status
+        # change needs writing, and a terminal status set earlier is kept.
         if became_completed:
+            update_recording_status(recording.id, "completed", self._data_dir,
+                                    ended_at=recording.ended_at)
             log.info("Local recording %s finalised as completed", recording.id)

@@ -101,14 +101,54 @@ python scripts/alignment_eval.py score alignment-eval/*/
 
 The sheet lists rows marked `discriminating` first: those are the words where the variants disagree, and they decide the result. The proxy is only a sanity check; trust the labels. Live-table recordings are the best test audio, since edited podcasts have little timing drift to fix.
 
+---
+
+## Finding a moment across sessions
+
+"When did we first meet the Baron?" Type it into the search box at the top of the sidebar (or run `wisper search "Baron"`). Results come grouped by session, best match first, each with the speaker, timestamp, and the matching line; clicking one opens the transcript at that line with the words highlighted.
+
+- Narrow it down with the campaign, speaker, and transcripts-or-summaries filters (`--campaign`, `--speaker`, `--kind` on the CLI).
+- Put a phrase in `"double quotes"`; end a word with `*` for anything that starts with it (`Barov*` finds Barovia and Barovian).
+- Edits you make in Obsidian are picked up automatically. If search ever looks out of date, `wisper db reindex` rebuilds it from the files.
+
+---
+
+## A transcript was renamed or deleted outside wisper
+
+wisper keeps a record of every transcript in the transcripts folder. If a file vanishes (deleted or renamed in Finder or Obsidian, a sync that hasn't finished, a drive that isn't connected), its campaign entry stays in place and shows **MISSING** instead of being dropped.
+
+- **It comes back** (sync finishes, drive reconnected): nothing to do; the flag clears the next time you open the Campaign or Transcripts page.
+- **It was renamed:** on the Campaign page, choose the new name in the **Relink** dropdown next to the missing entry. The session keeps its place in the episode order, its journal entry, and its speaker names. Renaming only the capitalization (e.g. `session 1` → `Session 1`) is picked up automatically on macOS and Windows.
+- **It's really gone:** remove it from the campaign with ✕. If it had been folded into the journal, the journal is marked as needing a rebuild.
+
+`wisper transcripts list` shows missing entries too.
+
+---
+
+## A recording stopped unexpectedly
+
+If wisper crashes or the machine loses power mid-session, the recording shows **FAILED** after the restart, but everything captured up to the last minute is still on disk. Open the recording and click **Recover recording** (or run `wisper record recover <recording_id>` while `wisper server` runs). The saved pieces are joined into one file, the recording becomes **COMPLETED**, and **Transcribe** works as usual. Expect up to the final minute to be missing.
+
+---
+
+## Starting the campaign journal over
+
+- **Rebuild journal** (web) or `wisper campaigns journal <slug> --rebuild` re-folds every session's existing summary: one LLM call per session, and your edits to summaries are kept.
+- **Rebuild from transcripts** / `--rebuild --resummarize` re-summarizes every session first (two calls per session). Use it after switching LLM model or when the summaries are poor.
+- Deleting `journal.md` from `campaigns/<slug>/` also starts over: every summarized session becomes pending again. Editing `journal.md` by hand is fine; later folds build on your version.
+
+---
+
 ## Known Limitations
 
 - **One recording at a time.** Starting a Discord or local recording while either kind is active is rejected.
 - **One voice channel per Discord session.** No multi-guild or multi-channel recording.
-- **Discord recording needs Java.** Discord encrypts voice end-to-end (DAVE), and only the Java JDA + JDAVE sidecar can decrypt it today. It will move to Python once a stable Python library supports DAVE receive.
+- **Discord recording needs Java.** Discord encrypts voice end-to-end (DAVE); the Java JDA + JDAVE sidecar decrypts it, since no stable Python library supports DAVE receive.
 - **Live transcription is local-only.** Discord sessions are transcribed after they stop.
 - **The live preview is a draft.** Lines are labelled "You" or "Other" by comparing mic and system-audio volume, not by voice. The diarized transcript from **Transcribe** is the real one. On CPU-only machines, use `base` or `small` so the preview keeps up.
 - **Live preview waits for other jobs.** Jobs run one at a time, so a job already running when a local session starts delays the preview until it finishes.
-- **Word alignment needs a GPU by default.** On CPU-only machines `forced_alignment = auto` leaves it off (it adds ~10–20 min per 2.5 h session); set it to `true` to use it anyway. It supports 11 languages (English, Chinese, Cantonese, French, German, Italian, Japanese, Korean, Portuguese, Russian, Spanish); others keep Whisper's word timing. It can't split words when two people talk at once.
+- **Word alignment needs a GPU by default.** On CPU-only machines `forced_alignment = auto` leaves it off (it adds ~9–20 min per 2.5 h session); set it to `true` to use it anyway. It supports 11 languages (English, Chinese, Cantonese, French, German, Italian, Japanese, Korean, Portuguese, Russian, Spanish); others keep Whisper's word timing. It can't split words when two people talk at once.
 - **Cancelling is best-effort.** A cancelled transcription stops at its next progress update; the GPU may finish its current batch first.
+- **Search highlighting is approximate.** Matching understands word forms ("fights" finds "fight"), but the highlighter only guesses at them, so occasionally a result shows no highlighted word.
+- **One way of running per data folder on Mac/Windows.** Don't run the native CLI or server against a data folder that a Docker Desktop container is using at the same time; wisper refuses the second one (see [docker.md](docker.md#one-way-of-running-at-a-time)).
 - **No web authentication.** `wisper server` binds `127.0.0.1` by default. With `--host 0.0.0.0`, anyone who can reach the port has full control, including recording — see the [trust model](web-ui.md#trust-model).

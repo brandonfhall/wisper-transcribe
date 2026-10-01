@@ -8,9 +8,13 @@ Active plans, open bugs, and parked designs. Shipped work is removed; its design
 
 ### Missing transcript file after a successful Transcribe job
 
-A local-recording `JOB_TRANSCRIPTION` job reported COMPLETED and logged "Wrote `<id>.md`", and the recording's metadata points at that path, but the file never existed on disk. Ruled out: a CWD-relative write, a `WISPER_DATA_DIR` mismatch, and every delete path in `jobs.py` (the upload-cleanup helpers are gated on `job.is_web_upload`, which recordings never set). The job queue has no persistence, so the evidence was lost on restart.
+A local-recording transcription once reported COMPLETED ("Wrote `<id>.md`") but the file never existed; root cause unknown. **Detection is in place:** the job fails with "Transcript file missing after write" and logs the transcripts folder, and job history keeps that log across restarts. **Next step:** if it recurs, check `/jobs/history` for the job's log and output root; run with `WISPER_DEBUG=1` to capture more (`LIVE_AUDIO_TEST_PLAN.md` §4a).
 
-**Next step:** run the server with `WISPER_DEBUG=1` during local-recording transcribes so a recurrence is captured. See `LIVE_AUDIO_TEST_PLAN.md` §4a.
+### Docker Desktop + native CLI on one data dir can corrupt the DB
+
+With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted, a native `wisper` command pointed at the same `./data` (via `WISPER_DATA_DIR`) and writing at the same time can corrupt `wisper.db`: file locks don't cross the Docker Desktop VM boundary. Reproduced 2026-09-30 (one host writer plus one container writer gave `database disk image is malformed` and lost updates). Container + container is fine (15,000/15,000 writes), and native Linux Docker is unaffected.
+
+**Status:** guarded, not fixed. The runtime lease (`db.py`, `runtime_leases`) makes the second runtime refuse to start when the container is inside Docker Desktop's VM; it is advisory (two processes starting in the same second could both pass). Documented in `docs/docker.md` ("One way of running at a time"). A real fix would need a lock that crosses the VM (e.g. routing host CLI writes through the container's server API).
 
 ### Ollama: empty responses from reasoning models
 
@@ -25,14 +29,25 @@ A local-recording `JOB_TRANSCRIPTION` job reported COMPLETED and logged "Wrote `
 - **Live recording + campaign journal:** `LIVE_AUDIO_TEST_PLAN.md` — real-device capture, live transcript, journal browser flows, bulk delete, busy-queue notice.
 - **Live Discord acceptance test.** The recording pipeline (WAV segments, `__mixed__` combined track, `combined_path` hand-off) is covered by synthesized-PCM tests, but the JDA → socket → Python path needs one real session: record a few minutes with 2+ speakers, play the per-user WAVs, and run Transcribe.
 - **Windows launcher dependency refresh.** `start.bat` reinstalls dependencies when `pyproject.toml` is newer than `.venv\.wisper-deps` (untested on Windows): update an existing install with `git pull`, double-click `start.bat`, confirm the one-time "Dependencies changed" reinstall runs, and that a second launch skips it.
-- **Docker image with forced alignment.** The "Docker Build" workflow is disabled on GitHub, so nothing builds the image automatically. Confirm the CPU and GPU images build with `transformers`, and that a diarized job on the GPU image downloads the alignment model into `./cache/` and logs "Aligned words".
-- **macOS loopback (PR #59).** Record page on a Mac with BlackHole installed: BlackHole appears under System Audio and captures audio.
+- **GPU Docker image on an NVIDIA host.** The "Docker Build" workflow is disabled on GitHub, and the GPU image can only be built (not run) without NVIDIA hardware. Confirm a diarized job on the GPU image downloads the alignment model into `./cache/` and logs "Aligned words".
+- **SQLite storage in a browser and on real capture** (automated coverage: `test_e2e.py`, `test_schema.py`). With `WISPER_DATA_DIR` pointing at a copy of real data:
+  - Journal: the stale-journal notice (move a folded session to another campaign) on the Campaign and Journal pages; **Rebuild journal** vs **Rebuild from transcripts** confirmations and their call counts; journal **Download** includes `journaled_sessions`.
+  - Job history page, filters, paging, and a historical job's page after a restart.
+  - Recording: record a few minutes (Discord and local), add markers (including two in quick succession), edit the notes mid-session, stop, Transcribe, Re-transcribe, then delete the transcript and confirm the recording is back under "Awaiting transcription" with its notes intact. Kill the server mid-session once, restart, and use **Recover recording**.
+  - Search: edit a transcript in Obsidian while the server runs and search for the new words (the result shows "changed — reindexing", then matches after a reload); rename a speaker in the wizard, then search by the new name with the speaker filter.
+- **macOS loopback.** Record page on a Mac with BlackHole installed: BlackHole appears under System Audio and captures audio.
+
+---
+
+## Dependency pins
+
+- **Drop `av<19`** (pyproject) once a faster-whisper release stops passing `metadata_errors=` to `av.open()`; check with a CPU Docker build and one transcription.
 
 ---
 
 ## Forced word alignment — follow-ups
 
-Shipped in #64 (design in `architecture.md`, "Forced word alignment"), default `forced_alignment = auto`. It shipped on spot-check evidence rather than the full labelled gate: on a 2 h episode, aligned and unaligned runs disagreed on 155 of 20,675 words; one-word "islands" inside another speaker's run were 10 (unaligned) vs 3 (aligned); 4 of 4 hand-checked disputed words were right with alignment. The labelling sheets were deleted after merge.
+Design in `architecture.md` ("Forced word alignment"). The `forced_alignment = auto` default rests on spot-check evidence, not a full labelled set: on a 2 h episode, aligned and unaligned runs disagreed on 155 of 20,675 words; one-word "islands" inside another speaker's run were 10 (unaligned) vs 3 (aligned); 4 of 4 hand-checked disputed words were right with alignment.
 
 - **If attribution at speaker changes regresses, or before changing the aligner, smoothing thresholds, or the default,** run `scripts/alignment_eval.py` (see `docs/scenarios.md`) on a live-table excerpt and label its sheet. Arms already exist for the open questions: `aligned-guard-1s` (on edited podcast audio, words moved >1 s favoured Whisper 8 vs 1, the opposite of the Hanataz spike's 28 vs 1), `aligned-smooth-1w` / `aligned-nosmooth`, and `aligned-exclusive`.
 - **Fallback engine:** `torchaudio` MMS_FA + star token (no new dependency, but CC-BY-NC weights and weaker on crosstalk). Only if the `transformers` dependency becomes a problem; recipe in git history (`6286e21`).
@@ -42,9 +57,8 @@ Shipped in #64 (design in `architecture.md`, "Forced word alignment"), default `
 
 ## Speaker consistency — remaining
 
-Shipped in #63; the design is in `architecture.md`. What's left:
+Design in `architecture.md`. Open items:
 
-- **Profile cleanup (user action).** Re-enroll every profile after the embedding-model change; delete the `speaker_*` / `SPEAKER_NN` junk and duplicate profiles; enroll Mike and Ben from sessions where they're clearly separated. Consider a `wisper speakers doctor` check that flags identical or near-identical (>0.95) profile embeddings.
 - **Diarization measurement set.** 8–12 hand-corrected excerpts of 2–3 min, stratified by speaker count (2–3 / 4–5 / 6–8), in-room vs remote, low vs high overlap. Report DER split into missed / false alarm / confusion (`pyannote.metrics`) plus JER, and compare configs with a paired bootstrap over recordings (B ≥ 1000). The 0.55 threshold and the community-1 choice rest on one session pair until this exists.
 - **Ruled out for now:** Sortformer (4-speaker cap), DiariZen (CC-BY-NC), NVIDIA Nemotron diarization (no independent validation). Revisit only if community-1 plateaus on the measurement set.
 
@@ -55,7 +69,7 @@ Shipped in #63; the design is in `architecture.md`. What's left:
 - **Change input devices mid-session.** `LocalCaptureManager.start_session()` binds both capture threads to fixed device IDs; switching today means Stop + Start (a new `Recording` and a gap in the transcript). Needs capture threads that can restart against a new device while the tick thread, segment writers, and `Recording` keep running. Needs a design pass first.
 - **Per-speaker diarization on the live system track.** The system track is a single RMS-attributed "Other", because OS loopback is already a mixed-down stream. pyannote only gives consistent labels across a whole-file pass; live use would need an incremental layer (embed each turn, match against a running per-session speaker pool) plus added latency in the live loop. Revisit if the You/Other split becomes limiting.
 - **Channel picker on the Record page.** `GET /api/record/channels` already lists the guilds and voice channels the bot can see; the Record page still takes raw IDs or a preset.
-- **Replay markers into the ticker on reload.** Markers persist on `Recording.markers` and show on the detail page, but a page reload doesn't re-insert them into the live ticker (only transcript lines come back through SSE).
+- **Replay markers into the ticker on reload.** Markers persist (`recording_markers`) and show on the detail page, but a page reload doesn't re-insert them into the live ticker (only transcript lines come back through SSE).
 
 ---
 
@@ -299,8 +313,6 @@ FROM base AS intel
 RUN pip install --no-cache-dir -e ".[intel]" \
  && pip install --no-cache-dir --upgrade "torch>=2.8.0" "torchaudio>=2.8.0" \
         --index-url https://download.pytorch.org/whl/xpu \
- && curl -sL "https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js" \
-         -o /app/src/wisper_transcribe/static/htmx.min.js \
  && python -m wisper_transcribe.tailwind
 ENTRYPOINT ["wisper"]
 CMD ["--help"]
@@ -419,31 +431,11 @@ Nothing else changes; the wire protocol is the stable interface.
 
 ---
 
-## Storage — SQLite migration (future consideration)
-
-Today files are the database: `speakers.json` + `.npy` embeddings, `campaigns.json`, `recordings.json`, `.md` transcripts with `.summary.md` / `_diar.json` / excerpt sidecars, and an in-memory job queue.
-
-**Why it might be worth it later:**
-- Transactional writes across related data (`campaigns.json` and `speakers.json` can drift on a mid-write crash).
-- Referential integrity: transcripts and campaigns are linked only by stem, so every delete path must remember to unlink. Three didn't (fixed 2026-09-30 with `_delete_transcript_companions()`; the campaign page now marks missing entries). A foreign key would make this class of bug impossible.
-- Persistent job history across restarts.
-- Relational queries ("all transcripts for a speaker", "jobs by campaign").
-- One source of truth instead of a growing set of sidecars.
-
-**Why not now:**
-- Needs a one-time migration for existing installs.
-- `.npy` embeddings stay on disk regardless.
-- Loses "just open the file" inspectability.
-- Schema migrations become ongoing maintenance.
-- A jobs-only SQLite hybrid was rejected: two storage patterns is worse than one.
-
-**Revisit when:** multi-user or multi-process writes are needed, job history across restarts becomes a user need, or another cross-cutting JSON file appears.
-
----
-
 ## Campaign-level LLM summaries (DM tools)
 
-The rolling campaign journal shipped first and set the pattern: slug-scoped storage under `campaigns/<slug>/`, `.summary.md` discovery via `unjournalled_sessions()`, and `JobQueue.submit_journal` / `_run_journal_job` as the template for new `JOB_CAMPAIGN_*` types on the standard SSE progress page. All three features below read the same `.summary.md` sidecars (`SummaryNote` already carries loot, NPCs, and follow-ups). Campaigns with no summarized sessions hide or disable the buttons.
+The rolling campaign journal sets the pattern: slug-scoped storage under `campaigns/<slug>/`, `.summary.md` discovery via `unjournalled_sessions()`, and `JobQueue.submit_journal` / `_run_journal_job` as the template for new `JOB_CAMPAIGN_*` types on the standard SSE progress page. All three features below read the same `.summary.md` sidecars (`SummaryNote` already carries loot, NPCs, and follow-ups). Campaigns with no summarized sessions hide or disable the buttons.
+
+**Build on the database:** the transcript registry and `journal_entries`, not stem lists or frontmatter. Combined-summary and recap outputs get their own table with FKs to the campaign (and the sessions they cover), so deletes cascade; add it as a new migration and extend `test_schema.py`. The search index could cover them too (a new `search_index_state.kind`).
 
 ### 1. Combined summary
 

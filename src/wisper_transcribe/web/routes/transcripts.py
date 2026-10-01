@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import html as _html_module
-import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
@@ -27,6 +27,7 @@ from wisper_transcribe.recording_manager import load_recordings
 
 from . import templates
 from wisper_transcribe.path_utils import get_output_dir
+from wisper_transcribe import transcript_store
 from wisper_transcribe.web._responses import invalid_input_response
 
 router = APIRouter(prefix="/transcripts")
@@ -128,6 +129,40 @@ def _parse_frontmatter(content: str) -> tuple[dict, str]:
     return {}, content
 
 
+def _anchor_blocks(body: str) -> str:
+    """Wrap each transcript block in ``<span id="b-<index>">`` so search
+    results can deep-link to it. Numbered by ``searchable_blocks()``, the same
+    numbering the search index stores."""
+    from wisper_transcribe.formatter import searchable_blocks
+
+    lines = body.splitlines()
+    for lineno, block in searchable_blocks(body):
+        lines[lineno] = (f'<span id="b-{block["index"]}" class="block-anchor">'
+                         f'{lines[lineno].strip()}</span>')
+    return "\n".join(lines)
+
+
+def _anchor_sections(html: str) -> str:
+    """Give the summary's ``<h2>`` sections ids ``s-1``, ``s-2``, … and the top
+    ``s-0``, matching ``search_index.summary_sections()``."""
+    count = 0
+
+    def number(_match) -> str:
+        nonlocal count
+        count += 1
+        return f'<h2 id="s-{count}" class="block-anchor">'
+
+    return '<span id="s-0" class="block-anchor"></span>' + re.sub(r"<h2>", number, html)
+
+
+def _highlight(q: str) -> str | None:
+    """The JS-compatible highlight regex for a search query, or None."""
+    from wisper_transcribe.search_index import highlight_pattern
+
+    pattern = highlight_pattern(q[:500]) if q else None
+    return pattern.pattern if pattern else None
+
+
 def _get_safe_content_path(name: str, suffix: str) -> Path | None:
     """Resolve and sanitize a transcript output path, mitigating path traversal.
 
@@ -149,82 +184,12 @@ def _get_safe_content_path(name: str, suffix: str) -> Path | None:
     target_path = os.path.abspath(os.path.join(str(out_dir), f"{safe_name}{suffix}"))
     if not target_path.startswith(base_dir):
         return None
+    # Only a path already inside the base is probed on disk; re-checked after.
+    target_path = transcript_store.existing_form(target_path)
+    if not target_path.startswith(base_dir):
+        return None
 
     return Path(target_path)
-
-
-def _delete_diar_sidecar_and_audio(name: str) -> None:
-    """Delete the ``_diar.json`` sidecar and the audio copy it references.
-
-    That audio exists only to back the enrollment wizard, so it goes with the
-    transcript. Excerpt clips are handled by ``_delete_excerpt_clips``.
-    """
-    diar_path = _get_safe_content_path(name, "_diar.json")
-    if not diar_path or not diar_path.exists():
-        return
-
-    try:
-        diar = json.loads(diar_path.read_text(encoding="utf-8"))
-        stored_input_path = diar.get("input_path")
-    except Exception:
-        stored_input_path = None
-
-    if stored_input_path:
-        # Only delete audio inside the output dir; old sidecars may point at
-        # a tempdir or user file.
-        out_dir = get_output_dir().resolve()
-        base_dir = os.path.abspath(str(out_dir))
-        if not base_dir.endswith(os.sep):
-            base_dir += os.sep
-        candidate_abs = os.path.abspath(stored_input_path)
-        if candidate_abs.startswith(base_dir):
-            try:
-                Path(candidate_abs).unlink(missing_ok=True)
-            except OSError:
-                pass
-
-    try:
-        diar_path.unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
-def _delete_transcript_companions(name: str) -> None:
-    """Delete everything that belongs to a transcript except its ``.md``.
-
-    The summary sidecar, the enrollment sidecar and its audio, excerpt clips,
-    and the transcript's campaign entry (left behind, the campaign page links
-    to a 404). Every transcript delete path calls this.
-    """
-    summary_path = _get_safe_content_path(name, ".summary.md")
-    if summary_path and summary_path.exists():
-        try:
-            summary_path.unlink()
-        except OSError:
-            pass
-    _delete_diar_sidecar_and_audio(name)
-    _delete_excerpt_clips(name)
-    remove_transcript_from_campaign(name)
-
-
-def _delete_excerpt_clips(name: str) -> None:
-    """Delete this transcript's ``<stem>_excerpt_*.mp3``/``.txt`` clips.
-
-    ``md_path`` is already path-guarded, so glob results stay inside the
-    output dir. The stem is still untrusted text (e.g. ``mix*``) and is
-    ``glob.escape()``-d so it can't match other transcripts' clips.
-    """
-    import glob as _glob
-
-    md_path = _get_safe_content_path(name, ".md")
-    if md_path is None:
-        return
-    out_dir = md_path.parent
-    for clip in out_dir.glob(f"{_glob.escape(md_path.stem)}_excerpt_*"):
-        try:
-            clip.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 @router.get("/partials/recent", response_class=HTMLResponse)
@@ -276,6 +241,7 @@ def _pending_recordings(data_dir: Path) -> tuple[list, set[str]]:
 @router.get("", response_class=HTMLResponse)
 async def transcripts_list(request: Request) -> HTMLResponse:
     out_dir = get_output_dir()
+    transcript_store.reconcile(out_dir)  # register new files, flag deleted ones
     # Exclude .summary.md sidecars — they are shown via the transcript detail page
     files = sorted(
         [f for f in out_dir.glob("*.md") if not f.name.endswith(".summary.md")],
@@ -331,9 +297,7 @@ async def bulk_delete_transcripts(request: Request) -> HTMLResponse:
         md_path = _get_safe_content_path(stem, ".md")
         if not md_path:
             continue
-        if md_path.exists():
-            md_path.unlink()
-        _delete_transcript_companions(stem)
+        transcript_store.delete_transcript(md_path.stem, output_dir=md_path.parent)
     return HTMLResponse(content="", status_code=303, headers={"Location": "/transcripts"})
 
 
@@ -369,7 +333,7 @@ async def bulk_assign_campaign(request: Request) -> HTMLResponse:
 
 
 @router.get("/{name}", response_class=HTMLResponse)
-async def transcript_detail(request: Request, name: str) -> HTMLResponse:
+async def transcript_detail(request: Request, name: str, q: str = "") -> HTMLResponse:
     md_path = _get_safe_content_path(name, ".md")
     if not md_path:
         return invalid_input_response("Invalid name")
@@ -380,7 +344,7 @@ async def transcript_detail(request: Request, name: str) -> HTMLResponse:
     meta, body = _parse_frontmatter(content)
 
     import markdown as _md
-    html_body = _sanitize_html(_md.markdown(body, extensions=["nl2br"]))
+    html_body = _sanitize_html(_md.markdown(_anchor_blocks(body), extensions=["nl2br"]))
 
     # Check for summary sidecar
     summary_path = _get_safe_content_path(name, ".summary.md")
@@ -414,6 +378,7 @@ async def transcript_detail(request: Request, name: str) -> HTMLResponse:
             "llm_model": llm_model,
             "campaigns": campaigns,
             "current_campaign_slug": current_campaign_slug,
+            "highlight": _highlight(q),
         },
     )
 
@@ -434,13 +399,11 @@ async def transcript_download(request: Request, name: str):
 
 @router.post("/{name}/delete", response_class=HTMLResponse)
 async def delete_transcript(request: Request, name: str) -> HTMLResponse:
-    """Delete a transcript .md file (and its summary sidecar if present)."""
+    """Delete a transcript, its campaign/journal links, and its companion files."""
     md_path = _get_safe_content_path(name, ".md")
     if not md_path:
         return invalid_input_response("Invalid name")
-    if md_path.exists():
-        md_path.unlink()
-    _delete_transcript_companions(name)
+    transcript_store.delete_transcript(md_path.stem, output_dir=md_path.parent)
     return HTMLResponse(
         content="",
         status_code=303,
@@ -504,7 +467,7 @@ async def transcript_edit_save(request: Request, name: str) -> HTMLResponse:
         from wisper_transcribe.formatter import rewrite_transcript_blocks
         content = md_path.read_text(encoding="utf-8")
         content = rewrite_transcript_blocks(content, updated_speakers)
-        md_path.write_text(content, encoding="utf-8")
+        transcript_store.save_transcript(md_path, content)
 
     return HTMLResponse(
         content="",
@@ -530,7 +493,7 @@ async def fix_speaker(request: Request, name: str) -> HTMLResponse:
         from wisper_transcribe.formatter import update_speaker_names
         content = md_path.read_text(encoding="utf-8")
         content = update_speaker_names(content, old_name, new_name)
-        md_path.write_text(content, encoding="utf-8")
+        transcript_store.save_transcript(md_path, content)
 
     return HTMLResponse(
         content="",
@@ -590,7 +553,7 @@ async def post_summarize(request: Request, name: str) -> HTMLResponse:
 
 
 @router.get("/{name}/summary", response_class=HTMLResponse)
-async def summary_detail(request: Request, name: str) -> HTMLResponse:
+async def summary_detail(request: Request, name: str, q: str = "") -> HTMLResponse:
     """Render the campaign-notes summary for a transcript."""
     md_path = _get_safe_content_path(name, ".md")
     if not md_path:
@@ -604,7 +567,7 @@ async def summary_detail(request: Request, name: str) -> HTMLResponse:
     meta, body = _parse_frontmatter(content)
 
     import markdown as _md
-    html_body = _sanitize_html(_md.markdown(body, extensions=["nl2br"]))
+    html_body = _anchor_sections(_sanitize_html(_md.markdown(body, extensions=["nl2br"])))
 
     return templates.TemplateResponse(
         request,
@@ -615,6 +578,7 @@ async def summary_detail(request: Request, name: str) -> HTMLResponse:
             "meta": meta,
             "html_body": html_body,
             "title": meta.get("title", f"{name} — Campaign Notes"),
+            "highlight": _highlight(q),
         },
     )
 
@@ -858,7 +822,7 @@ async def transcript_excerpt(request: Request, name: str, speaker_name: str):
     from fastapi.responses import FileResponse
 
     # Try the raw label first; fall back to the legacy display-name file
-    # (pre-fix transcripts keyed excerpts by display name).
+    # (older transcripts key excerpts by display name).
     candidates: list[str] = [safe_sp]
     diar = _load_diar_sidecar(md_path)
     if diar:

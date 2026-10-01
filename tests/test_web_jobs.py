@@ -7,6 +7,8 @@ from unittest.mock import patch
 
 import pytest
 
+from ._seed import seed_profile, sidecar_data
+
 
 def _make_queue():
     from wisper_transcribe.web.jobs import JobQueue
@@ -173,6 +175,42 @@ async def test_worker_does_not_revive_cancelled_pending_job():
     assert job.status == FAILED
     assert job.error == "Cancelled"
     mock_process.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_server_shutdown_mid_job_records_it_interrupted_not_completed(tmp_path):
+    """stop() cancels the worker while a job thread runs: the job is recorded
+    failed (interrupted) and its temp upload removed."""
+    import threading
+
+    from wisper_transcribe import db
+    from wisper_transcribe.job_history import INTERRUPTED
+    from wisper_transcribe.web.jobs import FAILED, RUNNING
+
+    upload = tmp_path / "wisper_upload_abc.mp3"
+    upload.write_bytes(b"audio")
+    started, release = threading.Event(), threading.Event()
+
+    def _slow(*args, **kwargs):
+        started.set()
+        release.wait(5)
+        raise RuntimeError("thread outlived the server")
+
+    q = _make_queue()
+    with patch("wisper_transcribe.web.jobs.process_file", side_effect=_slow):
+        job = q.submit(str(upload), model_size="tiny", no_diarize=True)
+        q.start()
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        assert job.status == RUNNING
+        await q.stop()
+        release.set()
+
+    assert job.status == FAILED and job.error == INTERRUPTED
+    assert not Path(job.input_path).exists()
+    with db.connection() as conn:
+        row = conn.execute("SELECT status, error_code FROM jobs WHERE id = ?", (job.id,)).fetchone()
+    assert tuple(row) == ("failed", INTERRUPTED)
 
 
 def test_cancel_unknown_job_returns_false():
@@ -599,7 +637,7 @@ def test_completed_job_moves_upload_to_output_dir(tmp_path):
 
     sidecar = out_dir / "Session 12_diar.json"
     assert sidecar.exists()
-    data = json.loads(sidecar.read_text(encoding="utf-8"))
+    data = sidecar_data(sidecar)
     assert data["input_path"] == str(durable)
 
 
@@ -816,9 +854,8 @@ def _write_sidecar(tmp_path, md_path, input_path, campaign=None):
         "campaign": campaign,
         "diarization_segments": [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"}],
     }
-    md_path.with_name(md_path.stem + "_diar.json").write_text(
-        json.dumps(diar), encoding="utf-8"
-    )
+    from ._seed import seed_sidecar
+    seed_sidecar(md_path, diar)
 
 
 def test_run_enroll_job_success_calls_enroll_profiles_and_completes(tmp_path):
@@ -1271,8 +1308,9 @@ def test_recording_enroll_job_updates_recording_state(tmp_path):
     job = _make_recording_enroll_job(rec.id)
 
     with patch("wisper_transcribe.config.get_data_dir", return_value=tmp_path), \
-         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path), \
-         patch("wisper_transcribe.speaker_manager.enroll_speaker_from_audio_dir") as mock_enroll:
+         patch.dict("os.environ", {"WISPER_DATA_DIR": str(tmp_path)}), \
+         patch("wisper_transcribe.speaker_manager.enroll_speaker_from_audio_dir",
+               side_effect=lambda **kw: seed_profile(kw["name"], data_dir=tmp_path)) as mock_enroll:
         q._run_job(job)
 
     assert job.status == COMPLETED
@@ -1557,7 +1595,7 @@ async def test_worker_fails_live_job_stopped_before_it_reached_front_of_queue(tm
 
 
 def test_worker_runs_live_job_normally_when_stop_event_not_yet_set(tmp_path):
-    """Sanity check for the fix above: a JOB_LIVE job that reaches the front
+    """Counterpart of the test above: a JOB_LIVE job that reaches the front
     of the queue before its session is stopped must still run normally."""
     from wisper_transcribe.web.jobs import COMPLETED, JobQueue
 
@@ -1649,3 +1687,63 @@ def test_will_align_false_for_other_job_types():
     job = Job(id="j", status="pending", created_at=None, input_path="/tmp/a.md",
               kwargs={}, name="a", job_type="refine")
     assert job.will_align is False
+
+
+# ---------------------------------------------------------------------------
+# Transcription jobs never report success on a transcript they didn't write
+# ---------------------------------------------------------------------------
+
+def _transcription_job(tmp_path):
+    from wisper_transcribe.web.jobs import JobQueue
+
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    q = JobQueue()
+    return q, q.submit(str(audio), output_dir=str(tmp_path))
+
+
+def test_job_fails_when_transcript_already_exists(tmp_path):
+    from wisper_transcribe.transcript_store import TranscriptExistsError
+    from wisper_transcribe.web.jobs import FAILED
+
+    q, job = _transcription_job(tmp_path)
+    with patch("wisper_transcribe.web.jobs.process_file",
+               side_effect=TranscriptExistsError("session")) as mock_pf:
+        with pytest.raises(TranscriptExistsError):
+            q._run_transcription_job(job)
+    assert mock_pf.call_args.kwargs["skip_existing"] is False
+    assert job.status == FAILED
+    assert job.error == "Transcript already exists"
+
+
+def test_job_fails_when_reported_transcript_is_missing(tmp_path):
+    from wisper_transcribe.web.jobs import FAILED, TranscriptMissingError
+
+    q, job = _transcription_job(tmp_path)
+    with patch("wisper_transcribe.web.jobs.process_file", return_value=tmp_path / "nowhere.md"):
+        with pytest.raises(TranscriptMissingError):
+            q._run_transcription_job(job)
+    assert job.status == FAILED
+    assert job.error == "Transcript file missing after write"
+    assert any("Transcripts folder:" in line for line in job.log_lines)
+
+
+def test_recording_is_transcribing_only_while_its_job_is_pending_or_running(tmp_path):
+    """A cancelled pending job never runs its callbacks; the recording must
+    still come back as transcribable (status is derived from the queue)."""
+    from wisper_transcribe.recording_manager import load_recordings
+    from wisper_transcribe.web.jobs import JobQueue
+
+    from ._seed import seed_recording
+
+    rec = seed_recording()
+    q = JobQueue()
+    job = q.submit(str(rec.combined_path), original_stem=rec.id, recording_id=rec.id,
+                   output_dir=str(tmp_path))
+    loaded = load_recordings()[rec.id]
+    assert loaded.status == "transcribing" and loaded.job_id == job.id
+
+    q.cancel(job.id)
+    loaded = load_recordings()[rec.id]
+    assert loaded.status == "completed"
+    assert loaded.job_id == job.id

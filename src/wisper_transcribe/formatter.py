@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 import yaml
@@ -93,6 +94,42 @@ def to_markdown(
     return "\n".join(lines)
 
 
+_SPEAKER_BLOCK_RE = re.compile(r'^\*\*(.+?)\*\*\s*(?:\*\((.+?)\)\*)?:\s*(.*)')
+_TIMESTAMP_BLOCK_RE = re.compile(r'^\*\((.+?)\)\*\s*(.*)')
+_FOOTER_PREFIX = "*Transcribed by wisper-transcribe"
+
+
+def _iter_blocks(body: str):
+    """Yield ``(line_number, block)`` for each speaker block in ``body``."""
+    count = 0
+    for lineno, line in enumerate(body.splitlines()):
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#') or stripped == '---':
+            continue
+        m = _SPEAKER_BLOCK_RE.match(stripped)
+        if m:
+            block = {
+                'index': count,
+                'speaker': m.group(1),
+                'timestamp': m.group(2) or '',
+                'text': m.group(3),
+                'has_speaker': True,
+            }
+        else:
+            m = _TIMESTAMP_BLOCK_RE.match(stripped)
+            if not m:
+                continue
+            block = {
+                'index': count,
+                'speaker': '',
+                'timestamp': m.group(1),
+                'text': m.group(2),
+                'has_speaker': False,
+            }
+        count += 1
+        yield lineno, block
+
+
 def parse_transcript_blocks(body: str) -> list[dict]:
     """Parse a transcript body into speaker blocks.
 
@@ -101,36 +138,30 @@ def parse_transcript_blocks(body: str) -> list[dict]:
     rendered without timestamps (``**Speaker**: text``); callers needing timing
     must handle that.
     """
-    import re
+    return [block for _, block in _iter_blocks(body)]
 
-    speaker_re = re.compile(r'^\*\*(.+?)\*\*\s*(?:\*\((.+?)\)\*)?:\s*(.*)')
-    no_speaker_re = re.compile(r'^\*\((.+?)\)\*\s*(.*)')
 
-    blocks = []
-    for line in body.splitlines():
+def searchable_blocks(body: str) -> list[tuple[int, dict]]:
+    """``(line_number, block)`` for every block the search index covers.
+
+    The speaker blocks of :func:`parse_transcript_blocks`, numbered the same
+    way. A transcript rendered with neither speakers nor timestamps has none,
+    so each plain text line becomes a block instead (``speaker`` and
+    ``timestamp`` empty). The transcript page's ``#b-<index>`` anchors use
+    this too, so a search hit and its anchor always agree.
+    """
+    blocks = list(_iter_blocks(body))
+    if blocks:
+        return blocks
+    plain = []
+    for lineno, line in enumerate(body.splitlines()):
         stripped = line.strip()
-        if not stripped or stripped.startswith('#') or stripped == '---':
+        if (not stripped or stripped.startswith('#') or stripped == '---'
+                or stripped.startswith(_FOOTER_PREFIX)):
             continue
-        m = speaker_re.match(stripped)
-        if m:
-            blocks.append({
-                'index': len(blocks),
-                'speaker': m.group(1),
-                'timestamp': m.group(2) or '',
-                'text': m.group(3),
-                'has_speaker': True,
-            })
-            continue
-        m = no_speaker_re.match(stripped)
-        if m:
-            blocks.append({
-                'index': len(blocks),
-                'speaker': '',
-                'timestamp': m.group(1),
-                'text': m.group(2),
-                'has_speaker': False,
-            })
-    return blocks
+        plain.append((lineno, {'index': len(plain), 'speaker': '', 'timestamp': '',
+                               'text': stripped, 'has_speaker': False}))
+    return plain
 
 
 def rewrite_transcript_blocks(content: str, updated_speakers: dict) -> str:

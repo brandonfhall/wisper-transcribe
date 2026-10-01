@@ -8,9 +8,13 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
+from tests._seed import save_campaigns as _seed_save_campaigns
+
 from wisper_transcribe.config import EMBEDDING_SPACE
 from wisper_transcribe.formatter import to_markdown
 from wisper_transcribe.models import AlignedSegment
+
+from ._seed import seed_profile, seed_sidecar, sidecar_data
 
 ALICE = np.array([1.0, 0.0, 0.0, 0.0])
 BOB = np.array([0.0, 1.0, 0.0, 0.0])
@@ -19,14 +23,7 @@ OTHER = np.array([0.0, 0.0, 0.0, 1.0])
 
 
 def _profile(data_dir: Path, key: str, emb: np.ndarray) -> None:
-    emb_dir = data_dir / "profiles" / "embeddings"
-    emb_dir.mkdir(parents=True, exist_ok=True)
-    np.save(str(emb_dir / f"{key}.npy"), emb)
-    path = data_dir / "profiles" / "speakers.json"
-    raw = json.loads(path.read_text()) if path.exists() else {}
-    raw[key] = {"display_name": key.title(), "embedding_file": f"embeddings/{key}.npy",
-                "embedding_space": EMBEDDING_SPACE}
-    path.write_text(json.dumps(raw))
+    seed_profile(key, key.title(), data_dir=data_dir, embedding=emb)
 
 
 def _transcript(out_dir: Path, stem: str, names: dict[str, str], embeddings=None,
@@ -52,7 +49,7 @@ def _transcript(out_dir: Path, stem: str, names: dict[str, str], embeddings=None
     if embeddings is not None:
         diar["embedding_space"] = EMBEDDING_SPACE
         diar["speaker_embeddings"] = {k: v.tolist() for k, v in embeddings.items()}
-    (out_dir / f"{stem}_diar.json").write_text(json.dumps(diar), encoding="utf-8")
+    seed_sidecar(md_path, diar)
     return md_path
 
 
@@ -93,7 +90,7 @@ def test_auto_unknown_gets_newly_enrolled_profile(world):
     assert report.transcripts[0].renamed == {"SPEAKER_00": ("Unknown Speaker 1", "Alice")}
     text = md.read_text(encoding="utf-8")
     assert "**Alice**" in text and "Unknown Speaker 1" not in text
-    sidecar = json.loads((out / "s1_diar.json").read_text())
+    sidecar = sidecar_data(out / "s1_diar.json")
     assert sidecar["speaker_map"]["SPEAKER_00"] == "Alice"
     assert sidecar["speaker_map_source"]["SPEAKER_00"] == "auto"
 
@@ -157,9 +154,9 @@ def test_dry_run_writes_nothing(world):
     assert (out / "s1_diar.json").read_text() == before_sidecar
 
 
-def test_backfills_embeddings_from_durable_audio(world, tmp_path):
+def test_backfills_embeddings_from_durable_audio(world):
     data, out = world
-    audio = tmp_path / "s1.wav"
+    audio = out / "s1.wav"  # durable copies live next to the transcript
     audio.write_bytes(b"fake")
     _transcript(out, "s1", {"SPEAKER_00": "Unknown Speaker 1"}, input_path=str(audio))
     _add(data, "s1")
@@ -170,7 +167,7 @@ def test_backfills_embeddings_from_durable_audio(world, tmp_path):
 
     mock_extract.assert_called_once()
     assert report.transcripts[0].renamed == {"SPEAKER_00": ("Unknown Speaker 1", "Alice")}
-    sidecar = json.loads((out / "s1_diar.json").read_text())
+    sidecar = sidecar_data(out / "s1_diar.json")
     assert sidecar["embedding_space"] == EMBEDDING_SPACE
     assert sidecar["speaker_embeddings"]["SPEAKER_00"] == pytest.approx(ALICE.tolist())
 
@@ -203,13 +200,14 @@ def test_unknown_campaign_raises(world):
 
 
 def test_path_like_stem_is_refused(world):
+    """A path-like stem can't reach the relabel pass: the transcript
+    registry's CHECK rejects it before it is stored."""
+    import sqlite3
+
     data, out = world
     import wisper_transcribe.campaign_manager as cm
 
     campaigns = cm.load_campaigns(data)
     campaigns["game"].transcripts.append("../escape")
-    cm.save_campaigns(campaigns, data)
-
-    report = _run(data, out)
-
-    assert report.transcripts[-1].skipped == "invalid transcript name"
+    with pytest.raises(sqlite3.IntegrityError):
+        _seed_save_campaigns(campaigns, data)

@@ -81,7 +81,6 @@ def test_dashboard_html_includes_mtime_cache_buster(client, tmp_path):
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.load_config", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
-         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)), \
          patch("wisper_transcribe.web.routes.dashboard.get_output_dir", return_value=tmp_path / "output"):
         resp = client.get("/")
 
@@ -94,7 +93,6 @@ def test_dashboard_returns_200(client, tmp_path):
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.load_config", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
-         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)), \
          patch("wisper_transcribe.web.routes.dashboard.get_output_dir", return_value=tmp_path / "output"):
         resp = client.get("/")
     assert resp.status_code == 200
@@ -113,7 +111,6 @@ def test_dashboard_shows_llm_provider_and_model(client, tmp_path, monkeypatch):
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.load_config", return_value=cfg), \
          patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
-         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)), \
          patch("wisper_transcribe.web.routes.dashboard.get_output_dir", return_value=tmp_path / "output"):
         resp = client.get("/")
     assert resp.status_code == 200
@@ -136,7 +133,6 @@ def test_dashboard_flags_cloud_provider_missing_key(client, tmp_path, monkeypatc
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.load_config", return_value=cfg), \
          patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
-         patch("wisper_transcribe.web.routes.dashboard.get_data_dir", return_value=str(tmp_path)), \
          patch("wisper_transcribe.web.routes.dashboard.get_output_dir", return_value=tmp_path / "output"):
         resp = client.get("/")
     assert resp.status_code == 200
@@ -256,6 +252,31 @@ def test_job_stream_serves_lines_after_log_trimming(client, tmp_path):
     assert '"line 998"' in body
     assert '"line 999"' in body
     assert '"status": "completed"' in body
+
+
+def test_job_page_stream_starts_after_rendered_lines(client, tmp_path):
+    """The job page renders the log it has, so its stream starts after those
+    lines."""
+    from wisper_transcribe.web.jobs import Job, COMPLETED, RUNNING
+    from datetime import datetime
+
+    job = Job(id="after-test-job", status=RUNNING, created_at=datetime.now(),
+              input_path=str(tmp_path / "audio.mp3"), kwargs={})
+    job.log_lines = ["line 5", "line 6", "line 7"]
+    job.log_lines_dropped = 5
+    client.app.state.job_queue._jobs[job.id] = job
+
+    page = client.get(f"/transcribe/jobs/{job.id}").text
+    assert f"/transcribe/jobs/{job.id}/stream?after=8" in page
+
+    job.status = COMPLETED  # so the streams below end
+
+    with client.stream("GET", f"/transcribe/jobs/{job.id}/stream?after=7") as resp:
+        body = "".join(resp.iter_text())
+    assert '"line 7"' in body and '"line 6"' not in body
+    with client.stream("GET", f"/transcribe/jobs/{job.id}/stream?after=8") as resp:
+        body = "".join(resp.iter_text())
+    assert '"type": "log"' not in body and '"status": "completed"' in body
 
 
 def test_transcribe_post_empty_upload_still_queues(client, tmp_path):
@@ -452,10 +473,21 @@ def test_pending_recordings_excludes_non_completed_statuses(tmp_path):
 
     from wisper_transcribe.web.routes.transcripts import _pending_recordings
 
-    for status in ("recording", "transcribing", "transcribed", "failed", "degraded"):
+    from wisper_transcribe import recording_manager as rm
+    from wisper_transcribe.path_utils import get_output_dir
+
+    for status in ("recording", "failed", "degraded"):
         rec = _seed_completed_recording(tmp_path, name=f"rec-{status}")
         rec.status = status
         save_recording(rec, tmp_path)
+    transcribed = _seed_completed_recording(tmp_path, name="rec-transcribed")
+    md = get_output_dir() / f"{transcribed.id}.md"
+    md.write_text("x", encoding="utf-8")
+    rm.link_transcript(transcribed.id, md, tmp_path)
+    busy = _seed_completed_recording(tmp_path, name="rec-transcribing")
+    from ._seed import seed_job
+    seed_job("22222222-2222-4222-8222-222222222222", status="running",
+             recording_id=busy.id, data_dir=tmp_path)
 
     pending, _ = _pending_recordings(tmp_path)
     assert pending == []
@@ -1218,7 +1250,7 @@ def test_speakers_list_flags_profiles_from_old_model(client, tmp_path):
 
     def _p(key, space):
         return SpeakerProfile(name=key, display_name=key.title(), role="",
-                              embedding_path=tmp_path / f"{key}.npy", enrolled_date="",
+                              embedding=None, enrolled_date="",
                               enrollment_source="", embedding_space=space)
 
     profiles = {"alice": _p("alice", EMBEDDING_SPACE), "bob": _p("bob", "")}
@@ -1227,6 +1259,19 @@ def test_speakers_list_flags_profiles_from_old_model(client, tmp_path):
     assert resp.status_code == 200
     assert resp.text.count("NEEDS RE-ENROLL") == 1
     assert "1 profile(s) were enrolled with an older speaker model" in resp.text
+
+
+def test_speakers_list_shows_sessions_and_last_heard(client):
+    from ._seed import seed_profile
+
+    seed_profile("alice", "Alice", enrolled_date="2026-01-02")
+    with patch("wisper_transcribe.web.routes.speakers.profile_activity",
+               return_value={"alice": (4, "2026-03-05T19:00:00Z")}):
+        resp = client.get("/speakers")
+    assert resp.status_code == 200
+    assert 'data-testid="speaker-sessions">4<' in resp.text
+    assert "2026-03-05" in resp.text and "2026-01-02" in resp.text
+    assert "SIM" not in resp.text  # no stored data behind it
 
 
 def test_speakers_enroll_form_returns_200(client):
@@ -1313,12 +1358,12 @@ def test_speakers_enroll_submit_cleans_up_temp_file_when_submit_fails(client, tm
 
 def test_speakers_remove_redirects(client, tmp_path):
     # Removal goes through speaker_manager.remove_profile(), so test against
-    # the real profiles.json rather than mocking the route module.
+    # the real database rather than mocking the route module.
     from wisper_transcribe.speaker_manager import load_profiles as _load
 
     _seed_profile_store(tmp_path)
 
-    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path):
+    with patch.dict("os.environ", {"WISPER_DATA_DIR": str(tmp_path)}):
         resp = client.post("/speakers/alice/remove", follow_redirects=False)
 
     assert resp.status_code == 303
@@ -1326,52 +1371,41 @@ def test_speakers_remove_redirects(client, tmp_path):
 
 
 def test_speakers_remove_deletes_reference_clip(client, tmp_path):
-    """The web removal route deletes the .mp3 reference clip alongside
-    the .npy embedding, not just the profile entry."""
+    """The web removal route deletes the .mp3 reference clip, not just
+    the profile row."""
     emb_dir = _seed_profile_store(tmp_path)
-    npy_path = emb_dir / "alice.npy"
     mp3_path = emb_dir / "alice.mp3"
-    assert npy_path.exists() and mp3_path.exists()
+    assert mp3_path.exists()
 
-    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path):
+    with patch.dict("os.environ", {"WISPER_DATA_DIR": str(tmp_path)}):
         resp = client.post("/speakers/alice/remove", follow_redirects=False)
 
     assert resp.status_code == 303
-    assert not npy_path.exists()
     assert not mp3_path.exists()
 
 
 def _seed_profile_store(tmp_path, key="alice", display="Alice", with_clip=True):
-    """Write a real speakers.json + embedding files under tmp_path (used as
-    the data dir) and return the embeddings dir."""
-    import numpy as np
-    from wisper_transcribe.models import SpeakerProfile
-    from wisper_transcribe.speaker_manager import save_profiles as _save
+    """Insert a real profile into tmp_path's wisper.db (tmp_path is the data
+    dir), optionally with a reference clip, and return the clips dir."""
+    from ._seed import seed_profile
 
     emb_dir = tmp_path / "profiles" / "embeddings"
     emb_dir.mkdir(parents=True, exist_ok=True)
-    np.save(str(emb_dir / f"{key}.npy"), np.zeros(4))
     if with_clip:
         (emb_dir / f"{key}.mp3").write_bytes(b"fake mp3")
-
-    profile = SpeakerProfile(
-        name=key, display_name=display, role="DM",
-        embedding_path=emb_dir / f"{key}.npy",
-        enrolled_date="2026-04-07", enrollment_source="test.mp3",
-    )
-    _save({key: profile}, data_dir=tmp_path)
+    seed_profile(key, display, role="DM", data_dir=tmp_path,
+                 enrolled_date="2026-04-07", enrollment_source="test.mp3")
     return emb_dir
 
 
 def test_speakers_rename_rekeys_profile_and_moves_files(client, tmp_path):
     """The web rename route adopts the CLI's rekey semantic — the
-    profile key changes and the .npy/.mp3 files move with it."""
+    profile key changes and the .mp3 clip moves with it."""
     from wisper_transcribe.speaker_manager import load_profiles as _load
 
     emb_dir = _seed_profile_store(tmp_path)
 
-    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path), \
-         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path):
+    with patch.dict("os.environ", {"WISPER_DATA_DIR": str(tmp_path)}):
         resp = client.post(
             "/speakers/alice/rename",
             data={"new_name": "Alicia"},
@@ -1384,9 +1418,8 @@ def test_speakers_rename_rekeys_profile_and_moves_files(client, tmp_path):
     assert "alice" not in profiles
     assert "alicia" in profiles
     assert profiles["alicia"].display_name == "Alicia"
-    assert (emb_dir / "alicia.npy").exists()
+    assert profiles["alicia"].embedding is not None
     assert (emb_dir / "alicia.mp3").exists()
-    assert not (emb_dir / "alice.npy").exists()
     assert not (emb_dir / "alice.mp3").exists()
 
 
@@ -1399,8 +1432,7 @@ def test_speakers_rename_updates_campaign_membership(client, tmp_path):
 
     _seed_profile_store(tmp_path)
 
-    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path), \
-         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path):
+    with patch.dict("os.environ", {"WISPER_DATA_DIR": str(tmp_path)}):
         campaign = create_campaign("Test Campaign", data_dir=tmp_path)
         add_member(campaign.slug, "alice", role="player", data_dir=tmp_path)
         bind_discord_id(campaign.slug, "alice", "123456789012345678", data_dir=tmp_path)
@@ -1426,19 +1458,19 @@ def test_speakers_rename_collision_redirects_generic_error(client, tmp_path):
     """Renaming onto an existing key fails with a generic error code —
     the CLI's collision guard, without reflecting the submitted name."""
     from wisper_transcribe.models import SpeakerProfile
-    from wisper_transcribe.speaker_manager import load_profiles as _load, save_profiles as _save
+    from wisper_transcribe.speaker_manager import load_profiles as _load
+    from tests._seed import save_profiles as _save
 
     emb_dir = _seed_profile_store(tmp_path)
     profiles = _load(data_dir=tmp_path)
     profiles["bob"] = SpeakerProfile(
         name="bob", display_name="Bob", role="",
-        embedding_path=emb_dir / "bob.npy",
+        embedding=None,
         enrolled_date="2026-04-07", enrollment_source="t.mp3",
     )
     _save(profiles, data_dir=tmp_path)
 
-    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path), \
-         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path):
+    with patch.dict("os.environ", {"WISPER_DATA_DIR": str(tmp_path)}):
         resp = client.post(
             "/speakers/alice/rename",
             data={"new_name": "Bob"},
@@ -1456,8 +1488,7 @@ def test_speakers_rename_invalid_key_redirects_generic_error(client, tmp_path):
     refused with a generic error code — never reflected into the redirect."""
     _seed_profile_store(tmp_path)
 
-    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path), \
-         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path):
+    with patch.dict("os.environ", {"WISPER_DATA_DIR": str(tmp_path)}):
         resp = client.post(
             "/speakers/alice/rename",
             data={"new_name": "evil/../../name"},
@@ -1476,8 +1507,7 @@ def test_speakers_rename_display_case_only_keeps_key(client, tmp_path):
 
     emb_dir = _seed_profile_store(tmp_path, display="alice")
 
-    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path), \
-         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path):
+    with patch.dict("os.environ", {"WISPER_DATA_DIR": str(tmp_path)}):
         resp = client.post(
             "/speakers/alice/rename",
             data={"new_name": "Alice"},
@@ -1488,7 +1518,7 @@ def test_speakers_rename_display_case_only_keeps_key(client, tmp_path):
     profiles = _load(data_dir=tmp_path)
     assert "alice" in profiles
     assert profiles["alice"].display_name == "Alice"
-    assert (emb_dir / "alice.npy").exists()
+    assert (emb_dir / "alice.mp3").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1840,7 +1870,7 @@ def test_speakers_rename_empty_name_no_change(client, tmp_path):
 
     _seed_profile_store(tmp_path)
 
-    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path):
+    with patch.dict("os.environ", {"WISPER_DATA_DIR": str(tmp_path)}):
         resp = client.post(
             "/speakers/alice/rename",
             data={"new_name": ""},
@@ -1953,16 +1983,13 @@ def test_campaign_add_member_persists(client, tmp_path, monkeypatch):
 
     # Create real campaign + profile
     (tmp_path / "profiles" / "embeddings").mkdir(parents=True)
-    fake_emb = tmp_path / "profiles" / "embeddings" / "alice.npy"
-    np.save(str(fake_emb), np.zeros(512))
-
     from wisper_transcribe.campaign_manager import create_campaign
-    from wisper_transcribe.speaker_manager import save_profiles
+    from tests._seed import save_profiles
     create_campaign("Test Game", data_dir=tmp_path)
     save_profiles(
         {"alice": SpeakerProfile(
             name="alice", display_name="Alice", role="",
-            embedding_path=fake_emb, enrolled_date="2026-04-28",
+            embedding=np.ones(4, dtype=np.float32) / 2, enrolled_date="2026-04-28",
             enrollment_source="test.mp3",
         )},
         data_dir=tmp_path,
@@ -2003,15 +2030,13 @@ def test_campaign_remove_member_does_not_delete_profile(client, tmp_path, monkey
     import numpy as np
     from wisper_transcribe.models import SpeakerProfile
     from wisper_transcribe.campaign_manager import create_campaign, add_member
-    from wisper_transcribe.speaker_manager import save_profiles
+    from tests._seed import save_profiles
 
     (tmp_path / "profiles" / "embeddings").mkdir(parents=True)
-    fake_emb = tmp_path / "profiles" / "embeddings" / "alice.npy"
-    np.save(str(fake_emb), np.zeros(512))
     save_profiles(
         {"alice": SpeakerProfile(
             name="alice", display_name="Alice", role="",
-            embedding_path=fake_emb, enrolled_date="2026-04-28",
+            embedding=np.ones(4, dtype=np.float32) / 2, enrolled_date="2026-04-28",
             enrollment_source="test.mp3",
         )},
         data_dir=tmp_path,
@@ -2022,7 +2047,8 @@ def test_campaign_remove_member_does_not_delete_profile(client, tmp_path, monkey
     resp = client.post("/campaigns/test-game/members/alice/remove", follow_redirects=False)
     assert resp.status_code == 303
     # Profile and embedding must still exist
-    assert fake_emb.exists()
+    from wisper_transcribe.speaker_manager import load_profiles
+    assert load_profiles(tmp_path)["alice"].embedding is not None
     from wisper_transcribe.campaign_manager import get_campaign_profile_keys
     assert "alice" not in get_campaign_profile_keys("test-game", data_dir=tmp_path)
 
@@ -2219,6 +2245,86 @@ def test_campaign_journal_post_rebuild(client, tmp_path, monkeypatch):
     assert resp.status_code == 303
     assert resp.headers["location"] == f"/transcribe/jobs/{fake_job.id}"
     assert mock_submit.call_args.kwargs.get("rebuild") is True
+    assert mock_submit.call_args.kwargs.get("resummarize") is False
+
+
+def test_campaign_journal_post_resummarize(client, tmp_path, monkeypatch):
+    """mode=resummarize is the full redrive: rebuild and resummarize."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.web.jobs import Job
+    from wisper_transcribe.campaign_manager import create_campaign
+    import uuid
+
+    create_campaign("My Game", data_dir=tmp_path)
+    fake_job = MagicMock(spec=Job)
+    fake_job.id = str(uuid.uuid4())
+    with patch.object(client.app.state.job_queue, "submit_journal",
+                      return_value=fake_job) as mock_submit:
+        resp = client.post("/campaigns/my-game/journal",
+                           data={"mode": "resummarize"}, follow_redirects=False)
+    assert resp.status_code == 303
+    kwargs = mock_submit.call_args.kwargs
+    assert kwargs.get("rebuild") is True and kwargs.get("resummarize") is True
+
+
+def _journaled_game(tmp_path, monkeypatch):
+    """A campaign with s1 folded into its journal; returns the output dir."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    from wisper_transcribe import journal as journal_mod
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+
+    create_campaign("My Game")
+    move_transcript_to_campaign("s1", "my-game")
+    (out / "s1.md").write_text("x", encoding="utf-8")
+    (out / "s1.summary.md").write_text("A session.", encoding="utf-8")
+
+    class _Client:
+        provider, model = "fake", "m"
+
+        def complete(self, system, user):
+            return "## Story So Far\n\nThe heroes gathered."
+
+    journal_mod.update_journal("my-game", _Client(), {}, session_stem="s1")
+    return out
+
+
+def test_campaign_page_shows_stale_banner(client, tmp_path, monkeypatch):
+    from wisper_transcribe.campaign_manager import remove_transcript_from_campaign
+
+    _journaled_game(tmp_path, monkeypatch)
+    resp = client.get("/campaigns/my-game")
+    assert 'data-testid="journal-stale"' not in resp.text
+    assert "Rebuild from transcripts" in resp.text
+
+    remove_transcript_from_campaign("s1")
+    resp = client.get("/campaigns/my-game")
+    assert 'data-testid="journal-stale"' in resp.text
+    resp = client.get("/campaigns/my-game/journal")
+    assert 'data-testid="journal-stale"' in resp.text
+
+
+def test_campaign_journal_download_adds_journaled_sessions(client, tmp_path, monkeypatch):
+    from wisper_transcribe.journal import parse_journal
+
+    _journaled_game(tmp_path, monkeypatch)
+    resp = client.get("/campaigns/my-game/journal/download")
+    assert resp.status_code == 200
+    assert 'filename="my-game-journal.md"' in resp.headers["content-disposition"]
+    meta, body = parse_journal(resp.text)
+    assert meta["journaled_sessions"] == ["s1"]
+    assert "The heroes gathered." in body
+
+
+def test_campaign_journal_download_404_without_journal(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    create_campaign("My Game")
+    assert client.get("/campaigns/my-game/journal/download").status_code == 404
+    assert client.get("/campaigns/ghost/journal/download").status_code == 404
 
 
 def test_campaign_journal_post_unknown_campaign(client, tmp_path, monkeypatch):
@@ -2307,7 +2413,7 @@ def test_campaign_journal_view_renders_body(client, tmp_path, monkeypatch):
     jpath = journal_mod.journal_path("my-game", data_dir=tmp_path)
     jpath.parent.mkdir(parents=True, exist_ok=True)
     jpath.write_text(journal_mod.render_journal(
-        "my-game", "## Story So Far\n\nThe heroes gathered.", ["s1"], "ollama", "llama3.1:8b"
+        "my-game", "## Story So Far\n\nThe heroes gathered.", "ollama", "llama3.1:8b"
     ), encoding="utf-8")
 
     resp = client.get("/campaigns/my-game/journal")
@@ -2914,7 +3020,7 @@ def test_unchanged_name_with_existing_profile_skips_enroll(client, tmp_path, mon
     client.app.state.job_queue._jobs[job.id] = job
 
     existing_alice = SpeakerProfile(
-        name="alice", display_name="Alice", role="", embedding_path=tmp_path / "alice.npy",
+        name="alice", display_name="Alice", role="", embedding=None,
         enrolled_date="2026-01-01", enrollment_source="old.mp3",
     )
 
@@ -3196,3 +3302,124 @@ def test_job_detail_align_step_only_when_aligning(client, will_align):
         html = client.get(f"/transcribe/jobs/{job.id}").text
     assert ('id="step_align"' in html) is will_align
     assert ("'align'," in html) is will_align
+
+
+# ---------------------------------------------------------------------------
+# Upload name collisions: never silently reuse or replace a transcript
+# ---------------------------------------------------------------------------
+
+def _post_upload(client, out_dir, **data):
+    from wisper_transcribe.web.jobs import Job
+    import uuid
+
+    fake_job = MagicMock(spec=Job)
+    fake_job.id = str(uuid.uuid4())
+    with patch("wisper_transcribe.web.routes.transcribe.get_output_dir", return_value=out_dir), \
+         patch.object(client.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
+        resp = client.post(
+            "/transcribe",
+            files={"file": ("session.mp3", b"fake audio", "audio/mpeg")},
+            data=data, follow_redirects=False,
+        )
+    return resp, mock_submit
+
+
+def test_upload_with_taken_name_is_refused(client, tmp_path):
+    (tmp_path / "session.md").write_text("old", encoding="utf-8")
+    resp, mock_submit = _post_upload(client, tmp_path)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/transcribe?error=name_exists"
+    mock_submit.assert_not_called()
+    assert (tmp_path / "session.md").read_text(encoding="utf-8") == "old"
+
+
+def test_upload_with_taken_name_and_overwrite_submits(client, tmp_path):
+    (tmp_path / "session.md").write_text("old", encoding="utf-8")
+    resp, mock_submit = _post_upload(client, tmp_path, overwrite="on")
+    assert resp.status_code == 303
+    assert mock_submit.call_args.kwargs["overwrite"] is True
+
+
+def test_upload_with_new_name_does_not_overwrite(client, tmp_path):
+    resp, mock_submit = _post_upload(client, tmp_path)
+    assert mock_submit.call_args.kwargs["overwrite"] is False
+
+
+def test_name_exists_error_is_explained(client):
+    resp = client.get("/transcribe?error=name_exists")
+    assert "already exists, so nothing was started" in resp.text
+
+
+def test_name_check_reports_existing_transcript_and_campaign(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+
+    (out / "session 1.md").write_text("x", encoding="utf-8")
+    create_campaign("The Game")
+    move_transcript_to_campaign("session 1", "the-game")
+
+    data = client.get("/transcribe/name-check", params={"filename": "session 1.mp3"}).json()
+    assert data == {"exists": True, "campaign": "The Game"}
+    data = client.get("/transcribe/name-check", params={"filename": "other.mp3"}).json()
+    assert data == {"exists": False, "campaign": None}
+
+
+def test_campaign_page_offers_relink_and_relink_route(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    from wisper_transcribe import transcript_store as ts
+    from wisper_transcribe.campaign_manager import (
+        create_campaign, get_transcripts_for_campaign, move_transcript_to_campaign,
+    )
+
+    monkeypatch.setattr(ts, "_is_case_insensitive", lambda d: False)
+    create_campaign("Game")
+    (out / "s01.md").write_text("x", encoding="utf-8")
+    ts.register("s01", origin="job")
+    move_transcript_to_campaign("s01", "game")
+    (out / "s01.md").rename(out / "Session 01 renamed.md")
+
+    resp = client.get("/campaigns/game")
+    assert "MISSING" in resp.text
+    assert 'data-testid="relink-form"' in resp.text
+    assert "Session 01 renamed" in resp.text
+
+    resp = client.post("/campaigns/game/transcripts/relink",
+                       data={"old_stem": "s01", "new_stem": "Session 01 renamed"},
+                       follow_redirects=False)
+    assert resp.status_code == 303 and resp.headers["location"] == "/campaigns/game"
+    assert get_transcripts_for_campaign("game") == ["Session 01 renamed"]
+
+    resp = client.post("/campaigns/game/transcripts/relink",
+                       data={"old_stem": "s01", "new_stem": "Session 01 renamed"},
+                       follow_redirects=False)
+    assert resp.headers["location"] == "/campaigns/game?error=relink_failed"
+
+
+def test_transcripts_page_has_bulk_actions_wired_to_routes(client, tmp_path, monkeypatch):
+    """The bulk bar posts `stems` (+ `campaign`) to the existing bulk routes."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    create_campaign("Game")
+    (out / "s01.md").write_text("---\ntitle: Session One\n---\n\nx\n", encoding="utf-8")
+    resp = client.get("/transcripts")
+    assert 'data-testid="bulk-transcripts-bar"' in resp.text
+    assert 'class="transcript-select" value="s01"' in resp.text
+    assert 'action="/transcripts/bulk-delete"' in resp.text
+    assert 'action="/transcripts/bulk-campaign"' in resp.text
+    assert "input.name = 'stems'" in resp.text
+    assert '<option value="game">Game</option>' in resp.text
+
+    resp = client.post("/transcripts/bulk-campaign", data={"stems": ["s01"], "campaign": "game"},
+                       follow_redirects=False)
+    from wisper_transcribe.campaign_manager import get_transcripts_for_campaign
+    assert get_transcripts_for_campaign("game") == ["s01"]

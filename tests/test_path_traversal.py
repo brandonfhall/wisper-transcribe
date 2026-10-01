@@ -314,6 +314,19 @@ def test_campaigns_delete_path_traversal_blocked(client, payload):
 
 
 @pytest.mark.parametrize("payload", _CAMPAIGN_SLUG_PAYLOADS)
+def test_campaigns_journal_download_path_traversal_blocked(client, payload):
+    from urllib.parse import quote
+    resp = client.get(
+        f"/campaigns/{quote(payload, safe='')}/journal/download", follow_redirects=False
+    )
+    # 400: our validator rejected; 404: routing or unknown campaign.
+    assert resp.status_code in (400, 404)
+    disposition = resp.headers.get("content-disposition", "")
+    assert "\x00" not in disposition and ".." not in disposition
+    assert "\r" not in disposition and "\n" not in disposition
+
+
+@pytest.mark.parametrize("payload", _CAMPAIGN_SLUG_PAYLOADS)
 def test_campaigns_relabel_path_traversal_blocked(client, payload):
     from urllib.parse import quote
     with patch.object(client.app.state.job_queue, "submit_relabel") as mock_submit:
@@ -498,24 +511,19 @@ def test_find_excerpt_clip_missing_returns_none(tmp_path):
     "../escape", "a/b", "..", "with space/../x",
 ])
 def test_speakers_rename_new_name_path_guard(client: TestClient, payload: str, tmp_path):
-    """The web rename rekeys the profile (moves .npy/.mp3 files), so the
+    """The web rename rekeys the profile (moves its .mp3 clip), so the
     submitted new name must pass the path-component guard; hostile names are
     refused with a generic error code and never reflected."""
-    import numpy as np
-    from wisper_transcribe.models import SpeakerProfile
-    from wisper_transcribe.speaker_manager import save_profiles
+    from wisper_transcribe.speaker_manager import load_profiles, reference_clip_path
 
-    emb_dir = tmp_path / "profiles" / "embeddings"
-    emb_dir.mkdir(parents=True)
-    np.save(str(emb_dir / "alice.npy"), np.zeros(2))
-    save_profiles({"alice": SpeakerProfile(
-        name="alice", display_name="Alice", role="",
-        embedding_path=emb_dir / "alice.npy",
-        enrolled_date="2026-04-07", enrollment_source="t.mp3",
-    )}, data_dir=tmp_path)
+    from ._seed import seed_profile
 
-    with patch("wisper_transcribe.speaker_manager.get_data_dir", return_value=tmp_path), \
-         patch("wisper_transcribe.campaign_manager.get_data_dir", return_value=tmp_path):
+    seed_profile("alice", "Alice", data_dir=tmp_path)
+    clip = reference_clip_path("alice", tmp_path)
+    clip.parent.mkdir(parents=True, exist_ok=True)
+    clip.write_bytes(b"mp3")
+
+    with patch.dict("os.environ", {"WISPER_DATA_DIR": str(tmp_path)}):
         resp = client.post(
             "/speakers/alice/rename",
             data={"new_name": payload},
@@ -524,5 +532,83 @@ def test_speakers_rename_new_name_path_guard(client: TestClient, payload: str, t
 
     assert resp.status_code == 303
     assert resp.headers["location"] == "/speakers?error=rename_failed"
-    # No file escaped or moved
-    assert (emb_dir / "alice.npy").exists()
+    # Nothing renamed, no file escaped or moved
+    assert set(load_profiles(tmp_path)) == {"alice"}
+    assert clip.exists()
+
+
+@pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS + [
+    "../escape.mp3", "../../etc/passwd", "a/b.mp3", "evil\r\nLocation: x.mp3",
+])
+def test_transcribe_name_check_never_escapes_output_dir(client, payload, tmp_path, monkeypatch):
+    """The name check resolves only inside the output dir and echoes nothing."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (tmp_path / "escape.md").write_text("outside", encoding="utf-8")
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    resp = client.get("/transcribe/name-check", params={"filename": payload})
+    assert resp.status_code == 200
+    assert resp.json() == {"exists": False, "campaign": None}
+    assert payload not in resp.text
+
+
+@pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS + [
+    "../escape", "../../etc/passwd", "a/b", "..", "evil\r\nLocation: x",
+])
+def test_campaign_relink_rejects_unsafe_stems(client, payload, tmp_path, monkeypatch):
+    """Relink takes two stems from form data; neither may leave the output dir,
+    and neither is ever reflected into the redirect."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    create_campaign("Game")
+    for form in ({"old_stem": payload, "new_stem": "x"}, {"old_stem": "x", "new_stem": payload}):
+        resp = client.post("/campaigns/game/transcripts/relink", data=form, follow_redirects=False)
+        assert resp.status_code in (303, 400, 422)
+        location = resp.headers.get("location", "")
+        assert location in ("", "/campaigns/game?error=relink_failed")
+
+
+@pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS + ["\x00", "a\x00b", "\r\nSet-Cookie: x=1"])
+def test_search_params_are_inert(client: TestClient, payload: str):
+    """/search reads no files and never redirects: every parameter is either a
+    search term or ignored unless it exactly matches a dropdown value."""
+    r = client.get("/search", params={"q": payload, "campaign": payload, "speaker": payload,
+                                      "kind": payload})
+    assert r.status_code == 200
+    assert "Set-Cookie" not in r.headers
+    assert "Traceback" not in r.text
+
+
+@pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS + ["\x00", '"</script>'])
+def test_transcript_highlight_param_is_inert(client: TestClient, payload: str):
+    """The ?q= highlight parameter on transcript and summary pages is never a path."""
+    for url in ("/transcripts/nope", "/transcripts/nope/summary"):
+        r = client.get(url, params={"q": payload})
+        assert r.status_code in (400, 404)
+
+
+@pytest.mark.parametrize("key", ["../outside", "..\\outside", "sub/../../outside", "outside\x00"])
+def test_remove_profile_files_stays_in_clips_dir(tmp_path, key):
+    """A key from a URL never deletes a file outside the reference-clips folder."""
+    from wisper_transcribe.speaker_manager import get_reference_clips_dir, remove_profile_files
+
+    clips = get_reference_clips_dir(tmp_path)
+    clips.mkdir(parents=True, exist_ok=True)
+    outside = clips.parent / "outside.mp3"
+    outside.write_bytes(b"keep")
+    try:
+        remove_profile_files(key, tmp_path)
+    except ValueError:
+        pass  # a null byte is rejected outright
+    assert outside.read_bytes() == b"keep"
+
+
+def test_remove_profile_files_deletes_its_own_clip(tmp_path):
+    from wisper_transcribe.speaker_manager import get_reference_clips_dir, remove_profile_files
+
+    clips = get_reference_clips_dir(tmp_path)
+    clips.mkdir(parents=True, exist_ok=True)
+    (clips / "joe_(dm).mp3").write_bytes(b"x")
+    remove_profile_files("joe_(dm)", tmp_path)
+    assert not (clips / "joe_(dm).mp3").exists()

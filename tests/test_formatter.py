@@ -295,3 +295,16 @@ def test_rewrite_blocks_preserves_frontmatter():
     result = rewrite_transcript_blocks(_SAMPLE_MD, {0: "NewName"})
     assert result.startswith("---")
     assert "title: Session 01" in result
+
+
+def test_searchable_blocks_report_line_numbers():
+    from wisper_transcribe.formatter import searchable_blocks
+    body = "# T\n\n**A** *(00:01)*: hi\n\n*(00:02)* there\n"
+    assert [(n, b["index"], b["speaker"]) for n, b in searchable_blocks(body)] == [
+        (2, 0, "A"), (4, 1, "")]
+
+
+def test_searchable_blocks_plain_fallback_skips_footer():
+    from wisper_transcribe.formatter import searchable_blocks
+    body = "# T\n\nhello\n\n---\n*Transcribed by wisper-transcribe v1*\n"
+    assert [(n, b["text"]) for n, b in searchable_blocks(body)] == [(2, "hello")]

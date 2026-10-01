@@ -10,15 +10,17 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Resp
 
 from . import get_queue as _get_queue, templates
 from wisper_transcribe.path_utils import validate_path_component
-from wisper_transcribe.speaker_manager import load_profiles, remove_profile, stale_profile_keys
+from wisper_transcribe.speaker_manager import (
+    load_profiles, profile_activity, remove_profile, stale_profile_keys,
+)
 from wisper_transcribe.web._responses import error_redirect, invalid_input_response
 
 router = APIRouter(prefix="/speakers")
 
 
 def _clip_path(key: str) -> "Path":
-    from wisper_transcribe.speaker_manager import _get_embeddings_dir
-    return _get_embeddings_dir() / f"{os.path.basename(key)}.mp3"
+    from wisper_transcribe.speaker_manager import get_reference_clips_dir
+    return get_reference_clips_dir() / f"{os.path.basename(key)}.mp3"
 
 
 def _waveform_bars(key: str, count: int = 64) -> list[int]:
@@ -50,7 +52,8 @@ async def speakers_list(request: Request) -> HTMLResponse:
         request,
         "speakers.html",
         {"request": request, "profiles": profiles, "has_clip": has_clip,
-         "waveforms": waveforms, "stale": set(stale_profile_keys(profiles))},
+         "waveforms": waveforms, "stale": set(stale_profile_keys(profiles)),
+         "activity": profile_activity()},
     )
 
 
@@ -61,8 +64,8 @@ async def speaker_clip(request: Request, key: str) -> Response:
     if safe_key is None:
         return invalid_input_response("Invalid key")
 
-    from wisper_transcribe.speaker_manager import _get_embeddings_dir
-    embeddings_dir = _get_embeddings_dir().resolve()
+    from wisper_transcribe.speaker_manager import get_reference_clips_dir
+    embeddings_dir = get_reference_clips_dir().resolve()
     base_dir = os.path.abspath(str(embeddings_dir))
     if not base_dir.endswith(os.sep):
         base_dir += os.sep
@@ -147,7 +150,8 @@ async def enroll_submit(
 
 @router.post("/{name}/remove", response_class=HTMLResponse)
 async def remove_speaker(request: Request, name: str) -> RedirectResponse:
-    # Shared with the CLI remove command (locked; removes .npy and .mp3).
+    # remove_profile() confines the clip path to the clips folder, so a key
+    # like "joe_(dm)" works without the [\w-] guard the other routes use.
     try:
         remove_profile(name)
     except KeyError:

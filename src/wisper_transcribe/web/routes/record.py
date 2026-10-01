@@ -18,17 +18,14 @@ from typing import Annotated, Optional
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 
-from wisper_transcribe.campaign_manager import (
-    load_campaigns,
-    move_transcript_to_campaign,
-)
+from wisper_transcribe.campaign_manager import load_campaigns
 from wisper_transcribe.config import get_data_dir, load_config, save_config
 from wisper_transcribe.recording_manager import (
     _validate_recording_id,
     append_marker,
     delete_recording,
+    link_transcript,
     load_recordings,
-    save_recording,
 )
 from wisper_transcribe.web._responses import error_redirect, invalid_input_response
 from wisper_transcribe.web.jobs import resume_slice
@@ -489,6 +486,43 @@ async def recording_transcribe(recording_id: str, request: Request):
     return JSONResponse({"id": recording.id, "job_id": job.id, "status": "transcribing"}, status_code=202)
 
 
+@router.post("/api/recordings/{recording_id}/recover")
+async def recording_recover_api(recording_id: str):
+    """Rebuild a crashed session's combined.wav from its segments (JSON)."""
+    safe_id = _validate_recording_id(recording_id)
+    if safe_id is None:
+        return JSONResponse({"error": "invalid_id"}, status_code=400)
+    from wisper_transcribe.recording_manager import recover_recording
+
+    try:
+        rec = await asyncio.to_thread(recover_recording, safe_id, get_data_dir())
+    except KeyError:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    except ValueError:
+        return JSONResponse({"error": "not_recoverable"}, status_code=409)
+    return JSONResponse({"id": rec.id, "status": rec.status, "recovered": True})
+
+
+@router.post("/recordings/{recording_id}/recover", response_class=HTMLResponse)
+async def recording_recover_html(recording_id: str) -> RedirectResponse:
+    """Recover button on the recording page (joins segments off the request thread)."""
+    safe_id = _validate_recording_id(recording_id)
+    if safe_id is None:
+        return invalid_input_response("Invalid recording ID")
+    from wisper_transcribe.recording_manager import load_recording, recover_recording
+
+    data_dir = get_data_dir()
+    rec = load_recording(safe_id, data_dir)
+    if rec is None:
+        return RedirectResponse(url="/recordings", status_code=303)
+    try:
+        await asyncio.to_thread(recover_recording, rec.id, data_dir)
+    except (KeyError, ValueError):
+        # rec.id comes from the database, not the URL.
+        return RedirectResponse(url=f"/recordings/{rec.id}?error=recover_failed", status_code=303)
+    return RedirectResponse(url=f"/recordings/{rec.id}", status_code=303)
+
+
 def _purge_recording_files(recording, data_dir: Path) -> None:
     """Delete a recording's files: ``recordings/<id>/`` and, if transcribed,
     the transcript and its sidecars (via ``transcripts.py``'s own helpers).
@@ -502,19 +536,18 @@ def _purge_recording_files(recording, data_dir: Path) -> None:
     if recording.status in ACTIVE_STATUSES:
         return
 
-    from wisper_transcribe.web.routes.transcripts import _delete_transcript_companions
+    from wisper_transcribe.path_utils import get_output_dir
+    from wisper_transcribe.transcript_store import delete_transcript
 
     rec_dir = data_dir / "recordings" / recording.id
     shutil.rmtree(rec_dir, ignore_errors=True)
 
+    # The transcript is deleted only when it's the one under the output root
+    # (the only place the hand-off writes); anything else isn't ours to delete.
     if recording.transcript_path is not None:
-        stem = recording.transcript_path.stem
-        try:
-            if recording.transcript_path.exists():
-                recording.transcript_path.unlink()
-        except OSError:
-            pass
-        _delete_transcript_companions(stem)
+        out_dir = os.path.abspath(str(get_output_dir()))
+        if os.path.dirname(os.path.abspath(str(recording.transcript_path))) == out_dir:
+            delete_transcript(recording.transcript_path.stem)
 
 
 @router.post("/api/recordings/{recording_id}/delete")
@@ -571,7 +604,7 @@ async def record_page(request: Request) -> HTMLResponse:
 
 @router.get("/record/sse")
 async def record_sse(request: Request) -> StreamingResponse:
-    """SSE stream of live recording session status (Pattern 6)."""
+    """SSE stream of live recording session status."""
 
     async def event_generator():
         while True:
@@ -933,51 +966,32 @@ def _submit_recording_transcription(recording, request: Request, data_dir: Path)
     dest = output_dir / f"{recording.id}.wav"
     shutil.copy2(str(recording.combined_path), str(dest))
 
-    # Restored on failure, so a failed re-transcribe keeps "transcribed" and
-    # its actions.
-    previous_status = recording.status
-
-    # Build the post-completion callback: auto-associate transcript with campaign
+    # On success, link the transcript. Nothing to undo on failure: the
+    # recording reads as "transcribing" only while this job is active.
     def _on_complete(job):
-        _recordings = load_recordings(data_dir)
-        rec = _recordings.get(recording.id)
-        if rec is None:
+        if not job.output_path:
             return
-        rec.status = "transcribed"
-        if job.output_path:
-            rec.transcript_path = Path(job.output_path)
-            stem = Path(job.output_path).stem
-            if rec.campaign_slug:
-                try:
-                    move_transcript_to_campaign(stem, rec.campaign_slug, data_dir)
-                except Exception:
-                    log.warning("Failed to move transcript to campaign in on_complete", exc_info=True)
-        save_recording(rec, data_dir)
-
-    # Revert the status on failure so the Transcribe button reappears.
-    def _on_error(job):
-        _recordings = load_recordings(data_dir)
-        rec = _recordings.get(recording.id)
-        if rec is None:
-            return
-        rec.status = previous_status
-        save_recording(rec, data_dir)
+        try:
+            link_transcript(recording.id, Path(job.output_path), data_dir)
+        except Exception:
+            log.warning("Failed to link transcript to recording %s", recording.id, exc_info=True)
 
     queue = request.app.state.job_queue
     job = queue.submit(
         str(dest),
         original_stem=recording.id,
+        recording_id=recording.id,
         output_dir=str(output_dir),
+        # process_file associates the transcript with this campaign.
         campaign=recording.campaign_slug or "",
         title=recording.name,
+        # The output is <recording-id>.md, which only this recording ever
+        # writes, so re-transcribing replaces its own transcript (keeping the
+        # transcript's identity and campaign; a folded journal goes stale).
+        # The page asks for confirmation first.
+        overwrite=True,
         on_complete=_on_complete,
-        on_error=_on_error,
     )
-
-    recording.job_id = job.id
-    recording.status = "transcribing"
-    save_recording(recording, data_dir)
-
     return job, None
 
 

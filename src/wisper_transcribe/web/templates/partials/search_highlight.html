@@ -1,0 +1,44 @@
+{#
+  Search deep-link: when a page is opened from a search result
+  (?q=…#b-<index> or #s-<index>), mark the query terms inside the target
+  block or summary section and scroll it into view. `highlight` is
+  search_index.highlight_pattern(q).pattern: word characters and `|` only.
+#}
+{% if highlight %}
+<script>
+(function () {
+  var target = location.hash ? document.getElementById(location.hash.slice(1)) : null;
+  if (!target) return;
+  var re;
+  try { re = new RegExp({{ highlight | tojson }}, "gi"); } catch (e) { return; }
+  var roots = [target];
+  if (target.tagName === "H2") {
+    for (var n = target.nextElementSibling; n && n.tagName !== "H2"; n = n.nextElementSibling) roots.push(n);
+  }
+  roots.forEach(function (root) {
+    var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    var texts = [];
+    while (walker.nextNode()) texts.push(walker.currentNode);
+    texts.forEach(function (node) {
+      var s = node.nodeValue, last = 0, frag = null, m;
+      re.lastIndex = 0;
+      while ((m = re.exec(s))) {
+        frag = frag || document.createDocumentFragment();
+        frag.appendChild(document.createTextNode(s.slice(last, m.index)));
+        var mark = document.createElement("mark");
+        mark.className = "search-mark";
+        mark.textContent = m[0];
+        frag.appendChild(mark);
+        last = m.index + m[0].length;
+      }
+      if (frag) {
+        frag.appendChild(document.createTextNode(s.slice(last)));
+        node.parentNode.replaceChild(frag, node);
+      }
+    });
+  });
+  target.classList.add("search-target");
+  target.scrollIntoView({ block: "center" });
+})();
+</script>
+{% endif %}
