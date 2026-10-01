@@ -177,6 +177,43 @@ async def test_worker_does_not_revive_cancelled_pending_job():
     mock_process.assert_not_called()
 
 
+@pytest.mark.anyio
+async def test_server_shutdown_mid_job_records_it_interrupted_not_completed(tmp_path):
+    """stop() cancels the worker while a job thread runs. The job must be
+    recorded failed (interrupted) with its temp upload removed -- a half-done
+    transcription was being recorded as completed with no transcript."""
+    import threading
+
+    from wisper_transcribe import db
+    from wisper_transcribe.job_history import INTERRUPTED
+    from wisper_transcribe.web.jobs import FAILED, RUNNING
+
+    upload = tmp_path / "wisper_upload_abc.mp3"
+    upload.write_bytes(b"audio")
+    started, release = threading.Event(), threading.Event()
+
+    def _slow(*args, **kwargs):
+        started.set()
+        release.wait(5)
+        raise RuntimeError("thread outlived the server")
+
+    q = _make_queue()
+    with patch("wisper_transcribe.web.jobs.process_file", side_effect=_slow):
+        job = q.submit(str(upload), model_size="tiny", no_diarize=True)
+        q.start()
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        assert job.status == RUNNING
+        await q.stop()
+        release.set()
+
+    assert job.status == FAILED and job.error == INTERRUPTED
+    assert not Path(job.input_path).exists()
+    with db.connection() as conn:
+        row = conn.execute("SELECT status, error_code FROM jobs WHERE id = ?", (job.id,)).fetchone()
+    assert tuple(row) == ("failed", INTERRUPTED)
+
+
 def test_cancel_unknown_job_returns_false():
     q = _make_queue()
     assert q.cancel("nonexistent") is False
