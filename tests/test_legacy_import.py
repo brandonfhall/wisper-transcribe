@@ -350,6 +350,24 @@ def test_sidecar_audio_outside_output_root_imports_as_none(data_dir, tmp_path):
     assert "s1" in _v4_report(data_dir)
 
 
+@pytest.mark.parametrize("old_path", [
+    "/Users/someone/Library/Application Support/wisper-transcribe/output/s1.mp3",
+    r"C:\Users\someone\AppData\Local\wisper-transcribe\output\s1.mp3",
+])
+def test_sidecar_audio_from_a_moved_data_folder_links_by_name(data_dir, old_path):
+    # A data folder copied into Docker or to another machine keeps the old
+    # absolute path; the audio next to the transcript is still found.
+    from wisper_transcribe.path_utils import get_output_dir
+    from wisper_transcribe.transcript_store import read_sidecar
+
+    out = get_output_dir()
+    _output_md("s1")
+    (out / "s1.mp3").write_bytes(b"a")
+    _legacy_sidecar(out, "s1", input_path=old_path, speaker_map={"SPEAKER_00": "A"})
+    assert read_sidecar(out / "s1.md")["input_path"] == str(out / "s1.mp3")
+    assert "s1" not in _v4_report(data_dir)
+
+
 def test_sidecar_campaign_key_associates_unassigned_transcript(data_dir):
     from wisper_transcribe.path_utils import get_output_dir
 
