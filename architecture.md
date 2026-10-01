@@ -756,6 +756,7 @@ The job page shows step pills and one bar split into equal per-step slices:
 | Constraint | Detail |
 |-----------|--------|
 | torchcodec on Windows | Needs FFmpeg's full-shared build; bypassed by scipy pre-loading |
+| PyAV pinned `<19` | faster-whisper 1.2.1 decodes audio with `av.open(metadata_errors=…)`, which PyAV 19 removed; a fresh install without the pin fails every CTranslate2 transcription (MLX on Apple Silicon doesn't use it). Drop the pin once faster-whisper releases a fix |
 | MPS on Apple Silicon | CTranslate2 has no MPS backend. With `[macos]`, transcription uses MLX; otherwise CPU. Diarization, embeddings, and word alignment use MPS |
 | Forced alignment scope | 11 languages (others keep Whisper times); `auto` skips CPU-only machines (~9–20 min per 2.5 h session); no confidence score, so a misplaced word can't be filtered; one timeline can't represent overlapped speech |
 | Thread safety | Model globals aren't thread-safe: the web queue runs one job at a time; folder mode uses processes |
