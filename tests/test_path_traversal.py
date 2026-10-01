@@ -586,3 +586,29 @@ def test_transcript_highlight_param_is_inert(client: TestClient, payload: str):
     for url in ("/transcripts/nope", "/transcripts/nope/summary"):
         r = client.get(url, params={"q": payload})
         assert r.status_code in (400, 404)
+
+
+@pytest.mark.parametrize("key", ["../outside", "..\\outside", "sub/../../outside", "outside\x00"])
+def test_remove_profile_files_stays_in_clips_dir(tmp_path, key):
+    """A key from a URL never deletes a file outside the reference-clips folder."""
+    from wisper_transcribe.speaker_manager import get_reference_clips_dir, remove_profile_files
+
+    clips = get_reference_clips_dir(tmp_path)
+    clips.mkdir(parents=True, exist_ok=True)
+    outside = clips.parent / "outside.mp3"
+    outside.write_bytes(b"keep")
+    try:
+        remove_profile_files(key, tmp_path)
+    except ValueError:
+        pass  # a null byte is rejected outright
+    assert outside.read_bytes() == b"keep"
+
+
+def test_remove_profile_files_deletes_its_own_clip(tmp_path):
+    from wisper_transcribe.speaker_manager import get_reference_clips_dir, remove_profile_files
+
+    clips = get_reference_clips_dir(tmp_path)
+    clips.mkdir(parents=True, exist_ok=True)
+    (clips / "joe_(dm).mp3").write_bytes(b"x")
+    remove_profile_files("joe_(dm)", tmp_path)
+    assert not (clips / "joe_(dm).mp3").exists()

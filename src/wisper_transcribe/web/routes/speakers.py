@@ -150,7 +150,8 @@ async def enroll_submit(
 
 @router.post("/{name}/remove", response_class=HTMLResponse)
 async def remove_speaker(request: Request, name: str) -> RedirectResponse:
-    # Shared with the CLI remove command (locked; removes .npy and .mp3).
+    # remove_profile() confines the clip path to the clips folder, so a key
+    # like "joe_(dm)" works without the [\w-] guard the other routes use.
     try:
         remove_profile(name)
     except KeyError:

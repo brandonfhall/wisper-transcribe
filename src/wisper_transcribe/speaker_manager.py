@@ -115,10 +115,16 @@ def profile_activity(data_dir: Optional[Path] = None) -> dict[str, tuple[int, Op
 
 
 def remove_profile_files(key: str, data_dir: Optional[Path] = None) -> None:
-    """Delete a profile's reference clip (and a stray pre-SQLite ``.npy``)."""
-    clips = get_reference_clips_dir(data_dir)
-    (clips / f"{key}.mp3").unlink(missing_ok=True)
-    (clips / f"{key}.npy").unlink(missing_ok=True)
+    """Delete a profile's reference clip (and a stray pre-SQLite ``.npy``).
+
+    ``key`` can come from a URL, so each path is confined to the clips folder
+    (basename + abspath/startswith, the form CodeQL accepts as a sanitiser).
+    """
+    base = os.path.abspath(str(get_reference_clips_dir(data_dir))) + os.sep
+    for suffix in (".mp3", ".npy"):
+        target = os.path.abspath(os.path.join(base, os.path.basename(f"{key}{suffix}")))
+        if target.startswith(base):
+            Path(target).unlink(missing_ok=True)
 
 
 def remove_profile(key: str, data_dir: Optional[Path] = None) -> None:
