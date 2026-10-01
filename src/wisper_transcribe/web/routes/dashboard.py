@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
@@ -35,6 +36,38 @@ def recent_jobs(queue, limit: int = RECENT_JOBS) -> list:
     merged = live + [r for r in stored if r.id not in seen]
     merged.sort(key=lambda j: j.created_at, reverse=True)
     return merged[:limit]
+
+
+def job_campaigns(jobs: list) -> dict[str, str]:
+    """Job id -> campaign display name, for the job table's Campaign column.
+
+    Same rule as job history: the job's transcript's current campaign, else
+    its recording's, else the campaign it was submitted with. History rows
+    arrive with it already derived (``campaign_name``).
+    """
+    from wisper_transcribe.campaign_manager import get_campaign_for_transcript, load_campaigns
+    from wisper_transcribe.recording_manager import load_recording
+
+    names = {slug: c.display_name for slug, c in load_campaigns().items()}
+    out: dict[str, str] = {}
+    for job in jobs:
+        name = getattr(job, "campaign_name", None)
+        if name is None and hasattr(job, "kwargs"):
+            slug = None
+            path = (getattr(job, "output_path", None) or getattr(job, "llm_transcript_path", None)
+                    or getattr(job, "enroll_md_path", None))
+            if path:
+                slug = get_campaign_for_transcript(Path(path).stem)
+            rid = getattr(job, "recording_id", None) or getattr(job, "live_recording_id", None)
+            if slug is None and rid:
+                rec = load_recording(rid)
+                slug = rec.campaign_slug if rec else None
+            if slug is None:
+                slug = job.kwargs.get("campaign") or job.kwargs.get("slug")
+            name = names.get(slug) if slug else None
+        if name:
+            out[job.id] = name
+    return out
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -77,12 +110,14 @@ async def dashboard(request: Request) -> HTMLResponse:
             llm_ready = False
         llm_status_hint = "API key" if llm_ready else "API key missing"
 
+    jobs = recent_jobs(queue)
     return templates.TemplateResponse(
         request,
         "index.html",
         {
             "request": request,
-            "jobs": recent_jobs(queue),
+            "jobs": jobs,
+            "job_campaigns": job_campaigns(jobs),
             "active_count": queue.active_count(),
             "transcript_count": transcript_count,
             "speaker_count": speaker_count,
@@ -101,10 +136,11 @@ async def dashboard(request: Request) -> HTMLResponse:
 async def jobs_partial(request: Request) -> HTMLResponse:
     """HTMX partial: job table rows (polled every 2s when jobs are active)."""
     queue = get_queue(request)
+    jobs = recent_jobs(queue)
     return templates.TemplateResponse(
         request,
         "partials/job_rows.html",
-        {"request": request, "jobs": recent_jobs(queue)},
+        {"request": request, "jobs": jobs, "job_campaigns": job_campaigns(jobs)},
     )
 
 

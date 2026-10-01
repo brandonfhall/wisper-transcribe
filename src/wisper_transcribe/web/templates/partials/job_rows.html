@@ -35,8 +35,8 @@
     </div>
   </div>
 
-  <!-- Campaign: always "—"; job rows don't show a campaign -->
-  <div style="font-size:11px;color:var(--color-paper-dim)">—</div>
+  <!-- Campaign (dashboard.job_campaigns) -->
+  <div data-testid="job-campaign" style="font-size:11px;color:var(--color-paper-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ (job_campaigns or {}).get(job.id) or "—" }}</div>
 
   <!-- Stage + progress bar -->
   <div style="display:flex;align-items:center;gap:10px">

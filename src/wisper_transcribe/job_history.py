@@ -154,6 +154,7 @@ class JobRecord:
     transcript_stem: Optional[str]
     campaign_slug: Optional[str]
     recording_id: Optional[str]
+    campaign_name: Optional[str]
     params: dict
     log_tail: str
 
@@ -169,6 +170,32 @@ class JobRecord:
         if self.job_type == "transcription" and self.transcript_stem and self.status == "completed":
             return f"{self.transcript_stem}.md"
         return None
+
+
+# A job's campaign: its own subject (journal, relabel), else its transcript's
+# current campaign, else its recording's, else the campaign it was submitted
+# with (params_json; a job that never wrote a transcript). Derived, so a moved
+# transcript's jobs follow it. campaign_transcripts allows one row per
+# transcript, so the joins never multiply job rows.
+_FROM = (
+    "FROM jobs j LEFT JOIN transcripts t ON t.id = j.transcript_id "
+    "LEFT JOIN campaign_transcripts ct ON ct.transcript_id = j.transcript_id "
+    "LEFT JOIN recordings rec ON rec.id = j.recording_id "
+    "LEFT JOIN campaigns c ON c.id = coalesce(j.campaign_id, ct.campaign_id, rec.campaign_id, "
+    "(SELECT id FROM campaigns WHERE slug = json_extract(j.params_json, '$.campaign'))) "
+)
+_COLUMNS = "j.*, t.stem AS transcript_stem, c.slug AS campaign_slug, c.display_name AS campaign_name"
+
+
+def _record(r) -> "JobRecord":
+    return JobRecord(
+        id=r["id"], job_type=r["type"], status=r["status"], created_at=_dt(r["created_at"]),
+        started_at=_dt(r["started_at"]), finished_at=_dt(r["finished_at"]),
+        error=r["error_code"], transcript_stem=r["transcript_stem"],
+        campaign_slug=r["campaign_slug"], recording_id=r["recording_id"],
+        campaign_name=r["campaign_name"],
+        params=json.loads(r["params_json"]), log_tail=r["log_tail"],
+    )
 
 
 def _dt(s: Optional[str]) -> Optional[datetime]:
@@ -195,40 +222,19 @@ def list_jobs(*, page: int = 1, per_page: int = 50, job_type: Optional[str] = No
         where.append("c.slug = ?")
         params.append(campaign)
     clause = ("WHERE " + " AND ".join(where)) if where else ""
-    base = ("FROM jobs j LEFT JOIN transcripts t ON t.id = j.transcript_id "
-            "LEFT JOIN campaigns c ON c.id = j.campaign_id " + clause)
+    base = _FROM + clause
     page = max(1, page)
     with db.connection(data_dir) as conn:
         total = conn.execute(f"SELECT count(*) {base}", params).fetchone()[0]
         rows = conn.execute(
-            f"SELECT j.*, t.stem AS transcript_stem, c.slug AS campaign_slug {base} "
+            f"SELECT {_COLUMNS} {base} "
             "ORDER BY j.created_at DESC, j.rowid DESC LIMIT ? OFFSET ?",
             [*params, per_page, (page - 1) * per_page],
         ).fetchall()
-    return [
-        JobRecord(
-            id=r["id"], job_type=r["type"], status=r["status"], created_at=_dt(r["created_at"]),
-            started_at=_dt(r["started_at"]), finished_at=_dt(r["finished_at"]),
-            error=r["error_code"], transcript_stem=r["transcript_stem"],
-            campaign_slug=r["campaign_slug"], recording_id=r["recording_id"],
-            params=json.loads(r["params_json"]), log_tail=r["log_tail"],
-        )
-        for r in rows
-    ], total
+    return [_record(r) for r in rows], total
 
 
 def get_job(job_id: str, data_dir: Optional[Path] = None) -> Optional[JobRecord]:
     with db.connection(data_dir) as conn:
-        row = conn.execute(
-            "SELECT j.*, t.stem AS transcript_stem, c.slug AS campaign_slug FROM jobs j "
-            "LEFT JOIN transcripts t ON t.id = j.transcript_id "
-            "LEFT JOIN campaigns c ON c.id = j.campaign_id WHERE j.id = ?", (job_id,)).fetchone()
-    if row is None:
-        return None
-    return JobRecord(
-        id=row["id"], job_type=row["type"], status=row["status"], created_at=_dt(row["created_at"]),
-        started_at=_dt(row["started_at"]), finished_at=_dt(row["finished_at"]),
-        error=row["error_code"], transcript_stem=row["transcript_stem"],
-        campaign_slug=row["campaign_slug"], recording_id=row["recording_id"],
-        params=json.loads(row["params_json"]), log_tail=row["log_tail"],
-    )
+        row = conn.execute(f"SELECT {_COLUMNS} {_FROM} WHERE j.id = ?", (job_id,)).fetchone()
+    return None if row is None else _record(row)
