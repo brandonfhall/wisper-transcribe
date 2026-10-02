@@ -526,6 +526,8 @@ Two managers write the same on-disk layout: `BotManager` (Discord, via a Java si
 - Two capture threads only fill per-track byte FIFOs. One tick thread every ~20 ms drains a chunk from each (silence-padding a starved track; draining surplus when a FIFO passes ~2 s), writes both tracks, and int32-sums them into the combined writer.
 - `stop_session()` is the only finalizer, so a finished ticker and an external stop can't both finalize.
 - `enumerate_devices()` returns `available: False` rather than raising when `soundcard` is missing or fails, and reports `default_microphone_id`/`default_loopback_id` so the Record page preselects the OS defaults.
+- A device counts as a loopback if `isloopback` is set (WASAPI, PulseAudio/PipeWire monitors) **or** its name matches a virtual-driver hint (`blackhole`, `soundflower`, `loopback audio`). macOS has no OS-level loopback, so `isloopback` never fires there.
+- `_get_microphone_by_id()` retries all-digit ids as ints: macOS ids are CoreAudio integers that come back from the `<select>` as strings.
 - A dead capture thread (e.g. unplugged USB mic) marks the session `degraded`.
 - `set_live_sink(callback)` taps the mixed chunks for live transcription; a failing sink disables itself.
 - Level gauge: per-track peak RMS since the last read (`get_and_reset_levels()`), so transients between ~1 s polls aren't missed.
