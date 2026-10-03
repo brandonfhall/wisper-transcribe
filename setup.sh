@@ -138,8 +138,9 @@ if ! command -v java &>/dev/null; then
         warn "Java 25+ not found — Discord recording bot unavailable."
         warn "Install: sudo apt-get install openjdk-25-jre-headless   or download from https://adoptium.net"
     fi
-elif java -version 2>&1 | head -1 | grep -qE '"25\.'; then
-    ok "Java 25 found"
+elif JAVA_MAJOR=$(java -version 2>&1 | head -1 | sed -nE 's/.*version "([0-9]+).*/\1/p') \
+     && [[ -n "$JAVA_MAJOR" ]] && (( JAVA_MAJOR >= 25 )); then
+    ok "Java $JAVA_MAJOR found"
 else
     JAVA_VER=$(java -version 2>&1 | head -1)
     if [[ "$OSTYPE" == "darwin"* ]]; then
