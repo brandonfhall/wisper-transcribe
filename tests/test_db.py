@@ -446,7 +446,10 @@ def test_to_rel_resolves_symlinked_root(tmp_path):
     real = tmp_path / "real"
     real.mkdir()
     link = tmp_path / "link"
-    link.symlink_to(real, target_is_directory=True)
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except OSError:  # Windows without Developer Mode or admin
+        pytest.skip("symlinks not permitted")
     (real / "a.md").write_text("x")
     assert db.to_rel(link / "a.md", real) == "a.md"
     assert db.to_rel(real / "a.md", link) == "a.md"

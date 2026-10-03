@@ -48,12 +48,15 @@ if !errorlevel! neq 0 (
     echo NOTE: Java 25+ not found. The Discord recording bot will not be available.
     echo Install from: https://adoptium.net/
 ) else (
-    for /f "tokens=3 delims=." %%v in ('java -version 2^>^&1 ^| findstr /i "version"') do (
-        if %%v LSS 25 (
-            echo.
-            echo NOTE: Java version %%v detected — Java 25+ required for Discord recording bot.
-            echo Install from: https://adoptium.net/
-        )
+    :: First line is e.g. openjdk version "17.0.2" or "25"; compare the major part.
+    set "JAVA_VER="
+    set "JAVA_MAJOR=0"
+    for /f "tokens=3" %%v in ('java -version 2^>^&1 ^| findstr /i /c:" version "') do if not defined JAVA_VER set "JAVA_VER=%%~v"
+    for /f "delims=." %%m in ("!JAVA_VER!") do set "JAVA_MAJOR=%%m"
+    if !JAVA_MAJOR! LSS 25 (
+        echo.
+        echo NOTE: Java !JAVA_VER! detected -- Java 25+ required for Discord recording bot.
+        echo Install from: https://adoptium.net/
     )
 )
 

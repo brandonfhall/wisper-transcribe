@@ -39,7 +39,8 @@ if ! command -v java &>/dev/null; then
     echo ""
     echo -e "${YELLOW}NOTE: Java 25+ not found. The Discord recording bot will not be available.${NC}"
     echo "Install with: apt-get install openjdk-25-jre-headless"
-elif ! java -version 2>&1 | head -1 | grep -qE '"25\.'; then
+elif JAVA_MAJOR=$(java -version 2>&1 | head -1 | sed -nE 's/.*version "([0-9]+).*/\1/p'); \
+     [[ -z "$JAVA_MAJOR" ]] || (( JAVA_MAJOR < 25 )); then
     echo ""
     echo -e "${YELLOW}NOTE: Java 25+ required for Discord recording bot. Install with: apt-get install openjdk-25-jre-headless${NC}"
 fi

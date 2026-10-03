@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     First-time setup for wisper-transcribe on Windows with CUDA support.
 .DESCRIPTION
@@ -163,8 +163,8 @@ if (-not $javaCmd) {
     Write-Warn "Install from https://adoptium.net or via winget: winget install EclipseAdoptium.Temurin.25.JRE"
 } else {
     $javaVersion = & java -version 2>&1 | Select-Object -First 1
-    if ($javaVersion -match '"25\.') {
-        Write-OK "Java 25 found"
+    if ($javaVersion -match 'version "(\d+)' -and [int]$Matches[1] -ge 25) {
+        Write-OK "Java $($Matches[1]) found"
     } else {
         Write-Warn "Java 25+ required for Discord recording bot (found: $javaVersion)."
         Write-Warn "Install from https://adoptium.net or via winget: winget install EclipseAdoptium.Temurin.25.JRE"
