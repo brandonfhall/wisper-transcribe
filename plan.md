@@ -64,8 +64,8 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 | 3 — Enroll from stored embeddings | done | 2a135af |
 | 4 — Extract audio, keep FLAC | done | f97a271 |
 | 5 — Trim recordings | done | 3c18dbb |
-| 6 — `wisper storage trim` | done | (this commit) |
-| 7 — Playback | not started | |
+| 6 — `wisper storage trim` | done | 1fc618f |
+| 7 — Playback | done (live audio check owed) | (this commit) |
 | 8 — Re-transcribe | not started | |
 | 9 — Final review | not started | |
 
@@ -115,6 +115,13 @@ Phase 6:
   - The dry run's total counted conversions as freed space; it now lists deletions and conversions separately.
   - The summary reports the net change.
 - **Behaviour:** the Phase 6 worker stalled three times on long writes; the orchestrator finished the review itself.
+
+Phase 7:
+- **Rehearsal (Mac data, Chrome):**
+  - The player bar renders, and `/audio` serves 206 ranges as `audio/mpeg`.
+  - With playback time simulated, the highlight landed on the right block at 31 s, 95 s, and 50 min, and a wheel scroll turned Follow along off.
+- **Owed:** a real playback check in a visible tab (click a line, hear it, watch Follow along scroll). Chrome won't load media in the hidden automation tab, so this needs Brandon or Phase 9.
+- **Behaviour:** the Follow along button is hidden server-side when the transcript has no timestamps.
 
 ### How to run this plan
 

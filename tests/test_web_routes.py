@@ -3780,3 +3780,112 @@ def test_job_page_shows_enroll_audio_missing_notice_only_for_exact_value(client,
     assert text not in client.get(f"/transcribe/jobs/{job.id}").text
     other = client.get(f"/transcribe/jobs/{job.id}?notice=<b>evil</b>").text
     assert text not in other and "<b>evil</b>" not in other
+
+
+# ---------------------------------------------------------------------------
+# Playback: audio route, data-start, player, markers
+# ---------------------------------------------------------------------------
+
+_TIMED_MD = (
+    "---\ntitle: T\n---\n\n"
+    "**Ann** *(00:05)*: hello there\n\n"
+    "**Bob** *(1:02:03)*: later on\n"
+)
+
+
+def _playback_setup(tmp_path, monkeypatch, body=_TIMED_MD):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    md = out / "s1.md"
+    md.write_text(body, encoding="utf-8")
+    from wisper_transcribe import transcript_store as ts
+    ts.register("s1", origin="job")
+    return out, md
+
+
+def _recording_for(tmp_path, md):
+    from ._seed import seed_recording
+    from wisper_transcribe.recording_manager import link_transcript
+
+    rec = seed_recording(tmp_path)
+    link_transcript(rec.id, md, tmp_path)
+    return rec
+
+
+def test_audio_route_serves_recording_combined_wav_with_range(client, tmp_path, monkeypatch):
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    _recording_for(tmp_path, md)  # no _diar.json exists
+    resp = client.get("/transcripts/s1/audio", headers={"Range": "bytes=0-99"})
+    assert resp.status_code == 206
+    assert resp.headers["content-type"] == "audio/wav"
+    assert len(resp.content) == 100
+
+
+def test_audio_route_serves_upload_flac_with_range(client, tmp_path, monkeypatch):
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    from ._seed import seed_file
+    from wisper_transcribe import transcript_store as ts
+    (out / "s1.flac").write_bytes(b"fLaC" + b"\x00" * 200)
+    ts.set_audio(md, out / "s1.flac")
+    resp = client.get("/transcripts/s1/audio", headers={"Range": "bytes=0-99"})
+    assert resp.status_code == 206
+    assert resp.headers["content-type"] == "audio/flac"
+
+
+def test_audio_route_404_without_audio_or_file(client, tmp_path, monkeypatch):
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    assert client.get("/transcripts/s1/audio").status_code == 404
+    assert client.get("/transcripts/missing/audio").status_code == 404
+    rec = _recording_for(tmp_path, md)
+    (tmp_path / "recordings" / rec.id / "combined.wav").unlink()
+    assert client.get("/transcripts/s1/audio").status_code == 404
+
+
+def test_detail_page_player_only_with_audio(client, tmp_path, monkeypatch):
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    assert 'id="transcript-audio"' not in client.get("/transcripts/s1").text
+    _recording_for(tmp_path, md)
+    page = client.get("/transcripts/s1").text
+    assert 'id="transcript-audio"' in page
+    assert 'src="/transcripts/s1/audio"' in page
+    assert 'id="follow-toggle"' in page
+
+
+def test_detail_page_has_no_follow_toggle_without_timestamps(client, tmp_path, monkeypatch):
+    out, md = _playback_setup(tmp_path, monkeypatch, body="**Ann**: plain text\n")
+    _recording_for(tmp_path, md)
+    page = client.get("/transcripts/s1").text
+    assert 'id="transcript-audio"' in page
+    assert 'id="follow-toggle"' not in page
+
+
+def test_data_start_survives_sanitizing(client, tmp_path, monkeypatch):
+    _playback_setup(tmp_path, monkeypatch)
+    page = client.get("/transcripts/s1").text
+    assert 'id="b-0" class="block-anchor" data-start="5"' in page
+    assert 'id="b-1" class="block-anchor" data-start="3723"' in page
+
+
+def test_marker_buttons_render_with_times(client, tmp_path, monkeypatch):
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    rec = _recording_for(tmp_path, md)
+    from wisper_transcribe import db
+    from wisper_transcribe.recording_manager import _ts, load_recording
+    from datetime import timedelta
+    started = load_recording(rec.id, tmp_path).started_at
+    with db.transaction(tmp_path) as conn:
+        for secs in (65, 3725):
+            conn.execute("INSERT INTO recording_markers (recording_id, marked_at) VALUES (?, ?)",
+                         (rec.id, _ts(started + timedelta(seconds=secs))))
+    page = client.get("/transcripts/s1").text
+    assert page.count("data-seek=") == 2
+    assert 'data-seek="65"' in page and ">0:01:05<" in page
+    assert 'data-seek="3725"' in page and ">1:02:05<" in page
+
+
+def test_no_marker_list_without_markers(client, tmp_path, monkeypatch):
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    _recording_for(tmp_path, md)
+    assert "data-seek=" not in client.get("/transcripts/s1").text

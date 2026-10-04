@@ -27,7 +27,7 @@ The web UI is a **single-user tool with no authentication and no CSRF protection
 | Dashboard | `/` | Job queue, system status (device, model, HF token, LLM provider), quick upload |
 | Transcribe | `/transcribe` | Upload and transcribe (see below) |
 | Job history | `/jobs/history` | Every job ever run, filterable, with each job's settings, result, and last log lines (see [Job page](#job-page)) |
-| Transcripts | `/transcripts` | Recordings awaiting transcription; browse, read, download, edit, and delete transcripts; tick rows to delete them or move them to a campaign in bulk |
+| Transcripts | `/transcripts` | Recordings awaiting transcription; browse, read, play back (see [Playing a transcript](#playing-a-transcript)), download, edit, and delete transcripts; tick rows to delete them or move them to a campaign in bulk |
 | Speakers | `/speakers` | Enroll, rename, and remove speaker profiles; play reference clips. Each card shows how many transcripts name the speaker, when they were last heard, and when the profile was enrolled. Profiles from an older speaker model show **NEEDS RE-ENROLL** |
 | Search | `/search` | Full-text search over every transcript and session summary (see below). The box at the top of the sidebar searches from any page |
 | Campaigns | `/campaigns` | Campaigns, rosters, episode order, and the rolling journal |
@@ -63,6 +63,18 @@ Large uploads show a byte-level progress bar ("Uploading… N%", then "Processin
 What a job keeps: the transcript, the summary, the speaker clips, and the audio as `<name>.flac` beside the transcript. The uploaded file itself isn't kept: wisper extracts its first audio track, deletes the upload, and saves that track as a 16 kHz mono FLAC. A recording keeps its `combined.wav` and the transcript plays from it.
 
 Transcripts are written to the transcripts folder (`output/` in the data directory unless `output_dir` / `WISPER_OUTPUT_DIR` says otherwise; see [configuration.md](configuration.md#transcripts-folder)) and appear on the Transcripts page as soon as the job finishes. Files you add to that folder yourself appear too.
+
+---
+
+## Playing a transcript
+
+A transcript with audio shows a player bar at the top of its page. An upload's audio is its kept `<stem>.flac`. A transcript made from a recording plays that recording's `combined.wav`. A transcript with no audio on disk shows no player.
+
+- **Highlight.** The block being spoken is highlighted as the audio plays.
+- **Follow along.** The page scrolls to keep the highlighted block centered. Scrolling yourself turns it off, and the button turns it back on. The button appears only when the transcript has timestamps.
+- **Click to seek.** Click any timestamped block to play from its start. Links inside a block still open normally.
+- **Deep links.** Opening a page at `#b-<n>` (a search result does) cues the audio to that block without playing it.
+- **Markers.** A transcript made from a recording lists the session's markers in the bar as `H:MM:SS` buttons that seek there. A marker's time is wall-clock time since the session started, while `combined.wav` joins audio frames, so over a long session a marker can land a few seconds off. Use it for "roughly here".
 
 ---
 

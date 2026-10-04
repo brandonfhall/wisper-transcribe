@@ -446,6 +446,12 @@
     padding: 0 1px;
   }
   .block-anchor { scroll-margin-top: 96px; }
+  [data-start] { cursor: pointer; }
+  .block-playing {
+    background: #5fd4e714;
+    box-shadow: 0 0 0 6px #5fd4e714;
+    border-radius: 2px;
+  }
   .search-target {
     background: #5fd4e710;
     box-shadow: 0 0 0 6px #5fd4e710;

@@ -150,7 +150,7 @@ def test_anchor_numbering_matches_index_without_blank_lines(out, client):
     _add(out, "s1", text)
     html = client.get("/transcripts/s1").text
     assert re.findall(r'id="(b-\d+)"', html) == ["b-0", "b-1", "b-2"]
-    assert '<span id="b-1" class="block-anchor"><strong>Bob</strong>' in html
+    assert re.search(r'<span id="b-1" class="block-anchor"[^>]*><strong>Bob</strong>', html)
 
 
 def test_transcript_page_highlight_script_with_query(out, client):

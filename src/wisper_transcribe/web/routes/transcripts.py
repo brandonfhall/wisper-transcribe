@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html as _html_module
 import logging
+import mimetypes
 import os
 import re
 from datetime import datetime, timezone
@@ -24,7 +25,8 @@ from wisper_transcribe.campaign_manager import (
     remove_transcript_from_campaign,
 )
 from wisper_transcribe.config import get_data_dir
-from wisper_transcribe.recording_manager import load_recordings
+from wisper_transcribe import file_registry
+from wisper_transcribe.recording_manager import load_recordings, recording_for_transcript
 
 from . import templates
 from wisper_transcribe.path_utils import get_output_dir
@@ -133,14 +135,38 @@ def _parse_frontmatter(content: str) -> tuple[dict, str]:
 def _anchor_blocks(body: str) -> str:
     """Wrap each transcript block in ``<span id="b-<index>">`` so search
     results can deep-link to it. Numbered by ``searchable_blocks()``, the same
-    numbering the search index stores."""
+    numbering the search index stores. A block with a timestamp also gets
+    ``data-start`` (seconds) for audio playback."""
     from wisper_transcribe.formatter import searchable_blocks
+    from wisper_transcribe.time_utils import parse_timestamp
 
     lines = body.splitlines()
     for lineno, block in searchable_blocks(body):
-        lines[lineno] = (f'<span id="b-{block["index"]}" class="block-anchor">'
+        start = parse_timestamp(block["timestamp"])
+        timing = "" if start is None else f' data-start="{start:g}"'
+        lines[lineno] = (f'<span id="b-{block["index"]}" class="block-anchor"{timing}>'
                          f'{lines[lineno].strip()}</span>')
     return "\n".join(lines)
+
+
+_AUDIO_TYPES = {".wav": "audio/wav", ".flac": "audio/flac"}
+
+
+def _playback(md_path: Path, name: str) -> tuple[str | None, list[dict]]:
+    """The audio URL for the player (None without audio) and, for a transcript
+    made from a recording, that recording's markers as ``{label, seconds}``."""
+    out_dir = get_output_dir()
+    if transcript_store.audio_path(md_path, output_dir=out_dir) is None:
+        return None, []
+    audio_url = f"/transcripts/{quote(name)}/audio"
+    owner = file_registry.Owner.for_stem(md_path.stem, output_dir=out_dir)
+    rec = recording_for_transcript(owner.id) if owner else None
+    markers = []
+    for marker in (rec.markers if rec else []):
+        secs = int(marker.elapsed_s)
+        markers.append({"label": f"{secs // 3600}:{secs % 3600 // 60:02d}:{secs % 60:02d}",
+                        "seconds": secs})
+    return audio_url, markers
 
 
 def _anchor_sections(html: str) -> str:
@@ -458,6 +484,7 @@ async def transcript_detail(request: Request, name: str, q: str = "") -> HTMLRes
 
     campaigns = load_campaigns()
     current_campaign_slug = get_campaign_for_transcript(md_path.stem)
+    audio_url, markers = _playback(md_path, name)
 
     return templates.TemplateResponse(
         request,
@@ -475,8 +502,33 @@ async def transcript_detail(request: Request, name: str, q: str = "") -> HTMLRes
             "campaigns": campaigns,
             "current_campaign_slug": current_campaign_slug,
             "highlight": _highlight(q),
+            "audio_url": audio_url,
+            "markers": markers,
+            "has_timing": "data-start=" in html_body,
         },
     )
+
+
+@router.get("/{name}/audio")
+async def transcript_audio(name: str):
+    md_path = _get_safe_content_path(name, ".md")
+    if not md_path:
+        return invalid_input_response("Invalid name")
+    if not md_path.exists():
+        return HTMLResponse(content="Not found", status_code=404)
+    audio = transcript_store.audio_path(md_path, output_dir=get_output_dir())
+    if audio is None:
+        return HTMLResponse(content="No audio", status_code=404)
+    target = os.path.abspath(str(audio))
+    roots = [os.path.abspath(str(get_output_dir())),
+             os.path.abspath(str(get_data_dir() / "recordings"))]
+    if not any(target.startswith(r.rstrip(os.sep) + os.sep) for r in roots):
+        return HTMLResponse(content="Not found", status_code=404)
+    suffix = os.path.splitext(target)[1].lower()
+    media_type = _AUDIO_TYPES.get(suffix) or mimetypes.guess_type(target)[0]
+    if not media_type or not os.path.isfile(target):
+        return HTMLResponse(content="Not found", status_code=404)
+    return FileResponse(target, media_type=media_type)
 
 
 @router.get("/{name}/download")

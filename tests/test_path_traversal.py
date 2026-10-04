@@ -43,6 +43,10 @@ def test_transcripts_path_traversal_blocked(client: TestClient, payload: str):
     resp = client.get(f"/transcripts/{safe_url}/download")
     assert resp.status_code == 400
 
+    # 2b. Audio
+    resp = client.get(f"/transcripts/{safe_url}/audio")
+    assert resp.status_code == 400
+
     # 3. Delete
     resp = client.post(f"/transcripts/{safe_url}/delete")
     assert resp.status_code == 400
@@ -656,3 +660,9 @@ def test_remove_profile_files_deletes_its_own_clip(tmp_path):
     (clips / "joe_(dm).mp3").write_bytes(b"x")
     remove_profile_files("joe_(dm)", tmp_path)
     assert not (clips / "joe_(dm).mp3").exists()
+
+
+@pytest.mark.parametrize("payload", ["..%2Foutside", "a%2Fb", "..%5Coutside"])
+def test_transcript_audio_rejects_slashes(client: TestClient, payload: str):
+    """An encoded slash or backslash never reaches the filesystem."""
+    assert client.get(f"/transcripts/{payload}/audio").status_code in (400, 404)

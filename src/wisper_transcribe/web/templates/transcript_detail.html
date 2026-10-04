@@ -42,6 +42,23 @@
   </div>
   {% endif %}
 
+  {% if audio_url %}
+  <div id="player-bar" style="position:sticky;top:0;z-index:20;display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:10px 36px;background:var(--color-ink-800);border-bottom:1px solid var(--color-rule)">
+    <audio id="transcript-audio" controls preload="metadata" src="{{ audio_url }}" style="flex:1;min-width:240px;height:36px"></audio>
+    {% if has_timing %}
+    <button type="button" id="follow-toggle" class="btn btn-secondary btn-sm" aria-pressed="true">Follow along: on</button>
+    {% endif %}
+    {% if markers %}
+    <div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px">
+      <span class="mono-kicker">Markers</span>
+      {% for m in markers %}
+      <button type="button" class="pill pill-rose" data-seek="{{ m.seconds }}" style="font-family:var(--font-mono);cursor:pointer">{{ m.label }}</button>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+
   <!-- Hero -->
   <div style="padding:32px 36px 24px;border-bottom:1px solid var(--color-rule)">
     {% if current_campaign_slug %}

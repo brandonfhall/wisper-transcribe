@@ -657,6 +657,14 @@ Tokens in `input.css` `@theme`: `--color-ink-*` backgrounds, `--color-paper*` te
 - `app.js` and `tailwind.min.css` are cache-busted with `?v={{ static_mtime(...) }}`, which stats the file on every render. The package version can't be used because static edits don't restart a `--reload` server.
 - Transcript stems in URLs use the `urlencode` filter; redirect `Location` headers use `urllib.parse.quote()` (latin-1 headers); JS uses `encodeURIComponent()`.
 
+### Transcript playback
+- `GET /transcripts/{name}/audio` serves `transcript_store.audio_path()`: the transcript's `audio` file, else its recording's `combined.wav`. It returns 404 when there is none.
+- The route serves a file only under the output root or `<data dir>/recordings/`, as `audio/wav`, `audio/flac`, or the `mimetypes` guess (404 if unknown). `FileResponse` handles Range requests, which seeking needs.
+- `_anchor_blocks()` adds `data-start="<seconds>"` to each block span whose timestamp `time_utils.parse_timestamp()` reads. A block without a timestamp has none, so a transcript without timestamps gets a plain player.
+- `transcript_detail.html` renders the sticky player bar only when `audio_url` is set. The Follow along button needs `has_timing`.
+- The page script is in `app.js`. It binary-searches the sorted `[data-start]` spans on `timeupdate` and toggles `.block-playing`.
+- A marker list comes from `recording_for_transcript()`. Its `elapsed_s` is wall-clock time, so it can drift from the joined `combined.wav`.
+
 ### Global JS (`static/app.js`)
 - `wisperConnectLiveStream(url, onLine, onSnapshot)` — shared SSE connector for live lines. De-dupes on `start_s|speaker|text` because the server's resume cursor is per connection, so a reconnect replays everything.
 - `wisperTickerAppend()` / `wisperTickerAppendMarker()` — Record page ticker rows (markers are rose, italic, speaker-less). The ticker scrolls and never drops lines.
