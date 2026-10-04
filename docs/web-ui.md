@@ -78,6 +78,20 @@ A transcript with audio shows a player bar at the top of its page. An upload's a
 
 ---
 
+## Re-transcribing a transcript
+
+A transcript with audio has a **Re-transcribe** button in its toolbar. It asks first, then runs the session again from the saved audio and replaces the transcript in place.
+
+- **Kept:** the transcript's name, its campaign place, and its recording link.
+- **Reset:** speaker names you set by hand. If the transcript was folded into the campaign journal, the journal is marked as needing a rebuild.
+- **Reused from the original run:** speaker counts, language, timestamps, and the refine and summarize options.
+- **Taken from the current config:** the model, device, VAD, and word alignment.
+- **Not reused:** custom vocabulary and prompts from the original upload.
+- **No audio:** the page says the transcript has no saved audio to re-transcribe from.
+- **Recording-linked:** a transcript made from a recording reruns from the recording's `combined.wav`, the same as **Transcribe** on the recording.
+
+---
+
 ## Searching
 
 Type in the sidebar box or open `/search`. Every transcript's title and text, and its session summary, are searched.
@@ -146,6 +160,7 @@ If another job is already running when you start, the Record page warns that the
 ### After recording
 
 - Stopping never starts transcription automatically. Click **Transcribe** on the recording (or from **Transcripts → Awaiting transcription**) to run the full diarized pass. The live draft stays on the recording's detail page until then.
+- **Campaign:** a recording shows the campaign its transcript is in. Moving the transcript to another campaign moves the recording with it. Before a transcript exists, it shows the campaign chosen when recording started.
 - **Re-transcribe** asks first, then replaces the recording's transcript (same name, same campaign place). If a transcription fails or you stop it, the recording is simply transcribable again.
 - **What a recording keeps:** its `combined.wav`. When a session ends, wisper checks that `combined.wav` holds all the captured audio, then deletes the one-minute pieces and the separate mic and system tracks. A Discord speaker's own track stays until that speaker is bound to a profile, because **Enroll** reads it. Enrolling a speaker whose track is already gone shows an error.
 - **Recover recording:** if wisper stopped unexpectedly mid-session (crash, power loss, killed process), the recording shows **FAILED** but its audio is still on disk. Its page offers **Recover recording**, which stitches the saved one-minute pieces back together; the recording then shows **COMPLETED** and can be transcribed. The last partial minute may be missing.

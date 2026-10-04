@@ -2128,3 +2128,41 @@ def test_run_enroll_job_old_embedding_space_with_audio_extracts(tmp_path):
 
     assert job.status == COMPLETED
     ext.assert_called_once()
+
+
+def test_rerun_from_the_kept_flac_leaves_the_audio_alone(tmp_path, monkeypatch):
+    from wisper_transcribe import transcript_store
+    from wisper_transcribe.models import DiarizationSegment
+
+    _, out_dir = _upload_env(tmp_path, monkeypatch)
+    md = out_dir / "s1.md"
+    md.write_text("# old", encoding="utf-8")
+    transcript_store.register("s1", origin="job")
+    flac = out_dir / "s1.flac"
+    flac.write_bytes(b"original-flac")
+    transcript_store.set_audio(md, flac)
+
+    q = _make_queue()
+    job = q.submit(str(flac), original_stem="s1", output_dir=str(out_dir), overwrite=True,
+                   source_name="Session 1.mp4")
+    assert job.is_web_upload is False and job.upload_dir == ""
+
+    def _process(path, _result_store=None, job_id=None, **kwargs):
+        md.write_text("# new", encoding="utf-8")
+        transcript_store.register("s1", origin="job")
+        _result_store["diarization_segments"] = [
+            DiarizationSegment(start=0.0, end=1.0, speaker="SPEAKER_00")]
+        _result_store["speaker_map"] = {"SPEAKER_00": "Speaker 1"}
+        return md
+
+    with patch("wisper_transcribe.web.jobs.process_file", side_effect=_process), \
+            patch("wisper_transcribe.audio_utils.encode_flac") as encode, \
+            patch("wisper_transcribe.web.jobs._extract_speaker_excerpts"):
+        q._run_job(job)
+
+    assert job.status == "completed"
+    encode.assert_not_called()
+    assert flac.read_bytes() == b"original-flac"
+    assert _audio_row(out_dir, "s1").path == flac
+    assert sorted(p.name for p in out_dir.glob("*.flac")) == ["s1.flac"]
+    assert md.read_text(encoding="utf-8") == "# new"

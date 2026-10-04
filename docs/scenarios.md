@@ -58,6 +58,15 @@ wisper fix session03.md --speaker "Alice" --name "Diana"
 
 ---
 
+## Re-run a session with a different model
+
+1. Change the model in **Config**.
+2. Open the session's transcript page and click **Re-transcribe**.
+
+The rerun reuses the session's speaker counts, language, and post-processing choices, and takes the model, device, VAD, and word alignment from the current config. The transcript is replaced in place and keeps its name and campaign place. Speaker names you set by hand are reset.
+
+---
+
 ## Improve transcription accuracy for character names and locations
 
 Pass a custom word list to boost recognition of proper nouns Whisper doesn't know:

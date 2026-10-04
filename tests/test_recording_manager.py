@@ -739,3 +739,64 @@ def test_bind_after_trim_deletes_that_users_track(tmp_path):
     assert (rec_dir / "per-user" / uids[2]).is_dir()
     assert _per_user_labels(tmp_path, rec.id) == [uids[2]]
     assert (rec_dir / "combined.wav").exists()
+
+
+def _transcribed_in_campaign(tmp_path, monkeypatch, slug="dnd"):
+    from wisper_transcribe import campaign_manager as cm
+    from wisper_transcribe.path_utils import get_output_dir
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    for name in ("dnd", "other"):
+        cm.create_campaign(name, tmp_path)
+    rec = _make_recording(tmp_path, campaign_slug=slug)
+    update_recording_status(rec.id, "completed", tmp_path)
+    md = get_output_dir() / "s1.md"
+    md.write_text("x", encoding="utf-8")
+    link_transcript(rec.id, md, tmp_path)
+    return rec, md
+
+
+def _stored_campaign_id(rec_id, tmp_path):
+    with db.connection(tmp_path) as conn:
+        return conn.execute("SELECT campaign_id FROM recordings WHERE id = ?",
+                            (rec_id,)).fetchone()[0]
+
+
+def test_transcribed_recording_campaign_follows_its_transcript(tmp_path, monkeypatch):
+    from wisper_transcribe import campaign_manager as cm
+    from wisper_transcribe import transcript_store
+
+    rec, md = _transcribed_in_campaign(tmp_path, monkeypatch)
+    stored = _stored_campaign_id(rec.id, tmp_path)
+    assert rm.load_recording(rec.id, tmp_path).campaign_slug is None  # transcript in no campaign
+    cm.move_transcript_to_campaign("s1", "other", tmp_path)
+    assert rm.load_recording(rec.id, tmp_path).campaign_slug == "other"
+    assert _stored_campaign_id(rec.id, tmp_path) == stored
+    cm.remove_transcript_from_campaign("s1", tmp_path)
+    assert rm.load_recording(rec.id, tmp_path).campaign_slug is None
+    transcript_store.delete_transcript("s1")
+    assert rm.load_recording(rec.id, tmp_path).campaign_slug == "dnd"
+
+
+def test_save_recording_keeps_a_transcribed_recordings_stored_campaign(tmp_path, monkeypatch):
+    from wisper_transcribe import campaign_manager as cm
+
+    rec, md = _transcribed_in_campaign(tmp_path, monkeypatch)
+    stored = _stored_campaign_id(rec.id, tmp_path)
+    cm.move_transcript_to_campaign("s1", "other", tmp_path)
+    loaded = rm.load_recording(rec.id, tmp_path)
+    loaded.name = "renamed"
+    save_recording(loaded, tmp_path)
+    assert _stored_campaign_id(rec.id, tmp_path) == stored
+    assert rm.load_recording(rec.id, tmp_path).campaign_slug == "other"
+
+
+def test_save_recording_sets_an_untranscribed_recordings_campaign(tmp_path, monkeypatch):
+    from wisper_transcribe import campaign_manager as cm
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    cm.create_campaign("dnd", tmp_path)
+    rec = _make_recording(tmp_path)
+    rec.campaign_slug = "dnd"
+    save_recording(rec, tmp_path)
+    assert rm.load_recording(rec.id, tmp_path).campaign_slug == "dnd"

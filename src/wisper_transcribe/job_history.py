@@ -238,3 +238,36 @@ def get_job(job_id: str, data_dir: Optional[Path] = None) -> Optional[JobRecord]
     with db.connection(data_dir) as conn:
         row = conn.execute(f"SELECT {_COLUMNS} {_FROM} WHERE j.id = ?", (job_id,)).fetchone()
     return None if row is None else _record(row)
+
+
+# Per-session choices a rerun repeats. Engine settings (model, device, VAD,
+# alignment) are left out so a rerun uses the current config.
+_SESSION_PARAMS = (
+    "language", "num_speakers", "min_speakers", "max_speakers", "no_diarize",
+    "include_timestamps",
+)
+
+
+def last_transcription_params(transcript_id: int,
+                              data_dir: Optional[Path] = None) -> dict:
+    """The session settings of a transcript's latest completed transcription
+    job, as keyword arguments for ``JobQueue.submit``; ``{}`` with no history.
+
+    ``post_refine`` and ``post_summarize`` are stored only when on, so absence
+    means off. ``overwrite`` and ``campaign`` are never returned: the caller
+    supplies its own.
+    """
+    with db.connection(data_dir) as conn:
+        row = conn.execute(
+            "SELECT params_json FROM jobs WHERE transcript_id = ? "
+            "AND type = 'transcription' AND status = 'completed' "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1", (transcript_id,),
+        ).fetchone()
+    if row is None:
+        return {}
+    stored = json.loads(row["params_json"])
+    out = {k: stored[k] for k in _SESSION_PARAMS if k in stored}
+    for flag in ("post_refine", "post_summarize"):
+        if stored.get(flag):
+            out[flag] = True
+    return out

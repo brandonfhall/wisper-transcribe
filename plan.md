@@ -65,8 +65,8 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 | 4 — Extract audio, keep FLAC | done | f97a271 |
 | 5 — Trim recordings | done | 3c18dbb |
 | 6 — `wisper storage trim` | done | 1fc618f |
-| 7 — Playback | done (live audio check owed) | (this commit) |
-| 8 — Re-transcribe | not started | |
+| 7 — Playback | done | e900a66 |
+| 8 — Re-transcribe | done | (this commit) |
 | 9 — Final review | not started | |
 
 Run on the Mac (2026-10-03). Rehearsals use a scratch copy of the Mac's own data, not the Windows data. Brandon waived the between-phase review pause for this run. Each phase is still committed and pushed separately.
@@ -120,8 +120,14 @@ Phase 7:
 - **Rehearsal (Mac data, Chrome):**
   - The player bar renders, and `/audio` serves 206 ranges as `audio/mpeg`.
   - With playback time simulated, the highlight landed on the right block at 31 s, 95 s, and 50 min, and a wheel scroll turned Follow along off.
-- **Owed:** a real playback check in a visible tab (click a line, hear it, watch Follow along scroll). Chrome won't load media in the hidden automation tab, so this needs Brandon or Phase 9.
+- **Live check:** Brandon confirmed real playback in a visible tab: the highlight follows the audio.
 - **Behaviour:** the Follow along button is hidden server-side when the transcript has no timestamps.
+
+Phase 8:
+- **Rehearsal (Mac data, real transcription):**
+  - Uploaded the test `.mp4`, set `use_mlx = "false"` in the copy's config, then re-transcribed from the transcript page.
+  - The job reused min/max speakers from history and ran the non-MLX engine. It kept transcript id 5 and its name, and left `Test Session.flac` byte-identical with no second FLAC. `source_file` stayed the `.mp4`.
+- **Changed existing test:** `test_legacy_import.py::test_recording_import_full` expects `campaign_slug is None` for an imported transcribed recording whose transcript is in no campaign. That follows from the derived-campaign decision.
 
 ### How to run this plan
 

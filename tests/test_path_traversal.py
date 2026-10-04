@@ -666,3 +666,28 @@ def test_remove_profile_files_deletes_its_own_clip(tmp_path):
 def test_transcript_audio_rejects_slashes(client: TestClient, payload: str):
     """An encoded slash or backslash never reaches the filesystem."""
     assert client.get(f"/transcripts/{payload}/audio").status_code in (400, 404)
+
+
+@pytest.mark.parametrize("payload", [quote(p, safe="") for p in _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS] + [
+    "..%2Foutside", "a%2Fb", "..%5Coutside", "evil%0D%0ALocation:%20x", "%5C%5Cevil.com"])
+def test_transcript_retranscribe_never_submits_for_an_unsafe_name(client, payload, tmp_path, monkeypatch):
+    """The name is guarded before any lookup, and never reaches a redirect."""
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(tmp_path))
+    queue = client.app.state.job_queue
+    with patch.object(queue, "submit") as submit:
+        resp = client.post(f"/transcripts/{payload}/retranscribe", follow_redirects=False)
+    assert resp.status_code in (400, 404)
+    assert "evil" not in resp.headers.get("location", "")
+    submit.assert_not_called()
+
+
+def test_transcript_retranscribe_error_redirect_quotes_the_stem(client, tmp_path, monkeypatch):
+    from wisper_transcribe import transcript_store
+
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    (out / "Session — 1!.md").write_text("x", encoding="utf-8")
+    transcript_store.register("Session — 1!", origin="job")
+    resp = client.post(f"/transcripts/{quote('Session — 1!')}/retranscribe", follow_redirects=False)
+    assert resp.headers["location"] == f"/transcripts/{quote('Session — 1!')}?error=no_audio"

@@ -20,6 +20,12 @@
     </span>
     <a href="/jobs/history?transcript={{ name | urlencode }}" class="btn btn-secondary btn-sm" title="Every job that worked on this transcript">Jobs</a>
     <a href="/transcripts/{{ name | urlencode }}/download" class="btn btn-secondary btn-sm">Export .md</a>
+    {% if audio_url %}
+    <form method="post" action="/transcripts/{{ name | urlencode }}/retranscribe" style="display:inline"
+          onsubmit='return confirm({{ "Re-transcribe this session from its saved audio? The transcript is replaced (it keeps its name and campaign place), speaker names you set by hand are reset, and custom vocabulary or prompts from the original upload aren't reused. If it was folded into the campaign journal, the journal is marked as needing a rebuild." | tojson }})'>
+      <button type="submit" class="btn btn-secondary btn-sm">Re-transcribe</button>
+    </form>
+    {% endif %}
     {% if has_summary %}
     <form method="post" action="/transcripts/{{ name | urlencode }}/refine" style="display:inline">
       <button type="submit" class="btn btn-secondary btn-sm">Re-refine</button>
@@ -39,6 +45,17 @@
   {% if request.query_params.get('notice') == 'enroll_audio_missing' %}
   <div style="margin:20px 36px 0;padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber)">
     Some speakers have no saved voice data and the source audio is gone. They were renamed but not enrolled; the others were enrolled.
+  </div>
+  {% endif %}
+
+  {% set retranscribe_errors = {
+    'no_audio': 'This transcript has no saved audio to re-transcribe from.',
+    'not_ready': "The recording isn't ready to transcribe.",
+  } %}
+  {% set err = retranscribe_errors.get(request.query_params.get('error')) %}
+  {% if err %}
+  <div style="margin:20px 36px 0;padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber)">
+    {{ err }}
   </div>
   {% endif %}
 

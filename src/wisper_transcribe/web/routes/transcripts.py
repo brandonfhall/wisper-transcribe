@@ -782,6 +782,49 @@ async def assign_campaign(request: Request, name: str) -> HTMLResponse:
     )
 
 
+@router.post("/{name}/retranscribe")
+async def retranscribe(request: Request, name: str):
+    """Re-run a transcript from its saved audio, replacing it in place."""
+    md_path = _get_safe_content_path(name, ".md")
+    if not md_path:
+        return invalid_input_response("Invalid name")
+    if not md_path.exists():
+        return HTMLResponse(content="Transcript not found", status_code=404)
+    back = f"/transcripts/{quote(md_path.stem)}"
+    out_dir = get_output_dir()
+    owner = file_registry.Owner.for_stem(md_path.stem, output_dir=out_dir)
+    rec = recording_for_transcript(owner.id) if owner else None
+    if rec is not None:
+        from wisper_transcribe.web.routes.record import _submit_recording_transcription
+
+        job, error = _submit_recording_transcription(rec, request, get_data_dir())
+        if job is None:
+            return RedirectResponse(url=f"{back}?error={error}", status_code=303)
+        return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
+
+    audio = transcript_store.audio_path(md_path, output_dir=out_dir)
+    if audio is None:
+        return RedirectResponse(url=f"{back}?error=no_audio", status_code=303)
+    from wisper_transcribe.job_history import last_transcription_params
+
+    meta, _ = _parse_frontmatter(md_path.read_text(encoding="utf-8"))
+    kwargs = last_transcription_params(owner.id) if owner else {}
+    if meta.get("title"):
+        kwargs["title"] = str(meta["title"])
+    campaign = get_campaign_for_transcript(md_path.stem)
+    if campaign:
+        kwargs["campaign"] = campaign
+    job = request.app.state.job_queue.submit(
+        str(audio),
+        original_stem=md_path.stem,
+        output_dir=str(md_path.parent),
+        source_name=str(meta.get("source_file") or audio.name),
+        overwrite=True,
+        **kwargs,
+    )
+    return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
+
+
 # ---------------------------------------------------------------------------
 # Transcript-centric enrollment wizard
 # ---------------------------------------------------------------------------

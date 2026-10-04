@@ -114,6 +114,8 @@ def _load(conn: sqlite3.Connection, data_dir: Optional[Path],
           where: str = "", params: tuple = ()) -> dict[str, Recording]:
     from .path_utils import get_output_dir
 
+    # recordings.campaign_id is the campaign chosen when recording started, used
+    # until a transcript exists; a transcribed recording's campaign is its transcript's.
     rows = conn.execute(
         "SELECT r.*, c.slug AS campaign_slug, t.stem AS transcript_stem, "
         "d.guild_id, d.voice_channel_id, "
@@ -122,7 +124,9 @@ def _load(conn: sqlite3.Connection, data_dir: Optional[Path],
         "EXISTS (SELECT 1 FROM jobs j WHERE j.recording_id = r.id AND j.type = 'transcription' "
         " AND j.status IN ('pending', 'running')) AS job_active "
         "FROM recordings r "
-        "LEFT JOIN campaigns c ON c.id = r.campaign_id "
+        "LEFT JOIN campaign_transcripts ct ON ct.transcript_id = r.transcript_id "
+        "LEFT JOIN campaigns c ON c.id = "
+        "CASE WHEN r.transcript_id IS NOT NULL THEN ct.campaign_id ELSE r.campaign_id END "
         "LEFT JOIN transcripts t ON t.id = r.transcript_id "
         "LEFT JOIN recording_discord d ON d.recording_id = r.id "
         f"{where} ORDER BY r.rowid",
@@ -307,7 +311,8 @@ def save_recording(recording: Recording, data_dir: Optional[Path] = None) -> Non
             "INSERT INTO recordings (id, source, name, notes, campaign_id, transcript_id, "
             "capture_status, started_at, ended_at, recovered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET name = excluded.name, notes = excluded.notes, "
-            "campaign_id = excluded.campaign_id, transcript_id = excluded.transcript_id, "
+            "campaign_id = CASE WHEN recordings.transcript_id IS NULL "
+            "THEN excluded.campaign_id ELSE recordings.campaign_id END, transcript_id = excluded.transcript_id, "
             "capture_status = excluded.capture_status, started_at = excluded.started_at, "
             "ended_at = excluded.ended_at, "
             "recovered_at = coalesce(excluded.recovered_at, recordings.recovered_at)",

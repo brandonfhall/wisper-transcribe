@@ -3889,3 +3889,113 @@ def test_no_marker_list_without_markers(client, tmp_path, monkeypatch):
     out, md = _playback_setup(tmp_path, monkeypatch)
     _recording_for(tmp_path, md)
     assert "data-seek=" not in client.get("/transcripts/s1").text
+
+
+# ---------------------------------------------------------------------------
+# Re-transcribe
+# ---------------------------------------------------------------------------
+
+def _flac_transcript(tmp_path, monkeypatch, stem="s1"):
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    from wisper_transcribe import transcript_store as ts
+    (out / f"{stem}.flac").write_bytes(b"fLaC" + b"\x00" * 200)
+    ts.set_audio(md, out / f"{stem}.flac")
+    return out, md
+
+
+def _submit_spy(client):
+    job = MagicMock(id="11111111-1111-4111-8111-111111111111")
+    return patch.object(client.app.state.job_queue, "submit", return_value=job)
+
+
+def test_retranscribe_upload_submits_the_flac_in_place(client, tmp_path, monkeypatch):
+    out, md = _flac_transcript(tmp_path, monkeypatch)
+    md.write_text("---\ntitle: Session One\nsource_file: Session 1.mp4\n---\n\nbody\n",
+                  encoding="utf-8")
+    from wisper_transcribe import campaign_manager as cm
+    from wisper_transcribe import job_history
+    cm.create_campaign("A", tmp_path)
+    cm.create_campaign("B", tmp_path)
+    cm.move_transcript_to_campaign("s1", "b", tmp_path)
+    job_history.record(_history_job(md))
+    with _submit_spy(client) as submit:
+        resp = client.post("/transcripts/s1/retranscribe", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/transcribe/jobs/11111111-1111-4111-8111-111111111111"
+    args, kw = submit.call_args
+    assert args == (str(out / "s1.flac"),)
+    assert kw["original_stem"] == "s1" and kw["overwrite"] is True
+    assert kw["output_dir"] == str(out)
+    assert kw["title"] == "Session One" and kw["source_name"] == "Session 1.mp4"
+    assert kw["campaign"] == "b"
+    assert kw["language"] == "en" and kw["num_speakers"] == 3
+    assert "model_size" not in kw
+
+
+def test_retranscribe_without_campaign_or_history_passes_neither(client, tmp_path, monkeypatch):
+    out, md = _flac_transcript(tmp_path, monkeypatch)
+    with _submit_spy(client) as submit:
+        client.post("/transcripts/s1/retranscribe", follow_redirects=False)
+    kw = submit.call_args.kwargs
+    assert "campaign" not in kw and "language" not in kw
+    assert kw["source_name"] == "s1.flac"
+
+
+def test_retranscribe_recording_uses_the_hand_off(client, tmp_path, monkeypatch):
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    _recording_for(tmp_path, md)
+    job = MagicMock(id="11111111-1111-4111-8111-111111111111")
+    with patch("wisper_transcribe.web.routes.record._submit_recording_transcription",
+               return_value=(job, None)) as hand_off, _submit_spy(client) as submit:
+        resp = client.post("/transcripts/s1/retranscribe", follow_redirects=False)
+    assert resp.headers["location"] == "/transcribe/jobs/11111111-1111-4111-8111-111111111111"
+    hand_off.assert_called_once()
+    submit.assert_not_called()
+
+
+def test_retranscribe_recording_error_redirects_to_the_page(client, tmp_path, monkeypatch):
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    _recording_for(tmp_path, md)
+    with patch("wisper_transcribe.web.routes.record._submit_recording_transcription",
+               return_value=(None, "not_ready")):
+        resp = client.post("/transcripts/s1/retranscribe", follow_redirects=False)
+    assert resp.headers["location"] == "/transcripts/s1?error=not_ready"
+    assert "isn&#39;t ready" in client.get("/transcripts/s1?error=not_ready").text
+
+
+def test_retranscribe_without_audio_redirects_and_submits_nothing(client, tmp_path, monkeypatch):
+    _playback_setup(tmp_path, monkeypatch)
+    with _submit_spy(client) as submit:
+        resp = client.post("/transcripts/s1/retranscribe", follow_redirects=False)
+    assert resp.headers["location"] == "/transcripts/s1?error=no_audio"
+    submit.assert_not_called()
+    assert "no saved audio to re-transcribe" in client.get("/transcripts/s1?error=no_audio").text
+
+
+def test_retranscribe_missing_transcript_is_404(client, tmp_path, monkeypatch):
+    _playback_setup(tmp_path, monkeypatch)
+    assert client.post("/transcripts/nope/retranscribe").status_code == 404
+
+
+def test_retranscribe_button_only_with_audio_and_confirm_survives_tojson(client, tmp_path, monkeypatch):
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    assert "/retranscribe" not in client.get("/transcripts/s1").text
+    from wisper_transcribe import transcript_store as ts
+    (out / "s1.flac").write_bytes(b"fLaC" + b"\x00" * 200)
+    ts.set_audio(md, out / "s1.flac")
+    page = client.get("/transcripts/s1").text
+    assert 'action="/transcripts/s1/retranscribe"' in page
+    assert "aren\\u0027t reused" in page
+    assert "onsubmit='return confirm(\"Re-transcribe" in page
+
+
+def _history_job(md):
+    import types
+    from datetime import datetime
+    now = datetime.now()
+    return types.SimpleNamespace(
+        id="22222222-2222-4222-8222-222222222222", job_type="transcription",
+        status="completed", created_at=now, started_at=now, finished_at=now, error=None,
+        log_lines=[], recording_id=None, output_path=str(md), post_refine=False,
+        post_summarize=False,
+        kwargs={"language": "en", "num_speakers": 3, "model_size": "tiny"})

@@ -239,3 +239,35 @@ def test_recording_transcript_delete_reopens_recording(client, ml):
     again = load_recording(rec.id)
     assert again.status == "completed" and again.transcript_path is None
     assert "Transcribe" in client.get(f"/recordings/{rec.id}").text
+
+
+# ---------------------------------------------------------------------------
+# Re-transcribe from the saved audio keeps the campaign place; the journal goes stale
+# ---------------------------------------------------------------------------
+
+def test_retranscribe_keeps_campaign_position_and_marks_journal_stale(client, ml):
+    from wisper_transcribe.campaign_manager import get_transcripts_for_campaign
+
+    out = get_output_dir()
+    assert client.post("/campaigns", data={"display_name": "Curse of Strahd"},
+                       follow_redirects=False).status_code == 303
+    for stem in ("Session 1", "Session 2", "Session 3"):
+        _wait(client, _upload(client, stem, "curse-of-strahd"))
+    _wait(client, _job_from(client.post("/transcripts/Session%201/summarize", follow_redirects=False)))
+    _wait(client, _job_from(client.post("/campaigns/curse-of-strahd/journal", data={"mode": "next"},
+                                        follow_redirects=False)))
+    tid, stem = _row("SELECT t.id, t.stem FROM journal_entries je "
+                     "JOIN transcripts t ON t.id = je.transcript_id")
+    assert _row("SELECT journal_stale_since FROM campaigns WHERE slug = 'curse-of-strahd'")[0] is None
+    flac = out / f"{stem}.flac"
+    order = get_transcripts_for_campaign("curse-of-strahd")
+
+    _wait(client, _job_from(client.post(f"/transcripts/{stem.replace(' ', '%20')}/retranscribe",
+                                        follow_redirects=False)))
+
+    assert get_transcripts_for_campaign("curse-of-strahd") == order
+    assert _row("SELECT id FROM transcripts WHERE stem = ?", stem)[0] == tid
+    assert flac.is_file() and sorted(p.name for p in out.glob("*.flac")) == [
+        "Session 1.flac", "Session 2.flac", "Session 3.flac"]
+    assert file_registry.file_for(file_registry.Owner("transcript", tid), "audio").path == flac
+    assert _row("SELECT journal_stale_since FROM campaigns WHERE slug = 'curse-of-strahd'")[0]

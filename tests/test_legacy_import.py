@@ -433,7 +433,13 @@ def test_recording_import_full(data_dir):
     )
     r = _recordings()[RID]
     assert r.status == "transcribed" and r.transcript_path == md
-    assert r.campaign_slug == "game" and r.name == "Session 3"
+    assert r.name == "Session 3"
+    # The capture-time campaign is stored; a transcribed recording shows its
+    # transcript's campaign, and the imported transcript is in none.
+    with db.connection(data_dir) as conn:
+        stored = conn.execute("SELECT c.slug FROM recordings r JOIN campaigns c "
+                              "ON c.id = r.campaign_id WHERE r.id = ?", (RID,)).fetchone()[0]
+    assert stored == "game" and r.campaign_slug is None
     assert r.discord_speakers == {"111": "alice", "222": "", "333": ""}
     assert r.unbound_speakers == ["222", "333"]
     assert [s.index for s in r.segment_manifest] == [0]
