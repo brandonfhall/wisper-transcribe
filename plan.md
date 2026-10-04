@@ -148,11 +148,14 @@ Phase 9 (steps 1–9):
   - campaign Delete everything and Keep the files (journal listed);
   - killed mid-upload (temp folder swept on restart);
   - Recover recording (`combined.wav` rebuilt, then segments trimmed);
-  - playback (Brandon, in a visible tab).
+  - playback (Brandon, in a visible tab);
+  - a speaker renamed in the wizard appears in the search speaker filter, and the filtered search finds the session.
+- **Schema drift:** none either way. A copy migrated in the container (SQLite 3.46) reads `schema_drift False` there and natively (3.53).
+- **CI:** it runs only on PRs and pushes to `main`. Python 3.13 and the `windows storage` job, the first run of `ServerLock`'s `msvcrt` path and the Windows `PermissionError`/`_replace` retries, first run when the PR opens.
+- **Cleanup:** scratch copies deleted. The `wisper-transcribe:cpu` image built from this branch was removed. The real Mac data dir is unchanged since 2026-10-01.
 - **Manual end-to-end not done (needs live hardware or Brandon):**
   - recording a few minutes, local and Discord, with markers and mid-session notes;
-  - jumping to a marker during playback;
-  - renaming a speaker in the wizard, then searching by the new name with the speaker filter.
+  - jumping to a marker during playback.
 - **Steps 10–13 need Brandon:**
   - 10: set `SCHEMA_FROZEN = True` in the PR commit;
   - 11: remove this section from plan.md;
