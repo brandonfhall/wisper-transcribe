@@ -925,8 +925,13 @@ async def recording_enroll_html(
             url=f"/recordings/{recording.id}?error=enroll_failed", status_code=303
         )
 
-    per_user_dir = data_dir / "recordings" / recording.id / "per-user" / safe_uid
-    if not per_user_dir.is_dir():
+    per_user_base = os.path.abspath(
+        os.path.join(str(data_dir), "recordings", recording.id, "per-user")) + os.sep
+    per_user_path = os.path.abspath(os.path.join(per_user_base, safe_uid))
+    if not per_user_path.startswith(per_user_base):
+        return JSONResponse({"detail": "invalid discord_user_id"}, status_code=400)
+    per_user_dir = Path(per_user_path)
+    if not os.path.isdir(per_user_path):
         return RedirectResponse(
             url=f"/recordings/{recording.id}?error=no_audio", status_code=303
         )

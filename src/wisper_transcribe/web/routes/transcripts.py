@@ -782,6 +782,19 @@ async def assign_campaign(request: Request, name: str) -> HTMLResponse:
     )
 
 
+_RETRANSCRIBE_ERRORS = {"no_audio", "not_ready"}
+
+
+def _back_to_transcript(name: str, error: str) -> HTMLResponse:
+    """303 to the transcript page with a fixed error code (a Location header, as the other routes do)."""
+    code = error if error in _RETRANSCRIBE_ERRORS else "not_ready"
+    return HTMLResponse(
+        content="",
+        status_code=303,
+        headers={"Location": f"/transcripts/{quote(name)}?error={code}"},
+    )
+
+
 @router.post("/{name}/retranscribe")
 async def retranscribe(request: Request, name: str):
     """Re-run a transcript from its saved audio, replacing it in place."""
@@ -790,7 +803,6 @@ async def retranscribe(request: Request, name: str):
         return invalid_input_response("Invalid name")
     if not md_path.exists():
         return HTMLResponse(content="Transcript not found", status_code=404)
-    back = f"/transcripts/{quote(md_path.stem)}"
     out_dir = get_output_dir()
     owner = file_registry.Owner.for_stem(md_path.stem, output_dir=out_dir)
     rec = recording_for_transcript(owner.id) if owner else None
@@ -799,12 +811,12 @@ async def retranscribe(request: Request, name: str):
 
         job, error = _submit_recording_transcription(rec, request, get_data_dir())
         if job is None:
-            return RedirectResponse(url=f"{back}?error={error}", status_code=303)
+            return _back_to_transcript(name, error or "not_ready")
         return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
 
     audio = transcript_store.audio_path(md_path, output_dir=out_dir)
     if audio is None:
-        return RedirectResponse(url=f"{back}?error=no_audio", status_code=303)
+        return _back_to_transcript(name, "no_audio")
     from wisper_transcribe.job_history import last_transcription_params
 
     meta, _ = _parse_frontmatter(md_path.read_text(encoding="utf-8"))
