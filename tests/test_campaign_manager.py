@@ -14,6 +14,7 @@ from wisper_transcribe.campaign_manager import (
     delete_campaign,
     get_campaign_for_transcript,
     get_campaign_profile_keys,
+    get_campaigns_dir,
     get_transcripts_for_campaign,
     load_campaigns,
     lookup_profile_by_discord_id,
@@ -129,6 +130,78 @@ def test_delete_campaign_removes_entry_only(tmp_path):
 def test_delete_campaign_raises_keyerror_if_missing(tmp_path):
     with pytest.raises(KeyError):
         delete_campaign("nonexistent", data_dir=tmp_path)
+
+
+def _campaign_with_two_sessions():
+    """A campaign whose transcripts have summaries, and a journal file."""
+    from wisper_transcribe import file_registry, transcript_store as ts
+    from wisper_transcribe.path_utils import get_output_dir
+
+    out = get_output_dir()
+    create_campaign("Game")
+    for stem in ("s01", "s02"):
+        (out / f"{stem}.md").write_text("x", encoding="utf-8")
+        ts.register(stem, origin="job")
+        (out / f"{stem}.summary.md").write_text("sum", encoding="utf-8")
+        move_transcript_to_campaign(stem, "game")
+    journal = get_campaigns_dir() / "game" / "journal.md"
+    journal.parent.mkdir(parents=True)
+    journal.write_text("journal", encoding="utf-8")
+    file_registry.sync(out)
+    return out, journal
+
+
+def test_delete_campaign_everything_removes_transcripts_files_and_journal():
+    from wisper_transcribe import file_registry
+
+    out, journal = _campaign_with_two_sessions()
+    delete_campaign("game", delete_transcripts=True)
+
+    assert "game" not in load_campaigns()
+    assert not list(out.iterdir()) and not journal.exists()
+    with db.connection() as conn:
+        assert conn.execute("SELECT count(*) FROM transcripts").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM files").fetchone()[0] == 0
+    assert file_registry.sync(out).unclaimed == []
+
+
+def test_delete_campaign_keep_the_files_lists_the_journal_as_unclaimed():
+    from wisper_transcribe import file_registry, transcript_store as ts
+
+    out, journal = _campaign_with_two_sessions()
+    delete_campaign("game")
+
+    assert (out / "s01.md").exists() and (out / "s02.summary.md").exists() and journal.exists()
+    assert get_campaign_for_transcript("s01") is None
+    assert file_registry.sync(out).unclaimed == [journal]
+    assert ts.needs_attention(out).unclaimed == [journal]
+
+
+def test_delete_campaign_everything_keeps_a_transcript_it_cannot_delete(monkeypatch):
+    from wisper_transcribe import transcript_store as ts
+
+    out, journal = _campaign_with_two_sessions()
+    real_unlink = Path.unlink
+
+    def locked(self, *args, **kwargs):
+        if self.name == "s01.md":
+            raise PermissionError(32, "in use")
+        return real_unlink(self, *args, **kwargs)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "unlink", locked)
+        delete_campaign("game", delete_transcripts=True)
+
+    assert "game" not in load_campaigns()
+    assert (out / "s01.md").exists() and not (out / "s02.md").exists()
+    assert not journal.exists()
+    assert get_campaign_for_transcript("s01") is None
+    assert [m.stem for m in ts.needs_attention(out).missing_transcripts] == []
+
+
+def test_delete_campaign_everything_raises_keyerror_before_deleting(tmp_path):
+    with pytest.raises(KeyError):
+        delete_campaign("nonexistent", delete_transcripts=True)
 
 
 # ---------------------------------------------------------------------------

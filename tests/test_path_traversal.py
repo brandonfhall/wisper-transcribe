@@ -569,6 +569,49 @@ def test_campaign_relink_rejects_unsafe_stems(client, payload, tmp_path, monkeyp
         assert location in ("", "/campaigns/game?error=relink_failed")
 
 
+_UNSAFE_NAMES = _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS + [
+    "../escape", "../../etc/passwd", "a/b", "..", "evil\r\nLocation: x",
+]
+
+
+@pytest.mark.parametrize("payload", _UNSAFE_NAMES)
+def test_transcripts_relink_rejects_unsafe_stems(client, payload, tmp_path, monkeypatch):
+    """Both stems come from form data; neither may leave the output dir or be
+    reflected into the redirect."""
+    for form in ({"old_stem": payload, "new_stem": "x"}, {"old_stem": "x", "new_stem": payload}):
+        resp = client.post("/transcripts/relink", data=form, follow_redirects=False)
+        assert resp.status_code in (303, 400, 422)
+        assert resp.headers.get("location", "") in ("", "/transcripts?error=relink_failed")
+        assert payload not in resp.text
+
+
+@pytest.mark.parametrize("payload", _UNSAFE_NAMES + ["../outside.summary.md",
+                                                     "..\\outside.summary.md",
+                                                     "sub/x.summary.md", "x.summary.md\x00.txt"])
+def test_needs_attention_delete_file_never_leaves_the_output_dir(client, payload, tmp_path):
+    """The file name is a basename with a companion-file pattern, inside the
+    output root; anything else deletes nothing."""
+    from wisper_transcribe.path_utils import get_output_dir
+
+    out = get_output_dir()
+    outside = out.parent / "outside.summary.md"
+    outside.write_text("keep", encoding="utf-8")
+    resp = client.post("/transcripts/needs-attention/delete-file", data={"name": payload},
+                       follow_redirects=False)
+    assert resp.status_code in (303, 400, 422)
+    assert resp.headers.get("location", "") in ("", "/transcripts?error=delete_failed")
+    assert payload not in resp.text
+    assert outside.exists()
+
+
+@pytest.mark.parametrize("payload", ["x", "1.5", "-1", "1; DROP TABLE files", "\x00", ""])
+def test_needs_attention_forget_takes_only_a_listed_file_id(client, payload):
+    resp = client.post("/transcripts/needs-attention/forget", data={"file_id": payload},
+                       follow_redirects=False)
+    assert resp.status_code in (303, 400, 422)
+    assert resp.headers.get("location", "") in ("", "/transcripts?error=forget_failed")
+
+
 @pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS + ["\x00", "a\x00b", "\r\nSet-Cookie: x=1"])
 def test_search_params_are_inert(client: TestClient, payload: str):
     """/search reads no files and never redirects: every parameter is either a

@@ -3383,6 +3383,8 @@ def test_campaign_page_offers_relink_and_relink_route(client, tmp_path, monkeypa
     ts.register("s01", origin="job")
     move_transcript_to_campaign("s01", "game")
     (out / "s01.md").rename(out / "Session 01 renamed.md")
+    import os
+    os.utime(out / "Session 01 renamed.md", ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
 
     resp = client.get("/campaigns/game")
     assert "MISSING" in resp.text
@@ -3423,3 +3425,225 @@ def test_transcripts_page_has_bulk_actions_wired_to_routes(client, tmp_path, mon
                        follow_redirects=False)
     from wisper_transcribe.campaign_manager import get_transcripts_for_campaign
     assert get_transcripts_for_campaign("game") == ["s01"]
+
+
+# ---------------------------------------------------------------------------
+# Needs attention (Transcripts page)
+# ---------------------------------------------------------------------------
+
+
+def _attention_setup():
+    from wisper_transcribe import file_registry, transcript_store as ts
+    from wisper_transcribe.path_utils import get_output_dir
+
+    out = get_output_dir()
+    (out / "kept.md").write_text("---\ntitle: Kept\n---\n\nx\n", encoding="utf-8")
+    ts.register("kept", origin="job")
+    return out, ts, file_registry
+
+
+def test_needs_attention_panel_is_hidden_when_nothing_needs_it(client):
+    out, _, _ = _attention_setup()
+    resp = client.get("/transcripts")
+    assert resp.status_code == 200 and 'data-testid="needs-attention"' not in resp.text
+
+
+def test_needs_attention_lists_orphans_with_delete_only_for_output_files(client):
+    from wisper_transcribe.config import get_data_dir
+
+    out, ts, fr = _attention_setup()
+    (out / "ghost.summary.md").write_text("orphan", encoding="utf-8")
+    stray = get_data_dir() / "recordings" / "no-such-recording" / "combined.wav"
+    stray.parent.mkdir(parents=True)
+    stray.write_bytes(b"RIFF")
+
+    resp = client.get("/transcripts")
+    assert 'data-testid="needs-attention"' in resp.text
+    assert "ghost.summary.md" in resp.text and "combined.wav" in resp.text
+    assert resp.text.count('action="/transcripts/needs-attention/delete-file"') == 1
+    assert "Relinking a missing transcript to its renamed file brings its files along." in resp.text
+
+    resp = client.post("/transcripts/needs-attention/delete-file",
+                       data={"name": "ghost.summary.md"}, follow_redirects=False)
+    assert resp.status_code == 303 and resp.headers["location"] == "/transcripts"
+    assert not (out / "ghost.summary.md").exists()
+    assert stray.exists()
+    assert "ghost.summary.md" not in client.get("/transcripts").text
+
+
+def test_delete_file_route_refuses_what_it_does_not_list(client):
+    out, ts, fr = _attention_setup()
+    (out / "kept.summary.md").write_text("mine", encoding="utf-8")
+    fr.sync(out)                                          # registered to "kept"
+    (out / "notes.txt").write_text("user file", encoding="utf-8")
+    (out / "needs-attention.md").write_text("a transcript", encoding="utf-8")
+    ts.register("needs-attention", origin="job")
+
+    for name in ("kept.summary.md", "notes.txt", "kept.md", "needs-attention.md",
+                 "needs-attention", "../kept.summary.md"):
+        resp = client.post("/transcripts/needs-attention/delete-file", data={"name": name},
+                           follow_redirects=False)
+        assert resp.status_code in (303, 400), name
+    assert all((out / n).exists() for n in
+               ("kept.summary.md", "notes.txt", "kept.md", "needs-attention.md"))
+    assert client.get("/transcripts/needs-attention").status_code == 200
+
+
+def test_unregistered_flac_can_be_deleted_from_the_panel(client):
+    out, ts, fr = _attention_setup()
+    (out / "mystery.flac").write_bytes(b"fLaC")
+    assert "mystery.flac" in client.get("/transcripts").text
+    client.post("/transcripts/needs-attention/delete-file", data={"name": "mystery.flac"})
+    assert not (out / "mystery.flac").exists()
+
+
+def test_forget_clears_a_registered_file_deleted_by_hand(client):
+    out, ts, fr = _attention_setup()
+    (out / "kept.summary.md").write_text("mine", encoding="utf-8")
+    fr.sync(out)
+    (out / "kept.summary.md").unlink()
+
+    page = client.get("/transcripts")
+    assert 'data-testid="missing-file"' in page.text and "kept.summary.md" in page.text
+    row = fr.file_for(fr.Owner.for_stem("kept"), "summary")
+    resp = client.post("/transcripts/needs-attention/forget", data={"file_id": str(row.id)},
+                       follow_redirects=False)
+    assert resp.status_code == 303 and resp.headers["location"] == "/transcripts"
+    assert fr.file_for(fr.Owner.for_stem("kept"), "summary") is None
+    assert 'data-testid="missing-file"' not in client.get("/transcripts").text
+
+
+def test_forget_refuses_a_file_that_is_on_disk_or_not_a_number(client):
+    out, ts, fr = _attention_setup()
+    row = fr.file_for(fr.Owner.for_stem("kept"), "transcript")
+    resp = client.post("/transcripts/needs-attention/forget", data={"file_id": str(row.id)},
+                       follow_redirects=False)
+    assert resp.headers["location"] == "/transcripts?error=forget_failed"
+    assert fr.file_for(fr.Owner.for_stem("kept"), "transcript") is not None
+    assert client.post("/transcripts/needs-attention/forget", data={"file_id": "x"}).status_code == 400
+
+
+def test_missing_transcript_is_listed_and_relinked_with_its_files(client):
+    import os
+
+    out, ts, fr = _attention_setup()
+    (out / "kept.summary.md").write_text("mine", encoding="utf-8")
+    (out / "kept_diar.json").write_text("{}", encoding="utf-8")
+    fr.sync(out)
+    (out / "kept.md").rename(out / "renamed.md")
+    os.utime(out / "renamed.md", ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+
+    page = client.get("/transcripts")
+    assert 'data-testid="missing-transcript"' in page.text
+    assert 'data-testid="relink-form"' in page.text
+    assert "Its summary, speaker clips, and audio are deleted too." in page.text
+
+    resp = client.post("/transcripts/relink", data={"old_stem": "kept", "new_stem": "renamed"},
+                       follow_redirects=False)
+    assert resp.status_code == 303 and resp.headers["location"] == "/transcripts"
+    assert (out / "renamed.summary.md").exists() and (out / "renamed_diar.json").exists()
+    assert not (out / "kept.summary.md").exists()
+    assert 'data-testid="needs-attention"' not in client.get("/transcripts").text
+
+
+def test_relink_route_reports_a_kept_name_and_a_failure(client):
+    import os
+
+    out, ts, fr = _attention_setup()
+    (out / "kept.summary.md").write_text("mine", encoding="utf-8")
+    fr.sync(out)
+    (out / "kept.md").rename(out / "renamed.md")
+    os.utime(out / "renamed.md", ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+    (out / "renamed.summary.md").write_text("theirs", encoding="utf-8")
+    client.get("/transcripts")
+
+    resp = client.post("/transcripts/relink", data={"old_stem": "kept", "new_stem": "renamed"},
+                       follow_redirects=False)
+    assert resp.headers["location"] == "/transcripts?notice=relink_kept_names"
+    assert "Some files kept their old name" in client.get(resp.headers["location"]).text
+
+    resp = client.post("/transcripts/relink", data={"old_stem": "kept", "new_stem": "renamed"},
+                       follow_redirects=False)
+    assert resp.headers["location"] == "/transcripts?error=relink_failed"
+
+
+def test_campaign_relink_route_reports_a_kept_name(client):
+    import os
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+
+    out, ts, fr = _attention_setup()
+    create_campaign("Game")
+    move_transcript_to_campaign("kept", "game")
+    (out / "kept.summary.md").write_text("mine", encoding="utf-8")
+    fr.sync(out)
+    (out / "kept.md").rename(out / "renamed.md")
+    os.utime(out / "renamed.md", ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+    (out / "renamed.summary.md").write_text("theirs", encoding="utf-8")
+    client.get("/campaigns/game")
+
+    resp = client.post("/campaigns/game/transcripts/relink",
+                       data={"old_stem": "kept", "new_stem": "renamed"}, follow_redirects=False)
+    assert resp.headers["location"] == "/campaigns/game?notice=relink_kept_names"
+    assert "Some files kept their old name" in client.get(resp.headers["location"]).text
+
+
+def test_startup_logs_what_needs_attention(tmp_path, monkeypatch, caplog):
+    import logging
+    from fastapi.testclient import TestClient
+    from wisper_transcribe.path_utils import get_output_dir
+    from wisper_transcribe.web.app import create_app
+
+    (get_output_dir() / "ghost.summary.md").write_text("orphan", encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        with TestClient(create_app()):
+            pass
+    assert any("Needs attention: 0 missing transcript(s), 0 missing file(s), "
+               "1 file(s) with no transcript" in r.getMessage() for r in caplog.records)
+    assert (get_output_dir() / "ghost.summary.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# Campaign delete choice
+# ---------------------------------------------------------------------------
+
+
+def _campaign_with_session():
+    from wisper_transcribe import file_registry, transcript_store as ts
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    from wisper_transcribe.config import get_data_dir
+    from wisper_transcribe.path_utils import get_output_dir
+
+    out = get_output_dir()
+    create_campaign("Game")
+    (out / "s01.md").write_text("x", encoding="utf-8")
+    ts.register("s01", origin="job")
+    (out / "s01.summary.md").write_text("sum", encoding="utf-8")
+    move_transcript_to_campaign("s01", "game")
+    journal = get_data_dir() / "campaigns" / "game" / "journal.md"
+    journal.parent.mkdir(parents=True)
+    journal.write_text("journal", encoding="utf-8")
+    file_registry.sync(out)
+    return out, journal
+
+
+def test_campaign_page_offers_both_delete_choices(client):
+    _campaign_with_session()
+    page = client.get("/campaigns/game").text
+    assert 'data-testid="delete-campaign-keep"' in page
+    assert 'data-testid="delete-campaign-everything"' in page
+
+
+def test_campaign_delete_everything_route(client):
+    out, journal = _campaign_with_session()
+    resp = client.post("/campaigns/game/delete", data={"mode": "everything"}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert not list(out.iterdir()) and not journal.exists()
+
+
+def test_campaign_delete_keep_route_lists_the_journal(client):
+    out, journal = _campaign_with_session()
+    resp = client.post("/campaigns/game/delete", data={"mode": "keep"}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert (out / "s01.md").exists() and journal.exists()
+    page = client.get("/transcripts").text
+    assert "journal.md" in page and "listed only" in page

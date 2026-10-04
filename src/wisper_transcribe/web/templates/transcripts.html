@@ -26,6 +26,92 @@
 {% block page %}
 <div class="studio-page">
 
+  {% set err = request.query_params.get('error') %}
+  {% if err == 'relink_failed' %}
+  <div style="margin-bottom:16px;color:var(--color-signal-amber);font-size:12.5px">Couldn't relink: that file may already belong to a campaign, or the session isn't missing.</div>
+  {% elif err == 'forget_failed' %}
+  <div style="margin-bottom:16px;color:var(--color-signal-amber);font-size:12.5px">Couldn't forget that file: it is back on disk or no longer listed.</div>
+  {% elif err == 'delete_failed' %}
+  <div style="margin-bottom:16px;color:var(--color-signal-amber);font-size:12.5px">Couldn't delete that file: it may be open in another program, or it now belongs to a transcript.</div>
+  {% endif %}
+  {% if request.query_params.get('notice') == 'relink_kept_names' %}
+  <div style="margin-bottom:16px;color:var(--color-signal-amber);font-size:12.5px">Relinked. Some files kept their old name because a file with the new name already exists; see Needs attention below.</div>
+  {% endif %}
+
+  <!-- Needs attention: items wisper can't resolve on its own -->
+  {% if attention %}
+  <div data-testid="needs-attention" style="margin-bottom:28px">
+    <div style="display:flex;align-items:baseline;gap:14px;margin-bottom:12px">
+      <span style="display:inline-flex;align-items:center;gap:9px">
+        <span class="dot-rose" style="width:7px;height:7px"></span>
+        <span style="font-family:var(--font-serif);font-style:italic;font-size:20px;color:var(--color-paper);letter-spacing:-0.01em">Needs attention</span>
+      </span>
+      <div style="flex:1;height:1px;background:var(--color-rule)"></div>
+    </div>
+    <div style="font-size:12.5px;color:var(--color-paper-dim);margin-bottom:12px">Relinking a missing transcript to its renamed file brings its files along. Nothing here is deleted unless you choose it.</div>
+
+    {% if attention.missing_transcripts %}
+    <div class="mono-kicker" style="margin-bottom:8px">Missing transcripts</div>
+    {% for m in attention.missing_transcripts %}
+    <div data-testid="missing-transcript" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--color-rule)">
+      <span style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper-faint)">{{ m.stem }}</span>
+      {% if m.campaign %}<span class="pill pill-dim">{{ m.campaign }}</span>{% endif %}
+      <span class="pill pill-rose">MISSING</span>
+      <div style="flex:1"></div>
+      {% if relink_candidates %}
+      <form method="post" action="/transcripts/relink" data-testid="relink-form" style="display:flex;gap:6px;align-items:center">
+        <input type="hidden" name="old_stem" value="{{ m.stem }}"/>
+        <select name="new_stem" aria-label="Relink to" style="background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:3px 6px;border-radius:4px;font-size:12px;max-width:260px">
+          {% for cand in relink_candidates %}<option value="{{ cand }}">{{ cand }}</option>{% endfor %}
+        </select>
+        <button type="submit" class="btn btn-secondary btn-sm" title="Use this file for the missing session, keeping its place, journal entry, speakers, and files">Relink</button>
+      </form>
+      {% endif %}
+      <form method="post" action="/transcripts/{{ m.stem | urlencode }}/delete"
+            onsubmit='return confirm({{ "Remove this transcript? Its summary, speaker clips, and audio are deleted too." | tojson }})'>
+        <button type="submit" class="btn btn-secondary btn-sm" style="color:var(--color-signal-rose)">Remove</button>
+      </form>
+    </div>
+    {% endfor %}
+    {% endif %}
+
+    {% if attention.missing_files %}
+    <div class="mono-kicker" style="margin:16px 0 8px">Files gone from disk</div>
+    {% for f in attention.missing_files %}
+    <div data-testid="missing-file" style="display:flex;gap:12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--color-rule)">
+      <span style="font-family:var(--font-mono);font-size:12px;color:var(--color-paper-dim);word-break:break-all">{{ f.name }}</span>
+      <span class="pill pill-dim">{{ f.kind | upper }}</span>
+      <div style="flex:1"></div>
+      <form method="post" action="/transcripts/needs-attention/forget">
+        <input type="hidden" name="file_id" value="{{ f.id }}"/>
+        <button type="submit" class="btn btn-secondary btn-sm" title="Stop tracking this file">Forget</button>
+      </form>
+    </div>
+    {% endfor %}
+    {% endif %}
+
+    {% if attention.unclaimed %}
+    <div class="mono-kicker" style="margin:16px 0 8px">Files with no transcript</div>
+    {% for u in attention.unclaimed %}
+    <div data-testid="unclaimed-file" style="display:flex;gap:12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--color-rule)">
+      <span style="font-family:var(--font-mono);font-size:12px;color:var(--color-paper-dim);word-break:break-all">{{ u.name }}</span>
+      <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint)">{{ (u.size / 1024) | round(1) }} KB · {{ u.modified }}</span>
+      <div style="flex:1"></div>
+      {% if u.deletable %}
+      <form method="post" action="/transcripts/needs-attention/delete-file"
+            onsubmit='return confirm({{ ("Delete " ~ u.name ~ "? This cannot be undone.") | tojson }})'>
+        <input type="hidden" name="name" value="{{ u.name }}"/>
+        <button type="submit" class="btn btn-secondary btn-sm" style="color:var(--color-signal-rose)">Delete</button>
+      </form>
+      {% else %}
+      <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint)">listed only</span>
+      {% endif %}
+    </div>
+    {% endfor %}
+    {% endif %}
+  </div>
+  {% endif %}
+
   <!-- Recordings awaiting transcription -->
   {% if pending_recordings %}
   <div style="margin-bottom:28px">

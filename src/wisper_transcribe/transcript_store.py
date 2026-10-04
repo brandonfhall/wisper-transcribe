@@ -30,6 +30,7 @@ import sqlite3
 import threading
 import time
 import unicodedata
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -375,7 +376,7 @@ def delete_transcript(stem: str, data_dir: Optional[Path] = None,
     unlink the ``.md``, delete the row in one transaction (cascading to its
     ``files``, campaign, and journal rows), then unlink the companions. A
     crash between the last two steps leaves companions with no ``.md`` and
-    no row, which reconcile sweeps.
+    no row; Needs attention lists them.
 
     ``output_dir`` defaults to the output root; routes pass the directory they
     already resolved. Returns False if ``stem`` isn't a safe name; True
@@ -446,13 +447,21 @@ def _transcript_files(output_dir: Path) -> dict[str, Path]:
 
 
 def _companion_stem(name: str) -> Optional[str]:
-    """The transcript stem a pattern-identifiable companion file belongs to."""
+    """The transcript stem a pattern-identifiable output-root file belongs to.
+
+    Covers summaries, sidecars, excerpt clips, ``.md.bak`` backups, and
+    ``.flac`` audio.
+    """
     if name.endswith(".summary.md"):
         return name[: -len(".summary.md")]
     if name.endswith("_diar.json"):
         return name[: -len("_diar.json")]
     if "_excerpt_" in name and name.endswith((".mp3", ".txt")):
         return name.rsplit("_excerpt_", 1)[0]
+    if name.endswith(".md.bak"):
+        return name[: -len(".md.bak")]
+    if name.lower().endswith(".flac"):
+        return name[: -len(".flac")]
     return None
 
 
@@ -467,16 +476,24 @@ def reconcile(output_dir: Optional[Path] = None, data_dir: Optional[Path] = None
       an unmounted drive). A reappearing file clears the flag.
     - On a case-insensitive filesystem, a ``.md`` whose name differs from a
       missing row's only in case renames that row, keeping its links.
+    - An unregistered ``.md`` whose size and modified time equal those the
+      registry last saw for exactly one missing transcript is that
+      transcript renamed: the row takes the new name. Anything ambiguous is
+      left for the user to relink.
 
-    Rows are never deleted here. With ``sweep`` (server startup), also delete
-    stale atomic-write temp files and pattern-identifiable companions
-    (summary, sidecar, excerpt clips) that have neither a ``.md`` nor a row.
+    Rows are never deleted here. A renamed transcript's companion files are
+    renamed after the transaction commits. With ``sweep`` (server startup),
+    also delete stale atomic-write temp files; companion files with no
+    transcript are never deleted, only listed (:func:`needs_attention`).
     Only cheap work: no file is parsed. Returns counts for logging.
 
-    After its transaction closes, it syncs the file registry
-    (:func:`file_registry.sync`): every call with ``"always"``, at most every
-    30 s per directory pair with ``"throttled"`` (page loads), never with
-    ``"never"``.
+    After its transaction closes, it moves companions, syncs the file
+    registry (:func:`file_registry.sync`), then checks search freshness. The
+    order matters: syncing after the moves keeps old-stem files from being
+    cached as unclaimed, and moving before the freshness check keeps a moved
+    summary from looking deleted. A sync runs on every call with
+    ``"always"``, at most every 30 s per directory pair with ``"throttled"``
+    (page loads; a rename forces it), never with ``"never"``.
     """
     if output_dir is None:
         from .path_utils import get_output_dir
@@ -486,11 +503,44 @@ def reconcile(output_dir: Optional[Path] = None, data_dir: Optional[Path] = None
     counts = {"added": 0, "missing": 0, "restored": 0, "renamed": 0, "swept": 0}
     now = db.now_utc()
 
+    # Stat the unregistered files before the transaction, so it does no I/O.
+    with db.connection(data_dir) as conn:
+        known = {r[0] for r in conn.execute("SELECT stem FROM transcripts")}
+    new_by_stat: dict[tuple[int, int], list[str]] = {}
+    stat_of: dict[str, tuple[int, int]] = {}
+    for stem, md in files.items():
+        if stem in known:
+            continue
+        try:
+            st = md.stat()
+        except OSError:
+            continue
+        stat_of[stem] = (st.st_size, st.st_mtime_ns)
+        new_by_stat.setdefault(stat_of[stem], []).append(stem)
+
+    pending_moves: list[tuple[int, str, str]] = []
     with db.transaction(data_dir) as conn:
         rows = {r["stem"]: r for r in conn.execute("SELECT id, stem, missing_since FROM transcripts")}
         missing_by_fold = {
             stem.casefold(): r for stem, r in rows.items() if stem not in files
         } if fold else {}
+        # (size, mtime_ns) the registry last saw → transcripts with no .md on disk.
+        lost_by_stat: dict[tuple[int, int], list[sqlite3.Row]] = {}
+        if new_by_stat:
+            for r in conn.execute(
+                "SELECT t.id, t.stem, f.size, f.mtime_ns FROM transcripts t "
+                "JOIN files f ON f.transcript_id = t.id AND f.kind = 'transcript' "
+                "WHERE f.size IS NOT NULL AND f.mtime_ns IS NOT NULL"
+            ):
+                if r["stem"] not in files:
+                    lost_by_stat.setdefault((r["size"], r["mtime_ns"]), []).append(r)
+
+        def drop_candidate(tid: int, old_stem: str) -> None:
+            rows.pop(old_stem, None)
+            missing_by_fold.pop(old_stem.casefold(), None)
+            for key, group in list(lost_by_stat.items()):
+                lost_by_stat[key] = [g for g in group if g["id"] != tid]
+
         for stem, md in files.items():
             row = rows.get(stem)
             if row is None:
@@ -500,7 +550,15 @@ def reconcile(output_dir: Optional[Path] = None, data_dir: Optional[Path] = None
                                  (stem, twin["id"]))
                     mark_stale(conn, [twin["id"]])  # a different file may carry the name now
                     _point_transcript_row(conn, twin["id"], md, data_dir, output_dir)
-                    rows.pop(twin["stem"], None)
+                    pending_moves.append((twin["id"], twin["stem"], stem))
+                    drop_candidate(twin["id"], twin["stem"])
+                    counts["renamed"] += 1
+                    continue
+                matched = _match_renamed(conn, md, stem, stat_of.get(stem), new_by_stat,
+                                         lost_by_stat, data_dir, output_dir)
+                if matched is not None:
+                    pending_moves.append((matched["id"], matched["stem"], stem))
+                    drop_candidate(matched["id"], matched["stem"])
                     counts["renamed"] += 1
                 else:
                     ensure_row(conn, stem, output_dir)
@@ -512,30 +570,25 @@ def reconcile(output_dir: Optional[Path] = None, data_dir: Optional[Path] = None
             if stem not in files and row["missing_since"] is None:
                 conn.execute("UPDATE transcripts SET missing_since = ? WHERE id = ?", (now, row["id"]))
                 counts["missing"] += 1
-        registered = {r[0] for r in conn.execute("SELECT stem FROM transcripts")}
 
     if sweep:
         cutoff = time.time() - _TEMP_MAX_AGE_S
         for entry in output_dir.iterdir():
             try:
-                if entry.name.startswith(TEMP_PREFIX):
-                    if entry.stat().st_mtime < cutoff:
-                        entry.unlink()
-                        counts["swept"] += 1
-                    continue
-                owner = _companion_stem(entry.name)
-                if owner is None or not entry.is_file():
-                    continue
-                owner = nfc(owner)
-                if owner not in files and owner not in registered:
+                if entry.name.startswith(TEMP_PREFIX) and entry.stat().st_mtime < cutoff:
                     entry.unlink()
                     counts["swept"] += 1
             except OSError:
                 pass
+    for tid, old_stem, new_stem in pending_moves:
+        kept = rename_companions(tid, old_stem, new_stem, output_dir=output_dir, data_dir=data_dir)
+        if kept:
+            log.warning("%d file(s) of %r kept their old names: a file with the new name exists",
+                        len(kept), new_stem)
     if sync == "always":
         file_registry.sync(output_dir, data_dir)
     elif sync == "throttled":
-        file_registry.sync_if_due(output_dir, data_dir)
+        file_registry.sync_if_due(output_dir, data_dir, force=bool(pending_moves))
     if any(counts.values()):
         log.info("Transcript reconcile: %s", counts)
     # Files edited outside wisper get reindexed; new ones get their first index.
@@ -546,6 +599,38 @@ def reconcile(output_dir: Optional[Path] = None, data_dir: Optional[Path] = None
     if counts["added"] or counts["renamed"] or counts["restored"]:
         request_backfill()
     return counts
+
+
+def _match_renamed(conn: sqlite3.Connection, md: Path, stem: str,
+                   key: Optional[tuple[int, int]],
+                   new_by_stat: dict[tuple[int, int], list[str]],
+                   lost_by_stat: dict[tuple[int, int], list[sqlite3.Row]],
+                   data_dir: Optional[Path], output_dir: Path) -> Optional[sqlite3.Row]:
+    """The missing transcript that ``md`` is the renamed file of, if provably one.
+
+    Provable means: no other unregistered file has the same size and modified
+    time, and exactly one missing transcript's last observed file has them.
+    On a match the row takes the name ``stem`` and its ``transcript`` file row
+    is re-pointed (inside ``conn``); returns the matched row, else None.
+    """
+    if key is None or len(new_by_stat.get(key, ())) != 1:
+        return None
+    candidates = lost_by_stat.get(key, [])
+    if len(candidates) != 1:
+        return None
+    cand = candidates[0]
+    owner = file_registry.Owner("transcript", cand["id"])
+    file_row = file_registry.file_for(owner, "transcript", conn=conn,
+                                      data_dir=data_dir, output_dir=output_dir)
+    try:
+        if file_row is not None:
+            file_registry.repoint(file_row, md, conn=conn, data_dir=data_dir, output_dir=output_dir)
+    except (sqlite3.IntegrityError, file_registry.OwnershipConflict, ValueError):
+        log.warning("Could not match %s to a missing transcript", md.name, exc_info=True)
+        return None
+    conn.execute("UPDATE transcripts SET stem = ?, missing_since = NULL WHERE id = ?",
+                 (stem, cand["id"]))
+    return cand
 
 
 def _point_transcript_row(conn: sqlite3.Connection, tid: int, md: Path,
@@ -569,15 +654,82 @@ def _point_transcript_row(conn: sqlite3.Connection, tid: int, md: Path,
                                data_dir=data_dir, output_dir=output_dir)
 
 
+def rename_companions(transcript_id: int, old_stem: str, new_stem: str, *,
+                      output_dir: Optional[Path] = None,
+                      data_dir: Optional[Path] = None) -> list[Path]:
+    """Rename a transcript's other files from ``old_stem`` to ``new_stem``.
+
+    Call after the ``stem`` change has committed (companion files follow the
+    row), with the stem captured before it. The files are the transcript's
+    ``files`` rows except the ``.md`` itself, plus any summary, sidecar,
+    excerpt, or backup of ``old_stem`` that isn't registered yet (registered
+    first). An unregistered ``.flac`` is never claimed: it may be the
+    user's own.
+
+    A file's new name replaces the ``old_stem`` prefix and keeps the rest
+    (``_excerpt_SPEAKER_00.mp3``, ``.summary.md``, ``_1.flac``). Returns the
+    files that kept their old name because the new name is taken or the move
+    failed (e.g. held open on Windows); their rows are unchanged.
+    """
+    if output_dir is None:
+        from .path_utils import get_output_dir
+        output_dir = get_output_dir()
+    output_dir = Path(output_dir)
+    old_stem, new_stem = nfc(old_stem), nfc(new_stem)
+    if old_stem == new_stem:
+        return []
+    fold = file_registry._fold(output_dir)
+    owner = file_registry.Owner("transcript", transcript_id)
+
+    def is_old(name: str) -> bool:
+        return nfc(name)[:len(old_stem)].casefold() == old_stem.casefold() if fold \
+            else nfc(name).startswith(old_stem)
+
+    rows = file_registry.files_for(owner, data_dir=data_dir, output_dir=output_dir)
+    taken = {(r.kind, r.label or "") for r in rows}
+    try:
+        names = sorted(e.name for e in os.scandir(output_dir) if e.is_file())
+    except OSError:
+        names = []
+    registered = False
+    for name in names:
+        if name.startswith(TEMP_PREFIX) or not is_old(name):
+            continue
+        for kind, stem, label in file_registry._output_candidates(name):
+            if kind in ("transcript", "audio") or file_registry._key(stem, fold) != \
+                    file_registry._key(old_stem, fold):
+                continue
+            if (kind, label or "") not in taken:
+                taken.add((kind, label or ""))
+                file_registry.add_if_owned(output_dir / name, kind=kind, owner=owner, label=label,
+                                           data_dir=data_dir, output_dir=output_dir)
+                registered = True
+            break
+    if registered:
+        rows = file_registry.files_for(owner, data_dir=data_dir, output_dir=output_dir)
+
+    kept: list[Path] = []
+    for row in rows:
+        if row.kind == "transcript" or row.root != "output" or not is_old(row.path.name):
+            continue
+        tail = nfc(row.path.name)[len(old_stem):]
+        result = file_registry.move(row, row.path.with_name(new_stem + tail),
+                                    data_dir=data_dir, output_dir=output_dir)
+        if result in ("conflict", "error"):
+            kept.append(row.path)
+    return kept
+
+
 def relink(old_stem: str, new_stem: str, data_dir: Optional[Path] = None,
-           output_dir: Optional[Path] = None) -> None:
+           output_dir: Optional[Path] = None) -> list[Path]:
     """Give a missing transcript's identity to a file under a new name.
 
     ``old_stem`` must be flagged missing; ``<new_stem>.md`` must exist and
     must not be linked to anything yet (no campaign, no journal entry). The
     old row takes the new name, so its campaign position, journal entry, and
     speakers are kept; the new name's own row (reconcile may have created one)
-    is removed.
+    is removed. The old name's companion files are renamed to match
+    (:func:`rename_companions`); returns the ones that couldn't be.
 
     Raises ValueError (unsafe name, not missing, or target already linked)
     or KeyError (no such transcript).
@@ -613,7 +765,10 @@ def relink(old_stem: str, new_stem: str, data_dir: Optional[Path] = None,
         conn.execute("UPDATE transcripts SET stem = ?, missing_since = NULL WHERE id = ?",
                      (new_stem, old["id"]))
         _point_transcript_row(conn, old["id"], new_md, data_dir, output_dir)
+        old_id = old["id"]
+    kept = rename_companions(old_id, old_stem, new_stem, output_dir=output_dir, data_dir=data_dir)
     _reindex(new_stem, data_dir)  # the old identity's index described the old file
+    return kept
 
 
 def relink_candidates(data_dir: Optional[Path] = None) -> list[str]:
@@ -625,6 +780,86 @@ def relink_candidates(data_dir: Optional[Path] = None) -> list[str]:
             "AND NOT EXISTS (SELECT 1 FROM campaign_transcripts ct WHERE ct.transcript_id = t.id) "
             "ORDER BY t.created_at DESC, t.stem"
         )]
+
+
+# ---------------------------------------------------------------------------
+# Needs attention: what wisper can't resolve on its own
+# ---------------------------------------------------------------------------
+
+@dataclass
+class MissingTranscript:
+    stem: str
+    campaign: Optional[str]   # the campaign's display name
+
+
+@dataclass
+class Attention:
+    """Everything the user has to resolve; nothing here is deleted automatically."""
+
+    missing_transcripts: list[MissingTranscript] = field(default_factory=list)
+    missing_files: list[file_registry.FileRow] = field(default_factory=list)
+    unclaimed: list[Path] = field(default_factory=list)
+
+    @property
+    def total(self) -> int:
+        return len(self.missing_transcripts) + len(self.missing_files) + len(self.unclaimed)
+
+
+def needs_attention(output_dir: Optional[Path] = None,
+                    data_dir: Optional[Path] = None) -> Attention:
+    """The transcripts and files that need the user's decision.
+
+    - missing transcripts: rows flagged ``missing_since``;
+    - missing files: registered companions, clips, or journals whose file is gone;
+    - unclaimed files: pattern-matching files with no owner.
+
+    The files come from the latest :func:`file_registry.sync` report, taken
+    on demand if there is none, and are re-checked against the disk.
+    """
+    if output_dir is None:
+        from .path_utils import get_output_dir
+        output_dir = get_output_dir()
+    report = file_registry.last_report(data_dir, output_dir)
+    if report is None:
+        report = file_registry.sync(output_dir, data_dir)
+    with db.connection(data_dir) as conn:
+        missing = [MissingTranscript(r["stem"], r["display_name"]) for r in conn.execute(
+            "SELECT t.stem, c.display_name FROM transcripts t "
+            "LEFT JOIN campaign_transcripts ct ON ct.transcript_id = t.id "
+            "LEFT JOIN campaigns c ON c.id = ct.campaign_id "
+            "WHERE t.missing_since IS NOT NULL ORDER BY t.stem")]
+    return Attention(
+        missing_transcripts=missing,
+        missing_files=[r for r in report.missing if not os.path.lexists(r.path)],
+        unclaimed=[p for p in report.unclaimed if os.path.isfile(p)],
+    )
+
+
+def delete_unowned_file(path: Path, output_dir: Optional[Path] = None,
+                        data_dir: Optional[Path] = None) -> bool:
+    """Delete a regular file in the output root that no ``files`` row names.
+
+    Returns False, deleting nothing, for anything else: a path outside the
+    output root, a directory or symlink, a registered file, or a file that
+    couldn't be removed. Callers decide which names are eligible.
+    """
+    if output_dir is None:
+        from .path_utils import get_output_dir
+        output_dir = get_output_dir()
+    base = os.path.abspath(str(output_dir))
+    if not base.endswith(os.sep):
+        base += os.sep
+    target = os.path.abspath(str(path))
+    if not target.startswith(base) or os.sep in target[len(base):]:
+        return False
+    if os.path.islink(target) or not os.path.isfile(target):
+        return False
+    if file_registry.is_registered(Path(target), data_dir=data_dir, output_dir=output_dir):
+        return False
+    if file_registry.unlink_paths([Path(target)]):
+        return False
+    file_registry.drop_from_report(data_dir, output_dir, paths=[Path(target)])
+    return True
 
 
 # ---------------------------------------------------------------------------

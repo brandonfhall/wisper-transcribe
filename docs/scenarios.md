@@ -118,10 +118,18 @@ The sheet lists rows marked `discriminating` first: those are the words where th
 wisper keeps a record of every transcript in the transcripts folder. If a file vanishes (deleted or renamed in Finder or Obsidian, a sync that hasn't finished, a drive that isn't connected), its campaign entry stays in place and shows **MISSING** instead of being dropped.
 
 - **It comes back** (sync finishes, drive reconnected): nothing to do; the flag clears the next time you open the Campaign or Transcripts page.
-- **It was renamed:** on the Campaign page, choose the new name in the **Relink** dropdown next to the missing entry. The session keeps its place in the episode order, its journal entry, and its speaker names. Renaming only the capitalization (e.g. `session 1` → `Session 1`) is picked up automatically on macOS and Windows.
+- **It was renamed:** see "I renamed a transcript outside wisper" below. The session keeps its place in the episode order, its journal entry, and its speaker names. Renaming only the capitalization (e.g. `session 1` → `Session 1`) is picked up automatically on macOS and Windows.
 - **It's really gone:** remove it from the campaign with ✕. If it had been folded into the journal, the journal is marked as needing a rebuild.
 
 `wisper transcripts list` shows missing entries too.
+
+---
+
+## I renamed a transcript outside wisper
+
+Rename it in Explorer, Finder, or Obsidian. On the next start (or when you open the Transcripts page), wisper recognises the file by its size and modified time, gives the transcript its new name, and renames its summary, speaker clips, backup, and audio to match. It keeps its campaign place, journal entry, and speaker names.
+
+If wisper can't be sure (you also edited the file, or two files look alike), the old name appears under **Needs attention** on the Transcripts page. Choose the new name in its **Relink** dropdown; relinking renames the other files for you. If a file with the new name already exists, that one keeps its old name and you're told so.
 
 ---
 

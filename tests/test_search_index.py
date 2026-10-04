@@ -466,6 +466,7 @@ def test_title_index_follows_register_rename_and_delete(out):
     md = _add(out, "Old name")
     assert _stems(si.search("old")) == ["Old name"]
     md.rename(out / "New name.md")
+    os.utime(out / "New name.md", ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
     ts.reconcile(out)                                 # Old name missing, New name registered
     ts.delete_transcript("New name")                  # drop the new row so relink can take it
     (out / "New name.md").write_text(TRANSCRIPT, encoding="utf-8")

@@ -155,10 +155,18 @@ def create_app() -> FastAPI:
             logging.getLogger(__name__).warning("Could not mark interrupted jobs", exc_info=True)
 
         # Register transcripts added while the server was down, flag deleted
-        # ones, and sweep crash leftovers (temp files, orphaned companions).
+        # ones, match renames, and sweep crash leftover temp files.
         try:
             from wisper_transcribe import transcript_store
             transcript_store.reconcile(sweep=True)
+            attention = transcript_store.needs_attention()
+            if attention.total:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Needs attention: %d missing transcript(s), %d missing file(s), "
+                    "%d file(s) with no transcript; see the Transcripts page",
+                    len(attention.missing_transcripts), len(attention.missing_files),
+                    len(attention.unclaimed))
         except Exception:
             import logging
             logging.getLogger(__name__).warning("Transcript reconcile failed", exc_info=True)

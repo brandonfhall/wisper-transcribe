@@ -898,8 +898,13 @@ def campaigns_create(display_name: str):
 @campaigns.command("delete")
 @click.argument("slug")
 @click.option("--yes", is_flag=True, default=False, help="Skip confirmation prompt")
-def campaigns_delete(slug: str, yes: bool):
-    """Delete a campaign. Does not affect enrolled speaker profiles."""
+@click.option("--delete-transcripts", is_flag=True, default=False,
+              help="Also delete the campaign's transcripts, their files, and its journal")
+def campaigns_delete(slug: str, yes: bool, delete_transcripts: bool):
+    """Delete a campaign. Does not affect enrolled speaker profiles.
+
+    By default the campaign's transcripts and journal file stay.
+    """
     from .campaign_manager import _validate_campaign_slug, delete_campaign
 
     safe = _validate_campaign_slug(slug)
@@ -907,10 +912,12 @@ def campaigns_delete(slug: str, yes: bool):
         raise click.ClickException(f"Invalid campaign slug: {slug!r}")
 
     if not yes:
-        click.confirm(f"Delete campaign {safe!r}?", abort=True)
+        what = ("and delete its transcripts, their files, and its journal"
+                if delete_transcripts else "and keep its transcripts and journal file")
+        click.confirm(f"Delete campaign {safe!r} {what}?", abort=True)
 
     try:
-        delete_campaign(safe)
+        delete_campaign(safe, delete_transcripts=delete_transcripts)
     except KeyError:
         raise click.ClickException(f"Campaign {safe!r} not found.")
 
@@ -1291,14 +1298,21 @@ def transcripts_list(campaign: Optional[str]):
     def _label(stem: str) -> str:
         return stem if stem in present else f"{stem}  (missing — file not found)"
 
+    def _attention_note() -> None:
+        from .transcript_store import needs_attention
+        total = needs_attention(out_dir).total
+        if total:
+            noun = "item needs" if total == 1 else "items need"
+            click.echo(f"\n{total} {noun} attention; see the Transcripts page")
+
     if campaign:
         # Campaign order, including entries whose file is missing.
         stems = campaigns[campaign].transcripts if campaign in campaigns else []
         if not stems:
             click.echo(f"No transcripts found for campaign {campaign!r}.")
-            return
         for stem in stems:
             click.echo(_label(stem))
+        _attention_note()
         return
 
     # Grouped output, each campaign in its fold order
@@ -1319,6 +1333,7 @@ def transcripts_list(campaign: Optional[str]):
             click.echo(f"   {stem}")
     elif not printed_any:
         click.echo("No transcripts found.")
+    _attention_note()
 
 
 @transcripts.command("move")

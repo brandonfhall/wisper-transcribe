@@ -384,6 +384,22 @@ def forget_kind(owner: Owner, kind: str, label: Optional[str] = None,
         return _delete_rows(c, c.execute(sql, params).fetchall(), data, output)
 
 
+def is_registered(path: Path, conn: Optional[sqlite3.Connection] = None, *,
+                  data_dir: Optional[Path] = None, output_dir: Optional[Path] = None) -> bool:
+    """Whether any row names ``path``."""
+    data, output = _dirs(data_dir, output_dir)
+    with _use(conn, data_dir, write=False) as c:
+        for root in ("output", "data"):
+            root_dir = _root_dir(root, data, output)
+            try:
+                rel = db.to_rel(Path(path), root_dir)
+            except ValueError:
+                continue
+            if _find_by_path(c, root, rel, _fold(root_dir)) is not None:
+                return True
+    return False
+
+
 def files_for(owner: Owner, conn: Optional[sqlite3.Connection] = None, *,
               data_dir: Optional[Path] = None,
               output_dir: Optional[Path] = None) -> list[FileRow]:

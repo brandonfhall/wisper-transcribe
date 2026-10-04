@@ -227,7 +227,8 @@ wisper campaigns show d-d-mondays                       # roster table with role
 wisper campaigns add-member d-d-mondays alice --role DM # add a player (must be enrolled)
 wisper campaigns add-member d-d-mondays bob --role Player --character "Theron"
 wisper campaigns remove-member d-d-mondays charlie      # remove from roster only (keeps voice profile)
-wisper campaigns delete d-d-mondays                     # delete campaign (with confirmation)
+wisper campaigns delete d-d-mondays                     # delete campaign, keep its transcripts and journal file (with confirmation)
+wisper campaigns delete d-d-mondays --delete-transcripts  # also delete its transcripts, their files, and its journal
 wisper campaigns reorder d-d-mondays s02 --up           # move a session one position earlier
 wisper campaigns reorder d-d-mondays s02 --down         # move a session one position later
 wisper campaigns reorder d-d-mondays --set "s01,s02,s03" # replace the whole order in one shot
@@ -316,6 +317,7 @@ wisper transcripts move session12 --no-campaign            # remove campaign ass
 
 - `session12` is the transcript stem (filename without `.md`).
 - A transcript can belong to at most one campaign at a time.
+- When a transcript or file needs a decision (a missing transcript, a file gone from disk, a file with no transcript), the listing ends with "N items need attention; see the Transcripts page".
 
 ---
 

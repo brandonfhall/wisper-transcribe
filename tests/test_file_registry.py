@@ -732,7 +732,8 @@ def test_relink_repoints_the_transcript_row(out):
     _touch(out / "old.md")
     tid = ts.register("old", origin="job")
     (out / "old.md").rename(out / "new.md")
-    ts.reconcile(out)
+    os.utime(out / "new.md", ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+    ts.reconcile(out)  # a new mtime: the rename isn't provable, so relink does it
     ts.relink("old", "new", output_dir=out)
     row = _row(fr.Owner("transcript", tid), "transcript")
     assert row.rel_path == "new.md"

@@ -1247,6 +1247,62 @@ def test_campaigns_delete_with_yes(tmp_path, monkeypatch):
     assert "Deleted" in result.output
 
 
+def _campaign_with_transcript(out):
+    from wisper_transcribe import transcript_store
+    from wisper_transcribe.campaign_manager import move_transcript_to_campaign
+
+    runner = CliRunner()
+    runner.invoke(main, ["campaigns", "create", "Test Campaign"])
+    (out / "s01.md").write_text("x", encoding="utf-8")
+    transcript_store.register("s01", origin="job")
+    (out / "s01.summary.md").write_text("sum", encoding="utf-8")
+    move_transcript_to_campaign("s01", "test-campaign")
+    return runner
+
+
+def test_campaigns_delete_keeps_transcripts_by_default(tmp_path, monkeypatch):
+    from wisper_transcribe.path_utils import get_output_dir
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    out = get_output_dir()
+    runner = _campaign_with_transcript(out)
+
+    result = runner.invoke(main, ["campaigns", "delete", "test-campaign"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "keep its transcripts and journal file" in result.output
+    assert (out / "s01.md").exists() and (out / "s01.summary.md").exists()
+
+
+def test_campaigns_delete_transcripts_flag_deletes_them(tmp_path, monkeypatch):
+    from wisper_transcribe.path_utils import get_output_dir
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    out = get_output_dir()
+    runner = _campaign_with_transcript(out)
+
+    result = runner.invoke(main, ["campaigns", "delete", "test-campaign", "--delete-transcripts"],
+                           input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "delete its transcripts, their files, and its journal" in result.output
+    assert not list(out.iterdir())
+
+
+def test_transcripts_list_points_at_the_attention_page(tmp_path, monkeypatch):
+    from wisper_transcribe.path_utils import get_output_dir
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    out = get_output_dir()
+    (out / "s01.md").write_text("x", encoding="utf-8")
+    result = CliRunner().invoke(main, ["transcripts", "list"])
+    assert "need attention" not in result.output and "needs attention" not in result.output
+
+    (out / "ghost.summary.md").write_text("orphan", encoding="utf-8")
+    (out / "ghost_diar.json").write_text("{}", encoding="utf-8")
+    result = CliRunner().invoke(main, ["transcripts", "list"])
+    assert "2 items need attention; see the Transcripts page" in result.output
+    assert (out / "ghost.summary.md").exists()
+
+
 def test_campaigns_add_unknown_profile_fails(tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     runner = CliRunner()
@@ -1556,4 +1612,6 @@ def test_transcripts_list_marks_missing_entries_in_campaign_order(tmp_path, monk
 
     result = CliRunner().invoke(main, ["transcripts", "list", "--campaign", "game"])
     assert result.exit_code == 0, result.output
-    assert result.output.splitlines() == ["s02  (missing — file not found)", "s01"]
+    lines = result.output.splitlines()
+    assert lines[:2] == ["s02  (missing — file not found)", "s01"]
+    assert "1 item needs attention; see the Transcripts page" in lines[2:]

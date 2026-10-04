@@ -374,19 +374,14 @@ def test_reconcile_maps_nfd_filenames_to_nfc_rows(out, case_sensitive):
     assert _rows() == {nfc_name: False}
 
 
-def test_reconcile_sweeps_only_true_orphans_and_old_temps(out, case_sensitive):
+def test_reconcile_sweeps_old_temps_but_never_a_companion(out, case_sensitive):
     import time as _time
 
     _md(out, "kept")
     ts.register("kept", origin="job")
-    files = {
-        "kept.summary.md": True,          # has a .md
-        "gone_diar.json": False,          # no .md, no row
-        "gone_excerpt_SPEAKER_00.mp3": False,
-        "gone.summary.md": False,
-        "random-audio.wav": True,         # never a generic audio file
-    }
-    for name in files:
+    companions = ["kept.summary.md", "gone_diar.json", "gone_excerpt_SPEAKER_00.mp3",
+                  "gone.summary.md", "gone.md.bak", "gone.flac", "random-audio.wav"]
+    for name in companions:
         (out / name).write_text("x", encoding="utf-8")
     old_temp = out / f"{ts.TEMP_PREFIX}kept.md.1-1"
     new_temp = out / f"{ts.TEMP_PREFIX}kept.md.2-2"
@@ -396,11 +391,13 @@ def test_reconcile_sweeps_only_true_orphans_and_old_temps(out, case_sensitive):
     os.utime(old_temp, (stale, stale))
 
     ts.reconcile(out)                     # list pages: no sweep
-    assert all((out / n).exists() for n in files)
+    assert old_temp.exists()
     ts.reconcile(out, sweep=True)         # startup
-    for name, keep in files.items():
-        assert (out / name).exists() == keep, name
+    assert all((out / n).exists() for n in companions)
     assert not old_temp.exists() and new_temp.exists()
+    orphans = {p.name for p in ts.needs_attention(out).unclaimed}
+    assert orphans == {"gone_diar.json", "gone_excerpt_SPEAKER_00.mp3", "gone.summary.md",
+                       "gone.md.bak", "gone.flac"}
 
 
 def test_case_probe_leaves_no_file(out):
@@ -419,6 +416,8 @@ def _missing_entry(out):
     ts.register("old name", origin="job")
     move_transcript_to_campaign("old name", "game")
     (out / "old name.md").rename(out / "new name.md")
+    # A new mtime, so reconcile can't prove the rename and lists it for relink.
+    os.utime(out / "new name.md", ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
     ts.reconcile(out)  # old flagged missing, new registered
 
 
@@ -450,6 +449,226 @@ def test_relink_refuses_present_source_and_linked_target(out, case_sensitive):
         ts.relink("old name", "no such file")
     with pytest.raises(ValueError):
         ts.relink("old name", "../escape")
+
+
+# ---------------------------------------------------------------------------
+# Renames keep a transcript's files
+# ---------------------------------------------------------------------------
+
+_BUMP_NS = 1_700_000_000_000_000_000
+_COMPANION_SUFFIXES = (".summary.md", "_diar.json", "_excerpt_SPEAKER_00.mp3",
+                       "_excerpt_SPEAKER_01.mp3", ".md.bak", ".flac")
+
+
+def _session(out: Path, stem: str) -> int:
+    """A registered transcript with a summary, sidecar, two excerpts, a backup, and audio."""
+    _md(out, stem)
+    tid = ts.register(stem, origin="job")
+    for suffix in _COMPANION_SUFFIXES:
+        (out / f"{stem}{suffix}").write_text(suffix, encoding="utf-8")
+    file_registry.add(out / f"{stem}.flac", kind="audio",
+                      owner=file_registry.Owner("transcript", tid))
+    file_registry.sync(out)
+    return tid
+
+
+def _registered_names(tid: int) -> set[str]:
+    rows = file_registry.files_for(file_registry.Owner("transcript", tid))
+    return {r.path.name for r in rows}
+
+
+def _rename_provably_different(out: Path, old: str, new: str) -> None:
+    """Rename a transcript's ``.md`` and change its mtime, so reconcile can't
+    prove it is the same file."""
+    (out / f"{old}.md").rename(out / f"{new}.md")
+    os.utime(out / f"{new}.md", ns=(_BUMP_NS, _BUMP_NS))
+
+
+def test_relink_carries_every_companion(out, case_sensitive):
+    tid = _session(out, "Session 5")
+    _rename_provably_different(out, "Session 5", "Hanataz 05")
+    ts.reconcile(out, sweep=True)
+    assert _rows()["Session 5"] is True
+
+    assert ts.relink("Session 5", "Hanataz 05") == []
+
+    expected = {"Hanataz 05.md"} | {f"Hanataz 05{s}" for s in _COMPANION_SUFFIXES}
+    assert {p.name for p in out.iterdir()} == expected
+    assert _registered_names(tid) == expected
+    ts.reconcile(out, sweep=True)                         # the sweep deletes nothing
+    assert {p.name for p in out.iterdir()} == expected
+    assert ts.needs_attention(out).total == 0
+
+
+def test_relink_conflict_keeps_both_files(out, case_sensitive):
+    tid = _session(out, "Session 5")
+    _rename_provably_different(out, "Session 5", "Hanataz 05")
+    (out / "Hanataz 05.summary.md").write_text("someone else's", encoding="utf-8")
+    ts.reconcile(out)
+
+    kept = ts.relink("Session 5", "Hanataz 05")
+
+    assert kept == [out / "Session 5.summary.md"]
+    assert (out / "Session 5.summary.md").read_text(encoding="utf-8") == ".summary.md"
+    assert (out / "Hanataz 05.summary.md").read_text(encoding="utf-8") == "someone else's"
+    assert "Session 5.summary.md" in _registered_names(tid)
+    assert "Hanataz 05_diar.json" in _registered_names(tid)    # the rest followed
+
+
+def test_rename_registers_an_unregistered_companion_first(out, case_sensitive):
+    tid = _session(out, "Session 5")
+    (out / "Session 5_excerpt_SPEAKER_02.txt").write_text("late", encoding="utf-8")
+    assert "Session 5_excerpt_SPEAKER_02.txt" not in _registered_names(tid)
+    _rename_provably_different(out, "Session 5", "Hanataz 05")
+    ts.reconcile(out)
+    ts.relink("Session 5", "Hanataz 05")
+    assert (out / "Hanataz 05_excerpt_SPEAKER_02.txt").is_file()
+    assert "Hanataz 05_excerpt_SPEAKER_02.txt" in _registered_names(tid)
+
+
+def test_rename_does_not_touch_another_transcripts_files(out, case_sensitive):
+    _session(out, "Session 5")
+    other = _session(out, "Session 5 B")
+    ts.rename_companions(file_registry.Owner.for_stem("Session 5").id, "Session 5", "Hanataz 05")
+    assert (out / "Session 5 B.summary.md").is_file()
+    assert "Session 5 B.summary.md" in _registered_names(other)
+    assert (out / "Hanataz 05.summary.md").is_file()
+
+
+def test_automatic_match_renames_the_transcript_and_its_files(out, case_sensitive):
+    create_campaign("Game")
+    for stem in ("s01", "Session 5", "s03"):
+        _session(out, stem)
+        move_transcript_to_campaign(stem, "game")
+    tid = file_registry.Owner.for_stem("Session 5").id
+    ts.write_sidecar(out / "Session 5.md", {"diarization_segments": _SEGS,
+                                            "speaker_map": {"SPEAKER_00": "Alice"},
+                                            "input_path": str(out / "Session 5.flac")})
+
+    os.replace(out / "Session 5.md", out / "Hanataz 05.md")   # keeps the mtime
+    counts = ts.reconcile(out, sweep=True)
+
+    assert counts["renamed"] == 1 and counts["added"] == 0 and counts["missing"] == 0
+    assert _rows() == {"s01": False, "Hanataz 05": False, "s03": False}
+    assert get_transcripts_for_campaign("game") == ["s01", "Hanataz 05", "s03"]
+    assert ts.read_sidecar(out / "Hanataz 05.md")["speaker_map"] == {"SPEAKER_00": "Alice"}
+    expected = {"Hanataz 05.md"} | {f"Hanataz 05{s}" for s in _COMPANION_SUFFIXES}
+    assert _registered_names(tid) == expected
+    assert not list(out.glob("Session 5*"))
+    assert ts.needs_attention(out).total == 0
+
+
+def test_automatic_match_needs_one_missing_row_and_one_new_file(out, case_sensitive):
+    for stem in ("a", "b"):
+        _md(out, stem)
+        os.utime(out / f"{stem}.md", ns=(_BUMP_NS, _BUMP_NS))
+        ts.register(stem, origin="job")
+    os.replace(out / "a.md", out / "c.md")
+    (out / "b.md").unlink()                    # two missing rows share c.md's size and mtime
+    counts = ts.reconcile(out)
+    assert counts["renamed"] == 0 and counts["added"] == 1
+    assert _rows() == {"a": True, "b": True, "c": False}
+
+
+def test_automatic_match_refuses_two_new_files_with_one_stat(out, case_sensitive):
+    import shutil
+
+    _md(out, "a")
+    ts.register("a", origin="job")
+    os.replace(out / "a.md", out / "c.md")
+    shutil.copy2(out / "c.md", out / "d.md")   # same size and mtime
+    counts = ts.reconcile(out)
+    assert counts["renamed"] == 0 and counts["added"] == 2
+    assert _rows() == {"a": True, "c": False, "d": False}
+
+
+def test_case_only_rename_on_a_case_insensitive_filesystem_moves_companions(out, monkeypatch):
+    monkeypatch.setattr(ts, "_is_case_insensitive", lambda d: True)
+    tid = _session(out, "session one")
+
+    (out / "session one.md").rename(out / "Session One.md")
+    counts = ts.reconcile(out)
+
+    assert counts["renamed"] == 1
+    names = {p.name for p in out.iterdir()}
+    assert names == {"Session One.md"} | {f"Session One{s}" for s in _COMPANION_SUFFIXES}
+    assert _registered_names(tid) == names
+
+
+def test_a_locked_companion_stays_put_and_is_reported(out, case_sensitive, monkeypatch):
+    tid = _session(out, "s")
+
+    def locked(src, dst):
+        raise PermissionError(32, "in use")
+
+    monkeypatch.setattr(ts.os, "replace", locked)
+    kept = ts.rename_companions(tid, "s", "t")
+
+    assert {p.name for p in kept} == {f"s{s}" for s in _COMPANION_SUFFIXES}
+    assert all((out / f"s{s}").is_file() for s in _COMPANION_SUFFIXES)
+    assert _registered_names(tid) == {"s.md"} | {f"s{s}" for s in _COMPANION_SUFFIXES}
+
+
+def test_rename_companions_ignores_an_unchanged_stem(out, case_sensitive):
+    tid = _session(out, "s")
+    assert ts.rename_companions(tid, "s", "s") == []
+    assert (out / "s.summary.md").is_file()
+
+
+# ---------------------------------------------------------------------------
+# Needs attention
+# ---------------------------------------------------------------------------
+
+def test_needs_attention_lists_orphans_and_vanished_files(out, case_sensitive):
+    create_campaign("Game")
+    _session(out, "kept")
+    _md(out, "lost")
+    ts.register("lost", origin="job")
+    move_transcript_to_campaign("lost", "game")
+    (out / "lost.md").unlink()
+    (out / "ghost.summary.md").write_text("orphan", encoding="utf-8")
+    (out / "kept.summary.md").unlink()
+    ts.reconcile(out, sweep=True)
+
+    found = ts.needs_attention(out)
+
+    assert [(m.stem, m.campaign) for m in found.missing_transcripts] == [("lost", "Game")]
+    assert [r.path.name for r in found.missing_files] == ["kept.summary.md"]
+    assert [p.name for p in found.unclaimed] == ["ghost.summary.md"]
+    assert found.total == 3
+    assert (out / "ghost.summary.md").exists()           # the sweep never deletes it
+
+
+def test_needs_attention_syncs_when_no_report_exists(out, case_sensitive):
+    (out / "ghost_diar.json").write_text("{}", encoding="utf-8")
+    file_registry.reset_state()
+    assert [p.name for p in ts.needs_attention(out).unclaimed] == ["ghost_diar.json"]
+
+
+def test_delete_unowned_file_deletes_only_what_nothing_owns(out, case_sensitive, tmp_path):
+    _session(out, "s")
+    (out / "ghost.summary.md").write_text("x", encoding="utf-8")
+    outside = tmp_path / "elsewhere.summary.md"
+    outside.write_text("x", encoding="utf-8")
+    (out / "sub").mkdir()
+
+    assert ts.delete_unowned_file(out / "s.summary.md") is False      # registered
+    assert ts.delete_unowned_file(out / "s.md") is False              # the transcript itself
+    assert ts.delete_unowned_file(outside) is False                   # outside the root
+    assert ts.delete_unowned_file(out / "sub") is False               # not a file
+    assert ts.delete_unowned_file(out / "sub" / ".." / "s.summary.md") is False
+    assert ts.delete_unowned_file(out / "missing.summary.md") is False
+    assert ts.delete_unowned_file(out / "ghost.summary.md") is True
+    assert not (out / "ghost.summary.md").exists() and (out / "s.summary.md").exists()
+    assert outside.exists()
+
+
+def test_companion_stem_recognises_backups_and_audio():
+    assert ts._companion_stem("a b.md.bak") == "a b"
+    assert ts._companion_stem("a b.flac") == "a b"
+    assert ts._companion_stem("a b.FLAC") == "a b"
+    assert ts._companion_stem("a b.md") is None
+    assert ts._companion_stem("a b.wav") is None
 
 
 # ---------------------------------------------------------------------------
