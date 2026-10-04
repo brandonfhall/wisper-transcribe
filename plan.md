@@ -8,7 +8,7 @@ Active plans, open bugs, and parked designs. Shipped work is removed; its design
 
 ### Missing transcript file after a successful Transcribe job
 
-A local-recording transcription once reported COMPLETED ("Wrote `<id>.md`") but the file never existed; root cause unknown. **Detection is in place:** the job fails with "Transcript file missing after write" and logs the transcripts folder, and job history keeps that log across restarts. **Seen again on the Windows data (2026-10-04):** recording `4a4af921` links to a transcript whose `.md` was already missing at the 2026-10-03 import; its `combined.wav` is kept, so it can be re-transcribed. **Next step:** if it recurs, check `/jobs/history` for the job's log and output root; run with `WISPER_DEBUG=1` to capture more (`LIVE_AUDIO_TEST_PLAN.md` §4a). The recording hand-off no longer copies `combined.wav` into the output dir (it reads it in place), so the job's input is `recordings/<id>/combined.wav` and the output is named by `output_stem`.
+A local-recording transcription once reported COMPLETED ("Wrote `<id>.md`") but the file never existed; root cause unknown. **Detection is in place:** the job fails with "Transcript file missing after write" and logs the transcripts folder, and job history keeps that log across restarts. **Next step:** if it recurs, check `/jobs/history` for the job's log and output root; run with `WISPER_DEBUG=1` to capture more (`LIVE_AUDIO_TEST_PLAN.md` §4a). The recording hand-off no longer copies `combined.wav` into the output dir (it reads it in place), so the job's input is `recordings/<id>/combined.wav` and the output is named by `output_stem`.
 
 ### Docker Desktop + native CLI on one data dir can corrupt the DB
 
@@ -46,17 +46,9 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 
 ## Storage — open
 
-Storage trim shipped on `feat/storage-trim`: file registry (v9/v10), rename-following, Needs attention, FLAC-only upload audio, recording trim, `wisper storage trim`, playback, and Re-transcribe. Its design is in `architecture.md`.
-
-- **Windows PC: run `wisper storage trim --apply` on the real data.** The database is at v10 (upgraded by `start.bat` 2026-10-04, integrity ok). The rehearsal on a copy converted the four Hanataz `.mp4`s to FLAC (23/23 voices backfilled), trimmed recording `4a4af921`, freed 26.0 GB in about 2 minutes, and a re-run found nothing. It differed from the expected result in two places:
-  - `13e7f889-….wav` and `b7de8d0a-….wav` in the output root were kept: their IDs are not recordings in the database, so trim doesn't treat them as hand-off copies. Delete them by hand (6 MB).
-  - Failed recordings `a9d3aaa6` and `ab4bbd96` keep their segments (about 23 MB): they have no `combined.wav`. Recover or delete them from the Recordings page.
-- **Windows-only paths are tested only in CI:** `db.ServerLock`'s `msvcrt` lock, and the `PermissionError`/`_replace` retry when a file is open in Obsidian, Explorer, or a player. Watch the first real use.
-- **Already-compressed audio grows on conversion:** `wisper storage trim` turns an audio-only MP3/M4A/Opus into a 16 kHz mono FLAC, about 3× a 64 kbps MP3 (Brandon chose one uniform format). On the Mac data, `--apply` used 460 MB more.
 - **Store `combined.wav` as FLAC** (about half the size)? It touches the fixed `recordings/<id>/combined.wav` layout and every reader of it.
 - **Prune old `backups/` snapshots** (keep the newest N)? Small today; it grows with each migration.
 - **Minor:** with an unfrozen schema and `WISPER_OUTPUT_DIR` unset, a CLI command creates the configured output folder (empty) before the dev guard refuses (`path_utils.get_output_dir` mkdir). The server path creates nothing.
-- **Seen, unrelated:** speaker matching printed a `nan` similarity for a speaker with a very short excerpt (`SPEAKER_00 → Announcer (nan)`). `docs/docker.md`'s `docker compose run wisper nvidia-smi` runs `wisper nvidia-smi`; use `--entrypoint nvidia-smi`.
 
 ---
 
@@ -90,9 +82,9 @@ Storage trim shipped on `feat/storage-trim`: file registry (v9/v10), rename-foll
 - Display names may contain characters Windows forbids in folder names, and two display names may map to the same folder name. Sanitizing and uniqueness rules are needed.
 - Obsidian links Brandon typed by name keep working after a move. Links written with a path, or ambiguous names shared by two campaigns, may not.
 - The existing flat output root needs a one-time migration of files into campaign folders: a CLI command with a dry run, like `wisper storage trim`.
-**Database review input (2026-10-03, against v1–v8 plus storage trim's planned v9 `files` table).** Re-check each item at the gate.
+**Database review input (2026-10-03).** Re-check each item at the gate.
 - **Migration number:** v11 (storage trim adds v9, the `files` registry, and v10, which drops `audio_rel_path`).
-- **Foreign keys off during migrations:** storage trim Phase 1 adds `PRAGMA foreign_keys=OFF` to `migrate()`. Without it, rebuilding `transcripts` would cascade-delete its speakers, search data, campaign places, journal entries, and `files` rows, and the final `foreign_key_check` would still pass. The v8→v10 upgrade test must seed every child table and assert their row counts are unchanged.
+- **Rebuilding `transcripts`** relies on `migrate()` running with `foreign_keys=OFF`; otherwise it cascade-deletes speakers, search data, campaign places, journal entries, and `files` rows, and `foreign_key_check` still passes. The v11 upgrade test must seed every child table and assert their row counts are unchanged.
 - **Per-campaign uniqueness:** move `campaign_id` and `position` onto `transcripts` and drop `campaign_transcripts`.
   - `UNIQUE (campaign_id, stem)`, plus a partial unique index on `stem` for the root (`WHERE campaign_id IS NULL`).
   - `CHECK ((campaign_id IS NULL) = (position IS NULL))`, `UNIQUE (campaign_id, position)`, and `UNIQUE (campaign_id, id)` as the journal's FK target.
@@ -105,7 +97,6 @@ Storage trim shipped on `feat/storage-trim`: file registry (v9/v10), rename-foll
   - Recreate the `transcript_titles_*` triggers and run `INSERT INTO transcript_titles(transcript_titles) VALUES('rebuild')`.
   - All structural changes go in the DDL string, because `expected_schema()` replays only DDL.
 - **`transcripts.id` becomes `INTEGER PRIMARY KEY AUTOINCREMENT`,** so ids are never reused, and URLs key transcripts by id.
-- `transcripts.audio_rel_path` is already gone (v10).
 - **`legacy_root` (a flag for files not yet moved into their campaign folder)** is unnecessary only if every path lookup resolves through `files.rel_path` (the `transcript` row is the authoritative `.md` location; storage trim Phase 1). If any helper builds paths from campaign folder + stem instead, it comes back. Decide at the gate: one source of truth for locations.
 - **Code that ships with v11:**
   - every `campaign_transcripts` query (`campaign_manager`, `journal`, `search_index`, `transcript_store`, `job_history`);
@@ -164,7 +155,7 @@ Design in `architecture.md`. Open items:
 - **Change input devices mid-session.** `LocalCaptureManager.start_session()` binds both capture threads to fixed device IDs; switching today means Stop + Start (a new `Recording` and a gap in the transcript). Needs capture threads that can restart against a new device while the tick thread, segment writers, and `Recording` keep running. Needs a design pass first.
 - **Per-speaker diarization on the live system track.** The system track is a single RMS-attributed "Other", because OS loopback is already a mixed-down stream. pyannote only gives consistent labels across a whole-file pass; live use would need an incremental layer (embed each turn, match against a running per-session speaker pool) plus added latency in the live loop. Revisit if the You/Other split becomes limiting.
 - **Channel picker on the Record page.** `GET /api/record/channels` already lists the guilds and voice channels the bot can see; the Record page still takes raw IDs or a preset.
-- **Replay markers into the ticker on reload.** Markers persist (`recording_markers`) and show on the detail page, but a page reload doesn't re-insert them into the live ticker (only transcript lines come back through SSE). For finished sessions, the transcript-page player lists markers ("Storage trim" Phase 7); this item is the live ticker only.
+- **Replay markers into the ticker on reload.** Markers persist (`recording_markers`) and show on the detail page, but a page reload doesn't re-insert them into the live ticker (only transcript lines come back through SSE).
 
 ---
 

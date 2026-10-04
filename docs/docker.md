@@ -99,7 +99,7 @@ Use **either** Docker for everything (web UI and CLI both via `docker compose`) 
 ### Verify GPU Passthrough
 
 ```bash
-docker compose run wisper nvidia-smi
+docker compose run --rm --entrypoint nvidia-smi wisper
 ```
 
 ---

@@ -205,7 +205,7 @@ Diarization labels are scoped to one run, so cross-session identity comes only f
 
 ### Embedding extraction
 
-`extract_embedding()` slices the WAV to a speaker's segments and runs the WeSpeaker ResNet34 model bundled in the diarization repo (`DIARIZATION_MODEL`, subfolder `EMBEDDING_SUBFOLDER`; 256-dim). Each segment's embedding is L2-normalized before averaging and the mean is normalized again, so long segments don't dominate and stored vectors are unit length. Segments are chosen by `_select_embedding_segments()` with `max_count=EMBEDDING_SEGMENTS` (30):
+`extract_embedding()` slices the WAV to a speaker's segments and runs the WeSpeaker ResNet34 model bundled in the diarization repo (`DIARIZATION_MODEL`, subfolder `EMBEDDING_SUBFOLDER`; 256-dim). Each segment's embedding is L2-normalized before averaging and the mean is normalized again, so long segments don't dominate and stored vectors are unit length. A segment whose embedding isn't finite (a too-short excerpt can come back all NaN) is skipped; with none left, extraction raises and the label stays Unknown. `_cosine_similarity()` scores a non-finite vector 0.0, because NaN never falls below the match threshold. Segments are chosen by `_select_embedding_segments()` with `max_count=EMBEDDING_SEGMENTS` (30):
 
 1. Up to 30 **solo** segments (no overlap with another speaker) of 2–20 s, longest first.
 2. Else all solo segments, longest first.

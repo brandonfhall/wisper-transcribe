@@ -114,6 +114,13 @@ def test_cosine_similarity_zero_vector():
     assert _cosine_similarity(a, b) == 0.0
 
 
+def test_cosine_similarity_nan_vector_scores_zero():
+    from wisper_transcribe.speaker_manager import _cosine_similarity
+    a = np.full(3, np.nan)
+    b = np.array([1.0, 0.0, 0.0])
+    assert _cosine_similarity(a, b) == 0.0
+
+
 # ---------------------------------------------------------------------------
 # match_speakers
 # ---------------------------------------------------------------------------
@@ -1033,6 +1040,35 @@ def test_profile_schema_constraints(tmp_path):
         with pytest.raises(sqlite3.IntegrityError):
             with db.transaction(tmp_path) as conn:
                 conn.execute(sql)
+
+
+def test_extract_embedding_skips_nan_segments():
+    import wisper_transcribe.speaker_manager as sm
+
+    segs = [DiarizationSegment(start=i * 10.0, end=i * 10.0 + 5.0, speaker="SPEAKER_00") for i in range(2)]
+    inference = MagicMock()
+    inference.crop.side_effect = [np.array([np.nan, np.nan]), np.array([0.0, 3.0])]
+
+    with patch.object(sm, "_load_embedding_model", return_value=inference),          patch("wisper_transcribe.audio_utils.load_wav_as_tensor", return_value={}):
+        emb = sm.extract_embedding(Path("fake.wav"), segs, "SPEAKER_00")
+
+    np.testing.assert_array_almost_equal(emb, [0.0, 1.0])
+
+
+def test_extract_embedding_all_nan_raises_and_match_leaves_label_unknown(tmp_path):
+    import wisper_transcribe.speaker_manager as sm
+
+    _write_profile(tmp_path, "alice", np.array([1.0, 0.0]))
+    segs = _fake_diarization(["SPEAKER_00"])
+    inference = MagicMock()
+    inference.crop.return_value = np.array([np.nan, np.nan])
+
+    with patch.object(sm, "_load_embedding_model", return_value=inference),          patch("wisper_transcribe.audio_utils.load_wav_as_tensor", return_value={}):
+        with pytest.raises(ValueError, match="No usable voice embedding"):
+            sm.extract_embedding(Path("fake.wav"), segs, "SPEAKER_00")
+        result = sm.match_speakers(Path("fake.wav"), segs, data_dir=tmp_path, threshold=0.5)
+
+    assert result["SPEAKER_00"] != "Alice"
 
 
 def test_extract_embedding_normalizes_and_uses_many_segments():
