@@ -287,7 +287,7 @@ def test_unreadable_journal_frontmatter_imports_no_entries(data_dir):
 
 
 # ---------------------------------------------------------------------------
-# v4: _diar.json speaker data → transcript_speakers + audio_rel_path
+# v4: _diar.json speaker data → transcript_speakers + the audio file row
 # ---------------------------------------------------------------------------
 
 def _legacy_sidecar(out, stem, **fields):

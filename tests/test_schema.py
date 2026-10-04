@@ -50,6 +50,23 @@ def conn():
         INSERT INTO search_blocks (id, transcript_id, kind, block_idx, speaker, start_s)
           VALUES (1, 1, 'transcript', 0, 'Alice', 0.0);
         INSERT INTO search_fts (rowid, text) VALUES (1, 'the party meets strahd');
+        INSERT INTO files (kind, root, rel_path, label, transcript_id, size, mtime_ns) VALUES
+          ('transcript',   'output', 's1.md',                       NULL,          1, 10, 5),
+          ('summary',      'output', 's1.summary.md',               NULL,          1, 10, 5),
+          ('sidecar',      'output', 's1_diar.json',                NULL,          1, 10, 5),
+          ('excerpt',      'output', 's1_excerpt_SPEAKER_00.mp3',   'SPEAKER_00',  1, 10, 5),
+          ('excerpt_text', 'output', 's1_excerpt_SPEAKER_00.txt',   'SPEAKER_00',  1, 10, 5),
+          ('audio',        'output', 's1.flac',                     NULL,          1, NULL, NULL),
+          ('backup',       'output', 's1.md.bak',                   NULL,          1, 10, 5);
+        INSERT INTO files (kind, root, rel_path, label, recording_id, size, mtime_ns) VALUES
+          ('combined',   'data', 'recordings/{R}/combined.wav',        NULL,     '{R}', 10, 5),
+          ('per_user',   'data', 'recordings/{R}/per-user/mic',        'mic',    '{R}', NULL, NULL),
+          ('per_user',   'data', 'recordings/{R}/per-user/123456',     '123456', '{R}', NULL, NULL),
+          ('live_draft', 'data', 'recordings/{R}/live_transcript.md',  NULL,     '{R}', 10, 5);
+        INSERT INTO files (kind, root, rel_path, profile_id, size, mtime_ns)
+          VALUES ('reference_clip', 'data', 'profiles/embeddings/alice.mp3', 1, 10, 5);
+        INSERT INTO files (kind, root, rel_path, campaign_id, size, mtime_ns)
+          VALUES ('journal', 'data', 'campaigns/game/journal.md', 1, 10, 5);
     """)
     yield c
     c.close()
@@ -87,9 +104,6 @@ VIOLATIONS = {
     "stem empty": "INSERT INTO transcripts (stem, created_at) VALUES ('', 'now')",
     "stem slash": "INSERT INTO transcripts (stem, created_at) VALUES ('a/b', 'now')",
     "stem backslash": "INSERT INTO transcripts (stem, created_at) VALUES ('a\\b', 'now')",
-    "audio path absolute": "UPDATE transcripts SET audio_rel_path = '/etc/x.mp3' WHERE id = 1",
-    "audio path backslash": "UPDATE transcripts SET audio_rel_path = 'a\\x.mp3' WHERE id = 1",
-    "audio path dotdot": "UPDATE transcripts SET audio_rel_path = 'a/../../x.mp3' WHERE id = 1",
     # campaign_transcripts
     "one campaign per transcript": "INSERT INTO campaign_transcripts VALUES (1, 2, 0)",
     "position unique": "INSERT INTO campaign_transcripts VALUES (3, 1, 0)",
@@ -146,6 +160,78 @@ VIOLATIONS = {
     "search kind enum": "INSERT INTO search_index_state VALUES (2, 'journal', 1, 1)",
     "search size >= 0": "INSERT INTO search_index_state VALUES (2, 'transcript', 1, -1)",
     "block needs its state row": "INSERT INTO search_blocks (transcript_id, kind, block_idx) VALUES (2, 'transcript', 0)",
+    # files
+    "file with no owner": "INSERT INTO files (kind, root, rel_path) VALUES ('audio', 'output', 'x.flac')",
+    "file with two owners": "INSERT INTO files (kind, root, rel_path, transcript_id, campaign_id) "
+                            "VALUES ('audio', 'output', 'x.flac', 2, 1)",
+    "transcript kind with a recording owner": f"INSERT INTO files (kind, root, rel_path, recording_id) "
+                                              f"VALUES ('audio', 'output', 'x.flac', '{R}')",
+    "recording kind with a transcript owner": "INSERT INTO files (kind, root, rel_path, transcript_id) "
+                                              "VALUES ('combined', 'output', 'x.wav', 2)",
+    "profile kind with a campaign owner": "INSERT INTO files (kind, root, rel_path, campaign_id) "
+                                          "VALUES ('reference_clip', 'data', 'profiles/embeddings/x.mp3', 2)",
+    "journal kind with a profile owner": "INSERT INTO files (kind, root, rel_path, profile_id) "
+                                         "VALUES ('journal', 'data', 'campaigns/x/journal.md', 2)",
+    "transcript-owned file under the data root": "INSERT INTO files (kind, root, rel_path, transcript_id) "
+                                                 "VALUES ('audio', 'data', 'x.flac', 2)",
+    "campaign-owned file under the output root": "INSERT INTO files (kind, root, rel_path, campaign_id) "
+                                                 "VALUES ('journal', 'output', 'campaigns/x/journal.md', 2)",
+    "file kind enum": "INSERT INTO files (kind, root, rel_path, transcript_id) VALUES ('video', 'output', 'x.mp4', 2)",
+    "file root enum": "INSERT INTO files (kind, root, rel_path, transcript_id) VALUES ('audio', 'cache', 'x.flac', 2)",
+    "excerpt without label": "INSERT INTO files (kind, root, rel_path, transcript_id) "
+                             "VALUES ('excerpt', 'output', 's2_excerpt_A.mp3', 2)",
+    "summary with a label": "INSERT INTO files (kind, root, rel_path, label, transcript_id) "
+                            "VALUES ('summary', 'output', 's2.summary.md', 'A', 2)",
+    "file label empty": "INSERT INTO files (kind, root, rel_path, label, transcript_id) "
+                        "VALUES ('excerpt', 'output', 's2_excerpt_.mp3', '', 2)",
+    "file label with separator": "INSERT INTO files (kind, root, rel_path, label, transcript_id) "
+                                 "VALUES ('excerpt', 'output', 's2_excerpt_a_b.mp3', 'a/b', 2)",
+    "per_user label not a track name": f"INSERT INTO files (kind, root, rel_path, label, recording_id) "
+                                       f"VALUES ('per_user', 'data', 'recordings/{R}/per-user/abc', 'abc', '{R}')",
+    "file path unique per root": "INSERT INTO files (kind, root, rel_path, transcript_id) "
+                                 "VALUES ('audio', 'output', 's1.flac', 2)",
+    "second audio for a transcript": "INSERT INTO files (kind, root, rel_path, transcript_id) "
+                                     "VALUES ('audio', 'output', 's1b.flac', 1)",
+    "second summary for a transcript": "INSERT INTO files (kind, root, rel_path, transcript_id) "
+                                       "VALUES ('summary', 'output', 's1b.summary.md', 1)",
+    "second sidecar for a transcript": "INSERT INTO files (kind, root, rel_path, transcript_id) "
+                                       "VALUES ('sidecar', 'output', 's1b_diar.json', 1)",
+    "duplicate excerpt label": "INSERT INTO files (kind, root, rel_path, label, transcript_id) "
+                               "VALUES ('excerpt', 'output', 's1_excerpt_SPEAKER_00b.mp3', 'SPEAKER_00', 1)",
+    "second combined for a recording": f"INSERT INTO files (kind, root, rel_path, recording_id) "
+                                       f"VALUES ('combined', 'data', 'recordings/{R}/combined.wav', '{R}')",
+    "second clip for a profile": "INSERT INTO files (kind, root, rel_path, profile_id) "
+                                 "VALUES ('reference_clip', 'data', 'profiles/embeddings/x.mp3', 1)",
+    "second journal for a campaign": "INSERT INTO files (kind, root, rel_path, campaign_id) "
+                                     "VALUES ('journal', 'data', 'campaigns/other/journal.md', 1)",
+    "file path absolute": "INSERT INTO files (kind, root, rel_path, transcript_id) VALUES ('audio', 'output', '/x.flac', 2)",
+    "file path dotdot": "INSERT INTO files (kind, root, rel_path, transcript_id) "
+                        "VALUES ('audio', 'output', 'a/../x.flac', 2)",
+    "file path backslash": "INSERT INTO files (kind, root, rel_path, transcript_id) "
+                           "VALUES ('audio', 'output', 'a\\x.flac', 2)",
+    "file path drive prefix": "INSERT INTO files (kind, root, rel_path, transcript_id) "
+                              "VALUES ('audio', 'output', 'C:x.flac', 2)",
+    "file path trailing slash": "INSERT INTO files (kind, root, rel_path, transcript_id) "
+                                "VALUES ('audio', 'output', 'dir/', 2)",
+    "file path empty": "INSERT INTO files (kind, root, rel_path, transcript_id) VALUES ('audio', 'output', '', 2)",
+    "combined path mismatch": f"INSERT INTO files (kind, root, rel_path, recording_id) "
+                              f"VALUES ('combined', 'data', 'recordings/{L}/combined.wav', '{R}')",
+    "per_user path mismatch": f"INSERT INTO files (kind, root, rel_path, label, recording_id) "
+                              f"VALUES ('per_user', 'data', 'recordings/{R}/per-user/system', 'mic', '{R}')",
+    "live_draft path mismatch": f"INSERT INTO files (kind, root, rel_path, recording_id) "
+                                f"VALUES ('live_draft', 'data', 'recordings/{L}/live_transcript.md', '{R}')",
+    "audio path ending .md": "INSERT INTO files (kind, root, rel_path, transcript_id) VALUES ('audio', 'output', 'x.md', 2)",
+    "backup not ending .md.bak": "INSERT INTO files (kind, root, rel_path, transcript_id) "
+                                 "VALUES ('backup', 'output', 'x.md', 2)",
+    "transcript path not .md": "INSERT INTO files (kind, root, rel_path, transcript_id) "
+                               "VALUES ('transcript', 'output', 's2.txt', 2)",
+    "transcript path is a summary": "INSERT INTO files (kind, root, rel_path, transcript_id) "
+                                    "VALUES ('transcript', 'output', 's2.summary.md', 2)",
+    "file size without mtime": "INSERT INTO files (kind, root, rel_path, transcript_id, size) "
+                               "VALUES ('audio', 'output', 'x.flac', 2, 5)",
+    "file size negative": "INSERT INTO files (kind, root, rel_path, transcript_id, size, mtime_ns) "
+                          "VALUES ('audio', 'output', 'x.flac', 2, -1, 5)",
+    "per_user directory has no size": f"UPDATE files SET size = 1, mtime_ns = 1 WHERE kind = 'per_user' AND recording_id = '{R}'",
 }
 
 
@@ -230,8 +316,29 @@ def test_recording_delete_cascades_to_every_child(conn):
                   "recording_markers", "recording_rejoins"):
         assert _one(conn, f"SELECT count(*) FROM {table}") == 0, table
     assert _one(conn, f"SELECT recording_id FROM jobs WHERE id = '{J}'") is None
+    assert _one(conn, "SELECT count(*) FROM files WHERE recording_id IS NOT NULL") == 0
     conn.execute(f"DELETE FROM recordings WHERE id = '{L}'")
     assert _one(conn, "SELECT count(*) FROM recording_devices") == 0
+
+
+def _file_count(conn, column, value):
+    return _one(conn, f"SELECT count(*) FROM files WHERE {column} = ?", value)
+
+
+def test_file_rows_cascade_with_their_owner(conn):
+    for column, value, table in (("transcript_id", 1, "transcripts"),
+                                 ("recording_id", R, "recordings"),
+                                 ("profile_id", 1, "profiles"),
+                                 ("campaign_id", 1, "campaigns")):
+        assert _file_count(conn, column, value) > 0, column
+        conn.execute(f"DELETE FROM {table} WHERE id = ?", (value,))
+        assert _file_count(conn, column, value) == 0, column
+
+
+def test_profile_key_rename_rewrites_its_clip_row(conn):
+    conn.execute("UPDATE profiles SET key = 'alicia' WHERE id = 1")
+    assert _one(conn, "SELECT rel_path FROM files WHERE profile_id = 1") == "profiles/embeddings/alicia.mp3"
+    assert _one(conn, "SELECT count(*) FROM files WHERE profile_id = 2") == 0
 
 
 def test_every_fk_child_column_is_indexed(conn):

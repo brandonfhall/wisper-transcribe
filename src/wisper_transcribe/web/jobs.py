@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 import subprocess
 import sys as _sys
 import threading
@@ -25,6 +26,7 @@ from typing import Any, Callable, Optional
 
 import tqdm as _tqdm_module
 
+from wisper_transcribe import file_registry
 from wisper_transcribe.pipeline import process_file
 from wisper_transcribe.transcript_store import atomic_write_text, save_summary, save_transcript
 
@@ -304,6 +306,7 @@ def _extract_speaker_excerpts(job: "Job", output_path: "Path",  # type: ignore[n
     out_dir = _Path(output_path).parent
     stem = _Path(output_path).stem
     input_path = _Path(job.input_path)
+    safe_names: list[str] = []
 
     for label in labels:
         turn = None
@@ -339,6 +342,7 @@ def _extract_speaker_excerpts(job: "Job", output_path: "Path",  # type: ignore[n
             duration = _EXCERPT_SECONDS
 
         safe_name = re.sub(r"[^\w\-]", "_", label)
+        safe_names.append(safe_name)
         clip_path = out_dir / f"{stem}_excerpt_{safe_name}.mp3"
         try:
             subprocess.run(
@@ -365,6 +369,20 @@ def _extract_speaker_excerpts(job: "Job", output_path: "Path",  # type: ignore[n
             atomic_write_text(text_path, text)
         except Exception:
             pass
+
+    # Two labels that sanitise to one name wrote one file; the second add updates its row.
+    from wisper_transcribe import db
+    try:
+        with db.transaction() as conn:
+            owner = file_registry.Owner.for_stem(stem, conn=conn, output_dir=out_dir)
+            for name in safe_names:
+                for kind, suffix in (("excerpt", ".mp3"), ("excerpt_text", ".txt")):
+                    path = out_dir / f"{stem}_excerpt_{name}{suffix}"
+                    if path.is_file():
+                        file_registry.add_if_owned(path, kind=kind, owner=owner, label=name,
+                                                   conn=conn, output_dir=out_dir)
+    except Exception:
+        log.warning("Could not register speaker excerpts for %s", stem, exc_info=True)
 
 
 @dataclass
@@ -1517,6 +1535,13 @@ class JobQueue:
             job.status = COMPLETED  # ended, not "failed" -- see docstring
         finally:
             job.finished_at = datetime.now()
+            if job.live_output_path and Path(job.live_output_path).is_file():
+                try:
+                    file_registry.add_if_owned(
+                        Path(job.live_output_path), kind="live_draft",
+                        owner=file_registry.Owner.for_recording(job.live_recording_id))
+                except sqlite3.Error:
+                    log.warning("Could not register the live draft", exc_info=True)
 
     def _do_llm_work(
         self,
@@ -1566,6 +1591,8 @@ class JobQueue:
             if edits and refined_md != md:
                 backup = transcript_path.with_suffix(transcript_path.suffix + ".bak")
                 atomic_write_text(backup, md)
+                file_registry.add_if_owned(
+                    backup, kind="backup", owner=file_registry.Owner.for_stem(transcript_path.stem))
                 save_transcript(transcript_path, refined_md)
                 job.append_log(
                     f"Applied {len(edits)} edit(s). Backup: {backup.name}"

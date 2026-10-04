@@ -141,26 +141,36 @@ def get_data_dir() -> Path:
     return Path(platformdirs.user_data_dir(APP_NAME))
 
 
+def resolve_output_root(cfg: dict, data_dir: Path, env: Optional[str]) -> Path:
+    """The transcript output root for a given config, data dir, and env value.
+
+    ``env`` (``WISPER_OUTPUT_DIR``), then ``cfg["output_dir"]``, then
+    ``<data_dir>/output``. The working directory is never consulted: the
+    database records which transcripts exist, so the root must not change
+    with where wisper was launched. A relative setting is relative to the
+    data dir; ``env`` is used as given, never joined to it.
+    """
+    if env:
+        return Path(env).expanduser()
+    configured = str(cfg.get("output_dir") or "").strip()
+    if configured:
+        path = Path(configured).expanduser()
+        return path if path.is_absolute() else data_dir / path
+    return data_dir / "output"
+
+
 def get_output_root(config: Optional[dict] = None) -> Path:
     """Resolve the transcript output root without creating it.
 
-    ``WISPER_OUTPUT_DIR``, then the ``output_dir`` setting, then
-    ``<data dir>/output``. The working directory is never consulted: the
-    database records which transcripts exist, so the root must not change
-    with where wisper was launched. A relative setting is relative to the
-    data dir.
+    ``WISPER_OUTPUT_DIR`` wins without reading ``config.toml``.
     """
     import os
-    override = os.environ.get("WISPER_OUTPUT_DIR")
-    if override:
-        return Path(override).expanduser()
-    if config is None:
-        config = load_config()
-    configured = str(config.get("output_dir") or "").strip()
-    if configured:
-        path = Path(configured).expanduser()
-        return path if path.is_absolute() else get_data_dir() / path
-    return get_data_dir() / "output"
+    env = os.environ.get("WISPER_OUTPUT_DIR")
+    if env:
+        return resolve_output_root({}, get_data_dir(), env)
+    return resolve_output_root(
+        config if config is not None else load_config(), get_data_dir(), None
+    )
 
 
 def get_config_path() -> Path:

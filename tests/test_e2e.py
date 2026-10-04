@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from wisper_transcribe import db, search_index
+from wisper_transcribe import db, file_registry, search_index
 from wisper_transcribe.models import DiarizationSegment, TranscriptionSegment
 from wisper_transcribe.path_utils import get_output_dir
 
@@ -119,8 +119,9 @@ def test_full_session_lifecycle(client, ml):
     _wait(client, _upload(client, "Session 1", "curse-of-strahd"))
     md = out / "Session 1.md"
     assert md.is_file() and "Castle Ravenloft" in md.read_text(encoding="utf-8")
-    tid, audio_rel = _row("SELECT id, audio_rel_path FROM transcripts WHERE stem = 'Session 1'")
-    assert audio_rel and (out / audio_rel).is_file()  # durable audio copy next to it
+    tid = _row("SELECT id FROM transcripts WHERE stem = 'Session 1'")[0]
+    audio = file_registry.file_for(file_registry.Owner("transcript", tid), "audio")
+    assert audio is not None and audio.path.parent == out and audio.path.is_file()  # durable copy next to it
     assert _count("SELECT count(*) FROM campaign_transcripts ct JOIN campaigns c ON c.id = ct.campaign_id "
                   "WHERE ct.transcript_id = ? AND c.slug = 'curse-of-strahd'", tid) == 1
     assert _count("SELECT count(*) FROM transcript_speakers WHERE transcript_id = ?", tid) == 2
@@ -156,7 +157,7 @@ def test_full_session_lifecycle(client, ml):
     # Delete: file, row, links, index, companions; the journal goes stale.
     assert client.post("/transcripts/Session%201/delete", follow_redirects=False).status_code == 303
     assert not md.exists() and not (out / "Session 1.summary.md").exists()
-    assert not (out / "Session 1_diar.json").exists() and not (out / audio_rel).exists()
+    assert not (out / "Session 1_diar.json").exists() and not audio.path.exists()
     for table in ("transcripts", "campaign_transcripts", "journal_entries", "transcript_speakers",
                   "search_index_state", "search_blocks"):
         col = "id" if table == "transcripts" else "transcript_id"

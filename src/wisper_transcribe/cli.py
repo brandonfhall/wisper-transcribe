@@ -36,6 +36,7 @@ _ensure_utf8_stdio()
 
 from . import __version__
 from . import config as _config
+from . import file_registry
 from .transcript_store import atomic_write_text, save_summary, save_transcript
 
 
@@ -1507,6 +1508,8 @@ def refine(transcript: Path, tasks_raw: str, provider: Optional[str],
 
     backup = transcript.with_suffix(transcript.suffix + ".bak")
     atomic_write_text(backup, original)
+    file_registry.add_if_owned(
+        backup, kind="backup", owner=file_registry.Owner.for_stem(transcript.stem))
     save_transcript(transcript, refined_md)
     click.echo(f"\nWrote {transcript}. Backup at {backup}.")
 
@@ -1600,6 +1603,8 @@ def summarize(transcript: Path, provider: Optional[str], model: Optional[str],
         if applied_edits and refined_md != current_md:
             backup = transcript.with_suffix(transcript.suffix + ".bak")
             atomic_write_text(backup, current_md)
+            file_registry.add_if_owned(
+                backup, kind="backup", owner=file_registry.Owner.for_stem(transcript.stem))
             save_transcript(transcript, refined_md)
             click.echo(f"Refine applied {len(applied_edits)} edit(s). "
                        f"Backup: {backup}")

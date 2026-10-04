@@ -1,7 +1,7 @@
 """One-time import of the pre-SQLite JSON stores into ``wisper.db``.
 
 Each function runs inside its migration's ``BEGIN IMMEDIATE`` transaction
-(see ``db.migrate``), with foreign keys deferred. Existing installs contain
+(see ``db.migrate``), with foreign keys off. Existing installs contain
 exactly what the new constraints forbid, so dirty data is repaired or skipped
 and always reported (``ctx.note``) instead of aborting. Only an unreadable
 top-level store aborts, because importing an empty store would lose data.

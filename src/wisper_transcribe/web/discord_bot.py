@@ -29,6 +29,7 @@ from wisper_transcribe.recording_manager import (
     create_recording,
     load_recordings,
     record_completed_wav_segment,
+    register_capture_files,
     update_recording_status,
 )
 from wisper_transcribe.web.audio_writer import (
@@ -535,6 +536,8 @@ class BotManager:
             if merged is not None:
                 recording.combined_path = merged
                 log.info("Recording %s combined track written to %s", recording.id, merged)
+
+        await asyncio.to_thread(register_capture_files, recording.id, self._data_dir)
 
         became_completed = recording.status == "recording"
         if became_completed:

@@ -55,6 +55,31 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 - **Renames:** a transcript renamed outside wisper is matched automatically where possible, its companion files follow its name, and anything left unclear is listed for Brandon to resolve. Nothing is deleted silently.
 - **Campaign subfolders** in the output root are a separate plan ("Campaign folders"), built after this one on its rename helper.
 
+### Status
+
+| Phase | State | Commit |
+|---|---|---|
+| 1 — File registry | done | (this commit) |
+| 2 — Renames / Needs attention / campaign delete | not started | |
+| 3 — Enroll from stored embeddings | not started | |
+| 4 — Extract audio, keep FLAC | not started | |
+| 5 — Trim recordings | not started | |
+| 6 — `wisper storage trim` | not started | |
+| 7 — Playback | not started | |
+| 8 — Re-transcribe | not started | |
+| 9 — Final review | not started | |
+
+Run on the Mac (2026-10-03). Rehearsals use a scratch copy of the Mac's own data, not the Windows data. Brandon waived the between-phase review pause for this run. Each phase is still committed and pushed separately.
+
+**Resume here: Phase 2.** Stopped after Phase 1 for usage limits. Phase 1 notes for later phases:
+- **Rehearsal (Mac data, v8 → v10):** clean. `files` counts matched the disk: 4 transcripts, 1 summary, 4 sidecars, 30 excerpt pairs, 4 audio, 6 clips, plus the recording's `combined`, 2 `per_user` and `live_draft`. Pages rendered, and the guard refused the server with `output_dir` outside the copy. Docker rehearsal not done.
+- **API beyond the plan:** `file_registry.forget_id`, `drop_from_report` (for Needs attention's Forget/Delete), `sync_if_due`, `reset_state`, and `recording_manager.register_capture_files` (used by both finalisers).
+- **Deviations accepted:**
+  - `move()` treats a case-only target as the same file only via `os.path.samefile`.
+  - `save_summary`, `save_transcript`, and `.md.bak` registration resolve against the configured output root, not the `.md`'s folder, so a CLI `--output` file is never registered.
+  - No test for "a profile key failing the `files.rel_path` CHECK aborts the rename": no key passing `validate_path_component` can fail it.
+- **Minor, open:** with `WISPER_OUTPUT_DIR` unset, a CLI command creates the configured output folder (`path_utils.get_output_dir` mkdir) before the guard refuses. It's empty and harmless; the server path creates nothing.
+
 ### How to run this plan
 
 - **Roles:** Opus is the orchestrator; Sonnet workers each implement one phase.

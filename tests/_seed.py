@@ -172,3 +172,12 @@ def seed_sidecar(md_path: Path, diar: dict, data_dir: Optional[Path] = None) -> 
     An ``input_path`` outside the transcript's folder is not tracked."""
     from wisper_transcribe.transcript_store import write_sidecar
     write_sidecar(Path(md_path), diar, data_dir)
+
+
+def seed_file(path: Path, kind: str, owner, label: Optional[str] = None, *,
+              data_dir: Optional[Path] = None, output_dir: Optional[Path] = None) -> None:
+    """A ``files`` row for ``path`` (which needn't exist yet)."""
+    from wisper_transcribe import file_registry
+
+    file_registry.add(Path(path), kind=kind, owner=owner, label=label,
+                      data_dir=data_dir, output_dir=output_dir)

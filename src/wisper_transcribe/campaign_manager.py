@@ -197,7 +197,9 @@ def create_campaign(display_name: str, data_dir: Optional[Path] = None) -> Campa
 def delete_campaign(slug: str, data_dir: Optional[Path] = None) -> None:
     """Delete a campaign and its roster and order. Raises KeyError if not found.
 
-    Profiles and transcripts are untouched.
+    Profiles, transcripts, and the journal file are untouched. The journal's
+    ``files`` row goes with the campaign, so ``file_registry.sync`` lists the
+    file as unclaimed.
     """
     with db.transaction(data_dir) as conn:
         if conn.execute("DELETE FROM campaigns WHERE slug = ?", (slug,)).rowcount == 0:

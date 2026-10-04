@@ -34,7 +34,7 @@ from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from . import db
+from . import db, file_registry
 from .config import get_data_dir
 from .models import Marker, Recording, RejoinAttempt, SegmentRecord
 from .path_utils import validate_path_component
@@ -516,6 +516,31 @@ def append_rejoin(recording_id: str, attempt: RejoinAttempt, data_dir: Optional[
         _insert_rejoin(conn, recording_id, attempt)
 
 
+def register_capture_files(recording_id: str, data_dir: Optional[Path] = None) -> None:
+    """Register the files a finished capture left: ``combined.wav``, each
+    ``per-user/<track>/`` directory, and the live draft. Best-effort, and a
+    file that doesn't exist is skipped.
+    """
+    try:
+        with db.transaction(data_dir) as conn:
+            owner = file_registry.Owner.for_recording(recording_id, conn=conn)
+            if owner is None:
+                return
+            rec_dir = get_recording_dir(recording_id, data_dir)
+            for kind, path in (("combined", combined_path_for(recording_id, data_dir)),
+                               ("live_draft", rec_dir / "live_transcript.md")):
+                if path.is_file():
+                    file_registry.add_if_owned(path, kind=kind, owner=owner, conn=conn,
+                                               data_dir=data_dir)
+            tracks = rec_dir / "per-user"
+            for track in sorted(tracks.iterdir()) if tracks.is_dir() else []:
+                if track.is_dir():
+                    file_registry.add_if_owned(track, kind="per_user", owner=owner,
+                                               label=track.name, conn=conn, data_dir=data_dir)
+    except (sqlite3.Error, OSError):
+        log.warning("Could not register the files of recording %s", recording_id, exc_info=True)
+
+
 def recover_recording(recording_id: str, data_dir: Optional[Path] = None) -> Recording:
     """Rebuild ``combined.wav`` for a session that crashed, from its segments.
 
@@ -547,6 +572,9 @@ def recover_recording(recording_id: str, data_dir: Optional[Path] = None) -> Rec
             "ended_at = coalesce(ended_at, ?) WHERE id = ? AND capture_status = 'failed'",
             (_ts(datetime.now(timezone.utc)), _ts(datetime.now(timezone.utc)), recording_id),
         )
+    file_registry.add_if_owned(
+        combined, kind="combined", owner=file_registry.Owner.for_recording(recording_id),
+        data_dir=data_dir)
     log.info("Recovered recording %s from its segments", recording_id)
     return load_recording(recording_id, data_dir)
 

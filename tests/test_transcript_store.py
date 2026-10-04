@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from wisper_transcribe import db, transcript_store as ts
+from wisper_transcribe import db, file_registry, transcript_store as ts
 from wisper_transcribe.campaign_manager import (
     create_campaign,
     get_transcripts_for_campaign,
@@ -308,7 +308,7 @@ def test_only_transcript_store_deletes_transcripts():
     offenders = [
         f"{rel}:{no}: {line.strip()}"
         for rel, no, line in _src_lines()
-        if rel != "transcript_store.py" and suspicious.search(line)
+        if rel not in ("transcript_store.py", "file_registry.py") and suspicious.search(line)
     ]
     assert offenders == [], "use transcript_store.delete_transcript():\n" + "\n".join(offenders)
 
@@ -489,7 +489,8 @@ def test_sidecar_round_trip(out):
     np.testing.assert_allclose(diar["speaker_embeddings"]["SPEAKER_00"], [0.6, 0.8], rtol=1e-6)
     assert os.path.realpath(diar["input_path"]) == os.path.realpath(audio)
     with db.connection() as conn:
-        assert conn.execute("SELECT audio_rel_path FROM transcripts").fetchone()[0] == "s01_1.wav"
+        owner = file_registry.Owner.for_stem("s01", conn=conn)
+        assert file_registry.file_for(owner, "audio", conn=conn).rel_path == "s01_1.wav"
 
 
 def test_missing_provenance_is_derived_like_is_relabelable(out):
