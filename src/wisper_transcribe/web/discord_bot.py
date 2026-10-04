@@ -30,6 +30,7 @@ from wisper_transcribe.recording_manager import (
     load_recordings,
     record_completed_wav_segment,
     register_capture_files,
+    trim_recording_audio,
     update_recording_status,
 )
 from wisper_transcribe.web.audio_writer import (
@@ -538,6 +539,10 @@ class BotManager:
                 log.info("Recording %s combined track written to %s", recording.id, merged)
 
         await asyncio.to_thread(register_capture_files, recording.id, self._data_dir)
+        try:
+            await asyncio.to_thread(trim_recording_audio, recording.id, self._data_dir)
+        except Exception:
+            log.warning("Could not trim recording %s", recording.id, exc_info=True)
 
         became_completed = recording.status == "recording"
         if became_completed:

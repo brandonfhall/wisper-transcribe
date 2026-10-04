@@ -971,12 +971,15 @@ def test_deleting_a_campaign_keeps_the_journal_file_unclaimed(out, data):
     assert result.path in fr.sync(out, data).unclaimed
 
 
-def test_local_finalise_registers_combined_per_user_and_the_live_draft(data):
+def test_local_finalise_registers_combined_per_user_and_the_live_draft(data, monkeypatch):
     from tests.test_local_capture import (
         _block, _run_session_to_completion, instant_ticker, scripted_capture_factory,
     )
     from wisper_transcribe.web.local_capture import LocalCaptureManager
 
+    # Trim would delete the per-user tracks this test expects to find registered.
+    monkeypatch.setattr("wisper_transcribe.web.local_capture.trim_recording_audio",
+                        lambda *a, **k: 0)
     blocks = {"mic-dev": [_block() for _ in range(3)], "sys-dev": [_block() for _ in range(3)]}
     mgr = LocalCaptureManager(data_dir=data, capture_factory=scripted_capture_factory(blocks),
                               ticker=instant_ticker(3))

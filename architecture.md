@@ -444,9 +444,9 @@ All user data lives in the OS user data dir unless `WISPER_DATA_DIR` is set. `co
 │   └── <slug>/journal.md            rolling campaign journal
 ├── recordings/
 │   └── <recording_id>/                recording rows are in wisper.db; paths below are fixed
-│       ├── per-user/<track>/NNNN.wav  60 s segments per Discord user id, or `mic` / `system`
-│       ├── combined/NNNN.wav        60 s segments of the mixed track
-│       ├── combined.wav             concatenated at session end
+│       ├── per-user/<track>/NNNN.wav  60 s segments per Discord user id, or `mic` / `system`; kept only until `combined.wav` is verified (see Recording layer)
+│       ├── combined/NNNN.wav        60 s segments of the mixed track; kept only until `combined.wav` is verified
+│       ├── combined.wav             concatenated at session end; the recording's only lasting audio
 │       └── live_transcript.md       live draft (local sessions)
 └── output/                          transcripts (default output root; see below)
 ```
@@ -522,6 +522,12 @@ Two managers write the same on-disk layout: `BotManager` (Discord, via a Java si
 - **Derived, not stored:** `combined_path` (`recordings/<id>/combined.wav` if it exists), `per_user_dir`, segment paths (`combined/NNNN.wav`; only the mixed stream is tracked), marker `elapsed_s` (`marked_at − started_at`), `unbound_speakers` (speakers with no profile), `recoverable`, and **status**: `transcribed` = has a transcript (`transcript_id`, `ON DELETE SET NULL`, so deleting the transcript makes the recording transcribable again), `transcribing` = the job queue has a pending or running job for it (`set_job_lookup()`, registered by `JobQueue`; `Job.recording_id`), else the stored capture state. A restart has no active job, so nothing can be stuck in `transcribing`, and a failed or cancelled job needs no status revert. `save_recording()` raises `ValueError` for a `combined_path` or segment path off the layout, and ignores `transcribing`/`transcribed` (the stored capture state stays).
 - **No lost updates:** the managers hold one long-lived `Recording` per session, whose name and notes can go stale while the user edits them. So capture code never writes the whole object: it uses targeted writers, `update_recording_status()`, `bind_recording_speaker()` (a binding is never undone), `append_rejoin()`, `append_segment()`, and `append_marker()`. `test_capture_code_uses_targeted_writers` keeps `save_recording()` out of `discord_bot.py`, `local_capture.py`, and `jobs.py`. `save_recording()` is for creating a recording and for edits made from a freshly loaded object. It updates the recording's own fields and only *inserts* missing segment/marker/rejoin rows (a segment's `finalized` can only go up).
 - **Capture hot path:** `record_completed_wav_segment()` runs whenever the combined writer rotates and once at finalise, with a 500 ms busy timeout instead of 5 s. Zero-frame or unreadable segments are skipped; `duration_s` is wall-clock-derived. It never raises: if the database stays busy the row is skipped and logged, and startup restores it. `bind_recording_speaker()` and `append_rejoin()` use the same short timeout. `append_marker()` doesn't: it runs from a web request, and a dropped marker can't be restored, so it waits the normal 5 s.
+- **Trim:** `trim_recording_audio()` deletes `combined/` and the per-user tracks nothing still needs, because `combined.wav` holds the same audio.
+  - It changes nothing unless `combined.wav` opens as a WAV with frames and, while `combined/` exists, its frame count equals the summed frames of the readable non-empty segments (what `concat_wav_segments()` joined) and no fewer segments are readable than there are segment rows. `duration_s` is wall-clock time, so it is not used.
+  - Once `combined/` is gone an earlier trim has verified the file, so only the first check applies. That is what lets a Discord user bound later have their track deleted.
+  - A local session loses all of `per-user/`. A Discord session loses `per-user/<uid>/` for each uid bound to a profile; an unbound uid's track stays because enrollment reads it.
+  - Each directory is renamed to `.wisper-trash-<n>`, its `per_user` rows are forgotten in one short transaction, then the trash is removed. This keeps the write lock short (capture uses a 500 ms busy timeout). `app._cleanup_recording_trash()` removes trash a crash left.
+  - It runs after local and Discord finalise, after `recover_recording()`, and after a recording enroll job binds a speaker. Never at capture-time binding, which runs mid-session. Segment rows stay as metadata. The enroll route redirects with `error=no_audio` when the uid's track is gone.
 - **Crash recovery:** `reconcile_on_startup()` marks `recording`/`degraded` sessions `failed` (audio stays on disk) and restores segment rows missing for `combined/NNNN.wav` files. A failed session with segments and no `combined.wav` is `recoverable`: **Recover recording** on its page (or `wisper record recover <id>`, via `POST /api/recordings/{id}/recover`) joins the segments with `concat_wav_segments()` off the request thread (segments are self-contained WAVs, so no repair step) and marks it `completed` with `recovered_at`; the page then notes the last partial minute may be missing.
 - **Import** (v5): `recordings.json` + each `metadata.json`, backed up and deleted after commit. `transcribing`/`transcribed` import as `completed`, active states as `failed`; `transcript_path` links by stem only under the output root (first recording keeps a shared one); an unknown campaign, a missing profile, Discord speakers on a local session, non-numeric ids, and off-layout segments are repaired or dropped and reported.
 - **Ids:** `_validate_recording_id()` uses the four-step CodeQL pattern.
@@ -538,7 +544,7 @@ Two managers write the same on-disk layout: `BotManager` (Discord, via a Java si
 1. Each segment is a self-contained WAV whose header sizes match its data.
 2. Segment rows are append-only (`append_segment()`), one short transaction each.
 3. Segments are ≤60 s.
-4. Layout is `recordings/<id>/per-user/<track>/NNNN.wav`.
+4. Layout is `recordings/<id>/per-user/<track>/NNNN.wav` while a session runs and until it is trimmed.
 5. `Recording.status` has a distinct `recording` state; live consumers watch only `recording`/`degraded`.
 
 ### Discord (`web/discord_bot.py`)

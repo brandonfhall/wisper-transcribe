@@ -1491,6 +1491,14 @@ class JobQueue:
                 "Failed to update recording state after enrollment", exc_info=True
             )
 
+        try:
+            from wisper_transcribe.recording_manager import trim_recording_audio
+
+            trim_recording_audio(p["recording_id"], data_dir)
+        except Exception:
+            log.warning("Could not trim recording %s after enrollment", p["recording_id"],
+                        exc_info=True)
+
         job.append_log("Speaker enrolled.")
         job.status = COMPLETED
         job.finished_at = datetime.now()

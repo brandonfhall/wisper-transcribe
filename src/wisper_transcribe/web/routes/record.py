@@ -926,6 +926,10 @@ async def recording_enroll_html(
         )
 
     per_user_dir = data_dir / "recordings" / recording.id / "per-user" / safe_uid
+    if not per_user_dir.is_dir():
+        return RedirectResponse(
+            url=f"/recordings/{recording.id}?error=no_audio", status_code=303
+        )
 
     # Enrollment runs as a JOB_ENROLL job; redirect via the server-generated
     # job.id.

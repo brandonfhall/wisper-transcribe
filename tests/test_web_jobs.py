@@ -1567,6 +1567,61 @@ def test_recording_enroll_job_updates_recording_state(tmp_path):
     assert members["bob"].discord_user_id == "999999999999999999"
 
 
+def _run_recording_enroll_with_trim(tmp_path, trim):
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+    from wisper_transcribe.web.jobs import JobQueue
+
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    rec.unbound_speakers = ["999999999999999999"]
+    rec.discord_speakers["999999999999999999"] = ""
+    save_recording(rec, tmp_path)
+    job = _make_recording_enroll_job(rec.id)
+    order = []
+    import wisper_transcribe.recording_manager as rm
+    real_bind = rm.bind_recording_speaker
+
+    def bind(*a, **k):
+        order.append("bind")
+        return real_bind(*a, **k)
+
+    def trim_spy(*a, **k):
+        order.append("trim")
+        return trim(*a, **k)
+
+    with patch("wisper_transcribe.config.get_data_dir", return_value=tmp_path), \
+         patch.dict("os.environ", {"WISPER_DATA_DIR": str(tmp_path)}), \
+         patch("wisper_transcribe.speaker_manager.enroll_speaker_from_audio_dir",
+               side_effect=lambda **kw: seed_profile(kw["name"], data_dir=tmp_path)), \
+         patch.object(rm, "bind_recording_speaker", bind), \
+         patch.object(rm, "trim_recording_audio", trim_spy):
+        JobQueue()._run_job(job)
+    return job, rec, order
+
+
+def test_recording_enroll_job_trims_after_binding(tmp_path):
+    from wisper_transcribe.web.jobs import COMPLETED
+
+    calls = []
+    job, rec, order = _run_recording_enroll_with_trim(
+        tmp_path, lambda rid, data_dir=None: calls.append((rid, data_dir)) or 0)
+
+    assert job.status == COMPLETED
+    assert calls == [(rec.id, tmp_path)]
+    assert order == ["bind", "trim"]
+
+
+def test_recording_enroll_job_survives_a_failing_trim(tmp_path):
+    from wisper_transcribe.web.jobs import COMPLETED
+
+    def boom(*a, **k):
+        raise OSError("disk")
+
+    job, _rec, order = _run_recording_enroll_with_trim(tmp_path, boom)
+
+    assert job.status == COMPLETED
+    assert order == ["bind", "trim"]
+
+
 def test_recording_enroll_job_failure_is_generic(tmp_path):
     """An enroll failure sets a generic error and leaves the
     recording's speaker state untouched."""

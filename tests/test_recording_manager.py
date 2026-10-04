@@ -523,3 +523,219 @@ def test_capture_code_uses_targeted_writers():
     offenders = [f.name for f in (src / "discord_bot.py", src / "local_capture.py", src / "jobs.py")
                  if "save_recording(" in f.read_text(encoding="utf-8")]
     assert offenders == []
+
+
+# ---------------------------------------------------------------------------
+# Trim a recording to combined.wav
+# ---------------------------------------------------------------------------
+
+def _write_segments(rec_dir: Path, frames_list, *, rows_for=None, combined=True):
+    """``combined/NNNN.wav`` files with real headers plus a matching ``combined.wav``.
+
+    ``rows_for`` is the recording id to add segment rows for (the capture path).
+    """
+    for i, n in enumerate(frames_list):
+        seg = rec_dir / "combined" / f"{i:04d}.wav"
+        _write_wav(seg, n_frames=n)
+        if rows_for and n > 0:
+            record_completed_wav_segment(rows_for, seg, datetime.now(timezone.utc),
+                                         finalized=True, data_dir=rec_dir.parent.parent)
+    if combined:
+        _write_wav(rec_dir / "combined.wav", n_frames=sum(frames_list))
+
+
+def _add_track(tmp_path, rec_id, track, kind_label=None):
+    from wisper_transcribe import file_registry
+    from ._seed import seed_file
+
+    d = tmp_path / "recordings" / rec_id / "per-user" / track
+    _write_wav(d / "0000.wav", n_frames=800)
+    seed_file(d, "per_user", file_registry.Owner("recording", rec_id), track, data_dir=tmp_path)
+    return d
+
+
+def _per_user_labels(tmp_path, rec_id):
+    from wisper_transcribe import file_registry
+
+    return sorted(r.label for r in file_registry.files_for(
+        file_registry.Owner("recording", rec_id), data_dir=tmp_path) if r.kind == "per_user")
+
+
+def _snapshot(rec_dir: Path):
+    return sorted(str(p.relative_to(rec_dir)) for p in rec_dir.rglob("*"))
+
+
+def test_trim_without_combined_wav_changes_nothing(tmp_path):
+    rec = _make_recording(tmp_path, source="local")
+    rec_dir = tmp_path / "recordings" / rec.id
+    _write_segments(rec_dir, [400, 400], rows_for=rec.id, combined=False)
+    _add_track(tmp_path, rec.id, "mic")
+    before = _snapshot(rec_dir)
+    assert rm.trim_recording_audio(rec.id, tmp_path) == 0
+    assert _snapshot(rec_dir) == before
+
+
+def test_trim_with_an_empty_combined_wav_changes_nothing(tmp_path):
+    rec = _make_recording(tmp_path, source="local")
+    rec_dir = tmp_path / "recordings" / rec.id
+    _write_segments(rec_dir, [400], rows_for=rec.id, combined=False)
+    _write_wav(rec_dir / "combined.wav", n_frames=0)
+    _add_track(tmp_path, rec.id, "mic")
+    before = _snapshot(rec_dir)
+    assert rm.trim_recording_audio(rec.id, tmp_path) == 0
+    assert _snapshot(rec_dir) == before
+
+
+def test_trim_with_a_fake_combined_wav_changes_nothing(tmp_path):
+    rec = _make_recording(tmp_path, source="local")
+    rec_dir = tmp_path / "recordings" / rec.id
+    _write_segments(rec_dir, [400], rows_for=rec.id, combined=False)
+    (rec_dir / "combined.wav").write_bytes(b"fake")
+    _add_track(tmp_path, rec.id, "mic")
+    before = _snapshot(rec_dir)
+    assert rm.trim_recording_audio(rec.id, tmp_path) == 0
+    assert _snapshot(rec_dir) == before
+    assert (rec_dir / "combined.wav").read_bytes() == b"fake"
+
+
+def test_trim_with_a_combined_wav_one_frame_short_changes_nothing(tmp_path):
+    rec = _make_recording(tmp_path, source="local")
+    rec_dir = tmp_path / "recordings" / rec.id
+    _write_segments(rec_dir, [400, 400], rows_for=rec.id, combined=False)
+    _write_wav(rec_dir / "combined.wav", n_frames=799)
+    _add_track(tmp_path, rec.id, "mic")
+    before = _snapshot(rec_dir)
+    assert rm.trim_recording_audio(rec.id, tmp_path) == 0
+    assert _snapshot(rec_dir) == before
+    assert load_recordings(tmp_path)[rec.id].combined_path is not None
+
+
+def test_trim_with_fewer_readable_segments_than_rows_changes_nothing(tmp_path):
+    """A segment file lost after its row was written: combined.wav may be
+    missing its audio, so nothing is deleted."""
+    rec = _make_recording(tmp_path, source="local")
+    rec_dir = tmp_path / "recordings" / rec.id
+    _write_segments(rec_dir, [400, 400, 400], rows_for=rec.id)
+    (rec_dir / "combined" / "0001.wav").write_bytes(b"corrupt")
+    _write_wav(rec_dir / "combined.wav", n_frames=800)  # matches the two readable files
+    before = _snapshot(rec_dir)
+    assert rm.trim_recording_audio(rec.id, tmp_path) == 0
+    assert _snapshot(rec_dir) == before
+
+
+def test_trim_unknown_or_invalid_id_changes_nothing(tmp_path):
+    assert rm.trim_recording_audio("../escape", tmp_path) == 0
+    assert rm.trim_recording_audio("00000000-0000-0000-0000-000000000000", tmp_path) == 0
+
+
+def test_trim_local_recording_loses_segments_and_per_user(tmp_path):
+    rec = _make_recording(tmp_path, source="local")
+    rec_dir = tmp_path / "recordings" / rec.id
+    _write_segments(rec_dir, [400, 400, 400], rows_for=rec.id)
+    _add_track(tmp_path, rec.id, "mic")
+    _add_track(tmp_path, rec.id, "system")
+    (rec_dir / "live_transcript.md").write_text("draft", encoding="utf-8")
+    combined_bytes = (rec_dir / "combined.wav").read_bytes()
+    expected = sum(p.stat().st_size for p in (rec_dir / "combined").glob("*.wav")) + \
+        2 * (rec_dir / "per-user" / "mic" / "0000.wav").stat().st_size
+
+    freed = rm.trim_recording_audio(rec.id, tmp_path)
+
+    assert freed == expected
+    assert not (rec_dir / "combined").exists() and not (rec_dir / "per-user").exists()
+    assert (rec_dir / "combined.wav").read_bytes() == combined_bytes
+    assert (rec_dir / "live_transcript.md").exists()
+    assert not [p for p in rec_dir.iterdir() if p.name.startswith(".wisper-trash-")]
+    assert _per_user_labels(tmp_path, rec.id) == []
+    assert len(load_recordings(tmp_path)[rec.id].segment_manifest) == 3  # rows stay
+    assert rm.trim_recording_audio(rec.id, tmp_path) == 0  # idempotent
+
+
+def test_trim_discord_recording_keeps_unbound_and_drops_bound(tmp_path):
+    seed_profile("alice", data_dir=tmp_path)
+    rec = _make_recording(tmp_path)
+    rec_dir = tmp_path / "recordings" / rec.id
+    _write_segments(rec_dir, [400, 400], rows_for=rec.id)
+    for uid in ("111111111111111111", "222222222222222222"):
+        _add_track(tmp_path, rec.id, uid)
+    rm.bind_recording_speaker(rec.id, "111111111111111111", "alice", tmp_path)
+    rm.bind_recording_speaker(rec.id, "222222222222222222", "", tmp_path)
+
+    freed = rm.trim_recording_audio(rec.id, tmp_path)
+
+    assert freed > 0
+    assert not (rec_dir / "combined").exists()
+    assert not (rec_dir / "per-user" / "111111111111111111").exists()
+    assert (rec_dir / "per-user" / "222222222222222222" / "0000.wav").exists()
+    assert (rec_dir / "combined.wav").exists()
+    assert _per_user_labels(tmp_path, rec.id) == ["222222222222222222"]
+
+
+def test_trim_keeps_a_directory_whose_rename_fails(tmp_path, monkeypatch):
+    seed_profile("alice", data_dir=tmp_path)
+    rec = _make_recording(tmp_path)
+    rec_dir = tmp_path / "recordings" / rec.id
+    _write_segments(rec_dir, [400], rows_for=rec.id)
+    _add_track(tmp_path, rec.id, "111111111111111111")
+    rm.bind_recording_speaker(rec.id, "111111111111111111", "alice", tmp_path)
+
+    with monkeypatch.context() as m:
+        m.setattr("wisper_transcribe.transcript_store._replace", lambda src, dst: False)
+        assert rm.trim_recording_audio(rec.id, tmp_path) == 0
+
+    assert (rec_dir / "combined").is_dir()
+    assert (rec_dir / "per-user" / "111111111111111111").is_dir()
+    assert _per_user_labels(tmp_path, rec.id) == ["111111111111111111"]
+    assert (rec_dir / "combined.wav").exists()
+
+
+def test_trim_forgets_per_user_rows_whose_directory_is_gone(tmp_path):
+    rec = _make_recording(tmp_path)
+    rec_dir = tmp_path / "recordings" / rec.id
+    _write_segments(rec_dir, [400], rows_for=rec.id)
+    gone = _add_track(tmp_path, rec.id, "111111111111111111")
+    kept = _add_track(tmp_path, rec.id, "222222222222222222")
+    import shutil
+    shutil.rmtree(gone)  # a crash between the rename and the forget
+    rm.bind_recording_speaker(rec.id, "222222222222222222", "", tmp_path)
+
+    rm.trim_recording_audio(rec.id, tmp_path)
+
+    assert kept.is_dir()
+    assert _per_user_labels(tmp_path, rec.id) == ["222222222222222222"]
+
+
+def test_recover_recording_trims_after_rebuilding(tmp_path):
+    rec = _crashed_session(tmp_path)
+    rec_dir = tmp_path / "recordings" / rec.id
+
+    recovered = rm.recover_recording(rec.id, tmp_path)
+
+    assert recovered.combined_path is not None and recovered.combined_path.exists()
+    assert not (rec_dir / "combined").exists()
+
+
+def test_bind_after_trim_deletes_that_users_track(tmp_path):
+    """combined/ is gone after the first trim, so only combined.wav is checked."""
+    seed_profile("alice", data_dir=tmp_path)
+    seed_profile("bob", data_dir=tmp_path)
+    rec = _make_recording(tmp_path)
+    rec_dir = tmp_path / "recordings" / rec.id
+    _write_segments(rec_dir, [400, 400], rows_for=rec.id)
+    uids = ("111111111111111111", "222222222222222222", "333333333333333333")
+    for uid in uids:
+        _add_track(tmp_path, rec.id, uid)
+    rm.bind_recording_speaker(rec.id, uids[0], "alice", tmp_path)
+    rm.bind_recording_speaker(rec.id, uids[1], "", tmp_path)
+    rm.bind_recording_speaker(rec.id, uids[2], "", tmp_path)
+    rm.trim_recording_audio(rec.id, tmp_path)
+    assert not (rec_dir / "combined").exists()
+    assert _per_user_labels(tmp_path, rec.id) == [uids[1], uids[2]]
+
+    rm.bind_recording_speaker(rec.id, uids[1], "bob", tmp_path)
+    assert rm.trim_recording_audio(rec.id, tmp_path) > 0
+
+    assert not (rec_dir / "per-user" / uids[1]).exists()
+    assert (rec_dir / "per-user" / uids[2]).is_dir()
+    assert _per_user_labels(tmp_path, rec.id) == [uids[2]]
+    assert (rec_dir / "combined.wav").exists()

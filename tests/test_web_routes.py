@@ -1205,6 +1205,27 @@ def test_preset_add_missing_name_rejected(client):
 # ---------------------------------------------------------------------------
 
 
+def test_cleanup_recording_trash_removes_only_trash_dirs(tmp_path, monkeypatch):
+    """Startup removes recordings/<id>/.wisper-trash-* left by an interrupted
+    trim and touches nothing else in the recording's folder."""
+    from wisper_transcribe.web.app import _cleanup_recording_trash
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    rec_dir = tmp_path / "recordings" / "11111111-1111-1111-1111-111111111111"
+    (rec_dir / ".wisper-trash-0" / "111").mkdir(parents=True)
+    (rec_dir / ".wisper-trash-0" / "111" / "0000.wav").write_bytes(b"x")
+    (rec_dir / ".wisper-trash-3").mkdir()
+    (rec_dir / "per-user" / "222").mkdir(parents=True)
+    (rec_dir / "per-user" / "222" / "0000.wav").write_bytes(b"x")
+    (rec_dir / "combined.wav").write_bytes(b"x")
+    (rec_dir / "trash-not-prefixed").mkdir()
+
+    _cleanup_recording_trash()
+
+    assert sorted(p.name for p in rec_dir.iterdir()) == ["combined.wav", "per-user", "trash-not-prefixed"]
+    assert (rec_dir / "per-user" / "222" / "0000.wav").exists()
+
+
 def test_cleanup_orphaned_uploads_removes_all_prefixes(tmp_path, monkeypatch):
     """The startup sweep removes wisper_upload_* folders and files, and the
     wisper_enroll_*/wisper_enrollsrc_* temp files, and leaves other entries."""

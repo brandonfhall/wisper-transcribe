@@ -67,6 +67,27 @@ def _build_tailwind() -> None:
         import warnings
         warnings.warn(f"Tailwind CSS build failed: {exc}. Using existing tailwind.min.css.")
 
+def _cleanup_recording_trash() -> None:
+    """Delete ``recordings/*/.wisper-trash-*`` directories at startup.
+
+    A trim renames what it deletes to a trash directory before removing it, so
+    these exist only if the server stopped mid-delete.
+    """
+    import logging
+    import shutil
+
+    from wisper_transcribe.config import get_data_dir
+    from wisper_transcribe.recording_manager import TRASH_PREFIX
+
+    log = logging.getLogger(__name__)
+    for path in (get_data_dir() / "recordings").glob(f"*/{TRASH_PREFIX}*"):
+        try:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+        except OSError as exc:
+            log.warning("Could not remove %s: %s", path, exc)
+
+
 def _cleanup_orphaned_uploads() -> None:
     """Delete wisper_upload_* folders and files and wisper_enroll_*/wisper_enrollsrc_* files at startup.
 
@@ -200,6 +221,7 @@ def create_app() -> FastAPI:
         reconcile_on_startup(data_dir)
 
         _cleanup_orphaned_uploads()
+        _cleanup_recording_trash()
 
         from .discord_bot import BotManager
         bot_manager = BotManager(data_dir=data_dir)

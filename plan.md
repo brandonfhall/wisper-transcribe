@@ -27,7 +27,7 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 ## Manual verification owed
 
 - **Live recording + campaign journal:** `LIVE_AUDIO_TEST_PLAN.md` — real-device capture, live transcript, journal browser flows, bulk delete, busy-queue notice.
-- **Live Discord acceptance test.** The recording pipeline (WAV segments, `__mixed__` combined track, `combined_path` hand-off) is covered by synthesized-PCM tests, but the JDA → socket → Python path needs one real session: record a few minutes with 2+ speakers, play the per-user WAVs, and run Transcribe.
+- **Live Discord acceptance test.** The recording pipeline (WAV segments, `__mixed__` combined track, `combined_path` hand-off) is covered by synthesized-PCM tests, but the JDA → socket → Python path needs one real session: record a few minutes with 2+ speakers, play the per-user WAVs before binding any speaker (a bound user's track is deleted when the session ends or on binding), and run Transcribe.
 - **Windows launcher dependency refresh.** `start.bat` reinstalls dependencies when `pyproject.toml` is newer than `.venv\.wisper-deps`. The one-time reinstall after a `git pull` is confirmed on Windows (2026-10-03); still owed: a second launch skips it.
 - **GPU Docker image on an NVIDIA host.** The "Docker Build" workflow is disabled on GitHub, and the GPU image can only be built (not run) without NVIDIA hardware. Confirm a diarized job on the GPU image downloads the alignment model into `./cache/` and logs "Aligned words".
 - **SQLite storage in a browser and on real capture** (automated coverage: `test_e2e.py`, `test_schema.py`). With `WISPER_DATA_DIR` pointing at a copy of real data:
@@ -62,8 +62,8 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 | 1 — File registry | done | 05d0b52 |
 | 2 — Renames / Needs attention / campaign delete | done | b538301 |
 | 3 — Enroll from stored embeddings | done | 2a135af |
-| 4 — Extract audio, keep FLAC | done | (this commit) |
-| 5 — Trim recordings | not started | |
+| 4 — Extract audio, keep FLAC | done | f97a271 |
+| 5 — Trim recordings | done | (this commit) |
 | 6 — `wisper storage trim` | not started | |
 | 7 — Playback | not started | |
 | 8 — Re-transcribe | not started | |
@@ -97,6 +97,13 @@ Phase 4:
   - A recording hand-off wrote no `<id>.wav`, left `combined.wav` alone, and gave the transcript no `audio` row.
 - **Seen, not caused by this branch:** speaker matching printed a `nan` similarity for a speaker with a very short excerpt (`SPEAKER_00 → Announcer (nan)`). Worth a look separately.
 - **Implementation notes:** `_keep_audio()` in `jobs.py` holds step 6.2. `job.upload_dir` is left set after cleanup.
+
+Phase 5:
+- **Rehearsal (Mac data):**
+  - The real `trim_recording_audio` on the local recording freed 2.4 MB (`combined/` plus both `per-user` tracks) and kept `combined.wav` and `live_transcript.md`.
+  - A second run freed 0.
+  - It trims a recording whose `capture_status` is `failed` too, since `combined.wav` verified complete.
+- **Beyond the plan:** the recording page's `no_audio` banner reads "The audio for this action is not on disk." Test modules for capture patch `trim_recording_audio` with an autouse fixture.
 
 ### How to run this plan
 

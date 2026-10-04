@@ -71,7 +71,7 @@ wisper-transcribe/
 ├── campaigns/
 │   └── <slug>/
 │       └── journal.md   rolling campaign journal (`wisper campaigns journal`)
-├── recordings/          Discord and local recording audio (recording details are in wisper.db)
+├── recordings/          each recording's combined.wav, plus per-user tracks of Discord speakers not yet enrolled (recording details are in wisper.db)
 └── output/              transcripts (unless `output_dir` / `WISPER_OUTPUT_DIR` points elsewhere)
 ```
 
