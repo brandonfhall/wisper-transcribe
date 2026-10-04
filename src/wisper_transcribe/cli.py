@@ -205,23 +205,36 @@ def server(host: str, port: int, reload: bool, debug: bool) -> None:
             "uvicorn is required to run the web server.  "
             "Install with: pip install 'wisper-transcribe[web]' or pip install uvicorn"
         )
-    # Fail before serving if the database can't be used (the lifespan checks
-    # again for `uvicorn` launched directly and --reload subprocesses).
+    # The lock is taken here, in the parent, before the first connect(): a
+    # --reload worker can release a dead process's lock late on Windows, and
+    # a trim in progress must stop the server before it migrates anything.
     from . import db
-    db.connect().close()
+    lock = db.ServerLock()
+    try:
+        lock.acquire()
+    except db.ServerLockHeld:
+        raise click.ClickException(
+            "wisper storage trim is running; try again when it finishes"
+        )
+    try:
+        # Fail before serving if the database can't be used (the lifespan checks
+        # again for `uvicorn` launched directly and --reload subprocesses).
+        db.connect().close()
 
-    # Publish bind address so app.py can write server.json for CLI discovery.
-    os.environ["WISPER_BIND"] = f"{host}:{port}"
+        # Publish bind address so app.py can write server.json for CLI discovery.
+        os.environ["WISPER_BIND"] = f"{host}:{port}"
 
-    click.echo(f"Starting wisper web UI on http://{host}:{port}")
-    click.echo("Press Ctrl+C to stop.")
-    uvicorn.run(
-        "wisper_transcribe.web.app:app",
-        host=host,
-        port=port,
-        reload=reload,
-        access_log=False,
-    )
+        click.echo(f"Starting wisper web UI on http://{host}:{port}")
+        click.echo("Press Ctrl+C to stop.")
+        uvicorn.run(
+            "wisper_transcribe.web.app:app",
+            host=host,
+            port=port,
+            reload=reload,
+            access_log=False,
+        )
+    finally:
+        lock.release()
 
 
 @main.command()
@@ -1303,7 +1316,7 @@ def transcripts_list(campaign: Optional[str]):
         total = needs_attention(out_dir).total
         if total:
             noun = "item needs" if total == 1 else "items need"
-            click.echo(f"\n{total} {noun} attention; see the Transcripts page")
+            click.echo(f"\n{total} {noun} attention; see the Transcripts page or `wisper storage trim`")
 
     if campaign:
         # Campaign order, including entries whose file is missing.
@@ -2087,3 +2100,106 @@ def db_dump(output: Optional[Path]):
         for line in lines:
             fh.write(line + "\n")
     click.echo(f"Wrote {output}")
+
+
+# ---------------------------------------------------------------------------
+# wisper storage
+# ---------------------------------------------------------------------------
+
+def _fmt_bytes(n: int) -> str:
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{int(size)} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{n} B"
+
+
+@main.group("storage")
+def storage_group():
+    """Reclaim disk space used by older transcripts and recordings."""
+
+
+def _echo_attention(attention) -> None:
+    if attention is None or not attention.total:
+        return
+    click.echo("")
+    click.echo(f"Needs attention ({attention.total}):")
+    for m in attention.missing_transcripts:
+        where = f" [{m.campaign}]" if m.campaign else ""
+        click.echo(f"  missing transcript: {m.stem}{where}")
+    for row in attention.missing_files:
+        click.echo(f"  missing file: {row.path}")
+    for path in attention.unclaimed:
+        click.echo(f"  no transcript: {path}")
+
+
+@storage_group.command("trim")
+@click.option("--apply", "apply_", is_flag=True, default=False,
+              help="Do it. Without this flag nothing is changed.")
+@click.option("--device", default="auto", show_default=True, type=click.Choice(_config.DEVICES),
+              help="Compute device for extracting missing speaker voices")
+def storage_trim(apply_: bool, device: str):
+    """Shrink stored audio to one compact copy per transcript.
+
+    Converts each transcript's audio to a 16 kHz mono FLAC (extracting any
+    speaker voices it lacks first), deletes orphaned recording hand-off
+    copies, and removes the segment and per-user audio a recording's
+    combined.wav makes redundant. Only files wisper tracks are touched.
+
+    Dry run by default. With --apply the web server must be stopped.
+    """
+    from . import db, storage_trim as trim
+
+    if apply_:
+        lock = db.ServerLock()
+        try:
+            lock.acquire()
+        except db.ServerLockHeld:
+            raise click.ClickException("Stop the wisper server first, then run this again.")
+        try:
+            trim.check_runtime()
+            with db.Heartbeat():
+                current = trim.plan()
+                _echo_plan(current)
+                if not current.actions:
+                    return
+                report = trim.apply(current, device=device, progress=lambda m: click.echo(f"  {m}"))
+        finally:
+            lock.release()
+        click.echo("")
+        click.echo(
+            f"Converted {len(report.converted)}, deleted {len(report.dropped)} copy(ies) and "
+            f"{len(report.orphans)} orphan(s), trimmed {len(report.trimmed)} recording(s); "
+            + (f"freed {_fmt_bytes(report.freed_bytes)}." if report.freed_bytes >= 0
+               else f"used {_fmt_bytes(-report.freed_bytes)} more."))
+        for line in report.errors:
+            click.echo(f"  ! {line}")
+        _echo_attention(report.attention)
+        if report.errors:
+            raise SystemExit(1)
+        return
+
+    trim.check_runtime()
+    current = trim.plan()
+    _echo_plan(current)
+    if current.actions:
+        click.echo("")
+        click.echo("Dry run: nothing was changed. Run again with --apply to do this.")
+
+
+def _echo_plan(current) -> None:
+    from .storage_trim import KIND_LABELS
+
+    if not current.actions:
+        click.echo("Nothing to trim.")
+    for a in current.actions:
+        click.echo(f"{KIND_LABELS[a.kind]:<16} {_fmt_bytes(a.size):>10}  {a.path}")
+    if current.actions:
+        if current.total_bytes:
+            click.echo(f"{'Deletions free':<16} {_fmt_bytes(current.total_bytes):>10}")
+        if current.convert_bytes:
+            click.echo(f"{'Converted':<16} {_fmt_bytes(current.convert_bytes):>10}  "
+                       "replaced by 16 kHz mono FLAC, about 90 MB per hour of audio; "
+                       "a compressed audio file can grow")
+    _echo_attention(current.attention)

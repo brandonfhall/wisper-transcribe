@@ -113,6 +113,18 @@ The sheet lists rows marked `discriminating` first: those are the words where th
 
 ---
 
+## Free up disk space used by older transcripts
+
+Older uploads keep the whole original file (often a video), and older recordings keep several copies of their audio.
+
+1. Stop the web server.
+2. Run `wisper storage trim` and review the list. Nothing is changed.
+3. Run `wisper storage trim --apply`.
+
+Each transcript keeps one compact `<name>.flac`, and each recording keeps `combined.wav`. See [cli-reference.md](cli-reference.md#wisper-storage).
+
+---
+
 ## A transcript was renamed or deleted outside wisper
 
 wisper keeps a record of every transcript in the transcripts folder. If a file vanishes (deleted or renamed in Finder or Obsidian, a sync that hasn't finished, a drive that isn't connected), its campaign entry stays in place and shows **MISSING** instead of being dropped.

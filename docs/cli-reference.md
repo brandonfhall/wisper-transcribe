@@ -494,6 +494,37 @@ Every command that uses the database stops with a clear message, not a traceback
 
 ---
 
+### `wisper storage`
+
+Reclaim disk space used by older transcripts and recordings.
+
+```bash
+wisper storage trim                  # dry run: list what would change
+wisper storage trim --apply          # do it
+wisper storage trim --apply --device cpu
+```
+
+`trim` is a dry run unless you pass `--apply`. It prints one line per action (what it does, the file's current size, the file), the space the deletions free, the size of the files to convert, and the Needs-attention list, and changes nothing. The actions, in order:
+
+- **Match renames.** Transcripts renamed outside wisper are matched first, as at server start.
+- **Convert transcript audio.** Each transcript's audio becomes a 16 kHz mono `<name>.flac`, the form new uploads keep. Speaker voices the transcript lacks are extracted from the original audio first. A `.flac` already at 16 kHz mono is left alone. If a conversion fails, the original stays and the failure is listed.
+  - A video or a large WAV shrinks to about 90 MB per hour of audio.
+  - An already-compressed audio file (MP3, M4A, Opus) can grow: a 64 kbps MP3 becomes about 3 times larger. Every transcript then keeps the same lossless format.
+  - The summary reports the net change, which can be more space used.
+- **Delete recording copies.** A transcript made from a recording uses the recording's `combined.wav`, so its own copy is deleted. A `<recording-id>.wav` in the transcripts folder that no transcript uses is deleted too.
+- **Trim recordings.** Segment and per-user audio is removed once `combined.wav` is verified complete.
+
+It deletes only files wisper tracks, plus those unused `<recording-id>.wav` copies. Other files in the transcripts folder are never touched. Needs-attention items (missing transcripts, missing files, files with no transcript) are listed, never deleted.
+
+| Flag | Meaning |
+|------|---------|
+| `--apply` | Make the changes. Refuses while the web server is running: stop it first. |
+| `--device auto\|cpu\|cuda\|mps` | Device for extracting missing speaker voices (default `auto`). |
+
+A second run finds nothing to do. For Docker, see [docker.md](docker.md#freeing-disk-space).
+
+---
+
 ### `wisper server`
 
 Start the browser-based web UI:

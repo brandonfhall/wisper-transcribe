@@ -1614,4 +1614,112 @@ def test_transcripts_list_marks_missing_entries_in_campaign_order(tmp_path, monk
     assert result.exit_code == 0, result.output
     lines = result.output.splitlines()
     assert lines[:2] == ["s02  (missing — file not found)", "s01"]
-    assert "1 item needs attention; see the Transcripts page" in lines[2:]
+    assert "1 item needs attention; see the Transcripts page or `wisper storage trim`" in lines[2:]
+
+
+# ---------------------------------------------------------------------------
+# wisper storage trim / server lock
+# ---------------------------------------------------------------------------
+
+def _trim_world(tmp_path, monkeypatch):
+    from tests._seed import seed_sidecar
+    out = tmp_path / "trim_out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    md = out / "Ep.md"
+    md.write_text("# t\n", encoding="utf-8")
+    (out / "Ep.mp4").write_bytes(b"v" * 2048)
+    seed_sidecar(md, {
+        "diarization_segments": [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}],
+        "speaker_map": {"SPEAKER_00": "A"},
+        "speaker_embeddings": {"SPEAKER_00": [1.0, 0.0]},
+        "embedding_space": __import__("wisper_transcribe.config", fromlist=["x"]).EMBEDDING_SPACE,
+        "input_path": str(out / "Ep.mp4"),
+    })
+    return out
+
+
+def _fake_flac(src, dst):
+    Path(dst).write_bytes(b"flac")
+
+
+def test_storage_trim_dry_run_output_and_no_changes(tmp_path, monkeypatch):
+    out = _trim_world(tmp_path, monkeypatch)
+    result = CliRunner().invoke(main, ["storage", "trim"])
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert lines[0].startswith("convert to FLAC") and lines[0].endswith(str(out / "Ep.mp4"))
+    assert "2.0 KB" in lines[0]
+    assert any(line.startswith("Converted") and "2.0 KB" in line for line in lines)
+    assert "Dry run: nothing was changed. Run again with --apply to do this." in result.output
+    assert (out / "Ep.mp4").is_file() and not (out / "Ep.flac").exists()
+
+
+def test_storage_trim_apply_after_dry_run_is_allowed(tmp_path, monkeypatch):
+    out = _trim_world(tmp_path, monkeypatch)
+    assert CliRunner().invoke(main, ["storage", "trim"]).exit_code == 0
+    with patch("wisper_transcribe.audio_utils.encode_flac", side_effect=_fake_flac), \
+         patch("wisper_transcribe.audio_utils.probe_format", return_value=(16000, 1)):
+        result = CliRunner().invoke(main, ["storage", "trim", "--apply"])
+    assert result.exit_code == 0, result.output
+    assert (out / "Ep.flac").is_file() and not (out / "Ep.mp4").exists()
+    with patch("wisper_transcribe.audio_utils.encode_flac", side_effect=_fake_flac), \
+         patch("wisper_transcribe.audio_utils.probe_format", return_value=(16000, 1)):
+        again = CliRunner().invoke(main, ["storage", "trim", "--apply"])
+    assert again.exit_code == 0 and "Nothing to trim." in again.output
+
+
+def test_storage_trim_apply_refused_while_server_lock_held(tmp_path, monkeypatch):
+    from wisper_transcribe import db
+    out = _trim_world(tmp_path, monkeypatch)
+    held = db.ServerLock().acquire()
+    try:
+        result = CliRunner().invoke(main, ["storage", "trim", "--apply"])
+    finally:
+        held.release()
+    assert result.exit_code != 0
+    assert "Stop the wisper server first, then run this again." in result.output
+    assert (out / "Ep.mp4").is_file()
+
+
+def test_server_refuses_while_trim_holds_the_lock(tmp_path):
+    from wisper_transcribe import db
+    mock_uvicorn = MagicMock()
+    held = db.ServerLock().acquire()
+    try:
+        with patch.dict("sys.modules", {"uvicorn": mock_uvicorn}):
+            result = CliRunner().invoke(main, ["server"])
+    finally:
+        held.release()
+    assert result.exit_code != 0
+    assert "wisper storage trim is running; try again when it finishes" in result.output
+    mock_uvicorn.run.assert_not_called()
+    assert not (db.db_path()).exists()
+
+
+def test_server_releases_its_lock_on_exit():
+    from wisper_transcribe import db
+    with patch.dict("sys.modules", {"uvicorn": MagicMock()}):
+        assert CliRunner().invoke(main, ["server"]).exit_code == 0
+    db.ServerLock().acquire().release()
+
+
+def test_storage_trim_container_refused_on_fresh_host_lease(tmp_path, monkeypatch):
+    import sqlite3
+    from datetime import UTC, datetime
+
+    from wisper_transcribe import db
+    _trim_world(tmp_path, monkeypatch)
+    db.connect().close()
+    with sqlite3.connect(db.db_path()) as conn:
+        conn.execute("INSERT OR REPLACE INTO runtime_leases VALUES ('host', 'h:1', 0, ?)",
+                     (datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),))
+    monkeypatch.setattr(db, "detect_runtime", lambda: db.RuntimeInfo("container", True))
+    result = CliRunner().invoke(main, ["storage", "trim", "--apply"])
+    assert result.exit_code != 0 and "host process" in result.output
+    with sqlite3.connect(db.db_path()) as conn:
+        conn.execute("DELETE FROM runtime_leases WHERE runtime = 'host'")
+    with patch("wisper_transcribe.audio_utils.encode_flac", side_effect=_fake_flac), \
+         patch("wisper_transcribe.audio_utils.probe_format", return_value=(16000, 1)):
+        ok = CliRunner().invoke(main, ["storage", "trim", "--apply"])
+    assert ok.exit_code == 0, ok.output

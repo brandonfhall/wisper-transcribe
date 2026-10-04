@@ -806,20 +806,23 @@ class Attention:
 
 
 def needs_attention(output_dir: Optional[Path] = None,
-                    data_dir: Optional[Path] = None) -> Attention:
+                    data_dir: Optional[Path] = None,
+                    report: Optional[file_registry.SyncReport] = None) -> Attention:
     """The transcripts and files that need the user's decision.
 
     - missing transcripts: rows flagged ``missing_since``;
     - missing files: registered companions, clips, or journals whose file is gone;
     - unclaimed files: pattern-matching files with no owner.
 
-    The files come from the latest :func:`file_registry.sync` report, taken
-    on demand if there is none, and are re-checked against the disk.
+    The files come from ``report`` if given, else the latest
+    :func:`file_registry.sync` report (taken on demand if there is none), and
+    are re-checked against the disk.
     """
     if output_dir is None:
         from .path_utils import get_output_dir
         output_dir = get_output_dir()
-    report = file_registry.last_report(data_dir, output_dir)
+    if report is None:
+        report = file_registry.last_report(data_dir, output_dir)
     if report is None:
         report = file_registry.sync(output_dir, data_dir)
     with db.connection(data_dir) as conn:

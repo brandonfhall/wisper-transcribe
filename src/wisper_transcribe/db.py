@@ -1131,6 +1131,81 @@ class Heartbeat:
 
 
 # ---------------------------------------------------------------------------
+# Server lock (a running server vs. `wisper storage trim --apply`)
+# ---------------------------------------------------------------------------
+
+SERVER_LOCK_FILENAME = "server.lock"
+
+
+class ServerLockHeld(DatabaseError):
+    """Another process holds ``<data dir>/server.lock``."""
+
+
+class ServerLock:
+    """An exclusive, non-blocking OS lock on ``<data dir>/server.lock``.
+
+    The kernel releases it when the process exits, so a crash never leaves it
+    held; the file's existence means nothing. Held by ``wisper server`` (in
+    the parent process, never a ``--reload`` worker) and by
+    ``wisper storage trim --apply``. The descriptor stays referenced for the
+    lock's lifetime, because closing it releases the lock.
+    """
+
+    def __init__(self, data_dir: Optional[Path] = None) -> None:
+        self._path = _data_dir(data_dir) / SERVER_LOCK_FILENAME
+        self._fd: Optional[int] = None
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    def acquire(self) -> "ServerLock":
+        """Take the lock or raise :class:`ServerLockHeld`."""
+        if self._fd is not None:
+            return self
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        # O_RDWR|O_CREAT: 'w' would truncate and 'a+' moves the write offset.
+        fd = os.open(self._path, os.O_RDWR | os.O_CREAT)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                os.lseek(fd, 0, 0)  # the locked byte is never read or written
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                # flock, not lockf: POSIX record locks don't conflict within one process.
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            os.close(fd)
+            raise ServerLockHeld(f"{self._path} is held by another process") from exc
+        self._fd = fd
+        return self
+
+    def release(self) -> None:
+        fd, self._fd = self._fd, None
+        if fd is None:
+            return
+        try:
+            if os.name == "nt":
+                import msvcrt
+                os.lseek(fd, 0, 0)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
+    def __enter__(self) -> "ServerLock":
+        return self.acquire()
+
+    def __exit__(self, *exc) -> None:
+        self.release()
+
+
+# ---------------------------------------------------------------------------
 # Inspection (wisper db status | backup | dump)
 # ---------------------------------------------------------------------------
 

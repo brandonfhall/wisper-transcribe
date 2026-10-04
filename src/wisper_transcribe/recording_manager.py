@@ -631,6 +631,64 @@ def _free_trash_name(rec_dir: Path) -> Path:
     return rec_dir / f"{TRASH_PREFIX}{n}"
 
 
+def _trim_targets(rid: str, data_dir: Optional[Path]) -> list[tuple[Path, Optional[str]]]:
+    """The directories :func:`trim_recording_audio` would remove, or ``[]``.
+
+    Each is ``(directory, per_user label)``; the label is None for ``combined/``
+    and ``""`` for a local session's whole ``per-user/``. Empty unless
+    ``combined.wav`` verifies as complete (see :func:`trim_recording_audio`).
+    """
+    rec_dir = get_recording_dir(rid, data_dir)
+    combined = combined_path_for(rid, data_dir)
+    total = _wav_frames(combined)
+    if total <= 0:
+        return []
+
+    with db.connection(data_dir) as conn:
+        rec = conn.execute("SELECT source FROM recordings WHERE id = ?", (rid,)).fetchone()
+        if rec is None:
+            return []
+        seg_rows = conn.execute(
+            "SELECT count(*) FROM recording_segments WHERE recording_id = ?", (rid,)).fetchone()[0]
+        bound = [r[0] for r in conn.execute(
+            "SELECT discord_user_id FROM recording_speakers "
+            "WHERE recording_id = ? AND profile_id IS NOT NULL", (rid,))]
+        source = rec["source"]
+
+    seg_dir = rec_dir / "combined"
+    targets: list[tuple[Path, Optional[str]]] = []
+    if seg_dir.is_dir():
+        readable = seg_frames = 0
+        for wav in seg_dir.glob("*.wav"):
+            frames = _wav_frames(wav)
+            if frames > 0:
+                readable += 1
+                seg_frames += frames
+        if seg_frames != total or readable < seg_rows:
+            return []
+        targets.append((seg_dir, None))
+    per_user = rec_dir / "per-user"
+    if source == "local":
+        targets.append((per_user, ""))
+    else:
+        targets.extend((per_user / uid, uid) for uid in sorted(bound))
+    return targets
+
+
+def trimmable_bytes(recording_id: str, data_dir: Optional[Path] = None) -> int:
+    """Bytes :func:`trim_recording_audio` would free right now; changes nothing."""
+    rid = _validate_recording_id(recording_id)
+    if rid is None:
+        return 0
+    rec_dir = get_recording_dir(rid, data_dir)
+    base = os.path.abspath(rec_dir) + os.sep
+    return sum(
+        _tree_bytes(target) for target, _label in _trim_targets(rid, data_dir)
+        if os.path.abspath(target).startswith(base) and target.is_dir()
+        and not target.is_symlink()
+    )
+
+
 def trim_recording_audio(recording_id: str, data_dir: Optional[Path] = None) -> int:
     """Delete the audio ``combined.wav`` makes redundant; return the bytes freed.
 
@@ -655,39 +713,7 @@ def trim_recording_audio(recording_id: str, data_dir: Optional[Path] = None) -> 
         return 0
     rec_dir = get_recording_dir(rid, data_dir)
     base = os.path.abspath(rec_dir) + os.sep
-    combined = combined_path_for(rid, data_dir)
-    total = _wav_frames(combined)
-    if total <= 0:
-        return 0
-
-    with db.connection(data_dir) as conn:
-        rec = conn.execute("SELECT source FROM recordings WHERE id = ?", (rid,)).fetchone()
-        if rec is None:
-            return 0
-        seg_rows = conn.execute(
-            "SELECT count(*) FROM recording_segments WHERE recording_id = ?", (rid,)).fetchone()[0]
-        bound = [r[0] for r in conn.execute(
-            "SELECT discord_user_id FROM recording_speakers "
-            "WHERE recording_id = ? AND profile_id IS NOT NULL", (rid,))]
-        source = rec["source"]
-
-    seg_dir = rec_dir / "combined"
-    targets: list[tuple[Path, Optional[str]]] = []  # (directory, per_user label or None)
-    if seg_dir.is_dir():
-        readable = seg_frames = 0
-        for wav in seg_dir.glob("*.wav"):
-            frames = _wav_frames(wav)
-            if frames > 0:
-                readable += 1
-                seg_frames += frames
-        if seg_frames != total or readable < seg_rows:
-            return 0
-        targets.append((seg_dir, None))
-    per_user = rec_dir / "per-user"
-    if source == "local":
-        targets.append((per_user, ""))
-    else:
-        targets.extend((per_user / uid, uid) for uid in sorted(bound))
+    targets = _trim_targets(rid, data_dir)
 
     freed = 0
     trashed: list[tuple[Path, Optional[str]]] = []

@@ -714,7 +714,7 @@ def _scan_data(data: Path, in_output, recordings: dict[str, str], profiles: dict
 
 
 def sync(output_dir: Optional[Path] = None, data_dir: Optional[Path] = None, *,
-         busy_timeout_ms: Optional[int] = None) -> SyncReport:
+         busy_timeout_ms: Optional[int] = None, scan_only: bool = False) -> SyncReport:
     """Bring the registry in line with the disk, without deleting anything.
 
     - A pattern file whose owner exists and has no row of that kind and label
@@ -727,7 +727,9 @@ def sync(output_dir: Optional[Path] = None, data_dir: Optional[Path] = None, *,
 
     The disk is scanned outside any transaction, then changes are written in
     short batches with compare-and-set, re-statting each new path first.
-    Errors are collected per file; this never raises.
+    Errors are collected per file; this never raises. With ``scan_only`` the
+    report is computed the same way but nothing is written: files that
+    would be registered or refreshed are not, and the report is not cached.
     """
     report = SyncReport()
     try:
@@ -736,20 +738,21 @@ def sync(output_dir: Optional[Path] = None, data_dir: Optional[Path] = None, *,
         report.errors.append(f"sync could not start: {exc}")
         return report
     try:
-        _sync(report, data, output, data_dir, busy_timeout_ms)
+        _sync(report, data, output, data_dir, busy_timeout_ms, scan_only)
     except (sqlite3.Error, OSError) as exc:
         report.errors.append(f"sync stopped: {exc}")
         log.warning("File sync stopped: %s", exc)
     except Exception as exc:
         report.errors.append(f"sync failed: {exc}")
         log.warning("File sync failed", exc_info=True)
-    with _state_lock:
-        _reports[_state_key(data, output)] = report
+    if not scan_only:
+        with _state_lock:
+            _reports[_state_key(data, output)] = report
     return report
 
 
 def _sync(report: SyncReport, data: Path, output: Path, data_dir_arg: Optional[Path],
-          busy_timeout_ms: Optional[int]) -> None:
+          busy_timeout_ms: Optional[int], scan_only: bool = False) -> None:
     fold = _fold(output)
     data_real = Path(os.path.realpath(data))
     out_real = Path(os.path.realpath(output))
@@ -807,6 +810,9 @@ def _sync(report: SyncReport, data: Path, output: Path, data_dir_arg: Optional[P
             continue
         taken.add(slot)
         new_files.append(f)
+
+    if scan_only:
+        return
 
     # Writes: short transactions, nothing at all when nothing changed.
     for start in range(0, len(refresh_rows), _SYNC_BATCH):

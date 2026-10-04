@@ -218,6 +218,8 @@ def encode_flac(src: Path, dst: Path) -> None:
                 "-map", "0:a:0",
                 "-ac", "1",
                 "-ar", "16000",
+                # A float decoder (MP3, AAC) would otherwise get 32-bit FLAC, larger than raw PCM.
+                "-sample_fmt", "s16",
                 "-c:a", "flac",
                 "-f", "flac",
                 str(tmp),
@@ -237,6 +239,36 @@ def encode_flac(src: Path, dst: Path) -> None:
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def probe_format(path: Path) -> tuple[int, int]:
+    """Return ``(sample_rate, channels)`` of the file's first audio stream via ffprobe.
+
+    Raises ``RuntimeError`` when ffprobe is missing or can't read the stream,
+    so a caller can treat "unknown" as "needs converting".
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=sample_rate,channels",
+                "-of", "csv=p=0",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"ffprobe could not run: {exc}") from exc
+    if result.returncode != 0:
+        raise RuntimeError(f"ffprobe could not read {Path(path).name!r}")
+    try:
+        rate, channels = result.stdout.strip().splitlines()[0].split(",")
+        return int(rate), int(channels)
+    except (ValueError, IndexError) as exc:
+        raise RuntimeError(f"ffprobe gave no audio format for {Path(path).name!r}") from exc
 
 
 def get_duration(path: Path) -> float:

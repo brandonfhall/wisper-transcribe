@@ -63,8 +63,8 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 | 2 — Renames / Needs attention / campaign delete | done | b538301 |
 | 3 — Enroll from stored embeddings | done | 2a135af |
 | 4 — Extract audio, keep FLAC | done | f97a271 |
-| 5 — Trim recordings | done | (this commit) |
-| 6 — `wisper storage trim` | not started | |
+| 5 — Trim recordings | done | 3c18dbb |
+| 6 — `wisper storage trim` | done | (this commit) |
 | 7 — Playback | not started | |
 | 8 — Re-transcribe | not started | |
 | 9 — Final review | not started | |
@@ -104,6 +104,17 @@ Phase 5:
   - A second run freed 0.
   - It trims a recording whose `capture_status` is `failed` too, since `combined.wav` verified complete.
 - **Beyond the plan:** the recording page's `no_audio` banner reads "The audio for this action is not on disk." Test modules for capture patch `trim_recording_audio` with an autouse fixture.
+
+Phase 6:
+- **Rehearsal (Mac data):**
+  - `--apply` was refused while the server ran, and the dry run changed no files.
+  - `--apply` converted the 4 MP3s and stored voices on MPS for a transcript whose embeddings were cleared. It deleted a planted orphan `<recording-id>.wav`, left `unrelated.mp3` alone, and trimmed the recording.
+  - A re-run printed "Nothing to trim."
+- **Found and fixed in rehearsal:**
+  - `encode_flac` lacked `-sample_fmt s16`, so an MP3 source made a 32-bit FLAC (306 MB for a 2 h 05 m session, now 187 MB).
+  - The dry run's total counted conversions as freed space; it now lists deletions and conversions separately.
+  - The summary reports the net change.
+- **Behaviour:** the Phase 6 worker stalled three times on long writes; the orchestrator finished the review itself.
 
 ### How to run this plan
 
@@ -254,6 +265,7 @@ Phase 5:
 | Deleting a campaign asks: **Delete everything** (its transcripts, their files, and its journal), or **Keep the files**. Keep the files removes the campaign, leaves its transcripts unassigned, and lists its journal under Needs attention as unclaimed. | Brandon, 2026-10-03. |
 | `wisper storage trim --apply` refuses while the server is running at all, not only while jobs run. | A user could start an upload mid-trim (Brandon, 2026-10-03). |
 | Old upload audio that isn't 16 kHz mono (including a `.flac` kept whole) is converted to 16 kHz mono FLAC. | The models only ever hear 16 kHz mono, so a larger copy doesn't improve re-transcription (Brandon, 2026-10-03). |
+| That includes already-compressed audio-only files (MP3, M4A, Opus), even though the FLAC can be ~3× larger (a 64 kbps MP3). | One uniform kept format (Brandon, 2026-10-04, after the Mac rehearsal showed an MP3 growing). |
 | An upload whose name matches a **missing** transcript gets the Overwrite/Cancel prompt, worded as "A transcript with this name is missing (renamed or deleted outside wisper)…". | Overwriting would otherwise replace that session's only audio and speakers silently (Brandon, 2026-10-03). |
 | Campaign **Delete everything**, when a transcript can't be deleted (a locked file): delete the rest, keep going, and list what's left under Needs attention. | Brandon, 2026-10-03. |
 | Unregistered `.flac` (and other pattern) files in the output root are listed under Needs attention **with** a Delete button. `sync` never registers an unregistered `.flac` as a transcript's audio. | It may be the user's own file; Brandon decides (2026-10-03). |

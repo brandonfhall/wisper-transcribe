@@ -443,6 +443,7 @@ def test_encode_flac_writes_through_a_temp_name(tmp_path):
 
     cmd = run.call_args[0][0]
     assert "0:a:0" in cmd and "flac" in cmd and "16000" in cmd and cmd[cmd.index("-ac") + 1] == "1"
+    assert cmd[cmd.index("-sample_fmt") + 1] == "s16"
     assert seen[0].name == TEMP_PREFIX + "Session.flac"
     assert dst.read_bytes() == b"fLaC"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["Session.flac", "audio.wav"]

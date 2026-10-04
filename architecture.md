@@ -49,6 +49,7 @@ src/wisper_transcribe/
 ├── config.py            Config load/save, device detection, HF token and LLM key lookup, provider metadata
 ├── models.py            Dataclasses shared across modules (segments, profiles, campaigns, recordings, LLM results)
 ├── campaign_manager.py  Campaign CRUD, rosters, Discord ID binding, transcript association and order (tables campaigns, campaign_members, campaign_transcripts)
+├── storage_trim.py      `wisper storage trim`: plan() reads, apply() converts audio to FLAC and deletes redundant copies (see "Storage trim")
 ├── recording_manager.py Recording CRUD, segment manifest, markers, crash recovery
 ├── refine.py            LLM vocabulary correction + unknown-speaker suggestions
 ├── summarize.py         LLM session notes → Obsidian-ready `.summary.md` sidecar
@@ -487,6 +488,20 @@ output/
 - **Registration:** `process_file()` writes the `.md`, then calls `transcript_store.register(stem, origin="job")` when the output is in the output root. An existing row keeps its id and campaign position (overwrite, re-transcribe); a row flagged missing is un-flagged. `--campaign` with output elsewhere prints a note and skips the association, since the web UI only sees the output root.
 - Excerpt clip globs are `glob.escape()`-d so a stem like `mix*` can't match another transcript's clips.
 
+### Storage trim (`storage_trim.py`)
+`plan()` only reads: it never reconciles or writes the registry, and takes the Needs-attention list from `file_registry.sync(scan_only=True)`. `apply()` runs, in order:
+1. `reconcile(sweep=True)`, so renames are matched before anything is converted.
+2. For each transcript with an `audio` row whose file exists: store the voice embeddings it lacks, then shrink the audio.
+3. Delete orphaned `<recording-id>.wav` files in the output root.
+4. `trim_recording_audio` for each finished recording.
+
+Rules:
+- **Embeddings before conversion.** Backfill reads the original audio, so it runs first. A failed backfill is reported and the conversion still proceeds.
+- **Conversion.** A transcript linked to a recording whose `combined.wav` exists drops its copy (`set_audio(None)`). A `<stem>.flac` at 16 kHz mono (`audio_utils.probe_format`; an unprobeable file counts as wrong) is kept. Anything else is encoded to `<stem>.flac`, in place through a temp name when it already has that name. A failed encode leaves the original and its row.
+- **Only files tied to a row are deleted.** Those are the replaced `audio` files, plus a `<uuid>.wav` whose uuid is a `recordings.id` and which no row names. A `<stem>.<ext>` beside a CLI transcript can be the user's own file, so it is never matched.
+- **No server alongside `--apply`.** `db.ServerLock` is an exclusive non-blocking OS lock on `<data>/server.lock` (`flock` on POSIX, never `lockf`, whose record locks don't conflict within one process; `msvcrt.locking` on Windows). `wisper server` takes it in the parent process before its first `db.connect()`; `--apply` takes it before doing anything. The lease table can't serve here: any CLI `connect()` writes a row and never releases it.
+- **Container beside a host process.** In a container that crosses the Docker Desktop VM, `--apply` refuses on a fresh `host` lease read from `db.status()`; a lease from its own runtime never blocks.
+
 ### Search index (`search_index.py`)
 Full-text search over every transcript and its `.summary.md`. The index is derived from the files and disposable: `wisper db reindex` drops and rebuilds it.
 - **Tables (v7).** `search_index_state` has one row per indexed file, keyed `(transcript_id, kind)` with `kind` `transcript` or `summary`, and holds the `mtime_ns` and size the file had when indexed. No `transcript` row means the transcript is unindexed or stale. `search_blocks` has one row per speaker block (`block_idx`, `speaker`, `start_s`) or summary section. Its composite FK to the state row means deleting a transcript's state rows removes its blocks, which is how "mark stale" works. `search_fts` is contentless FTS5 (`content=''`, `contentless_delete=1`, porter + `unicode61 remove_diacritics 2`) over the block text, with `rowid = search_blocks.id`. FTS tables can't hold foreign keys, so the `search_blocks_ad` trigger deletes the FTS row, and it fires on cascades: deleting a transcript clears its index.
@@ -788,7 +803,7 @@ The job page shows step pills and one bar split into equal per-step slices:
 
 **CI** (`.github/workflows/ci.yml`):
 - Python 3.13 and 3.14, both blocking — the versions shipped (Docker `python:3.14-slim`; `requires-python >= 3.13`).
-- A `windows-latest` job (3.13) runs the storage tests (`test_db.py`, `test_path_utils.py`, `test_legacy_import.py`, `test_speaker_manager.py`, `test_campaign_manager.py`, `test_transcript_store.py` with a real locked-file `os.replace`, `test_journal.py`, `test_recording_manager.py`, `test_job_history.py`, `test_search_index.py`, `test_schema.py`, `test_e2e.py`) on a real Windows filesystem.
+- A `windows-latest` job (3.13) runs the storage tests (`test_db.py`, `test_path_utils.py`, `test_legacy_import.py`, `test_speaker_manager.py`, `test_campaign_manager.py`, `test_transcript_store.py` with a real locked-file `os.replace`, `test_journal.py`, `test_recording_manager.py`, `test_job_history.py`, `test_search_index.py`, `test_schema.py`, `test_file_registry.py`, `test_audio_utils.py`, `test_web_jobs.py`, `test_storage_trim.py`, `test_e2e.py`) on a real Windows filesystem.
 - Weekly cron adds a `latest-deps` job (`pip install --upgrade`, 3.14) to catch upstream breakage early.
 - Tailwind staleness check; CodeQL. The Docker CPU image smoke build (`docker.yml`) is currently disabled on GitHub, so image builds are verified manually.
 - Dependabot watches `pip`, `docker`, and `github-actions` weekly.

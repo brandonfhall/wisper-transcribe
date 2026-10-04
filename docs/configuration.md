@@ -81,6 +81,8 @@ Override the storage path with `WISPER_DATA_DIR` (set automatically in Docker). 
 
 Transcripts go to the output root: `WISPER_OUTPUT_DIR` if set, else the `output_dir` setting, else `output/` in the data directory. It never depends on the directory you launch wisper from. Each uploaded transcript keeps its audio as `<name>.flac` beside it. An install whose transcripts are in a `./output` folder next to where wisper was started gets that path saved into `output_dir` the first time it runs with the database.
 
+Large stored audio (whole uploaded videos, extra recording copies) is shrunk by `wisper storage trim`.
+
 To move your transcripts: stop the server, move the files, then `wisper config set output_dir <new path>`.
 
 ### Database and backups
