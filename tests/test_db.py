@@ -657,6 +657,16 @@ def test_status_without_db_does_not_create_it(data_dir):
     assert not (data_dir / db.DB_FILENAME).exists()
 
 
+def test_schema_version_reads_without_migrating(monkeypatch, data_dir):
+    assert db.schema_version() == 0
+    assert not (data_dir / db.DB_FILENAME).exists()
+    with monkeypatch.context() as patched:
+        patched.setattr(db, "MIGRATIONS", db.MIGRATIONS[:8])
+        patched.setattr(db, "LATEST_VERSION", 8)
+        db.migrate()
+    assert db.schema_version() == 8
+
+
 def test_cli_db_status_backup_dump(tmp_path, data_dir):
     from wisper_transcribe.cli import main
 

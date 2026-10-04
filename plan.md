@@ -8,7 +8,7 @@ Active plans, open bugs, and parked designs. Shipped work is removed; its design
 
 ### Missing transcript file after a successful Transcribe job
 
-A local-recording transcription once reported COMPLETED ("Wrote `<id>.md`") but the file never existed; root cause unknown. **Detection is in place:** the job fails with "Transcript file missing after write" and logs the transcripts folder, and job history keeps that log across restarts. **Next step:** if it recurs, check `/jobs/history` for the job's log and output root; run with `WISPER_DEBUG=1` to capture more (`LIVE_AUDIO_TEST_PLAN.md` §4a). The recording hand-off no longer copies `combined.wav` into the output dir (it reads it in place), so the job's input is `recordings/<id>/combined.wav` and the output is named by `output_stem`.
+A local-recording transcription once reported COMPLETED ("Wrote `<id>.md`") but the file never existed; root cause unknown. **Detection is in place:** the job fails with "Transcript file missing after write" and logs the transcripts folder, and job history keeps that log across restarts. **Seen again on the Windows data (2026-10-04):** recording `4a4af921` links to a transcript whose `.md` was already missing at the 2026-10-03 import; its `combined.wav` is kept, so it can be re-transcribed. **Next step:** if it recurs, check `/jobs/history` for the job's log and output root; run with `WISPER_DEBUG=1` to capture more (`LIVE_AUDIO_TEST_PLAN.md` §4a). The recording hand-off no longer copies `combined.wav` into the output dir (it reads it in place), so the job's input is `recordings/<id>/combined.wav` and the output is named by `output_stem`.
 
 ### Docker Desktop + native CLI on one data dir can corrupt the DB
 
@@ -28,7 +28,6 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 
 - **Live recording + campaign journal:** `LIVE_AUDIO_TEST_PLAN.md` — real-device capture, live transcript, journal browser flows, bulk delete, busy-queue notice.
 - **Live Discord acceptance test.** The recording pipeline (WAV segments, `__mixed__` combined track, `combined_path` hand-off) is covered by synthesized-PCM tests, but the JDA → socket → Python path needs one real session: record a few minutes with 2+ speakers, play the per-user WAVs before binding any speaker (a bound user's track is deleted when the session ends or on binding), and run Transcribe.
-- **Windows launcher dependency refresh.** `start.bat` reinstalls dependencies when `pyproject.toml` is newer than `.venv\.wisper-deps`. The one-time reinstall after a `git pull` is confirmed on Windows (2026-10-03); still owed: a second launch skips it.
 - **GPU Docker image on an NVIDIA host.** The "Docker Build" workflow is disabled on GitHub, and the GPU image can only be built (not run) without NVIDIA hardware. Confirm a diarized job on the GPU image downloads the alignment model into `./cache/` and logs "Aligned words".
 - **SQLite storage in a browser and on real capture** (automated coverage: `test_e2e.py`, `test_schema.py`). With `WISPER_DATA_DIR` pointing at a copy of real data:
   - Journal: the stale-journal notice (move a folded session to another campaign) on the Campaign and Journal pages; **Rebuild journal** vs **Rebuild from transcripts** confirmations and their call counts; journal **Download** includes `journaled_sessions`.
@@ -49,7 +48,9 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 
 Storage trim shipped on `feat/storage-trim`: file registry (v9/v10), rename-following, Needs attention, FLAC-only upload audio, recording trim, `wisper storage trim`, playback, and Re-transcribe. Its design is in `architecture.md`.
 
-- **Windows rehearsal before the next `start.bat` launch:** run the merged build on the Windows PC against a *copy* of the Windows data dir and output folder (`WISPER_DATA_DIR`, `WISPER_OUTPUT_DIR`, `TEMP`/`TMP` pointed at scratch). Confirm v8 → v10 (`wisper db status`: integrity ok, no drift). Run `wisper storage trim`, then `--apply`; a re-run finds nothing. Expect the Hanataz `.mp4`s to become `<stem>.flac` after their voices are backfilled, the orphan `<recording-id>.wav` hand-off copies to be deleted, and the recordings to be trimmed. Then delete the copy.
+- **Windows PC: run `wisper storage trim --apply` on the real data.** The database is at v10 (upgraded by `start.bat` 2026-10-04, integrity ok). The rehearsal on a copy converted the four Hanataz `.mp4`s to FLAC (23/23 voices backfilled), trimmed recording `4a4af921`, freed 26.0 GB in about 2 minutes, and a re-run found nothing. It differed from the expected result in two places:
+  - `13e7f889-….wav` and `b7de8d0a-….wav` in the output root were kept: their IDs are not recordings in the database, so trim doesn't treat them as hand-off copies. Delete them by hand (6 MB).
+  - Failed recordings `a9d3aaa6` and `ab4bbd96` keep their segments (about 23 MB): they have no `combined.wav`. Recover or delete them from the Recordings page.
 - **Windows-only paths are tested only in CI:** `db.ServerLock`'s `msvcrt` lock, and the `PermissionError`/`_replace` retry when a file is open in Obsidian, Explorer, or a player. Watch the first real use.
 - **Already-compressed audio grows on conversion:** `wisper storage trim` turns an audio-only MP3/M4A/Opus into a 16 kHz mono FLAC, about 3× a 64 kbps MP3 (Brandon chose one uniform format). On the Mac data, `--apply` used 460 MB more.
 - **Store `combined.wav` as FLAC** (about half the size)? It touches the fixed `recordings/<id>/combined.wav` layout and every reader of it.
