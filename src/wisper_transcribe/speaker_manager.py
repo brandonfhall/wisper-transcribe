@@ -325,6 +325,7 @@ def extract_embedding(
 
     See ``_select_embedding_segments()`` for which segments are used.
     Each segment is normalized before averaging so long segments don't dominate.
+    Raises ``ValueError`` when no segment gives a finite embedding.
     """
     from pyannote.core import Segment as PyannoteSegment
 
@@ -340,9 +341,13 @@ def extract_embedding(
     embeddings = []
     for seg in selected:
         excerpt = PyannoteSegment(seg.start, seg.end)
-        emb = inference.crop(audio_dict, excerpt)
-        embeddings.append(_unit(np.asarray(emb, dtype=np.float32).reshape(-1)))
+        emb = np.asarray(inference.crop(audio_dict, excerpt), dtype=np.float32).reshape(-1)
+        # A too-short excerpt can come back as all NaN.
+        if np.isfinite(emb).all():
+            embeddings.append(_unit(emb))
 
+    if not embeddings:
+        raise ValueError(f"No usable voice embedding for {speaker_label}")
     return _unit(np.mean(embeddings, axis=0))
 
 
@@ -564,7 +569,8 @@ def placeholder_name_profiles(profiles: dict[str, SpeakerProfile]) -> list[str]:
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     a_norm = np.linalg.norm(a)
     b_norm = np.linalg.norm(b)
-    if a_norm == 0 or b_norm == 0:
+    # NaN would never fall below the match threshold, so it scores as no match.
+    if not (np.isfinite(a_norm) and np.isfinite(b_norm)) or a_norm == 0 or b_norm == 0:
         return 0.0
     return float(np.dot(a, b) / (a_norm * b_norm))
 

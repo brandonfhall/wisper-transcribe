@@ -1272,6 +1272,15 @@ def status(data_dir: Optional[Path] = None) -> Status:
     return st
 
 
+def schema_version(data_dir: Optional[Path] = None) -> int:
+    """The schema version on disk, 0 when there is no database yet. Never migrates."""
+    path = _data_dir(data_dir) / DB_FILENAME
+    if not path.exists():
+        return 0
+    with closing(_open(path)) as conn:
+        return _user_version(conn)
+
+
 def backup(data_dir: Optional[Path] = None, dest: Optional[Path] = None) -> Path:
     """Consistent copy of ``wisper.db`` via the backup API (safe while running)."""
     data_dir = _data_dir(data_dir)

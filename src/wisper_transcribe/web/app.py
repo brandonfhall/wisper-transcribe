@@ -88,6 +88,40 @@ def _cleanup_recording_trash() -> None:
             log.warning("Could not remove %s: %s", path, exc)
 
 
+def _report_upgrade(before: int) -> None:
+    """Say on the console that startup upgraded the database, and point at
+    ``wisper storage trim`` when an upgrade from before the file registry (v9)
+    left stored audio it would shrink.
+
+    Logged as warnings so they print without debug logging, like the
+    Needs-attention line.
+    """
+    import logging
+
+    from wisper_transcribe import db
+
+    log = logging.getLogger(__name__)
+    backup = None
+    try:
+        with db.connection() as conn:
+            row = conn.execute("SELECT backup_dir FROM migrations WHERE version = ?",
+                               (db.LATEST_VERSION,)).fetchone()
+        backup = row["backup_dir"] if row else None
+    except Exception:
+        log.debug("Could not read the upgrade backup path", exc_info=True)
+    log.warning("Database upgraded from version %d to %d%s", before, db.LATEST_VERSION,
+                f"; previous copy in {backup}" if backup else "")
+    if before >= 9:
+        return
+    try:
+        from wisper_transcribe import storage_trim
+        if storage_trim.plan().actions:
+            log.warning("Stored audio can be shrunk: stop the server and run "
+                        "`wisper storage trim` to review, then `wisper storage trim --apply`")
+    except Exception:
+        log.debug("Could not plan a storage trim", exc_info=True)
+
+
 def _cleanup_orphaned_uploads() -> None:
     """Delete wisper_upload_* folders and files and wisper_enroll_*/wisper_enrollsrc_* files at startup.
 
@@ -165,11 +199,14 @@ def create_app() -> FastAPI:
         # Migrate (or refuse) before serving anything.
         from wisper_transcribe import db
         try:
+            before = db.schema_version()
             db.connect().close()
         except db.DatabaseError as exc:
             import logging
             logging.getLogger(__name__).error("%s", exc)
             raise
+        if 0 < before < db.LATEST_VERSION:
+            _report_upgrade(before)
         heartbeat = db.Heartbeat().start()
 
         # Jobs left pending/running died with the last process.

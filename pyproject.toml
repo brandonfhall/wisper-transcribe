@@ -88,6 +88,8 @@ filterwarnings = [
     "ignore:'audioop' is deprecated:DeprecationWarning",
     # SWIG-generated types (onnxruntime / faster-whisper) have no __module__
     "ignore:builtin type .* has no __module__:DeprecationWarning",
+    # starlette prefers httpx2 for TestClient; httpx still works and is a runtime dep
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
 ]
 
 [tool.coverage.run]

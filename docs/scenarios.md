@@ -124,7 +124,7 @@ The sheet lists rows marked `discriminating` first: those are the words where th
 
 ## Free up disk space used by older transcripts
 
-Older uploads keep the whole original file (often a video), and older recordings keep several copies of their audio.
+Older uploads keep the whole original file (often a video), and older recordings keep several copies of their audio. The server reminds you once, on the start that upgrades the database, when there is something to trim.
 
 1. Stop the web server.
 2. Run `wisper storage trim` and review the list. Nothing is changed.

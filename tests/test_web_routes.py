@@ -3720,6 +3720,58 @@ def test_startup_logs_what_needs_attention(tmp_path, monkeypatch, caplog):
     assert (get_output_dir() / "ghost.summary.md").exists()
 
 
+def _start_after_v8(monkeypatch, caplog, audio_name=None):
+    """Start the app on a v8 database (one transcript, with ``audio_name`` as
+    its audio file if given) and return the startup warnings."""
+    import logging
+    from fastapi.testclient import TestClient
+    from wisper_transcribe import db
+    from wisper_transcribe.path_utils import get_output_dir
+    from wisper_transcribe.web.app import create_app
+
+    with monkeypatch.context() as patched:
+        patched.setattr(db, "MIGRATIONS", db.MIGRATIONS[:8])
+        patched.setattr(db, "LATEST_VERSION", 8)
+        db.migrate()
+        with db.transaction() as conn:
+            conn.execute("INSERT INTO transcripts (stem, created_at, audio_rel_path) "
+                         "VALUES ('s1', 'now', ?)", (audio_name,))
+    (get_output_dir() / "s1.md").write_text("# s1", encoding="utf-8")
+    if audio_name:
+        (get_output_dir() / audio_name).write_bytes(b"not really video")
+    with caplog.at_level(logging.WARNING):
+        with TestClient(create_app()):
+            pass
+    return [r.getMessage() for r in caplog.records]
+
+
+def test_startup_reports_a_database_upgrade_and_suggests_a_trim(monkeypatch, caplog):
+    from wisper_transcribe import db
+
+    messages = _start_after_v8(monkeypatch, caplog, "s1.mp4")
+    (upgraded,) = [m for m in messages if m.startswith("Database upgraded")]
+    assert upgraded.startswith(f"Database upgraded from version 8 to {db.LATEST_VERSION}; "
+                               "previous copy in backups/wisper-v8-")
+    assert any("wisper storage trim" in m for m in messages)
+
+
+def test_startup_upgrade_without_audio_to_trim_has_no_trim_hint(monkeypatch, caplog):
+    messages = _start_after_v8(monkeypatch, caplog)
+    assert any(m.startswith("Database upgraded from version 8") for m in messages)
+    assert not any("wisper storage trim" in m for m in messages)
+
+
+def test_startup_on_a_new_database_reports_no_upgrade(caplog):
+    import logging
+    from fastapi.testclient import TestClient
+    from wisper_transcribe.web.app import create_app
+
+    with caplog.at_level(logging.WARNING):
+        with TestClient(create_app()):
+            pass
+    assert not any("Database upgraded" in r.getMessage() for r in caplog.records)
+
+
 # ---------------------------------------------------------------------------
 # Campaign delete choice
 # ---------------------------------------------------------------------------
