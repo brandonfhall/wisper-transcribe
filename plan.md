@@ -207,7 +207,7 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 | An upload whose name matches a **missing** transcript gets the Overwrite/Cancel prompt, worded as "A transcript with this name is missing (renamed or deleted outside wisper)…". | Overwriting would otherwise replace that session's only audio and speakers silently (Brandon, 2026-10-03). |
 | Campaign **Delete everything**, when a transcript can't be deleted (a locked file): delete the rest, keep going, and list what's left under Needs attention. | Brandon, 2026-10-03. |
 | Unregistered `.flac` (and other pattern) files in the output root are listed under Needs attention **with** a Delete button. `sync` never registers an unregistered `.flac` as a transcript's audio. | It may be the user's own file; Brandon decides (2026-10-03). |
-| Docker: `storage trim --apply` runs in a one-off container with the web service stopped (`docker compose stop wisper-web && docker compose run --rm wisper-cpu wisper storage trim --apply`, or the GPU service). | `--apply` refuses while a server runs (Brandon, 2026-10-03). |
+| Docker: `storage trim --apply` runs in a one-off container with the web service stopped (GPU: `docker compose stop wisper-web && docker compose run --rm wisper storage trim --apply`; CPU: `docker compose stop wisper-cpu-web && docker compose run --rm wisper-cpu storage trim --apply`). | `--apply` refuses while a server runs (Brandon, 2026-10-03). |
 | Re-transcribing a transcript (upload or recording) writes to its **current** name and replaces it in place. Its row, id, campaign place, and recording link are kept, and nothing is written under an old or `<recording-id>` name. | A rename must never produce a duplicate or orphan (Brandon, 2026-10-03). |
 | Registration is central and best-effort. `save_transcript`, `save_summary`, `write_sidecar`, and `transcript_store.register` register their files; a write outside wisper's roots (a CLI `--output`) is simply not tracked, never an error. | One place per kind instead of ~12 call sites, and CLI use outside the roots keeps working. |
 
@@ -321,7 +321,7 @@ END;
      - It uses `INSERT … ON CONFLICT DO NOTHING`, with a `ctx.note` when nothing was inserted (two transcripts pointing at one file: the lower id keeps it).
      - Each insert is wrapped in `try/except sqlite3.IntegrityError` with a `ctx.note`. `ON CONFLICT` doesn't cover CHECK failures, and a name like `C:x.mp4` (legal on macOS and Linux) fails the drive-prefix CHECK; one failure must not abort the migration. A statement-level abort leaves the transaction usable.
    - **In `migrate()`:** run `conn.execute("PRAGMA foreign_keys=OFF")` right after `_open` (650) and before `BEGIN IMMEDIATE` (659); the pragma is a no-op inside a transaction. Keep the final `foreign_key_check`: it's now the only FK enforcement during migrations, which lets later rebuilds (`DROP TABLE` would otherwise cascade-delete children) stay safe. Remove the now-redundant `PRAGMA defer_foreign_keys=ON` (666). Update the module docstring (19–21), `legacy_import.py:4` ("with foreign keys deferred"), and architecture.md's Migrations bullet. Rename `test_deferred_foreign_keys_allow_any_import_order` (`test_db.py:178`) to say foreign keys are off.
-   - **Branch safety:** set `db.SCHEMA_FROZEN = False` (Phase 9 sets it back). Add `db.REQUIRE_OUTPUT_ENV = not SCHEMA_FROZEN`. While it's true, `db.connect()` on its `migrate_schema=True` path (before the version probe, `db.py:~784`, cached per data dir) raises `DevDataDirRefused` when `WISPER_OUTPUT_DIR` is unset **and** that data dir's output root is outside it. **No cache on the decision:** read the environment variable on every call (it's cheap). Cache only the config-derived fact "is the output root inside this data dir", keyed by `(realpath(data_dir), mtime of <data_dir>/config.toml)`. Resolve it from **`connect()`'s `data_dir` argument**, not `config.get_output_root()`, which reads the environment's data dir: load `<data_dir>/config.toml`, resolve a relative `output_dir` against that `data_dir`, and compare `os.path.realpath`s (macOS `/var` vs `/private/var`). That's exactly the copied-`config.toml` hazard.
+   - **Branch safety:** set `db.SCHEMA_FROZEN = False` (Phase 9 sets it back). Add `db.REQUIRE_OUTPUT_ENV = not SCHEMA_FROZEN`. While it's true, `db.connect()` on its `migrate_schema=True` path (before the version probe, `db.py:~784`, cached per data dir) raises `DevDataDirRefused` when `WISPER_OUTPUT_DIR` is unset **and** that data dir's output root is outside it. **No cache on the decision:** read the environment variable on every call (it's cheap). Cache only the config-derived fact "is the output root inside this data dir", keyed by `(realpath(data_dir), st_mtime_ns of <data_dir>/config.toml)`. Resolve it from **`connect()`'s `data_dir` argument**, not `config.get_output_root()`, which reads the environment's data dir. Add a pure helper `config.resolve_output_root(cfg: dict, data_dir: Path, env: Optional[str]) -> Path` holding `get_output_root`'s rules unchanged: the env var `expanduser()`ed as is (never joined to `data_dir`); else the `output_dir` setting `expanduser()`ed, joined to `data_dir` when relative; else `<data_dir>/output`. `get_output_root(config=None)` calls it with `get_data_dir()`, passing its `config` argument (or `load_config()`) as `cfg`, and `{}` when the env var is set, so that path still never reads `config.toml`. The guard reads `<data_dir>/config.toml` with `tomllib` directly (`load_config()` follows the environment's data dir), using `{}` and a `None` cache mtime when the file doesn't exist; a parse error raises `DevDataDirRefused` (fail closed). It calls `resolve_output_root(cfg, data_dir, None)` and compares `os.path.realpath`s (macOS `/var` vs `/private/var`). One helper means the guard and the app can't disagree; `output_dir = "~/Transcripts"` in a copied `config.toml` is exactly the hazard. Test it with `output_dir = "~/elsewhere"` (monkeypatch `HOME` and `USERPROFILE`). A Windows `output_dir = "C:\..."` read on the Mac is relative there and lands inside the copy, which is harmless.
      - The message names both variables: "This is an unmerged development build; set WISPER_DATA_DIR and WISPER_OUTPUT_DIR to copies of your data."
      - It lives in `connect()`, not `migrate()`, so it also fires on a copy that has already migrated. `db status|backup|dump` use `migrate_schema=False` and are unaffected; Docker sets `WISPER_OUTPUT_DIR` (`docker-compose.yml:25`).
    - **`tests/conftest.py`:** leave its `WISPER_OUTPUT_DIR` deletion (`:41`) alone. Add an autouse fixture that monkeypatches `db.REQUIRE_OUTPUT_ENV = False`; the guard's own tests set it to `True`. Also reset `file_registry`'s cached report and throttle (step 3) between tests.
@@ -343,7 +343,7 @@ END;
      - This applies to every kind, including the per-label ones (`excerpt`, `excerpt_text`, `per_user`).
      - Stats the file (`size`/`mtime_ns`; both NULL for a directory, and both NULL without raising when the file doesn't exist, as today's `audio_rel_path` tolerated: tests seed audio paths that don't exist, e.g. `tests/test_transcript_enroll.py:597`).
    - **`add_if_owned(path, *, kind, owner: Optional[Owner], label=None, conn=None, output_dir=None) -> Optional[Path]`:** the best-effort form used at write sites. It returns `None` without raising when `owner` is `None`, the path is outside the kind's root (a CLI `--output` file), or the add fails (`IntegrityError`, e.g. a stem ending `.summary` fails the `transcript` CHECK; `OwnershipConflict`; or any `OSError`). It logs at DEBUG, or WARNING for a failed add. Catching a statement-level `IntegrityError` inside the caller's transaction is safe.
-   - **`forget(path, conn=None)`**, **`forget_kind(owner, kind, label=None, conn=None)`**.
+   - **`forget(path, conn=None)`**, **`forget_kind(owner, kind, label=None, conn=None)`**. Both return the absolute paths of the rows they removed (`list[Path]`), so a caller like `set_audio` can unlink the replaced file after commit.
    - **`files_for(owner, conn=None) -> list[FileRow]`**, **`file_for(owner, kind, label=None, conn=None) -> Optional[FileRow]`**.
    - **`paths_for_delete(owner, conn) -> list[Path]`:** called *inside* the caller's delete transaction, before the owner row is deleted (the cascade removes the rows).
    - **`unlink_paths(paths) -> list[Path]`:** called after commit. Files are unlinked; directories (`per_user`) are removed with `shutil.rmtree`. It catches `OSError` per path and returns the failures; `sync` later lists them as unclaimed.
@@ -400,7 +400,7 @@ END;
    - **`write_sidecar`** calls `set_audio(md_path, <input_path if inside the .md's folder and not under <data>/recordings/, else None>, output_dir=md_path.parent)` after its transaction. That's today's behaviour (`db.to_rel(input_path, md_path.parent)`): an absent or outside path clears the audio and deletes the replaced file. `set_audio` raises `ValueError` for a path under `<data>/recordings/`; `write_sidecar` never passes one.
    - **`read_sidecar`:**
      - the early return at 600 tests "no speaker rows and no `audio` row";
-     - `input_path` (613–616) comes from `audio_path(md_path)`, computed right after the row lookup, before both early returns.
+     - `input_path` (613–616) comes from `audio_path(md_path, conn=conn)` (its open connection; a nested `connect()` can refresh the lease), computed right after the row lookup, before both early returns. It overrides the legacy fallback's own `input_path` (597, 600–601) only when `audio_path()` returns a path.
    - **`_companion_paths(md_path, output_dir, conn=None)`** returns the union of:
      - the transcript's registry rows (except the `transcript` row);
      - the pattern-derived paths it builds today (summary, sidecar, `glob.escape`d excerpts);
@@ -557,14 +557,15 @@ END;
    - **Exactly one candidate:**
      - `UPDATE transcripts SET stem = ?, missing_since = NULL`;
      - `repoint` its `transcript` row (same transaction);
-     - count it as `renamed`;
+     - count it as `renamed`, and force the post-commit `sync` past the 30 s throttle so Needs attention doesn't keep old-stem paths;
+     - an `IntegrityError` or `OwnershipConflict` from `repoint` is caught (as `add_if_owned` does) and the file falls through to `ensure_row`, so one bad row never rolls back the whole reconcile;
+     - remove the old stem from reconcile's `rows` snapshot and `missing_by_fold`, and from the candidate pool, exactly as the case-only branch does with `rows.pop(twin["stem"], None)` (442). Otherwise the final loop (450–453) sets `missing_since` on the transcript it just renamed, and a second file could claim the same row;
      - queue `rename_companions(id, old_stem, new_stem)` for after the commit.
 
      Its search index stays valid: the content is unchanged.
    - **Zero or several:** fall through to `ensure_row` as today. The missing row stays missing, for Brandon to relink.
    - The existing case-only rename branch (437–443) also queues `rename_companions`.
-   - `sync()` runs after `reconcile`'s transaction (Phase 1, step 3), so it never refreshes a fingerprint away before the match.
-   - Run the queued `rename_companions` calls **before** `reconcile`'s `check_freshness` (`transcript_store.py:474–478`), so the moved summary isn't seen as deleted and reindexed without it.
+   - **Order after the transaction commits:** the queued `rename_companions` calls, then `sync()` (Phase 1, step 3), then `check_freshness` (`transcript_store.py:474–478`). `sync` after the match means it never refreshes a fingerprint away first; `sync` after the moves means old-stem files aren't cached as unclaimed; moves before `check_freshness` mean a moved summary isn't seen as deleted and reindexed without it. The case-only branch also drops its twin from the auto-match candidate pool.
    - The first start after the upgrade has no `transcript` rows yet (`sync` creates them after this match), so a rename made before that first start can't be matched automatically; it's listed for relink. That's accepted.
 4. **The sweep never deletes a companion.** Remove the companion branch's `entry.unlink()` (465–471), keeping the deletion of stale atomic-write temp files. Change `delete_transcript`'s docstring: crash leftovers are listed under Needs attention.
 5. **`transcript_store.needs_attention(output_dir=None, data_dir=None) -> Attention`**, a dataclass with three lists:
@@ -572,7 +573,7 @@ END;
    - `missing_files`: `file_registry.last_report().missing` (registered companions, clips, or journals whose file is gone);
    - `unclaimed`: `file_registry.last_report().unclaimed` (pattern files with no owner).
 
-   `needs_attention(..., read_only: bool = False)`: if no report exists yet for this `(data_dir, output_dir)`, it runs `file_registry.sync()` first, unless `read_only` is set (Phase 6's dry run), in which case those two lists are empty and the result says so.
+   If no report exists yet for this `(data_dir, output_dir)`, `needs_attention` runs `file_registry.sync()` first. It reads the report via `last_report(data_dir, output_dir)` for those dirs. Phase 6's read-only dry run doesn't call `needs_attention`; it builds the same lists from `sync(scan_only=True)` and the `missing_since` query.
 6. **Transcripts page "Needs attention" panel**, shown only when any list is non-empty. It needs its own query, since the page's list comes from `glob("*.md")`.
    - **Missing transcripts:**
      - a Relink dropdown (`relink_candidates()`) posting to `POST /transcripts/relink`. It copies the campaigns relink route's guards (`_get_safe_content_path` on both names), and errors show as `?error=relink_failed` on the Transcripts page;
@@ -613,7 +614,7 @@ END;
 - **Unregistered companion** (written with `write_text`): it's registered and renamed too.
 - **Automatic match:**
   - register the `.md`, then rename it on disk (`os.replace` keeps the mtime);
-  - `reconcile()` renames the transcript (`counts["renamed"] == 1`), keeps its campaign position and speakers, and moves the companions and their rows.
+  - `reconcile()` renames the transcript (`counts["renamed"] == 1`), leaves its `missing_since` NULL, keeps its campaign position and speakers, and moves the companions and their rows.
 - **Ambiguous match:** two missing rows with the same size and mtime, or two new files with the same stat, mean no automatic rename.
 - **Case-only rename on a case-insensitive filesystem** (patch `_is_case_insensitive` to True): companions follow, with no conflicts.
 - **Windows lock:** `os.replace` raising `PermissionError` during `rename_companions` returns a conflict and leaves the row on the old name.
@@ -745,7 +746,7 @@ END;
    - When the input's name starts with `wisper_upload_` **and the file exists** (`tests/test_job_history.py:185` submits a nonexistent one; it gets no folder and no `upload_dir`):
      - create `Path(input_path).parent / f"wisper_upload_{job_id}"`;
      - if the file exists, move it to `<that dir>/<original_stem><suffix>`. If that move fails (`OSError`, e.g. a Windows-reserved name like `CON`), move it to `<that dir>/upload<suffix>` instead; `output_stem` still names the transcript;
-     - record `Job.upload_dir` (new field, default `""`). `upload_dir` and `needs_extraction_flag` are in-memory only, like `is_web_upload`; `job_history`'s allowlist keeps them out of `params_json`.
+     - set `job.input_path` to the moved file, and record `Job.upload_dir` (new field, default `""`). `upload_dir` and `needs_extraction_flag` are in-memory only, like `is_web_upload`; `job_history`'s allowlist keeps them out of `params_json`.
    - `submit()` rejects an `original_stem` containing `/` or `\` (use its basename). On POSIX, `Path(file.filename).stem` can contain `\`, which would reach `out_dir / (stem + ".md")` and fail the stem CHECK.
    - `source_name` is a submit kwarg, forwarded to `process_file` (step 5). The upload route passes `source_name=os.path.basename(file.filename or "")`, falling back to `original_stem + suffix` when that's empty.
    - **Delete the unconditional rename at `jobs.py:579–584`.** Non-upload inputs are never moved or renamed; the recording hand-off depends on this (step 9).
@@ -756,9 +757,9 @@ END;
      - The existing inner `finally: pbar.close()` can itself raise `InterruptedError` on cancel, so the kill must not depend on it.
      - The `FileNotFoundError` branch also deletes the output file.
 4. **Extract, then delete the upload.** In `_run_transcription_job`, inside the `try` after the tqdm patch is installed, before `process_file`, when `job.is_web_upload and job.upload_dir`:
-   - `wav = convert_to_wav(Path(job.input_path), out_path=Path(job.upload_dir) / "audio.wav")` (a fixed name, so user-filename characters never reach this path).
+   - `wav = convert_to_wav(Path(job.input_path), out_path=Path(job.upload_dir) / "extracted" / "audio.wav")`. The fixed name keeps user-filename characters out of this path, and the `extracted/` subfolder means it can never equal the moved upload (an upload named `audio.wav` or `Audio.WAV` that isn't 16 kHz mono would otherwise make ffmpeg read and write one file). Test: an `audio.wav` upload at 44.1 kHz stereo extracts and transcribes.
    - If `wav != Path(job.input_path)`: unlink the upload and log `job.append_log("Extracted audio; deleted the uploaded file")`.
-   - Set `job.input_path = str(wav)`.
+   - Set `job.input_path = str(wav)`. (Step 2 already set `input_path` to the moved upload.)
    - A web-upload job with an empty `upload_dir` (tests that build `Job` directly) skips extraction and cleanup.
 5. **`process_file(..., output_stem: Optional[str] = None, source_name: Optional[str] = None)`.**
    - The `.md` is `out_dir / ((output_stem or path.stem) + ".md")`.
@@ -769,12 +770,13 @@ END;
 6. **Post-pipeline order.** This replaces `jobs.py:1157–1172`; delete `_move_upload_to_output`.
    1. `_extract_speaker_excerpts(...)`, reading `job.input_path`: the WAV, or a recording's `combined.wav`.
    2. **Only when `job.upload_dir` is non-empty** (an extracted upload). Steps 6.2–6.5 key on `upload_dir`, not `is_web_upload`: existing tests build `Job(is_web_upload=True, …)` directly with no extraction (`tests/test_web_jobs.py:598–823`). Target `<output_dir>/<stem>.flac`.
-      - If that file exists and isn't this transcript's registered `audio` file, and `job.kwargs.get("overwrite")` isn't true: log "Kept no audio: <name> already exists and belongs to something else", and set `job.input_path = ""`. The pre-upload prompt makes this rare.
-      - A `<stem>.flac` registered to a **different** transcript is never overwritten, even with `overwrite=True`: keep no audio and log it. Overwrite only replaces this transcript's own file, or an unregistered one.
+      - If that file exists and isn't this transcript's registered `audio` file, and `job.kwargs.get("overwrite")` isn't true: no new audio is kept ("Kept no new audio: <name> already exists and belongs to something else"). The pre-upload prompt makes this rare.
+      - A `<stem>.flac` registered to a **different** transcript is never overwritten, even with `overwrite=True`: no new audio is kept, and it's logged. Overwrite only replaces this transcript's own file, or an unregistered one.
       - Otherwise `encode_flac(wav, target)` and set `job.input_path = str(target)`.
-      - On encode failure: log a warning, set `job.input_path = ""`, and let the job complete.
+      - On encode failure: log a warning, no new audio is kept, and the job completes.
+      - **"No new audio" never deletes the old audio.** Set `job.input_path` to the transcript's existing registered `audio` file if the transcript already exists and that file exists (`file_registry.file_for(owner, "audio")`, resolved with `output_dir=md_path.parent`, where `owner = Owner.for_stem(stem)`; a `None` owner means no previous audio), and log "Kept the previous audio"; else `""`. Steps 6.3 and 6.4 then re-register that same file, so `set_audio` replaces nothing. Without this, an Overwrite whose encode fails (on Windows, the player streaming `<stem>.flac` is enough to make `os.replace` fail) would delete the transcript's only audio. Tests: Overwrite with `encode_flac` raising keeps the old FLAC and its row, both with and without diarization; and a transcript whose `audio` row is a legacy `<stem>.mp4`, rerun without diarization and with Overwrite while `encode_flac` raises, keeps the `.mp4` and its row. `_write_enrollment_sidecar` (`jobs.py:160–195`) swallows exceptions, so make it return `True` only after `write_sidecar` succeeds (`False` on an early return or a swallowed exception). When `job.diarization_segments and job.upload_dir and job.input_path` and it returned `False`, call `set_audio(md_path, Path(job.input_path))` in its own try/except, so a new FLAC is never left unregistered. Test: `write_sidecar` raising after a successful encode still leaves the FLAC as the `audio` row. Step 6.1 stays first, so excerpts always cut from the WAV.
    3. `_write_enrollment_sidecar(...)`, which includes `"input_path"` only when `job.input_path` is non-empty **and `job.recording_id` is not set**. A recording's audio is found through `audio_path()` and must never become a transcript's `audio` row. With diarization, `write_sidecar` calls `set_audio` with `<stem>.flac`, which deletes a re-run's previous audio (e.g. an old `<stem>.mp4`).
-   4. When `not job.diarization_segments` (the exact condition: no sidecar was written; `kwargs["no_diarize"]` is not enough, since diarization is also skipped without an HF token) and `job.upload_dir` is non-empty: `transcript_store.set_audio(md_path, <the FLAC path> if job.input_path else None)`, wrapped in `try/except` (log a warning; the transcript is already written).
+   4. When `not job.diarization_segments` (the exact condition: no sidecar was written; `kwargs["no_diarize"]` is not enough, since diarization is also skipped without an HF token) and `job.upload_dir` is non-empty: `transcript_store.set_audio(md_path, Path(job.input_path) if job.input_path else None)` (whatever 6.2 left in `job.input_path`: the new FLAC, or the kept previous audio such as a legacy `<stem>.mp4`; never assume `<stem>.flac`), wrapped in `try/except` (log a warning; the transcript is already written).
    5. If `job.upload_dir` is non-empty and its basename starts with `wisper_upload_`: `shutil.rmtree(job.upload_dir, ignore_errors=True)`. Then `job.is_web_upload = False`.
 7. **Failure and cancel.**
    - `_delete_temp_upload(job)` removes `job.upload_dir` under the same guard (rmtree, ignore errors) and leaves every other path alone. A FLAC is written only after the pipeline succeeds, so a failed job leaves nothing in the output dir.
@@ -815,7 +817,7 @@ END;
      - afterwards the output dir holds `<stem>.md`, `<stem>.flac`, and the excerpts/sidecar; the `audio` row is `<stem>.flac`; `upload_dir` is gone; the frontmatter `source_file` is the original filename.
   2. No diarization: `<stem>.flac` is kept, and the `audio` row is `<stem>.flac` (through `set_audio`), and the folder is gone.
   3. `encode_flac` raises: the job completes, there's no `audio` row, the warning is in the job log, and the folder is gone.
-  4. A foreign `<stem>.flac` already exists, without overwrite: it's untouched, there's no `audio` row, and the job log says why. With overwrite, it's replaced.
+  4. An unregistered `<stem>.flac` already exists, without overwrite: it's untouched, there's no `audio` row, and the job log says why. With overwrite, it's replaced. A `<stem>.flac` registered to a different transcript stays untouched even with overwrite.
   5. `process_file` raises: the folder is gone, and there's no FLAC in the output dir.
   6. Cancel while running: patch `convert_to_wav` to set `job._cancel_event` and call `tqdm.write`. The folder is gone.
   7. Cancel while pending: the folder is gone.
@@ -869,6 +871,7 @@ END;
 
 **Done when:**
 - The listed tests pass, plus `pytest tests/test_web_jobs.py tests/test_record_routes.py tests/test_web_routes.py tests/test_transcript_store.py tests/test_pipeline.py tests/test_audio_utils.py tests/test_job_history.py tests/test_e2e.py`.
+- `tests/test_audio_utils.py` and `tests/test_web_jobs.py` are added to CI's `windows storage` list (`.github/workflows/ci.yml`).
 - The stale grep is clean, and so is the scar-tissue check.
 
 ---
@@ -891,15 +894,18 @@ END;
 **Steps:**
 1. Add `recording_manager.trim_recording_audio(recording_id: str, data_dir=None) -> int` (bytes freed). It returns 0 and changes nothing unless `combined.wav` is **complete**:
    - `combined.wav` opens with `wave` and has more than 0 frames (a `b"fake"` file or an empty one returns 0 without raising);
-   - its frame count equals the sum of `getnframes()` over the readable, non-empty `combined/*.wav` files, which is exactly what `concat_wav_segments` joined;
-   - there are no fewer readable segment files than `recording_segments` rows. "Readable" means `wave.open` succeeds and `getnframes() > 0`, the same test `concat_wav_segments` applies. A last segment that never got a row only adds frames to both sides.
+   - **only while `combined/` still exists:** its frame count equals the sum of `getnframes()` over the readable, non-empty `combined/*.wav` files, which is exactly what `concat_wav_segments` joined;
+   - **only while `combined/` still exists:** there are no fewer readable segment files than `recording_segments` rows. "Readable" means `wave.open` succeeds and `getnframes() > 0`, the same test `concat_wav_segments` applies. A last segment that never got a row only adds frames to both sides.
 
    Don't use `duration_s`: it's wall-clock time.
+
+   When `combined/` is gone, an earlier trim already verified `combined.wav`, so only the first check applies. That's what lets the `_run_recording_enroll` call (step 2) delete a Discord speaker's `per-user/<uid>/` after the user is bound later; with the segment checks applied, the sum would be 0 and nothing would ever be deleted.
 
    Then:
    - delete `combined/` (segments aren't registry rows);
    - read `recordings.source` from the DB. `local` deletes `per-user/`. `discord` deletes `per-user/<uid>/` for each uid with a non-NULL `recording_speakers.profile_id`, and keeps unbound uids;
-   - rename each directory it deletes to `.wisper-trash-<n>` inside `recordings/<id>/` (outside any transaction, with `_replace`'s Windows retry), then forget their `per_user` rows in one short transaction, then `rmtree` the trash after commit. A long delete never holds the write lock (capture uses a 500 ms busy timeout). The startup sweep also removes leftover `recordings/*/.wisper-trash-*` directories after a crash;
+   - rename each directory it deletes to `.wisper-trash-<n>` inside `recordings/<id>/` (outside any transaction, with `_replace`'s Windows retry), then forget their `per_user` rows in one short transaction, then `rmtree` the trash after commit. A long delete never holds the write lock (capture uses a 500 ms busy timeout). A new `app._cleanup_recording_trash()`, called next to `_cleanup_orphaned_uploads()` at startup, removes leftover `get_data_dir()/recordings/*/.wisper-trash-*` directories after a crash (`_cleanup_orphaned_uploads` only sweeps the temp dir);
+   - a directory whose rename fails (`_replace` returns `False`) is skipped and its row kept; `per_user` rows whose directory is already gone (a crash between rename and forget) are forgotten in the same transaction;
    - guard every path with `os.path.abspath(...).startswith(<recordings/<id>/> + os.sep)`.
 2. **Call sites.** Log failures; never fail the caller.
    - local finalise, after `combined.wav` is written;
@@ -923,6 +929,8 @@ END;
   - A Discord recording keeps an unbound uid and loses a bound one.
   - Bytes freed are reported, and the deleted directories' `per_user` rows are gone.
   - `recover_recording` trims after rebuilding.
+  - **Bind after trim** (`seed_recording` only creates `combined.wav`, so the test builds the `per-user/<uid>/` dirs, their `per_user` rows via `seed_file`, and the `recording_speakers` rows itself): trim a Discord recording, then bind a kept uid and trim again; that uid's `per-user/<uid>/` and its `per_user` row go, and other unbound uids stay.
+- **`tests/test_web_routes.py`** (next to `test_cleanup_orphaned_uploads_removes_all_prefixes`, ~1208): a `.wisper-trash-0` dir inside `recordings/<id>/` is removed by `_cleanup_recording_trash()`, and nothing else in that folder is touched.
 - **`tests/test_local_capture.py`, `tests/test_discord_bot.py`:** finalise calls trim (mocked; the Discord one through `asyncio.to_thread`).
 - **`tests/test_record_routes.py`:**
   - a trimmed recording's page renders;
@@ -934,6 +942,7 @@ END;
   - the recordings tree: `combined/` and local `per-user/` exist only until `combined.wav` is verified complete;
   - the recording layer.
 - `recording_manager.py` module docstring layout.
+- `CLAUDE.md`'s "Startup cleanup" bullet (as Phase 4 rewrote it): add that `_cleanup_recording_trash()` removes `recordings/*/.wisper-trash-*` left by an interrupted trim.
 - `docs/configuration.md`: the `recordings/` line.
 - `docs/web-ui.md`: the recordings page.
 - `LIVE_AUDIO_TEST_PLAN.md`: grep for `per-user` and `combined/`; reword any step that expects those files after stop.
@@ -964,7 +973,7 @@ END;
    1. **Reconcile** (in `apply()` only): `reconcile(output_dir, sweep=True)`, so renames are matched first; then recompute the plan and put `needs_attention()` in the report.
    2. **Transcripts with an existing `audio` row file.** Read the registry row directly (`file_registry.file_for(transcript, "audio")`), never `audio_path()`, which would return a recording's `combined.wav`.
       - Labels come from `transcript_speakers`, else from the `_diar.json` segments.
-      - When labels lack a current-`EMBEDDING_SPACE` embedding and segments exist: backfill with `_backfill_embeddings(diar, segments, device)` (it returns every label; `storage_trim` keeps only the labels that lacked a current-space embedding), building `diar` and segments as `relabel_campaign` does. **Set `diar["input_path"]` to this `audio` row's file**, because `read_sidecar` may resolve a recording to `combined.wav` instead. Store **only the missing labels** with `set_speaker_embeddings`. This runs first, while the original audio still exists.
+      - When labels lack a current-`EMBEDDING_SPACE` embedding and segments exist: backfill with `_backfill_embeddings(diar, segments, device)` (it returns a dict of the labels whose extraction succeeded, or `None` when the audio is missing or every extraction fails; wrap the backfill per transcript in `try/except Exception` (`convert_to_wav` raises on a corrupt file); on `None` or an exception, report the transcript under errors and still continue to the audio step; `storage_trim` keeps only the labels that lacked a current-space embedding), building `diar` and segments as `relabel_campaign` does. **Set `diar["input_path"]` to this `audio` row's file**, because `read_sidecar` may resolve a recording to `combined.wav` instead. Store **only the missing labels** with `set_speaker_embeddings`. This runs first, while the original audio still exists.
       - Then shrink the audio to the form new jobs keep:
         - **Recording-linked transcript whose `combined.wav` exists:** `set_audio(md_path, None)`. The file is the old hand-off copy.
         - **Already `<stem>.flac` at 16 kHz mono:** leave it. If probing fails (`ffprobe` missing or erroring), convert rather than abort; setup checks only `ffmpeg`. Check with a new `audio_utils.probe_format(path) -> tuple[int, int]` (sample rate, channels), using `ffprobe`, which tests patch. `soundfile` isn't a dependency. A `.flac` at any other rate or channel count is converted like the rest (Brandon, 2026-10-03).
@@ -979,7 +988,7 @@ END;
    - **`--apply`:**
      - **refuses while a server is running** (Brandon, 2026-10-03), through an **OS file lock**, not the runtime lease. The lease table has one row per runtime, which any CLI `connect()` overwrites and never releases, so a dry run followed by `--apply` would be refused.
        - Add `db.ServerLock(data_dir)`: an exclusive non-blocking lock on `<data>/server.lock` (`msvcrt.locking` on Windows, `fcntl.flock` elsewhere), released when the process exits.
-       - The `wisper server` CLI command (`cli.py:~185–223`, next to its `db.connect().close()`) takes it **before `uvicorn.run`**, in the parent process, and holds it for its lifetime. A dead `--reload` worker's lock can release late on Windows, so the parent holds it, never the workers.
+       - The `wisper server` CLI command (`cli.py:~185–223`) takes it **before** its `db.connect().close()` (`cli.py:210`), so a server started mid-trim refuses before it migrates, creating the data dir first since `server.lock` lives there. It holds it through `uvicorn.run`, in the parent process, and holds it for its lifetime. A dead `--reload` worker's lock can release late on Windows, so the parent holds it, never the workers.
        - **Mechanics:** open with `os.open(path, os.O_RDWR | os.O_CREAT)` (never `'w'`, which truncates, or `'a+'`) and keep the handle referenced for the process's life (garbage collection would release it).
          - On Windows: `os.lseek(fd, 0, 0)` before locking and unlocking, then `msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)`. Never read or write the locked byte: Windows locks are mandatory.
          - On macOS/Linux: `fcntl.flock(fd, LOCK_EX | LOCK_NB)`, never `fcntl.lockf`, whose POSIX record locks don't conflict within one process (the in-process tests would falsely pass).
@@ -988,7 +997,9 @@ END;
        - **Host/container case:** mirror `_refresh_lease`. When `--apply` runs in a container, read `db.status().leases` (read-only; never creates `wisper.db`) and refuse only on a fresh lease from the *other* runtime when the container crosses the Docker Desktop VM. On the host, `_refresh_lease` already raises `RuntimeConflict` in that case. A recent lease from *this* runtime (an earlier CLI command) never blocks: CLI connections don't release their lease.
        - Never probe liveness with `os.kill(pid, 0)`: on Windows it terminates the process.
      - Then open normally (`db.connect()`), and wrap the run in `with db.Heartbeat(...)`.
-   - **Docker:** stop whichever web service is running (`wisper-web` or `wisper-cpu-web`), then run a one-off container: `docker compose stop wisper-web && docker compose run --rm wisper-cpu wisper storage trim --apply` (or the GPU service `wisper`; Brandon, 2026-10-03).
+   - **Docker:** stop whichever web service is running (`wisper-web` or `wisper-cpu-web`), then run the matching one-off container (Brandon, 2026-10-03):
+     - GPU: `docker compose stop wisper-web && docker compose run --rm wisper storage trim --apply`;
+     - CPU: `docker compose stop wisper-cpu-web && docker compose run --rm wisper-cpu storage trim --apply`. The image's `ENTRYPOINT` is `wisper` (`Dockerfile:76`, `:94`), so the command never repeats it. When adding this to `docs/docker.md`, also fix its existing commands that repeat it (`:59`, `:62`, `:77`). Also fix the same doubled `wisper wisper` in the `docker-compose.yml` comments (`:37`, `:56`). Leave `docker compose run wisper nvidia-smi` (`:86`) and the Makefile's `bash` targets (`:49`, `:52`) alone; they're outside this work.
    - A second run finds nothing to do, apart from Needs-attention items Brandon hasn't resolved.
 
 **Tests** (`tests/test_storage_trim.py`, plus a `CliRunner` test in `tests/test_cli.py`; mock `wisper_transcribe.audio_utils.encode_flac` to create `dst`):
@@ -1033,6 +1044,7 @@ Then `--apply`, and a re-run is empty.
 
 **Done when:**
 - The listed tests pass, plus `pytest tests/test_storage_trim.py tests/test_transcript_store.py tests/test_cli.py`.
+- `tests/test_storage_trim.py` is added to CI's `windows storage` list (`.github/workflows/ci.yml`).
 - The manual check is done and docs are clean.
 
 ---
@@ -1188,7 +1200,7 @@ Every transcript with audio gets the player: uploads (`<stem>.flac`) and recordi
    - With the server stopped, run `wisper storage trim`, then `--apply`; a re-run is empty.
    - Walk step 9's checks there.
    - Repeat the migration on a second copy under Docker (`wisper-cpu-web`, compose override mounting `data`, `output`, and `recordings`).
-4. **CI:** `tests/test_file_registry.py` and `tests/test_storage_trim.py` are in the `windows storage` job's list (`.github/workflows/ci.yml:65`), and that job passes on the PR.
+4. **CI:** `tests/test_file_registry.py`, `tests/test_storage_trim.py`, `tests/test_audio_utils.py` and `tests/test_web_jobs.py` are in the `windows storage` job's list (`.github/workflows/ci.yml:65`), and that job passes on the PR.
 5. **Docs vs code.** For each statement below, find where the docs say it and confirm the code does it:
    - every file wisper owns is a `files` row: registered at write, moved and deleted through the registry, and `sync` never deletes;
    - renames keep a transcript's files, and Needs attention lists what reconcile couldn't match;
