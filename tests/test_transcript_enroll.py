@@ -859,7 +859,7 @@ def test_transcript_detail_shows_notice_banner(client: TestClient, tmp_path: Pat
         resp = client.get("/transcripts/session01?notice=enroll_audio_missing")
     assert resp.status_code == 200
     body = resp.content.decode()
-    assert "voice enrollment was skipped" in body.lower()
+    assert "no saved voice data" in body.lower()
 
 
 def test_transcript_detail_no_banner_without_notice(client: TestClient, tmp_path: Path):
@@ -868,7 +868,7 @@ def test_transcript_detail_no_banner_without_notice(client: TestClient, tmp_path
         resp = client.get("/transcripts/session01")
     assert resp.status_code == 200
     body = resp.content.decode()
-    assert "voice enrollment was skipped" not in body.lower()
+    assert "no saved voice data" not in body.lower()
 
 
 def test_enroll_form_shows_audio_missing_banner(client: TestClient, tmp_path: Path):
@@ -881,7 +881,7 @@ def test_enroll_form_shows_audio_missing_banner(client: TestClient, tmp_path: Pa
         resp = client.get("/transcripts/session01/enroll")
     assert resp.status_code == 200
     body = resp.content.decode()
-    assert "voice enrollment unavailable" in body.lower()
+    assert "no saved voice data" in body.lower()
 
 
 def test_enroll_form_no_banner_when_audio_present(client: TestClient, tmp_path: Path):
@@ -894,7 +894,7 @@ def test_enroll_form_no_banner_when_audio_present(client: TestClient, tmp_path: 
         resp = client.get("/transcripts/session01/enroll")
     assert resp.status_code == 200
     body = resp.content.decode()
-    assert "voice enrollment unavailable" not in body.lower()
+    assert "no saved voice data" not in body.lower()
 
 
 def test_enroll_submit_404_when_no_sidecar(client: TestClient, tmp_path: Path):
@@ -1638,3 +1638,254 @@ def test_job_detail_completed_enroll_shows_transcript_link_not_name_speakers(
     body = resp.content.decode()
     assert "View transcript" in body
     assert "Name speakers" not in body
+
+
+# ---------------------------------------------------------------------------
+# Enrollment from stored embeddings
+# ---------------------------------------------------------------------------
+
+def _unit(*xs: float):
+    import numpy as np
+    v = np.array(xs, dtype=np.float32)
+    return v / np.linalg.norm(v)
+
+
+def _stored_diar(tmp_path: Path, vectors: dict, *, audio: bool = False,
+                 space: str | None = None) -> dict:
+    from wisper_transcribe.config import EMBEDDING_SPACE
+
+    audio_path = tmp_path / "audio" / "session01.mp3"
+    if audio:
+        audio_path.parent.mkdir()
+        audio_path.write_bytes(b"fake")
+    return {
+        "input_path": str(audio_path),
+        "diarization_segments": [
+            {"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"},
+            {"start": 12.0, "end": 18.0, "speaker": "SPEAKER_01"},
+            {"start": 20.0, "end": 25.0, "speaker": "SPEAKER_02"},
+        ],
+        "speaker_map": {},
+        "speaker_embeddings": {k: [float(x) for x in v] for k, v in vectors.items()},
+        "embedding_space": space or EMBEDDING_SPACE,
+    }
+
+
+def _segments(diar: dict):
+    from wisper_transcribe.models import DiarizationSegment
+    return [DiarizationSegment(**s) for s in diar["diarization_segments"]]
+
+
+def _boom(*a, **k):
+    raise AssertionError("audio must not be read")
+
+
+def test_enrollable_labels_split(tmp_path: Path):
+    from wisper_transcribe.web.enroll_shared import (
+        audio_available, enrollable_labels, stored_embeddings,
+    )
+
+    diar = _stored_diar(tmp_path, {"SPEAKER_00": _unit(1, 0, 0)})
+    assert set(stored_embeddings(diar)) == {"SPEAKER_00"}
+    assert stored_embeddings(None) == {}
+    assert not audio_available(diar)
+    assert not audio_available({**diar, "input_path": ""})
+    assert not audio_available(None)
+    assert enrollable_labels(diar, ["SPEAKER_00", "SPEAKER_01"]) == (["SPEAKER_00"], ["SPEAKER_01"])
+    assert enrollable_labels(None, ["SPEAKER_00"]) == ([], ["SPEAKER_00"])
+    with_audio = _stored_diar(tmp_path, {}, audio=True)
+    assert audio_available(with_audio)
+    assert enrollable_labels(with_audio, ["SPEAKER_00"]) == (["SPEAKER_00"], [])
+
+
+def test_enroll_profiles_from_stored_embeddings_without_audio(tmp_path: Path):
+    import numpy as np
+    from wisper_transcribe.speaker_manager import load_profiles
+    from wisper_transcribe.web.enroll_shared import enroll_profiles, stored_embeddings
+
+    diar = _stored_diar(tmp_path, {"SPEAKER_00": _unit(1, 0, 0)})
+    with patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=_boom), \
+         patch("wisper_transcribe.speaker_manager.extract_embedding", side_effect=_boom):
+        skipped = enroll_profiles(
+            input_path=None, segments=_segments(diar),
+            groups={"Alice": ["SPEAKER_00"]}, campaign_slug=None, device="cpu",
+            stored=stored_embeddings(diar),
+        )
+
+    assert skipped == []
+    assert np.allclose(load_profiles()["alice"].embedding, _unit(1, 0, 0), atol=1e-5)
+
+
+def test_enroll_profiles_two_stored_labels_average(tmp_path: Path):
+    import numpy as np
+    from wisper_transcribe.speaker_manager import load_profiles
+    from wisper_transcribe.web.enroll_shared import enroll_profiles
+
+    a, b = _unit(1, 0, 0), _unit(0, 1, 0)
+    diar = _stored_diar(tmp_path, {"SPEAKER_00": a, "SPEAKER_01": b})
+    with patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=_boom), \
+         patch("wisper_transcribe.speaker_manager.extract_embedding", side_effect=_boom):
+        enroll_profiles(
+            input_path=None, segments=_segments(diar),
+            groups={"Alice": ["SPEAKER_00", "SPEAKER_01"]}, campaign_slug=None, device="cpu",
+            stored={"SPEAKER_00": a, "SPEAKER_01": b},
+        )
+
+    mean = (a + b) / np.linalg.norm(a + b)
+    assert np.allclose(load_profiles()["alice"].embedding, mean, atol=1e-5)
+
+
+def test_enroll_profiles_existing_profile_gets_stored_vector(tmp_path: Path):
+    import numpy as np
+    from wisper_transcribe.models import SpeakerProfile
+    from wisper_transcribe.web.enroll_shared import enroll_profiles
+
+    vec = _unit(0, 0, 1)
+    diar = _stored_diar(tmp_path, {"SPEAKER_00": vec})
+    existing = SpeakerProfile(name="alice", display_name="Alice", role="", embedding=None,
+                              enrolled_date="2026-01-01", enrollment_source="old.mp3")
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={"alice": existing}), \
+         patch("wisper_transcribe.speaker_manager.update_embedding") as mock_update, \
+         patch("wisper_transcribe.speaker_manager.extract_embedding", side_effect=_boom):
+        enroll_profiles(
+            input_path=None, segments=_segments(diar),
+            groups={"Alice": ["SPEAKER_00"]}, campaign_slug=None, device="cpu",
+            stored={"SPEAKER_00": vec},
+        )
+
+    mock_update.assert_called_once()
+    assert np.allclose(mock_update.call_args.args[1], vec)
+
+
+def test_enroll_profiles_partial_skips_group_without_data(tmp_path: Path):
+    from wisper_transcribe.speaker_manager import load_profiles
+    from wisper_transcribe.web.enroll_shared import enroll_profiles
+
+    diar = _stored_diar(tmp_path, {"SPEAKER_00": _unit(1, 0, 0)})
+    messages: list[str] = []
+    with patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=_boom):
+        skipped = enroll_profiles(
+            input_path=None, segments=_segments(diar),
+            groups={"Alice": ["SPEAKER_00"], "Brad": ["SPEAKER_01"]},
+            campaign_slug=None, device="cpu",
+            stored={"SPEAKER_00": _unit(1, 0, 0)}, progress=messages.append,
+        )
+
+    assert skipped == ["Brad"]
+    profiles = load_profiles()
+    assert "alice" in profiles and "brad" not in profiles
+    assert any("Skipped Brad" in m for m in messages)
+
+
+def test_enroll_profiles_mixed_extracts_only_missing_label(tmp_path: Path):
+    import numpy as np
+    from wisper_transcribe.speaker_manager import load_profiles
+    from wisper_transcribe.web.enroll_shared import enroll_profiles
+
+    diar = _stored_diar(tmp_path, {"SPEAKER_00": _unit(1, 0, 0)}, audio=True)
+    extracted = _unit(0, 1, 0)
+    with patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=lambda p: p) as conv, \
+         patch("wisper_transcribe.speaker_manager.extract_embedding", return_value=extracted) as ext, \
+         patch("wisper_transcribe.speaker_manager._save_reference_clip"):
+        enroll_profiles(
+            input_path=Path(diar["input_path"]), segments=_segments(diar),
+            groups={"Alice": ["SPEAKER_00"], "Brad": ["SPEAKER_01"]},
+            campaign_slug=None, device="cpu", stored={"SPEAKER_00": _unit(1, 0, 0)},
+        )
+
+    ext.assert_called_once()
+    assert ext.call_args.args[2] == "SPEAKER_01"
+    conv.assert_called_once()
+    profiles = load_profiles()
+    assert np.allclose(profiles["alice"].embedding, _unit(1, 0, 0), atol=1e-5)
+    assert np.allclose(profiles["brad"].embedding, extracted, atol=1e-5)
+
+
+def test_enroll_profiles_copies_excerpt_as_reference_clip(tmp_path: Path):
+    from wisper_transcribe.speaker_manager import reference_clip_path
+    from wisper_transcribe.web.enroll_shared import enroll_profiles
+
+    md = _write_transcript(tmp_path, diar=None)
+    excerpt = tmp_path / "session01_excerpt_SPEAKER_00.mp3"
+    excerpt.write_bytes(b"excerpt-bytes")
+    diar = _stored_diar(tmp_path, {"SPEAKER_00": _unit(1, 0, 0)})
+    with patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=_boom):
+        enroll_profiles(
+            input_path=None, segments=_segments(diar),
+            groups={"Alice": ["SPEAKER_00"]}, campaign_slug=None, device="cpu",
+            stored={"SPEAKER_00": _unit(1, 0, 0)}, md_path=md,
+        )
+
+    assert reference_clip_path("alice").read_bytes() == b"excerpt-bytes"
+
+
+def test_enroll_profiles_no_excerpt_no_audio_creates_profile_without_clip(tmp_path: Path):
+    from wisper_transcribe.speaker_manager import load_profiles, reference_clip_path
+    from wisper_transcribe.web.enroll_shared import enroll_profiles
+
+    md = _write_transcript(tmp_path, diar=None)
+    diar = _stored_diar(tmp_path, {"SPEAKER_00": _unit(1, 0, 0)})
+    enroll_profiles(
+        input_path=None, segments=_segments(diar),
+        groups={"Alice": ["SPEAKER_00"]}, campaign_slug=None, device="cpu",
+        stored={"SPEAKER_00": _unit(1, 0, 0)}, md_path=md,
+    )
+
+    assert "alice" in load_profiles()
+    assert not reference_clip_path("alice").exists()
+
+
+def test_enroll_form_old_embedding_space_without_audio_shows_banner(client: TestClient, tmp_path: Path):
+    diar = _stored_diar(tmp_path, {"SPEAKER_00": _unit(1, 0, 0)}, space="old-model")
+    _write_transcript(tmp_path, diar=diar)
+    with _patch_output(tmp_path), \
+         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        resp = client.get("/transcripts/session01/enroll")
+    assert "no saved voice data" in resp.content.decode().lower()
+
+
+def test_enroll_form_no_banner_when_all_speakers_have_embeddings(client: TestClient, tmp_path: Path):
+    diar = _stored_diar(tmp_path, {"SPEAKER_00": _unit(1, 0, 0), "SPEAKER_01": _unit(0, 1, 0),
+                                   "SPEAKER_02": _unit(0, 0, 1)})
+    _write_transcript(tmp_path, diar=diar)
+    with _patch_output(tmp_path), \
+         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        resp = client.get("/transcripts/session01/enroll")
+    assert "no saved voice data" not in resp.content.decode().lower()
+
+
+def test_enroll_submit_stored_embeddings_without_audio_enqueues_job(client: TestClient, tmp_path: Path):
+    diar = _stored_diar(tmp_path, {"SPEAKER_00": _unit(1, 0, 0)})
+    _write_transcript(tmp_path, diar=diar)
+    with _patch_output(tmp_path):
+        resp = client.post("/transcripts/session01/enroll",
+                           data={"speaker_SPEAKER_00": "Alice"}, follow_redirects=False)
+    location = resp.headers["location"]
+    assert location.startswith("/transcribe/jobs/")
+    assert "notice" not in location
+
+
+def test_enroll_submit_partial_enqueues_job_and_carries_notice(client: TestClient, tmp_path: Path):
+    diar = _stored_diar(tmp_path, {"SPEAKER_00": _unit(1, 0, 0)})
+    _write_transcript(tmp_path, diar=diar)
+    with _patch_output(tmp_path):
+        resp = client.post("/transcripts/session01/enroll",
+                           data={"speaker_SPEAKER_00": "Alice", "speaker_SPEAKER_01": "Brad"},
+                           follow_redirects=False)
+    location = resp.headers["location"]
+    assert location.startswith("/transcribe/jobs/")
+    assert location.endswith("?notice=enroll_audio_missing")
+    # Both renames applied.
+    md = (tmp_path / "session01.md").read_text(encoding="utf-8")
+    assert "Alice" in md and "Brad" in md
+
+
+def test_enroll_submit_old_embedding_space_without_audio_redirects_with_notice(
+    client: TestClient, tmp_path: Path
+):
+    diar = _stored_diar(tmp_path, {"SPEAKER_00": _unit(1, 0, 0)}, space="old-model")
+    _write_transcript(tmp_path, diar=diar)
+    with _patch_output(tmp_path):
+        resp = client.post("/transcripts/session01/enroll",
+                           data={"speaker_SPEAKER_00": "Alice"}, follow_redirects=False)
+    assert resp.headers["location"] == "/transcripts/session01?notice=enroll_audio_missing"

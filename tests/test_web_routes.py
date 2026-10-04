@@ -2640,6 +2640,11 @@ def test_enroll_submit_enqueues_job_when_segments_present(
         output_path=str(transcript),
         diarization_segments=[fake_segment],
     )
+    from ._seed import seed_sidecar
+    seed_sidecar(transcript, {
+        "input_path": str(audio),
+        "diarization_segments": [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"}],
+    })
     client.app.state.job_queue._jobs[job.id] = job
 
     resp = client.post(
@@ -2922,6 +2927,11 @@ def test_existing_profile_name_still_enqueues_job(client, tmp_path, monkeypatch)
             DiarizationSegment(start=0.0, end=5.0, speaker="SPEAKER_00"),
         ],
     )
+    from ._seed import seed_sidecar
+    seed_sidecar(transcript, {
+        "input_path": str(audio),
+        "diarization_segments": [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"}],
+    })
     client.app.state.job_queue._jobs[job.id] = job
 
     resp = client.post(
@@ -2972,6 +2982,11 @@ def test_two_labels_same_name_grouped_into_one_job_entry(client, tmp_path, monke
             DiarizationSegment(start=10.0, end=15.0, speaker="SPEAKER_01"),
         ],
     )
+    from ._seed import seed_sidecar
+    seed_sidecar(transcript, {
+        "input_path": str(audio),
+        "diarization_segments": [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"}, {"start": 10.0, "end": 15.0, "speaker": "SPEAKER_01"}],
+    })
     client.app.state.job_queue._jobs[job.id] = job
 
     resp = client.post(
@@ -3647,3 +3662,18 @@ def test_campaign_delete_keep_route_lists_the_journal(client):
     assert (out / "s01.md").exists() and journal.exists()
     page = client.get("/transcripts").text
     assert "journal.md" in page and "listed only" in page
+
+
+def test_job_page_shows_enroll_audio_missing_notice_only_for_exact_value(client, tmp_path):
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from datetime import datetime
+
+    job = Job(id="notice-test-job", status=COMPLETED, created_at=datetime.now(),
+              input_path=str(tmp_path / "audio.mp3"), kwargs={})
+    client.app.state.job_queue._jobs[job.id] = job
+    text = "no saved voice data"
+
+    assert text in client.get(f"/transcribe/jobs/{job.id}?notice=enroll_audio_missing").text
+    assert text not in client.get(f"/transcribe/jobs/{job.id}").text
+    other = client.get(f"/transcribe/jobs/{job.id}?notice=<b>evil</b>").text
+    assert text not in other and "<b>evil</b>" not in other

@@ -335,6 +335,7 @@ async def enroll_form(request: Request, job_id: str) -> Response:
     from wisper_transcribe.speaker_manager import load_profiles
     from wisper_transcribe.web.enroll_shared import (
         _load_diar_sidecar,
+        enrollable_labels,
         resolve_current_names,
         template_current_names,
     )
@@ -372,8 +373,10 @@ async def enroll_form(request: Request, job_id: str) -> Response:
 
     profiles = load_profiles()
 
-    # Warn before submit when the source audio is gone.
-    audio_missing = not (job.input_path and Path(job.input_path).exists())
+    # Warn before submit when some speakers can't be enrolled: they have no
+    # saved embedding and the source audio is gone.
+    wizard_diar = _load_diar_sidecar(Path(job.output_path)) if job.output_path else None
+    audio_missing = bool(enrollable_labels(wizard_diar, speakers_in_transcript)[1])
 
     # Load persisted transcript text snippets for each speaker (written as
     # <stem>_excerpt_<speaker>.txt alongside the clip files).
@@ -480,10 +483,18 @@ async def enroll_submit(request: Request, job_id: str) -> Response:
         rename_result = apply_renames(md_path, job.diarization_segments, renames)
 
         if rename_result.groups:
-            input_path = Path(job.input_path)
-            if not input_path.exists():
-                url += "?notice=enroll_audio_missing"
-            else:
+            from wisper_transcribe.web.enroll_shared import (
+                _load_diar_sidecar,
+                enrollable_labels,
+            )
+
+            diar = _load_diar_sidecar(md_path)
+            submitted = [lb for labels in rename_result.groups.values() for lb in labels]
+            enrollable, skipped = enrollable_labels(diar, submitted)
+            notice = "?notice=enroll_audio_missing" if skipped else ""
+            url += notice
+            if any(all(lb in enrollable for lb in labels)
+                   for labels in rename_result.groups.values()):
                 device = job.kwargs.get("device", "cpu")
                 if device == "auto":
                     from wisper_transcribe.config import get_device
@@ -495,6 +506,6 @@ async def enroll_submit(request: Request, job_id: str) -> Response:
                     groups=rename_result.groups,
                     device=device,
                 )
-                return RedirectResponse(url=f"/transcribe/jobs/{enroll_job.id}", status_code=303)
+                return RedirectResponse(url=f"/transcribe/jobs/{enroll_job.id}{notice}", status_code=303)
 
     return RedirectResponse(url=url, status_code=303)

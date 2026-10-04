@@ -85,7 +85,7 @@ After a transcription, click **Name Speakers** on the job page, or **Name speake
 - Reopening the wizard later pre-fills the names you already applied, so you can fix one without retyping the rest.
 - Submitting renames the transcript immediately, then opens a job page while voice embeddings are extracted.
 
-For web uploads, the source audio is kept next to its transcript in the output folder so the wizard works after a server restart; it's deleted with the transcript. If that audio is missing, renames still apply and a notice says voice enrollment was skipped.
+The wizard enrolls from voice data saved when the transcript was made, so it doesn't re-read the audio. A speaker with no saved voice data is enrolled from the transcript's audio; if that's gone too, the speaker is renamed but not enrolled, and the others still are.
 
 **Across a campaign:** naming someone in one session's wizard also renames them in the campaign's other sessions wherever their name was assigned automatically. Names you typed are never changed. The Campaign page's **Re-match speakers** button runs the full pass as a job: it re-matches every session against the roster (re-extracting voice data from the saved audio for sessions that have none stored), and gives an unknown voice heard in two or more sessions one shared name, **Recurring Speaker N**. Name them once and the other sessions follow.
 

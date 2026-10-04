@@ -739,6 +739,8 @@ from wisper_transcribe.web.enroll_shared import (
     _load_diar_sidecar,
     apply_renames,
     build_legacy_label_map as _build_legacy_label_map,
+    enrollable_labels,
+    excerpt_candidates,
     resolve_current_names,
     template_current_names,
 )
@@ -758,7 +760,6 @@ async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
         return HTMLResponse(content="No enrollment data found for this transcript", status_code=404)
 
     # Derive speaker labels ordered by first appearance
-    import re as _re
     seen: dict[str, float] = {}
     for seg in diar.get("diarization_segments", []):
         if seg["speaker"] not in seen:
@@ -772,22 +773,15 @@ async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
 
     legacy_label_map = _build_legacy_label_map(md_path, diar.get("diarization_segments", []))
 
-    def _excerpt_candidates(raw_label: str) -> list[str]:
-        cands = [_re.sub(r"[^\w\-]", "_", raw_label)]
-        legacy = legacy_label_map.get(raw_label)
-        if legacy:
-            cands.append(_re.sub(r"[^\w\-]", "_", legacy))
-        return cands
-
     speaker_excerpts: dict[str, str] = {}
     speaker_excerpt_texts: dict[str, str] = {}
     for sp in speakers:
-        for safe_label in _excerpt_candidates(sp):
+        for safe_label in excerpt_candidates(sp, legacy_label_map):
             clip = out_dir / f"{stem}_excerpt_{safe_label}.mp3"
             if clip.exists():
                 speaker_excerpts[sp] = str(clip)
                 break
-        for safe_label in _excerpt_candidates(sp):
+        for safe_label in excerpt_candidates(sp, legacy_label_map):
             txt = out_dir / f"{stem}_excerpt_{safe_label}.txt"
             if txt.exists():
                 try:
@@ -798,10 +792,9 @@ async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
 
     from wisper_transcribe.speaker_manager import load_profiles
 
-    # Warn before submit when the source audio is gone (renames still work,
-    # enrollment won't).
-    diar_input_path = diar.get("input_path", "")
-    audio_missing = not (diar_input_path and Path(diar_input_path).exists())
+    # Warn before submit when some speakers can't be enrolled (no saved
+    # embedding and the source audio is gone); renames still work.
+    audio_missing = bool(enrollable_labels(diar, speakers)[1])
 
     return templates.TemplateResponse(
         request,
@@ -858,9 +851,6 @@ async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
         DiarizationSegment(start=s["start"], end=s["end"], speaker=s["speaker"])
         for s in diar.get("diarization_segments", [])
     ]
-    diar_input_path = diar.get("input_path", "")
-    input_path = Path(diar_input_path) if diar_input_path else None
-
     rename_result = apply_renames(md_path, raw_segments, renames)
 
     location = f"/transcripts/{quote(name)}"
@@ -872,11 +862,13 @@ async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
             headers={"Location": location},
         )
 
-    # Enqueue only when something is eligible and the source audio exists;
-    # otherwise redirect with the existing notice.
-    if input_path is None or not input_path.exists():
-        log.warning("Enrollment skipped: source audio not found at %s", input_path)
+    # Enqueue when any group can be enrolled; flag the speakers that can't.
+    submitted = [lb for labels in rename_result.groups.values() for lb in labels]
+    enrollable, skipped = enrollable_labels(diar, submitted)
+    if skipped:
         location += "?notice=enroll_audio_missing"
+    if not any(all(lb in enrollable for lb in labels)
+               for labels in rename_result.groups.values()):
         return HTMLResponse(
             content="", status_code=303,
             headers={"Location": location},
@@ -896,9 +888,12 @@ async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
         groups=rename_result.groups,
         device=device,
     )
+    job_location = f"/transcribe/jobs/{job.id}"
+    if skipped:
+        job_location += "?notice=enroll_audio_missing"
     return HTMLResponse(
         content="", status_code=303,
-        headers={"Location": f"/transcribe/jobs/{job.id}"},
+        headers={"Location": job_location},
     )
 
 

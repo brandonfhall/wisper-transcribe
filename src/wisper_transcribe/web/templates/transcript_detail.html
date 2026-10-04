@@ -38,7 +38,7 @@
 
   {% if request.query_params.get('notice') == 'enroll_audio_missing' %}
   <div style="margin:20px 36px 0;padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber)">
-    Speaker names were updated, but voice enrollment was skipped because the source audio is no longer available.
+    Some speakers have no saved voice data and the source audio is gone. They were renamed but not enrolled; the others were enrolled.
   </div>
   {% endif %}
 

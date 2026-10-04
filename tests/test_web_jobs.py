@@ -910,7 +910,7 @@ def test_run_enroll_job_progress_lines_land_in_log(tmp_path):
     )
 
     def fake_enroll_profiles(*, input_path, segments, groups, campaign_slug,
-                              device, data_dir=None, progress=None):
+                              device, data_dir=None, progress=None, **kw):
         if progress is not None:
             progress("Converting audio…")
             progress("Extracting embedding for Alice (1/1)…")
@@ -1747,3 +1747,88 @@ def test_recording_is_transcribing_only_while_its_job_is_pending_or_running(tmp_
     loaded = load_recordings()[rec.id]
     assert loaded.status == "completed"
     assert loaded.job_id == job.id
+
+
+def _seed_stored(tmp_path, vectors, *, audio=False, space=None):
+    from wisper_transcribe.config import EMBEDDING_SPACE
+    from ._seed import seed_sidecar
+
+    md_path = tmp_path / "session01.md"
+    md_path.write_text("# Session 01", encoding="utf-8")
+    audio_path = tmp_path / "gone" / "session01.mp3"
+    if audio:
+        audio_path.parent.mkdir()
+        audio_path.write_bytes(b"fake")
+    seed_sidecar(md_path, {
+        "input_path": str(audio_path),
+        "diarization_segments": [
+            {"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"},
+            {"start": 6.0, "end": 9.0, "speaker": "SPEAKER_01"},
+        ],
+        "speaker_map": {},
+        "speaker_embeddings": {k: list(v) for k, v in vectors.items()},
+        "embedding_space": space or EMBEDDING_SPACE,
+    })
+    return md_path
+
+
+def test_run_enroll_job_stored_embeddings_without_audio_completes(tmp_path):
+    from wisper_transcribe.web.jobs import JobQueue, COMPLETED
+
+    md_path = _seed_stored(tmp_path, {"SPEAKER_00": [1.0, 0.0, 0.0]})
+    q = JobQueue()
+    job = q.submit_enroll(md_path=str(md_path), transcript_name="session01",
+                          groups={"Alice": ["SPEAKER_00"]}, device="cpu")
+    with patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=AssertionError):
+        q._run_enroll_job(job)
+
+    assert job.status == COMPLETED
+    from wisper_transcribe.speaker_manager import load_profiles
+    assert "alice" in load_profiles()
+
+
+def test_run_enroll_job_partial_logs_skipped_name_and_completes(tmp_path):
+    from wisper_transcribe.web.jobs import JobQueue, COMPLETED
+
+    md_path = _seed_stored(tmp_path, {"SPEAKER_00": [1.0, 0.0, 0.0]})
+    q = JobQueue()
+    job = q.submit_enroll(md_path=str(md_path), transcript_name="session01",
+                          groups={"Alice": ["SPEAKER_00"], "Brad": ["SPEAKER_01"]}, device="cpu")
+    q._run_enroll_job(job)
+
+    assert job.status == COMPLETED
+    assert any("Skipped Brad" in line for line in job.log_lines)
+    from wisper_transcribe.speaker_manager import load_profiles
+    profiles = load_profiles()
+    assert "alice" in profiles and "brad" not in profiles
+
+
+def test_run_enroll_job_old_embedding_space_without_audio_fails(tmp_path):
+    from wisper_transcribe.web.jobs import JobQueue, FAILED
+
+    md_path = _seed_stored(tmp_path, {"SPEAKER_00": [1.0, 0.0, 0.0]}, space="old-model")
+    q = JobQueue()
+    job = q.submit_enroll(md_path=str(md_path), transcript_name="session01",
+                          groups={"Alice": ["SPEAKER_00"]}, device="cpu")
+    q._run_enroll_job(job)
+
+    assert job.status == FAILED
+    assert job.error == "Source audio not available"
+
+
+def test_run_enroll_job_old_embedding_space_with_audio_extracts(tmp_path):
+    import numpy as np
+    from wisper_transcribe.web.jobs import JobQueue, COMPLETED
+
+    md_path = _seed_stored(tmp_path, {"SPEAKER_00": [1.0, 0.0, 0.0]}, audio=True, space="old-model")
+    q = JobQueue()
+    job = q.submit_enroll(md_path=str(md_path), transcript_name="session01",
+                          groups={"Alice": ["SPEAKER_00"]}, device="cpu")
+    with patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=lambda p: p), \
+         patch("wisper_transcribe.speaker_manager.extract_embedding",
+               return_value=np.array([0.0, 1.0, 0.0])) as ext, \
+         patch("wisper_transcribe.speaker_manager._save_reference_clip"):
+        q._run_enroll_job(job)
+
+    assert job.status == COMPLETED
+    ext.assert_called_once()

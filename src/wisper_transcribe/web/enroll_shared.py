@@ -73,6 +73,50 @@ def _load_diar_sidecar(md_path: Path) -> Optional[dict]:
         return None
 
 
+def stored_embeddings(diar: Optional[dict]) -> dict:
+    """Per-label embeddings saved with the transcript, in the current
+    embedding space; empty when there are none."""
+    from wisper_transcribe.speaker_registry import embeddings_from_sidecar
+
+    if diar is None:
+        return {}
+    return embeddings_from_sidecar(diar) or {}
+
+
+def audio_available(diar: Optional[dict]) -> bool:
+    """Whether the transcript's source audio file still exists."""
+    if diar is None:
+        return False
+    # Path("") is ".", which exists, so an empty path is checked first.
+    raw = diar.get("input_path")
+    return bool(raw) and Path(raw).is_file()
+
+
+def enrollable_labels(diar: Optional[dict], labels: list[str]) -> tuple[list[str], list[str]]:
+    """Split ``labels`` into ``(enrollable, skipped)``.
+
+    A label enrolls from its saved embedding, or from the source audio when
+    that still exists.
+    """
+    if diar is None:
+        return [], list(labels)
+    if audio_available(diar):
+        return list(labels), []
+    stored = stored_embeddings(diar)
+    enrollable = [lb for lb in labels if lb in stored]
+    return enrollable, [lb for lb in labels if lb not in stored]
+
+
+def excerpt_candidates(raw_label: str, legacy_label_map: dict) -> list[str]:
+    """Excerpt-file label spellings to try for ``raw_label``, in order: the
+    raw label, then the display-name key older transcripts used."""
+    cands = [re.sub(r"[^\w\-]", "_", raw_label)]
+    legacy = legacy_label_map.get(raw_label)
+    if legacy:
+        cands.append(re.sub(r"[^\w\-]", "_", legacy))
+    return cands
+
+
 def _segment_intervals(segments: list) -> list[tuple[float, float, str]]:
     """Normalise ``DiarizationSegment``-like or plain-dict segments into
     ``(start, end, raw_label)`` tuples for interval matching."""
@@ -341,26 +385,33 @@ def apply_renames(
 
 def enroll_profiles(
     *,
-    input_path: Path,
+    input_path: Optional[Path] = None,
     segments: list,
     groups: dict[str, list[str]],
     campaign_slug: Optional[str],
     device: str,
     data_dir=None,
     progress: Optional[Callable[[str], None]] = None,
-) -> None:
-    """Convert audio, then enroll or EMA-update each group's profile.
+    stored: Optional[dict] = None,
+    md_path: Optional[Path] = None,
+) -> list[str]:
+    """Enroll or EMA-update each group's profile; returns the skipped names.
 
-    Slow (WAV conversion plus up to 5 embedding passes per speaker); runs in a
-    ``JOB_ENROLL`` job with ``progress`` feeding the job log. ``groups`` is
-    ``RenameResult.groups``. Existing profiles are EMA-merged; several raw
-    labels for one name are averaged. Each profile is added to the campaign.
+    Runs in a ``JOB_ENROLL`` job with ``progress`` feeding the job log.
+    ``groups`` is ``RenameResult.groups``. A label's vector comes from
+    ``stored`` (embeddings saved with the transcript) when present; otherwise
+    it is extracted from ``input_path``, converted once and only if needed.
+    A group with a label that has neither is skipped whole. Existing profiles
+    are EMA-merged; several raw labels for one name are averaged. With
+    ``md_path``, a new profile's reference clip is copied from the
+    transcript's excerpt. Each profile is added to the campaign.
 
-    Raises if ``input_path`` is missing or conversion fails; a single group's
-    failure is logged and skipped.
+    Raises if a needed conversion fails; a single group's failure is logged
+    and skipped.
     """
+    skipped: list[str] = []
     if not groups:
-        return
+        return skipped
 
     def _progress(msg: str) -> None:
         if progress is not None:
@@ -372,53 +423,95 @@ def enroll_profiles(
 
     import numpy as np
 
-    from wisper_transcribe.audio_utils import convert_to_wav
     from wisper_transcribe.speaker_manager import enroll_speaker, extract_embedding, update_embedding
 
-    _progress("Converting audio…")
-    wav_path = convert_to_wav(input_path)
+    stored = stored or {}
+    wav_path: Optional[Path] = None
+
+    def _wav() -> Path:
+        nonlocal wav_path
+        if wav_path is None:
+            from wisper_transcribe.audio_utils import convert_to_wav
+
+            _progress("Converting audio…")
+            wav_path = convert_to_wav(input_path)
+        return wav_path
+
+    def _vector(label: str):
+        if label in stored:
+            return stored[label]
+        return extract_embedding(_wav(), segments, label, device)
+
+    legacy_map: Optional[dict] = None
+
+    def _clip_source(first_label: str) -> Optional[Path]:
+        nonlocal legacy_map
+        if md_path is None:
+            return None
+        if legacy_map is None:
+            try:
+                legacy_map = build_legacy_label_map(md_path, segments)
+            except Exception:
+                legacy_map = {}
+        return find_excerpt_clip(
+            md_path.parent, md_path.stem, excerpt_candidates(first_label, legacy_map)
+        )
+
     try:
         total = len(groups)
         for i, (display_name, raw_labels) in enumerate(groups.items(), start=1):
-            _progress(f"Extracting embedding for {display_name} ({i}/{total})…")
+            if input_path is None and not all(lb in stored for lb in raw_labels):
+                _progress(
+                    f"Skipped {display_name}: no saved voice data and the source audio is gone"
+                )
+                skipped.append(display_name)
+                continue
+            if any(lb not in stored for lb in raw_labels):
+                _wav()  # a failed conversion aborts the job
+                _progress(f"Extracting embedding for {display_name} ({i}/{total})…")
+            else:
+                _progress(f"Enrolling {display_name} from saved voice data ({i}/{total})…")
             profile_key = display_name.lower().replace(" ", "_")
             profile_exists = profile_key in existing_profiles
             try:
                 if profile_exists:
-                    embeddings = [
-                        extract_embedding(wav_path, segments, label, device)
-                        for label in raw_labels
-                    ]
+                    embeddings = [_vector(label) for label in raw_labels]
                     avg = embeddings[0] if len(embeddings) == 1 else np.mean(embeddings, axis=0)
                     update_embedding(profile_key, avg, data_dir=data_dir)
-                elif len(raw_labels) == 1:
-                    enroll_speaker(
-                        name=profile_key,
-                        display_name=display_name,
-                        role="",
-                        audio_path=wav_path,
-                        segments=segments,
-                        speaker_label=raw_labels[0],
-                        device=device,
-                        data_dir=data_dir,
-                    )
                 else:
-                    embeddings = [
-                        extract_embedding(wav_path, segments, label, device)
-                        for label in raw_labels
-                    ]
-                    avg = np.mean(embeddings, axis=0)
-                    enroll_speaker(
-                        name=profile_key,
-                        display_name=display_name,
-                        role="",
-                        audio_path=wav_path,
-                        segments=segments,
-                        speaker_label=raw_labels[0],
-                        device=device,
-                        data_dir=data_dir,
-                        embedding=avg,
-                    )
+                    extra: dict = {}
+                    if md_path is not None:
+                        extra = {
+                            "clip_source": _clip_source(raw_labels[0]),
+                            "source_name": md_path.stem,
+                        }
+                    if len(raw_labels) == 1 and raw_labels[0] not in stored:
+                        enroll_speaker(
+                            name=profile_key,
+                            display_name=display_name,
+                            role="",
+                            audio_path=wav_path,
+                            segments=segments,
+                            speaker_label=raw_labels[0],
+                            device=device,
+                            data_dir=data_dir,
+                            **extra,
+                        )
+                    else:
+                        embeddings = [_vector(label) for label in raw_labels]
+                        avg = embeddings[0] if len(embeddings) == 1 else np.mean(embeddings, axis=0)
+                        enroll_speaker(
+                            name=profile_key,
+                            display_name=display_name,
+                            role="",
+                            audio_path=wav_path,
+                            segments=segments,
+                            speaker_label=raw_labels[0],
+                            device=device,
+                            data_dir=data_dir,
+                            embedding=avg,
+                            **extra,
+                        )
             except Exception as exc:
                 log.warning("enroll failed for %s: %s", display_name, exc)
                 continue
@@ -436,5 +529,6 @@ def enroll_profiles(
                         profile_key, campaign_slug, exc,
                     )
     finally:
-        if wav_path != input_path and wav_path.exists():
+        if wav_path is not None and wav_path != input_path and wav_path.exists():
             wav_path.unlink(missing_ok=True)
+    return skipped

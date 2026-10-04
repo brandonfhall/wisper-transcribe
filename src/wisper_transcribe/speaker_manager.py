@@ -354,21 +354,29 @@ def enroll_speaker(
     name: str,
     display_name: str,
     role: str,
-    audio_path: Path,
-    segments: list[DiarizationSegment],
-    speaker_label: str,
+    audio_path: Optional[Path] = None,
+    segments: Optional[list[DiarizationSegment]] = None,
+    speaker_label: Optional[str] = None,
     device: str = "cpu",
     data_dir: Optional[Path] = None,
     notes: str = "",
     embedding: Optional[np.ndarray] = None,
+    clip_source: Optional[Path] = None,
+    source_name: Optional[str] = None,
 ) -> SpeakerProfile:
-    """Extract an embedding and save a new speaker profile.
+    """Save a new speaker profile, extracting its embedding from audio.
 
-    Pass ``embedding`` to skip extraction, e.g. when the caller averaged
-    several raw labels assigned the same name.
+    Pass ``embedding`` to skip extraction (a stored vector, or one averaged
+    over several raw labels); then ``audio_path`` is only needed for the clip.
+    ``clip_source`` is an existing clip copied as the reference clip, so no
+    audio is read. ``source_name`` labels the enrollment source; it defaults
+    to the audio file's name.
     """
     import datetime
+    import shutil
 
+    if embedding is None and audio_path is None:
+        raise ValueError("enroll_speaker needs an embedding or an audio_path")
     if embedding is None:
         embedding = extract_embedding(audio_path, segments, speaker_label, device)
 
@@ -378,7 +386,7 @@ def enroll_speaker(
         role=role,
         embedding=_unit(np.asarray(embedding, dtype=np.float32).reshape(-1)),
         enrolled_date=datetime.date.today().isoformat(),
-        enrollment_source=Path(audio_path).name,
+        enrollment_source=source_name or (Path(audio_path).name if audio_path else ""),
         notes=notes,
     )
     # Extraction above stays outside the transaction.
@@ -388,8 +396,12 @@ def enroll_speaker(
     # Save a short reference audio clip for web playback (file after row).
     # Failures are silently swallowed — the clip is a convenience, not critical.
     clip = reference_clip_path(name, data_dir)
-    clip.parent.mkdir(parents=True, exist_ok=True)
-    _save_reference_clip(audio_path, segments, speaker_label, clip)
+    if clip_source is not None and Path(clip_source).is_file():
+        clip.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(clip_source, clip)
+    elif audio_path is not None and segments is not None and speaker_label is not None:
+        clip.parent.mkdir(parents=True, exist_ok=True)
+        _save_reference_clip(audio_path, segments, speaker_label, clip)
     if clip.is_file():
         file_registry.add_if_owned(
             clip, kind="reference_clip",

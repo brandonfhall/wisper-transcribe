@@ -1128,3 +1128,45 @@ def test_profile_activity_counts_transcripts_naming_the_speaker():
     assert activity["bob"][0] == 1
     assert activity["carol"] == (0, None)
     assert activity["alice"][1] is not None
+
+
+# ---------------------------------------------------------------------------
+# enroll_speaker without audio: stored embedding, copied clip
+# ---------------------------------------------------------------------------
+
+def test_enroll_speaker_requires_embedding_or_audio():
+    from wisper_transcribe.speaker_manager import enroll_speaker
+
+    with pytest.raises(ValueError):
+        enroll_speaker(name="alice", display_name="Alice", role="", embedding=None, audio_path=None)
+
+
+def test_enroll_speaker_copies_clip_source_byte_for_byte(tmp_path):
+    from wisper_transcribe.speaker_manager import enroll_speaker, reference_clip_path
+
+    clip_src = tmp_path / "session01_excerpt_SPEAKER_00.mp3"
+    clip_src.write_bytes(b"\x00excerpt-bytes\xff")
+
+    with patch("wisper_transcribe.speaker_manager.extract_embedding") as mock_extract:
+        profile = enroll_speaker(
+            name="alice", display_name="Alice", role="",
+            embedding=np.array([1.0, 0.0, 0.0]),
+            clip_source=clip_src, source_name="session01",
+        )
+
+    mock_extract.assert_not_called()
+    assert reference_clip_path("alice").read_bytes() == clip_src.read_bytes()
+    assert profile.enrollment_source == "session01"
+
+
+def test_enroll_speaker_without_clip_or_audio_creates_profile_without_clip(tmp_path):
+    from wisper_transcribe.speaker_manager import enroll_speaker, load_profiles, reference_clip_path
+
+    enroll_speaker(
+        name="alice", display_name="Alice", role="",
+        embedding=np.array([0.0, 1.0, 0.0]),
+        clip_source=tmp_path / "missing.mp3",
+    )
+
+    assert not reference_clip_path("alice").exists()
+    assert "alice" in load_profiles()

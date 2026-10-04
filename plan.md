@@ -60,8 +60,8 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 | Phase | State | Commit |
 |---|---|---|
 | 1 — File registry | done | 05d0b52 |
-| 2 — Renames / Needs attention / campaign delete | done | (this commit) |
-| 3 — Enroll from stored embeddings | not started | |
+| 2 — Renames / Needs attention / campaign delete | done | b538301 |
+| 3 — Enroll from stored embeddings | done | (this commit) |
 | 4 — Extract audio, keep FLAC | not started | |
 | 5 — Trim recordings | not started | |
 | 6 — `wisper storage trim` | not started | |
@@ -84,6 +84,10 @@ Phase 2:
 - **Rehearsal (Mac data):** a `.md` renamed in the shell was matched on restart, and all 18 of its files and rows followed. An orphan `ghost.summary.md` was listed, then deleted through the route; `../wisper.db` got 400.
 - **API beyond the plan:** `relink()` returns the conflict list; `file_registry.is_registered`; `Attention.total`; `delete_campaign` raises `KeyError` for an unknown slug before deleting anything.
 - **Behaviour:** `reconcile(sync="never")` stays "never" after a rename.
+
+Phase 3:
+- **Rehearsal (Mac data):** with one transcript's audio deleted, the wizard enrolled a speaker from saved voice data in under a second. The excerpt was copied as the profile's clip, and the clip was registered.
+- **Behaviour:** a job-page redirect after a partial enrollment shows the `enroll_audio_missing` notice too.
 
 ### How to run this plan
 

@@ -1423,22 +1423,23 @@ class JobQueue:
         """
         from pathlib import Path
 
-        from wisper_transcribe.web.enroll_shared import _load_diar_sidecar
+        from wisper_transcribe.web.enroll_shared import (
+            _load_diar_sidecar,
+            audio_available,
+            enrollable_labels,
+            stored_embeddings,
+        )
 
         md_path = Path(job.enroll_md_path or job.output_path or "")
         diar = _load_diar_sidecar(md_path)
-        if not diar:
+        all_labels = [lb for labels in job.enroll_groups.values() for lb in labels]
+        if not diar or not enrollable_labels(diar, all_labels)[0]:
             job.status = FAILED
             job.error = "Source audio not available"
             job.finished_at = datetime.now()
             return
 
-        input_path = Path(diar.get("input_path") or "")
-        if not diar.get("input_path") or not input_path.is_file():
-            job.status = FAILED
-            job.error = "Source audio not available"
-            job.finished_at = datetime.now()
-            return
+        input_path = Path(diar["input_path"]) if audio_available(diar) else None
 
         from wisper_transcribe.models import DiarizationSegment
 
@@ -1463,6 +1464,8 @@ class JobQueue:
                 campaign_slug=campaign_slug,
                 device=job.enroll_device,
                 progress=_progress,
+                stored=stored_embeddings(diar),
+                md_path=md_path,
             )
             if campaign_slug:
                 # Propagate the new names to the campaign's other sessions,
