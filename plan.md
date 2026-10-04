@@ -66,8 +66,8 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 | 5 — Trim recordings | done | 3c18dbb |
 | 6 — `wisper storage trim` | done | 1fc618f |
 | 7 — Playback | done | e900a66 |
-| 8 — Re-transcribe | done | (this commit) |
-| 9 — Final review | not started | |
+| 8 — Re-transcribe | done | 561c02b |
+| 9 — Final review | steps 1–9 done; 10–13 need Brandon | (this commit) |
 
 Run on the Mac (2026-10-03). Rehearsals use a scratch copy of the Mac's own data, not the Windows data. Brandon waived the between-phase review pause for this run. Each phase is still committed and pushed separately.
 
@@ -128,6 +128,36 @@ Phase 8:
   - Uploaded the test `.mp4`, set `use_mlx = "false"` in the copy's config, then re-transcribed from the transcript page.
   - The job reused min/max speakers from history and ran the non-MLX engine. It kept transcript id 5 and its name, and left `Test Session.flac` byte-identical with no second FLAC. `source_file` stayed the `.mp4`.
 - **Changed existing test:** `test_legacy_import.py::test_recording_import_full` expects `campaign_slug is None` for an imported transcribed recording whose transcript is in no campaign. That follows from the derived-campaign decision.
+
+Phase 9 (steps 1–9):
+- **Suite:** 2239 passed. Coverage: `file_registry` 93%, `storage_trim` 87%, with only error branches uncovered. Tailwind is clean, and all four storage test files are in CI's `windows storage` list.
+- **Greps:** the stale and scar-tissue greps are clean; the only hits are intended migration notes, the command name, current-time "now", and test data.
+- **README:** playback is in the description, the first-audio-track paragraph is present, and no new docs row is needed.
+- **Docs vs code:** 16 statements audited. Fixed: `live_transcript.md` added to "what a recording keeps" (`web-ui.md`, `architecture.md`), and the CLAUDE.md branch-guard wording made exact. Not fixed (outside this work): `docs/docker.md` `docker compose run wisper nvidia-smi` runs `wisper nvidia-smi`; it should use `--entrypoint nvidia-smi`.
+- **Full-branch rehearsal (native, Mac data):** v8 → v10 with integrity ok. `storage trim` dry run, then `--apply`; the re-run found nothing.
+- **Docker rehearsal (`wisper-transcribe:cpu`, separate copy, data/output/recordings mounted):**
+  - v8 → v10 with integrity ok, and the pages render.
+  - `--apply` was refused while the container's server ran.
+  - The dry run matched the native one, with the same registry counts.
+- **Manual end-to-end done:**
+  - outside rename followed (Phase 2);
+  - upload deleted after extraction, FLAC kept, clash prompt with mtime (Phase 4);
+  - re-transcribe with a new engine kept name and FLAC (Phase 8);
+  - wizard enroll without audio (Phase 3);
+  - recording transcribed, its transcript moved between campaigns (recording followed), re-transcribed (stayed in its campaign), transcript deleted (recording back to awaiting, `combined.wav` kept);
+  - campaign Delete everything and Keep the files (journal listed);
+  - killed mid-upload (temp folder swept on restart);
+  - Recover recording (`combined.wav` rebuilt, then segments trimmed);
+  - playback (Brandon, in a visible tab).
+- **Manual end-to-end not done (needs live hardware or Brandon):**
+  - recording a few minutes, local and Discord, with markers and mid-session notes;
+  - jumping to a marker during playback;
+  - renaming a speaker in the wizard, then searching by the new name with the speaker filter.
+- **Steps 10–13 need Brandon:**
+  - 10: set `SCHEMA_FROZEN = True` in the PR commit;
+  - 11: remove this section from plan.md;
+  - 12: open the PR;
+  - 13: the Windows rehearsal after merge.
 
 ### How to run this plan
 
