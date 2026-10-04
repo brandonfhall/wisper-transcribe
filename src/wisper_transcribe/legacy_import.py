@@ -1,7 +1,7 @@
 """One-time import of the pre-SQLite JSON stores into ``wisper.db``.
 
 Each function runs inside its migration's ``BEGIN IMMEDIATE`` transaction
-(see ``db.migrate``), with foreign keys deferred. Existing installs contain
+(see ``db.migrate``), with foreign keys off. Existing installs contain
 exactly what the new constraints forbid, so dirty data is repaired or skipped
 and always reported (``ctx.note``) instead of aborting. Only an unreadable
 top-level store aborts, because importing an empty store would lose data.
@@ -345,7 +345,7 @@ def import_diarization_sidecars(conn: sqlite3.Connection, ctx: MigrationContext)
             real = os.path.realpath(str(input_path))
             if not (real.startswith(root + os.sep) and os.path.isfile(real)):
                 # A data folder moved to another machine or into Docker keeps
-                # the old absolute path; the audio sits next to the transcript
+                # the old absolute path; the audio sits beside the transcript
                 # under the same name.
                 name = re.split(r"[\\/]", str(input_path))[-1]
                 moved = os.path.realpath(os.path.join(root, name))

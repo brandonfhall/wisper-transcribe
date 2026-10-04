@@ -1205,32 +1205,57 @@ def test_preset_add_missing_name_rejected(client):
 # ---------------------------------------------------------------------------
 
 
+def test_cleanup_recording_trash_removes_only_trash_dirs(tmp_path, monkeypatch):
+    """Startup removes recordings/<id>/.wisper-trash-* left by an interrupted
+    trim and touches nothing else in the recording's folder."""
+    from wisper_transcribe.web.app import _cleanup_recording_trash
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    rec_dir = tmp_path / "recordings" / "11111111-1111-1111-1111-111111111111"
+    (rec_dir / ".wisper-trash-0" / "111").mkdir(parents=True)
+    (rec_dir / ".wisper-trash-0" / "111" / "0000.wav").write_bytes(b"x")
+    (rec_dir / ".wisper-trash-3").mkdir()
+    (rec_dir / "per-user" / "222").mkdir(parents=True)
+    (rec_dir / "per-user" / "222" / "0000.wav").write_bytes(b"x")
+    (rec_dir / "combined.wav").write_bytes(b"x")
+    (rec_dir / "trash-not-prefixed").mkdir()
+
+    _cleanup_recording_trash()
+
+    assert sorted(p.name for p in rec_dir.iterdir()) == ["combined.wav", "per-user", "trash-not-prefixed"]
+    assert (rec_dir / "per-user" / "222" / "0000.wav").exists()
+
+
 def test_cleanup_orphaned_uploads_removes_all_prefixes(tmp_path, monkeypatch):
-    """The startup sweep recognizes wisper_enroll_* temp files (the
-    standalone speaker-enroll route's crash-window safety net) and the
-    wisper_enrollsrc_* files a pending standalone enroll job was renamed to,
-    not just wisper_upload_*."""
+    """The startup sweep removes wisper_upload_* folders and files, and the
+    wisper_enroll_*/wisper_enrollsrc_* temp files, and leaves other entries."""
     import tempfile
 
     from wisper_transcribe.web.app import _cleanup_orphaned_uploads
 
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
 
+    upload_dir = tmp_path / "wisper_upload_job-1"
+    (upload_dir / "extracted").mkdir(parents=True)
+    (upload_dir / "extracted" / "audio.wav").write_bytes(b"x")
+    (upload_dir / "Session.mp4").write_bytes(b"x")
     upload = tmp_path / "wisper_upload_abc123.mp3"
     enroll = tmp_path / "wisper_enroll_def456.wav"
     enrollsrc = tmp_path / "wisper_enrollsrc_ghi789.mp3"
     other = tmp_path / "unrelated.txt"
-    upload.write_bytes(b"x")
-    enroll.write_bytes(b"x")
-    enrollsrc.write_bytes(b"x")
-    other.write_bytes(b"x")
+    other_dir = tmp_path / "unrelated_dir"
+    other_dir.mkdir()
+    for f in (upload, enroll, enrollsrc, other):
+        f.write_bytes(b"x")
 
     _cleanup_orphaned_uploads()
 
+    assert not upload_dir.exists()
     assert not upload.exists()
     assert not enroll.exists()
     assert not enrollsrc.exists()
     assert other.exists()
+    assert other_dir.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -2640,6 +2665,11 @@ def test_enroll_submit_enqueues_job_when_segments_present(
         output_path=str(transcript),
         diarization_segments=[fake_segment],
     )
+    from ._seed import seed_sidecar
+    seed_sidecar(transcript, {
+        "input_path": str(audio),
+        "diarization_segments": [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"}],
+    })
     client.app.state.job_queue._jobs[job.id] = job
 
     resp = client.post(
@@ -2922,6 +2952,11 @@ def test_existing_profile_name_still_enqueues_job(client, tmp_path, monkeypatch)
             DiarizationSegment(start=0.0, end=5.0, speaker="SPEAKER_00"),
         ],
     )
+    from ._seed import seed_sidecar
+    seed_sidecar(transcript, {
+        "input_path": str(audio),
+        "diarization_segments": [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"}],
+    })
     client.app.state.job_queue._jobs[job.id] = job
 
     resp = client.post(
@@ -2972,6 +3007,11 @@ def test_two_labels_same_name_grouped_into_one_job_entry(client, tmp_path, monke
             DiarizationSegment(start=10.0, end=15.0, speaker="SPEAKER_01"),
         ],
     )
+    from ._seed import seed_sidecar
+    seed_sidecar(transcript, {
+        "input_path": str(audio),
+        "diarization_segments": [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"}, {"start": 10.0, "end": 15.0, "speaker": "SPEAKER_01"}],
+    })
     client.app.state.job_queue._jobs[job.id] = job
 
     resp = client.post(
@@ -3361,10 +3401,88 @@ def test_name_check_reports_existing_transcript_and_campaign(client, tmp_path, m
     create_campaign("The Game")
     move_transcript_to_campaign("session 1", "the-game")
 
+    import os
+    from datetime import datetime
+
+    stamp = datetime(2026, 9, 12, 21, 40).timestamp()
+    os.utime(out / "session 1.md", (stamp, stamp))
+
     data = client.get("/transcribe/name-check", params={"filename": "session 1.mp3"}).json()
-    assert data == {"exists": True, "campaign": "The Game"}
+    assert data == {"exists": True, "campaign": "The Game", "modified": "2026-09-12 21:40",
+                    "missing": False, "clashes": ["md"]}
     data = client.get("/transcribe/name-check", params={"filename": "other.mp3"}).json()
-    assert data == {"exists": False, "campaign": None}
+    assert data == {"exists": False, "campaign": None, "modified": None,
+                    "missing": False, "clashes": []}
+
+
+def test_name_check_reports_a_foreign_flac(client, tmp_path, monkeypatch):
+    """A <stem>.flac that isn't the named transcript's own audio is a clash,
+    with its modified time."""
+    import os
+    from datetime import datetime
+
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    flac = out / "take.flac"
+    flac.write_bytes(b"not ours")
+    stamp = datetime(2026, 1, 2, 3, 4).timestamp()
+    os.utime(flac, (stamp, stamp))
+
+    data = client.get("/transcribe/name-check", params={"filename": "take.mp4"}).json()
+
+    assert data["exists"] is True and data["clashes"] == ["flac"]
+    assert data["modified"] == "2026-01-02 03:04"
+    assert data["campaign"] is None
+
+
+def test_name_check_ignores_the_transcripts_own_flac_and_flags_a_missing_transcript(
+        client, tmp_path, monkeypatch):
+    from wisper_transcribe import transcript_store as ts
+
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    md = out / "mine.md"
+    md.write_text("x", encoding="utf-8")
+    ts.register("mine", origin="job")
+    flac = out / "mine.flac"
+    flac.write_bytes(b"ours")
+    ts.set_audio(md, flac)
+    md.unlink()
+    flac.unlink()
+    ts.reconcile()  # flags the transcript missing
+
+    data = client.get("/transcribe/name-check", params={"filename": "mine.mp4"}).json()
+    assert data["missing"] is True and data["clashes"] == ["missing"] and data["exists"] is True
+
+    # With its own file back and the .md present, only the .md clashes.
+    md.write_text("x", encoding="utf-8")
+    flac.write_bytes(b"ours")
+    ts.reconcile()
+    ts.set_audio(md, flac)
+    data = client.get("/transcribe/name-check", params={"filename": "mine.mp4"}).json()
+    assert data["clashes"] == ["md"]
+
+
+def test_upload_refused_for_a_flac_only_clash_without_overwrite(client, tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    (out / "session.flac").write_bytes(b"someone elses")
+
+    resp, mock_submit = _post_upload(client, out)
+    assert resp.headers["location"] == "/transcribe?error=name_exists"
+    mock_submit.assert_not_called()
+
+    resp, mock_submit = _post_upload(client, out, overwrite="on")
+    assert mock_submit.call_args.kwargs["overwrite"] is True
+
+
+def test_upload_passes_the_original_filename_as_source_name(client, tmp_path):
+    resp, mock_submit = _post_upload(client, tmp_path)
+    assert mock_submit.call_args.kwargs["source_name"] == "session.mp3"
+    assert mock_submit.call_args.kwargs["original_stem"] == "session"
 
 
 def test_campaign_page_offers_relink_and_relink_route(client, tmp_path, monkeypatch):
@@ -3383,6 +3501,8 @@ def test_campaign_page_offers_relink_and_relink_route(client, tmp_path, monkeypa
     ts.register("s01", origin="job")
     move_transcript_to_campaign("s01", "game")
     (out / "s01.md").rename(out / "Session 01 renamed.md")
+    import os
+    os.utime(out / "Session 01 renamed.md", ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
 
     resp = client.get("/campaigns/game")
     assert "MISSING" in resp.text
@@ -3423,3 +3543,459 @@ def test_transcripts_page_has_bulk_actions_wired_to_routes(client, tmp_path, mon
                        follow_redirects=False)
     from wisper_transcribe.campaign_manager import get_transcripts_for_campaign
     assert get_transcripts_for_campaign("game") == ["s01"]
+
+
+# ---------------------------------------------------------------------------
+# Needs attention (Transcripts page)
+# ---------------------------------------------------------------------------
+
+
+def _attention_setup():
+    from wisper_transcribe import file_registry, transcript_store as ts
+    from wisper_transcribe.path_utils import get_output_dir
+
+    out = get_output_dir()
+    (out / "kept.md").write_text("---\ntitle: Kept\n---\n\nx\n", encoding="utf-8")
+    ts.register("kept", origin="job")
+    return out, ts, file_registry
+
+
+def test_needs_attention_panel_is_hidden_when_nothing_needs_it(client):
+    out, _, _ = _attention_setup()
+    resp = client.get("/transcripts")
+    assert resp.status_code == 200 and 'data-testid="needs-attention"' not in resp.text
+
+
+def test_needs_attention_lists_orphans_with_delete_only_for_output_files(client):
+    from wisper_transcribe.config import get_data_dir
+
+    out, ts, fr = _attention_setup()
+    (out / "ghost.summary.md").write_text("orphan", encoding="utf-8")
+    stray = get_data_dir() / "recordings" / "no-such-recording" / "combined.wav"
+    stray.parent.mkdir(parents=True)
+    stray.write_bytes(b"RIFF")
+
+    resp = client.get("/transcripts")
+    assert 'data-testid="needs-attention"' in resp.text
+    assert "ghost.summary.md" in resp.text and "combined.wav" in resp.text
+    assert resp.text.count('action="/transcripts/needs-attention/delete-file"') == 1
+    assert "Relinking a missing transcript to its renamed file brings its files along." in resp.text
+
+    resp = client.post("/transcripts/needs-attention/delete-file",
+                       data={"name": "ghost.summary.md"}, follow_redirects=False)
+    assert resp.status_code == 303 and resp.headers["location"] == "/transcripts"
+    assert not (out / "ghost.summary.md").exists()
+    assert stray.exists()
+    assert "ghost.summary.md" not in client.get("/transcripts").text
+
+
+def test_delete_file_route_refuses_what_it_does_not_list(client):
+    out, ts, fr = _attention_setup()
+    (out / "kept.summary.md").write_text("mine", encoding="utf-8")
+    fr.sync(out)                                          # registered to "kept"
+    (out / "notes.txt").write_text("user file", encoding="utf-8")
+    (out / "needs-attention.md").write_text("a transcript", encoding="utf-8")
+    ts.register("needs-attention", origin="job")
+
+    for name in ("kept.summary.md", "notes.txt", "kept.md", "needs-attention.md",
+                 "needs-attention", "../kept.summary.md"):
+        resp = client.post("/transcripts/needs-attention/delete-file", data={"name": name},
+                           follow_redirects=False)
+        assert resp.status_code in (303, 400), name
+    assert all((out / n).exists() for n in
+               ("kept.summary.md", "notes.txt", "kept.md", "needs-attention.md"))
+    assert client.get("/transcripts/needs-attention").status_code == 200
+
+
+def test_unregistered_flac_can_be_deleted_from_the_panel(client):
+    out, ts, fr = _attention_setup()
+    (out / "mystery.flac").write_bytes(b"fLaC")
+    assert "mystery.flac" in client.get("/transcripts").text
+    client.post("/transcripts/needs-attention/delete-file", data={"name": "mystery.flac"})
+    assert not (out / "mystery.flac").exists()
+
+
+def test_forget_clears_a_registered_file_deleted_by_hand(client):
+    out, ts, fr = _attention_setup()
+    (out / "kept.summary.md").write_text("mine", encoding="utf-8")
+    fr.sync(out)
+    (out / "kept.summary.md").unlink()
+
+    page = client.get("/transcripts")
+    assert 'data-testid="missing-file"' in page.text and "kept.summary.md" in page.text
+    row = fr.file_for(fr.Owner.for_stem("kept"), "summary")
+    resp = client.post("/transcripts/needs-attention/forget", data={"file_id": str(row.id)},
+                       follow_redirects=False)
+    assert resp.status_code == 303 and resp.headers["location"] == "/transcripts"
+    assert fr.file_for(fr.Owner.for_stem("kept"), "summary") is None
+    assert 'data-testid="missing-file"' not in client.get("/transcripts").text
+
+
+def test_forget_refuses_a_file_that_is_on_disk_or_not_a_number(client):
+    out, ts, fr = _attention_setup()
+    row = fr.file_for(fr.Owner.for_stem("kept"), "transcript")
+    resp = client.post("/transcripts/needs-attention/forget", data={"file_id": str(row.id)},
+                       follow_redirects=False)
+    assert resp.headers["location"] == "/transcripts?error=forget_failed"
+    assert fr.file_for(fr.Owner.for_stem("kept"), "transcript") is not None
+    assert client.post("/transcripts/needs-attention/forget", data={"file_id": "x"}).status_code == 400
+
+
+def test_missing_transcript_is_listed_and_relinked_with_its_files(client):
+    import os
+
+    out, ts, fr = _attention_setup()
+    (out / "kept.summary.md").write_text("mine", encoding="utf-8")
+    (out / "kept_diar.json").write_text("{}", encoding="utf-8")
+    fr.sync(out)
+    (out / "kept.md").rename(out / "renamed.md")
+    os.utime(out / "renamed.md", ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+
+    page = client.get("/transcripts")
+    assert 'data-testid="missing-transcript"' in page.text
+    assert 'data-testid="relink-form"' in page.text
+    assert "Its summary, speaker clips, and audio are deleted too." in page.text
+
+    resp = client.post("/transcripts/relink", data={"old_stem": "kept", "new_stem": "renamed"},
+                       follow_redirects=False)
+    assert resp.status_code == 303 and resp.headers["location"] == "/transcripts"
+    assert (out / "renamed.summary.md").exists() and (out / "renamed_diar.json").exists()
+    assert not (out / "kept.summary.md").exists()
+    assert 'data-testid="needs-attention"' not in client.get("/transcripts").text
+
+
+def test_relink_route_reports_a_kept_name_and_a_failure(client):
+    import os
+
+    out, ts, fr = _attention_setup()
+    (out / "kept.summary.md").write_text("mine", encoding="utf-8")
+    fr.sync(out)
+    (out / "kept.md").rename(out / "renamed.md")
+    os.utime(out / "renamed.md", ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+    (out / "renamed.summary.md").write_text("theirs", encoding="utf-8")
+    client.get("/transcripts")
+
+    resp = client.post("/transcripts/relink", data={"old_stem": "kept", "new_stem": "renamed"},
+                       follow_redirects=False)
+    assert resp.headers["location"] == "/transcripts?notice=relink_kept_names"
+    assert "Some files kept their old name" in client.get(resp.headers["location"]).text
+
+    resp = client.post("/transcripts/relink", data={"old_stem": "kept", "new_stem": "renamed"},
+                       follow_redirects=False)
+    assert resp.headers["location"] == "/transcripts?error=relink_failed"
+
+
+def test_campaign_relink_route_reports_a_kept_name(client):
+    import os
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+
+    out, ts, fr = _attention_setup()
+    create_campaign("Game")
+    move_transcript_to_campaign("kept", "game")
+    (out / "kept.summary.md").write_text("mine", encoding="utf-8")
+    fr.sync(out)
+    (out / "kept.md").rename(out / "renamed.md")
+    os.utime(out / "renamed.md", ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+    (out / "renamed.summary.md").write_text("theirs", encoding="utf-8")
+    client.get("/campaigns/game")
+
+    resp = client.post("/campaigns/game/transcripts/relink",
+                       data={"old_stem": "kept", "new_stem": "renamed"}, follow_redirects=False)
+    assert resp.headers["location"] == "/campaigns/game?notice=relink_kept_names"
+    assert "Some files kept their old name" in client.get(resp.headers["location"]).text
+
+
+def test_startup_logs_what_needs_attention(tmp_path, monkeypatch, caplog):
+    import logging
+    from fastapi.testclient import TestClient
+    from wisper_transcribe.path_utils import get_output_dir
+    from wisper_transcribe.web.app import create_app
+
+    (get_output_dir() / "ghost.summary.md").write_text("orphan", encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        with TestClient(create_app()):
+            pass
+    assert any("Needs attention: 0 missing transcript(s), 0 missing file(s), "
+               "1 file(s) with no transcript" in r.getMessage() for r in caplog.records)
+    assert (get_output_dir() / "ghost.summary.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# Campaign delete choice
+# ---------------------------------------------------------------------------
+
+
+def _campaign_with_session():
+    from wisper_transcribe import file_registry, transcript_store as ts
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    from wisper_transcribe.config import get_data_dir
+    from wisper_transcribe.path_utils import get_output_dir
+
+    out = get_output_dir()
+    create_campaign("Game")
+    (out / "s01.md").write_text("x", encoding="utf-8")
+    ts.register("s01", origin="job")
+    (out / "s01.summary.md").write_text("sum", encoding="utf-8")
+    move_transcript_to_campaign("s01", "game")
+    journal = get_data_dir() / "campaigns" / "game" / "journal.md"
+    journal.parent.mkdir(parents=True)
+    journal.write_text("journal", encoding="utf-8")
+    file_registry.sync(out)
+    return out, journal
+
+
+def test_campaign_page_offers_both_delete_choices(client):
+    _campaign_with_session()
+    page = client.get("/campaigns/game").text
+    assert 'data-testid="delete-campaign-keep"' in page
+    assert 'data-testid="delete-campaign-everything"' in page
+
+
+def test_campaign_delete_everything_route(client):
+    out, journal = _campaign_with_session()
+    resp = client.post("/campaigns/game/delete", data={"mode": "everything"}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert not list(out.iterdir()) and not journal.exists()
+
+
+def test_campaign_delete_keep_route_lists_the_journal(client):
+    out, journal = _campaign_with_session()
+    resp = client.post("/campaigns/game/delete", data={"mode": "keep"}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert (out / "s01.md").exists() and journal.exists()
+    page = client.get("/transcripts").text
+    assert "journal.md" in page and "listed only" in page
+
+
+def test_job_page_shows_enroll_audio_missing_notice_only_for_exact_value(client, tmp_path):
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+    from datetime import datetime
+
+    job = Job(id="notice-test-job", status=COMPLETED, created_at=datetime.now(),
+              input_path=str(tmp_path / "audio.mp3"), kwargs={})
+    client.app.state.job_queue._jobs[job.id] = job
+    text = "no saved voice data"
+
+    assert text in client.get(f"/transcribe/jobs/{job.id}?notice=enroll_audio_missing").text
+    assert text not in client.get(f"/transcribe/jobs/{job.id}").text
+    other = client.get(f"/transcribe/jobs/{job.id}?notice=<b>evil</b>").text
+    assert text not in other and "<b>evil</b>" not in other
+
+
+# ---------------------------------------------------------------------------
+# Playback: audio route, data-start, player, markers
+# ---------------------------------------------------------------------------
+
+_TIMED_MD = (
+    "---\ntitle: T\n---\n\n"
+    "**Ann** *(00:05)*: hello there\n\n"
+    "**Bob** *(1:02:03)*: later on\n"
+)
+
+
+def _playback_setup(tmp_path, monkeypatch, body=_TIMED_MD):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    md = out / "s1.md"
+    md.write_text(body, encoding="utf-8")
+    from wisper_transcribe import transcript_store as ts
+    ts.register("s1", origin="job")
+    return out, md
+
+
+def _recording_for(tmp_path, md):
+    from ._seed import seed_recording
+    from wisper_transcribe.recording_manager import link_transcript
+
+    rec = seed_recording(tmp_path)
+    link_transcript(rec.id, md, tmp_path)
+    return rec
+
+
+def test_audio_route_serves_recording_combined_wav_with_range(client, tmp_path, monkeypatch):
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    _recording_for(tmp_path, md)  # no _diar.json exists
+    resp = client.get("/transcripts/s1/audio", headers={"Range": "bytes=0-99"})
+    assert resp.status_code == 206
+    assert resp.headers["content-type"] == "audio/wav"
+    assert len(resp.content) == 100
+
+
+def test_audio_route_serves_upload_flac_with_range(client, tmp_path, monkeypatch):
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    from ._seed import seed_file
+    from wisper_transcribe import transcript_store as ts
+    (out / "s1.flac").write_bytes(b"fLaC" + b"\x00" * 200)
+    ts.set_audio(md, out / "s1.flac")
+    resp = client.get("/transcripts/s1/audio", headers={"Range": "bytes=0-99"})
+    assert resp.status_code == 206
+    assert resp.headers["content-type"] == "audio/flac"
+
+
+def test_audio_route_404_without_audio_or_file(client, tmp_path, monkeypatch):
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    assert client.get("/transcripts/s1/audio").status_code == 404
+    assert client.get("/transcripts/missing/audio").status_code == 404
+    rec = _recording_for(tmp_path, md)
+    (tmp_path / "recordings" / rec.id / "combined.wav").unlink()
+    assert client.get("/transcripts/s1/audio").status_code == 404
+
+
+def test_detail_page_player_only_with_audio(client, tmp_path, monkeypatch):
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    assert 'id="transcript-audio"' not in client.get("/transcripts/s1").text
+    _recording_for(tmp_path, md)
+    page = client.get("/transcripts/s1").text
+    assert 'id="transcript-audio"' in page
+    assert 'src="/transcripts/s1/audio"' in page
+    assert 'id="follow-toggle"' in page
+
+
+def test_detail_page_has_no_follow_toggle_without_timestamps(client, tmp_path, monkeypatch):
+    out, md = _playback_setup(tmp_path, monkeypatch, body="**Ann**: plain text\n")
+    _recording_for(tmp_path, md)
+    page = client.get("/transcripts/s1").text
+    assert 'id="transcript-audio"' in page
+    assert 'id="follow-toggle"' not in page
+
+
+def test_data_start_survives_sanitizing(client, tmp_path, monkeypatch):
+    _playback_setup(tmp_path, monkeypatch)
+    page = client.get("/transcripts/s1").text
+    assert 'id="b-0" class="block-anchor" data-start="5"' in page
+    assert 'id="b-1" class="block-anchor" data-start="3723"' in page
+
+
+def test_marker_buttons_render_with_times(client, tmp_path, monkeypatch):
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    rec = _recording_for(tmp_path, md)
+    from wisper_transcribe import db
+    from wisper_transcribe.recording_manager import _ts, load_recording
+    from datetime import timedelta
+    started = load_recording(rec.id, tmp_path).started_at
+    with db.transaction(tmp_path) as conn:
+        for secs in (65, 3725):
+            conn.execute("INSERT INTO recording_markers (recording_id, marked_at) VALUES (?, ?)",
+                         (rec.id, _ts(started + timedelta(seconds=secs))))
+    page = client.get("/transcripts/s1").text
+    assert page.count("data-seek=") == 2
+    assert 'data-seek="65"' in page and ">0:01:05<" in page
+    assert 'data-seek="3725"' in page and ">1:02:05<" in page
+
+
+def test_no_marker_list_without_markers(client, tmp_path, monkeypatch):
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    _recording_for(tmp_path, md)
+    assert "data-seek=" not in client.get("/transcripts/s1").text
+
+
+# ---------------------------------------------------------------------------
+# Re-transcribe
+# ---------------------------------------------------------------------------
+
+def _flac_transcript(tmp_path, monkeypatch, stem="s1"):
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    from wisper_transcribe import transcript_store as ts
+    (out / f"{stem}.flac").write_bytes(b"fLaC" + b"\x00" * 200)
+    ts.set_audio(md, out / f"{stem}.flac")
+    return out, md
+
+
+def _submit_spy(client):
+    job = MagicMock(id="11111111-1111-4111-8111-111111111111")
+    return patch.object(client.app.state.job_queue, "submit", return_value=job)
+
+
+def test_retranscribe_upload_submits_the_flac_in_place(client, tmp_path, monkeypatch):
+    out, md = _flac_transcript(tmp_path, monkeypatch)
+    md.write_text("---\ntitle: Session One\nsource_file: Session 1.mp4\n---\n\nbody\n",
+                  encoding="utf-8")
+    from wisper_transcribe import campaign_manager as cm
+    from wisper_transcribe import job_history
+    cm.create_campaign("A", tmp_path)
+    cm.create_campaign("B", tmp_path)
+    cm.move_transcript_to_campaign("s1", "b", tmp_path)
+    job_history.record(_history_job(md))
+    with _submit_spy(client) as submit:
+        resp = client.post("/transcripts/s1/retranscribe", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/transcribe/jobs/11111111-1111-4111-8111-111111111111"
+    args, kw = submit.call_args
+    assert args == (str(out / "s1.flac"),)
+    assert kw["original_stem"] == "s1" and kw["overwrite"] is True
+    assert kw["output_dir"] == str(out)
+    assert kw["title"] == "Session One" and kw["source_name"] == "Session 1.mp4"
+    assert kw["campaign"] == "b"
+    assert kw["language"] == "en" and kw["num_speakers"] == 3
+    assert "model_size" not in kw
+
+
+def test_retranscribe_without_campaign_or_history_passes_neither(client, tmp_path, monkeypatch):
+    out, md = _flac_transcript(tmp_path, monkeypatch)
+    with _submit_spy(client) as submit:
+        client.post("/transcripts/s1/retranscribe", follow_redirects=False)
+    kw = submit.call_args.kwargs
+    assert "campaign" not in kw and "language" not in kw
+    assert kw["source_name"] == "s1.flac"
+
+
+def test_retranscribe_recording_uses_the_hand_off(client, tmp_path, monkeypatch):
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    _recording_for(tmp_path, md)
+    job = MagicMock(id="11111111-1111-4111-8111-111111111111")
+    with patch("wisper_transcribe.web.routes.record._submit_recording_transcription",
+               return_value=(job, None)) as hand_off, _submit_spy(client) as submit:
+        resp = client.post("/transcripts/s1/retranscribe", follow_redirects=False)
+    assert resp.headers["location"] == "/transcribe/jobs/11111111-1111-4111-8111-111111111111"
+    hand_off.assert_called_once()
+    submit.assert_not_called()
+
+
+def test_retranscribe_recording_error_redirects_to_the_page(client, tmp_path, monkeypatch):
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    _recording_for(tmp_path, md)
+    with patch("wisper_transcribe.web.routes.record._submit_recording_transcription",
+               return_value=(None, "not_ready")):
+        resp = client.post("/transcripts/s1/retranscribe", follow_redirects=False)
+    assert resp.headers["location"] == "/transcripts/s1?error=not_ready"
+    assert "isn&#39;t ready" in client.get("/transcripts/s1?error=not_ready").text
+
+
+def test_retranscribe_without_audio_redirects_and_submits_nothing(client, tmp_path, monkeypatch):
+    _playback_setup(tmp_path, monkeypatch)
+    with _submit_spy(client) as submit:
+        resp = client.post("/transcripts/s1/retranscribe", follow_redirects=False)
+    assert resp.headers["location"] == "/transcripts/s1?error=no_audio"
+    submit.assert_not_called()
+    assert "no saved audio to re-transcribe" in client.get("/transcripts/s1?error=no_audio").text
+
+
+def test_retranscribe_missing_transcript_is_404(client, tmp_path, monkeypatch):
+    _playback_setup(tmp_path, monkeypatch)
+    assert client.post("/transcripts/nope/retranscribe").status_code == 404
+
+
+def test_retranscribe_button_only_with_audio_and_confirm_survives_tojson(client, tmp_path, monkeypatch):
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    assert "/retranscribe" not in client.get("/transcripts/s1").text
+    from wisper_transcribe import transcript_store as ts
+    (out / "s1.flac").write_bytes(b"fLaC" + b"\x00" * 200)
+    ts.set_audio(md, out / "s1.flac")
+    page = client.get("/transcripts/s1").text
+    assert 'action="/transcripts/s1/retranscribe"' in page
+    assert "aren\\u0027t reused" in page
+    assert "onsubmit='return confirm(\"Re-transcribe" in page
+
+
+def _history_job(md):
+    import types
+    from datetime import datetime
+    now = datetime.now()
+    return types.SimpleNamespace(
+        id="22222222-2222-4222-8222-222222222222", job_type="transcription",
+        status="completed", created_at=now, started_at=now, finished_at=now, error=None,
+        log_lines=[], recording_id=None, output_path=str(md), post_refine=False,
+        post_summarize=False,
+        kwargs={"language": "en", "num_speakers": 3, "model_size": "tiny"})

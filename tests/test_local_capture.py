@@ -586,6 +586,39 @@ def test_set_live_sink_replaces_and_clears():
     assert mgr._live_sink is None
 
 
+@pytest.fixture(autouse=True)
+def trim_mock(monkeypatch):
+    """Finalise would delete the segments and per-user tracks these tests read."""
+    mock = MagicMock(return_value=0)
+    monkeypatch.setattr("wisper_transcribe.web.local_capture.trim_recording_audio", mock)
+    return mock
+
+
+def test_finalise_trims_the_recording_audio(tmp_path, trim_mock):
+    blocks = {"mic-dev": [_block() for _ in range(2)]}
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path,
+        capture_factory=scripted_capture_factory(blocks),
+        ticker=instant_ticker(2),
+    )
+    rec = mgr.start_session(None, "mic-dev", "sys-dev")
+    _run_session_to_completion(mgr)
+    trim_mock.assert_called_once_with(rec.id, tmp_path)
+
+
+def test_finalise_survives_a_failing_trim(tmp_path, trim_mock):
+    trim_mock.side_effect = OSError("disk")
+    blocks = {"mic-dev": [_block() for _ in range(2)]}
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path,
+        capture_factory=scripted_capture_factory(blocks),
+        ticker=instant_ticker(2),
+    )
+    rec = mgr.start_session(None, "mic-dev", "sys-dev")
+    _run_session_to_completion(mgr)
+    assert load_recordings(tmp_path)[rec.id].status == "completed"
+
+
 def test_finalise_clears_live_sink(tmp_path):
     n_ticks = 2
     blocks = {"mic-dev": [_block() for _ in range(n_ticks)]}

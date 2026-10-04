@@ -76,7 +76,7 @@ async def campaign_detail(request: Request, slug: str) -> HTMLResponse:
 
     from wisper_transcribe import transcript_store
     from wisper_transcribe.path_utils import get_output_dir
-    transcript_store.reconcile(get_output_dir())  # flag externally deleted/renamed files
+    transcript_store.reconcile(get_output_dir(), sync="throttled")  # flag externally deleted/renamed files
 
     from wisper_transcribe.journal import journal_path, journal_stale_since, unjournalled_sessions
     journal_pending = len(unjournalled_sessions(safe))  # also syncs file ↔ DB
@@ -124,15 +124,26 @@ async def campaign_detail(request: Request, slug: str) -> HTMLResponse:
 
 
 @router.post("/{slug}/delete", response_class=HTMLResponse)
-async def campaign_delete(request: Request, slug: str) -> RedirectResponse:
+async def campaign_delete(
+    request: Request,
+    slug: str,
+    mode: Annotated[str, Form()] = "keep",
+) -> RedirectResponse:
+    """Delete a campaign. ``mode=everything`` also deletes its transcripts and
+    journal; anything else keeps them."""
     safe = _validate_campaign_slug(slug)
     if safe is None:
         return invalid_input_response("Invalid campaign slug")
 
     try:
-        delete_campaign(safe)
+        delete_campaign(safe, delete_transcripts=(mode == "everything"))
     except KeyError:
         pass  # Already gone — redirect silently
+    else:
+        # A kept journal becomes an unowned file; list it without waiting for the throttle.
+        from wisper_transcribe import file_registry
+        from wisper_transcribe.path_utils import get_output_dir
+        file_registry.sync_if_due(get_output_dir(), force=True)
 
     return RedirectResponse(url="/campaigns", status_code=303)
 
@@ -467,8 +478,9 @@ async def campaign_relink_transcript(
     if old_md is None or new_md is None or old_md.stem not in campaign.transcripts:
         return RedirectResponse(url=f"/campaigns/{campaign.slug}?error=relink_failed", status_code=303)
     try:
-        transcript_store.relink(old_md.stem, new_md.stem, output_dir=out_dir)
+        kept = transcript_store.relink(old_md.stem, new_md.stem, output_dir=out_dir)
     except (KeyError, ValueError):
         return RedirectResponse(url=f"/campaigns/{campaign.slug}?error=relink_failed", status_code=303)
     # campaign.slug comes from the database, not the URL.
-    return RedirectResponse(url=f"/campaigns/{campaign.slug}", status_code=303)
+    notice = "?notice=relink_kept_names" if kept else ""
+    return RedirectResponse(url=f"/campaigns/{campaign.slug}{notice}", status_code=303)

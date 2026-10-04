@@ -925,7 +925,16 @@ async def recording_enroll_html(
             url=f"/recordings/{recording.id}?error=enroll_failed", status_code=303
         )
 
-    per_user_dir = data_dir / "recordings" / recording.id / "per-user" / safe_uid
+    per_user_base = os.path.abspath(
+        os.path.join(str(data_dir), "recordings", recording.id, "per-user")) + os.sep
+    per_user_path = os.path.abspath(os.path.join(per_user_base, safe_uid))
+    if not per_user_path.startswith(per_user_base):
+        return JSONResponse({"detail": "invalid discord_user_id"}, status_code=400)
+    per_user_dir = Path(per_user_path)
+    if not os.path.isdir(per_user_path):
+        return RedirectResponse(
+            url=f"/recordings/{recording.id}?error=no_audio", status_code=303
+        )
 
     # Enrollment runs as a JOB_ENROLL job; redirect via the server-generated
     # job.id.
@@ -960,11 +969,11 @@ def _submit_recording_transcription(recording, request: Request, data_dir: Path)
 
     from wisper_transcribe.path_utils import get_output_dir
 
-    # Copy combined.wav to output dir so the transcript lands alongside existing ones
     output_dir = get_output_dir()
     output_dir.mkdir(parents=True, exist_ok=True)
-    dest = output_dir / f"{recording.id}.wav"
-    shutil.copy2(str(recording.combined_path), str(dest))
+    # A re-transcribe replaces the recording's transcript in place, under its
+    # current name (it may have been renamed); a first run uses the recording id.
+    stem = recording.transcript_path.stem if recording.transcript_path else recording.id
 
     # On success, link the transcript. Nothing to undo on failure: the
     # recording reads as "transcribing" only while this job is active.
@@ -978,17 +987,17 @@ def _submit_recording_transcription(recording, request: Request, data_dir: Path)
 
     queue = request.app.state.job_queue
     job = queue.submit(
-        str(dest),
-        original_stem=recording.id,
+        str(recording.combined_path),
+        original_stem=stem,
+        source_name=recording.name or recording.id,
         recording_id=recording.id,
         output_dir=str(output_dir),
         # process_file associates the transcript with this campaign.
         campaign=recording.campaign_slug or "",
         title=recording.name,
-        # The output is <recording-id>.md, which only this recording ever
-        # writes, so re-transcribing replaces its own transcript (keeping the
-        # transcript's identity and campaign; a folded journal goes stale).
-        # The page asks for confirmation first.
+        # The output is the recording's own transcript, so re-transcribing
+        # replaces it (keeping its identity and campaign; a folded journal goes
+        # stale). The page asks for confirmation first.
         overwrite=True,
         on_complete=_on_complete,
     )

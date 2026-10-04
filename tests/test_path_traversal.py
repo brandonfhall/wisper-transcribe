@@ -43,6 +43,10 @@ def test_transcripts_path_traversal_blocked(client: TestClient, payload: str):
     resp = client.get(f"/transcripts/{safe_url}/download")
     assert resp.status_code == 400
 
+    # 2b. Audio
+    resp = client.get(f"/transcripts/{safe_url}/audio")
+    assert resp.status_code == 400
+
     # 3. Delete
     resp = client.post(f"/transcripts/{safe_url}/delete")
     assert resp.status_code == 400
@@ -548,7 +552,8 @@ def test_transcribe_name_check_never_escapes_output_dir(client, payload, tmp_pat
     monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
     resp = client.get("/transcribe/name-check", params={"filename": payload})
     assert resp.status_code == 200
-    assert resp.json() == {"exists": False, "campaign": None}
+    assert resp.json() == {"exists": False, "campaign": None, "modified": None,
+                           "missing": False, "clashes": []}
     assert payload not in resp.text
 
 
@@ -567,6 +572,49 @@ def test_campaign_relink_rejects_unsafe_stems(client, payload, tmp_path, monkeyp
         assert resp.status_code in (303, 400, 422)
         location = resp.headers.get("location", "")
         assert location in ("", "/campaigns/game?error=relink_failed")
+
+
+_UNSAFE_NAMES = _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS + [
+    "../escape", "../../etc/passwd", "a/b", "..", "evil\r\nLocation: x",
+]
+
+
+@pytest.mark.parametrize("payload", _UNSAFE_NAMES)
+def test_transcripts_relink_rejects_unsafe_stems(client, payload, tmp_path, monkeypatch):
+    """Both stems come from form data; neither may leave the output dir or be
+    reflected into the redirect."""
+    for form in ({"old_stem": payload, "new_stem": "x"}, {"old_stem": "x", "new_stem": payload}):
+        resp = client.post("/transcripts/relink", data=form, follow_redirects=False)
+        assert resp.status_code in (303, 400, 422)
+        assert resp.headers.get("location", "") in ("", "/transcripts?error=relink_failed")
+        assert payload not in resp.text
+
+
+@pytest.mark.parametrize("payload", _UNSAFE_NAMES + ["../outside.summary.md",
+                                                     "..\\outside.summary.md",
+                                                     "sub/x.summary.md", "x.summary.md\x00.txt"])
+def test_needs_attention_delete_file_never_leaves_the_output_dir(client, payload, tmp_path):
+    """The file name is a basename with a companion-file pattern, inside the
+    output root; anything else deletes nothing."""
+    from wisper_transcribe.path_utils import get_output_dir
+
+    out = get_output_dir()
+    outside = out.parent / "outside.summary.md"
+    outside.write_text("keep", encoding="utf-8")
+    resp = client.post("/transcripts/needs-attention/delete-file", data={"name": payload},
+                       follow_redirects=False)
+    assert resp.status_code in (303, 400, 422)
+    assert resp.headers.get("location", "") in ("", "/transcripts?error=delete_failed")
+    assert payload not in resp.text
+    assert outside.exists()
+
+
+@pytest.mark.parametrize("payload", ["x", "1.5", "-1", "1; DROP TABLE files", "\x00", ""])
+def test_needs_attention_forget_takes_only_a_listed_file_id(client, payload):
+    resp = client.post("/transcripts/needs-attention/forget", data={"file_id": payload},
+                       follow_redirects=False)
+    assert resp.status_code in (303, 400, 422)
+    assert resp.headers.get("location", "") in ("", "/transcripts?error=forget_failed")
 
 
 @pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS + ["\x00", "a\x00b", "\r\nSet-Cookie: x=1"])
@@ -612,3 +660,34 @@ def test_remove_profile_files_deletes_its_own_clip(tmp_path):
     (clips / "joe_(dm).mp3").write_bytes(b"x")
     remove_profile_files("joe_(dm)", tmp_path)
     assert not (clips / "joe_(dm).mp3").exists()
+
+
+@pytest.mark.parametrize("payload", ["..%2Foutside", "a%2Fb", "..%5Coutside"])
+def test_transcript_audio_rejects_slashes(client: TestClient, payload: str):
+    """An encoded slash or backslash never reaches the filesystem."""
+    assert client.get(f"/transcripts/{payload}/audio").status_code in (400, 404)
+
+
+@pytest.mark.parametrize("payload", [quote(p, safe="") for p in _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS] + [
+    "..%2Foutside", "a%2Fb", "..%5Coutside", "evil%0D%0ALocation:%20x", "%5C%5Cevil.com"])
+def test_transcript_retranscribe_never_submits_for_an_unsafe_name(client, payload, tmp_path, monkeypatch):
+    """The name is guarded before any lookup, and never reaches a redirect."""
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(tmp_path))
+    queue = client.app.state.job_queue
+    with patch.object(queue, "submit") as submit:
+        resp = client.post(f"/transcripts/{payload}/retranscribe", follow_redirects=False)
+    assert resp.status_code in (400, 404)
+    assert "evil" not in resp.headers.get("location", "")
+    submit.assert_not_called()
+
+
+def test_transcript_retranscribe_error_redirect_quotes_the_stem(client, tmp_path, monkeypatch):
+    from wisper_transcribe import transcript_store
+
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    (out / "Session — 1!.md").write_text("x", encoding="utf-8")
+    transcript_store.register("Session — 1!", origin="job")
+    resp = client.post(f"/transcripts/{quote('Session — 1!')}/retranscribe", follow_redirects=False)
+    assert resp.headers["location"] == f"/transcripts/{quote('Session — 1!')}?error=no_audio"

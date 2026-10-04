@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 import subprocess
 import sys as _sys
 import threading
@@ -25,6 +26,7 @@ from typing import Any, Callable, Optional
 
 import tqdm as _tqdm_module
 
+from wisper_transcribe import file_registry
 from wisper_transcribe.pipeline import process_file
 from wisper_transcribe.transcript_store import atomic_write_text, save_summary, save_transcript
 
@@ -157,23 +159,25 @@ class _StderrCapture:
         return False
 
 
-def _write_enrollment_sidecar(job: "Job", output_path: "Path") -> None:  # type: ignore[name-defined]
+def _write_enrollment_sidecar(job: "Job", output_path: "Path") -> bool:  # type: ignore[name-defined]
     """Store the job's diarization data with ``transcript_store.write_sidecar``:
     speakers and the audio path in the database, segments in ``<stem>_diar.json``.
 
     Lets the enrollment wizard work after a restart. Failures are swallowed:
-    the transcript is already written.
+    the transcript is already written. Returns True only after the write
+    succeeded.
+
+    ``input_path`` is included only for a job that owns its audio copy: a
+    recording's audio belongs to the recording, never to the transcript.
     """
-    import json as _json
     from pathlib import Path as _Path
 
     if not job.diarization_segments:
-        return
+        return False
 
     try:
         out = _Path(output_path)
         sidecar = {
-            "input_path": str(_Path(job.input_path)),
             "diarization_segments": [
                 {"start": s.start, "end": s.end, "speaker": s.speaker}
                 for s in job.diarization_segments
@@ -181,6 +185,8 @@ def _write_enrollment_sidecar(job: "Job", output_path: "Path") -> None:  # type:
             # Authoritative raw label -> display name map; absent in old sidecars.
             "speaker_map": dict(job.speaker_map) if job.speaker_map else {},
         }
+        if job.input_path and not job.recording_id:
+            sidecar["input_path"] = str(_Path(job.input_path))
         if job.speaker_map:
             from wisper_transcribe.speaker_registry import SOURCE_AUTO
             sidecar["speaker_map_source"] = {label: SOURCE_AUTO for label in job.speaker_map}
@@ -190,61 +196,79 @@ def _write_enrollment_sidecar(job: "Job", output_path: "Path") -> None:  # type:
         # Speakers + audio path to the DB, segments to <stem>_diar.json.
         from wisper_transcribe.transcript_store import write_sidecar
         write_sidecar(out, sidecar)
+        return True
     except Exception:
         log.warning("Could not store speaker data for %s", _Path(output_path).name, exc_info=True)
+        return False
 
 
-def _move_upload_to_output(input_path: str, output_path: "Path") -> str:  # type: ignore[name-defined]
-    """Move a temp web-upload file next to its finished transcript.
+def _keep_audio(job: "Job", output_path: "Path") -> None:  # type: ignore[name-defined]
+    """Encode the job's extracted WAV to ``<stem>.flac`` beside the transcript.
 
-    The upload was renamed to ``<original_stem><suffix>`` in the tempdir at
-    submit time, so the startup sweep can't reclaim it. Moving it makes the
-    sidecar's ``input_path`` durable and empties the tempdir.
+    Sets ``job.input_path`` to the audio the transcript should keep: the new
+    FLAC, else the transcript's existing registered audio, else ``""``. A
+    ``<stem>.flac`` that belongs to another transcript is never replaced, and
+    one wisper doesn't own is replaced only on Overwrite. A failed encode
+    never costs the transcript the audio it already had.
+    """
+    from pathlib import Path as _Path
 
-    Returns the new path, or ``input_path`` unchanged if the move fails
-    (enrollment audio may then be unavailable; the transcript is unaffected).
+    from wisper_transcribe import transcript_store
+    from wisper_transcribe.audio_utils import encode_flac
+
+    md_path = _Path(output_path)
+    out_dir = md_path.parent
+    stem = md_path.stem
+    wav = _Path(job.input_path)
+    target = transcript_store.safe_path(stem, ".flac", out_dir) or (out_dir / f"{stem}.flac")
+
+    owner = file_registry.Owner.for_stem(stem, output_dir=out_dir)
+    previous = (file_registry.file_for(owner, "audio", output_dir=out_dir)
+                if owner is not None else None)
+    previous_path = previous.path if previous is not None and previous.path.is_file() else None
+
+    keep_new = True
+    if target.exists():
+        own = previous is not None and transcript_store._same_file(previous.path, target)
+        if not own and file_registry.is_registered(target, output_dir=out_dir):
+            job.append_log(f"Kept no new audio: {target.name} belongs to another transcript")
+            keep_new = False
+        elif not own and not job.kwargs.get("overwrite"):
+            job.append_log(
+                f"Kept no new audio: {target.name} already exists and belongs to something else"
+            )
+            keep_new = False
+
+    if keep_new:
+        try:
+            encode_flac(wav, target)
+            job.input_path = str(target)
+            return
+        except Exception:
+            log.warning("Could not encode the audio for %s", stem, exc_info=True)
+            job.append_log("Warning: could not save the audio copy; the transcript is unaffected")
+
+    if previous_path is not None:
+        job.input_path = str(previous_path)
+        job.append_log("Kept the previous audio")
+    else:
+        job.input_path = ""
+
+
+def _delete_temp_upload(job: "Job") -> None:  # type: ignore[name-defined]
+    """Delete the job's temp upload folder after failure or cancellation.
+
+    Acts only on a ``wisper_upload_*`` folder the job created, so recording
+    audio and every other path are never touched.
     """
     import shutil
     from pathlib import Path as _Path
 
-    src = _Path(input_path)
-    if not src.exists():
-        return input_path
-
-    out = _Path(output_path)
-    out_dir = out.parent
-    stem = out.stem
-    suffix = src.suffix
-
-    dest = out_dir / f"{stem}{suffix}"
-    counter = 1
-    while dest.exists():
-        dest = out_dir / f"{stem}_{counter}{suffix}"
-        counter += 1
-
-    try:
-        shutil.move(str(src), str(dest))
-    except OSError:
-        return input_path
-    return str(dest)
-
-
-def _delete_temp_upload(job: "Job") -> None:  # type: ignore[name-defined]
-    """Delete the job's temp web upload after failure or cancellation.
-
-    Acts only when ``Job.is_web_upload`` is set, so recording audio and other
-    durable inputs are never touched.
-    """
-    if not job.is_web_upload:
+    if not job.upload_dir:
         return
-    from pathlib import Path as _Path
-
-    try:
-        p = _Path(job.input_path)
-        if p.exists():
-            p.unlink()
-    except OSError:
-        pass
+    folder = _Path(job.upload_dir)
+    if folder.name.startswith("wisper_upload_"):
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def _longest_aligned_segment(aligned_segments: list, label: str) -> Optional[tuple]:
@@ -304,6 +328,7 @@ def _extract_speaker_excerpts(job: "Job", output_path: "Path",  # type: ignore[n
     out_dir = _Path(output_path).parent
     stem = _Path(output_path).stem
     input_path = _Path(job.input_path)
+    safe_names: list[str] = []
 
     for label in labels:
         turn = None
@@ -339,6 +364,7 @@ def _extract_speaker_excerpts(job: "Job", output_path: "Path",  # type: ignore[n
             duration = _EXCERPT_SECONDS
 
         safe_name = re.sub(r"[^\w\-]", "_", label)
+        safe_names.append(safe_name)
         clip_path = out_dir / f"{stem}_excerpt_{safe_name}.mp3"
         try:
             subprocess.run(
@@ -365,6 +391,20 @@ def _extract_speaker_excerpts(job: "Job", output_path: "Path",  # type: ignore[n
             atomic_write_text(text_path, text)
         except Exception:
             pass
+
+    # Two labels that sanitise to one name wrote one file; the second add updates its row.
+    from wisper_transcribe import db
+    try:
+        with db.transaction() as conn:
+            owner = file_registry.Owner.for_stem(stem, conn=conn, output_dir=out_dir)
+            for name in safe_names:
+                for kind, suffix in (("excerpt", ".mp3"), ("excerpt_text", ".txt")):
+                    path = out_dir / f"{stem}_excerpt_{name}{suffix}"
+                    if path.is_file():
+                        file_registry.add_if_owned(path, kind=kind, owner=owner, label=name,
+                                                   conn=conn, output_dir=out_dir)
+    except Exception:
+        log.warning("Could not register speaker excerpts for %s", stem, exc_info=True)
 
 
 @dataclass
@@ -410,10 +450,15 @@ class Job:
     llm_transcript_path: Optional[str] = None
     # For summarize jobs: path to the generated .summary.md file
     summary_path: Optional[str] = None
-    # True when input_path came from a wisper_upload_* temp file. Captured
-    # from the original basename at submit, before the friendly-name rename.
-    # Only these files are ever moved or deleted by the job.
+    # True when input_path came from a wisper_upload_* temp file, judged from
+    # the original basename at submit. Only these are ever extracted and deleted.
     is_web_upload: bool = False
+    # The job's ``wisper_upload_<job-id>`` temp folder (the moved upload and
+    # its extracted WAV); "" for any other input. In memory only.
+    upload_dir: str = ""
+    # Frozen at submit from the original input, so the Extract step doesn't
+    # change when ``input_path`` does. None: derive from ``input_path``.
+    needs_extraction_flag: Optional[bool] = None
     # Transcription of a recording's combined track: which recording. The
     # recording's "transcribing" status and job link are derived from this.
     recording_id: Optional[str] = None
@@ -495,6 +540,8 @@ class Job:
         WAVs are passthrough-checked and may also re-encode silently if their
         rate/channels are wrong — but the common case is no extraction.
         """
+        if self.needs_extraction_flag is not None:
+            return self.needs_extraction_flag
         from pathlib import Path as _Path
         return _Path(self.input_path or "").suffix.lower() != ".wav"
 
@@ -546,25 +593,34 @@ class JobQueue:
     ) -> Job:
         """Enqueue a transcription job and return it.
 
-        Recognized kwargs (stripped before forwarding to process_file):
-        ``original_stem`` names the job and renames the temp upload so the
-        transcript inherits the original filename; ``post_refine`` /
-        ``post_summarize`` chain LLM post-processing.
+        ``original_stem`` names the job and the transcript (it reaches
+        ``process_file`` as ``output_stem``); a temp upload is moved into a
+        ``wisper_upload_<job-id>`` folder the job deletes when it ends.
+        ``source_name`` is forwarded as the frontmatter ``source_file``.
+        ``recording_id``, ``post_refine`` and ``post_summarize`` are stripped
+        before forwarding; the last two chain LLM post-processing.
 
         ``on_complete`` / ``on_error`` run in the worker thread when the job
         completes or fails (including cancellation), so callers with external
         state (e.g. a Recording's status) can update it.
         """
         from pathlib import Path
+        import re
         import shutil
 
-        original_stem: str = kwargs.pop("original_stem", "")
+        job_id = str(uuid.uuid4())
+        original_stem: str = re.split(r"[\\/]", kwargs.pop("original_stem", "") or "")[-1]
         recording_id: Optional[str] = kwargs.pop("recording_id", None)
         post_refine: bool = bool(kwargs.pop("post_refine", False))
         post_summarize: bool = bool(kwargs.pop("post_summarize", False))
 
         if not original_stem:
             original_stem = Path(input_path).stem
+        if not kwargs.get("source_name"):
+            kwargs.pop("source_name", None)
+
+        # The transcript is named after the job, not after the input file.
+        kwargs["output_stem"] = original_stem
 
         # Freeze the alignment setting at submit so the job page's Align step
         # and the run agree even if the config changes while queued.
@@ -572,19 +628,32 @@ class JobQueue:
             from wisper_transcribe.config import load_config
             kwargs["forced_alignment"] = load_config().get("forced_alignment", "auto")
 
-        # Capture the web-upload marker before the rename strips the
-        # "wisper_upload_" prefix; the renamed file is still a temp upload.
-        is_web_upload = Path(input_path).name.startswith("wisper_upload_")
-
-        # Rename temp file so process_file writes <stem>.md instead of a UUID
         tmp_path = Path(input_path)
-        if tmp_path.exists() and tmp_path.stem != original_stem:
-            renamed = tmp_path.with_name(original_stem + tmp_path.suffix)
-            shutil.move(str(tmp_path), str(renamed))
-            input_path = str(renamed)
+        is_web_upload = tmp_path.name.startswith("wisper_upload_")
+        needs_extraction = tmp_path.suffix.lower() != ".wav"
+
+        # An upload gets a folder of its own so the job can delete everything
+        # it made, whatever the file ends up called.
+        upload_dir = ""
+        if is_web_upload and tmp_path.exists():
+            folder = tmp_path.parent / f"wisper_upload_{job_id}"
+            folder.mkdir()
+            try:
+                moved = folder / (original_stem + tmp_path.suffix)
+                try:
+                    shutil.move(str(tmp_path), str(moved))
+                except OSError:
+                    # A name the filesystem refuses (e.g. a Windows-reserved one).
+                    moved = folder / ("upload" + tmp_path.suffix)
+                    shutil.move(str(tmp_path), str(moved))
+            except OSError:
+                shutil.rmtree(folder, ignore_errors=True)
+                raise
+            upload_dir = str(folder)
+            input_path = str(moved)
 
         job = Job(
-            id=str(uuid.uuid4()),
+            id=job_id,
             status=PENDING,
             created_at=datetime.now(),
             input_path=input_path,
@@ -594,6 +663,8 @@ class JobQueue:
             post_refine=post_refine,
             post_summarize=post_summarize,
             is_web_upload=is_web_upload,
+            upload_dir=upload_dir,
+            needs_extraction_flag=needs_extraction,
             recording_id=recording_id,
         )
         if on_complete is not None:
@@ -892,6 +963,7 @@ class JobQueue:
             job.status = FAILED
             job.error = "Cancelled"
             job.finished_at = datetime.now()
+            _delete_temp_upload(job)
             _record_history(job)
             self._prune_finished_jobs()
             return True
@@ -1142,6 +1214,21 @@ class JobQueue:
         _tqdm_module.tqdm.write = capturing_write  # type: ignore[method-assign]
         _tqdm_module.tqdm.__init__ = capturing_init  # type: ignore[method-assign]
         try:
+            if job.is_web_upload and job.upload_dir:
+                # Only the WAV is read from here on, so the upload (a video can
+                # be gigabytes) goes as soon as it has been extracted.
+                from wisper_transcribe.audio_utils import convert_to_wav
+                upload = Path(job.input_path)
+                wav = convert_to_wav(
+                    upload, out_path=Path(job.upload_dir) / "extracted" / "audio.wav")
+                if Path(wav) != upload:
+                    try:
+                        upload.unlink()
+                        job.append_log("Extracted audio; deleted the uploaded file")
+                    except OSError:
+                        job.append_log("Extracted audio; could not delete the uploaded file")
+                job.input_path = str(wav)
+
             _result_store: dict = {}
             output_path = process_file(Path(job.input_path), _result_store=_result_store,
                                        job_id=job.id, skip_existing=False, **job.kwargs)
@@ -1154,22 +1241,33 @@ class JobQueue:
             job.speaker_embeddings = _result_store.get("speaker_embeddings", {})
             job.output_path = str(output_path)
 
-            # Move the temp upload next to the transcript (before excerpts and
-            # the sidecar, so both record the durable path). Without
-            # diarization data there's no sidecar to reference it, so delete
-            # it instead.
-            if job.is_web_upload:
-                if job.diarization_segments:
-                    job.input_path = _move_upload_to_output(job.input_path, output_path)
-                else:
-                    _delete_temp_upload(job)
-                # Clear the flag so a later failure can't delete the durable copy.
-                job.is_web_upload = False
-
+            # Excerpts are cut from the extracted WAV (or a recording's combined.wav).
             _extract_speaker_excerpts(job, output_path,
                                       aligned_segments=_result_store.get("aligned_segments", []),
                                       diarization_segments=job.diarization_segments)
-            _write_enrollment_sidecar(job, output_path)
+
+            if job.upload_dir:
+                _keep_audio(job, Path(output_path))
+            sidecar_written = _write_enrollment_sidecar(job, output_path)
+            if job.upload_dir:
+                from wisper_transcribe import transcript_store
+                if job.diarization_segments and not sidecar_written and job.input_path:
+                    # The sidecar write failed after the encode: don't leave the
+                    # new FLAC unregistered.
+                    try:
+                        transcript_store.set_audio(Path(output_path), Path(job.input_path))
+                    except Exception:
+                        log.warning("Could not record the audio for %s", Path(output_path).name,
+                                    exc_info=True)
+                elif not job.diarization_segments:
+                    try:
+                        transcript_store.set_audio(
+                            Path(output_path), Path(job.input_path) if job.input_path else None)
+                    except Exception:
+                        log.warning("Could not record the audio for %s", Path(output_path).name,
+                                    exc_info=True)
+                _delete_temp_upload(job)
+                job.is_web_upload = False
 
             # Chain LLM post-processing if requested; defer COMPLETED until done
             if job.post_refine or job.post_summarize:
@@ -1393,6 +1491,14 @@ class JobQueue:
                 "Failed to update recording state after enrollment", exc_info=True
             )
 
+        try:
+            from wisper_transcribe.recording_manager import trim_recording_audio
+
+            trim_recording_audio(p["recording_id"], data_dir)
+        except Exception:
+            log.warning("Could not trim recording %s after enrollment", p["recording_id"],
+                        exc_info=True)
+
         job.append_log("Speaker enrolled.")
         job.status = COMPLETED
         job.finished_at = datetime.now()
@@ -1405,22 +1511,23 @@ class JobQueue:
         """
         from pathlib import Path
 
-        from wisper_transcribe.web.enroll_shared import _load_diar_sidecar
+        from wisper_transcribe.web.enroll_shared import (
+            _load_diar_sidecar,
+            audio_available,
+            enrollable_labels,
+            stored_embeddings,
+        )
 
         md_path = Path(job.enroll_md_path or job.output_path or "")
         diar = _load_diar_sidecar(md_path)
-        if not diar:
+        all_labels = [lb for labels in job.enroll_groups.values() for lb in labels]
+        if not diar or not enrollable_labels(diar, all_labels)[0]:
             job.status = FAILED
             job.error = "Source audio not available"
             job.finished_at = datetime.now()
             return
 
-        input_path = Path(diar.get("input_path") or "")
-        if not diar.get("input_path") or not input_path.is_file():
-            job.status = FAILED
-            job.error = "Source audio not available"
-            job.finished_at = datetime.now()
-            return
+        input_path = Path(diar["input_path"]) if audio_available(diar) else None
 
         from wisper_transcribe.models import DiarizationSegment
 
@@ -1445,6 +1552,8 @@ class JobQueue:
                 campaign_slug=campaign_slug,
                 device=job.enroll_device,
                 progress=_progress,
+                stored=stored_embeddings(diar),
+                md_path=md_path,
             )
             if campaign_slug:
                 # Propagate the new names to the campaign's other sessions,
@@ -1517,6 +1626,13 @@ class JobQueue:
             job.status = COMPLETED  # ended, not "failed" -- see docstring
         finally:
             job.finished_at = datetime.now()
+            if job.live_output_path and Path(job.live_output_path).is_file():
+                try:
+                    file_registry.add_if_owned(
+                        Path(job.live_output_path), kind="live_draft",
+                        owner=file_registry.Owner.for_recording(job.live_recording_id))
+                except sqlite3.Error:
+                    log.warning("Could not register the live draft", exc_info=True)
 
     def _do_llm_work(
         self,
@@ -1566,6 +1682,8 @@ class JobQueue:
             if edits and refined_md != md:
                 backup = transcript_path.with_suffix(transcript_path.suffix + ".bak")
                 atomic_write_text(backup, md)
+                file_registry.add_if_owned(
+                    backup, kind="backup", owner=file_registry.Owner.for_stem(transcript_path.stem))
                 save_transcript(transcript_path, refined_md)
                 job.append_log(
                     f"Applied {len(edits)} edit(s). Backup: {backup.name}"

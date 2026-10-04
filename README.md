@@ -2,7 +2,7 @@
 
 Local transcription with automatic speaker identification. Built for tabletop RPG actual-play recordings (D&D, Pathfinder, etc.) with 5–8 speakers, but works for any multi-speaker audio.
 
-Transcribe files, or record a Discord voice channel or your own mic + system audio, from a browser UI or the CLI. Output is markdown ready for NotebookLM or Obsidian, and every transcript and session summary is full-text searchable. Transcription runs entirely on your machine; optional LLM summaries and campaign journals can use a local model (Ollama, LM Studio) or a cloud provider.
+Transcribe files, or record a Discord voice channel or your own mic + system audio, from a browser UI or the CLI. Output is markdown ready for NotebookLM or Obsidian, and every transcript and session summary is full-text searchable. Each transcript plays its audio back in the browser, highlighting the passage being spoken. Transcription runs entirely on your machine; optional LLM summaries and campaign journals can use a local model (Ollama, LM Studio) or a cloud provider.
 
 ---
 
@@ -41,6 +41,8 @@ Each audio file produces a `.md` transcript with speaker labels and timestamps:
 ```
 
 YAML frontmatter (title, date, speakers, duration) makes these files easy to ingest into NotebookLM or Obsidian.
+
+Only the first audio track of an uploaded file is transcribed. wisper keeps that track as a compact audio copy for playback and re-transcription, not the original file: a video's picture and any other audio tracks are discarded, so keep your originals.
 
 ---
 

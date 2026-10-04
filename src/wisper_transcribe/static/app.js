@@ -306,3 +306,63 @@ document.addEventListener('DOMContentLoaded', function() {
     }
   }, 200);
 })();
+
+// Transcript playback: highlight the block being spoken, click or deep link to seek.
+(function() {
+  var audio = document.getElementById('transcript-audio');
+  if (!audio) return;
+  var blocks = Array.prototype.slice.call(document.querySelectorAll('[data-start]'))
+    .map(function(el) { return { el: el, start: parseFloat(el.dataset.start) }; })
+    .sort(function(a, b) { return a.start - b.start; });
+  var toggle = document.getElementById('follow-toggle');
+  var scroller = document.getElementById('player-bar').parentElement;
+  var follow = true, current = -1;
+
+  function setToggle() {
+    toggle.setAttribute('aria-pressed', follow ? 'true' : 'false');
+    toggle.textContent = 'Follow along: ' + (follow ? 'on' : 'off');
+  }
+  if (blocks.length && toggle) {
+    toggle.addEventListener('click', function() { follow = !follow; setToggle(); });
+    ['wheel', 'touchmove', 'keydown'].forEach(function(evt) {
+      scroller.addEventListener(evt, function() { if (follow) { follow = false; setToggle(); } },
+                                { passive: true });
+    });
+  }
+
+  function indexAt(t) {
+    var lo = 0, hi = blocks.length - 1, found = -1;
+    while (lo <= hi) {
+      var mid = (lo + hi) >> 1;
+      if (blocks[mid].start <= t) { found = mid; lo = mid + 1; } else { hi = mid - 1; }
+    }
+    return found;
+  }
+  audio.addEventListener('timeupdate', function() {
+    var i = indexAt(audio.currentTime);
+    if (i === current) return;
+    if (current >= 0) blocks[current].el.classList.remove('block-playing');
+    current = i;
+    if (i < 0) return;
+    blocks[i].el.classList.add('block-playing');
+    if (follow) blocks[i].el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  });
+
+  function seek(t, play) {
+    audio.currentTime = t;
+    if (play) audio.play();
+  }
+  blocks.forEach(function(b) {
+    b.el.addEventListener('click', function(e) {
+      if (e.target.closest('a')) return;
+      seek(b.start, true);
+    });
+  });
+  document.querySelectorAll('[data-seek]').forEach(function(btn) {
+    btn.addEventListener('click', function() { seek(parseFloat(btn.dataset.seek), true); });
+  });
+  if (location.hash.indexOf('#b-') === 0) {
+    var target = document.getElementById(location.hash.slice(1));
+    if (target && target.dataset.start) seek(parseFloat(target.dataset.start), false);
+  }
+})();

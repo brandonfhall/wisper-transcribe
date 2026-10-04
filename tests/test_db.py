@@ -165,7 +165,7 @@ def test_foreign_key_violation_rolls_back(monkeypatch, data_dir):
     """
 
     def dangling(conn, ctx):
-        conn.execute("INSERT INTO fk_child VALUES (7)")  # deferred: no parent 7
+        conn.execute("INSERT INTO fk_child VALUES (7)")  # no parent 7; only foreign_key_check notices
 
     _fake_migration(monkeypatch, db.Migration(NEXT, "dangling", ddl, dangling))
     with pytest.raises(db.MigrationFailed):
@@ -175,7 +175,7 @@ def test_foreign_key_violation_rolls_back(monkeypatch, data_dir):
         assert conn.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] == 0
 
 
-def test_deferred_foreign_keys_allow_any_import_order(monkeypatch):
+def test_foreign_keys_are_off_so_imports_may_insert_in_any_order(monkeypatch):
     ddl = """
     CREATE TABLE fk_parent (id INTEGER PRIMARY KEY) STRICT;
     CREATE TABLE fk_child (pid INTEGER NOT NULL REFERENCES fk_parent(id)) STRICT;
@@ -187,6 +187,43 @@ def test_deferred_foreign_keys_allow_any_import_order(monkeypatch):
 
     _fake_migration(monkeypatch, db.Migration(NEXT, "order", ddl, child_first))
     assert db.migrate() == list(range(1, NEXT + 1))
+
+
+def test_foreign_keys_are_off_inside_a_migration_and_on_after(monkeypatch):
+    seen = []
+
+    def probe(conn, ctx):
+        seen.append(conn.execute("PRAGMA foreign_keys").fetchone()[0])
+
+    _fake_migration(monkeypatch, db.Migration(NEXT, "probe", "", probe))
+    db.migrate()
+    assert seen == [0]
+    with db.connection() as conn:
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+
+def test_migration_may_rebuild_a_parent_table_without_losing_children(monkeypatch):
+    ddl = """
+    CREATE TABLE fk_parent (id INTEGER PRIMARY KEY) STRICT;
+    CREATE TABLE fk_child (pid INTEGER NOT NULL REFERENCES fk_parent(id) ON DELETE CASCADE) STRICT;
+    """
+
+    def seed(conn, ctx):
+        conn.execute("INSERT INTO fk_parent VALUES (1)")
+        conn.execute("INSERT INTO fk_child VALUES (1)")
+
+    def rebuild(conn, ctx):
+        conn.execute("CREATE TABLE fk_parent_new (id INTEGER PRIMARY KEY, extra TEXT) STRICT")
+        conn.execute("INSERT INTO fk_parent_new (id) SELECT id FROM fk_parent")
+        conn.execute("DROP TABLE fk_parent")
+        conn.execute("ALTER TABLE fk_parent_new RENAME TO fk_parent")
+
+    _fake_migration(monkeypatch,
+                    db.Migration(NEXT, "seed", ddl, seed),
+                    db.Migration(NEXT + 1, "rebuild", "", rebuild))
+    db.migrate()
+    with db.connection() as conn:
+        assert conn.execute("SELECT count(*) FROM fk_child").fetchone()[0] == 1
 
 
 def test_upgrade_snapshots_existing_db(monkeypatch, data_dir):
@@ -322,6 +359,66 @@ def test_dev_guard_allows_override(monkeypatch, tmp_path, default_data_dir):
     db.connect().close()
 
 
+def _guard_world(monkeypatch, tmp_path, output_dir_setting: str = "") -> Path:
+    """A non-default data dir whose config.toml names ``output_dir_setting``."""
+    monkeypatch.setattr(db, "REQUIRE_OUTPUT_ENV", True)
+    monkeypatch.setattr(db, "_output_inside_cache", {})
+    monkeypatch.delenv("WISPER_OUTPUT_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    data = tmp_path / "copy"
+    data.mkdir()
+    monkeypatch.setenv("WISPER_DATA_DIR", str(data))
+    if output_dir_setting:
+        (data / "config.toml").write_text(f'output_dir = "{output_dir_setting}"\n', encoding="utf-8")
+    return data
+
+
+def test_output_guard_refuses_an_output_root_outside_the_data_dir(monkeypatch, tmp_path):
+    _guard_world(monkeypatch, tmp_path, "~/elsewhere")
+    with pytest.raises(db.DevDataDirRefused) as err:
+        db.connect()
+    assert "WISPER_DATA_DIR" in str(err.value) and "WISPER_OUTPUT_DIR" in str(err.value)
+
+
+def test_output_guard_allows_the_env_var(monkeypatch, tmp_path):
+    _guard_world(monkeypatch, tmp_path, "~/elsewhere")
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(tmp_path / "out"))
+    db.connect().close()
+
+
+def test_output_guard_allows_the_default_output_root(monkeypatch, tmp_path):
+    _guard_world(monkeypatch, tmp_path)
+    db.connect().close()
+
+
+def test_output_guard_allows_a_relative_setting(monkeypatch, tmp_path):
+    _guard_world(monkeypatch, tmp_path, "transcripts")
+    db.connect().close()
+
+
+def test_output_guard_refuses_an_unreadable_config(monkeypatch, tmp_path):
+    data = _guard_world(monkeypatch, tmp_path)
+    (data / "config.toml").write_text("output_dir = [", encoding="utf-8")
+    with pytest.raises(db.DevDataDirRefused):
+        db.connect()
+
+
+def test_output_guard_rereads_the_environment_on_every_call(monkeypatch, tmp_path):
+    _guard_world(monkeypatch, tmp_path, "~/elsewhere")
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(tmp_path / "out"))
+    db.migrate()
+    db.connect().close()  # passes while the variable is set
+    monkeypatch.delenv("WISPER_OUTPUT_DIR")
+    with pytest.raises(db.DevDataDirRefused):  # even though already migrated
+        db.connect()
+
+
+def test_output_guard_skips_inspection_commands(monkeypatch, tmp_path):
+    _guard_world(monkeypatch, tmp_path, "~/elsewhere")
+    db.connect(migrate_schema=False, claim_runtime=False).close()
+
+
 def test_schema_frozen_on_main():
     """main must never ship SCHEMA_FROZEN = False (a branch-only escape hatch)."""
     base = os.environ.get("GITHUB_BASE_REF", "")
@@ -329,6 +426,67 @@ def test_schema_frozen_on_main():
     if base != "main" and ref != "refs/heads/main":
         pytest.skip("only enforced for main and pull requests into main")
     assert db.SCHEMA_FROZEN is True
+
+
+# ---------------------------------------------------------------------------
+# v9 / v10: file registry replaces transcripts.audio_rel_path
+# ---------------------------------------------------------------------------
+
+def test_upgrade_v8_to_latest_moves_audio_paths_into_files(monkeypatch, data_dir):
+    with monkeypatch.context() as patched:
+        patched.setattr(db, "MIGRATIONS", db.MIGRATIONS[:8])
+        patched.setattr(db, "LATEST_VERSION", 8)
+        assert db.migrate() == list(range(1, 9))
+        seeded = [("s1", "a.mp4"), ("s2", ""), ("s3", "sub/b.mp4"), ("s4", "c.MD"),
+                  ("s5", "dup.mp4"), ("s6", "dup.mp4"), ("s7", "C:x.mp4"), ("s8", None)]
+        with db.transaction() as conn:
+            for stem, audio in seeded:
+                conn.execute("INSERT INTO transcripts (stem, created_at, audio_rel_path) VALUES (?, 'now', ?)",
+                             (stem, audio))
+    assert db.migrate() == [9, 10]
+
+    with db.connection() as conn:
+        rows = conn.execute(
+            "SELECT t.stem, f.kind, f.root, f.rel_path, f.size, f.mtime_ns FROM files f "
+            "JOIN transcripts t ON t.id = f.transcript_id ORDER BY t.id").fetchall()
+        assert [tuple(r) for r in rows] == [
+            ("s1", "audio", "output", "a.mp4", None, None),
+            ("s5", "audio", "output", "dup.mp4", None, None),
+        ]
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert "audio_rel_path" not in [r["name"] for r in conn.execute("PRAGMA table_info(transcripts)")]
+        assert db._normalized_schema(conn) == db.expected_schema(10)
+    assert db.status().schema_drift is False
+
+    (report,) = (data_dir / "backups").glob("import-report-*.txt")
+    text = report.read_text(encoding="utf-8")
+    for skipped in ("''", "sub/b.mp4", "c.MD", "C:x.mp4"):
+        assert skipped in text, skipped
+    assert "already registered" in text and "dup.mp4" in text
+
+
+def test_legacy_install_imports_sidecar_audio_as_a_files_row(data_dir):
+    import json
+
+    from wisper_transcribe.config import get_output_root
+
+    out = get_output_root()
+    out.mkdir(parents=True)
+    (out / "s1.md").write_text("---\ntitle: x\n---\n", encoding="utf-8")
+    (out / "s1.wav").write_bytes(b"a")
+    (out / "s1_diar.json").write_text(json.dumps({
+        "input_path": str(out / "s1.wav"),
+        "speaker_map": {"SPEAKER_00": "Alice"},
+        "diarization_segments": [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}],
+    }), encoding="utf-8")
+    (data_dir / "speakers.json").write_text("{}", encoding="utf-8")
+
+    assert db.migrate() == list(range(1, db.LATEST_VERSION + 1))
+    with db.connection() as conn:
+        rows = conn.execute(
+            "SELECT t.stem, f.kind, f.root, f.rel_path FROM files f "
+            "JOIN transcripts t ON t.id = f.transcript_id").fetchall()
+    assert [tuple(r) for r in rows] == [("s1", "audio", "output", "s1.wav")]
 
 
 # ---------------------------------------------------------------------------

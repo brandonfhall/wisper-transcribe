@@ -27,7 +27,7 @@ The web UI is a **single-user tool with no authentication and no CSRF protection
 | Dashboard | `/` | Job queue, system status (device, model, HF token, LLM provider), quick upload |
 | Transcribe | `/transcribe` | Upload and transcribe (see below) |
 | Job history | `/jobs/history` | Every job ever run, filterable, with each job's settings, result, and last log lines (see [Job page](#job-page)) |
-| Transcripts | `/transcripts` | Recordings awaiting transcription; browse, read, download, edit, and delete transcripts; tick rows to delete them or move them to a campaign in bulk |
+| Transcripts | `/transcripts` | Recordings awaiting transcription; browse, read, play back (see [Playing a transcript](#playing-a-transcript)), download, edit, and delete transcripts; tick rows to delete them or move them to a campaign in bulk |
 | Speakers | `/speakers` | Enroll, rename, and remove speaker profiles; play reference clips. Each card shows how many transcripts name the speaker, when they were last heard, and when the profile was enrolled. Profiles from an older speaker model show **NEEDS RE-ENROLL** |
 | Search | `/search` | Full-text search over every transcript and session summary (see below). The box at the top of the sidebar searches from any page |
 | Campaigns | `/campaigns` | Campaigns, rosters, episode order, and the rolling journal |
@@ -50,7 +50,7 @@ Drag a file onto `/transcribe` and choose options:
 
 Large uploads show a byte-level progress bar ("Uploading… N%", then "Processing…") before the job page opens.
 
-**Name already taken:** the transcript is named after the file. If a transcript with that name exists, the page says so as soon as you pick the file (and which campaign it's in), before anything uploads. Tick **Overwrite it** to replace it — it keeps its campaign place, and if it was folded into the campaign journal the journal is marked as needing a rebuild — or **Cancel** and rename the file. A job never reports success without writing its transcript: if a same-named transcript appears while the job runs, the job fails with "Transcript already exists", and a job whose transcript file isn't there afterwards fails with "Transcript file missing after write" (the job log shows the transcripts folder it used).
+**Name already taken:** the transcript is named after the file. If a transcript or an audio file (`<name>.flac`) with that name exists, the page says so as soon as you pick the file (which campaign it's in, and when the existing file was last modified), before anything uploads. A transcript of that name that is missing (renamed or deleted outside wisper) is flagged too: overwriting replaces its audio and speakers, so relink it first to keep them. Tick **Overwrite it** to replace it — it keeps its campaign place, and if it was folded into the campaign journal the journal is marked as needing a rebuild — or **Cancel** and rename the file. A job never reports success without writing its transcript: if a same-named transcript appears while the job runs, the job fails with "Transcript already exists", and a job whose transcript file isn't there afterwards fails with "Transcript file missing after write" (the job log shows the transcripts folder it used).
 
 ### Job page
 
@@ -60,7 +60,35 @@ Large uploads show a byte-level progress bar ("Uploading… N%", then "Processin
 - Failed jobs show a generic message ("Transcription failed — see server logs"). The full error is in the server log (the terminal running `wisper server`, or the `--debug` log file).
 - The dashboard shows the 20 newest jobs, including ones from before a restart, each with its campaign (the campaign its transcript is in now, else the one it was submitted with). **all jobs →** opens **Job history** (`/jobs/history`): every job ever run, 50 per page, filterable by type and status, with each job's settings, result, and last log lines. Transcript and campaign pages have a **Jobs** button that filters it to that transcript or campaign; a campaign's list includes the transcriptions of its sessions. Jobs that were queued or running when the server stopped show as "Interrupted by restart"; they are not resumed.
 
+What a job keeps: the transcript, the summary, the speaker clips, and the audio as `<name>.flac` beside the transcript. The uploaded file itself isn't kept: wisper extracts its first audio track, deletes the upload, and saves that track as a 16 kHz mono FLAC. A recording keeps its `combined.wav` and the transcript plays from it.
+
 Transcripts are written to the transcripts folder (`output/` in the data directory unless `output_dir` / `WISPER_OUTPUT_DIR` says otherwise; see [configuration.md](configuration.md#transcripts-folder)) and appear on the Transcripts page as soon as the job finishes. Files you add to that folder yourself appear too.
+
+---
+
+## Playing a transcript
+
+A transcript with audio shows a player bar at the top of its page. An upload's audio is its kept `<stem>.flac`. A transcript made from a recording plays that recording's `combined.wav`. A transcript with no audio on disk shows no player.
+
+- **Highlight.** The block being spoken is highlighted as the audio plays.
+- **Follow along.** The page scrolls to keep the highlighted block centered. Scrolling yourself turns it off, and the button turns it back on. The button appears only when the transcript has timestamps.
+- **Click to seek.** Click any timestamped block to play from its start. Links inside a block still open normally.
+- **Deep links.** Opening a page at `#b-<n>` (a search result does) cues the audio to that block without playing it.
+- **Markers.** A transcript made from a recording lists the session's markers in the bar as `H:MM:SS` buttons that seek there. A marker's time is wall-clock time since the session started, while `combined.wav` joins audio frames, so over a long session a marker can land a few seconds off. Use it for "roughly here".
+
+---
+
+## Re-transcribing a transcript
+
+A transcript with audio has a **Re-transcribe** button in its toolbar. It asks first, then runs the session again from the saved audio and replaces the transcript in place.
+
+- **Kept:** the transcript's name, its campaign place, and its recording link.
+- **Reset:** speaker names you set by hand. If the transcript was folded into the campaign journal, the journal is marked as needing a rebuild.
+- **Reused from the original run:** speaker counts, language, timestamps, and the refine and summarize options.
+- **Taken from the current config:** the model, device, VAD, and word alignment.
+- **Not reused:** custom vocabulary and prompts from the original upload.
+- **No audio:** the page says the transcript has no saved audio to re-transcribe from.
+- **Recording-linked:** a transcript made from a recording reruns from the recording's `combined.wav`, the same as **Transcribe** on the recording.
 
 ---
 
@@ -85,7 +113,7 @@ After a transcription, click **Name Speakers** on the job page, or **Name speake
 - Reopening the wizard later pre-fills the names you already applied, so you can fix one without retyping the rest.
 - Submitting renames the transcript immediately, then opens a job page while voice embeddings are extracted.
 
-For web uploads, the source audio is kept next to its transcript in the output folder so the wizard works after a server restart; it's deleted with the transcript. If that audio is missing, renames still apply and a notice says voice enrollment was skipped.
+The wizard enrolls from voice data saved when the transcript was made, so it doesn't re-read the audio. A speaker with no saved voice data is enrolled from the transcript's audio; if that's gone too, the speaker is renamed but not enrolled, and the others still are.
 
 **Across a campaign:** naming someone in one session's wizard also renames them in the campaign's other sessions wherever their name was assigned automatically. Names you typed are never changed. The Campaign page's **Re-match speakers** button runs the full pass as a job: it re-matches every session against the roster (re-extracting voice data from the saved audio for sessions that have none stored), and gives an unknown voice heard in two or more sessions one shared name, **Recurring Speaker N**. Name them once and the other sessions follow.
 
@@ -132,7 +160,9 @@ If another job is already running when you start, the Record page warns that the
 ### After recording
 
 - Stopping never starts transcription automatically. Click **Transcribe** on the recording (or from **Transcripts → Awaiting transcription**) to run the full diarized pass. The live draft stays on the recording's detail page until then.
+- **Campaign:** a recording shows the campaign its transcript is in. Moving the transcript to another campaign moves the recording with it. Before a transcript exists, it shows the campaign chosen when recording started.
 - **Re-transcribe** asks first, then replaces the recording's transcript (same name, same campaign place). If a transcription fails or you stop it, the recording is simply transcribable again.
+- **What a recording keeps:** its `combined.wav`, plus `live_transcript.md` (the live draft) for a session recorded on this computer. When a session ends, wisper checks that `combined.wav` holds all the captured audio, then deletes the one-minute pieces and the separate mic and system tracks. A Discord speaker's own track stays until that speaker is bound to a profile, because **Enroll** reads it. Enrolling a speaker whose track is already gone shows an error.
 - **Recover recording:** if wisper stopped unexpectedly mid-session (crash, power loss, killed process), the recording shows **FAILED** but its audio is still on disk. Its page offers **Recover recording**, which stitches the saved one-minute pieces back together; the recording then shows **COMPLETED** and can be transcribed. The last partial minute may be missing.
 - Deleting a recording's transcript from `/transcripts` puts the recording back under **Awaiting transcription**.
 - **Deleting a recording is permanent.** Single delete and **Delete selected** both remove the audio and, if it was transcribed, the transcript and its sidecars. Active sessions can't be deleted.
@@ -164,7 +194,15 @@ The Campaign page's **Rolling journal** panel combines session summaries into on
 
 **Episode order:** the ▲/▼ arrows on the Episodes list set the order sessions are folded in. Order is when a transcript was added to the campaign, not its date, so check it before rebuilding.
 
-**Deleted transcripts:** deleting a transcript in wisper (single, **Delete selected**, or a recording with its files) removes it from its campaign and its companion files (summary, speaker clips, audio copy). A transcript file that disappears some other way — deleted in Finder, renamed in Obsidian, a sync still in progress, an unplugged drive — keeps its place and shows as **MISSING** on the Campaign page. If the file comes back, the flag clears on its own. If it was renamed, pick the new file in the **Relink** dropdown next to it: the session keeps its place, journal entry, and speaker names. Otherwise remove it with ✕.
+**Deleted transcripts:** deleting a transcript in wisper (single, **Delete selected**, or a recording with its files) removes it from its campaign and its companion files (summary, speaker clips, audio copy). A transcript file that disappears some other way — deleted in Finder, renamed in Obsidian, a sync still in progress, an unplugged drive — keeps its place and shows as **MISSING** on the Campaign page. If the file comes back, the flag clears on its own. If it was renamed, wisper matches it on the next start when the file is unchanged; otherwise pick the new file in the **Relink** dropdown next to it: the session keeps its place, journal entry, speaker names, and its summary, speaker clips, and audio. Otherwise remove it with ✕.
+
+**Deleting a campaign** asks which of two you want. **Delete campaign, keep the files** removes the campaign and leaves its transcripts unassigned; its `journal.md` stays on disk and is listed under Needs attention. **Delete campaign and everything in it** deletes the campaign, every transcript in it with its summary, speaker clips, and audio, and its journal. A transcript that can't be deleted (another program has it open) is kept, unassigned, and listed under Needs attention.
+
+**Needs attention:** the Transcripts page shows this panel only when something needs you. Nothing in it is deleted automatically.
+- **Missing transcripts** have a **Relink** dropdown (the renamed file brings its summary, speaker clips, and audio along) and a **Remove** button that deletes the transcript and its files.
+- **Files gone from disk** (a summary or clip you deleted by hand) have a **Forget** button that stops tracking them.
+- **Files with no transcript** show their size and modified time. Summaries, speaker data, clips, backups, and `.flac` audio in the transcripts folder have a **Delete** button; a file in wisper's data folder, such as a recording's `combined.wav`, is listed only.
+- wisper logs the counts at startup.
 
 ---
 

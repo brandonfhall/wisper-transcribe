@@ -42,6 +42,24 @@ def _isolated_data_dir(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_output_env_guard(monkeypatch):
+    """The unmerged-build guard needs WISPER_OUTPUT_DIR, which the tests
+    above deliberately leave unset. Guard tests turn it back on."""
+    monkeypatch.setattr("wisper_transcribe.db.REQUIRE_OUTPUT_ENV", False)
+
+
+@pytest.fixture(autouse=True)
+def _reset_file_registry_state():
+    """The cached sync report and its 30 s throttle are per process; a test
+    must not inherit another's."""
+    from wisper_transcribe import file_registry
+
+    file_registry.reset_state()
+    yield
+    file_registry.reset_state()
+
+
+@pytest.fixture(autouse=True)
 def _no_search_backfill_thread(monkeypatch):
     """The web lifespan would start the search backfill thread, racing tests'
     DB assertions. Search tests call search_index.run_backfill() directly."""

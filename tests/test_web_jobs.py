@@ -15,6 +15,30 @@ def _make_queue():
     return JobQueue()
 
 
+def _write_wav(path: Path) -> Path:
+    import wave
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(b"\x00\x00" * 160)
+    return path
+
+
+def _fake_convert(path, out_path=None):
+    """Stand-in for audio_utils.convert_to_wav: writes the WAV it was asked for."""
+    if out_path is None:
+        return Path(path)
+    return _write_wav(Path(out_path))
+
+
+def _fake_encode_flac(src, dst):
+    """Stand-in for audio_utils.encode_flac: creates ``dst``."""
+    Path(dst).write_bytes(b"flac-from-" + Path(src).name.encode())
+
+
 def test_submit_returns_job_with_pending_status():
     q = _make_queue()
     job = q.submit("/tmp/test.mp3", model_size="tiny", no_diarize=True)
@@ -197,7 +221,8 @@ async def test_server_shutdown_mid_job_records_it_interrupted_not_completed(tmp_
         raise RuntimeError("thread outlived the server")
 
     q = _make_queue()
-    with patch("wisper_transcribe.web.jobs.process_file", side_effect=_slow):
+    with patch("wisper_transcribe.web.jobs.process_file", side_effect=_slow), \
+            patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=_fake_convert):
         job = q.submit(str(upload), model_size="tiny", no_diarize=True)
         q.start()
         while not started.is_set():
@@ -207,7 +232,7 @@ async def test_server_shutdown_mid_job_records_it_interrupted_not_completed(tmp_
         release.set()
 
     assert job.status == FAILED and job.error == INTERRUPTED
-    assert not Path(job.input_path).exists()
+    assert job.upload_dir and not Path(job.upload_dir).exists()
     with db.connection() as conn:
         row = conn.execute("SELECT status, error_code FROM jobs WHERE id = ?", (job.id,)).fetchone()
     assert tuple(row) == ("failed", INTERRUPTED)
@@ -568,20 +593,66 @@ def _fake_process_file_with_segments(out_md, segments):
     return _fake
 
 
-def test_submit_detects_web_upload_prefix(tmp_path):
-    """JobQueue.submit must flag is_web_upload from the *original* basename,
-    before the friendly-name rename strips the wisper_upload_ prefix."""
+def test_submit_moves_upload_into_its_own_folder(tmp_path):
+    """An upload goes into wisper_upload_<job-id>/ under its original name; the
+    job keeps the web-upload flag and names the transcript after original_stem."""
     q = _make_queue()
     upload = tmp_path / "wisper_upload_abc123.mp3"
     upload.write_bytes(b"fake-audio")
 
-    job = q.submit(str(upload), original_stem="My Session")
+    job = q.submit(str(upload), original_stem="My Session", source_name="My Session.mp3")
 
     assert job.is_web_upload is True
-    # The rename already happened inside submit() -- the prefix is gone from
-    # the current path, but the flag must still be True.
-    assert not Path(job.input_path).name.startswith("wisper_upload_")
-    assert Path(job.input_path).name == "My Session.mp3"
+    assert job.upload_dir == str(tmp_path / f"wisper_upload_{job.id}")
+    assert Path(job.input_path) == Path(job.upload_dir) / "My Session.mp3"
+    assert Path(job.input_path).read_bytes() == b"fake-audio"
+    assert not upload.exists()
+    assert job.kwargs["output_stem"] == "My Session"
+    assert job.kwargs["source_name"] == "My Session.mp3"
+    assert job.name == "My Session"
+
+
+def test_submit_upload_with_unusable_name_falls_back_to_upload(tmp_path):
+    """If the filesystem refuses the original name, the file is stored as
+    upload<suffix>; the transcript is still named after original_stem."""
+    import shutil as _shutil
+
+    q = _make_queue()
+    upload = tmp_path / "wisper_upload_abc123.mp3"
+    upload.write_bytes(b"fake-audio")
+    real_move = _shutil.move
+
+    def _move(src, dst):
+        if Path(dst).name == "CON.mp3":
+            raise OSError("reserved name")
+        return real_move(src, dst)
+
+    with patch("shutil.move", side_effect=_move):
+        job = q.submit(str(upload), original_stem="CON")
+
+    assert Path(job.input_path) == Path(job.upload_dir) / "upload.mp3"
+    assert Path(job.input_path).read_bytes() == b"fake-audio"
+    assert job.kwargs["output_stem"] == "CON"
+
+
+def test_submit_strips_separators_from_original_stem(tmp_path):
+    q = _make_queue()
+    upload = tmp_path / "wisper_upload_abc123.mp3"
+    upload.write_bytes(b"x")
+
+    job = q.submit(str(upload), original_stem="..\\evil/name")
+
+    assert job.kwargs["output_stem"] == "name"
+    assert Path(job.input_path).parent == Path(job.upload_dir)
+
+
+def test_submit_nonexistent_upload_gets_no_folder(tmp_path):
+    q = _make_queue()
+    job = q.submit(str(tmp_path / "wisper_upload_x.mp3"), original_stem="Gone")
+
+    assert job.is_web_upload is True
+    assert job.upload_dir == ""
+    assert not any(p.name.startswith("wisper_upload_") for p in tmp_path.iterdir())
 
 
 def test_submit_non_upload_path_not_flagged(tmp_path):
@@ -593,52 +664,7 @@ def test_submit_non_upload_path_not_flagged(tmp_path):
     job = q.submit(str(rec))
 
     assert job.is_web_upload is False
-
-
-def test_completed_job_moves_upload_to_output_dir(tmp_path):
-    """(a) A completed job moves the wisper_upload_* temp file next to the
-    transcript, and the enrollment sidecar records the durable path."""
-    import json
-    from datetime import datetime
-    from wisper_transcribe.models import DiarizationSegment
-    from wisper_transcribe.web.jobs import Job, JobQueue, COMPLETED
-
-    tmp_dir = tmp_path / "tmp"
-    tmp_dir.mkdir()
-    out_dir = tmp_path / "output"
-    out_dir.mkdir()
-
-    upload = tmp_dir / "wisper_upload_abc123.mp3"
-    upload.write_bytes(b"fake-audio")
-    out_md = out_dir / "Session 12.md"
-    out_md.write_text("# Session 12", encoding="utf-8")
-
-    seg = DiarizationSegment(start=0.0, end=1.0, speaker="SPEAKER_00")
-
-    q = JobQueue()
-    job = Job(
-        id="move-test",
-        status="running",
-        created_at=datetime.now(),
-        input_path=str(upload),
-        kwargs={},
-        is_web_upload=True,
-    )
-
-    fake_pf = _fake_process_file_with_segments(out_md, [seg])
-    with patch("wisper_transcribe.web.jobs.process_file", side_effect=fake_pf):
-        q._run_job(job)
-
-    assert job.status == COMPLETED
-    durable = out_dir / "Session 12.mp3"
-    assert Path(job.input_path) == durable
-    assert durable.exists()
-    assert not upload.exists()
-
-    sidecar = out_dir / "Session 12_diar.json"
-    assert sidecar.exists()
-    data = sidecar_data(sidecar)
-    assert data["input_path"] == str(durable)
+    assert job.upload_dir == ""
 
 
 def test_non_temp_input_not_moved(tmp_path):
@@ -681,148 +707,363 @@ def test_non_temp_input_not_moved(tmp_path):
     assert not (out_dir / "Session 12.wav").exists()
 
 
-def test_failed_job_deletes_temp_upload(tmp_path):
-    """(c) A failed job deletes its wisper_upload_* temp file -- it's useless
-    once the job won't complete, so it must not leak until next restart."""
-    from datetime import datetime
-    from wisper_transcribe.web.jobs import Job, JobQueue, FAILED
 
+# ---- upload jobs: extract, delete the upload, keep a FLAC ------------------
+
+def _upload_env(tmp_path, monkeypatch):
     tmp_dir = tmp_path / "tmp"
+    out_dir = tmp_path / "output"
     tmp_dir.mkdir()
-    upload = tmp_dir / "wisper_upload_fail123.mp3"
-    upload.write_bytes(b"fake-audio")
+    out_dir.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out_dir))
+    return tmp_dir, out_dir
 
-    q = JobQueue()
-    job = Job(
-        id="fail-test",
-        status="running",
-        created_at=datetime.now(),
-        input_path=str(upload),
-        kwargs={},
-        is_web_upload=True,
-    )
 
-    with patch("wisper_transcribe.web.jobs.process_file", side_effect=RuntimeError("boom")):
+def _audio_row(out_dir, stem):
+    from wisper_transcribe import file_registry
+
+    owner = file_registry.Owner.for_stem(stem, output_dir=out_dir)
+    return file_registry.file_for(owner, "audio", output_dir=out_dir) if owner else None
+
+
+def _run_upload_job(tmp_dir, out_dir, *, suffix=".mp4", stem="Session 12", diarize=True,
+                    overwrite=False, process_raises=None, encode=_fake_encode_flac,
+                    convert=_fake_convert, cancel_in_convert=False, wav_upload=False):
+    """Submit a temp upload and run it with every ML/ffmpeg call mocked.
+
+    Returns ``(job, seen)``; ``seen`` records what the mocks observed.
+    """
+    from wisper_transcribe import transcript_store
+    from wisper_transcribe.models import DiarizationSegment
+
+    upload = tmp_dir / f"wisper_upload_{stem.replace(' ', '')}{suffix}"
+    upload.write_bytes(b"fake-upload")
+    q = _make_queue()
+    job = q.submit(str(upload), original_stem=stem, source_name=f"{stem}{suffix}",
+                   output_dir=out_dir, overwrite=overwrite, no_diarize=not diarize)
+    upload_path = Path(job.input_path)
+    seen: dict = {"upload": upload_path}
+
+    def _convert(path, out_path=None):
+        if cancel_in_convert:
+            import tqdm
+            job._cancel_event.set()
+            tqdm.tqdm.write("converting")
+        if wav_upload and out_path is not None:
+            return Path(path)  # already 16 kHz mono: used in place
+        return convert(path, out_path)
+
+    def _process(path, _result_store=None, job_id=None, **kwargs):
+        seen["process_input"] = Path(path)
+        seen["upload_existed"] = upload_path.exists()
+        seen["kwargs"] = kwargs
+        if process_raises is not None:
+            raise process_raises
+        md = out_dir / (kwargs["output_stem"] + ".md")
+        md.write_text("# " + kwargs["output_stem"], encoding="utf-8")
+        transcript_store.register(md.stem, origin="job")
+        if diarize:
+            _result_store["diarization_segments"] = [
+                DiarizationSegment(start=0.0, end=1.0, speaker="SPEAKER_00")]
+            _result_store["speaker_map"] = {"SPEAKER_00": "Speaker 1"}
+        return md
+
+    def _excerpts(job_, output_path, **kw):
+        seen["excerpt_input"] = Path(job_.input_path)
+        (Path(output_path).parent / f"{Path(output_path).stem}_excerpt_SPEAKER_00.mp3").write_bytes(b"m")
+
+    with patch("wisper_transcribe.web.jobs.process_file", side_effect=_process), \
+            patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=_convert), \
+            patch("wisper_transcribe.audio_utils.encode_flac", side_effect=encode), \
+            patch("wisper_transcribe.web.jobs._extract_speaker_excerpts", side_effect=_excerpts):
         try:
             q._run_job(job)
-        except RuntimeError:
+        except Exception:
             pass
-
-    assert job.status == FAILED
-    assert not upload.exists()
+    return job, seen
 
 
-def test_cancelled_job_deletes_temp_upload(tmp_path):
-    """(c) Cancellation (InterruptedError) must also delete the temp upload."""
-    from datetime import datetime
-    from wisper_transcribe.web.jobs import Job, JobQueue, FAILED
+def test_mp4_upload_is_extracted_deleted_and_kept_as_flac(tmp_path, monkeypatch):
+    tmp_dir, out_dir = _upload_env(tmp_path, monkeypatch)
 
-    tmp_dir = tmp_path / "tmp"
-    tmp_dir.mkdir()
-    upload = tmp_dir / "wisper_upload_cancel123.mp3"
-    upload.write_bytes(b"fake-audio")
+    job, seen = _run_upload_job(tmp_dir, out_dir)
 
-    q = JobQueue()
-    job = Job(
-        id="cancel-test",
-        status="running",
-        created_at=datetime.now(),
-        input_path=str(upload),
-        kwargs={},
-        is_web_upload=True,
-    )
-
-    with patch("wisper_transcribe.web.jobs.process_file", side_effect=InterruptedError("cancelled")):
-        q._run_job(job)
-
-    assert job.status == FAILED
-    assert job.error == "Cancelled"
-    assert not upload.exists()
+    assert job.status == "completed"
+    assert seen["upload_existed"] is False  # gone before the pipeline runs
+    assert seen["process_input"].name == "audio.wav"
+    assert seen["excerpt_input"].name == "audio.wav"  # excerpts cut from the WAV
+    assert seen["kwargs"]["output_stem"] == "Session 12"
+    assert seen["kwargs"]["source_name"] == "Session 12.mp4"
+    assert sorted(p.name for p in out_dir.iterdir()) == [
+        "Session 12.flac", "Session 12.md", "Session 12_diar.json",
+        "Session 12_excerpt_SPEAKER_00.mp3",
+    ]
+    assert _audio_row(out_dir, "Session 12").path == out_dir / "Session 12.flac"
+    assert Path(job.input_path) == out_dir / "Session 12.flac"
+    assert not Path(job.upload_dir).exists()
+    assert "Extracted audio; deleted the uploaded file" in "\n".join(job.log_lines)
 
 
-def test_move_upload_collision_gets_counter_suffix(tmp_path):
-    """(d) A name collision with an existing file in the output dir must not
-    clobber it -- the moved upload gets a counter suffix instead."""
-    from datetime import datetime
-    from wisper_transcribe.models import DiarizationSegment
-    from wisper_transcribe.web.jobs import Job, JobQueue, COMPLETED
+def test_upload_without_diarization_keeps_flac(tmp_path, monkeypatch):
+    tmp_dir, out_dir = _upload_env(tmp_path, monkeypatch)
 
-    tmp_dir = tmp_path / "tmp"
-    tmp_dir.mkdir()
-    out_dir = tmp_path / "output"
-    out_dir.mkdir()
+    job, _ = _run_upload_job(tmp_dir, out_dir, diarize=False)
 
-    # Pre-existing file at the exact destination the mover would pick.
-    collision = out_dir / "Session 12.mp3"
-    collision.write_bytes(b"pre-existing-file")
-
-    upload = tmp_dir / "wisper_upload_dup123.mp3"
-    upload.write_bytes(b"new-upload-audio")
-    out_md = out_dir / "Session 12.md"
-    out_md.write_text("# Session 12", encoding="utf-8")
-
-    seg = DiarizationSegment(start=0.0, end=1.0, speaker="SPEAKER_00")
-
-    q = JobQueue()
-    job = Job(
-        id="collision-test",
-        status="running",
-        created_at=datetime.now(),
-        input_path=str(upload),
-        kwargs={},
-        is_web_upload=True,
-    )
-
-    fake_pf = _fake_process_file_with_segments(out_md, [seg])
-    with patch("wisper_transcribe.web.jobs.process_file", side_effect=fake_pf):
-        q._run_job(job)
-
-    assert job.status == COMPLETED
-    # Original collision file must be untouched
-    assert collision.read_bytes() == b"pre-existing-file"
-    # New file lands with a counter suffix
-    counted = out_dir / "Session 12_1.mp3"
-    assert counted.exists()
-    assert counted.read_bytes() == b"new-upload-audio"
-    assert Path(job.input_path) == counted
-
-
-def test_completed_job_no_diarization_deletes_upload_not_moves(tmp_path):
-    """When a job completes with no diarization data, there will never be a
-    _diar.json sidecar to record an audio path -- moving the file would leak
-    it in the output dir forever. It must be deleted instead, same as the
-    failure path."""
-    from datetime import datetime
-    from wisper_transcribe.web.jobs import Job, JobQueue, COMPLETED
-
-    tmp_dir = tmp_path / "tmp"
-    tmp_dir.mkdir()
-    out_dir = tmp_path / "output"
-    out_dir.mkdir()
-
-    upload = tmp_dir / "wisper_upload_nodiar123.mp3"
-    upload.write_bytes(b"fake-audio")
-    out_md = out_dir / "Session 12.md"
-    out_md.write_text("# Session 12", encoding="utf-8")
-
-    q = JobQueue()
-    job = Job(
-        id="no-diar-test",
-        status="running",
-        created_at=datetime.now(),
-        input_path=str(upload),
-        kwargs={},
-        is_web_upload=True,
-    )
-
-    # process_file returns no diarization_segments (e.g. --no-diarize)
-    with patch("wisper_transcribe.web.jobs.process_file", return_value=out_md):
-        q._run_job(job)
-
-    assert job.status == COMPLETED
-    assert not upload.exists()
-    assert not (out_dir / "Session 12.mp3").exists()
+    assert job.status == "completed"
+    assert (out_dir / "Session 12.flac").exists()
+    assert _audio_row(out_dir, "Session 12").path == out_dir / "Session 12.flac"
     assert not (out_dir / "Session 12_diar.json").exists()
+    assert not Path(job.upload_dir).exists()
+
+
+@pytest.mark.parametrize("diarize", [True, False])
+def test_encode_failure_completes_without_audio(tmp_path, monkeypatch, diarize):
+    tmp_dir, out_dir = _upload_env(tmp_path, monkeypatch)
+
+    def _boom(src, dst):
+        raise RuntimeError("ffmpeg exploded")
+
+    job, _ = _run_upload_job(tmp_dir, out_dir, diarize=diarize, encode=_boom)
+
+    assert job.status == "completed"
+    assert _audio_row(out_dir, "Session 12") is None
+    assert not (out_dir / "Session 12.flac").exists()
+    assert any("could not save the audio copy" in line for line in job.log_lines)
+    assert not Path(job.upload_dir).exists()
+
+
+def test_unregistered_flac_is_untouched_without_overwrite(tmp_path, monkeypatch):
+    tmp_dir, out_dir = _upload_env(tmp_path, monkeypatch)
+    (out_dir / "Session 12.flac").write_bytes(b"users-own-file")
+
+    job, _ = _run_upload_job(tmp_dir, out_dir)
+
+    assert job.status == "completed"
+    assert (out_dir / "Session 12.flac").read_bytes() == b"users-own-file"
+    assert _audio_row(out_dir, "Session 12") is None
+    assert any("already exists and belongs to something else" in line for line in job.log_lines)
+
+
+def test_unregistered_flac_is_replaced_with_overwrite(tmp_path, monkeypatch):
+    tmp_dir, out_dir = _upload_env(tmp_path, monkeypatch)
+    (out_dir / "Session 12.flac").write_bytes(b"users-own-file")
+
+    job, _ = _run_upload_job(tmp_dir, out_dir, overwrite=True)
+
+    assert (out_dir / "Session 12.flac").read_bytes().startswith(b"flac-from-")
+    assert _audio_row(out_dir, "Session 12").path == out_dir / "Session 12.flac"
+
+
+def test_flac_registered_to_another_transcript_is_never_overwritten(tmp_path, monkeypatch):
+    from wisper_transcribe import transcript_store
+
+    tmp_dir, out_dir = _upload_env(tmp_path, monkeypatch)
+    other = out_dir / "Other.md"
+    other.write_text("# Other", encoding="utf-8")
+    transcript_store.register("Other", origin="job")
+    theirs = out_dir / "Session 12.flac"
+    theirs.write_bytes(b"belongs-to-other")
+    transcript_store.set_audio(other, theirs)
+
+    job, _ = _run_upload_job(tmp_dir, out_dir, overwrite=True)
+
+    assert job.status == "completed"
+    assert theirs.read_bytes() == b"belongs-to-other"
+    assert _audio_row(out_dir, "Other").path == theirs
+    assert _audio_row(out_dir, "Session 12") is None
+    assert any("belongs to another transcript" in line for line in job.log_lines)
+
+
+def test_process_file_failure_leaves_nothing(tmp_path, monkeypatch):
+    tmp_dir, out_dir = _upload_env(tmp_path, monkeypatch)
+
+    job, _ = _run_upload_job(tmp_dir, out_dir, process_raises=RuntimeError("boom"))
+
+    assert job.status == "failed"
+    assert not Path(job.upload_dir).exists()
+    assert list(out_dir.iterdir()) == []
+
+
+def test_cancel_while_running_deletes_the_upload_folder(tmp_path, monkeypatch):
+    tmp_dir, out_dir = _upload_env(tmp_path, monkeypatch)
+
+    job, _ = _run_upload_job(tmp_dir, out_dir, cancel_in_convert=True)
+
+    assert job.status == "failed"
+    assert job.error == "Cancelled"
+    assert not Path(job.upload_dir).exists()
+    assert list(out_dir.iterdir()) == []
+
+
+def test_cancel_while_pending_deletes_the_upload_folder(tmp_path):
+    q = _make_queue()
+    upload = tmp_path / "wisper_upload_pending.mp3"
+    upload.write_bytes(b"x")
+    job = q.submit(str(upload), original_stem="Waiting")
+    assert Path(job.upload_dir).is_dir()
+
+    assert q.cancel(job.id) is True
+
+    assert job.status == "failed"
+    assert not Path(job.upload_dir).exists()
+
+
+def test_16khz_wav_upload_is_used_in_place_and_kept_as_flac(tmp_path, monkeypatch):
+    tmp_dir, out_dir = _upload_env(tmp_path, monkeypatch)
+
+    job, seen = _run_upload_job(tmp_dir, out_dir, suffix=".wav", wav_upload=True)
+
+    assert job.status == "completed"
+    assert seen["upload_existed"] is True  # not deleted before the pipeline
+    assert seen["process_input"].name == "Session 12.wav"
+    assert (out_dir / "Session 12.flac").exists()
+    assert not Path(job.upload_dir).exists()
+
+
+def test_rerun_replaces_a_legacy_audio_file_with_the_flac(tmp_path, monkeypatch):
+    from wisper_transcribe import transcript_store
+
+    tmp_dir, out_dir = _upload_env(tmp_path, monkeypatch)
+    md = out_dir / "Session 12.md"
+    md.write_text("# old", encoding="utf-8")
+    transcript_store.register("Session 12", origin="job")
+    legacy = out_dir / "Session 12.mp4"
+    legacy.write_bytes(b"whole-video")
+    transcript_store.set_audio(md, legacy)
+
+    job, _ = _run_upload_job(tmp_dir, out_dir, overwrite=True)
+
+    assert job.status == "completed"
+    assert not legacy.exists()
+    assert _audio_row(out_dir, "Session 12").path == out_dir / "Session 12.flac"
+
+
+@pytest.mark.parametrize("diarize", [True, False])
+def test_failed_encode_on_overwrite_keeps_the_old_flac(tmp_path, monkeypatch, diarize):
+    from wisper_transcribe import transcript_store
+
+    tmp_dir, out_dir = _upload_env(tmp_path, monkeypatch)
+    md = out_dir / "Session 12.md"
+    md.write_text("# old", encoding="utf-8")
+    transcript_store.register("Session 12", origin="job")
+    old = out_dir / "Session 12.flac"
+    old.write_bytes(b"old-audio")
+    transcript_store.set_audio(md, old)
+
+    def _boom(src, dst):
+        raise OSError("player holds the file")
+
+    job, _ = _run_upload_job(tmp_dir, out_dir, overwrite=True, diarize=diarize, encode=_boom)
+
+    assert job.status == "completed"
+    assert old.read_bytes() == b"old-audio"
+    assert _audio_row(out_dir, "Session 12").path == old
+    assert "Kept the previous audio" in "\n".join(job.log_lines)
+
+
+@pytest.mark.parametrize("diarize", [True, False])
+def test_failed_encode_keeps_a_legacy_mp4(tmp_path, monkeypatch, diarize):
+    from wisper_transcribe import transcript_store
+
+    tmp_dir, out_dir = _upload_env(tmp_path, monkeypatch)
+    md = out_dir / "Session 12.md"
+    md.write_text("# old", encoding="utf-8")
+    transcript_store.register("Session 12", origin="job")
+    legacy = out_dir / "Session 12.mp4"
+    legacy.write_bytes(b"whole-video")
+    transcript_store.set_audio(md, legacy)
+
+    def _boom(src, dst):
+        raise OSError("player holds the file")
+
+    job, _ = _run_upload_job(tmp_dir, out_dir, overwrite=True, diarize=diarize, encode=_boom)
+
+    assert legacy.read_bytes() == b"whole-video"
+    assert _audio_row(out_dir, "Session 12").path == legacy
+    assert not (out_dir / "Session 12.flac").exists()
+
+
+def test_sidecar_failure_after_encode_still_registers_the_flac(tmp_path, monkeypatch):
+    tmp_dir, out_dir = _upload_env(tmp_path, monkeypatch)
+
+    with patch("wisper_transcribe.transcript_store.write_sidecar", side_effect=RuntimeError("db")):
+        job, _ = _run_upload_job(tmp_dir, out_dir)
+
+    assert job.status == "completed"
+    assert _audio_row(out_dir, "Session 12").path == out_dir / "Session 12.flac"
+
+
+def test_recording_input_is_never_moved_deleted_or_registered(tmp_path, monkeypatch):
+    """A recording's combined.wav is not an upload: it stays put, no FLAC is
+    written, and the transcript gets no audio row of its own."""
+    from wisper_transcribe import transcript_store
+    from wisper_transcribe.models import DiarizationSegment
+
+    tmp_dir, out_dir = _upload_env(tmp_path, monkeypatch)
+    combined = _write_wav(tmp_path / "recordings" / "rec1" / "combined.wav")
+    q = _make_queue()
+    job = q.submit(str(combined), original_stem="rec1", recording_id="rec1",
+                   output_dir=out_dir, overwrite=True)
+    assert Path(job.input_path) == combined and job.upload_dir == ""
+
+    def _process(path, _result_store=None, job_id=None, **kwargs):
+        md = out_dir / (kwargs["output_stem"] + ".md")
+        md.write_text("# rec1", encoding="utf-8")
+        transcript_store.register(md.stem, origin="job")
+        _result_store["diarization_segments"] = [
+            DiarizationSegment(start=0.0, end=1.0, speaker="SPEAKER_00")]
+        return md
+
+    with patch("wisper_transcribe.web.jobs.process_file", side_effect=_process), \
+            patch("wisper_transcribe.audio_utils.encode_flac", side_effect=_fake_encode_flac) as enc, \
+            patch("wisper_transcribe.web.jobs._extract_speaker_excerpts"):
+        q._run_job(job)
+
+    assert job.status == "completed"
+    assert combined.exists() and Path(job.input_path) == combined
+    enc.assert_not_called()
+    assert not list(out_dir.glob("*.flac"))
+    assert _audio_row(out_dir, "rec1") is None
+
+
+def test_needs_extraction_is_frozen_at_submit(tmp_path, monkeypatch):
+    tmp_dir, out_dir = _upload_env(tmp_path, monkeypatch)
+    upload = tmp_dir / "wisper_upload_frozen.mp4"
+    upload.write_bytes(b"x")
+    q = _make_queue()
+    job = q.submit(str(upload), original_stem="Frozen")
+    assert job.needs_extraction is True  # before
+
+    seen = []
+
+    def _process(path, _result_store=None, job_id=None, **kwargs):
+        seen.append(job.needs_extraction)  # during: input_path is a .wav
+        md = out_dir / "Frozen.md"
+        md.write_text("# Frozen", encoding="utf-8")
+        return md
+
+    with patch("wisper_transcribe.web.jobs.process_file", side_effect=_process), \
+            patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=_fake_convert), \
+            patch("wisper_transcribe.audio_utils.encode_flac", side_effect=_fake_encode_flac):
+        q._run_job(job)
+
+    assert Path(job.input_path).suffix != ".mp4"
+    assert seen == [True]
+    assert job.needs_extraction is True  # after
+
+
+def test_delete_temp_upload_only_touches_wisper_upload_folders(tmp_path):
+    from wisper_transcribe.web.jobs import Job, _delete_temp_upload
+
+    safe = tmp_path / "keepme"
+    safe.mkdir()
+    (safe / "f.txt").write_text("x")
+    job = Job(id="j", status="running", created_at=None, input_path=str(safe / "f.txt"),
+              kwargs={}, is_web_upload=True, upload_dir=str(safe))
+
+    _delete_temp_upload(job)
+
+    assert (safe / "f.txt").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -910,7 +1151,7 @@ def test_run_enroll_job_progress_lines_land_in_log(tmp_path):
     )
 
     def fake_enroll_profiles(*, input_path, segments, groups, campaign_slug,
-                              device, data_dir=None, progress=None):
+                              device, data_dir=None, progress=None, **kw):
         if progress is not None:
             progress("Converting audio…")
             progress("Extracting embedding for Alice (1/1)…")
@@ -1324,6 +1565,61 @@ def test_recording_enroll_job_updates_recording_state(tmp_path):
     members = load_campaigns(data_dir=tmp_path)[campaign.slug].members
     assert "bob" in members
     assert members["bob"].discord_user_id == "999999999999999999"
+
+
+def _run_recording_enroll_with_trim(tmp_path, trim):
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+    from wisper_transcribe.web.jobs import JobQueue
+
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    rec.unbound_speakers = ["999999999999999999"]
+    rec.discord_speakers["999999999999999999"] = ""
+    save_recording(rec, tmp_path)
+    job = _make_recording_enroll_job(rec.id)
+    order = []
+    import wisper_transcribe.recording_manager as rm
+    real_bind = rm.bind_recording_speaker
+
+    def bind(*a, **k):
+        order.append("bind")
+        return real_bind(*a, **k)
+
+    def trim_spy(*a, **k):
+        order.append("trim")
+        return trim(*a, **k)
+
+    with patch("wisper_transcribe.config.get_data_dir", return_value=tmp_path), \
+         patch.dict("os.environ", {"WISPER_DATA_DIR": str(tmp_path)}), \
+         patch("wisper_transcribe.speaker_manager.enroll_speaker_from_audio_dir",
+               side_effect=lambda **kw: seed_profile(kw["name"], data_dir=tmp_path)), \
+         patch.object(rm, "bind_recording_speaker", bind), \
+         patch.object(rm, "trim_recording_audio", trim_spy):
+        JobQueue()._run_job(job)
+    return job, rec, order
+
+
+def test_recording_enroll_job_trims_after_binding(tmp_path):
+    from wisper_transcribe.web.jobs import COMPLETED
+
+    calls = []
+    job, rec, order = _run_recording_enroll_with_trim(
+        tmp_path, lambda rid, data_dir=None: calls.append((rid, data_dir)) or 0)
+
+    assert job.status == COMPLETED
+    assert calls == [(rec.id, tmp_path)]
+    assert order == ["bind", "trim"]
+
+
+def test_recording_enroll_job_survives_a_failing_trim(tmp_path):
+    from wisper_transcribe.web.jobs import COMPLETED
+
+    def boom(*a, **k):
+        raise OSError("disk")
+
+    job, _rec, order = _run_recording_enroll_with_trim(tmp_path, boom)
+
+    assert job.status == COMPLETED
+    assert order == ["bind", "trim"]
 
 
 def test_recording_enroll_job_failure_is_generic(tmp_path):
@@ -1747,3 +2043,126 @@ def test_recording_is_transcribing_only_while_its_job_is_pending_or_running(tmp_
     loaded = load_recordings()[rec.id]
     assert loaded.status == "completed"
     assert loaded.job_id == job.id
+
+
+def _seed_stored(tmp_path, vectors, *, audio=False, space=None):
+    from wisper_transcribe.config import EMBEDDING_SPACE
+    from ._seed import seed_sidecar
+
+    md_path = tmp_path / "session01.md"
+    md_path.write_text("# Session 01", encoding="utf-8")
+    audio_path = tmp_path / "gone" / "session01.mp3"
+    if audio:
+        audio_path.parent.mkdir()
+        audio_path.write_bytes(b"fake")
+    seed_sidecar(md_path, {
+        "input_path": str(audio_path),
+        "diarization_segments": [
+            {"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"},
+            {"start": 6.0, "end": 9.0, "speaker": "SPEAKER_01"},
+        ],
+        "speaker_map": {},
+        "speaker_embeddings": {k: list(v) for k, v in vectors.items()},
+        "embedding_space": space or EMBEDDING_SPACE,
+    })
+    return md_path
+
+
+def test_run_enroll_job_stored_embeddings_without_audio_completes(tmp_path):
+    from wisper_transcribe.web.jobs import JobQueue, COMPLETED
+
+    md_path = _seed_stored(tmp_path, {"SPEAKER_00": [1.0, 0.0, 0.0]})
+    q = JobQueue()
+    job = q.submit_enroll(md_path=str(md_path), transcript_name="session01",
+                          groups={"Alice": ["SPEAKER_00"]}, device="cpu")
+    with patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=AssertionError):
+        q._run_enroll_job(job)
+
+    assert job.status == COMPLETED
+    from wisper_transcribe.speaker_manager import load_profiles
+    assert "alice" in load_profiles()
+
+
+def test_run_enroll_job_partial_logs_skipped_name_and_completes(tmp_path):
+    from wisper_transcribe.web.jobs import JobQueue, COMPLETED
+
+    md_path = _seed_stored(tmp_path, {"SPEAKER_00": [1.0, 0.0, 0.0]})
+    q = JobQueue()
+    job = q.submit_enroll(md_path=str(md_path), transcript_name="session01",
+                          groups={"Alice": ["SPEAKER_00"], "Brad": ["SPEAKER_01"]}, device="cpu")
+    q._run_enroll_job(job)
+
+    assert job.status == COMPLETED
+    assert any("Skipped Brad" in line for line in job.log_lines)
+    from wisper_transcribe.speaker_manager import load_profiles
+    profiles = load_profiles()
+    assert "alice" in profiles and "brad" not in profiles
+
+
+def test_run_enroll_job_old_embedding_space_without_audio_fails(tmp_path):
+    from wisper_transcribe.web.jobs import JobQueue, FAILED
+
+    md_path = _seed_stored(tmp_path, {"SPEAKER_00": [1.0, 0.0, 0.0]}, space="old-model")
+    q = JobQueue()
+    job = q.submit_enroll(md_path=str(md_path), transcript_name="session01",
+                          groups={"Alice": ["SPEAKER_00"]}, device="cpu")
+    q._run_enroll_job(job)
+
+    assert job.status == FAILED
+    assert job.error == "Source audio not available"
+
+
+def test_run_enroll_job_old_embedding_space_with_audio_extracts(tmp_path):
+    import numpy as np
+    from wisper_transcribe.web.jobs import JobQueue, COMPLETED
+
+    md_path = _seed_stored(tmp_path, {"SPEAKER_00": [1.0, 0.0, 0.0]}, audio=True, space="old-model")
+    q = JobQueue()
+    job = q.submit_enroll(md_path=str(md_path), transcript_name="session01",
+                          groups={"Alice": ["SPEAKER_00"]}, device="cpu")
+    with patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=lambda p: p), \
+         patch("wisper_transcribe.speaker_manager.extract_embedding",
+               return_value=np.array([0.0, 1.0, 0.0])) as ext, \
+         patch("wisper_transcribe.speaker_manager._save_reference_clip"):
+        q._run_enroll_job(job)
+
+    assert job.status == COMPLETED
+    ext.assert_called_once()
+
+
+def test_rerun_from_the_kept_flac_leaves_the_audio_alone(tmp_path, monkeypatch):
+    from wisper_transcribe import transcript_store
+    from wisper_transcribe.models import DiarizationSegment
+
+    _, out_dir = _upload_env(tmp_path, monkeypatch)
+    md = out_dir / "s1.md"
+    md.write_text("# old", encoding="utf-8")
+    transcript_store.register("s1", origin="job")
+    flac = out_dir / "s1.flac"
+    flac.write_bytes(b"original-flac")
+    transcript_store.set_audio(md, flac)
+
+    q = _make_queue()
+    job = q.submit(str(flac), original_stem="s1", output_dir=str(out_dir), overwrite=True,
+                   source_name="Session 1.mp4")
+    assert job.is_web_upload is False and job.upload_dir == ""
+
+    def _process(path, _result_store=None, job_id=None, **kwargs):
+        md.write_text("# new", encoding="utf-8")
+        transcript_store.register("s1", origin="job")
+        _result_store["diarization_segments"] = [
+            DiarizationSegment(start=0.0, end=1.0, speaker="SPEAKER_00")]
+        _result_store["speaker_map"] = {"SPEAKER_00": "Speaker 1"}
+        return md
+
+    with patch("wisper_transcribe.web.jobs.process_file", side_effect=_process), \
+            patch("wisper_transcribe.audio_utils.encode_flac") as encode, \
+            patch("wisper_transcribe.web.jobs._extract_speaker_excerpts"):
+        q._run_job(job)
+
+    assert job.status == "completed"
+    encode.assert_not_called()
+    assert flac.read_bytes() == b"original-flac"
+    assert _audio_row(out_dir, "s1").path == flac
+    assert sorted(p.name for p in out_dir.glob("*.flac")) == ["s1.flac"]
+    assert md.read_text(encoding="utf-8") == "# new"

@@ -67,16 +67,39 @@ def _build_tailwind() -> None:
         import warnings
         warnings.warn(f"Tailwind CSS build failed: {exc}. Using existing tailwind.min.css.")
 
-def _cleanup_orphaned_uploads() -> None:
-    """Delete wisper_upload_*/wisper_enroll_*/wisper_enrollsrc_* temp files at startup.
+def _cleanup_recording_trash() -> None:
+    """Delete ``recordings/*/.wisper-trash-*`` directories at startup.
 
-    Jobs rename their uploads at submit time (to ``<stem><suffix>`` or
-    ``wisper_enrollsrc_<job-id>``) and clean up after themselves, so this only
-    covers crashes. Sweeping ``wisper_enrollsrc_*`` is safe because the
+    A trim renames what it deletes to a trash directory before removing it, so
+    these exist only if the server stopped mid-delete.
+    """
+    import logging
+    import shutil
+
+    from wisper_transcribe.config import get_data_dir
+    from wisper_transcribe.recording_manager import TRASH_PREFIX
+
+    log = logging.getLogger(__name__)
+    for path in (get_data_dir() / "recordings").glob(f"*/{TRASH_PREFIX}*"):
+        try:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+        except OSError as exc:
+            log.warning("Could not remove %s: %s", path, exc)
+
+
+def _cleanup_orphaned_uploads() -> None:
+    """Delete wisper_upload_* folders and files and wisper_enroll_*/wisper_enrollsrc_* files at startup.
+
+    A transcription upload lives in ``wisper_upload_<job-id>/`` until its job
+    ends, and the job deletes the folder on success, failure, or cancel; an
+    enroll upload is renamed to ``wisper_enrollsrc_<job-id>`` and deleted the
+    same way. This only covers a crash, and sweeping is safe because the
     in-memory queue is empty at startup.
     """
     import glob
     import logging
+    import shutil
     import tempfile
 
     tmp_dir = tempfile.gettempdir()
@@ -87,11 +110,14 @@ def _cleanup_orphaned_uploads() -> None:
     log = logging.getLogger(__name__)
     for path in orphans:
         try:
-            Path(path).unlink(missing_ok=True)
+            if Path(path).is_dir() and not Path(path).is_symlink():
+                shutil.rmtree(path)
+            else:
+                Path(path).unlink(missing_ok=True)
             log.debug("Removed orphaned upload: %s", path)
         except OSError as exc:
             log.warning("Could not remove orphaned upload %s: %s", path, exc)
-    log.info("Cleaned up %d orphaned upload file(s) from previous session", len(orphans))
+    log.info("Cleaned up %d orphaned upload(s) from previous session", len(orphans))
 
 
 try:
@@ -155,10 +181,18 @@ def create_app() -> FastAPI:
             logging.getLogger(__name__).warning("Could not mark interrupted jobs", exc_info=True)
 
         # Register transcripts added while the server was down, flag deleted
-        # ones, and sweep crash leftovers (temp files, orphaned companions).
+        # ones, match renames, and sweep crash leftover temp files.
         try:
             from wisper_transcribe import transcript_store
             transcript_store.reconcile(sweep=True)
+            attention = transcript_store.needs_attention()
+            if attention.total:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Needs attention: %d missing transcript(s), %d missing file(s), "
+                    "%d file(s) with no transcript; see the Transcripts page",
+                    len(attention.missing_transcripts), len(attention.missing_files),
+                    len(attention.unclaimed))
         except Exception:
             import logging
             logging.getLogger(__name__).warning("Transcript reconcile failed", exc_info=True)
@@ -187,6 +221,7 @@ def create_app() -> FastAPI:
         reconcile_on_startup(data_dir)
 
         _cleanup_orphaned_uploads()
+        _cleanup_recording_trash()
 
         from .discord_bot import BotManager
         bot_manager = BotManager(data_dir=data_dir)

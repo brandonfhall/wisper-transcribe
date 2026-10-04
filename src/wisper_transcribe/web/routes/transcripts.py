@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import html as _html_module
 import logging
+import mimetypes
 import os
 import re
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
+from typing import Optional
 from urllib.parse import quote
 
 log = logging.getLogger(__name__)
@@ -23,7 +25,8 @@ from wisper_transcribe.campaign_manager import (
     remove_transcript_from_campaign,
 )
 from wisper_transcribe.config import get_data_dir
-from wisper_transcribe.recording_manager import load_recordings
+from wisper_transcribe import file_registry
+from wisper_transcribe.recording_manager import load_recordings, recording_for_transcript
 
 from . import templates
 from wisper_transcribe.path_utils import get_output_dir
@@ -132,14 +135,38 @@ def _parse_frontmatter(content: str) -> tuple[dict, str]:
 def _anchor_blocks(body: str) -> str:
     """Wrap each transcript block in ``<span id="b-<index>">`` so search
     results can deep-link to it. Numbered by ``searchable_blocks()``, the same
-    numbering the search index stores."""
+    numbering the search index stores. A block with a timestamp also gets
+    ``data-start`` (seconds) for audio playback."""
     from wisper_transcribe.formatter import searchable_blocks
+    from wisper_transcribe.time_utils import parse_timestamp
 
     lines = body.splitlines()
     for lineno, block in searchable_blocks(body):
-        lines[lineno] = (f'<span id="b-{block["index"]}" class="block-anchor">'
+        start = parse_timestamp(block["timestamp"])
+        timing = "" if start is None else f' data-start="{start:g}"'
+        lines[lineno] = (f'<span id="b-{block["index"]}" class="block-anchor"{timing}>'
                          f'{lines[lineno].strip()}</span>')
     return "\n".join(lines)
+
+
+_AUDIO_TYPES = {".wav": "audio/wav", ".flac": "audio/flac"}
+
+
+def _playback(md_path: Path, name: str) -> tuple[str | None, list[dict]]:
+    """The audio URL for the player (None without audio) and, for a transcript
+    made from a recording, that recording's markers as ``{label, seconds}``."""
+    out_dir = get_output_dir()
+    if transcript_store.audio_path(md_path, output_dir=out_dir) is None:
+        return None, []
+    audio_url = f"/transcripts/{quote(name)}/audio"
+    owner = file_registry.Owner.for_stem(md_path.stem, output_dir=out_dir)
+    rec = recording_for_transcript(owner.id) if owner else None
+    markers = []
+    for marker in (rec.markers if rec else []):
+        secs = int(marker.elapsed_s)
+        markers.append({"label": f"{secs // 3600}:{secs % 3600 // 60:02d}:{secs % 60:02d}",
+                        "seconds": secs})
+    return audio_url, markers
 
 
 def _anchor_sections(html: str) -> str:
@@ -241,7 +268,7 @@ def _pending_recordings(data_dir: Path) -> tuple[list, set[str]]:
 @router.get("", response_class=HTMLResponse)
 async def transcripts_list(request: Request) -> HTMLResponse:
     out_dir = get_output_dir()
-    transcript_store.reconcile(out_dir)  # register new files, flag deleted ones
+    transcript_store.reconcile(out_dir, sync="throttled")  # register new files, flag deleted ones
     # Exclude .summary.md sidecars — they are shown via the transcript detail page
     files = sorted(
         [f for f in out_dir.glob("*.md") if not f.name.endswith(".summary.md")],
@@ -273,6 +300,7 @@ async def transcripts_list(request: Request) -> HTMLResponse:
         })
 
     pending_recordings, live_draft_ids = _pending_recordings(get_data_dir())
+    attention = _attention_context(out_dir)
 
     return templates.TemplateResponse(
         request,
@@ -284,8 +312,44 @@ async def transcripts_list(request: Request) -> HTMLResponse:
             "stem_to_campaign": stem_to_campaign,
             "pending_recordings": pending_recordings,
             "live_draft_ids": live_draft_ids,
+            "attention": attention,
+            "relink_candidates": transcript_store.relink_candidates() if attention else [],
         },
     )
+
+
+def _attention_context(out_dir: Path) -> Optional[dict]:
+    """The Needs attention panel's data, or None when there is nothing to show."""
+    try:
+        found = transcript_store.needs_attention(out_dir)
+    except Exception:
+        log.warning("Could not list items needing attention", exc_info=True)
+        return None
+    if not found.total:
+        return None
+    base = os.path.abspath(str(out_dir))
+    data_base = os.path.abspath(str(get_data_dir()))
+    unclaimed = []
+    for path in found.unclaimed:
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        in_output = os.path.dirname(os.path.abspath(path)) == base
+        unclaimed.append({
+            "name": path.name if in_output else os.path.relpath(path, data_base),
+            "size": st.st_size,
+            "modified": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
+            # Only an output-root file with a recognised companion name may be deleted here.
+            "deletable": in_output and transcript_store._companion_stem(path.name) is not None,
+        })
+    return {
+        "missing_transcripts": found.missing_transcripts,
+        "missing_files": [
+            {"id": r.id, "name": r.rel_path, "kind": r.kind} for r in found.missing_files
+        ],
+        "unclaimed": unclaimed,
+    }
 
 
 @router.post("/bulk-delete", response_class=HTMLResponse)
@@ -332,6 +396,64 @@ async def bulk_assign_campaign(request: Request) -> HTMLResponse:
     return HTMLResponse(content="", status_code=303, headers={"Location": "/transcripts"})
 
 
+@router.post("/relink", response_class=HTMLResponse)
+async def relink_transcript(request: Request) -> RedirectResponse:
+    """Give a missing transcript's identity (and companion files) to a renamed file."""
+    form = await request.form()
+    old_md = _get_safe_content_path(str(form.get("old_stem", "")), ".md")
+    new_md = _get_safe_content_path(str(form.get("new_stem", "")), ".md")
+    if old_md is None or new_md is None:
+        return RedirectResponse(url="/transcripts?error=relink_failed", status_code=303)
+    try:
+        kept = transcript_store.relink(old_md.stem, new_md.stem, output_dir=old_md.parent)
+    except (KeyError, ValueError):
+        return RedirectResponse(url="/transcripts?error=relink_failed", status_code=303)
+    notice = "?notice=relink_kept_names" if kept else ""
+    return RedirectResponse(url=f"/transcripts{notice}", status_code=303)
+
+
+@router.post("/needs-attention/forget", response_class=HTMLResponse)
+async def forget_missing_file(request: Request) -> HTMLResponse:
+    """Drop the record of a registered file that is gone from disk."""
+    from wisper_transcribe import file_registry
+
+    form = await request.form()
+    try:
+        file_id = int(str(form.get("file_id", "")))
+    except ValueError:
+        return invalid_input_response("Invalid file id")
+    out_dir = get_output_dir()
+    report = file_registry.last_report(None, out_dir)
+    row = next((r for r in report.missing if r.id == file_id), None) if report else None
+    # Only a row the latest sync reported missing whose file is still gone.
+    if row is None or os.path.lexists(row.path):
+        return RedirectResponse(url="/transcripts?error=forget_failed", status_code=303)
+    file_registry.forget_id(row.id)
+    file_registry.drop_from_report(None, out_dir, file_ids=[row.id])
+    return RedirectResponse(url="/transcripts", status_code=303)
+
+
+@router.post("/needs-attention/delete-file", response_class=HTMLResponse)
+async def delete_unclaimed_file(request: Request) -> HTMLResponse:
+    """Delete an output-root file with a companion-file name that nothing owns."""
+    form = await request.form()
+    name = str(form.get("name", ""))
+    safe_name = os.path.basename(name)
+    if (not name or "\x00" in name or safe_name != name or safe_name in {".", ".."}
+            or transcript_store._companion_stem(safe_name) is None):
+        return invalid_input_response("Invalid file name")
+    out_dir = get_output_dir()
+    base = os.path.abspath(str(out_dir))
+    if not base.endswith(os.sep):
+        base += os.sep
+    target = os.path.abspath(os.path.join(base, safe_name))
+    if not target.startswith(base):
+        return invalid_input_response("Invalid file name")
+    if not transcript_store.delete_unowned_file(Path(target), output_dir=out_dir):
+        return RedirectResponse(url="/transcripts?error=delete_failed", status_code=303)
+    return RedirectResponse(url="/transcripts", status_code=303)
+
+
 @router.get("/{name}", response_class=HTMLResponse)
 async def transcript_detail(request: Request, name: str, q: str = "") -> HTMLResponse:
     md_path = _get_safe_content_path(name, ".md")
@@ -362,6 +484,7 @@ async def transcript_detail(request: Request, name: str, q: str = "") -> HTMLRes
 
     campaigns = load_campaigns()
     current_campaign_slug = get_campaign_for_transcript(md_path.stem)
+    audio_url, markers = _playback(md_path, name)
 
     return templates.TemplateResponse(
         request,
@@ -379,8 +502,33 @@ async def transcript_detail(request: Request, name: str, q: str = "") -> HTMLRes
             "campaigns": campaigns,
             "current_campaign_slug": current_campaign_slug,
             "highlight": _highlight(q),
+            "audio_url": audio_url,
+            "markers": markers,
+            "has_timing": "data-start=" in html_body,
         },
     )
+
+
+@router.get("/{name}/audio")
+async def transcript_audio(name: str):
+    md_path = _get_safe_content_path(name, ".md")
+    if not md_path:
+        return invalid_input_response("Invalid name")
+    if not md_path.exists():
+        return HTMLResponse(content="Not found", status_code=404)
+    audio = transcript_store.audio_path(md_path, output_dir=get_output_dir())
+    if audio is None:
+        return HTMLResponse(content="No audio", status_code=404)
+    target = os.path.abspath(str(audio))
+    roots = [os.path.abspath(str(get_output_dir())),
+             os.path.abspath(str(get_data_dir() / "recordings"))]
+    if not any(target.startswith(r.rstrip(os.sep) + os.sep) for r in roots):
+        return HTMLResponse(content="Not found", status_code=404)
+    suffix = os.path.splitext(target)[1].lower()
+    media_type = _AUDIO_TYPES.get(suffix) or mimetypes.guess_type(target)[0]
+    if not media_type or not os.path.isfile(target):
+        return HTMLResponse(content="Not found", status_code=404)
+    return FileResponse(target, media_type=media_type)
 
 
 @router.get("/{name}/download")
@@ -634,6 +782,61 @@ async def assign_campaign(request: Request, name: str) -> HTMLResponse:
     )
 
 
+_RETRANSCRIBE_ERRORS = {"no_audio", "not_ready"}
+
+
+def _back_to_transcript(name: str, error: str) -> HTMLResponse:
+    """303 to the transcript page with a fixed error code (a Location header, as the other routes do)."""
+    code = error if error in _RETRANSCRIBE_ERRORS else "not_ready"
+    return HTMLResponse(
+        content="",
+        status_code=303,
+        headers={"Location": f"/transcripts/{quote(name)}?error={code}"},
+    )
+
+
+@router.post("/{name}/retranscribe")
+async def retranscribe(request: Request, name: str):
+    """Re-run a transcript from its saved audio, replacing it in place."""
+    md_path = _get_safe_content_path(name, ".md")
+    if not md_path:
+        return invalid_input_response("Invalid name")
+    if not md_path.exists():
+        return HTMLResponse(content="Transcript not found", status_code=404)
+    out_dir = get_output_dir()
+    owner = file_registry.Owner.for_stem(md_path.stem, output_dir=out_dir)
+    rec = recording_for_transcript(owner.id) if owner else None
+    if rec is not None:
+        from wisper_transcribe.web.routes.record import _submit_recording_transcription
+
+        job, error = _submit_recording_transcription(rec, request, get_data_dir())
+        if job is None:
+            return _back_to_transcript(name, error or "not_ready")
+        return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
+
+    audio = transcript_store.audio_path(md_path, output_dir=out_dir)
+    if audio is None:
+        return _back_to_transcript(name, "no_audio")
+    from wisper_transcribe.job_history import last_transcription_params
+
+    meta, _ = _parse_frontmatter(md_path.read_text(encoding="utf-8"))
+    kwargs = last_transcription_params(owner.id) if owner else {}
+    if meta.get("title"):
+        kwargs["title"] = str(meta["title"])
+    campaign = get_campaign_for_transcript(md_path.stem)
+    if campaign:
+        kwargs["campaign"] = campaign
+    job = request.app.state.job_queue.submit(
+        str(audio),
+        original_stem=md_path.stem,
+        output_dir=str(md_path.parent),
+        source_name=str(meta.get("source_file") or audio.name),
+        overwrite=True,
+        **kwargs,
+    )
+    return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
+
+
 # ---------------------------------------------------------------------------
 # Transcript-centric enrollment wizard
 # ---------------------------------------------------------------------------
@@ -643,6 +846,8 @@ from wisper_transcribe.web.enroll_shared import (
     _load_diar_sidecar,
     apply_renames,
     build_legacy_label_map as _build_legacy_label_map,
+    enrollable_labels,
+    excerpt_candidates,
     resolve_current_names,
     template_current_names,
 )
@@ -662,7 +867,6 @@ async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
         return HTMLResponse(content="No enrollment data found for this transcript", status_code=404)
 
     # Derive speaker labels ordered by first appearance
-    import re as _re
     seen: dict[str, float] = {}
     for seg in diar.get("diarization_segments", []):
         if seg["speaker"] not in seen:
@@ -676,22 +880,15 @@ async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
 
     legacy_label_map = _build_legacy_label_map(md_path, diar.get("diarization_segments", []))
 
-    def _excerpt_candidates(raw_label: str) -> list[str]:
-        cands = [_re.sub(r"[^\w\-]", "_", raw_label)]
-        legacy = legacy_label_map.get(raw_label)
-        if legacy:
-            cands.append(_re.sub(r"[^\w\-]", "_", legacy))
-        return cands
-
     speaker_excerpts: dict[str, str] = {}
     speaker_excerpt_texts: dict[str, str] = {}
     for sp in speakers:
-        for safe_label in _excerpt_candidates(sp):
+        for safe_label in excerpt_candidates(sp, legacy_label_map):
             clip = out_dir / f"{stem}_excerpt_{safe_label}.mp3"
             if clip.exists():
                 speaker_excerpts[sp] = str(clip)
                 break
-        for safe_label in _excerpt_candidates(sp):
+        for safe_label in excerpt_candidates(sp, legacy_label_map):
             txt = out_dir / f"{stem}_excerpt_{safe_label}.txt"
             if txt.exists():
                 try:
@@ -702,10 +899,9 @@ async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
 
     from wisper_transcribe.speaker_manager import load_profiles
 
-    # Warn before submit when the source audio is gone (renames still work,
-    # enrollment won't).
-    diar_input_path = diar.get("input_path", "")
-    audio_missing = not (diar_input_path and Path(diar_input_path).exists())
+    # Warn before submit when some speakers can't be enrolled (no saved
+    # embedding and the source audio is gone); renames still work.
+    audio_missing = bool(enrollable_labels(diar, speakers)[1])
 
     return templates.TemplateResponse(
         request,
@@ -762,9 +958,6 @@ async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
         DiarizationSegment(start=s["start"], end=s["end"], speaker=s["speaker"])
         for s in diar.get("diarization_segments", [])
     ]
-    diar_input_path = diar.get("input_path", "")
-    input_path = Path(diar_input_path) if diar_input_path else None
-
     rename_result = apply_renames(md_path, raw_segments, renames)
 
     location = f"/transcripts/{quote(name)}"
@@ -776,11 +969,13 @@ async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
             headers={"Location": location},
         )
 
-    # Enqueue only when something is eligible and the source audio exists;
-    # otherwise redirect with the existing notice.
-    if input_path is None or not input_path.exists():
-        log.warning("Enrollment skipped: source audio not found at %s", input_path)
+    # Enqueue when any group can be enrolled; flag the speakers that can't.
+    submitted = [lb for labels in rename_result.groups.values() for lb in labels]
+    enrollable, skipped = enrollable_labels(diar, submitted)
+    if skipped:
         location += "?notice=enroll_audio_missing"
+    if not any(all(lb in enrollable for lb in labels)
+               for labels in rename_result.groups.values()):
         return HTMLResponse(
             content="", status_code=303,
             headers={"Location": location},
@@ -800,9 +995,12 @@ async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
         groups=rename_result.groups,
         device=device,
     )
+    job_location = f"/transcribe/jobs/{job.id}"
+    if skipped:
+        job_location += "?notice=enroll_audio_missing"
     return HTMLResponse(
         content="", status_code=303,
-        headers={"Location": f"/transcribe/jobs/{job.id}"},
+        headers={"Location": job_location},
     )
 
 

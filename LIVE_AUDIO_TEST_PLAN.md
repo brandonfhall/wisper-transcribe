@@ -42,7 +42,7 @@ Open `http://localhost:8080/record`.
       the active toolbar, the recording banner on *other* pages, and
       `/recordings`.
 - [ ] Talk into the mic while playing system audio for ~15s.
-- [ ] `.wav` files exist and grow under the recording directory:
+- [ ] While recording, `.wav` files exist and grow under the recording directory (they are deleted once the session ends and `combined.wav` is verified):
       ```powershell
       dir $env:APPDATA\wisper-transcribe\recordings\<id>\per-user\mic
       dir $env:APPDATA\wisper-transcribe\recordings\<id>\per-user\system
@@ -53,8 +53,10 @@ Open `http://localhost:8080/record`.
       session name.
 - [ ] Detail page shows device names, duration, and a populated Segments panel.
 - [ ] `combined.wav` has mic + system mixed with no gaps or time compression.
-- [ ] `per-user/mic/0000.wav` is only your voice; `per-user/system/0000.wav` is
-      only system audio, with silence in any gaps.
+- [ ] After stop, `combined/` and `per-user/` are gone and `combined.wav` remains.
+      To check the separate tracks, play `per-user/mic/0000.wav` (only your voice)
+      and `per-user/system/0000.wav` (only system audio, with silence in any gaps)
+      before pressing stop.
 - [ ] Starting a Discord recording while a local session is active is rejected.
 
 ### 1b. Live transcript + noise floor

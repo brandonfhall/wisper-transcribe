@@ -1247,6 +1247,62 @@ def test_campaigns_delete_with_yes(tmp_path, monkeypatch):
     assert "Deleted" in result.output
 
 
+def _campaign_with_transcript(out):
+    from wisper_transcribe import transcript_store
+    from wisper_transcribe.campaign_manager import move_transcript_to_campaign
+
+    runner = CliRunner()
+    runner.invoke(main, ["campaigns", "create", "Test Campaign"])
+    (out / "s01.md").write_text("x", encoding="utf-8")
+    transcript_store.register("s01", origin="job")
+    (out / "s01.summary.md").write_text("sum", encoding="utf-8")
+    move_transcript_to_campaign("s01", "test-campaign")
+    return runner
+
+
+def test_campaigns_delete_keeps_transcripts_by_default(tmp_path, monkeypatch):
+    from wisper_transcribe.path_utils import get_output_dir
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    out = get_output_dir()
+    runner = _campaign_with_transcript(out)
+
+    result = runner.invoke(main, ["campaigns", "delete", "test-campaign"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "keep its transcripts and journal file" in result.output
+    assert (out / "s01.md").exists() and (out / "s01.summary.md").exists()
+
+
+def test_campaigns_delete_transcripts_flag_deletes_them(tmp_path, monkeypatch):
+    from wisper_transcribe.path_utils import get_output_dir
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    out = get_output_dir()
+    runner = _campaign_with_transcript(out)
+
+    result = runner.invoke(main, ["campaigns", "delete", "test-campaign", "--delete-transcripts"],
+                           input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "delete its transcripts, their files, and its journal" in result.output
+    assert not list(out.iterdir())
+
+
+def test_transcripts_list_points_at_the_attention_page(tmp_path, monkeypatch):
+    from wisper_transcribe.path_utils import get_output_dir
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    out = get_output_dir()
+    (out / "s01.md").write_text("x", encoding="utf-8")
+    result = CliRunner().invoke(main, ["transcripts", "list"])
+    assert "need attention" not in result.output and "needs attention" not in result.output
+
+    (out / "ghost.summary.md").write_text("orphan", encoding="utf-8")
+    (out / "ghost_diar.json").write_text("{}", encoding="utf-8")
+    result = CliRunner().invoke(main, ["transcripts", "list"])
+    assert "2 items need attention; see the Transcripts page" in result.output
+    assert (out / "ghost.summary.md").exists()
+
+
 def test_campaigns_add_unknown_profile_fails(tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     runner = CliRunner()
@@ -1556,4 +1612,114 @@ def test_transcripts_list_marks_missing_entries_in_campaign_order(tmp_path, monk
 
     result = CliRunner().invoke(main, ["transcripts", "list", "--campaign", "game"])
     assert result.exit_code == 0, result.output
-    assert result.output.splitlines() == ["s02  (missing — file not found)", "s01"]
+    lines = result.output.splitlines()
+    assert lines[:2] == ["s02  (missing — file not found)", "s01"]
+    assert "1 item needs attention; see the Transcripts page or `wisper storage trim`" in lines[2:]
+
+
+# ---------------------------------------------------------------------------
+# wisper storage trim / server lock
+# ---------------------------------------------------------------------------
+
+def _trim_world(tmp_path, monkeypatch):
+    from tests._seed import seed_sidecar
+    out = tmp_path / "trim_out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    md = out / "Ep.md"
+    md.write_text("# t\n", encoding="utf-8")
+    (out / "Ep.mp4").write_bytes(b"v" * 2048)
+    seed_sidecar(md, {
+        "diarization_segments": [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}],
+        "speaker_map": {"SPEAKER_00": "A"},
+        "speaker_embeddings": {"SPEAKER_00": [1.0, 0.0]},
+        "embedding_space": __import__("wisper_transcribe.config", fromlist=["x"]).EMBEDDING_SPACE,
+        "input_path": str(out / "Ep.mp4"),
+    })
+    return out
+
+
+def _fake_flac(src, dst):
+    Path(dst).write_bytes(b"flac")
+
+
+def test_storage_trim_dry_run_output_and_no_changes(tmp_path, monkeypatch):
+    out = _trim_world(tmp_path, monkeypatch)
+    result = CliRunner().invoke(main, ["storage", "trim"])
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert lines[0].startswith("convert to FLAC") and lines[0].endswith(str(out / "Ep.mp4"))
+    assert "2.0 KB" in lines[0]
+    assert any(line.startswith("Converted") and "2.0 KB" in line for line in lines)
+    assert "Dry run: nothing was changed. Run again with --apply to do this." in result.output
+    assert (out / "Ep.mp4").is_file() and not (out / "Ep.flac").exists()
+
+
+def test_storage_trim_apply_after_dry_run_is_allowed(tmp_path, monkeypatch):
+    out = _trim_world(tmp_path, monkeypatch)
+    assert CliRunner().invoke(main, ["storage", "trim"]).exit_code == 0
+    with patch("wisper_transcribe.audio_utils.encode_flac", side_effect=_fake_flac), \
+         patch("wisper_transcribe.audio_utils.probe_format", return_value=(16000, 1)):
+        result = CliRunner().invoke(main, ["storage", "trim", "--apply"])
+    assert result.exit_code == 0, result.output
+    assert (out / "Ep.flac").is_file() and not (out / "Ep.mp4").exists()
+    with patch("wisper_transcribe.audio_utils.encode_flac", side_effect=_fake_flac), \
+         patch("wisper_transcribe.audio_utils.probe_format", return_value=(16000, 1)):
+        again = CliRunner().invoke(main, ["storage", "trim", "--apply"])
+    assert again.exit_code == 0 and "Nothing to trim." in again.output
+
+
+def test_storage_trim_apply_refused_while_server_lock_held(tmp_path, monkeypatch):
+    from wisper_transcribe import db
+    out = _trim_world(tmp_path, monkeypatch)
+    held = db.ServerLock().acquire()
+    try:
+        result = CliRunner().invoke(main, ["storage", "trim", "--apply"])
+    finally:
+        held.release()
+    assert result.exit_code != 0
+    assert "Stop the wisper server first, then run this again." in result.output
+    assert (out / "Ep.mp4").is_file()
+
+
+def test_server_refuses_while_trim_holds_the_lock(tmp_path):
+    from wisper_transcribe import db
+    mock_uvicorn = MagicMock()
+    held = db.ServerLock().acquire()
+    try:
+        with patch.dict("sys.modules", {"uvicorn": mock_uvicorn}):
+            result = CliRunner().invoke(main, ["server"])
+    finally:
+        held.release()
+    assert result.exit_code != 0
+    assert "wisper storage trim is running; try again when it finishes" in result.output
+    mock_uvicorn.run.assert_not_called()
+    assert not (db.db_path()).exists()
+
+
+def test_server_releases_its_lock_on_exit():
+    from wisper_transcribe import db
+    with patch.dict("sys.modules", {"uvicorn": MagicMock()}):
+        assert CliRunner().invoke(main, ["server"]).exit_code == 0
+    db.ServerLock().acquire().release()
+
+
+def test_storage_trim_container_refused_on_fresh_host_lease(tmp_path, monkeypatch):
+    import sqlite3
+    from datetime import UTC, datetime
+
+    from wisper_transcribe import db
+    _trim_world(tmp_path, monkeypatch)
+    db.connect().close()
+    with sqlite3.connect(db.db_path()) as conn:
+        conn.execute("INSERT OR REPLACE INTO runtime_leases VALUES ('host', 'h:1', 0, ?)",
+                     (datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),))
+    monkeypatch.setattr(db, "detect_runtime", lambda: db.RuntimeInfo("container", True))
+    result = CliRunner().invoke(main, ["storage", "trim", "--apply"])
+    assert result.exit_code != 0 and "host process" in result.output
+    with sqlite3.connect(db.db_path()) as conn:
+        conn.execute("DELETE FROM runtime_leases WHERE runtime = 'host'")
+    with patch("wisper_transcribe.audio_utils.encode_flac", side_effect=_fake_flac), \
+         patch("wisper_transcribe.audio_utils.probe_format", return_value=(16000, 1)):
+        ok = CliRunner().invoke(main, ["storage", "trim", "--apply"])
+    assert ok.exit_code == 0, ok.output

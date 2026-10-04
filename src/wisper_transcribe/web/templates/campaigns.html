@@ -50,6 +50,9 @@
 {% elif request.query_params.get('error') == 'relink_failed' %}
 <div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Couldn't relink: that file may already belong to a campaign, or the session is no longer missing.</div>
 {% endif %}
+{% if request.query_params.get('notice') == 'relink_kept_names' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Relinked. Some files kept their old name because a file with the new name already exists; see Needs attention on the Transcripts page.</div>
+{% endif %}
 
 <div style="flex:1;display:grid;grid-template-columns:260px 1fr;overflow:hidden;height:100%">
 
@@ -268,9 +271,14 @@
 
         <!-- Delete campaign -->
         <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--color-rule)">
-          <form method="post" action="/campaigns/{{ slug }}/delete"
-                onsubmit="return confirm('Delete campaign {{ active_campaign.name }}? Transcripts will not be deleted.')">
-            <button type="submit" style="background:none;border:none;color:var(--color-signal-rose);font-size:12px;font-family:var(--font-sans);cursor:pointer;padding:0">Delete campaign</button>
+          <form method="post" action="/campaigns/{{ slug }}/delete" style="display:flex;flex-direction:column;gap:8px;align-items:flex-start">
+            <div class="mono-kicker">Delete campaign</div>
+            <button type="submit" name="mode" value="keep" data-testid="delete-campaign-keep"
+                    onclick='return confirm({{ ("Delete campaign " ~ active_campaign.display_name ~ "? Its transcripts and journal file stay; the journal is listed under Needs attention.") | tojson }})'
+                    style="background:none;border:none;color:var(--color-signal-rose);font-size:12px;font-family:var(--font-sans);cursor:pointer;padding:0">Delete campaign, keep the files</button>
+            <button type="submit" name="mode" value="everything" data-testid="delete-campaign-everything"
+                    onclick='return confirm({{ ("Delete campaign " ~ active_campaign.display_name ~ " and everything in it? Its transcripts, their summaries, speaker clips, and audio, and its journal are deleted. This cannot be undone.") | tojson }})'
+                    style="background:none;border:none;color:var(--color-signal-rose);font-size:12px;font-family:var(--font-sans);cursor:pointer;padding:0">Delete campaign and everything in it</button>
           </form>
         </div>
       </div>

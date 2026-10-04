@@ -18,10 +18,12 @@ lease on.
 
 Migrations are versioned by ``PRAGMA user_version``. Each one is DDL plus an
 optional import step and runs, with the ``user_version`` bump, in one
-``BEGIN IMMEDIATE`` transaction that ``PRAGMA foreign_key_check`` must pass.
+``BEGIN IMMEDIATE`` transaction with foreign keys off, which ``PRAGMA
+foreign_key_check`` must pass before it commits.
 Shipped migrations are frozen: a schema change is a new version. A branch
 that must reshape unreleased migrations in place sets :data:`SCHEMA_FROZEN`
-to ``False``, which makes that build refuse the default data dir.
+to ``False``, which makes that build refuse the default data dir and, until
+``WISPER_OUTPUT_DIR`` is set, any data dir whose output root lies outside it.
 """
 from __future__ import annotations
 
@@ -31,6 +33,7 @@ import socket
 import sqlite3
 import threading
 import time
+import tomllib
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
@@ -47,6 +50,11 @@ MIN_SQLITE = (3, 43, 0)
 # False only on a branch that edits unreleased migrations in place; such a
 # build refuses the default data dir. test_db fails on main unless True.
 SCHEMA_FROZEN = True
+
+# While the schema is unfrozen, connect() also refuses to run unless
+# WISPER_OUTPUT_DIR is set or the output root lies inside the data dir, so a
+# copied config.toml can't point a scratch build at the real transcripts.
+REQUIRE_OUTPUT_ENV = not SCHEMA_FROZEN
 
 # Runtime lease: a lease older than this is treated as abandoned.
 LEASE_TTL_S = 120
@@ -590,6 +598,108 @@ INSERT INTO transcript_titles (transcript_titles) VALUES ('rebuild');
 """
 
 
+# --- v9: file registry -----------------------------------------------------
+
+# Every file wisper owns is a row here, with exactly one owner. Paths are
+# stored (campaign folders move files), so the derived kinds are pinned by
+# CHECKs and a trigger. The root follows the kind because the default output
+# root lives inside the data dir, so a path alone can't say which root it is
+# under. size and mtime_ns are the last observed values and survive a missing
+# file, which is how a renamed file is recognised.
+_V9_DDL = """
+CREATE TABLE files (                           -- every file wisper owns; exactly one owner; root follows kind
+  id            INTEGER PRIMARY KEY,
+  kind          TEXT NOT NULL CHECK (kind IN ('transcript', 'summary', 'sidecar', 'excerpt', 'excerpt_text', 'audio',
+                                              'backup', 'combined', 'per_user', 'live_draft', 'reference_clip', 'journal')),
+  root          TEXT NOT NULL CHECK (root IN ('output', 'data')),
+  rel_path      TEXT NOT NULL CHECK (rel_path <> '' AND rel_path NOT GLOB '/*' AND rel_path NOT GLOB '*\\*'
+                                     AND rel_path NOT GLOB '[A-Za-z]:*' AND rel_path NOT GLOB '*/'
+                                     AND rel_path NOT GLOB '*//*'
+                                     AND '/' || rel_path || '/' NOT GLOB '*/../*'
+                                     AND '/' || rel_path || '/' NOT GLOB '*/./*'),   -- on-disk spelling, POSIX separators
+  label         TEXT CHECK (label IS NULL OR (label <> '' AND label NOT GLOB '*[/\\:]*')),
+  transcript_id INTEGER REFERENCES transcripts(id) ON DELETE CASCADE,
+  recording_id  TEXT    REFERENCES recordings(id)  ON DELETE CASCADE,
+  profile_id    INTEGER REFERENCES profiles(id)    ON DELETE CASCADE,
+  campaign_id   INTEGER REFERENCES campaigns(id)   ON DELETE CASCADE,
+  size          INTEGER CHECK (size IS NULL OR size >= 0),   -- last observed; NULL for directories and until first stat
+  mtime_ns      INTEGER,                                     -- last observed
+  UNIQUE (root, rel_path),
+  CHECK ((transcript_id IS NOT NULL) + (recording_id IS NOT NULL)
+         + (profile_id IS NOT NULL) + (campaign_id IS NOT NULL) = 1),
+  CHECK ((kind IN ('transcript', 'summary', 'sidecar', 'excerpt', 'excerpt_text', 'audio', 'backup'))
+         = (transcript_id IS NOT NULL)),
+  CHECK ((kind IN ('combined', 'per_user', 'live_draft')) = (recording_id IS NOT NULL)),
+  CHECK ((kind = 'reference_clip') = (profile_id IS NOT NULL)),
+  CHECK ((kind = 'journal') = (campaign_id IS NOT NULL)),
+  CHECK ((root = 'output') = (transcript_id IS NOT NULL)),
+  CHECK ((kind IN ('excerpt', 'excerpt_text', 'per_user')) = (label IS NOT NULL)),
+  CHECK (kind <> 'per_user' OR label IN ('mic', 'system') OR label NOT GLOB '*[^0-9]*'),
+  CHECK ((size IS NULL) = (mtime_ns IS NULL)),
+  CHECK (kind <> 'per_user' OR size IS NULL),
+  CHECK (kind <> 'transcript'   OR (lower(rel_path) GLOB '*.md' AND lower(rel_path) NOT GLOB '*.summary.md')),
+  CHECK (kind <> 'summary'      OR lower(rel_path) GLOB '*.summary.md'),
+  CHECK (kind <> 'sidecar'      OR rel_path GLOB '*_diar.json'),
+  CHECK (kind <> 'excerpt'      OR rel_path GLOB '*_excerpt_*.mp3'),
+  CHECK (kind <> 'excerpt_text' OR rel_path GLOB '*_excerpt_*.txt'),
+  CHECK (kind <> 'audio'        OR lower(rel_path) NOT GLOB '*.md'),
+  CHECK (kind <> 'backup'       OR lower(rel_path) GLOB '*.md.bak'),
+  CHECK (kind <> 'combined'     OR rel_path = 'recordings/' || recording_id || '/combined.wav'),
+  CHECK (kind <> 'per_user'     OR rel_path = 'recordings/' || recording_id || '/per-user/' || label),
+  CHECK (kind <> 'live_draft'   OR rel_path = 'recordings/' || recording_id || '/live_transcript.md'),
+  CHECK (kind <> 'reference_clip' OR rel_path GLOB 'profiles/embeddings/*.mp3'),
+  CHECK (kind <> 'journal'      OR rel_path GLOB 'campaigns/*/journal.md')
+) STRICT;
+-- One file per (owner, kind[, label]); each also serves as the owner FK's index.
+CREATE UNIQUE INDEX files_transcript ON files(transcript_id, kind, coalesce(label, ''));
+CREATE UNIQUE INDEX files_recording  ON files(recording_id, kind, coalesce(label, ''));
+CREATE UNIQUE INDEX files_profile    ON files(profile_id, kind);
+CREATE UNIQUE INDEX files_campaign   ON files(campaign_id, kind);
+-- A clip's path is its profile key: the row moves with the key, the file follows after commit.
+CREATE TRIGGER files_profile_key_au AFTER UPDATE OF key ON profiles BEGIN
+  UPDATE files SET rel_path = 'profiles/embeddings/' || new.key || '.mp3'
+   WHERE profile_id = new.id AND kind = 'reference_clip';
+END;
+"""
+
+
+def _v9_import(conn: sqlite3.Connection, ctx: MigrationContext) -> None:
+    """Copy each transcript's stored audio path into an ``audio`` row.
+
+    Self-contained: shipped migrations never call application modules.
+    Web audio is always a top-level ``<stem><suffix>``, so a value with a
+    subfolder or a ``.md`` name is the user's own file and is left alone.
+    """
+    rows = conn.execute(
+        "SELECT id, audio_rel_path FROM transcripts "
+        "WHERE audio_rel_path IS NOT NULL ORDER BY id"
+    ).fetchall()
+    for row in rows:
+        tid, rel = row[0], row[1]
+        if rel == "" or "/" in rel or rel.lower().endswith(".md"):
+            ctx.note(f"transcript {tid}: audio path {rel!r} is not a top-level "
+                     "audio file; not registered")
+            continue
+        try:
+            cur = conn.execute(
+                "INSERT INTO files (kind, root, rel_path, transcript_id) "
+                "VALUES ('audio', 'output', ?, ?) ON CONFLICT DO NOTHING",
+                (rel, tid),
+            )
+        except sqlite3.IntegrityError as exc:
+            ctx.note(f"transcript {tid}: audio path {rel!r} rejected ({exc}); "
+                     "not registered")
+            continue
+        if cur.rowcount == 0:
+            ctx.note(f"transcript {tid}: audio path {rel!r} is already "
+                     "registered to another transcript; not registered")
+
+
+# --- v10: the registry replaces transcripts.audio_rel_path -----------------
+
+_V10_DDL = "ALTER TABLE transcripts DROP COLUMN audio_rel_path;"
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "foundation", _V1_DDL, _v1_pin_output_dir),
     Migration(2, "profiles-campaigns", _V2_DDL, _v2_import),
@@ -599,6 +709,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(6, "jobs", _V6_DDL),
     Migration(7, "search", _V7_DDL),
     Migration(8, "search-titles", _V8_DDL),
+    Migration(9, "file-registry", _V9_DDL, _v9_import),
+    Migration(10, "drop-audio-rel-path", _V10_DDL),
 )
 LATEST_VERSION = MIGRATIONS[-1].version
 
@@ -648,6 +760,10 @@ def migrate(data_dir: Optional[Path] = None) -> list[int]:
         )
     data_dir.mkdir(parents=True, exist_ok=True)
     conn = _open(path)
+    # Off for the whole run: a rebuild's DROP TABLE would otherwise cascade-
+    # delete child rows. The pragma is a no-op inside a transaction, so it is
+    # set before BEGIN; the final foreign_key_check is the enforcement.
+    conn.execute("PRAGMA foreign_keys=OFF")
     applied: list[int] = []
     contexts: list[MigrationContext] = []
     try:
@@ -663,7 +779,6 @@ def migrate(data_dir: Optional[Path] = None) -> list[int]:
             snapshot = None
             if 0 < current < LATEST_VERSION:
                 snapshot = _snapshot(path, data_dir, current)
-            conn.execute("PRAGMA defer_foreign_keys=ON")
             for m in MIGRATIONS:
                 if m.version <= current:
                     continue
@@ -768,6 +883,46 @@ def _open(path: Path, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite3.Connect
     return conn
 
 
+# (realpath(data dir), config.toml mtime_ns) -> "the output root is inside the
+# data dir". Only this config-derived fact is cached; the environment
+# variable is read on every call.
+_output_inside_cache: dict[tuple[str, Optional[int]], bool] = {}
+
+
+def _check_output_env(data_dir: Path) -> None:
+    """Refuse an unmerged build whose output root could be the real one."""
+    if not REQUIRE_OUTPUT_ENV or os.environ.get("WISPER_OUTPUT_DIR"):
+        return
+    from .config import resolve_output_root
+
+    cfg_path = data_dir / "config.toml"
+    try:
+        mtime: Optional[int] = cfg_path.stat().st_mtime_ns
+    except FileNotFoundError:
+        mtime = None
+    key = (os.path.realpath(data_dir), mtime)
+    inside = _output_inside_cache.get(key)
+    if inside is None:
+        cfg: dict = {}
+        if mtime is not None:
+            try:
+                with open(cfg_path, "rb") as f:
+                    cfg = tomllib.load(f)
+            except (OSError, tomllib.TOMLDecodeError) as exc:
+                raise DevDataDirRefused(
+                    f"Could not read {cfg_path} ({exc}); refusing to guess "
+                    "where the transcripts are."
+                ) from exc
+        root = Path(os.path.realpath(resolve_output_root(cfg, data_dir, None)))
+        inside = root.is_relative_to(Path(os.path.realpath(data_dir)))
+        _output_inside_cache[key] = inside
+    if not inside:
+        raise DevDataDirRefused(
+            "This is an unmerged development build; set WISPER_DATA_DIR and "
+            "WISPER_OUTPUT_DIR to copies of your data."
+        )
+
+
 def connect(data_dir: Optional[Path] = None, *, migrate_schema: bool = True,
             claim_runtime: bool = True,
             busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite3.Connection:
@@ -781,6 +936,7 @@ def connect(data_dir: Optional[Path] = None, *, migrate_schema: bool = True,
     data_dir = _data_dir(data_dir)
     if migrate_schema:
         check_sqlite_capabilities()
+        _check_output_env(data_dir)
         path = data_dir / DB_FILENAME
         needs = True
         if path.exists():
@@ -972,6 +1128,81 @@ class Heartbeat:
 
     def __exit__(self, *exc) -> None:
         self.stop()
+
+
+# ---------------------------------------------------------------------------
+# Server lock (a running server vs. `wisper storage trim --apply`)
+# ---------------------------------------------------------------------------
+
+SERVER_LOCK_FILENAME = "server.lock"
+
+
+class ServerLockHeld(DatabaseError):
+    """Another process holds ``<data dir>/server.lock``."""
+
+
+class ServerLock:
+    """An exclusive, non-blocking OS lock on ``<data dir>/server.lock``.
+
+    The kernel releases it when the process exits, so a crash never leaves it
+    held; the file's existence means nothing. Held by ``wisper server`` (in
+    the parent process, never a ``--reload`` worker) and by
+    ``wisper storage trim --apply``. The descriptor stays referenced for the
+    lock's lifetime, because closing it releases the lock.
+    """
+
+    def __init__(self, data_dir: Optional[Path] = None) -> None:
+        self._path = _data_dir(data_dir) / SERVER_LOCK_FILENAME
+        self._fd: Optional[int] = None
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    def acquire(self) -> "ServerLock":
+        """Take the lock or raise :class:`ServerLockHeld`."""
+        if self._fd is not None:
+            return self
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        # O_RDWR|O_CREAT: 'w' would truncate and 'a+' moves the write offset.
+        fd = os.open(self._path, os.O_RDWR | os.O_CREAT)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                os.lseek(fd, 0, 0)  # the locked byte is never read or written
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                # flock, not lockf: POSIX record locks don't conflict within one process.
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            os.close(fd)
+            raise ServerLockHeld(f"{self._path} is held by another process") from exc
+        self._fd = fd
+        return self
+
+    def release(self) -> None:
+        fd, self._fd = self._fd, None
+        if fd is None:
+            return
+        try:
+            if os.name == "nt":
+                import msvcrt
+                os.lseek(fd, 0, 0)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
+    def __enter__(self) -> "ServerLock":
+        return self.acquire()
+
+    def __exit__(self, *exc) -> None:
+        self.release()
 
 
 # ---------------------------------------------------------------------------

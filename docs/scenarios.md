@@ -58,6 +58,15 @@ wisper fix session03.md --speaker "Alice" --name "Diana"
 
 ---
 
+## Re-run a session with a different model
+
+1. Change the model in **Config**.
+2. Open the session's transcript page and click **Re-transcribe**.
+
+The rerun reuses the session's speaker counts, language, and post-processing choices, and takes the model, device, VAD, and word alignment from the current config. The transcript is replaced in place and keeps its name and campaign place. Speaker names you set by hand are reset.
+
+---
+
 ## Improve transcription accuracy for character names and locations
 
 Pass a custom word list to boost recognition of proper nouns Whisper doesn't know:
@@ -113,15 +122,35 @@ The sheet lists rows marked `discriminating` first: those are the words where th
 
 ---
 
+## Free up disk space used by older transcripts
+
+Older uploads keep the whole original file (often a video), and older recordings keep several copies of their audio.
+
+1. Stop the web server.
+2. Run `wisper storage trim` and review the list. Nothing is changed.
+3. Run `wisper storage trim --apply`.
+
+Each transcript keeps one compact `<name>.flac`, and each recording keeps `combined.wav`. See [cli-reference.md](cli-reference.md#wisper-storage).
+
+---
+
 ## A transcript was renamed or deleted outside wisper
 
 wisper keeps a record of every transcript in the transcripts folder. If a file vanishes (deleted or renamed in Finder or Obsidian, a sync that hasn't finished, a drive that isn't connected), its campaign entry stays in place and shows **MISSING** instead of being dropped.
 
 - **It comes back** (sync finishes, drive reconnected): nothing to do; the flag clears the next time you open the Campaign or Transcripts page.
-- **It was renamed:** on the Campaign page, choose the new name in the **Relink** dropdown next to the missing entry. The session keeps its place in the episode order, its journal entry, and its speaker names. Renaming only the capitalization (e.g. `session 1` → `Session 1`) is picked up automatically on macOS and Windows.
+- **It was renamed:** see "I renamed a transcript outside wisper" below. The session keeps its place in the episode order, its journal entry, and its speaker names. Renaming only the capitalization (e.g. `session 1` → `Session 1`) is picked up automatically on macOS and Windows.
 - **It's really gone:** remove it from the campaign with ✕. If it had been folded into the journal, the journal is marked as needing a rebuild.
 
 `wisper transcripts list` shows missing entries too.
+
+---
+
+## I renamed a transcript outside wisper
+
+Rename it in Explorer, Finder, or Obsidian. On the next start (or when you open the Transcripts page), wisper recognises the file by its size and modified time, gives the transcript its new name, and renames its summary, speaker clips, backup, and audio to match. It keeps its campaign place, journal entry, and speaker names.
+
+If wisper can't be sure (you also edited the file, or two files look alike), the old name appears under **Needs attention** on the Transcripts page. Choose the new name in its **Relink** dropdown; relinking renames the other files for you. If a file with the new name already exists, that one keeps its old name and you're told so.
 
 ---
 
@@ -141,6 +170,7 @@ If wisper crashes or the machine loses power mid-session, the recording shows **
 
 ## Known Limitations
 
+- **Only the first audio track of an uploaded file is transcribed and kept.** To use a different track, export it from the original and upload that.
 - **One recording at a time.** Starting a Discord or local recording while either kind is active is rejected.
 - **One voice channel per Discord session.** No multi-guild or multi-channel recording.
 - **Discord recording needs Java.** Discord encrypts voice end-to-end (DAVE); the Java JDA + JDAVE sidecar decrypts it, since no stable Python library supports DAVE receive.

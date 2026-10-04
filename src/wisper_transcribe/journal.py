@@ -37,13 +37,14 @@ import hashlib
 import logging
 import os
 import re
+import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
 import yaml
 
-from . import db
+from . import db, file_registry
 from .campaign_manager import (
     _validate_campaign_slug,
     get_campaigns_dir,
@@ -197,6 +198,9 @@ def sync_journal(slug: str, data_dir: Optional[Path] = None) -> None:
                 if not _replace(pending, jpath):
                     jpath.write_bytes(pending.read_bytes())
                     pending.unlink(missing_ok=True)
+                file_registry.add_if_owned(
+                    jpath, kind="journal", owner=file_registry.Owner("campaign", row["id"]),
+                    conn=conn, data_dir=data_dir)
                 log.info("Finished an interrupted journal update for %s", safe)
             else:
                 pending.unlink(missing_ok=True)
@@ -206,6 +210,8 @@ def sync_journal(slug: str, data_dir: Optional[Path] = None) -> None:
             ).fetchone()
             if has_entries or row["journal_sha256"]:
                 log.info("journal.md for %s was deleted; starting a fresh journal", safe)
+            file_registry.forget_kind(file_registry.Owner("campaign", row["id"]), "journal",
+                                      conn=conn, data_dir=data_dir)
             _reset_rows(conn, row["id"])
             return
         current = _sha256(jpath)
@@ -233,6 +239,8 @@ def reset_journal(slug: str, data_dir: Optional[Path] = None) -> None:
         row = conn.execute("SELECT id FROM campaigns WHERE slug = ?", (safe,)).fetchone()
         if row is None:
             raise KeyError(f"Campaign {safe!r} not found")
+        file_registry.forget_kind(file_registry.Owner("campaign", row["id"]), "journal",
+                                  conn=conn, data_dir=data_dir)
         _reset_rows(conn, row["id"])
     for path in (jpath, _pending_path(jpath)):
         path.unlink(missing_ok=True)
@@ -433,6 +441,16 @@ def update_journal(slug: str, client: LLMClient,
         log.warning("%s is locked by another program; writing it in place", jpath.name)
         jpath.write_bytes(pending_file.read_bytes())
         pending_file.unlink(missing_ok=True)
+
+    # Registered after the file move: journal.md doesn't exist inside the commit above on a first fold.
+    try:
+        with db.transaction(data_dir) as conn:
+            file_registry.add_if_owned(
+                jpath, kind="journal",
+                owner=file_registry.Owner.for_campaign_slug(safe, conn=conn),
+                conn=conn, data_dir=data_dir)
+    except sqlite3.Error:
+        log.warning("Could not register %s", jpath, exc_info=True)
 
     journaled = journaled_stems(safe, data_dir)
     return JournalResult(

@@ -38,6 +38,8 @@ from wisper_transcribe.models import Recording
 from wisper_transcribe.recording_manager import (
     create_recording,
     record_completed_wav_segment,
+    register_capture_files,
+    trim_recording_audio,
     update_recording_status,
 )
 from wisper_transcribe.web.audio_writer import (
@@ -555,6 +557,12 @@ class LocalCaptureManager:
             if merged is not None:
                 recording.combined_path = merged
                 log.info("Local recording %s combined track written to %s", recording.id, merged)
+
+        register_capture_files(recording.id, self._data_dir)
+        try:
+            trim_recording_audio(recording.id, self._data_dir)
+        except Exception:
+            log.warning("Could not trim local recording %s", recording.id, exc_info=True)
 
         became_completed = recording.status == "recording"
         if became_completed:

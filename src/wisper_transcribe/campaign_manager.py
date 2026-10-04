@@ -194,14 +194,48 @@ def create_campaign(display_name: str, data_dir: Optional[Path] = None) -> Campa
     return Campaign(slug=slug, display_name=display_name, created=created[:10], members={})
 
 
-def delete_campaign(slug: str, data_dir: Optional[Path] = None) -> None:
+def delete_campaign(slug: str, *, delete_transcripts: bool = False,
+                    data_dir: Optional[Path] = None) -> None:
     """Delete a campaign and its roster and order. Raises KeyError if not found.
 
-    Profiles and transcripts are untouched.
+    Profiles are untouched. By default the campaign's transcripts stay,
+    unassigned, and so does its journal file: the journal's ``files`` row goes
+    with the campaign, so ``file_registry.sync`` lists the file as unclaimed.
+
+    With ``delete_transcripts``, each transcript goes through
+    ``transcript_store.delete_transcript`` (row, files, speakers, search
+    entries), then the campaign and its journal file. A transcript whose
+    ``.md`` can't be deleted (held open on Windows) is kept, unassigned.
     """
+    from . import file_registry
+
+    if delete_transcripts:
+        from .transcript_store import delete_transcript
+
+        with db.connection(data_dir) as conn:
+            _campaign_id(conn, slug)  # KeyError before anything is deleted
+        for stem in get_transcripts_for_campaign(slug, data_dir):
+            delete_transcript(stem, data_dir=data_dir)
+
+    journal_files: list[Path] = []
     with db.transaction(data_dir) as conn:
-        if conn.execute("DELETE FROM campaigns WHERE slug = ?", (slug,)).rowcount == 0:
-            raise KeyError(f"Campaign {slug!r} not found")
+        cid = _campaign_id(conn, slug)
+        if delete_transcripts:
+            owner = file_registry.Owner("campaign", cid)
+            journal_files = file_registry.paths_for_delete(owner, conn, data_dir=data_dir)
+            if not journal_files:  # a journal file that was never registered
+                from .journal import journal_path
+                path = journal_path(slug, data_dir)
+                if path is not None and path.is_file():
+                    journal_files = [path]
+        conn.execute("DELETE FROM campaigns WHERE id = ?", (cid,))
+    if journal_files:
+        file_registry.unlink_paths(journal_files)
+        for path in journal_files:
+            try:
+                path.parent.rmdir()  # the campaign's folder, if nothing else is in it
+            except OSError:
+                pass
 
 
 def add_member(

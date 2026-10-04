@@ -18,7 +18,7 @@ from .config import (
     EMBEDDING_SUBFOLDER,
     get_data_dir,
 )
-from . import db
+from . import db, file_registry
 from .models import DiarizationSegment, SpeakerProfile
 
 # Embedding-model cache, keyed by device so a different device reloads it.
@@ -134,9 +134,12 @@ def remove_profile(key: str, data_dir: Optional[Path] = None) -> None:
     not enrolled.
     """
     with db.transaction(data_dir) as conn:
+        owner = file_registry.Owner.for_profile_key(key, conn=conn)
+        registered = file_registry.paths_for_delete(owner, conn, data_dir=data_dir) if owner else []
         if conn.execute("DELETE FROM profiles WHERE key = ?", (key,)).rowcount == 0:
             raise KeyError(f"Speaker profile {key!r} not found")
-    remove_profile_files(key, data_dir)
+    file_registry.unlink_paths(registered)
+    remove_profile_files(key, data_dir)  # also an unregistered clip or stray .npy
 
 
 def rename_profile(old_key: str, new_name: str, data_dir: Optional[Path] = None) -> SpeakerProfile:
@@ -175,6 +178,7 @@ def rename_profile(old_key: str, new_name: str, data_dir: Optional[Path] = None)
             (safe_new_key, new_name, old_key),
         ).fetchone()
         profile = _row_to_profile(row)
+        profile_id = row["id"]
 
     if safe_new_key != old_key:
         old_clip = reference_clip_path(old_key, data_dir)
@@ -182,14 +186,25 @@ def rename_profile(old_key: str, new_name: str, data_dir: Optional[Path] = None)
             try:
                 old_clip.rename(reference_clip_path(safe_new_key, data_dir))
             except OSError:
-                pass  # the clip is a convenience; the rename already committed
+                # The clip is a convenience; the rename already committed. The
+                # trigger moved its row, so point it back at the file on disk.
+                row = file_registry.file_for(
+                    file_registry.Owner("profile", profile_id), "reference_clip", data_dir=data_dir)
+                if row is not None:
+                    file_registry.repoint(row, old_clip, data_dir=data_dir)
     return profile
 
 
 def reset_profiles(data_dir: Optional[Path] = None) -> int:
     """Delete all speaker profiles and reference clips. Returns the number removed."""
     with db.transaction(data_dir) as conn:
+        registered = [
+            path for (pid,) in conn.execute("SELECT id FROM profiles").fetchall()
+            for path in file_registry.paths_for_delete(
+                file_registry.Owner("profile", pid), conn, data_dir=data_dir)
+        ]
         count = conn.execute("DELETE FROM profiles").rowcount
+    file_registry.unlink_paths(registered)
     clips = get_reference_clips_dir(data_dir)
     if clips.exists():
         for pattern in ("*.mp3", "*.npy"):
@@ -339,21 +354,29 @@ def enroll_speaker(
     name: str,
     display_name: str,
     role: str,
-    audio_path: Path,
-    segments: list[DiarizationSegment],
-    speaker_label: str,
+    audio_path: Optional[Path] = None,
+    segments: Optional[list[DiarizationSegment]] = None,
+    speaker_label: Optional[str] = None,
     device: str = "cpu",
     data_dir: Optional[Path] = None,
     notes: str = "",
     embedding: Optional[np.ndarray] = None,
+    clip_source: Optional[Path] = None,
+    source_name: Optional[str] = None,
 ) -> SpeakerProfile:
-    """Extract an embedding and save a new speaker profile.
+    """Save a new speaker profile, extracting its embedding from audio.
 
-    Pass ``embedding`` to skip extraction, e.g. when the caller averaged
-    several raw labels assigned the same name.
+    Pass ``embedding`` to skip extraction (a stored vector, or one averaged
+    over several raw labels); then ``audio_path`` is only needed for the clip.
+    ``clip_source`` is an existing clip copied as the reference clip, so no
+    audio is read. ``source_name`` labels the enrollment source; it defaults
+    to the audio file's name.
     """
     import datetime
+    import shutil
 
+    if embedding is None and audio_path is None:
+        raise ValueError("enroll_speaker needs an embedding or an audio_path")
     if embedding is None:
         embedding = extract_embedding(audio_path, segments, speaker_label, device)
 
@@ -363,7 +386,7 @@ def enroll_speaker(
         role=role,
         embedding=_unit(np.asarray(embedding, dtype=np.float32).reshape(-1)),
         enrolled_date=datetime.date.today().isoformat(),
-        enrollment_source=Path(audio_path).name,
+        enrollment_source=source_name or (Path(audio_path).name if audio_path else ""),
         notes=notes,
     )
     # Extraction above stays outside the transaction.
@@ -373,8 +396,16 @@ def enroll_speaker(
     # Save a short reference audio clip for web playback (file after row).
     # Failures are silently swallowed — the clip is a convenience, not critical.
     clip = reference_clip_path(name, data_dir)
-    clip.parent.mkdir(parents=True, exist_ok=True)
-    _save_reference_clip(audio_path, segments, speaker_label, clip)
+    if clip_source is not None and Path(clip_source).is_file():
+        clip.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(clip_source, clip)
+    elif audio_path is not None and segments is not None and speaker_label is not None:
+        clip.parent.mkdir(parents=True, exist_ok=True)
+        _save_reference_clip(audio_path, segments, speaker_label, clip)
+    if clip.is_file():
+        file_registry.add_if_owned(
+            clip, kind="reference_clip",
+            owner=file_registry.Owner.for_profile_key(name, data_dir=data_dir), data_dir=data_dir)
 
     return profile
 

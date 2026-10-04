@@ -167,7 +167,7 @@ def relabel_campaign(
     """Re-match auto-named speakers across every transcript in a campaign.
 
     ``backfill`` extracts embeddings for transcripts whose sidecar has none
-    (older runs) from the durable source audio, and stores them. ``dry_run``
+    (older runs) from the transcript's kept audio, and stores them. ``dry_run``
     computes the report without writing anything.
 
     Raises ``KeyError`` for an unknown campaign.

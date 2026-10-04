@@ -71,7 +71,7 @@ wisper-transcribe/
 ├── campaigns/
 │   └── <slug>/
 │       └── journal.md   rolling campaign journal (`wisper campaigns journal`)
-├── recordings/          Discord and local recording audio (recording details are in wisper.db)
+├── recordings/          each recording's combined.wav, plus per-user tracks of Discord speakers not yet enrolled (recording details are in wisper.db)
 └── output/              transcripts (unless `output_dir` / `WISPER_OUTPUT_DIR` points elsewhere)
 ```
 
@@ -79,13 +79,15 @@ Override the storage path with `WISPER_DATA_DIR` (set automatically in Docker). 
 
 ### Transcripts folder
 
-Transcripts go to the output root: `WISPER_OUTPUT_DIR` if set, else the `output_dir` setting, else `output/` in the data directory. It never depends on the directory you launch wisper from. An install whose transcripts are in a `./output` folder next to where wisper was started gets that path saved into `output_dir` the first time it runs with the database.
+Transcripts go to the output root: `WISPER_OUTPUT_DIR` if set, else the `output_dir` setting, else `output/` in the data directory. It never depends on the directory you launch wisper from. Each uploaded transcript keeps its audio as `<name>.flac` beside it. An install whose transcripts are in a `./output` folder next to where wisper was started gets that path saved into `output_dir` the first time it runs with the database.
+
+Large stored audio (whole uploaded videos, extra recording copies) is shrunk by `wisper storage trim`.
 
 To move your transcripts: stop the server, move the files, then `wisper config set output_dir <new path>`.
 
 ### Database and backups
 
-`wisper.db` in the data directory holds speaker profiles (including voice fingerprints), campaigns and their session order, the list of known transcripts with each one's speaker names, which sessions each journal has folded in, recordings, job history, and the search index. Transcripts, summaries, journals, and audio stay ordinary files you can open and edit. The database is created on first use and upgraded automatically; before an upgrade changes an existing database, a copy is saved in `backups/`.
+`wisper.db` in the data directory holds speaker profiles (including voice fingerprints), campaigns and their session order, the list of known transcripts with each one's speaker names, which sessions each journal has folded in, recordings, job history, and the search index. Transcripts, summaries, journals, and audio stay ordinary files you can open and edit. The database also records every file wisper owns: its owner, kind, location, size, and modified time. It is brought in line with the disk at startup and when you open the Transcripts or Campaigns page; it never deletes a file it finds unexpected. The database is created on first use and upgraded automatically; before an upgrade changes an existing database, a copy is saved in `backups/`.
 
 Upgrading from a version that stored these as JSON files (`speakers.json`, `campaigns.json`, `.npy` voice files, `recordings.json` and each recording's `metadata.json`, and the speaker data in each transcript's `_diar.json`) imports them once on first start. Copies of the originals go to `backups/pre-sqlite-v<N>-<time>/`, and anything that had to be repaired or dropped (for example a campaign member whose profile no longer exists) is listed in `import-report.txt` there. The JSON files are then deleted; each `_diar.json` keeps only its speaker timings.
 

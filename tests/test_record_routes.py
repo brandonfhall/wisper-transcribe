@@ -1360,6 +1360,7 @@ def test_enroll_unknown_speaker_enqueues_job(client):
     rec.unbound_speakers = ["999999999999999999"]
     rec.discord_speakers["999999999999999999"] = ""
     save_recording(rec, tmp_path)
+    (tmp_path / "recordings" / rec.id / "per-user" / "999999999999999999").mkdir(parents=True)
 
     # Neutralise the runner so the live worker (this fixture runs the app
     # lifespan) can't race the assertions below.
@@ -1384,6 +1385,31 @@ def test_enroll_unknown_speaker_enqueues_job(client):
         assert job.enroll_params["discord_uid"] == "999999999999999999"
         assert job.enroll_params["profile_key"] == "bob"
         assert job.enroll_params["per_user_dir"].endswith("999999999999999999")
+
+
+def test_enroll_with_a_missing_per_user_dir_redirects_with_no_audio(client):
+    """A trimmed or missing per-user track can't be enrolled from."""
+    from unittest.mock import patch
+
+    from wisper_transcribe.recording_manager import create_recording, save_recording
+    from wisper_transcribe.web.jobs import JobQueue
+
+    c, tmp_path = client
+    rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    rec.unbound_speakers = ["999999999999999999"]
+    rec.discord_speakers["999999999999999999"] = ""
+    save_recording(rec, tmp_path)
+
+    with patch.object(JobQueue, "submit_recording_enroll") as submit:
+        resp = c.post(
+            f"/recordings/{rec.id}/enroll",
+            data={"discord_user_id": "999999999999999999", "profile_name": "Bob"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/recordings/{rec.id}?error=no_audio"
+    submit.assert_not_called()
 
 
 def test_enroll_unknown_speaker_invalid_id_returns_400(client):
@@ -1460,7 +1486,7 @@ def test_transcribe_recording_handoff(client):
         id=str(_uuid.uuid4()),
         status="pending",
         created_at=rec.started_at,
-        input_path=str(tmp_path / "output" / f"{rec.id}.wav"),
+        input_path=str(tmp_path / "recordings" / rec.id / "combined.wav"),
         kwargs={},
         name=rec.id,
     )
@@ -1476,11 +1502,105 @@ def test_transcribe_recording_handoff(client):
     assert loaded.job_id is not None
     assert loaded.job_id == fake_job.id
 
-    # Verify the combined.wav was copied to output dir
-    # get_data_dir is patched to tmp_path, so _default_output_dir() → tmp_path / "output"
-    dest = tmp_path / "output" / f"{rec.id}.wav"
-    assert dest.exists()
+    # The job reads combined.wav in place: nothing is copied into the output dir.
+    assert not list((tmp_path / "output").glob("*.wav"))
     mock_submit.assert_called_once()
+    assert mock_submit.call_args.args[0] == str(combined)
+    assert mock_submit.call_args.kwargs["original_stem"] == rec.id
+    assert mock_submit.call_args.kwargs["source_name"] == rec.id
+    assert combined.exists()
+
+
+def _hand_off(c, tmp_path, rec):
+    """POST the hand-off with submit mocked; returns (args, kwargs) it received."""
+    from wisper_transcribe.web.jobs import Job as JobCls
+    import uuid as _uuid
+
+    fake_job = JobCls(
+        id=str(_uuid.uuid4()), status="pending", created_at=rec.started_at,
+        input_path=str(tmp_path / "recordings" / rec.id / "combined.wav"), kwargs={}, name=rec.id,
+    )
+    with patch.object(c.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
+        c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
+    mock_submit.assert_called_once()
+    return mock_submit.call_args
+
+
+def _run_handed_off_job(call, out_dir, *, fail=False):
+    """Run the job a hand-off submitted on a fresh queue, with process_file
+    mocked to write what the pipeline writes."""
+    from wisper_transcribe import transcript_store
+    from wisper_transcribe.web.jobs import JobQueue
+
+    def _process(path, _result_store=None, job_id=None, **kwargs):
+        if fail:
+            raise RuntimeError("boom")
+        md = out_dir / (kwargs["output_stem"] + ".md")
+        md.write_text("# t", encoding="utf-8")
+        transcript_store.register(md.stem, origin="job")
+        return md
+
+    queue = JobQueue()
+    job = queue.submit(*call.args, **call.kwargs)
+    with patch("wisper_transcribe.web.jobs.process_file", side_effect=_process):
+        try:
+            queue._run_job(job)
+        except RuntimeError:
+            pass
+    return job
+
+
+def test_combined_wav_survives_a_finished_and_a_failed_job(client):
+    """The hand-off job reads combined.wav in place; nothing it does deletes it."""
+    from wisper_transcribe.path_utils import get_output_dir
+
+    from ._seed import seed_recording
+
+    c, tmp_path = client
+    rec = seed_recording(tmp_path)
+    call = _hand_off(c, tmp_path, rec)
+    combined = rec.combined_path
+
+    ok = _run_handed_off_job(call, get_output_dir())
+    assert ok.status == "completed" and combined.exists()
+
+    bad = _run_handed_off_job(call, get_output_dir(), fail=True)
+    assert bad.status == "failed" and combined.exists()
+
+
+def test_retranscribe_after_rename_replaces_the_renamed_transcript(client):
+    """Re-transcribing writes to the transcript's current name, so there's
+    still exactly one transcript for the recording and nothing under <id>."""
+    from wisper_transcribe import transcript_store
+    from wisper_transcribe.campaign_manager import (
+        create_campaign, get_transcripts_for_campaign, move_transcript_to_campaign,
+    )
+    from wisper_transcribe.path_utils import get_output_dir
+    from wisper_transcribe.recording_manager import link_transcript, load_recording
+
+    from ._seed import seed_recording
+
+    c, tmp_path = client
+    create_campaign("My Game", data_dir=tmp_path)
+    rec = seed_recording(tmp_path)
+    out = get_output_dir()
+    out.mkdir(parents=True, exist_ok=True)
+    renamed = out / "Session 14.md"
+    renamed.write_text("old", encoding="utf-8")
+    transcript_store.register("Session 14", origin="job")
+    move_transcript_to_campaign("Session 14", "my-game", data_dir=tmp_path)
+    link_transcript(rec.id, renamed, tmp_path)
+
+    call = _hand_off(c, tmp_path, rec)
+    assert call.kwargs["original_stem"] == "Session 14"
+    assert call.kwargs["overwrite"] is True
+
+    job = _run_handed_off_job(call, out)
+
+    assert job.status == "completed"
+    assert sorted(p.name for p in out.glob("*.md")) == ["Session 14.md"]
+    assert load_recording(rec.id, tmp_path).transcript_path == renamed
+    assert get_transcripts_for_campaign("my-game", data_dir=tmp_path) == ["Session 14"]
 
 
 def test_transcribe_recording_passes_name_as_title(client):
@@ -1502,7 +1622,7 @@ def test_transcribe_recording_passes_name_as_title(client):
     import uuid as _uuid
     fake_job = JobCls(
         id=str(_uuid.uuid4()), status="pending", created_at=rec.started_at,
-        input_path=str(tmp_path / "output" / f"{rec.id}.wav"), kwargs={}, name=rec.id,
+        input_path=str(tmp_path / "recordings" / rec.id / "combined.wav"), kwargs={}, name=rec.id,
     )
     with patch.object(c.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
         c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
@@ -1532,7 +1652,7 @@ def test_transcribe_recording_no_name_passes_none_title(client):
     import uuid as _uuid
     fake_job = JobCls(
         id=str(_uuid.uuid4()), status="pending", created_at=rec.started_at,
-        input_path=str(tmp_path / "output" / f"{rec.id}.wav"), kwargs={}, name=rec.id,
+        input_path=str(tmp_path / "recordings" / rec.id / "combined.wav"), kwargs={}, name=rec.id,
     )
     with patch.object(c.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
         c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
@@ -1553,7 +1673,7 @@ def test_failed_transcription_leaves_recording_transcribable(client):
     rec = seed_recording(tmp_path)
     fake_job = JobCls(
         id=str(_uuid.uuid4()), status="pending", created_at=rec.started_at,
-        input_path=str(tmp_path / "output" / f"{rec.id}.wav"), kwargs={}, name=rec.id,
+        input_path=str(tmp_path / "recordings" / rec.id / "combined.wav"), kwargs={}, name=rec.id,
     )
     queue = c.app.state.job_queue
     with patch.object(queue, "submit", side_effect=_queue_fake_job(queue, fake_job)):
@@ -1585,7 +1705,7 @@ def test_failed_retranscribe_keeps_the_existing_transcript(client):
     link_transcript(rec.id, md, tmp_path)
     fake_job = JobCls(
         id=str(_uuid.uuid4()), status="pending", created_at=rec.started_at,
-        input_path=str(tmp_path / "output" / f"{rec.id}.wav"), kwargs={}, name=rec.id,
+        input_path=str(tmp_path / "recordings" / rec.id / "combined.wav"), kwargs={}, name=rec.id,
     )
     queue = c.app.state.job_queue
     with patch.object(queue, "submit", side_effect=_queue_fake_job(queue, fake_job)):
@@ -1658,7 +1778,7 @@ def test_transcribe_recording_no_audio_regression_after_real_bot_session(client)
         id=str(_uuid.uuid4()),
         status="pending",
         created_at=loaded.started_at,
-        input_path=str(tmp_path / "output" / f"{rec.id}.wav"),
+        input_path=str(tmp_path / "recordings" / rec.id / "combined.wav"),
         kwargs={},
         name=rec.id,
     )
@@ -1670,9 +1790,9 @@ def test_transcribe_recording_no_audio_regression_after_real_bot_session(client)
     assert f"/recordings/{rec.id}" in resp.headers["location"]
     mock_submit.assert_called_once()
 
-    dest = tmp_path / "output" / f"{rec.id}.wav"
-    assert dest.exists()
-    with wave.open(str(dest), "rb") as wf:
+    assert mock_submit.call_args.args[0] == str(loaded.combined_path)
+    assert not list((tmp_path / "output").glob("*.wav"))
+    with wave.open(str(loaded.combined_path), "rb") as wf:
         assert wf.getframerate() == 16000
         assert wf.getnchannels() == 1
         assert wf.getnframes() > 0
@@ -1800,7 +1920,7 @@ def test_api_recording_transcribe_handoff(client):
         id=str(_uuid.uuid4()),
         status="pending",
         created_at=rec.started_at,
-        input_path=str(tmp_path / "output" / f"{rec.id}.wav"),
+        input_path=str(tmp_path / "recordings" / rec.id / "combined.wav"),
         kwargs={},
         name=rec.id,
     )
@@ -1907,3 +2027,69 @@ def test_recover_routes_reject_bad_ids(client, payload):
     assert resp.status_code in (400, 404)
     resp = c.post(f"/api/recordings/{quote(payload, safe='')}/recover")
     assert resp.status_code in (400, 404)
+
+
+def _trimmed_recording(tmp_path, *, transcribed=False):
+    """A recording whose segments were deleted by a trim; only combined.wav remains."""
+    from datetime import datetime, timezone
+
+    from wisper_transcribe.recording_manager import (
+        record_completed_wav_segment, trim_recording_audio,
+    )
+
+    from ._seed import seed_recording
+
+    rec = seed_recording(tmp_path, with_audio=False)
+    rec_dir = tmp_path / "recordings" / rec.id
+    for i in range(2):
+        seg = rec_dir / "combined" / f"{i:04d}.wav"
+        seg.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(seg), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(b"\x00\x00" * 320)
+        record_completed_wav_segment(rec.id, seg, datetime.now(timezone.utc), finalized=True,
+                                     data_dir=tmp_path)
+    with wave.open(str(rec_dir / "combined.wav"), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(b"\x00\x00" * 640)
+    assert trim_recording_audio(rec.id, tmp_path) > 0
+    assert not (rec_dir / "combined").exists()
+    return rec
+
+
+def test_trimmed_recording_page_renders(client):
+    c, tmp_path = client
+    rec = _trimmed_recording(tmp_path)
+    resp = c.get(f"/recordings/{rec.id}")
+    assert resp.status_code == 200
+
+
+def test_trimmed_recording_still_submits_combined_wav(client):
+    c, tmp_path = client
+    rec = _trimmed_recording(tmp_path)
+    call = _hand_off(c, tmp_path, rec)
+    assert call.args[0] == str(tmp_path / "recordings" / rec.id / "combined.wav")
+
+
+def test_trimmed_recording_retranscribe_submits_combined_wav(client):
+    from wisper_transcribe import transcript_store
+    from wisper_transcribe.path_utils import get_output_dir
+    from wisper_transcribe.recording_manager import link_transcript
+
+    c, tmp_path = client
+    rec = _trimmed_recording(tmp_path)
+    out = get_output_dir()
+    out.mkdir(parents=True, exist_ok=True)
+    md = out / "Session 3.md"
+    md.write_text("old", encoding="utf-8")
+    transcript_store.register("Session 3", origin="job")
+    link_transcript(rec.id, md, tmp_path)
+
+    call = _hand_off(c, tmp_path, rec)
+
+    assert call.args[0] == str(tmp_path / "recordings" / rec.id / "combined.wav")
+    assert call.kwargs["overwrite"] is True

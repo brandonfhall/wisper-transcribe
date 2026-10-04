@@ -227,7 +227,8 @@ wisper campaigns show d-d-mondays                       # roster table with role
 wisper campaigns add-member d-d-mondays alice --role DM # add a player (must be enrolled)
 wisper campaigns add-member d-d-mondays bob --role Player --character "Theron"
 wisper campaigns remove-member d-d-mondays charlie      # remove from roster only (keeps voice profile)
-wisper campaigns delete d-d-mondays                     # delete campaign (with confirmation)
+wisper campaigns delete d-d-mondays                     # delete campaign, keep its transcripts and journal file (with confirmation)
+wisper campaigns delete d-d-mondays --delete-transcripts  # also delete its transcripts, their files, and its journal
 wisper campaigns reorder d-d-mondays s02 --up           # move a session one position earlier
 wisper campaigns reorder d-d-mondays s02 --down         # move a session one position later
 wisper campaigns reorder d-d-mondays --set "s01,s02,s03" # replace the whole order in one shot
@@ -248,7 +249,7 @@ wisper campaigns relabel d-d-mondays --no-backfill  # only use voice data alread
 - Automatically assigned names are matched against the campaign roster again, so a player enrolled after a session was transcribed gets named in it.
 - An unknown voice heard in two or more sessions gets one shared name, `Recurring Speaker N`. Name them once in any session's wizard and the others follow.
 - Names you set by hand are never changed.
-- Sessions with no stored voice data have it re-extracted from the saved source audio when that still exists (web uploads keep it next to the transcript). Sessions without either are skipped and listed.
+- Sessions with no stored voice data have it re-extracted from the transcript's kept audio (the `<name>.flac` an upload leaves beside it, or a recording's `combined.wav`). Sessions without either are skipped and listed.
 
 ```
 Options:
@@ -316,6 +317,7 @@ wisper transcripts move session12 --no-campaign            # remove campaign ass
 
 - `session12` is the transcript stem (filename without `.md`).
 - A transcript can belong to at most one campaign at a time.
+- When a transcript or file needs a decision (a missing transcript, a file gone from disk, a file with no transcript), the listing ends with "N items need attention; see the Transcripts page".
 
 ---
 
@@ -489,6 +491,37 @@ wisper db reindex                 # drop and rebuild the search index from the t
 `status` is read-only: it never upgrades the database, so it also works when startup refuses (for example, a database from a newer wisper). `backup` uses SQLite's backup API and is safe while the server is running. `reindex` loses nothing: the search index is built from the `.md` files, so rebuilding it fixes a stale or damaged index.
 
 Every command that uses the database stops with a clear message, not a traceback, when it can't: a database newer than this wisper, an unmerged development build pointed at the default data directory, an SQLite older than 3.43 or without FTS5, or a native process while a Docker Desktop container is using the same data directory (see [docker.md](docker.md#one-way-of-running-at-a-time)).
+
+---
+
+### `wisper storage`
+
+Reclaim disk space used by older transcripts and recordings.
+
+```bash
+wisper storage trim                  # dry run: list what would change
+wisper storage trim --apply          # do it
+wisper storage trim --apply --device cpu
+```
+
+`trim` is a dry run unless you pass `--apply`. It prints one line per action (what it does, the file's current size, the file), the space the deletions free, the size of the files to convert, and the Needs-attention list, and changes nothing. The actions, in order:
+
+- **Match renames.** Transcripts renamed outside wisper are matched first, as at server start.
+- **Convert transcript audio.** Each transcript's audio becomes a 16 kHz mono `<name>.flac`, the form new uploads keep. Speaker voices the transcript lacks are extracted from the original audio first. A `.flac` already at 16 kHz mono is left alone. If a conversion fails, the original stays and the failure is listed.
+  - A video or a large WAV shrinks to about 90 MB per hour of audio.
+  - An already-compressed audio file (MP3, M4A, Opus) can grow: a 64 kbps MP3 becomes about 3 times larger. Every transcript then keeps the same lossless format.
+  - The summary reports the net change, which can be more space used.
+- **Delete recording copies.** A transcript made from a recording uses the recording's `combined.wav`, so its own copy is deleted. A `<recording-id>.wav` in the transcripts folder that no transcript uses is deleted too.
+- **Trim recordings.** Segment and per-user audio is removed once `combined.wav` is verified complete.
+
+It deletes only files wisper tracks, plus those unused `<recording-id>.wav` copies. Other files in the transcripts folder are never touched. Needs-attention items (missing transcripts, missing files, files with no transcript) are listed, never deleted.
+
+| Flag | Meaning |
+|------|---------|
+| `--apply` | Make the changes. Refuses while the web server is running: stop it first. |
+| `--device auto\|cpu\|cuda\|mps` | Device for extracting missing speaker voices (default `auto`). |
+
+A second run finds nothing to do. For Docker, see [docker.md](docker.md#freeing-disk-space).
 
 ---
 

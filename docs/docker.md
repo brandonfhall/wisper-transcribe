@@ -56,11 +56,27 @@ On first run the server downloads the Whisper and pyannote models (~2 GB) into `
 
 ```bash
 # Place audio files in ./input/ first
-docker compose run wisper-cpu wisper transcribe /app/input/session01.mp3 --enroll-speakers
+docker compose run wisper-cpu transcribe /app/input/session01.mp3 --enroll-speakers
 
 # GPU variant
-docker compose run wisper wisper transcribe /app/input/session01.mp3 --enroll-speakers
+docker compose run wisper transcribe /app/input/session01.mp3 --enroll-speakers
 ```
+
+The image's entrypoint is `wisper`, so the command after the service name never repeats it.
+
+### Freeing disk space
+
+`wisper storage trim --apply` refuses while the web server runs. Stop the web service and run a one-off container:
+
+```bash
+# GPU
+docker compose stop wisper-web && docker compose run --rm wisper storage trim --apply
+
+# CPU
+docker compose stop wisper-cpu-web && docker compose run --rm wisper-cpu storage trim --apply
+```
+
+Run it without `--apply` first to see what it would do.
 
 ### Volume Layout
 
@@ -74,7 +90,7 @@ docker compose run wisper wisper transcribe /app/input/session01.mp3 --enroll-sp
 
 All directories are created automatically on first run and persist across container restarts. The compose file sets `WISPER_DATA_DIR=/data` and `WISPER_OUTPUT_DIR=/app/output`.
 
-Back up the database with `docker compose run wisper-cpu wisper db backup` (written to `./data/backups/`).
+Back up the database with `docker compose run wisper-cpu db backup` (written to `./data/backups/`).
 
 ### One way of running at a time
 

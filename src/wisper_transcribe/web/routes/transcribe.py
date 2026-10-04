@@ -4,7 +4,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Optional
 from urllib.parse import quote
@@ -73,8 +75,9 @@ async def start_transcribe(
 ) -> RedirectResponse:
     """Accept an uploaded audio file, save it to a temp location, enqueue job.
 
-    A transcript with the same name is never replaced silently: without
-    ``overwrite`` the upload is refused (``?error=name_exists``). The page
+    A transcript, or an audio file, with the same name is never replaced
+    silently: without ``overwrite`` the upload is refused
+    (``?error=name_exists``). The page
     checks the name when a file is picked (``/transcribe/name-check``) and
     offers Overwrite or Cancel before anything is uploaded.
     """
@@ -85,7 +88,7 @@ async def start_transcribe(
         return error_redirect("/transcribe", "invalid_option")
 
     replace_existing = overwrite == "on"
-    if not replace_existing and _existing_transcript(file.filename) is not None:
+    if not replace_existing and _name_clashes(file.filename)["clashes"]:
         return error_redirect("/transcribe", "name_exists")
 
     # Save uploaded file to a persistent temp location (job must outlive request)
@@ -127,7 +130,7 @@ async def start_transcribe(
 
     # Use the original filename stem as a hint so the output .md has a
     # meaningful name instead of a temp-file UUID.
-    original_stem = Path(file.filename or "upload").stem
+    original_stem = _upload_stem(file.filename)
 
     # Validate campaign slug if provided — use server-side object for redirect URL.
     safe_campaign: Optional[str] = None
@@ -140,6 +143,7 @@ async def start_transcribe(
     job = queue.submit(
         input_path=tmp.name,
         original_stem=original_stem,
+        source_name=os.path.basename(file.filename or "") or (original_stem + suffix),
         model_size=model_size,
         # Pass "auto" through: process_file treats None as "use config".
         language=language,
@@ -164,32 +168,85 @@ async def start_transcribe(
     return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
 
 
-def _existing_transcript(filename: Optional[str]) -> Optional[Path]:
-    """The transcript an upload named ``filename`` would replace, if any."""
-    from wisper_transcribe.transcript_store import safe_path
+def _upload_stem(filename: Optional[str]) -> str:
+    """The transcript name an upload called ``filename`` gets.
 
-    stem = Path(os.path.basename(filename or "upload")).stem
-    md = safe_path(stem, ".md", get_output_dir())
-    return md if md is not None and md.is_file() else None
+    Splits on both separators: on POSIX a browser-supplied name can carry
+    ``\\``, which would otherwise end up inside the stem.
+    """
+    last = re.split(r"[\\/]", filename or "upload")[-1]
+    return Path(last).stem or "upload"
+
+
+def _name_clashes(filename: Optional[str]) -> dict:
+    """What an upload named ``filename`` would collide with.
+
+    ``clashes`` holds ``"md"`` (a transcript of that name exists), ``"flac"``
+    (``<stem>.flac`` exists and isn't that transcript's own audio) and
+    ``"missing"`` (a transcript of that name is registered but its file is
+    gone: a new job would reuse its row, audio and speakers). ``md`` and
+    ``flac`` are the clashing paths, for their modified times.
+    """
+    from wisper_transcribe import db, file_registry
+    from wisper_transcribe.transcript_store import _same_file, nfc, safe_path
+
+    stem = _upload_stem(filename)
+    out = get_output_dir()
+    md = safe_path(stem, ".md", out)
+    flac = safe_path(stem, ".flac", out)
+    result: dict = {"clashes": [], "stem": stem, "md": None, "flac": None}
+    if md is not None and md.is_file():
+        result["clashes"].append("md")
+        result["md"] = md
+    if flac is not None and flac.is_file():
+        owner = file_registry.Owner.for_stem(stem, output_dir=out)
+        own = file_registry.file_for(owner, "audio", output_dir=out) if owner else None
+        if own is None or not _same_file(own.path, flac):
+            result["clashes"].append("flac")
+            result["flac"] = flac
+    if md is not None and result["md"] is None:
+        with db.connection() as conn:
+            row = conn.execute("SELECT missing_since FROM transcripts WHERE stem = ?",
+                               (nfc(stem),)).fetchone()
+        if row is not None and row["missing_since"] is not None:
+            result["clashes"].append("missing")
+    return result
 
 
 @router.get("/name-check")
 async def name_check(filename: str = "") -> Response:
-    """Whether uploading ``filename`` would replace an existing transcript.
+    """Whether uploading ``filename`` would replace something.
 
-    Returns ``{"exists": bool, "campaign": <display name> | null}``; the
-    filename is never echoed back.
+    Returns ``{"exists", "campaign", "modified", "missing", "clashes"}``:
+    ``clashes`` lists ``"md"``, ``"flac"`` and ``"missing"`` (see
+    :func:`_name_clashes`), ``exists`` is true when it isn't empty, and
+    ``modified`` is the clashing file's last-modified time (the ``.md``'s when
+    both clash). The filename is never echoed back.
     """
     from wisper_transcribe.campaign_manager import get_campaign_for_transcript
 
-    md = _existing_transcript(filename)
+    found = _name_clashes(filename)
+    clashes = found["clashes"]
     campaign_name = None
-    if md is not None:
-        slug = get_campaign_for_transcript(md.stem)
+    if "md" in clashes or "missing" in clashes:
+        slug = get_campaign_for_transcript(found["stem"])
         campaign = load_campaigns().get(slug) if slug else None
         campaign_name = campaign.display_name if campaign else None
+    clashing = found["md"] or found["flac"]
+    modified = None
+    if clashing is not None:
+        try:
+            modified = datetime.fromtimestamp(clashing.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        except OSError:
+            modified = None
     return Response(
-        content=json.dumps({"exists": md is not None, "campaign": campaign_name}),
+        content=json.dumps({
+            "exists": bool(clashes),
+            "campaign": campaign_name,
+            "modified": modified,
+            "missing": "missing" in clashes,
+            "clashes": clashes,
+        }),
         media_type="application/json",
     )
 
@@ -335,6 +392,7 @@ async def enroll_form(request: Request, job_id: str) -> Response:
     from wisper_transcribe.speaker_manager import load_profiles
     from wisper_transcribe.web.enroll_shared import (
         _load_diar_sidecar,
+        enrollable_labels,
         resolve_current_names,
         template_current_names,
     )
@@ -372,8 +430,10 @@ async def enroll_form(request: Request, job_id: str) -> Response:
 
     profiles = load_profiles()
 
-    # Warn before submit when the source audio is gone.
-    audio_missing = not (job.input_path and Path(job.input_path).exists())
+    # Warn before submit when some speakers can't be enrolled: they have no
+    # saved embedding and the source audio is gone.
+    wizard_diar = _load_diar_sidecar(Path(job.output_path)) if job.output_path else None
+    audio_missing = bool(enrollable_labels(wizard_diar, speakers_in_transcript)[1])
 
     # Load persisted transcript text snippets for each speaker (written as
     # <stem>_excerpt_<speaker>.txt alongside the clip files).
@@ -480,10 +540,18 @@ async def enroll_submit(request: Request, job_id: str) -> Response:
         rename_result = apply_renames(md_path, job.diarization_segments, renames)
 
         if rename_result.groups:
-            input_path = Path(job.input_path)
-            if not input_path.exists():
-                url += "?notice=enroll_audio_missing"
-            else:
+            from wisper_transcribe.web.enroll_shared import (
+                _load_diar_sidecar,
+                enrollable_labels,
+            )
+
+            diar = _load_diar_sidecar(md_path)
+            submitted = [lb for labels in rename_result.groups.values() for lb in labels]
+            enrollable, skipped = enrollable_labels(diar, submitted)
+            notice = "?notice=enroll_audio_missing" if skipped else ""
+            url += notice
+            if any(all(lb in enrollable for lb in labels)
+                   for labels in rename_result.groups.values()):
                 device = job.kwargs.get("device", "cpu")
                 if device == "auto":
                     from wisper_transcribe.config import get_device
@@ -495,6 +563,6 @@ async def enroll_submit(request: Request, job_id: str) -> Response:
                     groups=rename_result.groups,
                     device=device,
                 )
-                return RedirectResponse(url=f"/transcribe/jobs/{enroll_job.id}", status_code=303)
+                return RedirectResponse(url=f"/transcribe/jobs/{enroll_job.id}{notice}", status_code=303)
 
     return RedirectResponse(url=url, status_code=303)

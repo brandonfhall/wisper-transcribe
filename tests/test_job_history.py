@@ -83,14 +83,14 @@ def test_schema_rejects_inconsistent_rows():
 
 def test_enum_checks_mirror_python_constants():
     """Adding a job type, status, or source without a migration fails here."""
-    from wisper_transcribe import recording_manager
+    from wisper_transcribe import file_registry, recording_manager
     from wisper_transcribe.speaker_registry import SOURCE_AUTO, SOURCE_MANUAL
     from wisper_transcribe.web import jobs
 
     ddl = "\n".join(m.ddl for m in db.MIGRATIONS)
 
-    def check_values(column: str) -> set[str]:
-        m = re.search(rf"{column}\s+TEXT NOT NULL CHECK \({column} IN \(([^)]*)\)\)", ddl)
+    def check_values(column: str, source: str = ddl) -> set[str]:
+        m = re.search(rf"{column}\s+TEXT NOT NULL CHECK \({column} IN \(([^)]*)\)\)", source)
         assert m, column
         return set(re.findall(r"'([^']+)'", m.group(1)))
 
@@ -99,6 +99,9 @@ def test_enum_checks_mirror_python_constants():
     assert check_values("status") == {jobs.PENDING, jobs.RUNNING, jobs.COMPLETED, jobs.FAILED}
     assert check_values("capture_status") == set(recording_manager.CAPTURE_STATUSES)
     assert check_values("source") >= {SOURCE_AUTO, SOURCE_MANUAL}
+    # Other tables also have a `kind` column, so read only the files table's DDL.
+    files_ddl = next(m.ddl for m in db.MIGRATIONS if m.version == 9)
+    assert check_values("kind", files_ddl) == set(file_registry.KINDS)
 
 
 def test_history_page_and_detail_fallback(tmp_path):
@@ -188,3 +191,72 @@ def test_dashboard_campaign_column(tmp_path):
     assert job_campaigns([live]) == {live.id: "Curse"}
     cells = re.findall(r'data-testid="job-campaign"[^>]*>([^<]*)<', rows)
     assert cells.count("Curse") == 2  # in-memory + history row
+
+
+def _transcription(job_id, transcript_path, status="completed", job_type="transcription",
+                   created=None, **kw):
+    kwargs = {"model_size": "large-v3", "device": "cuda", "vad_filter": True,
+              "overwrite": True, "campaign": "dnd", "language": "en",
+              "num_speakers": 4, "no_diarize": False, "include_timestamps": True}
+    kwargs.update(kw.pop("kwargs", {}))
+    job = _job(id=job_id, status=status, job_type=job_type, kwargs=kwargs,
+               output_path=str(transcript_path), created_at=created or datetime.now(),
+               finished_at=datetime.now(), **kw)
+    job.llm_transcript_path = str(transcript_path)
+    job.post_refine = job.post_summarize = False
+    return job
+
+
+def _transcript_row(tmp_path, monkeypatch, stem="s1"):
+    out = tmp_path / "out"
+    out.mkdir(exist_ok=True)
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    (out / f"{stem}.md").write_text("x", encoding="utf-8")
+    from wisper_transcribe import transcript_store as ts
+    ts.register(stem, origin="job")
+    return out / f"{stem}.md"
+
+
+def _tid(stem="s1"):
+    with db.connection() as conn:
+        return conn.execute("SELECT id FROM transcripts WHERE stem = ?", (stem,)).fetchone()[0]
+
+
+def test_last_transcription_params_returns_latest_completed_session_settings(tmp_path, monkeypatch):
+    md = _transcript_row(tmp_path, monkeypatch)
+    old = "22222222-2222-4222-8222-222222222222"
+    new = "33333333-3333-4333-8333-333333333333"
+    job_history.record(_transcription(old, md, kwargs={"language": "fr", "num_speakers": 2}))
+    newer = _transcription(new, md, created=datetime.now())
+    newer.post_refine = True
+    job_history.record(newer)
+    assert job_history.last_transcription_params(_tid()) == {
+        "language": "en", "num_speakers": 4, "no_diarize": False,
+        "include_timestamps": True, "post_refine": True,
+    }
+
+
+def test_last_transcription_params_ignores_failed_and_other_jobs(tmp_path, monkeypatch):
+    md = _transcript_row(tmp_path, monkeypatch)
+    job_history.record(_transcription("22222222-2222-4222-8222-222222222222", md,
+                                      kwargs={"language": "de"}))
+    job_history.record(_transcription("33333333-3333-4333-8333-333333333333", md,
+                                      status="failed", kwargs={"language": "fr"}))
+    job_history.record(_transcription("44444444-4444-4444-8444-444444444444", md,
+                                      job_type="refine", kwargs={"language": "es"}))
+    assert job_history.last_transcription_params(_tid())["language"] == "de"
+
+
+def test_last_transcription_params_drops_engine_and_submit_keys(tmp_path, monkeypatch):
+    md = _transcript_row(tmp_path, monkeypatch)
+    job_history.record(_transcription("22222222-2222-4222-8222-222222222222", md))
+    got = job_history.last_transcription_params(_tid())
+    for key in ("model_size", "device", "compute_type", "vad_filter", "forced_alignment",
+                "overwrite", "campaign", "output_root"):
+        assert key not in got
+
+
+def test_last_transcription_params_empty_without_history(tmp_path, monkeypatch):
+    _transcript_row(tmp_path, monkeypatch)
+    assert job_history.last_transcription_params(_tid()) == {}
+    assert job_history.last_transcription_params(99999) == {}

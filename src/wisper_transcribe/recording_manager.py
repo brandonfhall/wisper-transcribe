@@ -10,6 +10,12 @@ layout under ``$DATA_DIR/recordings/<id>/``:
     combined.wav                concatenated at session end
     live_transcript.md          live draft (local sessions)
 
+``combined.wav`` is the recording's only lasting audio. Once it is verified
+complete, :func:`trim_recording_audio` deletes ``combined/`` and the per-user
+tracks nothing still needs: all of a local session's, and a Discord user's once
+that user is bound to a profile (an unbound user's track is what enrollment
+reads). Segment rows stay as metadata.
+
 so paths are never stored: :class:`~wisper_transcribe.models.Recording`'s
 ``combined_path``, ``per_user_dir``, and segment ``path`` are derived from
 the layout. So is ``status``: only the capture lifecycle is stored
@@ -27,6 +33,8 @@ marker another request appended meanwhile.
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import sqlite3
 import uuid
 import wave
@@ -34,7 +42,7 @@ from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from . import db
+from . import db, file_registry
 from .config import get_data_dir
 from .models import Marker, Recording, RejoinAttempt, SegmentRecord
 from .path_utils import validate_path_component
@@ -46,6 +54,8 @@ ACTIVE_CAPTURE = ("recording", "degraded")
 # The capture hot path waits at most this long for the database, then logs
 # and carries on (startup reconcile restores missing segment rows).
 HOT_PATH_BUSY_MS = 500
+# Directories awaiting deletion after a trim; removed at startup if a crash left them.
+TRASH_PREFIX = ".wisper-trash-"
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +114,8 @@ def _load(conn: sqlite3.Connection, data_dir: Optional[Path],
           where: str = "", params: tuple = ()) -> dict[str, Recording]:
     from .path_utils import get_output_dir
 
+    # recordings.campaign_id is the campaign chosen when recording started, used
+    # until a transcript exists; a transcribed recording's campaign is its transcript's.
     rows = conn.execute(
         "SELECT r.*, c.slug AS campaign_slug, t.stem AS transcript_stem, "
         "d.guild_id, d.voice_channel_id, "
@@ -112,7 +124,9 @@ def _load(conn: sqlite3.Connection, data_dir: Optional[Path],
         "EXISTS (SELECT 1 FROM jobs j WHERE j.recording_id = r.id AND j.type = 'transcription' "
         " AND j.status IN ('pending', 'running')) AS job_active "
         "FROM recordings r "
-        "LEFT JOIN campaigns c ON c.id = r.campaign_id "
+        "LEFT JOIN campaign_transcripts ct ON ct.transcript_id = r.transcript_id "
+        "LEFT JOIN campaigns c ON c.id = "
+        "CASE WHEN r.transcript_id IS NOT NULL THEN ct.campaign_id ELSE r.campaign_id END "
         "LEFT JOIN transcripts t ON t.id = r.transcript_id "
         "LEFT JOIN recording_discord d ON d.recording_id = r.id "
         f"{where} ORDER BY r.rowid",
@@ -210,6 +224,17 @@ def load_recording(recording_id: str, data_dir: Optional[Path] = None) -> Option
         return _load(conn, data_dir, "WHERE r.id = ?", (recording_id,)).get(recording_id)
 
 
+def recording_for_transcript(transcript_id: int,
+                             data_dir: Optional[Path] = None) -> Optional[Recording]:
+    """The recording whose ``transcript_id`` is this transcript, or None."""
+    with db.connection(data_dir) as conn:
+        row = conn.execute("SELECT id FROM recordings WHERE transcript_id = ?",
+                           (transcript_id,)).fetchone()
+        if row is None:
+            return None
+        return _load(conn, data_dir, "WHERE r.id = ?", (row["id"],)).get(row["id"])
+
+
 # ---------------------------------------------------------------------------
 # Save
 # ---------------------------------------------------------------------------
@@ -286,7 +311,8 @@ def save_recording(recording: Recording, data_dir: Optional[Path] = None) -> Non
             "INSERT INTO recordings (id, source, name, notes, campaign_id, transcript_id, "
             "capture_status, started_at, ended_at, recovered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET name = excluded.name, notes = excluded.notes, "
-            "campaign_id = excluded.campaign_id, transcript_id = excluded.transcript_id, "
+            "campaign_id = CASE WHEN recordings.transcript_id IS NULL "
+            "THEN excluded.campaign_id ELSE recordings.campaign_id END, transcript_id = excluded.transcript_id, "
             "capture_status = excluded.capture_status, started_at = excluded.started_at, "
             "ended_at = excluded.ended_at, "
             "recovered_at = coalesce(excluded.recovered_at, recordings.recovered_at)",
@@ -516,6 +542,31 @@ def append_rejoin(recording_id: str, attempt: RejoinAttempt, data_dir: Optional[
         _insert_rejoin(conn, recording_id, attempt)
 
 
+def register_capture_files(recording_id: str, data_dir: Optional[Path] = None) -> None:
+    """Register the files a finished capture left: ``combined.wav``, each
+    ``per-user/<track>/`` directory, and the live draft. Best-effort, and a
+    file that doesn't exist is skipped.
+    """
+    try:
+        with db.transaction(data_dir) as conn:
+            owner = file_registry.Owner.for_recording(recording_id, conn=conn)
+            if owner is None:
+                return
+            rec_dir = get_recording_dir(recording_id, data_dir)
+            for kind, path in (("combined", combined_path_for(recording_id, data_dir)),
+                               ("live_draft", rec_dir / "live_transcript.md")):
+                if path.is_file():
+                    file_registry.add_if_owned(path, kind=kind, owner=owner, conn=conn,
+                                               data_dir=data_dir)
+            tracks = rec_dir / "per-user"
+            for track in sorted(tracks.iterdir()) if tracks.is_dir() else []:
+                if track.is_dir():
+                    file_registry.add_if_owned(track, kind="per_user", owner=owner,
+                                               label=track.name, conn=conn, data_dir=data_dir)
+    except (sqlite3.Error, OSError):
+        log.warning("Could not register the files of recording %s", recording_id, exc_info=True)
+
+
 def recover_recording(recording_id: str, data_dir: Optional[Path] = None) -> Recording:
     """Rebuild ``combined.wav`` for a session that crashed, from its segments.
 
@@ -547,8 +598,166 @@ def recover_recording(recording_id: str, data_dir: Optional[Path] = None) -> Rec
             "ended_at = coalesce(ended_at, ?) WHERE id = ? AND capture_status = 'failed'",
             (_ts(datetime.now(timezone.utc)), _ts(datetime.now(timezone.utc)), recording_id),
         )
+    file_registry.add_if_owned(
+        combined, kind="combined", owner=file_registry.Owner.for_recording(recording_id),
+        data_dir=data_dir)
     log.info("Recovered recording %s from its segments", recording_id)
+    try:
+        trim_recording_audio(recording_id, data_dir)
+    except Exception:
+        log.warning("Could not trim recording %s after recovery", recording_id, exc_info=True)
     return load_recording(recording_id, data_dir)
+
+
+def _wav_frames(path: Path) -> int:
+    """Frame count of a readable WAV, else 0 (the test ``concat_wav_segments`` applies)."""
+    try:
+        with wave.open(str(path), "rb") as wf:
+            return wf.getnframes()
+    except (wave.Error, EOFError, OSError):
+        return 0
+
+
+def _tree_bytes(path: Path) -> int:
+    total = 0
+    for root, _dirs, names in os.walk(path):
+        for name in names:
+            try:
+                total += os.stat(os.path.join(root, name)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def _free_trash_name(rec_dir: Path) -> Path:
+    n = 0
+    while os.path.lexists(rec_dir / f"{TRASH_PREFIX}{n}"):
+        n += 1
+    return rec_dir / f"{TRASH_PREFIX}{n}"
+
+
+def _trim_targets(rid: str, data_dir: Optional[Path]) -> list[tuple[Path, Optional[str]]]:
+    """The directories :func:`trim_recording_audio` would remove, or ``[]``.
+
+    Each is ``(directory, per_user label)``; the label is None for ``combined/``
+    and ``""`` for a local session's whole ``per-user/``. Empty unless
+    ``combined.wav`` verifies as complete (see :func:`trim_recording_audio`).
+    """
+    rec_dir = get_recording_dir(rid, data_dir)
+    combined = combined_path_for(rid, data_dir)
+    total = _wav_frames(combined)
+    if total <= 0:
+        return []
+
+    with db.connection(data_dir) as conn:
+        rec = conn.execute("SELECT source FROM recordings WHERE id = ?", (rid,)).fetchone()
+        if rec is None:
+            return []
+        seg_rows = conn.execute(
+            "SELECT count(*) FROM recording_segments WHERE recording_id = ?", (rid,)).fetchone()[0]
+        bound = [r[0] for r in conn.execute(
+            "SELECT discord_user_id FROM recording_speakers "
+            "WHERE recording_id = ? AND profile_id IS NOT NULL", (rid,))]
+        source = rec["source"]
+
+    seg_dir = rec_dir / "combined"
+    targets: list[tuple[Path, Optional[str]]] = []
+    if seg_dir.is_dir():
+        readable = seg_frames = 0
+        for wav in seg_dir.glob("*.wav"):
+            frames = _wav_frames(wav)
+            if frames > 0:
+                readable += 1
+                seg_frames += frames
+        if seg_frames != total or readable < seg_rows:
+            return []
+        targets.append((seg_dir, None))
+    per_user = rec_dir / "per-user"
+    if source == "local":
+        targets.append((per_user, ""))
+    else:
+        targets.extend((per_user / uid, uid) for uid in sorted(bound))
+    return targets
+
+
+def trimmable_bytes(recording_id: str, data_dir: Optional[Path] = None) -> int:
+    """Bytes :func:`trim_recording_audio` would free right now; changes nothing."""
+    rid = _validate_recording_id(recording_id)
+    if rid is None:
+        return 0
+    rec_dir = get_recording_dir(rid, data_dir)
+    base = os.path.abspath(rec_dir) + os.sep
+    return sum(
+        _tree_bytes(target) for target, _label in _trim_targets(rid, data_dir)
+        if os.path.abspath(target).startswith(base) and target.is_dir()
+        and not target.is_symlink()
+    )
+
+
+def trim_recording_audio(recording_id: str, data_dir: Optional[Path] = None) -> int:
+    """Delete the audio ``combined.wav`` makes redundant; return the bytes freed.
+
+    Changes nothing (returns 0) unless ``combined.wav`` is complete: it opens
+    as a WAV with at least one frame and, while ``combined/`` still exists,
+    its frames equal the summed frames of the readable, non-empty segments
+    (what ``concat_wav_segments`` joined) and no fewer segment files are
+    readable than there are segment rows. Segment ``duration_s`` is wall-clock
+    time, so it is not used. Once ``combined/`` is gone an earlier trim has
+    verified the file, so only the first check applies; that is what lets a
+    Discord user bound later have their track deleted.
+
+    Deletes ``combined/``, then ``per-user/`` for a local session or
+    ``per-user/<uid>/`` for each bound Discord user. Each directory is renamed
+    to ``.wisper-trash-<n>`` first and removed after the registry rows are
+    forgotten, so a long delete never holds the database write lock and a
+    crash leaves only trash for ``app._cleanup_recording_trash``. Never touches
+    ``combined.wav``.
+    """
+    rid = _validate_recording_id(recording_id)
+    if rid is None:
+        return 0
+    rec_dir = get_recording_dir(rid, data_dir)
+    base = os.path.abspath(rec_dir) + os.sep
+    targets = _trim_targets(rid, data_dir)
+
+    freed = 0
+    trashed: list[tuple[Path, Optional[str]]] = []
+    for target, label in targets:
+        if not os.path.abspath(target).startswith(base) or not target.is_dir() \
+                or target.is_symlink():
+            continue
+        size = _tree_bytes(target)
+        trash = _free_trash_name(rec_dir)
+        try:
+            from .transcript_store import _replace
+            if not _replace(target, trash):
+                continue
+        except OSError as exc:
+            log.warning("Could not trim %s: %s", target, exc)
+            continue
+        freed += size
+        trashed.append((trash, label))
+
+    owner = file_registry.Owner("recording", rid)
+    try:
+        with db.transaction(data_dir) as conn:
+            for _trash, label in trashed:
+                if label == "":
+                    file_registry.forget_kind(owner, "per_user", conn=conn, data_dir=data_dir)
+                elif label is not None:
+                    file_registry.forget_kind(owner, "per_user", label, conn=conn,
+                                              data_dir=data_dir)
+            for row in file_registry.files_for(owner, conn, data_dir=data_dir):
+                if row.kind == "per_user" and not os.path.lexists(row.path):
+                    file_registry.forget_id(row.id, conn, data_dir=data_dir)
+    except (sqlite3.Error, OSError):
+        log.warning("Could not update the file registry after trimming recording %s", rid,
+                    exc_info=True)
+    for trash, _label in trashed:
+        shutil.rmtree(trash, ignore_errors=True)
+    if freed:
+        log.info("Trimmed %d bytes of audio from recording %s", freed, rid)
+    return freed
 
 
 def link_transcript(recording_id: str, transcript_path: Path,

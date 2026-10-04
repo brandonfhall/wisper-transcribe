@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from wisper_transcribe import db, search_index
+from wisper_transcribe import db, file_registry, search_index
 from wisper_transcribe.models import DiarizationSegment, TranscriptionSegment
 from wisper_transcribe.path_utils import get_output_dir
 
@@ -34,6 +34,26 @@ DIARIZATION = [
 ]
 SUMMARY = {"summary": "The party reached Castle Ravenloft and summoned Strahd.",
            "session_title": "At the Gate", "loot": [], "npcs": [{"name": "Strahd"}]}
+
+
+def _convert_to_wav(path, out_path=None):
+    """convert_to_wav stand-in: writes a tiny WAV where asked, else passes through."""
+    import wave
+
+    if out_path is None:
+        return Path(path)
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(out_path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(b"\x00\x00" * 160)
+    return out_path
+
+
+def _encode_flac(src, dst):
+    Path(dst).write_bytes(b"fLaC-fake")
 
 
 def _embedding(*args, **kwargs):
@@ -53,7 +73,8 @@ def ml():
             ("wisper_transcribe.pipeline.check_ffmpeg", {}),
             ("wisper_transcribe.pipeline.validate_audio", {}),
             ("wisper_transcribe.pipeline.convert_to_wav", {"side_effect": lambda p, *a, **k: Path(p)}),
-            ("wisper_transcribe.audio_utils.convert_to_wav", {"side_effect": lambda p, *a, **k: Path(p)}),
+            ("wisper_transcribe.audio_utils.convert_to_wav", {"side_effect": _convert_to_wav}),
+            ("wisper_transcribe.audio_utils.encode_flac", {"side_effect": _encode_flac}),
             ("wisper_transcribe.pipeline.get_duration", {"return_value": 10.0}),
             ("wisper_transcribe.pipeline.transcribe", {"return_value": SEGMENTS}),
             ("wisper_transcribe.pipeline.get_hf_token", {"return_value": "hf_fake"}),
@@ -119,8 +140,9 @@ def test_full_session_lifecycle(client, ml):
     _wait(client, _upload(client, "Session 1", "curse-of-strahd"))
     md = out / "Session 1.md"
     assert md.is_file() and "Castle Ravenloft" in md.read_text(encoding="utf-8")
-    tid, audio_rel = _row("SELECT id, audio_rel_path FROM transcripts WHERE stem = 'Session 1'")
-    assert audio_rel and (out / audio_rel).is_file()  # durable audio copy next to it
+    tid = _row("SELECT id FROM transcripts WHERE stem = 'Session 1'")[0]
+    audio = file_registry.file_for(file_registry.Owner("transcript", tid), "audio")
+    assert audio is not None and audio.path == out / "Session 1.flac" and audio.path.is_file()
     assert _count("SELECT count(*) FROM campaign_transcripts ct JOIN campaigns c ON c.id = ct.campaign_id "
                   "WHERE ct.transcript_id = ? AND c.slug = 'curse-of-strahd'", tid) == 1
     assert _count("SELECT count(*) FROM transcript_speakers WHERE transcript_id = ?", tid) == 2
@@ -156,7 +178,7 @@ def test_full_session_lifecycle(client, ml):
     # Delete: file, row, links, index, companions; the journal goes stale.
     assert client.post("/transcripts/Session%201/delete", follow_redirects=False).status_code == 303
     assert not md.exists() and not (out / "Session 1.summary.md").exists()
-    assert not (out / "Session 1_diar.json").exists() and not (out / audio_rel).exists()
+    assert not (out / "Session 1_diar.json").exists() and not audio.path.exists()
     for table in ("transcripts", "campaign_transcripts", "journal_entries", "transcript_speakers",
                   "search_index_state", "search_blocks"):
         col = "id" if table == "transcripts" else "transcript_id"
@@ -217,3 +239,35 @@ def test_recording_transcript_delete_reopens_recording(client, ml):
     again = load_recording(rec.id)
     assert again.status == "completed" and again.transcript_path is None
     assert "Transcribe" in client.get(f"/recordings/{rec.id}").text
+
+
+# ---------------------------------------------------------------------------
+# Re-transcribe from the saved audio keeps the campaign place; the journal goes stale
+# ---------------------------------------------------------------------------
+
+def test_retranscribe_keeps_campaign_position_and_marks_journal_stale(client, ml):
+    from wisper_transcribe.campaign_manager import get_transcripts_for_campaign
+
+    out = get_output_dir()
+    assert client.post("/campaigns", data={"display_name": "Curse of Strahd"},
+                       follow_redirects=False).status_code == 303
+    for stem in ("Session 1", "Session 2", "Session 3"):
+        _wait(client, _upload(client, stem, "curse-of-strahd"))
+    _wait(client, _job_from(client.post("/transcripts/Session%201/summarize", follow_redirects=False)))
+    _wait(client, _job_from(client.post("/campaigns/curse-of-strahd/journal", data={"mode": "next"},
+                                        follow_redirects=False)))
+    tid, stem = _row("SELECT t.id, t.stem FROM journal_entries je "
+                     "JOIN transcripts t ON t.id = je.transcript_id")
+    assert _row("SELECT journal_stale_since FROM campaigns WHERE slug = 'curse-of-strahd'")[0] is None
+    flac = out / f"{stem}.flac"
+    order = get_transcripts_for_campaign("curse-of-strahd")
+
+    _wait(client, _job_from(client.post(f"/transcripts/{stem.replace(' ', '%20')}/retranscribe",
+                                        follow_redirects=False)))
+
+    assert get_transcripts_for_campaign("curse-of-strahd") == order
+    assert _row("SELECT id FROM transcripts WHERE stem = ?", stem)[0] == tid
+    assert flac.is_file() and sorted(p.name for p in out.glob("*.flac")) == [
+        "Session 1.flac", "Session 2.flac", "Session 3.flac"]
+    assert file_registry.file_for(file_registry.Owner("transcript", tid), "audio").path == flac
+    assert _row("SELECT journal_stale_since FROM campaigns WHERE slug = 'curse-of-strahd'")[0]

@@ -1,0 +1,310 @@
+"""wisper storage trim: plan (read-only) and apply, with encode/probe/backfill mocked."""
+from __future__ import annotations
+
+import sqlite3
+import uuid
+from pathlib import Path
+from unittest import mock
+
+import numpy as np
+import pytest
+
+from tests._seed import seed_recording, seed_sidecar
+from wisper_transcribe import db, file_registry, recording_manager, storage_trim, transcript_store
+from wisper_transcribe.config import EMBEDDING_SPACE
+
+
+@pytest.fixture
+def out(tmp_path, monkeypatch) -> Path:
+    path = tmp_path / "out"
+    path.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(path))
+    return path
+
+
+def _fake_encode(src, dst):
+    Path(dst).write_bytes(b"flac")
+
+
+@pytest.fixture
+def encode():
+    with mock.patch("wisper_transcribe.audio_utils.encode_flac", side_effect=_fake_encode) as m:
+        yield m
+
+
+@pytest.fixture
+def probe():
+    with mock.patch("wisper_transcribe.audio_utils.probe_format", return_value=(16000, 1)) as m:
+        yield m
+
+
+def _transcript(out: Path, stem: str, audio_name: str, *, embedded: bool = True,
+                payload: bytes = b"x" * 100) -> Path:
+    md = out / f"{stem}.md"
+    md.write_text("# t\n", encoding="utf-8")
+    audio = out / audio_name
+    audio.write_bytes(payload)
+    diar = {
+        "diarization_segments": [{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+        "speaker_map": {"SPEAKER_00": "Alice"},
+        "input_path": str(audio),
+    }
+    if embedded:
+        diar["speaker_embeddings"] = {"SPEAKER_00": [1.0, 0.0]}
+        diar["embedding_space"] = EMBEDDING_SPACE
+    seed_sidecar(md, diar)
+    return md
+
+
+def _audio_row(md: Path):
+    owner = file_registry.Owner.for_stem(md.stem, output_dir=md.parent)
+    return file_registry.file_for(owner, "audio", output_dir=md.parent)
+
+
+def _tree(root: Path) -> list[tuple[str, int]]:
+    return sorted((str(p.relative_to(root)), p.stat().st_size)
+                  for p in root.rglob("*") if p.is_file())
+
+
+# --- upload transcripts ------------------------------------------------------
+
+def test_mp4_is_converted_to_flac(out, encode, probe):
+    md = _transcript(out, "Session 1", "Session 1.mp4")
+    report = storage_trim.apply()
+    assert (out / "Session 1.flac").is_file()
+    assert not (out / "Session 1.mp4").exists()
+    assert _audio_row(md).path.name == "Session 1.flac"
+    assert report.converted == ["Session 1"] and not report.errors
+
+
+def test_embeddings_are_stored_before_conversion(out, encode, probe):
+    md = _transcript(out, "S", "S.mp4", embedded=False)
+    parent = mock.Mock()
+    vec = {"SPEAKER_00": np.ones(4, dtype=np.float32)}
+    parent.backfill.side_effect = lambda *a, **k: vec
+    parent.encode.side_effect = _fake_encode
+    with mock.patch("wisper_transcribe.speaker_registry._backfill_embeddings", parent.backfill), \
+         mock.patch("wisper_transcribe.audio_utils.encode_flac", parent.encode):
+        storage_trim.apply()
+    names = [c[0] for c in parent.mock_calls]
+    assert names.index("backfill") < names.index("encode")
+    diar = transcript_store.read_sidecar(md)
+    assert "SPEAKER_00" in diar["speaker_embeddings"]
+
+
+def test_backfill_failure_is_reported_and_conversion_continues(out, encode, probe):
+    _transcript(out, "S", "S.mp4", embedded=False)
+    with mock.patch("wisper_transcribe.speaker_registry._backfill_embeddings",
+                    side_effect=RuntimeError("corrupt")):
+        report = storage_trim.apply()
+    assert any("voices not extracted" in e for e in report.errors)
+    assert report.converted == ["S"]
+
+
+def test_kept_flac_is_untouched(out, encode, probe):
+    md = _transcript(out, "S", "S.flac")
+    before = _tree(out)
+    report = storage_trim.apply()
+    assert _tree(out) == before and not report.converted
+    encode.assert_not_called()
+    assert _audio_row(md).path.name == "S.flac"
+
+
+def test_wrong_format_flac_is_converted_in_place_through_a_temp(out, encode):
+    md = _transcript(out, "S", "S.flac")
+    with mock.patch("wisper_transcribe.audio_utils.probe_format", return_value=(48000, 2)):
+        report = storage_trim.apply()
+    assert report.converted == ["S"]
+    (src, dst), _ = encode.call_args
+    assert Path(dst).name.startswith(transcript_store.TEMP_PREFIX)
+    assert (out / "S.flac").read_bytes() == b"flac"
+    assert _audio_row(md).path.name == "S.flac"
+    assert not [p for p in out.iterdir() if p.name.startswith(transcript_store.TEMP_PREFIX)]
+
+
+def test_probe_failure_converts(out, encode):
+    _transcript(out, "S", "S.flac")
+    with mock.patch("wisper_transcribe.audio_utils.probe_format", side_effect=RuntimeError("x")):
+        report = storage_trim.apply()
+    assert report.converted == ["S"]
+
+
+def test_encode_failure_leaves_original_and_row(out, probe):
+    md = _transcript(out, "S", "S.mp4")
+    with mock.patch("wisper_transcribe.audio_utils.encode_flac", side_effect=ValueError("boom")):
+        report = storage_trim.apply()
+    assert (out / "S.mp4").is_file() and not (out / "S.flac").exists()
+    assert _audio_row(md).path.name == "S.mp4"
+    assert report.errors and not report.converted
+
+
+def test_foreign_flac_is_never_overwritten(out, encode, probe):
+    md = _transcript(out, "S", "S.mp4")
+    (out / "S.flac").write_bytes(b"users own")
+    report = storage_trim.apply()
+    assert (out / "S.flac").read_bytes() == b"users own"
+    assert (out / "S.mp4").is_file() and _audio_row(md).path.name == "S.mp4"
+    assert report.errors
+
+
+# --- recordings and orphans --------------------------------------------------
+
+def test_recording_linked_copy_is_dropped(out, encode, probe):
+    rec = seed_recording()
+    md = _transcript(out, "Rec", f"{rec.id}.wav")
+    recording_manager.link_transcript(rec.id, md)
+    report = storage_trim.apply()
+    assert not (out / f"{rec.id}.wav").exists()
+    assert _audio_row(md) is None
+    assert transcript_store.audio_path(md) == recording_manager.combined_path_for(rec.id)
+    assert report.dropped == ["Rec"]
+    encode.assert_not_called()
+
+
+def test_orphans_only_unreferenced_recording_wavs(out, encode, probe):
+    rec = seed_recording()
+    orphan = out / f"{rec.id}.wav"
+    orphan.write_bytes(b"w")
+    stray_uuid = out / f"{uuid.uuid4()}.wav"
+    stray_uuid.write_bytes(b"w")
+    keep = {
+        "unrelated.mp3": out / "unrelated.mp3",
+        "ep1.mp3": out / "ep1.mp3",
+        "ep1.md": out / "ep1.md",
+        "Session_1.mp4": out / "Session_1.mp4",
+        "Session.md": out / "Session.md",
+    }
+    for p in keep.values():
+        p.write_bytes(b"k")
+    # ep1.md is registered with a CLI-style transcript: no audio row.
+    transcript_store.reconcile(out)
+    report = storage_trim.apply()
+    assert not orphan.exists()
+    assert report.orphans == [orphan.name]
+    assert stray_uuid.exists()
+    assert all(p.exists() for p in keep.values())
+
+
+def test_registered_recording_wav_is_not_an_orphan(out, encode, probe):
+    rec = seed_recording()
+    md = _transcript(out, "Rec", f"{rec.id}.wav")  # an audio row names it, no link
+    plan = storage_trim.plan()
+    assert not [a for a in plan.actions if a.kind == storage_trim.ORPHAN]
+    assert [a.kind for a in plan.actions] == [storage_trim.CONVERT]
+    assert md.exists()
+
+
+def test_recordings_are_trimmed(out, encode, probe):
+    rec = seed_recording()
+    seg = recording_manager.get_recording_dir(rec.id) / "combined"
+    seg.mkdir()
+    import shutil
+    shutil.copy(recording_manager.combined_path_for(rec.id), seg / "0000.wav")
+    plan = storage_trim.plan()
+    assert [a.kind for a in plan.actions] == [storage_trim.TRIM_RECORDING]
+    assert seg.exists()  # a plan changes nothing
+    report = storage_trim.apply()
+    assert not seg.exists()
+    assert recording_manager.combined_path_for(rec.id).is_file()
+    assert report.trimmed and storage_trim.plan().actions == []
+
+
+# --- dry run and idempotence -------------------------------------------------
+
+def _snapshot(out: Path) -> dict:
+    with sqlite3.connect(db.db_path()) as conn:
+        rows = {t: conn.execute(f"SELECT * FROM {t} ORDER BY 1, 2").fetchall()
+                for t in ("transcripts", "transcript_speakers", "files")}
+    return {"tree": _tree(out), "rows": rows}
+
+
+def test_plan_changes_nothing(out, encode, probe):
+    rec = seed_recording()
+    _transcript(out, "A", "A.mp4", embedded=False)
+    md = _transcript(out, "B", f"{rec.id}.wav")
+    recording_manager.link_transcript(rec.id, md)
+    (out / f"{uuid.uuid4()}.wav").write_bytes(b"w")
+    (out / "stray.flac").write_bytes(b"s")
+    (out / "ghost.summary.md").write_text("g", encoding="utf-8")
+    before = _snapshot(out)
+    plan = storage_trim.plan()
+    assert plan.actions and plan.attention.total
+    assert _snapshot(out) == before
+    encode.assert_not_called()
+
+
+def test_second_run_is_a_noop(out, encode, probe):
+    rec = seed_recording()
+    _transcript(out, "A", "A.mp4")
+    md = _transcript(out, "B", f"{rec.id}.wav")
+    recording_manager.link_transcript(rec.id, md)
+    (out / f"{uuid.uuid4()}.wav").write_bytes(b"w")
+    storage_trim.apply()
+    assert storage_trim.plan().actions == []
+    before = _snapshot(out)
+    report = storage_trim.apply()
+    assert not (report.converted or report.dropped or report.orphans or report.trimmed)
+    assert _snapshot(out) == before
+
+
+# --- locks -------------------------------------------------------------------
+
+def test_server_lock_is_exclusive_within_a_process(tmp_path):
+    first = db.ServerLock(tmp_path).acquire()
+    with pytest.raises(db.ServerLockHeld):
+        db.ServerLock(tmp_path).acquire()
+    first.release()
+    db.ServerLock(tmp_path).acquire().release()
+
+
+def test_lock_file_existing_is_not_held(tmp_path):
+    (tmp_path / db.SERVER_LOCK_FILENAME).write_text("stale")
+    db.ServerLock(tmp_path).acquire().release()
+    assert (tmp_path / db.SERVER_LOCK_FILENAME).read_text() == "stale"
+
+
+def test_lock_is_held_across_processes(tmp_path):
+    import subprocess
+    import sys
+    code = ("import sys,time;from pathlib import Path;from wisper_transcribe import db;"
+            "l=db.ServerLock(Path(sys.argv[1])).acquire();print('ok',flush=True);time.sleep(30)")
+    proc = subprocess.Popen([sys.executable, "-c", code, str(tmp_path)],
+                            stdout=subprocess.PIPE, text=True)
+    try:
+        assert proc.stdout.readline().strip() == "ok"
+        with pytest.raises(db.ServerLockHeld):
+            db.ServerLock(tmp_path).acquire()
+    finally:
+        proc.kill()
+        proc.wait()
+    db.ServerLock(tmp_path).acquire().release()
+
+
+def _lease(runtime: str, age_s: float = 0) -> None:
+    from datetime import UTC, datetime, timedelta
+    stamp = (datetime.now(UTC) - timedelta(seconds=age_s)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    db.connect().close()
+    with sqlite3.connect(db.db_path()) as conn:
+        conn.execute("INSERT OR REPLACE INTO runtime_leases VALUES (?, 'other:1', 0, ?)",
+                     (runtime, stamp))
+
+
+def test_container_refuses_fresh_host_lease(monkeypatch):
+    _lease("host")
+    monkeypatch.setattr(db, "detect_runtime", lambda: db.RuntimeInfo("container", True))
+    with pytest.raises(db.RuntimeConflict):
+        storage_trim.check_runtime()
+
+
+def test_container_allows_its_own_lease_and_stale_host(monkeypatch):
+    _lease("container")
+    _lease("host", age_s=db.LEASE_TTL_S + 60)
+    monkeypatch.setattr(db, "detect_runtime", lambda: db.RuntimeInfo("container", True))
+    storage_trim.check_runtime()
+
+
+def test_check_runtime_does_not_create_the_database(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path / "fresh"))
+    monkeypatch.setattr(db, "detect_runtime", lambda: db.RuntimeInfo("container", True))
+    storage_trim.check_runtime()
+    assert not (tmp_path / "fresh" / db.DB_FILENAME).exists()

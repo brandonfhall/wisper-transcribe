@@ -34,7 +34,7 @@ x-env: &env
 services:
 
   # ── GPU CLI ───────────────────────────────────────────────────────────────
-  # docker compose run wisper wisper transcribe /app/input/session.mp3
+  # docker compose run wisper transcribe /app/input/session.mp3
   wisper:
     build:
       context: .
@@ -53,7 +53,7 @@ services:
     tty: true
 
   # ── CPU CLI ───────────────────────────────────────────────────────────────
-  # docker compose run wisper-cpu wisper transcribe /app/input/session.mp3
+  # docker compose run wisper-cpu transcribe /app/input/session.mp3
   wisper-cpu:
     build:
       context: .
