@@ -753,6 +753,115 @@ def test_delete_uses_stored_audio_path(out):
         assert conn.execute("SELECT count(*) FROM transcript_speakers").fetchone()[0] == 0
 
 
+def test_audio_path_resolves_flac_recording_and_unlinked(out):
+    from wisper_transcribe.recording_manager import link_transcript
+
+    from ._seed import seed_recording
+
+    md = _md(out, "s01")
+    ts.register("s01", origin="job")
+    assert ts.audio_path(md) is None  # unlinked, no audio row
+
+    flac = out / "s01.flac"
+    flac.write_bytes(b"f")
+    ts.set_audio(md, flac)
+    assert ts.audio_path(md) == flac
+
+    rec_md = _md(out, "rec")
+    ts.register("rec", origin="job")
+    rec = seed_recording()
+    link_transcript(rec.id, rec_md)  # no audio row and no _diar.json
+    assert ts.audio_path(rec_md) == rec.combined_path
+
+
+def test_read_sidecar_input_path_for_a_recording_without_speaker_rows(out):
+    from wisper_transcribe.recording_manager import link_transcript
+
+    from ._seed import seed_recording
+
+    md = _md(out, "rec")
+    ts.register("rec", origin="job")
+    rec = seed_recording()
+    link_transcript(rec.id, md)
+    (out / "rec_diar.json").write_text(json.dumps({"diarization_segments": []}), encoding="utf-8")
+
+    diar = ts.read_sidecar(md)
+
+    assert diar is not None and diar["input_path"] == str(rec.combined_path)
+    assert diar["input_path"] == str(ts.audio_path(md))
+
+
+def test_set_audio_replaces_the_row_and_deletes_the_previous_file(out):
+    md = _md(out, "s01")
+    old, new = out / "s01.mp4", out / "s01.flac"
+    old.write_bytes(b"video")
+    new.write_bytes(b"flac")
+    ts.set_audio(md, old)
+    ts.set_audio(md, new)
+    assert ts.audio_path(md) == new
+    assert not old.exists() and new.exists()
+
+
+def test_set_audio_never_deletes_a_file_outside_the_registry(out):
+    md = _md(out, "s01")
+    bystander = out / "s01.mp3"
+    bystander.write_bytes(b"user's own file")
+    new = out / "s01.flac"
+    new.write_bytes(b"flac")
+    ts.set_audio(md, new)
+    ts.set_audio(md, None)
+    assert bystander.exists()
+    assert not new.exists()  # the registered file goes when cleared
+
+
+def test_recording_transcript_in_the_data_dir_has_no_audio_row_and_keeps_combined_wav(
+        tmp_path, monkeypatch):
+    """Even with the output root set to the data dir (so recordings/ lies
+    inside it), a recording's transcript gets no audio row, and deleting the
+    transcript leaves combined.wav."""
+    from datetime import datetime
+    from unittest.mock import patch
+
+    from wisper_transcribe import file_registry
+    from wisper_transcribe.models import DiarizationSegment
+    from wisper_transcribe.recording_manager import link_transcript
+    from wisper_transcribe.web.jobs import JobQueue
+
+    from ._seed import seed_recording
+
+    data = Path(os.environ["WISPER_DATA_DIR"])
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(data))
+    rec = seed_recording()
+    combined = rec.combined_path
+    queue = JobQueue()
+    job = queue.submit(str(combined), original_stem=rec.id, recording_id=rec.id,
+                       output_dir=data, overwrite=True)
+
+    def _process(path, _result_store=None, job_id=None, **kwargs):
+        md = data / (kwargs["output_stem"] + ".md")
+        md.write_text("# t", encoding="utf-8")
+        ts.register(md.stem, origin="job")
+        _result_store["diarization_segments"] = [
+            DiarizationSegment(start=0.0, end=1.0, speaker="SPEAKER_00")]
+        return md
+
+    with patch("wisper_transcribe.web.jobs.process_file", side_effect=_process), \
+            patch("wisper_transcribe.web.jobs._extract_speaker_excerpts"):
+        queue._run_job(job)
+
+    assert job.status == "completed"
+    md = data / f"{rec.id}.md"
+    owner = file_registry.Owner.for_stem(rec.id)
+    assert file_registry.file_for(owner, "audio") is None
+    link_transcript(rec.id, md)
+    assert ts.audio_path(md) == combined
+
+    ts.delete_transcript(rec.id)
+
+    assert combined.exists()
+    assert not md.exists()
+
+
 def test_overwrite_clears_stale_speakers_and_segments(out):
     md = _md(out, "s01")
     ts.write_sidecar(md, _full_diar(out / "none.wav"))

@@ -36,6 +36,26 @@ SUMMARY = {"summary": "The party reached Castle Ravenloft and summoned Strahd.",
            "session_title": "At the Gate", "loot": [], "npcs": [{"name": "Strahd"}]}
 
 
+def _convert_to_wav(path, out_path=None):
+    """convert_to_wav stand-in: writes a tiny WAV where asked, else passes through."""
+    import wave
+
+    if out_path is None:
+        return Path(path)
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(out_path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(b"\x00\x00" * 160)
+    return out_path
+
+
+def _encode_flac(src, dst):
+    Path(dst).write_bytes(b"fLaC-fake")
+
+
 def _embedding(*args, **kwargs):
     label = kwargs.get("speaker_label") or args[2]
     return unit(np.eye(256)[0 if label == "SPEAKER_00" else 1])
@@ -53,7 +73,8 @@ def ml():
             ("wisper_transcribe.pipeline.check_ffmpeg", {}),
             ("wisper_transcribe.pipeline.validate_audio", {}),
             ("wisper_transcribe.pipeline.convert_to_wav", {"side_effect": lambda p, *a, **k: Path(p)}),
-            ("wisper_transcribe.audio_utils.convert_to_wav", {"side_effect": lambda p, *a, **k: Path(p)}),
+            ("wisper_transcribe.audio_utils.convert_to_wav", {"side_effect": _convert_to_wav}),
+            ("wisper_transcribe.audio_utils.encode_flac", {"side_effect": _encode_flac}),
             ("wisper_transcribe.pipeline.get_duration", {"return_value": 10.0}),
             ("wisper_transcribe.pipeline.transcribe", {"return_value": SEGMENTS}),
             ("wisper_transcribe.pipeline.get_hf_token", {"return_value": "hf_fake"}),
@@ -121,7 +142,7 @@ def test_full_session_lifecycle(client, ml):
     assert md.is_file() and "Castle Ravenloft" in md.read_text(encoding="utf-8")
     tid = _row("SELECT id FROM transcripts WHERE stem = 'Session 1'")[0]
     audio = file_registry.file_for(file_registry.Owner("transcript", tid), "audio")
-    assert audio is not None and audio.path.parent == out and audio.path.is_file()  # durable copy next to it
+    assert audio is not None and audio.path == out / "Session 1.flac" and audio.path.is_file()
     assert _count("SELECT count(*) FROM campaign_transcripts ct JOIN campaigns c ON c.id = ct.campaign_id "
                   "WHERE ct.transcript_id = ? AND c.slug = 'curse-of-strahd'", tid) == 1
     assert _count("SELECT count(*) FROM transcript_speakers WHERE transcript_id = ?", tid) == 2

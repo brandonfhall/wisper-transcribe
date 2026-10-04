@@ -548,7 +548,8 @@ def test_transcribe_name_check_never_escapes_output_dir(client, payload, tmp_pat
     monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
     resp = client.get("/transcribe/name-check", params={"filename": payload})
     assert resp.status_code == 200
-    assert resp.json() == {"exists": False, "campaign": None}
+    assert resp.json() == {"exists": False, "campaign": None, "modified": None,
+                           "missing": False, "clashes": []}
     assert payload not in resp.text
 
 

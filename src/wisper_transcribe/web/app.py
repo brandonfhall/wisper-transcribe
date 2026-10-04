@@ -68,15 +68,17 @@ def _build_tailwind() -> None:
         warnings.warn(f"Tailwind CSS build failed: {exc}. Using existing tailwind.min.css.")
 
 def _cleanup_orphaned_uploads() -> None:
-    """Delete wisper_upload_*/wisper_enroll_*/wisper_enrollsrc_* temp files at startup.
+    """Delete wisper_upload_* folders and files and wisper_enroll_*/wisper_enrollsrc_* files at startup.
 
-    Jobs rename their uploads at submit time (to ``<stem><suffix>`` or
-    ``wisper_enrollsrc_<job-id>``) and clean up after themselves, so this only
-    covers crashes. Sweeping ``wisper_enrollsrc_*`` is safe because the
+    A transcription upload lives in ``wisper_upload_<job-id>/`` until its job
+    ends, and the job deletes the folder on success, failure, or cancel; an
+    enroll upload is renamed to ``wisper_enrollsrc_<job-id>`` and deleted the
+    same way. This only covers a crash, and sweeping is safe because the
     in-memory queue is empty at startup.
     """
     import glob
     import logging
+    import shutil
     import tempfile
 
     tmp_dir = tempfile.gettempdir()
@@ -87,11 +89,14 @@ def _cleanup_orphaned_uploads() -> None:
     log = logging.getLogger(__name__)
     for path in orphans:
         try:
-            Path(path).unlink(missing_ok=True)
+            if Path(path).is_dir() and not Path(path).is_symlink():
+                shutil.rmtree(path)
+            else:
+                Path(path).unlink(missing_ok=True)
             log.debug("Removed orphaned upload: %s", path)
         except OSError as exc:
             log.warning("Could not remove orphaned upload %s: %s", path, exc)
-    log.info("Cleaned up %d orphaned upload file(s) from previous session", len(orphans))
+    log.info("Cleaned up %d orphaned upload(s) from previous session", len(orphans))
 
 
 try:

@@ -1206,31 +1206,35 @@ def test_preset_add_missing_name_rejected(client):
 
 
 def test_cleanup_orphaned_uploads_removes_all_prefixes(tmp_path, monkeypatch):
-    """The startup sweep recognizes wisper_enroll_* temp files (the
-    standalone speaker-enroll route's crash-window safety net) and the
-    wisper_enrollsrc_* files a pending standalone enroll job was renamed to,
-    not just wisper_upload_*."""
+    """The startup sweep removes wisper_upload_* folders and files, and the
+    wisper_enroll_*/wisper_enrollsrc_* temp files, and leaves other entries."""
     import tempfile
 
     from wisper_transcribe.web.app import _cleanup_orphaned_uploads
 
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
 
+    upload_dir = tmp_path / "wisper_upload_job-1"
+    (upload_dir / "extracted").mkdir(parents=True)
+    (upload_dir / "extracted" / "audio.wav").write_bytes(b"x")
+    (upload_dir / "Session.mp4").write_bytes(b"x")
     upload = tmp_path / "wisper_upload_abc123.mp3"
     enroll = tmp_path / "wisper_enroll_def456.wav"
     enrollsrc = tmp_path / "wisper_enrollsrc_ghi789.mp3"
     other = tmp_path / "unrelated.txt"
-    upload.write_bytes(b"x")
-    enroll.write_bytes(b"x")
-    enrollsrc.write_bytes(b"x")
-    other.write_bytes(b"x")
+    other_dir = tmp_path / "unrelated_dir"
+    other_dir.mkdir()
+    for f in (upload, enroll, enrollsrc, other):
+        f.write_bytes(b"x")
 
     _cleanup_orphaned_uploads()
 
+    assert not upload_dir.exists()
     assert not upload.exists()
     assert not enroll.exists()
     assert not enrollsrc.exists()
     assert other.exists()
+    assert other_dir.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -3376,10 +3380,88 @@ def test_name_check_reports_existing_transcript_and_campaign(client, tmp_path, m
     create_campaign("The Game")
     move_transcript_to_campaign("session 1", "the-game")
 
+    import os
+    from datetime import datetime
+
+    stamp = datetime(2026, 9, 12, 21, 40).timestamp()
+    os.utime(out / "session 1.md", (stamp, stamp))
+
     data = client.get("/transcribe/name-check", params={"filename": "session 1.mp3"}).json()
-    assert data == {"exists": True, "campaign": "The Game"}
+    assert data == {"exists": True, "campaign": "The Game", "modified": "2026-09-12 21:40",
+                    "missing": False, "clashes": ["md"]}
     data = client.get("/transcribe/name-check", params={"filename": "other.mp3"}).json()
-    assert data == {"exists": False, "campaign": None}
+    assert data == {"exists": False, "campaign": None, "modified": None,
+                    "missing": False, "clashes": []}
+
+
+def test_name_check_reports_a_foreign_flac(client, tmp_path, monkeypatch):
+    """A <stem>.flac that isn't the named transcript's own audio is a clash,
+    with its modified time."""
+    import os
+    from datetime import datetime
+
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    flac = out / "take.flac"
+    flac.write_bytes(b"not ours")
+    stamp = datetime(2026, 1, 2, 3, 4).timestamp()
+    os.utime(flac, (stamp, stamp))
+
+    data = client.get("/transcribe/name-check", params={"filename": "take.mp4"}).json()
+
+    assert data["exists"] is True and data["clashes"] == ["flac"]
+    assert data["modified"] == "2026-01-02 03:04"
+    assert data["campaign"] is None
+
+
+def test_name_check_ignores_the_transcripts_own_flac_and_flags_a_missing_transcript(
+        client, tmp_path, monkeypatch):
+    from wisper_transcribe import transcript_store as ts
+
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    md = out / "mine.md"
+    md.write_text("x", encoding="utf-8")
+    ts.register("mine", origin="job")
+    flac = out / "mine.flac"
+    flac.write_bytes(b"ours")
+    ts.set_audio(md, flac)
+    md.unlink()
+    flac.unlink()
+    ts.reconcile()  # flags the transcript missing
+
+    data = client.get("/transcribe/name-check", params={"filename": "mine.mp4"}).json()
+    assert data["missing"] is True and data["clashes"] == ["missing"] and data["exists"] is True
+
+    # With its own file back and the .md present, only the .md clashes.
+    md.write_text("x", encoding="utf-8")
+    flac.write_bytes(b"ours")
+    ts.reconcile()
+    ts.set_audio(md, flac)
+    data = client.get("/transcribe/name-check", params={"filename": "mine.mp4"}).json()
+    assert data["clashes"] == ["md"]
+
+
+def test_upload_refused_for_a_flac_only_clash_without_overwrite(client, tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    (out / "session.flac").write_bytes(b"someone elses")
+
+    resp, mock_submit = _post_upload(client, out)
+    assert resp.headers["location"] == "/transcribe?error=name_exists"
+    mock_submit.assert_not_called()
+
+    resp, mock_submit = _post_upload(client, out, overwrite="on")
+    assert mock_submit.call_args.kwargs["overwrite"] is True
+
+
+def test_upload_passes_the_original_filename_as_source_name(client, tmp_path):
+    resp, mock_submit = _post_upload(client, tmp_path)
+    assert mock_submit.call_args.kwargs["source_name"] == "session.mp3"
+    assert mock_submit.call_args.kwargs["original_stem"] == "session"
 
 
 def test_campaign_page_offers_relink_and_relink_route(client, tmp_path, monkeypatch):

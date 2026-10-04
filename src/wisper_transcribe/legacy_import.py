@@ -345,7 +345,7 @@ def import_diarization_sidecars(conn: sqlite3.Connection, ctx: MigrationContext)
             real = os.path.realpath(str(input_path))
             if not (real.startswith(root + os.sep) and os.path.isfile(real)):
                 # A data folder moved to another machine or into Docker keeps
-                # the old absolute path; the audio sits next to the transcript
+                # the old absolute path; the audio sits beside the transcript
                 # under the same name.
                 name = re.split(r"[\\/]", str(input_path))[-1]
                 moved = os.path.realpath(os.path.join(root, name))

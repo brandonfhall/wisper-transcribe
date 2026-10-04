@@ -8,7 +8,7 @@ Active plans, open bugs, and parked designs. Shipped work is removed; its design
 
 ### Missing transcript file after a successful Transcribe job
 
-A local-recording transcription once reported COMPLETED ("Wrote `<id>.md`") but the file never existed; root cause unknown. **Detection is in place:** the job fails with "Transcript file missing after write" and logs the transcripts folder, and job history keeps that log across restarts. **Next step:** if it recurs, check `/jobs/history` for the job's log and output root; run with `WISPER_DEBUG=1` to capture more (`LIVE_AUDIO_TEST_PLAN.md` §4a).
+A local-recording transcription once reported COMPLETED ("Wrote `<id>.md`") but the file never existed; root cause unknown. **Detection is in place:** the job fails with "Transcript file missing after write" and logs the transcripts folder, and job history keeps that log across restarts. **Next step:** if it recurs, check `/jobs/history` for the job's log and output root; run with `WISPER_DEBUG=1` to capture more (`LIVE_AUDIO_TEST_PLAN.md` §4a). The recording hand-off no longer copies `combined.wav` into the output dir (it reads it in place), so the job's input is `recordings/<id>/combined.wav` and the output is named by `output_stem`.
 
 ### Docker Desktop + native CLI on one data dir can corrupt the DB
 
@@ -61,8 +61,8 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 |---|---|---|
 | 1 — File registry | done | 05d0b52 |
 | 2 — Renames / Needs attention / campaign delete | done | b538301 |
-| 3 — Enroll from stored embeddings | done | (this commit) |
-| 4 — Extract audio, keep FLAC | not started | |
+| 3 — Enroll from stored embeddings | done | 2a135af |
+| 4 — Extract audio, keep FLAC | done | (this commit) |
 | 5 — Trim recordings | not started | |
 | 6 — `wisper storage trim` | not started | |
 | 7 — Playback | not started | |
@@ -88,6 +88,15 @@ Phase 2:
 Phase 3:
 - **Rehearsal (Mac data):** with one transcript's audio deleted, the wizard enrolled a speaker from saved voice data in under a second. The excerpt was copied as the profile's clip, and the clip was registered.
 - **Behaviour:** a job-page redirect after a partial enrollment shows the `enroll_audio_missing` notice too.
+
+Phase 4:
+- **Rehearsal (Mac data, real MLX transcription on MPS):**
+  - Uploaded a 45 s `.mp4` with video and two audio tracks. The upload was gone within 3 s of submit.
+  - The job kept `Test Session.flac` (16 kHz mono, ~1 MB) plus the transcript files, all registered. The temp folder was removed, and `source_file` named the `.mp4`.
+  - `name-check` returned the `.md` clash with its modified time, and a re-upload without Overwrite was refused.
+  - A recording hand-off wrote no `<id>.wav`, left `combined.wav` alone, and gave the transcript no `audio` row.
+- **Seen, not caused by this branch:** speaker matching printed a `nan` similarity for a speaker with a very short excerpt (`SPEAKER_00 → Announcer (nan)`). Worth a look separately.
+- **Implementation notes:** `_keep_audio()` in `jobs.py` holds step 6.2. `job.upload_dir` is left set after cleanup.
 
 ### How to run this plan
 

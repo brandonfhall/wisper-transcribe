@@ -210,6 +210,17 @@ def load_recording(recording_id: str, data_dir: Optional[Path] = None) -> Option
         return _load(conn, data_dir, "WHERE r.id = ?", (recording_id,)).get(recording_id)
 
 
+def recording_for_transcript(transcript_id: int,
+                             data_dir: Optional[Path] = None) -> Optional[Recording]:
+    """The recording whose ``transcript_id`` is this transcript, or None."""
+    with db.connection(data_dir) as conn:
+        row = conn.execute("SELECT id FROM recordings WHERE transcript_id = ?",
+                           (transcript_id,)).fetchone()
+        if row is None:
+            return None
+        return _load(conn, data_dir, "WHERE r.id = ?", (row["id"],)).get(row["id"])
+
+
 # ---------------------------------------------------------------------------
 # Save
 # ---------------------------------------------------------------------------

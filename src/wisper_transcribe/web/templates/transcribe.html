@@ -82,7 +82,7 @@
 
     {% if request.query_params.get('error') == 'name_exists' %}
     <div style="margin-top:12px;padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber)">
-      A transcript with that file's name already exists, so nothing was started. Pick the file again and tick
+      A transcript or audio file with that file's name already exists, so nothing was started. Pick the file again and tick
       <strong>Overwrite it</strong>, or rename the file.
     </div>
     {% elif request.query_params.get('error') %}
@@ -236,25 +236,34 @@ function wisperFileSelected(input) {
 var wisperNameTaken = false;
 function wisperCheckName(filename) {
   wisperNameTaken = false;
-  wisperShowCollision(false, null);
+  wisperShowCollision(false, {});
   fetch('/transcribe/name-check?filename=' + encodeURIComponent(filename))
     .then(function(r) { return r.ok ? r.json() : {exists: false}; })
     .then(function(data) {
       wisperNameTaken = !!data.exists;
-      wisperShowCollision(wisperNameTaken, data.campaign);
+      wisperShowCollision(wisperNameTaken, data);
     })
     .catch(function() {});
 }
-function wisperShowCollision(show, campaign) {
+function wisperShowCollision(show, info) {
   var box = document.getElementById('name-collision');
   var cb = document.getElementById('overwrite-input');
   if (!box) return;
   box.style.display = show ? 'block' : 'none';
   if (cb) cb.checked = false;
   var text = document.getElementById('name-collision-text');
-  if (text) {
-    text.textContent = 'A transcript with this name already exists' +
-      (campaign ? ' (in campaign "' + campaign + '")' : '') + '.';
+  if (!text) return;
+  info = info || {};
+  var clashes = info.clashes || [];
+  var when = info.modified ? ', last modified ' + info.modified : '';
+  var where = info.campaign ? ' (in campaign "' + info.campaign + '")' : '';
+  if (clashes.indexOf('md') !== -1) {
+    text.textContent = 'A transcript with this name already exists' + where + when + '.';
+  } else if (clashes.indexOf('missing') !== -1) {
+    text.textContent = 'A transcript with this name is missing (renamed or deleted outside wisper). ' +
+      'Overwriting replaces its audio and speakers; relinking it first keeps them.';
+  } else {
+    text.textContent = 'An audio file with this name already exists in the transcripts folder' + when + '.';
   }
 }
 function wisperClearFile() {
@@ -262,7 +271,7 @@ function wisperClearFile() {
   var el = document.getElementById('selected-file');
   if (el) el.style.display = 'none';
   wisperNameTaken = false;
-  wisperShowCollision(false, null);
+  wisperShowCollision(false, {});
 }
 function wisperModelSelect(radio) {
   document.querySelectorAll('.model-label').forEach(function(s) {

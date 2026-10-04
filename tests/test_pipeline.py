@@ -232,6 +232,35 @@ def test_process_file_title_override(
 @patch("wisper_transcribe.pipeline.convert_to_wav")
 @patch("wisper_transcribe.pipeline.get_duration", return_value=600.0)
 @patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
+def test_process_file_output_stem_and_source_name(
+    mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg, tmp_path
+):
+    """output_stem names the .md and the default title; source_name is the
+    frontmatter source_file, so a derived input file (audio.wav) never leaks
+    into either."""
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"fake audio")
+    mock_convert.return_value = audio
+
+    from wisper_transcribe.pipeline import process_file
+
+    out = process_file(
+        audio, output_dir=tmp_path, device="cpu", no_diarize=True,
+        output_stem="Session 12", source_name="Session 12.mp4",
+    )
+    content = out.read_text(encoding="utf-8")
+
+    assert out == tmp_path / "Session 12.md"
+    assert "title: Session 12" in content
+    assert "source_file: Session 12.mp4" in content
+    assert not (tmp_path / "audio.md").exists()
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=600.0)
+@patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
 def test_process_file_video_input(
     mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg, tmp_path
 ):

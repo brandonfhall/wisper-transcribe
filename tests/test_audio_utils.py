@@ -349,6 +349,156 @@ def test_extract_first_audio_track_ffmpeg_not_found(tmp_path):
             convert_to_wav(mp4_file)
 
 
+def test_convert_to_wav_honours_out_path(tmp_path):
+    """out_path names the WAV ffmpeg writes (parents created); no temp file."""
+    mp4_file = tmp_path / "session.mp4"
+    mp4_file.write_bytes(b"fake mp4")
+    target = tmp_path / "job" / "extracted" / "audio.wav"
+
+    from wisper_transcribe.audio_utils import convert_to_wav
+
+    with patch("wisper_transcribe.audio_utils.subprocess.run",
+               return_value=_mock_ffprobe(None)), \
+         patch("wisper_transcribe.audio_utils.subprocess.Popen",
+               side_effect=_make_mock_popen()) as mock_popen:
+        result = convert_to_wav(mp4_file, out_path=target)
+
+    assert result == target and target.exists()
+    assert mock_popen.call_args[0][0][-1] == str(target)
+
+
+def test_interrupted_extraction_kills_ffmpeg_and_removes_partial_file(tmp_path):
+    """A progress loop that raises (job cancellation) must not leave ffmpeg
+    running or a partial WAV behind."""
+    mp4_file = tmp_path / "session.mp4"
+    mp4_file.write_bytes(b"fake mp4")
+    target = tmp_path / "out" / "audio.wav"
+    procs: list[MagicMock] = []
+
+    def _popen(cmd, **kw):
+        Path(cmd[-1]).write_bytes(b"RIFF" + b"\x00" * 10)
+        proc = MagicMock()
+
+        def _stdout():
+            yield b"out_time=00:00:01.000000\n"
+            raise InterruptedError("Job cancelled by user")
+
+        proc.stdout = _stdout()
+        proc.stderr = iter([])
+        procs.append(proc)
+        return proc
+
+    from wisper_transcribe.audio_utils import convert_to_wav
+
+    with patch("wisper_transcribe.audio_utils.subprocess.run",
+               return_value=_mock_ffprobe(10.0)), \
+         patch("wisper_transcribe.audio_utils.subprocess.Popen", side_effect=_popen):
+        with pytest.raises(InterruptedError):
+            convert_to_wav(mp4_file, out_path=target)
+
+    procs[0].kill.assert_called_once()
+    procs[0].wait.assert_called()
+    assert not target.exists()
+
+
+def test_ffmpeg_not_found_removes_the_out_path_file(tmp_path):
+    mp4_file = tmp_path / "clip.mp4"
+    mp4_file.write_bytes(b"fake")
+    target = tmp_path / "out" / "audio.wav"
+
+    from wisper_transcribe.audio_utils import convert_to_wav
+
+    with patch("wisper_transcribe.audio_utils.subprocess.run",
+               return_value=_mock_ffprobe(None)), \
+         patch("wisper_transcribe.audio_utils.subprocess.Popen",
+               side_effect=FileNotFoundError("ffmpeg")):
+        with pytest.raises(RuntimeError):
+            convert_to_wav(mp4_file, out_path=target)
+
+    assert not target.exists()
+
+
+# ---------------------------------------------------------------------------
+# encode_flac
+# ---------------------------------------------------------------------------
+
+def test_encode_flac_writes_through_a_temp_name(tmp_path):
+    from wisper_transcribe.audio_utils import encode_flac
+    from wisper_transcribe.transcript_store import TEMP_PREFIX
+
+    src = tmp_path / "audio.wav"
+    src.write_bytes(b"wav")
+    dst = tmp_path / "Session.flac"
+    seen: list[Path] = []
+
+    def _run(cmd, **kw):
+        out = Path(cmd[-1])
+        seen.append(out)
+        assert not dst.exists()
+        out.write_bytes(b"fLaC")
+        return MagicMock(returncode=0, stderr=b"")
+
+    with patch("wisper_transcribe.audio_utils.subprocess.run", side_effect=_run) as run:
+        encode_flac(src, dst)
+
+    cmd = run.call_args[0][0]
+    assert "0:a:0" in cmd and "flac" in cmd and "16000" in cmd and cmd[cmd.index("-ac") + 1] == "1"
+    assert seen[0].name == TEMP_PREFIX + "Session.flac"
+    assert dst.read_bytes() == b"fLaC"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["Session.flac", "audio.wav"]
+
+
+def test_encode_flac_failure_leaves_no_temp_file_and_keeps_dst(tmp_path):
+    from wisper_transcribe.audio_utils import encode_flac
+
+    src = tmp_path / "audio.wav"
+    src.write_bytes(b"wav")
+    dst = tmp_path / "Session.flac"
+    dst.write_bytes(b"previous")
+
+    def _run(cmd, **kw):
+        Path(cmd[-1]).write_bytes(b"half")
+        return MagicMock(returncode=1, stderr=b"boom")
+
+    with patch("wisper_transcribe.audio_utils.subprocess.run", side_effect=_run):
+        with pytest.raises(ValueError):
+            encode_flac(src, dst)
+
+    assert dst.read_bytes() == b"previous"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["Session.flac", "audio.wav"]
+
+
+def test_encode_flac_replace_failure_removes_the_temp_file(tmp_path):
+    from wisper_transcribe.audio_utils import encode_flac
+
+    src = tmp_path / "audio.wav"
+    src.write_bytes(b"wav")
+    dst = tmp_path / "Session.flac"
+
+    def _run(cmd, **kw):
+        Path(cmd[-1]).write_bytes(b"fLaC")
+        return MagicMock(returncode=0, stderr=b"")
+
+    with patch("wisper_transcribe.audio_utils.subprocess.run", side_effect=_run), \
+         patch("os.replace", side_effect=PermissionError("in use")):
+        with pytest.raises(PermissionError):
+            encode_flac(src, dst)
+
+    assert not dst.exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["audio.wav"]
+
+
+def test_encode_flac_without_ffmpeg_raises_runtime_error(tmp_path):
+    from wisper_transcribe.audio_utils import encode_flac
+
+    src = tmp_path / "audio.wav"
+    src.write_bytes(b"wav")
+    with patch("wisper_transcribe.audio_utils.subprocess.run", side_effect=FileNotFoundError("ffmpeg")):
+        with pytest.raises(RuntimeError, match="ffmpeg not found"):
+            encode_flac(src, tmp_path / "x.flac")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["audio.wav"]
+
+
 # ---------------------------------------------------------------------------
 # load_wav_as_tensor
 # ---------------------------------------------------------------------------

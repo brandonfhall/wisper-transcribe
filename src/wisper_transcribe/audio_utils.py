@@ -54,7 +54,7 @@ def _probe_duration(video_path: Path) -> float | None:
     return None
 
 
-def _extract_first_audio_track(source_path: Path) -> Path:
+def _extract_first_audio_track(source_path: Path, out_path: Path | None = None) -> Path:
     """Convert any audio or video file to a 16kHz mono WAV via streaming ffmpeg.
 
     Streams ffmpeg's ``-progress pipe:1`` output to drive a tqdm progress bar
@@ -67,12 +67,20 @@ def _extract_first_audio_track(source_path: Path) -> Path:
     decoded PCM into memory and raises ``Unable to process >4GB files`` for
     long-form audio (e.g. multi-hour audiobooks decoded at native rate).
     Streaming through ffmpeg has no such limit.
+
+    With ``out_path`` the WAV is written there (parents created); otherwise a
+    temp file is used. A failure or interruption kills ffmpeg and removes the
+    partial output.
     """
     from tqdm import tqdm as _tqdm
 
-    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    tmp.close()
-    out_path = Path(tmp.name)
+    if out_path is not None:
+        out_path = Path(out_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        tmp.close()
+        out_path = Path(tmp.name)
 
     total_seconds = _probe_duration(source_path)
 
@@ -95,68 +103,78 @@ def _extract_first_audio_track(source_path: Path) -> Path:
             stderr=subprocess.PIPE,
         )
     except FileNotFoundError as exc:
+        out_path.unlink(missing_ok=True)
         raise RuntimeError(
             "ffmpeg not found. Install it to process audio and video files: "
             "https://ffmpeg.org/download.html"
         ) from exc
 
-    # Drain stderr in the background so the pipe never blocks.
-    stderr_lines: list[str] = []
-
-    def _drain() -> None:
-        for line in proc.stderr:
-            stderr_lines.append(line.decode(errors="replace").rstrip())
-
-    drain_thread = threading.Thread(target=_drain, daemon=True)
-    drain_thread.start()
-
-    # Drive a tqdm bar from ffmpeg's structured progress output.
-    bar_kw: dict = dict(
-        desc="Extracting audio",
-        unit="%",
-        bar_format="{desc}: {percentage:3.0f}%|{bar}| [{elapsed}<{remaining}]",
-    )
-    if total_seconds:
-        pbar = _tqdm(total=100, **bar_kw)
-    else:
-        # Duration unknown — show time elapsed without a percentage.
-        pbar = _tqdm(total=None, desc="Extracting audio",
-                     bar_format="{desc}: {elapsed} elapsed")
-
-    last_pct = 0
     try:
-        for raw in proc.stdout:
-            m = _OUT_TIME_RE.match(raw.decode(errors="replace").strip())
-            if m and total_seconds:
-                h, mn, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
-                elapsed_s = h * 3600 + mn * 60 + s
-                pct = min(int(elapsed_s / total_seconds * 100), 99)
-                if pct > last_pct:
-                    pbar.update(pct - last_pct)
-                    last_pct = pct
-        if total_seconds:
-            pbar.update(100 - last_pct)
-    finally:
-        pbar.close()
+        # Drain stderr in the background so the pipe never blocks.
+        stderr_lines: list[str] = []
 
-    proc.wait()
-    drain_thread.join(timeout=5)
+        def _drain() -> None:
+            for line in proc.stderr:
+                stderr_lines.append(line.decode(errors="replace").rstrip())
 
-    if proc.returncode != 0:
-        # Remove any partial output ffmpeg left before failing.
-        out_path.unlink(missing_ok=True)
-        stderr_tail = "\n".join(stderr_lines[-10:])
-        raise ValueError(
-            f"ffmpeg could not extract audio from {source_path.name!r}. "
-            f"Does the file have an audio track?\nffmpeg: {stderr_tail}"
+        drain_thread = threading.Thread(target=_drain, daemon=True)
+        drain_thread.start()
+
+        # Drive a tqdm bar from ffmpeg's structured progress output.
+        bar_kw: dict = dict(
+            desc="Extracting audio",
+            unit="%",
+            bar_format="{desc}: {percentage:3.0f}%|{bar}| [{elapsed}<{remaining}]",
         )
+        if total_seconds:
+            pbar = _tqdm(total=100, **bar_kw)
+        else:
+            # Duration unknown — show time elapsed without a percentage.
+            pbar = _tqdm(total=None, desc="Extracting audio",
+                         bar_format="{desc}: {elapsed} elapsed")
+
+        last_pct = 0
+        try:
+            for raw in proc.stdout:
+                m = _OUT_TIME_RE.match(raw.decode(errors="replace").strip())
+                if m and total_seconds:
+                    h, mn, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
+                    elapsed_s = h * 3600 + mn * 60 + s
+                    pct = min(int(elapsed_s / total_seconds * 100), 99)
+                    if pct > last_pct:
+                        pbar.update(pct - last_pct)
+                        last_pct = pct
+            if total_seconds:
+                pbar.update(100 - last_pct)
+        finally:
+            pbar.close()
+
+        proc.wait()
+        drain_thread.join(timeout=5)
+
+        if proc.returncode != 0:
+            # Remove any partial output ffmpeg left before failing.
+            out_path.unlink(missing_ok=True)
+            stderr_tail = "\n".join(stderr_lines[-10:])
+            raise ValueError(
+                f"ffmpeg could not extract audio from {source_path.name!r}. "
+                f"Does the file have an audio track?\nffmpeg: {stderr_tail}"
+            )
+    except BaseException:
+        # The progress loop can raise (cancellation); ffmpeg must not outlive it.
+        proc.kill()
+        proc.wait()
+        out_path.unlink(missing_ok=True)
+        raise
 
     _tqdm.write("  Audio extraction complete.")
     return out_path
 
 
-def convert_to_wav(path: Path) -> Path:
+def convert_to_wav(path: Path, out_path: Path | None = None) -> Path:
     """Convert an audio or video file to a 16kHz mono WAV.
+
+    ``out_path`` names the WAV ffmpeg writes; without it a temp file is used.
 
     Already-correct WAVs (16 kHz mono) are returned unchanged. Everything
     else is streamed through ffmpeg via ``_extract_first_audio_track``.
@@ -177,7 +195,48 @@ def convert_to_wav(path: Path) -> Path:
         except wave.Error:
             pass
 
-    return _extract_first_audio_track(path)
+    return _extract_first_audio_track(path, out_path)
+
+
+def encode_flac(src: Path, dst: Path) -> None:
+    """Encode ``src``'s first audio track to a 16 kHz mono FLAC at ``dst``.
+
+    Writes to a temp name beside ``dst`` and replaces ``dst`` only on success,
+    so a failed encode never leaves a half-written or truncated ``dst``.
+    """
+    import os
+
+    from wisper_transcribe.transcript_store import TEMP_PREFIX
+
+    src, dst = Path(src), Path(dst)
+    tmp = dst.with_name(TEMP_PREFIX + dst.name)
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", str(src),
+                "-map", "0:a:0",
+                "-ac", "1",
+                "-ar", "16000",
+                "-c:a", "flac",
+                "-f", "flac",
+                str(tmp),
+            ],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            tail = (result.stderr or b"").decode(errors="replace").strip()[-300:]
+            raise ValueError(f"ffmpeg could not encode FLAC from {src.name!r}: {tail}")
+        os.replace(tmp, dst)
+    except FileNotFoundError as exc:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(
+            "ffmpeg not found. Install it to process audio and video files: "
+            "https://ffmpeg.org/download.html"
+        ) from exc
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def get_duration(path: Path) -> float:

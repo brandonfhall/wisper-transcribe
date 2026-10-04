@@ -149,6 +149,7 @@ If wisper crashes or the machine loses power mid-session, the recording shows **
 
 ## Known Limitations
 
+- **Only the first audio track of an uploaded file is transcribed and kept.** To use a different track, export it from the original and upload that.
 - **One recording at a time.** Starting a Discord or local recording while either kind is active is rejected.
 - **One voice channel per Discord session.** No multi-guild or multi-channel recording.
 - **Discord recording needs Java.** Discord encrypts voice end-to-end (DAVE); the Java JDA + JDAVE sidecar decrypts it, since no stable Python library supports DAVE receive.

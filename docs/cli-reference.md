@@ -249,7 +249,7 @@ wisper campaigns relabel d-d-mondays --no-backfill  # only use voice data alread
 - Automatically assigned names are matched against the campaign roster again, so a player enrolled after a session was transcribed gets named in it.
 - An unknown voice heard in two or more sessions gets one shared name, `Recurring Speaker N`. Name them once in any session's wizard and the others follow.
 - Names you set by hand are never changed.
-- Sessions with no stored voice data have it re-extracted from the saved source audio when that still exists (web uploads keep it next to the transcript). Sessions without either are skipped and listed.
+- Sessions with no stored voice data have it re-extracted from the transcript's kept audio (the `<name>.flac` an upload leaves beside it, or a recording's `combined.wav`). Sessions without either are skipped and listed.
 
 ```
 Options:

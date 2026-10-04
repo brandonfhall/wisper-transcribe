@@ -402,6 +402,8 @@ def process_file(
     title: Optional[str] = None,
     forced_alignment: Optional[str] = None,
     skip_existing: bool = True,
+    output_stem: Optional[str] = None,
+    source_name: Optional[str] = None,
     _result_store: Optional[dict] = None,
 ) -> Path:
     """Run the full pipeline on one audio file and return the output .md path.
@@ -419,6 +421,10 @@ def process_file(
 
     ``title`` overrides the frontmatter title without changing the output
     filename, so free text never becomes a path.
+
+    ``output_stem`` names the ``.md`` (and the default title) when the input's
+    own name isn't the transcript's; ``source_name`` is the frontmatter
+    ``source_file`` when the input is a derived file.
 
     With diarization on and no speaker-count arguments, config
     ``min_speakers``/``max_speakers`` constrain the diarizer.
@@ -474,7 +480,8 @@ def process_file(
 
     out_dir = Path(output_dir) if output_dir else path.parent
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / (path.stem + ".md")
+    out_stem = output_stem or path.stem
+    out_path = out_dir / (out_stem + ".md")
 
     if out_path.exists() and not overwrite:
         from .transcript_store import TranscriptExistsError
@@ -644,8 +651,8 @@ def process_file(
                             speaker_metadata.append({"name": label, "role": ""})
 
         metadata = {
-            "title": title or path.stem.replace("_", " ").replace("-", " ").title(),
-            "source_file": path.name,
+            "title": title or out_stem.replace("_", " ").replace("-", " ").title(),
+            "source_file": source_name or path.name,
             "date_processed": datetime.date.today().isoformat(),
             "duration": format_duration(duration),
             "speakers": speaker_metadata,

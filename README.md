@@ -42,6 +42,8 @@ Each audio file produces a `.md` transcript with speaker labels and timestamps:
 
 YAML frontmatter (title, date, speakers, duration) makes these files easy to ingest into NotebookLM or Obsidian.
 
+Only the first audio track of an uploaded file is transcribed. wisper keeps that track as a compact audio copy for playback and re-transcription, not the original file: a video's picture and any other audio tracks are discarded, so keep your originals.
+
 ---
 
 ## Documentation
