@@ -64,7 +64,7 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 
 | Phase | State | Commit |
 |---|---|---|
-| Planning: gate review, design, reviewer cycles | in progress (cycle 2 fixed; cycle 3 next) | |
+| Planning: gate review, design, reviewer cycles | in progress (cycle 3 fixed; cycle 4 next) | |
 | 1 — Schema v11; campaign queries; journal into the campaign folder | not started | |
 | 2a — Location API (`transcript_store.locate` and friends), no callers changed | not started | |
 | 2b — Every caller resolves through the location API | not started | |
@@ -118,6 +118,10 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
   - Every function that touches the database takes `conn: Optional[sqlite3.Connection] = None`. With one, it runs in the caller's transaction; without one, it opens its own `db.transaction()`.
   - **Never open a second connection or transaction while this thread holds one; pass `conn`.**
   - Functions that move or delete *files* take no `conn`: files change only after the owner's transaction commits ("files follow rows").
+- **Output root resolution:**
+  - New code (`campaign_folders`, the Locations section, `journal`, move/rename, the folder rename) resolves the root with `config.get_output_root()`, which never creates it. `path_utils.get_output_dir()` creates the root and stays only in existing callers. Every "is the output root there?" check is `get_output_root().is_dir()`.
+  - Every `file_registry` call (`add`, `add_if_owned`, `move`, `forget`, `repoint`) receives the **output root** as `output_dir`, never a session's own folder: `file_registry` builds `rel_path` relative to that argument, so passing `md.parent` for a session in `<root>/Folder/` stores `S.md` instead of `Folder/S.md`, and a later delete can hit another session's file.
+- **Stem lookups use the indexes:** branch in Python, `campaign_id = ? AND stem = ?` for a campaign and `campaign_id IS NULL AND stem = ?` for the root. Never bind `campaign_id IS ?` in these lookups: neither partial unique index serves it (`EXPLAIN QUERY PLAN` shows a campaign scan).
 - **Windows can't be reproduced on macOS:** `os.replace`, `os.rename`, and `unlink` fail on a file or folder another program holds open (Obsidian, Explorer, a player, the search indexer).
   - Every move and rename catches `PermissionError`/`OSError`, reports it, and leaves the database matching the disk.
   - Test it by monkeypatching `os.replace`/`os.rename` to raise `PermissionError`.
@@ -258,6 +262,10 @@ Brandon's answers are dated 2026-10-04 unless noted. Rows marked *default* are t
 | **wisper owns a campaign folder only when it claimed it:** it created the folder, or found it absent or empty (`campaigns.folder_claimed`). Only a claimed folder is scanned, written to (sessions, journal), renamed, or removed. An existing non-empty folder with the campaign's name is never adopted automatically; it's listed under Needs attention as "folder taken", where the user either renames the campaign or chooses **Use this folder**, which claims it after saying that every `.md` in it becomes a session (*default*). wisper never creates the output root itself, and an absent campaign folder or output root means "unavailable", never "deleted". Creating or renaming a campaign is refused when the folder name matches (ignoring case) an existing entry in the output root, except when that folder holds only this campaign's `<folder> Journal.md` (left by a keep-files delete), which is re-claimed. | The output root can be the user's vault. A scanned folder registers every `.md` as a session, and a registered file can later be deleted by wisper. |
 | A campaign folder rename runs in two steps: the display name and slug change at once, the folder changes on disk, then `campaigns.folder` and every path under it. `campaigns.folder_pending` records the target, so a crash or a locked folder leaves a state that startup finishes, or that Needs attention retries. | On Windows a folder can't be renamed while any file in it is open. |
 | Transcript URLs use the row id: `/transcripts/{id}/…` (the `{transcript_id:int}` path convertor, so a name falls through). An old `/transcripts/{name}` page URL redirects when exactly one transcript has that name; old sub-page URLs (`/summary`, `/audio`, `/edit`) don't (*default*). | Names aren't unique across campaigns. An integer path parameter also removes the path-traversal surface from 16 routes. |
+| Overwrite deletes the existing session first, then moves the chosen one in. If the chosen one's `.md` then can't move (locked), the move is refused: the overwritten session is gone and the chosen one is unchanged where it was (*default*). | The user chose to replace that session; holding both through a temp file adds a third state to recover from. The prompt's Overwrite text says the existing session is deleted. |
+| A claimed campaign folder that disappears (renamed or deleted outside wisper, or an unmounted drive) is never recreated silently. Writes into it are refused (`folder_missing`), its sessions read missing, and Needs attention offers **Recreate folder** or renaming the campaign (*default*). | Recreating it on an empty remount would let the journal check see "folder present, journal gone" and reset the journal's fold state. |
+| New session names (uploads, keep-both, Rename) are at most 100 characters, don't start with `.`, and aren't Windows reserved names. Existing longer names are kept. | A typical Windows vault path (~45) + folder (80) + separators + name (100) + `_excerpt_SPEAKER_00.mp3` (23) stays under MAX_PATH (260). A leading `.wisper-tmp-` name would be swept as a temp file. |
+| Adopting a legacy journal keeps the old file renamed to `journal.md.v11-adopted` beside it, instead of deleting it. `docs/configuration.md` documents a rollback: restore the `wisper-v10-*.db` snapshot, rename each `journal.md.v11-adopted` back, and move session files back to the output root. | A v10 build that finds no `journal.md` resets the journal. |
 | Moving a transcript to another campaign, or out of all of them, moves its `.md` and every registered file (summary, sidecar, excerpts, audio, backup) into the target folder. The database changes first, then the files follow. If the `.md` can't move (locked), the database change is undone and the move is refused. A companion that can't move stays, and the transcript reads as misplaced until Move files finishes it. A session flagged missing moves in the database only. | "Files follow rows". The registry keeps a partial move consistent. |
 | A move, rename, or upload that would land on an existing name prompts **Overwrite**, **Keep both** (saved as `<name> (2)`), or **Cancel**, showing the existing file's last-modified time. Overwrite is offered only when the existing file is a wisper transcript (it has a `files` row); otherwise only Keep both or Cancel. A bulk move doesn't prompt: a clashing transcript stays where it is and is listed in the result (*default*). | Brandon, 2026-10-03 (the prompt). wisper never overwrites a file it doesn't own. |
 | wisper gets a **Rename** action for transcripts (web and CLI). It renames the `.md` and every companion together, with the same clash prompt. | Brandon, 2026-10-03 (*default*: in scope). |
@@ -418,7 +426,8 @@ CREATE TABLE files_new (
                                      AND rel_path NOT GLOB '[A-Za-z]:*' AND rel_path NOT GLOB '*/'
                                      AND rel_path NOT GLOB '*//*'
                                      AND '/' || rel_path || '/' NOT GLOB '*/../*'
-                                     AND '/' || rel_path || '/' NOT GLOB '*/./*'),
+                                     AND '/' || rel_path || '/' NOT GLOB '*/./*'
+                                     AND instr(CAST(rel_path AS BLOB), x'00') = 0),
   label         TEXT CHECK (label IS NULL OR (label <> '' AND label NOT GLOB '*[/\:]*')),
   transcript_id INTEGER REFERENCES transcripts(id) ON DELETE CASCADE,
   recording_id  TEXT    REFERENCES recordings(id)  ON DELETE CASCADE,
@@ -456,6 +465,8 @@ CREATE TABLE files_new (
 ) STRICT;
 CREATE TEMP TABLE v11_dropped AS
   SELECT id, kind, rel_path FROM files WHERE root = 'output' AND rel_path GLOB '*/*/*';
+CREATE TEMP TABLE v11_journals AS
+  SELECT c.slug FROM files f JOIN campaigns c ON c.id = f.campaign_id WHERE f.kind = 'journal';
 INSERT INTO files_new SELECT * FROM files
   WHERE kind <> 'journal' AND NOT (root = 'output' AND rel_path GLOB '*/*/*');
 DROP TABLE files;
@@ -471,14 +482,14 @@ END;
 ```
 
 **`_v11_import(conn, ctx)`** (self-contained: it imports no application module, like `_v9_import`):
-1. For each row of `temp.v11_dropped`: `ctx.note(f"file record {rel_path!r} ({kind}) was more than one folder deep; dropped")`. Then `DROP TABLE temp.v11_dropped`.
+1. For each row of `temp.v11_dropped`: `ctx.note(f"file record {rel_path!r} ({kind}) was more than one folder deep; dropped")`. Then `DROP TABLE temp.v11_dropped`. Also note each campaign whose data-root journal row was dropped (from `temp.v11_journals`, which the DDL fills before the `files` copy; drop it after): `ctx.note(f"campaign {slug}: journal record dropped; the file moves into the campaign folder on first read")`.
 2. For each campaign in `id` order:
    - `folder = _v11_folder_name(display_name)`;
    - while `folder.casefold()` is taken by an earlier campaign, try `_v11_folder_name(display_name, room=80 - len(sfx)) + sfx` for `sfx = " (2)", " (3)", …`;
    - `UPDATE campaigns SET folder = ?`.
 
    A campaign whose folder differs from its display name gets `ctx.note(f"campaign {slug}: folder {folder!r}")`.
-3. **Backfill `transcript` rows.** For each transcript with no `kind = 'transcript'` row in `files`, in `id` order: `INSERT INTO files (kind, root, rel_path, transcript_id) VALUES ('transcript', 'output', stem || '.md', id) ON CONFLICT DO NOTHING`. The row is stat-less (`size`/`mtime_ns` NULL); `file_registry.sync` fills the stat on its next pass. An `IntegrityError` (a stem the `transcript` CHECK rejects, such as one ending `.summary`) gets `ctx.note(f"transcript {id}: {stem!r}.md not registered ({exc})")` and is skipped. This is `_v9_import`'s pattern.
+3. **Backfill `transcript` rows.** For each transcript with no `kind = 'transcript'` row in `files`, in `id` order: `INSERT INTO files (kind, root, rel_path, transcript_id) VALUES ('transcript', 'output', stem || '.md', id) ON CONFLICT DO NOTHING`. The row is stat-less (`size`/`mtime_ns` NULL); `file_registry.sync` fills the stat on its next pass. An `IntegrityError` (a stem the `transcript` CHECK rejects, such as one ending `.summary`) gets `ctx.note(f"transcript {id}: {stem!r}.md not registered ({exc})")` and is skipped. A `rowcount` of 0 (the path is already registered to another transcript, e.g. Linux case twins) gets `ctx.note(f"transcript {id}: {stem!r}.md already registered to another transcript; not registered")`. This is `_v9_import`'s pattern.
 4. It touches no files (it reads none either).
 5. `db.py` gains `import re` and `import unicodedata` for the sanitizer.
 
@@ -546,7 +557,8 @@ def _v11_folder_name(display_name: str, room: int = 80) -> str:
   - campaign id 0 and the root may share a stem.
 - **Schema drift:** `db.status()` reports no drift on a migrated database (`expected_schema(11)` replays the DDL; the temp table isn't in `sqlite_master`).
 - **Backslashes:** `test_v11_ddl_backslashes` (above), plus `test_db_py_has_no_invalid_escapes`: `compile()` `db.py`'s source under `warnings.simplefilter("error", SyntaxWarning)`. Python keeps an invalid escape like `\]` literally, so only the warning catches a single backslash.
-- **NUL:** a `folder` containing `char(0)` is refused.
+- **NUL:** a `folder` or a `files.rel_path` containing `char(0)` is refused (GLOB stops at NUL, so `'a.md' || char(0) || '/b/c.md'` would otherwise pass the depth CHECK).
+- **Reserved names** are enforced by the sanitizer and the app only; the `folder` CHECK accepts `CON`. Say so in the "Why each constraint" list.
 
 ---
 
@@ -576,22 +588,24 @@ def _v11_folder_name(display_name: str, room: int = 80) -> str:
 2. **New module `campaign_folders.py`:**
    - `folder_name(display_name, room=80) -> str`: a copy of `_v11_folder_name`. It imports nothing from `db.py`, so the frozen copy stays separate.
    - `journal_name(folder) -> str`: `f"{folder} Journal.md"`.
-   - `unique_folder(conn, display_name, *, exclude_id=None) -> str`: v11's suffix rule, used only by `create_campaign` until Phase 7 replaces it with a refusal. It compares casefold against every other campaign's `folder` and `folder_pending`.
+   - `unique_folder(display_name, conn=None, *, exclude_id=None) -> str`: v11's suffix rule, used only by `create_campaign` until Phase 7 replaces it with a refusal. It compares casefold against every other campaign's `folder` and `folder_pending`.
    - `class FolderTakenError(Exception)`.
-   - **`ensure_folder(campaign_id, conn=None, *, data_dir=None, output_dir=None) -> Path`**, checked in this order:
-     1. **Output root absent** (an unmounted drive or vault) → raise `FileNotFoundError`. Every `mkdir` here is `mkdir(exist_ok=True)` **without** `parents`, so wisper never creates the output root itself.
-     2. **Pending rename:** if `folder_pending` is set, raise `FolderPendingError(folder)` (a subclass of `FolderTakenError`). Phase 7 makes this try `finish_folder_rename` first.
-     3. **Claimed:** if `folder_claimed = 1`, `mkdir` and return `output / folder`.
+   - **`ensure_folder(campaign_id, *, data_dir=None, output_dir=None) -> Path`** takes **no** `conn`: callers call it with no transaction open (it opens its own short one for the claim, and from Phase 7 may finish a folder rename). `output_dir` defaults to `get_output_root()`. Checked in this order:
+     1. **Output root absent** (an unmounted drive or vault) → raise `FileNotFoundError`. Nothing here passes `parents=True`, so wisper never creates the output root itself.
+     2. **Pending rename:** if `folder_pending` is set, raise `FolderPendingError(folder)`. Phase 7 makes this try `finish_folder_rename` first.
+     3. **Claimed:** if `folder_claimed = 1`: the folder exists → return `output / folder`; it doesn't → raise `FolderMissingError(folder)`. A claimed folder that vanished (renamed or deleted outside wisper, or a drive remounted empty) is never recreated here.
      4. **Unclaimed:**
-        - absent, or an empty directory → `mkdir`, set `folder_claimed = 1`, return it;
+        - absent → `mkdir(exist_ok=False)`; on `FileExistsError` (it appeared meanwhile) fall through to the next two checks. Then set `folder_claimed = 1` and return it;
+        - an empty directory → claim it;
         - a directory that holds only `journal_name(folder)` → claim it (a keep-files delete left it);
         - anything else → raise `FolderTakenError(folder)`.
 
         "Empty" ignores OS clutter: `.DS_Store`, `._*`, `Thumbs.db`, `desktop.ini`, and `TEMP_PREFIX` files (`is_clutter(name) -> bool`, also used by Phase 7's `check_available`).
-     - Takes `conn` for the claim update; does its mkdir before that update.
+   - **`recreate_folder(campaign_id, …) -> Path`:** for a claimed campaign whose folder is gone and whose output root exists, `mkdir` it. Only the Needs attention **Recreate folder** action (Phase 4) calls it.
    - **`claim_folder(campaign_id, conn=None, …) -> None`:** sets `folder_claimed = 1` on an existing non-empty folder. Only the Needs attention "Use this folder" action (Phase 4) calls it, after the user confirms that every `.md` in it becomes a session.
    - `is_claimed(campaign_id, conn=None) -> bool`.
-   - `class FolderPendingError(FolderTakenError)`.
+   - `class FolderPendingError(FolderTakenError)` and `class FolderMissingError(FolderTakenError)`: callers that refuse on `FolderTakenError` refuse on both; routes map them to `folder_pending` and `folder_missing` codes.
+   - `is_reserved(name) -> bool`: the part before the first dot, right-stripped, upper-cased, is in the reserved set (the same set as `_V11_RESERVED`). Phase 6's `validate_new_stem` and Phase 5's upload name check use it.
    - New `tests/test_campaign_folders.py`.
 3. **`Campaign` gains `id: int = 0`, `folder: str = ""`, and `transcript_ids: list[int]`** (same order as `transcripts`). `load_campaigns` fills them.
 4. **`campaign_manager` against `transcripts`:**
@@ -604,9 +618,10 @@ def _v11_folder_name(display_name: str, room: int = 80) -> str:
 
      A session moving in from another campaign changes `campaign_id` in that update, and `transcripts_campaign_bu` deletes its journal entry. Keep the docstring's two-step reason.
    - **The other functions:** `_stems`, `remove_transcript_from_campaign`, `reorder_campaign_transcript`, `set_campaign_transcript_order`, `get_campaign_for_transcript`, `get_transcripts_for_campaign`, and `load_campaigns` read and write `transcripts.campaign_id`/`position`. Appending uses `(SELECT coalesce(max(position), -1) + 1 FROM transcripts WHERE campaign_id = ?)`.
-   - **`create_campaign`** sets `folder = unique_folder(conn, display_name)`, and creates no directory.
+   - **`create_campaign`** sets `folder = unique_folder(display_name, conn)`, and creates no directory.
    - **`delete_campaign`:** in the transaction that deletes the campaign, first `UPDATE transcripts SET campaign_id = NULL, position = NULL WHERE campaign_id = ?`, since the schema refuses the delete otherwise. Phase 7 replaces it.
      - It deletes only journal paths read from the registry (`paths_for_delete`). The `journal_path(slug)` fallback at `campaign_manager.py:226-230` goes: after v11 that path can be a user's own note in a folder wisper never claimed.
+     - After commit it also unlinks `legacy_journal_path(slug)`, its pending file, and `journal.md.v11-adopted` (wisper's own data dir), so a later campaign with the same slug doesn't adopt a deleted campaign's journal.
    - **Interim unassign clash (until Phases 6–7 replace these paths):** from Phase 4 on, a campaign and the root can hold the same stem, so the unassign in `delete_campaign`, `remove_transcript_from_campaign`, and `_write_order`'s drop can hit `transcripts_root_stem`. Each catches that `sqlite3.IntegrityError`, rolls back, and raises `ValueError(f"a session named {stem!r} is already in the output root")`; the campaign routes show the existing generic error flash. A test seeds the clash and checks the refusal.
 5. **Every other `campaign_transcripts` query** (`grep -n campaign_transcripts src/` minus `db.py` and `legacy_import.py`: `journal.py` 254, 420; `search_index.py` 581, 628; `job_history.py` 182; `recording_manager.py` 127; `transcript_store.py` 758, 780, 831, 913, 1028) joins `transcripts.campaign_id` instead. The mechanical rule: `JOIN campaign_transcripts ct ON ct.transcript_id = t.id` → drop the join, `ct.campaign_id` → `t.campaign_id`, `ct.position` → `t.position`; a `LEFT JOIN … WHERE ct.campaign_id IS NULL` ("no campaign") → `t.campaign_id IS NULL`. The ones that need more than that:
    - `job_history._FROM`: `coalesce(j.campaign_id, t.campaign_id, rec.campaign_id, …)`;
@@ -615,55 +630,62 @@ def _v11_folder_name(display_name: str, room: int = 80) -> str:
 
    Update the comments naming `campaign_transcripts`: `campaigns.py` 264, 303; `job_history.py` 178; `transcript_store.py` 1028.
 6. **Journal location** (`journal.py`):
-   - **`journal_path(slug, data_dir=None, *, conn=None, output_dir=None) -> Optional[Path]`** (`data_dir` stays second, so existing positional callers keep working):
+   - **`journal_path(slug, data_dir=None, *, conn=None, output_dir=None) -> Optional[Path]`** (`data_dir` stays second, so existing positional callers keep working; callers inside a transaction pass its `conn`; `output_dir` defaults to `get_output_root()`):
      - `None` for an invalid slug or a slug with no campaign;
      - the campaign's `journal` row path if registered;
      - else, **only when `folder_claimed = 1`**, `output / folder / journal_name(folder)`;
      - else `None`: wisper never reads, adopts, or deletes a file in a folder it hasn't claimed.
      - `output` is `output_dir`, or `get_output_dir()`.
 
-     Every caller handles `None` as "no journal yet": `journal.py` 185, 235, 276, 367; `campaign_manager.py` 228 (removed above); `cli.py` 962; `web/routes/campaigns.py` 83, 404.
+     Every caller handles `None` as "no journal yet": `journal.py` 185, 235, 276, 367; `campaign_manager.py` 228 (removed above); `cli.py` 962; `web/routes/campaigns.py` 83, 404. Slug validation moves out of the path lookup: `reset_journal` and `export_journal` validate the slug (`ValueError("Invalid campaign slug")` as today) and then treat a `None` path as "no journal", never as an invalid slug.
+   - **Order of calls** in `export_journal`, `update_journal`, and the campaign page: `adopt_legacy_journal` (no transaction) → for `update_journal` only, `ensure_folder` (no transaction) → `sync_journal` → `journal_path` read **after** sync (it can change from `None` to a path when adoption claims the folder) → for `update_journal`, the LLM call outside any transaction.
 
      `JOURNAL_FILENAME` goes, and `PENDING_SUFFIX` stays: the pending file sits beside the journal.
    - **`legacy_journal_path(slug, data_dir=None) -> Path`:** `get_campaigns_dir(data_dir) / slug / "journal.md"`.
-   - **`adopt_legacy_journal(slug, data_dir=None, output_dir=None) -> str`.** Call it with no transaction open. It returns `"none" | "adopted" | "kept" | "folder_taken" | "failed"`:
+   - **`adopt_legacy_journal(slug, data_dir=None, output_dir=None) -> str`.** Call it with no transaction open. It returns `"none" | "adopted" | "kept" | "folder_taken" | "unavailable" | "failed"`:
      1. No legacy `journal.md` and no legacy pending file → `"none"`.
      2. **Pick the file to adopt.** If a legacy pending file exists and its sha256 equals `campaigns.journal_sha256`, it's a fold that committed before its file move, so it is the journal; otherwise delete the pending file. (This is `sync_journal`'s rule, applied at the legacy location.)
-     3. `ensure_folder(campaign_id)`. `FolderTakenError` → `"folder_taken"`, nothing moved.
+     3. `ensure_folder(campaign_id)`. `FolderTakenError` (including pending and missing) → `"folder_taken"`; `FileNotFoundError` (output root absent) → `"unavailable"`; nothing moved either way.
      4. **Target exists already:**
-        - its sha256 equals the chosen legacy file's, or `campaigns.journal_sha256` → a previous adoption crashed after `os.replace` and before the unlink: register it, unlink the legacy file(s), return `"adopted"`;
+        - its sha256 equals the chosen legacy file's, or `campaigns.journal_sha256` → a previous adoption crashed after `os.replace` and before the legacy file was set aside: register it, set the legacy file aside (below), return `"adopted"`;
         - otherwise → `"kept"`: log a warning, change nothing.
      5. **Copy across volumes** (the data dir and output root are separate Docker bind mounts, or separate Windows drives):
         - copy to a `TEMP_PREFIX` temp file in the target folder, `fsync`, and verify its sha256 equals the source's;
         - `os.replace` it to the target;
         - register it (`add_if_owned`, kind `journal`, owner the campaign);
-        - then unlink the legacy file(s) and remove `<data>/campaigns/<slug>/` if it's empty.
+        - then set the legacy file aside: `os.replace(journal.md, journal.md.v11-adopted)` (same directory, same volume), and unlink the legacy pending file. The `.v11-adopted` copy is what a rollback restores (Decisions).
         - Any `OSError` → `"failed"`, leaving the legacy file in place (and removing the temp file).
      6. Return `"adopted"`.
    - **`sync_journal(slug)`** calls `adopt_legacy_journal` **before** opening its transaction. Then:
      - if the legacy file still exists (any result other than `"none"`/`"adopted"`), it returns at once;
-     - if `journal_path` is `None` (unclaimed folder), or the output root or the campaign folder doesn't exist, it returns at once: an absent folder means "unavailable", not "deleted";
+     - if `journal_path` is `None` (unclaimed folder), or the output root (`get_output_root()`) or the campaign folder doesn't exist, it returns at once: an absent folder means "unavailable", not "deleted";
      - only when the claimed folder exists and the journal file doesn't does the existing "journal deleted → reset" branch run.
-   - **`reset_journal`** deletes the journal and pending file only when `journal_path` is not `None`, and always deletes the legacy file and pending file, so a rebuild never re-adopts the old text.
-   - **`update_journal`** calls `adopt_legacy_journal` first and continues only on `"none"` or `"adopted"`; otherwise it fails the job with a fixed code: `journal_folder_taken` for `"folder_taken"`, `journal_legacy_pending` for `"kept"` or `"failed"`.
-   - **`adopt_legacy_journals(data_dir=None, output_dir=None) -> dict[str, str]`** runs it for every campaign. `web/app.py` calls it at startup right after the migration, before `reconcile`, and logs non-`none` results.
-   - **Pending-file location:** `update_journal` writes its pending file beside the target, so it calls `ensure_folder` first. `FolderTakenError` (including `FolderPendingError`) fails the journal job with `journal_folder_taken`; `FileNotFoundError` (output root absent) with `journal_output_unavailable`.
+   - **`reset_journal`** deletes the journal and pending file only when `journal_path` is not `None`, and always deletes the legacy file, its pending file, and `journal.md.v11-adopted`, so a rebuild never re-adopts the old text.
+   - **`update_journal`** calls `adopt_legacy_journal` first and continues only on `"none"` or `"adopted"`; otherwise it fails the job with a fixed code: `journal_folder_taken` for `"folder_taken"`, `journal_output_unavailable` for `"unavailable"`, `journal_legacy_pending` for `"kept"` or `"failed"`.
+   - **`adopt_legacy_journals(data_dir=None, output_dir=None) -> dict[str, str]`** runs it for every campaign, catching and logging any exception per campaign as `"failed"`, so startup never fails on it. `web/app.py` calls it at startup right after the migration, before `reconcile`, and logs non-`none` results.
+   - **Pending-file location:** `update_journal` writes its pending file beside the target, so it calls `ensure_folder` first (see the order above). `FolderTakenError` (including pending and missing) fails the journal job with `journal_folder_taken`; `FileNotFoundError` (output root absent) with `journal_output_unavailable`. The target is `journal_path(...)` read after `ensure_folder`, which is the registered row or `<folder>/<folder> Journal.md`.
    - `journaled_stems` (254) and the 420 query order by `t.position` from `transcripts`.
 7. **`file_registry`:**
-   - `ROOT_OF_KIND["journal"] = "output"` (build it from `_OUTPUT_KINDS | {"journal"}`); `_OWNER_OF_KIND["journal"]` stays `"campaign"`.
+   - `ROOT_OF_KIND["journal"] = "output"`: add a separate `_OUTPUT_ROOT_KINDS = _OUTPUT_KINDS | {"journal"}` for `ROOT_OF_KIND` only. `_OUTPUT_KINDS` itself is unchanged, because `_OWNER_OF_KIND` spreads it as transcript-owned; `_OWNER_OF_KIND["journal"]` stays `"campaign"`.
    - `_scan_data` drops the `campaigns/*/journal.md` scan.
    - `_sync` adds, for each campaign with `folder_claimed = 1`: if `output / folder / journal_name(folder)` is a file, a `_Found("journal", path, "output", Owner("campaign", id))`.
 8. **Seeds and raw inserts:**
    - `tests/_seed.save_campaigns`:
-     - new campaigns get `folder = campaign_folders.unique_folder(conn, display_name)`;
+     - new campaigns get `folder = campaign_folders.unique_folder(display_name, conn)`;
      - before deleting a campaign it unassigns that campaign's transcripts (`campaign_id = NULL, position = NULL`);
-     - it assigns members with `transcript_store.ensure_row(conn, stem)` and a direct `UPDATE transcripts SET campaign_id = ?, position = ?` per stem in order, not through `cm._transcript_id`/`_write_order` (which become read-only and reorder-only).
+     - it assigns members with its own copy of `_write_order`'s two steps, not through `cm._transcript_id`/`_write_order` (which become read-only and reorder-only), so re-saving a campaign in a new order never collides with `UNIQUE (campaign_id, position)`:
+       1. `shift = max(position) + 1 + len(stems)`; `UPDATE transcripts SET position = position + shift WHERE campaign_id = ?`;
+       2. for each `(pos, stem)`: find the row by stem in **any** campaign or the root (`WHERE stem = ?`, `LIMIT 2`, `ValueError` when two match), else `ensure_row(conn, stem)` (root); then `UPDATE transcripts SET campaign_id = ?, position = ? WHERE id = ?`;
+       3. `UPDATE transcripts SET campaign_id = NULL, position = NULL WHERE campaign_id = ? AND position >= shift`: rows of the campaign that aren't listed are unassigned.
    - Add `seed_campaign(display_name, slug=None, *, claimed=False, data_dir=None) -> int`. Without `slug` it wraps `create_campaign`; with one it inserts the row directly (`slug`, `display_name`, `folder = unique_folder(...)`, `created_at`), since `create_campaign` always derives the slug. With `claimed`, it also calls `ensure_folder`. Returns the id.
    - Add `seed_transcript(stem, *, campaign=None, write_md=False, data_dir=None, output_dir=None) -> int`: `ensure_row`, then assign to campaign slug `campaign` (appended position) with a direct `UPDATE`. With `write_md`, it writes `<stem>.md` in the output root and registers it (`file_registry.add`), which is where every session lives until Phase 5. Returns the id.
    - The raw `INSERT INTO campaigns` statements in `tests/test_schema.py` (~28, ~92, ~299) gain a `folder` value.
 
 **Existing tests to rewrite** (find with `grep -n "campaign_transcripts\|journal.md\|get_campaigns_dir\|journal_path\|INSERT INTO campaigns" tests/*.py`):
 - `tests/test_schema.py`: the `campaign_transcripts` constraint cases (~32, 90, 107–115, 264, 293–301) become the same rules on `transcripts`.
+- `tests/test_db.py:446` (`db.migrate() == [9, 10]` → `[9, 10, 11]`), `~463` (`expected_schema(10)` → `expected_schema(11)`), `664–690` (patch to v8, then upgrade: through v11), and `tests/test_web_routes.py` ~3725–3760 (`_start_after_v8`): their expectations include v11.
+- `tests/test_schema.py:69`: the `journal` `files` row `campaigns/game/journal.md` in the data root becomes `<folder>/<folder> Journal.md` in the output root.
+- `tests/test_schema.py` cases `"one campaign per transcript"` and `"position unique"` (and every other insert into `campaign_transcripts`; find them with `grep -n campaign_transcripts tests/test_schema.py`) become the same rules on `transcripts.campaign_id`/`position`.
 - `tests/test_schema.py:103` (`"stem unique"`): the fixture's `s1` is in campaign 1, so a second root `s1` is legal at v11. It becomes two cases: a duplicate root stem is refused, and a duplicate stem within one campaign is refused.
 - `tests/test_campaign_manager.py` ~578–594; `tests/test_e2e.py` ~146, ~182; `tests/test_journal.py` ~810.
 - Journal-path tests in `test_journal.py`, `test_file_registry.py`, `test_web_routes.py`, `test_campaign_manager.py`, and `test_legacy_import.py` expect the journal in the campaign folder.
@@ -689,7 +711,12 @@ def _v11_folder_name(display_name: str, room: int = 80) -> str:
   - `reset_journal` removes the legacy file.
 - **Unclaimed folders are never touched:** a user's own `Hanataz/Hanataz Journal.md` in an unclaimed folder survives a campaign-page load (`sync_journal`), a rebuild (`reset_journal`), and `delete_campaign`; `journal_path` returns `None`.
 - **Unavailable output root:** with the claimed folder (or the output root) removed, `sync_journal` keeps `journal_entries` and `journal_sha256`; with the folder present and only the journal file gone, it resets.
-- **`ensure_folder`:** the output root absent → `FileNotFoundError` and nothing created; a folder holding only `.DS_Store` and `desktop.ini` is claimed; `folder_pending` set → `FolderPendingError`.
+- **`ensure_folder`:** the output root absent → `FileNotFoundError` and nothing created, **through the default path** (no `output_dir` argument, `WISPER_OUTPUT_DIR` pointing at a removed directory); a folder holding only `.DS_Store` and `desktop.ini` is claimed; `folder_pending` set → `FolderPendingError`; claimed but deleted → `FolderMissingError`, nothing created.
+- **Adoption with the output root absent** → `"unavailable"`, legacy file untouched; `adopt_legacy_journals` with one campaign raising still returns results for the others.
+- **Set aside:** after adoption, `<data>/campaigns/<slug>/journal.md.v11-adopted` holds the old text and `journal.md` is gone.
+- **Deleting an unadopted campaign** removes its legacy journal; a new campaign with that slug starts with no journal.
+- **`save_campaigns`** re-saving a campaign in reverse order, and with one stem dropped, leaves exactly the listed order and unassigns the dropped stem.
+- **`export_journal`** on a migrated campaign with a legacy journal returns the adopted text on the first call; `reset_journal` on a campaign with no journal yet doesn't raise.
 - **Campaign moves:** moving into another campaign via `move_transcript_to_campaign` deletes the journal entry and marks the old campaign's journal stale; a reorder doesn't.
 - **`delete_campaign` keep-files** leaves its transcripts with `campaign_id IS NULL`.
 
@@ -699,7 +726,7 @@ def _v11_folder_name(display_name: str, room: int = 80) -> str:
   - the journal's location and adoption;
   - the Module Map line for `campaign_folders`;
   - Known Constraints: `transcripts.campaign_id` restricts a campaign delete.
-- `docs/configuration.md`: the data storage table, where the journal moves from `campaigns/<slug>/journal.md` to the campaign folder in the transcripts folder.
+- `docs/configuration.md`: the data storage table, where the journal moves from `campaigns/<slug>/journal.md` to the campaign folder in the transcripts folder; and a "Going back to an older version" section: restore `backups/wisper-v10-*.db` as `wisper.db`, rename each `campaigns/<slug>/journal.md.v11-adopted` back to `journal.md`, and move session files from campaign folders back into the output root.
 - **`docs/docker.md` and the `docker-compose.yml` volume comment** ("config, wisper.db, voice samples, journals"): journals live in `./output`, so back up both.
 - `docs/web-ui.md` and `docs/cli-reference.md`, wherever they name the journal's path.
 
@@ -742,7 +769,7 @@ def _v11_folder_name(display_name: str, room: int = 80) -> str:
        def companion(self, suffix: str) -> Path: ...
    ```
    - **`md`:** v11 backfills a `transcript` row for every transcript, and every write registers one, so the fallback is reached only by a row created without a file (`ensure_row` for a missing session, test seeds).
-   - **`misplaced`:** true when `dir` differs from `expected_dir`, **or** any registered companion's directory differs from `dir` (a move that left a locked `.flac` behind). Directories compare by `realpath`, then `file_registry._key(…, fold)` with the output root's `_fold`. `os.path.normcase` is a no-op on macOS, so it isn't used.
+   - **`misplaced`:** false when the target is a campaign folder that can't be written to now (unclaimed and existing non-empty, i.e. folder taken; `folder_pending` set; or claimed and missing); those states have their own Needs attention entries. Otherwise true when `dir` differs from `expected_dir`, **or** any registered companion's directory differs from `dir` (a move that left a locked `.flac` behind). Directories compare by `realpath`, then `file_registry._key(…, fold)` with the output root's `_fold`. `os.path.normcase` is a no-op on macOS, so it isn't used.
    - **`companion(suffix)`:**
      - the registered path when a row of the matching kind exists (`.summary.md` → summary, `_diar.json` → sidecar, `.flac` → audio, `.md.bak` → backup);
      - else `safe_path(stem, suffix, dir)`;
@@ -764,6 +791,8 @@ def _v11_folder_name(display_name: str, room: int = 80) -> str:
 5. **`expected_dir(campaign_id, conn=None, *, output_dir=None) -> Path`:** no mkdir.
 6. **`find_by_stem(stem, conn=None, *, campaign_id=ANY, present_only=False, data_dir=None, output_dir=None) -> list[Located]`:**
    - NFC match first, then casefold when `_fold`;
+   - "present" means `missing_since IS NULL` (no disk check);
+   - every Locations function's `output_dir` defaults to `config.get_output_root()` and `data_dir` to `get_data_dir()`;
    - `ANY: Final = object()` is defined once, in `transcript_store`, meaning any campaign; `None` means the root. Every other `campaign_id=` default that means "any" (`list_transcripts`, `_seed.transcript_id`) imports this same object.
 
 **New tests (`tests/test_transcript_store.py`):**
@@ -819,8 +848,10 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
      - scans `src_dir` for unregistered companions of `old_stem`;
      - moves each registered or found file to `(dst_dir or src_dir) / (new_stem + tail)`;
      - with `old_stem == new_stem` and a `dst_dir`, it still moves.
-   - **`relink(old_id, new_md, data_dir=None) -> list[Path]`** and **`relink_candidates() -> list[Located]`.**
+   - **`relink(old_id, new_md, data_dir=None) -> list[Path]`** and **`relink_candidates() -> list[Located]`.** `MissingTranscript` gains `id: int`. Callers: `web/routes/transcripts.py` 316 and 408, `web/routes/campaigns.py` 121 and 476–481 (they resolve the posted name to `old_id` and the new file's path until Phase 3 switches the forms to ids).
    - **The `md_path` functions** keep that parameter but resolve the owner with `locate_path` instead of `Owner.for_stem` + `output_dir=md.parent`: `audio_path`, `set_audio`, `read_sidecar`, `write_sidecar`, `set_speaker_names`, `set_speaker_embeddings`, `_refresh_transcript_row`, `_register_summary`.
+     - Where one creates a row today (`ensure_row(conn, stem)` in `set_audio`, `write_sidecar`, `set_speaker_names`, `set_speaker_embeddings` at `transcript_store.py` ~1003, 1057, 1098, 1121, and ~564), it uses `register(md_path)` instead, which supplies the campaign from `dir_campaign`; `None` (not a transcript folder) → the function does nothing to the database and logs. A bare `ensure_row(conn, stem)` would key a campaign-folder `.md` to a wrong root row.
+   - **The output root, not the `.md`'s folder, goes to `file_registry`** (run rule "Output root resolution"). Today's sites passing the folder: `transcript_store.py` 285 (`add_if_owned(..., output_dir=md.parent)`), 962 and 1001 (`output_dir = md_path.parent if output_dir is None`); `web/jobs.py` 225–233 and 399–405 (`output_dir=out_dir`); `web/routes/transcripts.py` 159–162 and 807–817. Each passes `get_output_root()` (or the caller's root parameter). `audio_path`/`set_audio` drop the `md_path.parent` default.
 2. **`file_registry`:** remove `Owner.for_stem`, and add `Owner.for_path(md_path, conn=None, *, data_dir=None, output_dir=None)`. It's a thin `locate_path` wrapper, imported inside the function because `transcript_store` imports `file_registry`.
 3. **`campaign_manager`:**
    - `move_transcript_to_campaign(transcript_id, slug)`, `remove_transcript_from_campaign(transcript_id)`, `get_campaign_for_transcript(transcript_id)`. With an id there's nothing to create: an unknown id raises `KeyError`;
@@ -836,9 +867,12 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
    - **`recording_manager`:**
      - add `Recording.transcript_id: Optional[int]`; `_load` fills it from `recordings.transcript_id`, and `Recording.transcript_path` from `locate(transcript_id).md`;
      - `save_recording` writes `rec.transcript_id` as is and never creates a transcript row (today it derives one from `transcript_path` via `ensure_row`, which on a stale path would create a phantom row);
-     - the code that links a finished transcript to its recording sets `transcript_id` from `register`'s return value;
+     - `link_transcript(recording_id, transcript_id: int, data_dir=None)` replaces `link_transcript(recording_id, transcript_path, …)` (~763); its callers pass the id `register` returned;
+     - tests building `Recording(transcript_path=…)` (`test_web_jobs.py`, `test_legacy_import.py`) set `transcript_id` from a seeded row;
      - `_transcript_id` is deleted.
-   - **`record._purge_recording_files`:** `delete_transcript(recording.transcript_id)` when set, with no path check (a linked transcript is always wisper's).
+   - **`record._purge_recording_files`** (`web/routes/record.py` ~548–550): `delete_transcript(recording.transcript_id)` when set, with no path check (a linked transcript is always wisper's).
+   - **`campaign_manager.delete_campaign`** (~218, `delete_transcript(stem, …)`): passes the id.
+   - **`search_index._paths` and `transcript_store._reindex(stem)`:** take a `Located` / an id.
    - **`web/jobs.py`:**
      - `_keep_audio` and the excerpt registration (~399) via `locate_path(output_path)`;
      - the backup (~1686) via `Owner.for_path`;
@@ -855,7 +889,8 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
    - The directory always comes from a `Located` (`loc.dir`) or `expected_dir`, never from `get_output_dir()` directly, except in the routes Phase 3 rewrites.
 
 **Existing tests to rewrite:**
-- Every test calling the changed signatures. Find them with `grep -n "delete_transcript(\|register(\|rename_companions(\|relink(\|for_stem(\|reindex(\|move_transcript_to_campaign(\|remove_transcript_from_campaign(\|get_campaign_for_transcript(" tests/*.py`.
+- Every test calling the changed signatures. **This grep is the authoritative list** (the files named below are examples; any file it finds may be edited this phase): `grep -ln "delete_transcript(\|register(\|rename_companions(\|relink(\|for_stem(\|reindex(\|move_transcript_to_campaign(\|remove_transcript_from_campaign(\|get_campaign_for_transcript(\|link_transcript(\|transcript_path=" tests/*.py`.
+- `tests/_seed.py`: `seed_transcript` and `save_campaigns` keep their Phase 1 lookups (stem in any campaign); `transcript_id(stem, campaign_slug=ANY)` is added here.
 - Each gets the id from a new seed helper: `tests/_seed.transcript_id(stem, *, campaign_slug=ANY, data_dir=None) -> int` (a lookup; `KeyError` if absent).
 - The ~140 `move_transcript_to_campaign("stem", slug)` calls on stems with no row become `seed_transcript("stem", campaign=slug)` (Phase 1). Tests that assign a stem and then write its companions by hand in the output root (e.g. `test_journal.py:102-110`, `s1.summary.md`) use `seed_transcript(..., write_md=True)`, so the session's registered `.md` puts `loc.dir` in the root where the companions are.
 - Expect mechanical edits in `test_transcript_store.py`, `test_search_index.py`, `test_campaign_manager.py`, `test_web_jobs.py`, `test_storage_trim.py`, `test_cli.py`, and `test_e2e.py`. A test that needs a *behaviour* change means a step was misread: stop.
@@ -870,13 +905,15 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
 **Docs:** remove statements that companion names are derived from the stem in the output root (`architecture.md`).
 
 **Done when:**
-- The listed test files pass, and the full suite is green.
+- Every test file the grep above finds passes, and the full suite is green.
 - `grep -rn "for_stem\|_under_output_root" src/` is empty.
+- `grep -rnE "output_dir=(md|md_path|out)\.parent|parent if output_dir is None|output_dir=out_dir" src/` is empty.
+- **Registry paths in a folder:** a session seeded in `Folder/` (rows and files by hand) goes through `register`, `set_audio`, `write_sidecar`, and excerpt registration, and every resulting `rel_path` starts with `Folder/`.
 - `grep -rn "get_output_dir()" src/wisper_transcribe` shows only:
   - `path_utils`, `db`, `config`, `job_history` (`output_root` param);
   - `transcript_store`/`file_registry`/`campaign_folders` defaults;
   - `journal_path`'s default, `search_index`'s defaults (214, 245, 293, 578), and `speaker_registry` (189);
-  - `recording_manager` (155, 280; Phase 5 rewrites 280);
+  - `recording_manager` (155);
   - `web/jobs.py` (1237; Phase 5);
   - the route files (Phase 3);
   - `cli.py`'s output-root defaults;
@@ -898,6 +935,8 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
 - `job_history.JobRecord` (150–170), and the in-memory `Job.output_path`
 - `.claude/rules/web-security.md`; `tests/test_path_traversal.py`
 
+**Hand-offs:** 3a is steps 1–3 (routes, legacy redirect, forms) and `test_path_traversal.py`/`test_owasp.py`; 3b is steps 4–7 (view models, job page, lists, campaign page, search) and the templates; 3c rewrites the remaining URL references in tests. One commit after 3c.
+
 **Steps:**
 1. **Routes** (`web/routes/transcripts.py`):
    - every `/{name}…` route becomes `/{transcript_id:int}…` (Starlette's `int` path convertor, not only a type annotation), so a non-integer segment doesn't match and falls through to the legacy route instead of returning 422;
@@ -916,20 +955,22 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
    The name is used only as a bound SQL parameter. Starlette tries routes in order, so `/transcripts/12` hits the integer route. A transcript literally named `12` is reachable through the lists, not the legacy URL; that's accepted.
 3. **Forms post ids:**
    - `bulk-delete` and `bulk-campaign` take `transcript_id` lists, parsed with `int()` and dropping bad values;
-   - `relink` takes `old_id` and `new_id`;
+   - `relink` takes `old_id` and `new_id`; the route calls `relink(old_id, locate(new_id).md)`;
    - the campaign page's remove and reorder take `transcript_id` (ints), replacing the stem guards at `campaigns.py` 264–330. Each route calls `locate(transcript_id)` and refuses (`?error=not_found`) unless `loc.campaign_id` is this campaign's id. Remove calls `remove_transcript_from_campaign(loc.id)` (Phase 6 changes it to a move); reorder calls the slug-scoped `reorder_campaign_transcript(slug, loc.stem, …)`, which is unambiguous within one campaign;
    - the campaign relink route (`campaigns.py` ~452–490) takes `old_id`/`new_id`, like `/transcripts/relink`;
    - Needs attention's Forget keeps `files.id`.
 4. **View models carry ids:**
-   - `Campaign.transcript_ids: list[int]`, in the same order as `transcripts`;
+   - `Campaign.transcript_ids` (added in Phase 1) is what the campaign templates link with;
    - the list items' `id`, `ResultGroup.transcript_id`, `JobRecord.transcript_id`, `Recording.transcript_id` (Phase 2b);
    - the in-memory job page resolves `locate_path(job.output_path)` when it renders;
+   - **`Job` gains `transcript_id: Optional[int] = None`** (`web/jobs.py` Job dataclass ~411) in this phase; Phase 5 fills it at submit;
+   - **`JobRecord.output_path`** (`job_history.py` ~166–170, returns `f"{stem}.md"`) and the links built from it in `partials/job_rows.html` and `job_detail.html` ~135, 140 (`job.output_path | stem | urlencode`) link by `transcript_id` instead;
    - **the job page's completion links are built in JavaScript** from the SSE `done` event (`templates/job_detail.html` ~327–332, `/transcripts/${enc}` and `/transcripts/${enc}/summary`; payload at `web/routes/transcribe.py` ~352). The `done` payload gains `"transcript_id"`: `job.transcript_id` when set (Phase 5 sets it at submit), else `locate_path(Path(job.output_path)).id` resolved when the event is built, else `null`. The script links `/transcripts/${evt.transcript_id}` and `…/summary`, and shows no transcript buttons when it's `null`;
    - **job history's transcript filter** (`job_history.list_jobs(transcript=stem)`, `t.stem = ?` at ~219; `dashboard.py` ~183; the "Jobs" button in `transcript_detail.html:21`; the paging links in `job_history.html:60`) becomes `transcript_id: Optional[int]` (`t.id = ?`), query parameter `transcript_id`, parsed with `int()` and ignored when bad.
 
    Templates link `/transcripts/{{ x.id }}`; drop `| urlencode` on those links.
 5. **Lists from the database:**
-   - `transcript_store.list_transcripts(conn=None, *, campaign_id=..., data_dir=None, output_dir=None) -> list[Located]`: present transcripts ordered by the `transcript` row's `mtime_ns` (newest first), then `created_at`;
+   - `transcript_store.list_transcripts(conn=None, *, campaign_id=ANY, data_dir=None, output_dir=None) -> list[Located]`: present transcripts ordered by the `transcript` row's `mtime_ns` (newest first), then `created_at`;
    - the Transcripts page, recent partial, dashboard, and `wisper transcripts list` use it, reading frontmatter from `loc.md`.
 
    The page keeps its campaign column and filter.
@@ -996,13 +1037,14 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
 **Steps:**
 1. **`transcript_store.transcript_dirs(conn=None, *, data_dir=None, output_dir=None) -> list[tuple[Path, Optional[int]]]`:**
    - the output root with `None`;
-   - then, for each **claimed** campaign **with no `folder_pending`**, its `folder`.
+   - then, for each **claimed** campaign **with no `folder_pending`** whose folder exists, its `folder`.
 
    An unclaimed folder, a campaign mid-rename, and every other subfolder are never scanned. A campaign with `folder_pending` set is skipped entirely by reconcile and sync (its rows are neither matched nor flagged missing): between `os.rename` and the compare-and-swap commit (Phase 7) its rows still name the old folder, and scanning either directory would flag them all missing. Startup finishes pending renames before reconcile, and Needs attention lists the ones that stay pending.
 2. **`_transcript_files(dirs) -> dict[tuple[str, str], tuple[Path, Optional[int]]]`**, keyed by `(file_registry._key(realpath(dir), fold), nfc(stem))` (not `os.path.normcase`, which is a no-op on macOS). It skips:
    - `*.summary.md`;
    - `TEMP_PREFIX` files;
-   - in a campaign folder, the file named `journal_name(folder)` (compared casefolded).
+   - in a campaign folder, the file named `journal_name(folder)` (compared casefolded);
+   - **any file registered to a campaign** (`files.campaign_id IS NOT NULL`, by path): a journal left under its old name after a failed post-rename move, and the planned campaign-level outputs, are never read as sessions. `file_registry.sync`'s transcript candidates skip the same paths.
 3. **`reconcile` across folders.** Same rules as today, applied to `(dir, stem)` instead of `stem`:
    - **Present:** a row whose current location (its `transcript` files row, else `expected_dir`) has its `.md` is present; un-flag it if it was missing.
    - **Case-only rename:** the twin match applies within one directory only.
@@ -1016,31 +1058,38 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
        - This happens when campaign B has a misplaced `Session 1` (its `.md` still in the root) and the user drags `A/Session 1.md` into `B/`.
        - When the target row *is* the candidate (the user dragged B's misplaced `Session 1.md` from the root into `B/`), it matches: the row keeps its id, campaign, and position, and is no longer misplaced.
        - Each match runs inside `SAVEPOINT m`; success ends with `RELEASE m`. Any `sqlite3.IntegrityError` runs `ROLLBACK TO m; RELEASE m` (which also undoes the `repoint`), queues no companion moves, and the file is unclaimed.
+   - **A registered `.md` is never new.** A file whose path is any row's `transcript` files row belongs to that row, whatever the row's campaign (including a campaign mid-rename, step 1, whose misplaced sessions sit in the root).
    - **New** (only after matching found nothing): `ensure_row(conn, stem, campaign_id=<dir's>)`, appended at the end of that campaign.
      - Exception: a row for `(dir's campaign, stem)` already exists with its registered `.md` elsewhere **and present** (a misplaced session). Then the newcomer is **unclaimed**, not a second file for that row.
    - **Name and file disagree:** a row whose registered `.md` exists but whose basename differs from `stem` (a crash between a stem update and its file move). The registry wins:
      - set `stem` from the file name;
      - or, when that name is taken in its campaign, list it under Needs attention ("name doesn't match file").
    - **Missing:** rows not found anywhere are flagged missing, as today (except rows of a campaign mid-rename, step 1).
-   - **One writer at a time in this process:** reconcile's write phase holds `transcript_store._LOCATION_LOCK` (a module `threading.RLock`), which Phase 6's move and rename also hold from their row commit until their files have moved. FastAPI runs sync routes on a thread pool, so without it a page-load reconcile could apply "registry wins" between a rename's commit and its file move. A CLI command in another process isn't covered; that race settles on the next reconcile (the stem follows the file twice) and only marks the journal stale. Document it in `architecture.md`.
+   - **Companion moves run after the outer commit.** `RELEASE m` doesn't commit; reconcile's `db.transaction()` can still roll back. Matches append their `rename_companions` calls to a list that runs only after that transaction commits ("files follow rows"); a rollback discards the list.
+   - **One writer at a time in this process:** `transcript_store._LOCATION_LOCK` (a module `threading.RLock`) covers reconcile's **scan and write** (from listing the dirs until its transaction commits), Phase 6's move and rename (acquired **before** their `BEGIN IMMEDIATE`, held until their files have moved), and Phase 7's `finish_folder_rename` (from the disk step through the post-commit journal rename). Lock first, then transaction, everywhere.
+     - FastAPI runs sync routes on a thread pool, so without it a page-load reconcile could apply "registry wins" between a rename's commit and its file move.
+     - Page-load reconcile (`campaign_detail`, `transcripts_list`, `campaign_delete` are `async def` and run on the event loop) takes the lock with `acquire(blocking=False)` and skips the whole reconcile when it's held, so a move retrying a locked file never stalls the loop. The startup and CLI reconciles block. A CLI command in another process isn't covered; that race settles on the next reconcile (the stem follows the file twice) and only marks the journal stale. Document it in `architecture.md`.
    - **Sweep:** stale temp files are swept in every scanned dir.
 4. **`file_registry.sync`:**
    - `_scan_output` scans every dir from `transcript_dirs`.
    - The owner of a companion named `<S><suffix>` in dir `D` is the transcript whose current `.md` is `D/<S>.md`. Build that map from the `transcript` rows' `rel_path` (dir + stem), falling back to `expected_dir` for rows without one.
    - The journal file in each campaign folder is found by name (Phase 1) and is never read as a transcript.
    - The "transcript row rel_path matches its stem" consistency check compares the basename only.
-5. **Needs attention** (`Attention`) gains two fields:
+5. **Needs attention** (`Attention`) gains five fields (the missing-transcript query already reads `transcripts.campaign_id` from Phase 1):
    - `misplaced: list[Located]`: present transcripts with `loc.misplaced`;
    - `pending_folders: list[tuple[str, str, str]]`: `(display_name, folder, folder_pending)` for campaigns with a pending rename. Phase 7 creates them; listing them belongs here.
 
    - `folder_taken: list[tuple[int, str, str]]`: `(campaign_id, display_name, folder)` for unclaimed campaigns whose folder exists and isn't empty (ignoring clutter, Phase 1);
-   - `legacy_journals: list[str]`: campaigns whose `<data>/campaigns/<slug>/journal.md` couldn't be adopted.
+   - `legacy_journals: list[str]`: campaigns whose `<data>/campaigns/<slug>/journal.md` couldn't be adopted;
+   - `missing_folders: list[tuple[int, str, str]]`: `(campaign_id, display_name, folder)` for claimed campaigns whose folder is gone while the output root exists.
 
-   `total` counts all four.
+   `total` counts all five.
    - **Panel, misplaced:** one grouped line, "N sessions aren't in their campaign's folder yet", with each name and campaign. The action text says "Run `wisper storage trim --apply`, or use Move files on the session's page" (that button arrives in Phase 6).
    - **Panel, pending renames:** each one, with its text and a Retry button that Phase 7 adds.
    - **Panel, folder taken:** "A folder named X already exists in your transcripts folder and isn't wisper's. Rename the campaign to use a different folder, or use this folder: every `.md` file in it becomes a session of this campaign." with a **Use this folder** button. It posts `campaign_id` (int) to `POST /transcripts/needs-attention/claim-folder`, which calls `campaign_folders.claim_folder(id)` and redirects to the Transcripts page; the next reconcile registers the folder's files. (*default*: lets an Obsidian user who made the folder first adopt it.)
    - **Panel, legacy journals:** "The journal for X couldn't be moved into its folder yet."
+   - **Panel, missing folders:** "The folder X for campaign Y isn't in your transcripts folder. If you renamed it, rename the campaign to match; otherwise Recreate folder." with a **Recreate folder** button posting `campaign_id` (int) to `POST /transcripts/needs-attention/recreate-folder` → `campaign_folders.recreate_folder(id)`.
+   - Buttons that later phases add (Move files in Phase 6, Retry in Phase 7) are text only until then.
 6. **Delete-file route and `delete_unowned_file`** accept one level:
    - `name` may be `"<file>"` or `"<folder>/<file>"`;
    - `<folder>` must equal a current campaign's `folder`;
@@ -1068,7 +1117,11 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
 - **Drag with companions:** `.md` and `.flac` both dragged from `A/` to `B/`: the `audio` row is repointed to `B/…flac`, not forgotten.
 - **Mid-rename campaign:** a campaign with `folder_pending` set: neither directory is scanned and its rows aren't flagged missing.
 - **Use this folder:** posting the claim for a folder-taken campaign sets `folder_claimed`; the next reconcile registers its `.md` files as that campaign's sessions. A non-integer `campaign_id` → 400; an id with no folder-taken state → redirect with `error=not_found`.
-- **Lock:** `_LOCATION_LOCK` is held by reconcile's write phase (a test patches it with a recording lock).
+- **Lock:** `_LOCATION_LOCK` is held across reconcile's scan and write (a test patches it with a recording lock); a page-load reconcile with the lock held returns without scanning.
+- **No companion moves on rollback:** a reconcile whose transaction raises after a match moves no file.
+- **Registered files aren't sessions:** a campaign-owned file named `Old Journal.md` in a campaign folder isn't registered as a transcript.
+- **Pending campaign's root files:** a campaign with `folder_pending` set and a misplaced session in the root: no new root row is created for that `.md`.
+- **Missing folder:** a claimed campaign whose folder was deleted is listed; Recreate folder makes it; a non-integer `campaign_id` → 400.
 - The misplaced listing for a campaign transcript whose files are in the root.
 - **Delete-file route:**
   - a campaign-folder orphan is deleted;
@@ -1112,13 +1165,15 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
    - The form's `overwrite` field becomes `clash` ∈ `{"", "overwrite", "keep_both"}`:
      - `keep_both` → `original_stem = next_free_stem(out_dir, stem, campaign_id)`;
      - `overwrite` → today's overwrite. When the clashing name is an existing session of that campaign (present, missing, or **misplaced**), the job writes to that session's `loc.dir` and `loc.stem`, so its row is reused and no second `.md` appears.
+   - **Upload names** (`_upload_stem`, today only splitting separators at `transcribe.py` ~171): NFC; strip; a leading `.` is stripped; a name that is `is_reserved` gets `_` appended (as the folder sanitizer does); cut to 100 characters (Decisions) and trimmed of trailing dots and spaces; empty → `upload`.
    - `transcript_store.next_free_stem(directory, stem, campaign_id, conn=None) -> str`: `stem`, else `stem (2)`, `(3)`, …, the first with no file `<s>.md` or `<s>.flac` in `directory` (casefold when `_fold`), no row `(campaign_id, s)` (casefold), and not the folder's journal name.
 3. **`_name_clashes(filename, campaign_slug)` and `GET /transcribe/name-check?filename=…&campaign=…`:**
    - resolve the target with `expected_dir`, with no mkdir; an unclaimed folder that exists and isn't empty is clash `"folder_taken"`, with no overwrite and no keep-both, only Cancel;
    - check the target folder's `.md`/`.flac`;
    - check the target campaign's rows for a casefold match (`"md"` when it's present, `"missing"` when flagged);
    - a stem equal to that folder's journal name casefold is a clash `"reserved"`.
-   - **Response:** adds `"overwrite_allowed": bool`. It's false for `"reserved"`, for an existing `.md` with no `files` row (a user's file), and for a `.flac` with no `.md` beside it (clash `"audio"`: Keep both or Cancel).
+   - **Codes:** the existing `"md"`, `"flac"`, and `"missing"` keep their names and meanings, including the own-audio rule: a `.flac` that is the clashing session's own registered `audio` row isn't a `"flac"` clash. New codes: `"reserved"` and `"folder_taken"`. The script and existing tests keep working on the old three.
+   - **Response:** adds `"overwrite_allowed": bool`. It's false for `"reserved"`, for an existing `.md` with no `files` row (a user's file), and for a `"flac"` clash with no `.md` (Keep both or Cancel).
    - **The page's script:**
      - re-checks when the campaign select changes;
      - offers **Overwrite** only when `overwrite_allowed`, plus **Keep both** and **Cancel**;
@@ -1127,6 +1182,7 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
 4. **`process_file`:**
    - after `atomic_write_text`, calls `register(out_path, origin="job")` when `dir_campaign(out_path.parent)[0]`;
    - **remove** the post-write `move_transcript_to_campaign` call (683–695): the folder decides the campaign;
+   - `out_dir.mkdir(parents=True, exist_ok=True)` (~419) stays for a CLI `-o` elsewhere (a directory the user named). For the output root or a campaign folder, `out_dir` comes from `ensure_folder`/`get_output_dir()` and already exists, so the mkdir does nothing;
    - `campaign` remains the roster filter only;
    - the "not added to campaign" note becomes "Note: {out_path.parent} isn't the transcripts folder; the transcript isn't tracked".
 5. **Recording hand-off** (`_submit_recording_transcription`):
@@ -1137,7 +1193,7 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
 6. **Re-transcribe route:** `output_dir = loc.dir`, `original_stem = loc.stem`, `overwrite=True` (replace in place; the row, campaign, and id are kept).
 7. **Jobs:**
    - The "Transcripts folder:" log line prints the job's `output_dir`. `_keep_audio` already writes beside the `.md`.
-   - **The target is recorded at submit.** `JobQueue.submit` resolves `locate_path(Path(output_dir) / f"{original_stem}.md")` and stores `job.transcript_id` (or `None` for a new name). `job_history._subject_ids` uses `job.transcript_id` when set, before falling back to `output_path`. A pending or running re-transcribe or overwrite therefore has `jobs.transcript_id`, which Phase 6's busy guard needs.
+   - **The target is recorded at submit.** `JobQueue.submit` resolves `locate_path(Path(output_dir) / f"{original_stem}.md")` and stores `job.transcript_id` (or `None` for a new name). `job_history._params` records the job's actual `output_dir` as `output_root` (~60), not `get_output_dir()`, so the missing-file evidence names the campaign folder. `job_history._subject_ids` uses `job.transcript_id` when set, before falling back to `output_path`. A pending or running re-transcribe or overwrite therefore has `jobs.transcript_id`, which Phase 6's busy guard needs.
 8. **CLI:**
    - `wisper transcribe --campaign X` without `-o`, or with `-o` resolving (`realpath`) to the output root: `output_dir = ensure_folder(id of X)`.
      - An unknown slug or `FolderTakenError` is a `ClickException`.
@@ -1163,8 +1219,10 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
 - **Overwrite** of a misplaced session by an upload into its campaign: one row and one `.md`, written where the `.md` was.
 - **Job target:** a re-transcribe submitted through `JobQueue.submit` has `jobs.transcript_id` set while pending.
 - **name-check** on an unclaimed, non-empty folder returns `folder_taken` and creates nothing.
-- **name-check** with only `<stem>.flac` in the target folder returns clash `"audio"` with `overwrite_allowed: false`; `keep_both` skips past it.
+- **name-check** with only `<stem>.flac` in the target folder returns clash `"flac"` with `overwrite_allowed: false`; `keep_both` skips past it.
 - **Upload refused early:** an upload into a folder-taken campaign leaves no `wisper_upload_*` temp folder behind.
+- **Upload names:** `.wisper-tmp-x.mp3` → `wisper-tmp-x`; `CON.mp3` → `CON_`; a 150-character name → 100 characters.
+- **name-check** keeps `"flac"` for a stray `.flac`, and doesn't report the session's own audio.
 - **Missing transcript after write** still fails the job with "Transcript file missing after write" for a campaign-folder target.
 
 **Docs:**
@@ -1207,17 +1265,18 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
      - `campaign_id IN campaign_ids`;
      - a transcript whose `campaign_id IN campaign_ids`;
      - `json_extract(params_json, '$.campaign') IN campaign_slugs`;
-   - `recordings` with `status IN file_registry._ACTIVE_CAPTURE` whose `campaign_id IN campaign_ids` or whose `transcript_id` is `transcript_id` (a Discord or local capture holds its campaign's slug in memory and has no `jobs` row).
+   - `recordings` with `capture_status IN file_registry._ACTIVE_CAPTURE` (`db.py` ~443) whose `campaign_id IN campaign_ids` or whose `transcript_id` is `transcript_id` (a Discord or local capture holds its campaign's slug in memory and has no `jobs` row).
 
    The scope is deliberately the whole source and target campaign, not only that transcript: journal and relabel jobs read every session of their campaign.
 
    It takes the caller's `conn` and is called **inside** the write transaction (`BEGIN IMMEDIATE`), so a job submitted between check and write is impossible: submit writes its `jobs` row first.
-   - **Submit must not lose that row:** `job_history.record` swallows exceptions. `JobQueue.submit` calls a new `job_history.record_required(...)` (same insert, re-raises) for the submit write, and fails the submit when it raises.
+   - **Submit must not lose that row:** `job_history.record` swallows exceptions. Add `job_history.record_required(...)` (same insert, re-raises). `JobQueue._enqueue` (`web/jobs.py` ~559–562), which every job type goes through, calls it via `_record_history(job, required=True)` before the job joins the queue. If it raises, `_enqueue` re-raises, the job is not queued, and `submit` deletes the job's `wisper_upload_<id>/` folder (as a cancel does) before re-raising; the route shows `?error=submit_failed`. Status updates after that keep the swallowing `record`.
    - **Not covered, accepted:** a CLI `wisper transcribe` run writes no `jobs` row, so it isn't seen. Rows left `pending`/`running` by a crashed server count as busy until the next server start runs `mark_interrupted`; the CLI's busy message names the job ids and says "If no wisper server is running, these are left over from a crash: start the server once to clear them." Document both in `architecture.md`.
 2. **`transcript_store.check_move(transcript_id, campaign_slug: Optional[str], *, new_stem=None, conn=None, data_dir=None, output_dir=None) -> MoveCheck`.** It is pure: no mkdir and no writes. It's used by the clash page and by `move_transcript`/`rename_transcript`.
    - **`MoveCheck`:** `status`, `dst_dir`, `stem`, `clash_modified`, `overwrite_allowed`, `existing_id`.
-   - **`status`:** `"ok" | "unchanged" | "busy" | "folder_taken" | "clash" | "reserved"`.
+   - **`status`:** `"ok" | "unchanged" | "invalid" | "busy" | "folder_taken" | "clash" | "reserved"`.
    - **`MoveCheck.files_move: bool`:** false when there's nothing to move on disk: the session is flagged missing, or `dst_dir` is the directory its `.md` is already in (by `realpath` + `_key`) and the stem is unchanged. Then the move is a database change only.
+   - **Validation first:** with `new_stem`, `check_move` runs `validate_new_stem` and then `safe_path(new_stem, ".md", dst_dir)` before any disk access, returning `status="invalid"` when either refuses. The clash page passes a name from the query string, so this is a path guard.
    - **Rules:**
      - `unchanged`: same campaign and same stem;
      - `busy`: `active_jobs(transcript_id, campaign_ids={source, target}, campaign_slugs={source, target})` is non-empty;
@@ -1229,12 +1288,26 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
 
    **`transcript_store.move_transcript(transcript_id, campaign_slug: Optional[str], *, clash: Literal["ask", "overwrite", "keep_both", "skip"] = "ask", data_dir=None, output_dir=None) -> MoveOutcome`.**
    - **`MoveOutcome`:** `status`, `new_stem`, `clash_modified`, `overwrite_allowed`, `kept: list[Path]`, `busy: list[str]`.
-   - **`status`:** `"moved" | "unchanged" | "busy" | "folder_taken" | "clash" | "reserved" | "locked" | "partial"`.
+   - **`status`:** `"moved" | "unchanged" | "invalid" | "busy" | "folder_taken" | "clash" | "reserved" | "locked" | "partial"`.
 
-   Steps (steps 5–6 run holding `_LOCATION_LOCK`, Phase 4):
+   **One status table** (routes, bulk, the campaign page, and the CLI all use it; `folder_taken` includes `folder_pending`/`folder_missing`, which show their own text):
+
+   | Status | Route redirect | Bulk counter | CLI (exit 1 unless noted) |
+   |---|---|---|---|
+   | `moved` | 303 to the page | `moved` | prints the new place (exit 0) |
+   | `unchanged` | 303 to the page | `moved` | "already there" (exit 0) |
+   | `invalid` | `?error=invalid_name` | `skipped` | "invalid name" |
+   | `busy` | `?error=busy` | `busy` | names the job ids |
+   | `folder_taken` | `?error=folder_taken` (or `folder_pending`, `folder_missing`) | `skipped` | the folder problem |
+   | `clash` | the clash page (`?clash=…`) | `skipped` | existing file's time |
+   | `reserved` | `?error=reserved` | `skipped` | "name is the journal's" |
+   | `locked` | `?error=locked` | `skipped` | "a file is open in another program" |
+   | `partial` | `?notice=partial_move` | `moved` | lists the kept files (exit 0) |
+
+   Steps (`_LOCATION_LOCK` is acquired before step 5's transaction and held through step 6, Phase 4):
    1. `check_move` (read-only). `ask`/`skip` with a clash → return `clash`, with nothing changed. Any other non-`ok` status → return it.
    2. **Target folder:** `ensure_folder(target)`, or the root (only when `files_move`). `FolderTakenError` → `folder_taken`.
-   3. **`overwrite`:** only when `overwrite_allowed`. First a short `BEGIN IMMEDIATE` re-running the busy check with `existing_id` added (`active_jobs(transcript_id=existing_id, …)` too); busy → return `busy` with nothing changed. Then `delete_transcript(existing_id)`; `"kept"` → return `locked`, with nothing else changed. The delete is the last step that can refuse before the move's own transaction.
+   3. **`overwrite`:** only when `overwrite_allowed`. First a short `BEGIN IMMEDIATE` re-running the busy check with `existing_id` added (`active_jobs(transcript_id=existing_id, …)` too); busy → return `busy` with nothing changed. Then `delete_transcript(existing_id)`; `"kept"` → return `locked`, with nothing else changed. If the chosen session's own move then fails, the overwritten one stays deleted (Decisions, Overwrite).
    4. **`keep_both`:** `new_stem = next_free_stem(dst_dir, stem, target_id)`.
    5. **One transaction:** re-run `check_move`'s busy and clash checks with this `conn`; if either now fails, return its status. Then `UPDATE transcripts SET campaign_id = ?, position = <end or NULL>, stem = ? WHERE id = ?`. The triggers un-journal the session, and mark the journal stale on a stem change. When `files_move` is false, return `moved` after commit.
    6. **After commit,** move the `.md` to `dst_dir/<new_stem>.md` with `file_registry.move(row, …)` (with no `transcript` row, `os.replace` then `file_registry.add`):
@@ -1250,11 +1323,11 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
    - Used by Needs attention's **Move files** and by `storage trim` (Phase 8).
 4. **`transcript_store.validate_new_stem(name) -> Optional[str]`:**
    - NFC and strip;
-   - non-empty, at most 150 characters;
+   - non-empty, at most 100 characters (Decisions);
    - no ``/ \ : * ? " < > |`` or control characters;
-   - no trailing dot or space;
+   - no leading dot (which also refuses `TEMP_PREFIX`), no trailing dot or space;
    - not ending in `.summary` or `.md` (case-insensitive);
-   - the part before the first dot isn't a Windows reserved device name.
+   - not `campaign_folders.is_reserved`.
 
    Returns the cleaned name or None.
 5. **`rename_transcript(transcript_id, new_name, *, clash="ask", data_dir=None, output_dir=None) -> MoveOutcome`:**
@@ -1324,7 +1397,10 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
 - **Rename:** carries companions; case-only works on a case-insensitive filesystem; a locked `.md` restores the old stem; reserved and invalid names are refused.
 - **Bulk:** with one clash, it moves the rest.
 - **CLI:** an ambiguous name is refused without `--from`.
-- **Path traversal:** the rename route's `new_name` payloads (null byte, `../x`, `a/b`, CRLF) are refused with no file touched.
+- **Path traversal:** the rename route's `new_name` payloads (null byte, `../x`, `a/b`, CRLF) are refused with no file touched; so is the GET clash page's `name` query parameter (`?clash=rename&name=../x`), with no disk access before validation.
+- **Rename names:** `.hidden`, `.wisper-tmp-1`, `COM1`, and a 101-character name are refused.
+- **Submit history:** `record_required` raising makes `submit` raise, queues nothing, and removes the upload folder.
+- **Test placement:** the store-level move, lock, and busy tests live in `test_transcript_store.py` and `test_campaign_manager.py` (already in CI's `windows storage` list); `test_web_routes.py` and `test_cli.py` test only the routes and the CLI's status mapping.
 
 **Docs:**
 - `docs/web-ui.md`: moving between campaigns moves files, the clash prompt, Rename, and Move files.
@@ -1353,8 +1429,10 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
 - `cli.py` `campaigns` group (~863–1060)
 - `web/app.py` startup
 
+**Hand-offs:** 7a is steps 1, 2, 7, and the delete parts of 8–9 (`check_available`, create, delete, CLI `campaigns delete`); 7b is steps 3–6 and the rename parts of 8–9 (rename, finish, startup, Retry). One commit after 7b.
+
 **Steps:**
-1. **`campaign_folders.check_available(name, conn, *, output_dir, exclude_id=None) -> Optional[str]`:** returns an error code, or None.
+1. **`campaign_folders.check_available(name, conn=None, *, output_dir=None, exclude_id=None) -> Optional[str]`:** returns an error code, or None. `output_dir` defaults to `get_output_root()`; when the root doesn't exist, the disk check finds nothing (the folder is claimed later, on first write).
    - `"taken"`: `name.casefold()` equals another campaign's `folder` or `folder_pending` casefold.
    - `"folder_exists"`: an entry in the output root whose NFC casefold equals `name`'s, and that isn't this campaign's current `folder`.
      - Exception: a directory holding only `journal_name(<its name>)` (ignoring `is_clutter` files, Phase 1), left by a keep-files delete, is available and is re-claimed.
@@ -1369,12 +1447,14 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
    | `check_available` → `folder_exists` | `folder_exists` | `folder_taken` | "A folder with that name already exists in your transcripts folder." |
    | `ensure_folder` → `FolderTakenError` | `folder_taken` | `folder_taken` | same |
    | `active_jobs` non-empty | `busy` | `busy` | "A job is running for this campaign; try again when it finishes." |
-   | `folder_pending` already set and still unfinished | `pending` | `rename_pending` | "The last rename of this campaign's folder hasn't finished; Retry it under Needs attention first." |
+   | `folder_pending` already set and still unfinished, or `FolderPendingError` from `ensure_folder` | `pending` | `rename_pending` | "The last rename of this campaign's folder hasn't finished; Retry it under Needs attention first." |
+   | `FolderMissingError` from `ensure_folder` | `folder_missing` | `folder_missing` | "The campaign's folder is missing from your transcripts folder; see Needs attention." |
 
    Database checks (`slug_taken`, and `check_available`'s `taken`) run **inside** the write transaction with its `conn`. An `sqlite3.IntegrityError` from the write is still mapped: a message containing `campaign folder taken` or `campaigns.folder` → `taken`; `campaigns.slug` → `slug_taken`. The `folder_exists` disk check runs before the transaction (it can't be made atomic, and a folder appearing in between is caught by `ensure_folder`).
 2. **`create_campaign`:**
    - `folder = folder_name(display_name)`; `check_available`; refuse with a `CampaignError(code)` (a new exception carrying a table code, subclassing `ValueError` so existing callers and tests that catch `ValueError` for empty or duplicate names keep working). No ` (2)` suffix: `unique_folder` is no longer called here;
-   - insert the row, commit, then `ensure_folder`, which claims the folder. If the mkdir fails, it's made, and claimed, on first write.
+   - insert the row, commit, then `ensure_folder`, which claims the folder. If it raises (`FileNotFoundError` for an absent root, or a folder that appeared meanwhile), the campaign still exists and the folder is made, and claimed, on first write.
+   - `create_campaign(display_name, data_dir=None, *, output_dir=None)` gains `output_dir` for tests.
 3. **`campaign_folders.rename_campaign(slug, new_display_name, *, data_dir=None, output_dir=None) -> RenameOutcome`.** `status` is one of `"renamed" | "pending" | "busy" | "invalid" | "slug_taken" | "folder_taken"`, plus `new_slug`. Steps:
    1. Strip the display name; `new_slug = _make_slug`; empty → `invalid`. A `new_slug` used by another campaign → `slug_taken`.
    2. `new_folder = folder_name(new_display_name)`; `check_available(new_folder, exclude_id=self)`. An exact match with the current folder means no folder change.
@@ -1383,15 +1463,15 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
    5. **One transaction:**
       - `active_jobs(conn, campaign_ids={id}, campaign_slugs={slug})` non-empty → `busy`;
       - `slug_taken` and `taken` checks (step 1's table, with this `conn`);
-      - then `UPDATE campaigns SET display_name = ?, slug = ?, folder_pending = ? WHERE id = ? AND folder_pending IS NULL`. `folder_pending` is NULL when `new_folder == folder`. A rowcount of 0 (another process started a rename in between) → `pending`.
+      - then `UPDATE campaigns SET display_name = ?, slug = ?, folder_pending = ? WHERE id = ? AND folder_pending IS NULL`. An `sqlite3.IntegrityError` is mapped per step 1's table, never raised. `folder_pending` is NULL when `new_folder == folder`. A rowcount of 0 (another process started a rename in between) → `pending`.
    6. **Unclaimed folder** (`folder_claimed = 0`, nothing of wisper's on disk): set `folder = new_folder` directly in that transaction, with no `folder_pending`.
    7. If a folder change is pending: `finish_folder_rename(campaign_id)`. Return `renamed`, or `pending` if that left it pending.
 4. **`finish_folder_rename(campaign_id, *, data_dir=None, output_dir=None) -> bool`** (True when done):
    1. Read `folder` → `:old`, `folder_pending` → `:new`. If `folder_pending` is NULL → True.
    2. **Busy (early exit):** `active_jobs(campaign_ids={id}, campaign_slugs={slug})` non-empty → False, still pending. A queued upload into the old folder must land before the folder moves. Step 5 checks again inside its transaction.
-   3. `old_dir = output / :old`, `new_dir = output / :new`; `renamed_here = False`.
+   3. **Output root:** `output = get_output_root()`; if it isn't a directory → False, still pending (an unmounted drive must never commit the swap). Acquire `_LOCATION_LOCK` (held through step 7). `old_dir = output / :old`, `new_dir = output / :new`; `renamed_here = False`.
    4. **Disk** (every case spelled out):
-      - **`old_dir` absent, `new_dir` absent:** go to step 5 (database only).
+      - **`old_dir` absent, `new_dir` absent:** return False, still pending. A claimed folder that vanished is the missing-folder state (Needs attention); a pending rename with neither directory gets a **Finish without folder** button there, which runs step 5 database-only and sets `folder_claimed = 0` (the next write claims the new name).
       - **`old_dir` absent, `new_dir` present:** the main crash-recovery case (the rename happened, the commit didn't). Go to step 5.
       - **Both present and the same directory** (`os.path.samefile`; a case-only rename on a case-insensitive filesystem): `os.rename(old_dir, new_dir)` (it changes the case), then step 5.
       - **Both present and different:** return False, leaving it pending.
@@ -1399,14 +1479,14 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
       - After any successful `os.rename`, `renamed_here = True`.
    5. **One transaction (compare-and-swap):**
       - `active_jobs(conn, …)` again; non-empty → raise `FolderBusy` (handled in step 6 like any raise);
-      - `UPDATE campaigns SET folder = folder_pending, folder_pending = NULL WHERE id = ? AND folder = :old AND folder_pending = :new`;
+      - `UPDATE campaigns SET folder = folder_pending, folder_pending = NULL WHERE id = ? AND folder = :old COLLATE BINARY AND folder_pending = :new COLLATE BINARY RETURNING folder`. Both columns are `COLLATE NOCASE`, so without `COLLATE BINARY` a stale caller holding `hanataz → Hanataz` would match a later pending `HANATAZ`. The prefix rewrite uses the returned `folder`;
       - **only if** that changed one row, rewrite the prefix **in Python, row by row**: `SELECT id, rel_path FROM files WHERE root = 'output' AND instr(rel_path, '/') > 0`; for each row whose first path component matches `:old` under `file_registry._key(nfc(component), fold=True)`, `UPDATE files SET rel_path = :new || '/' || <rest> WHERE id = ?`. Rows carry the disk's spelling of the folder (`db.to_rel` uses `realpath`, which returns the on-disk case on Windows; Finder can store NFD), so a byte-exact SQL prefix match would miss them. Folding is safe: `campaigns.folder` is unique ignoring case, and only claimed folders hold registered rows;
-      - then assert, in the same transaction, that no output row's first component still folds to `:old`. If any does, raise, which rolls back.
+      - then assert, in the same transaction, that every output row whose first component folds to `:old` now has a first component equal to `:new` **byte for byte**. (For a case-only rename `:new` folds to `:old`, so "nothing folds to `:old`" would always fail.) If any row doesn't, raise, which rolls back.
       - A rowcount of 0 on the campaign update means another process finished it: return True and touch nothing.
-   6. **If step 5 raises and `renamed_here`,** `os.rename(new_dir, old_dir)` back, but only if the row still reads pending. `FolderBusy` → return False; any other exception is re-raised.
+   6. **If step 5 raises and `renamed_here`:** open `BEGIN IMMEDIATE`, re-read the row, and only if it still reads pending `:old → :new`, `os.rename(new_dir, old_dir)` back while holding it; then roll back. `FolderBusy` → return False; any other exception is re-raised.
    7. **After commit:** the journal file `<old folder> Journal.md`, now inside `new`, moves to `journal_name(new folder)` (`file_registry.move`). A conflict or error leaves it under its old name. `journal_path` follows the registry row, so it still works; the next rename or a Needs attention Retry fixes the name.
 5. **Startup** (`web/app.py`, after `adopt_legacy_journals`, before `reconcile`): `campaign_folders.finish_pending_renames()` calls `finish_folder_rename` once for every campaign with `folder_pending`. It never loops or sleeps beyond step 4's retries. It catches and logs any exception per campaign (`log.exception`), leaving that rename pending for Needs attention; startup never fails on it.
-   - `ensure_folder` (Phase 1) on a campaign with `folder_pending` calls `finish_folder_rename` first. If that returns False, it raises `FolderPendingError(FolderTakenError)` (code `folder_pending`, mapped to `?error=busy`). No session is ever written into a folder that's mid-rename.
+   - `ensure_folder` (Phase 1) on a campaign with `folder_pending` calls `finish_folder_rename` first. If that returns False, it raises `FolderPendingError` (code `pending`, `?error=rename_pending`, step 1's table). No session is ever written into a folder that's mid-rename.
    - CLI commands that scan (`wisper transcripts list`, `storage trim`) call it too.
 6. **Needs attention** pending renames get a **Retry** button: `POST /campaigns/{slug}/finish-rename`, with `slug` validated as today (and a `test_path_traversal.py` case for it). The panel text: "Rename of folder X to Y didn't finish: a file in it is open in another program. Close it, then Retry."
 7. **`delete_campaign(slug, *, delete_transcripts=False, …)`.** Phase 1's interim unassign goes; the campaign is deleted only when it's empty.
@@ -1421,7 +1501,7 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
      - `moved` and `unchanged` continue (a missing or misplaced session is a database-only move, Phase 6). **Any other status** (`locked`, `partial`, `busy`, and, though moving to the root can't produce them, `folder_taken`, `clash`, `reserved`) **stops** the delete: the campaign stays, and the result names the sessions that didn't move;
      - otherwise delete the campaign. Its journal row cascades, and the journal file and folder stay on disk, untracked.
    - **The final `DELETE`** catches `sqlite3.IntegrityError` (a reconcile in another process registered a new `.md` in the folder) and returns `delete_incomplete`.
-   - Returns a `DeleteOutcome(status, kept: list[str])`. Routes map it to `?error=delete_incomplete` with the count, and the CLI prints the names.
+   - Returns a `DeleteOutcome(status: Literal["deleted", "busy", "kept", "delete_incomplete"], kept: list[str])`. Routes map it to `?error=busy` or `?error=delete_incomplete` with the count. The CLI `wisper campaigns delete` (find by name in `cli.py`) prints the outcome and the kept names, exits 1 unless `deleted`, and its tests in `test_cli.py` are rewritten for it.
 8. **Routes and UI:**
    - `POST /campaigns/{slug}/rename` (`display_name`) → 303 to `/campaigns/<new slug from the database>`, or `?error=<code>`;
    - a Rename form in the campaign page header;
@@ -1452,6 +1532,11 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
 - **Rename refusals:** busy (a pending relabel job, or a pending upload with `$.campaign`), and `slug_taken`.
 - **Second rename while pending:** with `folder_pending` set and the old folder locked, a second rename returns `pending` and leaves `folder_pending` unchanged.
 - **Prefix spelling:** rows registered as `hanataz/S1.md` and NFD `Été/S2.md` under campaigns `Hanataz` and `Été` are rewritten by a rename (patch `_fold`); the assertion doesn't fire.
+- **Case-only rename** `hanataz` → `Hanataz` commits, every row starts `Hanataz/`, and the rename isn't left pending.
+- **Stale compare-and-swap:** with the row pending `Alpha → ALPHA2`, a caller holding `Alpha → alpha2` changes nothing.
+- **Root unmounted:** `finish_folder_rename` with the output root removed returns False and leaves `folder`, `folder_pending`, and every `files` row unchanged; startup does the same.
+- **Neither directory:** returns False; **Finish without folder** commits the swap and sets `folder_claimed = 0`.
+- **Old-named journal after a failed post-commit rename:** the next reconcile registers no transcript for it.
 - **Startup:** `finish_pending_renames` with a rename whose step 5 raises logs it, leaves it pending, and returns.
 - **Busy inside the swap:** a job submitted between step 2 and step 5 (patch `os.rename` to submit one) → the folder is renamed back and the rename stays pending.
 - **Raced create:** two creates of the same name in one test (the second's pre-check patched to pass) → the second is `CampaignError("taken")` or `slug_taken`, never a bare `IntegrityError`.
@@ -1473,7 +1558,7 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
 - `docs/web-ui.md`: rename, and the delete outcomes.
 - `docs/cli-reference.md`: `campaigns rename`, `campaigns show`.
 - `architecture.md`: the folder rename's two steps and crash rule, `check_available`, and never adopting a user folder.
-- `docs/scenarios.md`: "Renaming a campaign says the folder is busy".
+- `docs/scenarios.md`: "Renaming a campaign says the folder is busy", and "I renamed or deleted a campaign folder outside wisper" (Recreate folder, or rename the campaign).
 
 **Done when:**
 - The listed test files pass, and the full suite is green.
@@ -1499,6 +1584,7 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
 **Steps:**
 1. **New action `ORGANIZE = "organize"`,** labelled "move into campaign folder", first in `_ORDER`.
    - `plan()` adds one action per misplaced transcript: `path = loc.md`, `size` = total bytes of its registered files, `transcript_id`, `note = f"→ {folder}/"`.
+   - Sessions of a campaign whose folder is taken, pending, or missing aren't misplaced (Phase 2a), so they get no action. The dry run and `--apply` instead print one line per such campaign, every run until it's fixed: "Hanataz: 3 sessions can't be organized (folder taken; see Needs attention)".
    - `TrimPlan.total_bytes` and `convert_bytes` exclude it. A new `move_bytes` property sums it.
    - The dry-run summary prints "Move N sessions into their campaign folders (X MB, nothing deleted)".
 2. **`plan()` also lists legacy journals** still at `<data>/campaigns/<slug>/journal.md` as `ORGANIZE` actions, with `note="journal"`.
@@ -1513,7 +1599,7 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
 4. **Backup pruning** (`db.py`):
    - after `COMMIT` in `migrate()`, when a snapshot was taken, `_prune_snapshots(data_dir, keep=5)` deletes all but the newest 5 files matching `backups/wisper-v*-*.db`;
    - it sorts by the parsed `-<YYYYmmddTHHMMSSZ>.db` stamp, not the whole name (`v10` sorts before `v9` as text);
-   - `wisper db status` shows a `migrations.backup_dir` that no longer exists as "(pruned)";
+   - `wisper db status` (`cli.py` `db_status`, ~2041, where it formats `m['backup_dir']`) shows a backup path that no longer exists as `backup <path> (pruned)`;
    - it never touches other files or directories in `backups/` (legacy import dirs, reports);
    - an `OSError` is logged.
 5. **`wisper storage trim` output** lists organize actions first. A re-run after `--apply` prints nothing to organize.
@@ -1531,6 +1617,7 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
 - **Pruning:**
   - 7 snapshots (including `wisper-v9-…` and `wisper-v10-…` with interleaved stamps), plus a legacy backup dir and a report → the newest 5 by stamp remain, and the dir and report are untouched;
   - `db status` marks a pruned backup.
+- **Blocked campaign:** a campaign whose folder is taken is reported, not planned, on every run.
 - **Notice:** a v10 → v11 upgrade with an assigned session in the root shows the organize line and not the audio line; a fresh install shows neither; a v8 → v11 upgrade with only organize actions shows only the organize line.
 
 **Docs:**
@@ -1635,7 +1722,8 @@ A worker may add tests here (for a Decisions row with none). A test that exposes
    - rename a campaign while one of its files is open in Obsidian → pending; close it → Retry completes;
    - move a session while its `.md` is open → `locked` (nothing moved); with only its `.flac` open → `partial`, then Move files;
    - change a claimed campaign folder's case in Explorer, then rename the campaign: it completes (the prefix rewrite folds case).
-7. **Steps that need Brandon:** set `SCHEMA_FROZEN = True` in the PR commit; remove this section from `plan.md`; open the PR (ask first); the Windows rehearsal (step 6) before his next `start.bat`.
+7. **Rollback rehearsal** (Mac copy, once): after step 4, follow `docs/configuration.md`'s "Going back to an older version" with a `main` build; the journal page shows its folded sessions (no reset) and the transcripts list is complete.
+8. **Steps that need Brandon:** set `SCHEMA_FROZEN = True` in the PR commit; remove this section from `plan.md`; open the PR (ask first); the Windows rehearsal (step 6) before his next `start.bat`.
 
 ---
 
