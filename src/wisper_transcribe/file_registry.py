@@ -480,7 +480,10 @@ def move(row: FileRow, new_path: Path, *, data_dir: Optional[Path] = None,
     """
     data, output = _dirs(data_dir, output_dir)
     src, dst = row.path, Path(new_path)
-    new_rel = db.to_rel(dst, _root_dir(row.root, data, output))  # before touching the disk
+    # Resolve only the folder: on Windows realpath(dst) returns the source's
+    # spelling during a case-only rename, which would keep the old name.
+    new_rel = db.to_rel_pure(Path(os.path.realpath(dst.parent)) / dst.name,
+                             Path(os.path.realpath(_root_dir(row.root, data, output))))
     if not os.path.lexists(src):
         forget_id(row.id, data_dir=data_dir)
         return "missing"

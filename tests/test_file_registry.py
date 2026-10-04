@@ -319,6 +319,24 @@ def test_move_case_only_rename(out, monkeypatch, insensitive):
     assert fr.file_for(owner, "audio").rel_path == "A.flac"
 
 
+def test_move_case_only_rename_when_realpath_returns_the_disk_spelling(out, monkeypatch):
+    # Windows' realpath answers with the existing file's spelling ("a.flac" for "A.flac").
+    owner, path, row = _registered(out, "a.flac")
+    real = os.path.realpath
+
+    def windows_like(p, *a, **k):
+        p = Path(real(p, *a, **k))
+        if p.parent.is_dir():
+            match = [n for n in os.listdir(p.parent) if n.casefold() == p.name.casefold()]
+            if match:
+                return str(p.parent / match[0])
+        return str(p)
+
+    monkeypatch.setattr(os.path, "realpath", windows_like)
+    assert fr.move(row, out / "A.flac") == "moved"
+    assert fr.file_for(owner, "audio").rel_path == "A.flac"
+
+
 def test_move_missing_source_forgets_the_row(out):
     owner, path, row = _registered(out)
     path.unlink()
