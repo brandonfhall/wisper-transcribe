@@ -37,6 +37,14 @@ def _rows() -> dict[str, bool]:
             "SELECT stem, missing_since FROM transcripts")}
 
 
+def _tid(stem: str) -> int:
+    """The id of the single transcript named ``stem``."""
+    with db.connection() as conn:
+        rows = conn.execute("SELECT id FROM transcripts WHERE stem = ?", (stem,)).fetchall()
+    assert len(rows) == 1, f"{stem!r} matches {len(rows)} rows"
+    return rows[0][0]
+
+
 # ---------------------------------------------------------------------------
 # atomic_write_text
 # ---------------------------------------------------------------------------
@@ -133,39 +141,95 @@ def test_windows_write_while_another_handle_holds_the_target(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_register_creates_row(out):
-    _md(out, "s01")
-    ts.register("s01", origin="job")
+    md = _md(out, "s01")
+    ts.register(md, origin="job")
     assert _rows() == {"s01": False}
 
 
 def test_register_keeps_identity_and_campaign(out):
     create_campaign("Game")
-    _md(out, "s01")
-    first = ts.register("s01", origin="job")
-    move_transcript_to_campaign("s01", "game")
-    assert ts.register("s01", origin="job") == first  # overwrite keeps the row
+    md = _md(out, "s01")
+    first = ts.register(md, origin="job")
+    _seed.move_to_campaign("s01", "game")
+    assert ts.register(md, origin="job") == first  # overwrite keeps the row
     assert get_transcripts_for_campaign("game") == ["s01"]
 
 
 def test_register_clears_missing_flag(out):
     create_campaign("Game")
-    move_transcript_to_campaign("s01", "game")  # no .md yet: flagged missing
+    _seed.seed_transcript("s01", campaign="game")  # no .md yet: flagged missing
     assert _rows() == {"s01": True}
-    _md(out, "s01")
-    ts.register("s01", origin="reconcile")
+    md = _md(out, "s01")
+    ts.register(md, origin="reconcile")
     assert _rows() == {"s01": False}
 
 
-def test_register_rejects_unknown_origin():
+def test_register_not_in_a_transcript_folder_returns_none(out, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    md = elsewhere / "s01.md"
+    md.write_text("x", encoding="utf-8")
+    assert ts.register(md, origin="job") is None
+    assert _rows() == {}
+
+
+def test_register_rejects_unknown_origin(out):
     with pytest.raises(ValueError):
-        ts.register("s01", origin="guess")
+        ts.register(out / "s01.md", origin="guess")
 
 
 def test_register_normalizes_to_nfc(out):
     import unicodedata
 
-    ts.register(unicodedata.normalize("NFD", "Café"), origin="job")
+    nfd = unicodedata.normalize("NFD", "Café")
+    ts.register(out / f"{nfd}.md", origin="job")
     assert list(_rows()) == [unicodedata.normalize("NFC", "Café")]
+
+
+def test_register_a_misplaced_sessions_root_md_keeps_its_campaign_row(out):
+    cid, slug, folder = _claimed_campaign("Game")
+    tid = _seed.seed_transcript("Stray", campaign=slug)
+    md = _place(out, out, "Stray", tid)   # registered in the root though it belongs to Game
+
+    assert ts.register(md, origin="job") == tid
+    with db.connection() as conn:
+        assert conn.execute("SELECT count(*) FROM transcripts").fetchone()[0] == 1
+    assert ts.locate(tid).misplaced is True
+
+
+def test_register_a_file_in_an_unrelated_folder_returns_none(out):
+    folder = out / "notes"
+    folder.mkdir()
+    md = folder / "x.md"
+    md.write_text("x", encoding="utf-8")
+    assert ts.register(md, origin="job") is None
+    assert _rows() == {}
+
+
+def test_register_a_newcomer_folder_file_does_not_take_a_misplaced_row(out):
+    """B's ``S`` is registered in the root; ``B/S.md`` must not become B's row."""
+    cid, slug, folder = _claimed_campaign("B")
+    tid = _seed.seed_transcript("S", campaign=slug)
+    root_md = _place(out, out, "S", tid)          # S's registered .md is in the root
+    newcomer = out / folder / "S.md"
+    newcomer.write_text("# newcomer\n", encoding="utf-8")
+
+    # The folder file is a newcomer: register creates a second row for B rather than
+    # stealing the misplaced row's registration... but B already holds S, so it is refused.
+    assert ts.register(newcomer, origin="job") is None
+    assert ts.locate(tid).md == root_md
+    with db.connection() as conn:
+        assert conn.execute("SELECT count(*) FROM transcripts").fetchone()[0] == 1
+
+
+def test_ensure_row_in_a_campaign_appends_a_position(out):
+    cid, slug, folder = _claimed_campaign("Game")
+    first = _seed.seed_transcript("one", campaign=slug)
+    with db.transaction() as conn:
+        second = ts.ensure_row(conn, "two", campaign_id=cid)
+        positions = dict(conn.execute(
+            "SELECT id, position FROM transcripts WHERE campaign_id = ?", (cid,)).fetchall())
+    assert positions[first] == 0 and positions[second] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -191,11 +255,11 @@ def _with_companions(out: Path, stem: str, audio_name: str) -> list[Path]:
 def test_delete_removes_file_row_links_and_companions(out):
     create_campaign("Game")
     md = _md(out, "s01")
-    ts.register("s01", origin="job")
-    move_transcript_to_campaign("s01", "game")
+    tid = ts.register(md, origin="job")
+    _seed.move_to_campaign("s01", "game")
     companions = _with_companions(out, "s01", "s01_1.wav")  # collision-suffixed audio
 
-    assert ts.delete_transcript("s01") is True
+    assert ts.delete_transcript(tid) == "deleted"
     assert not md.exists()
     assert all(not f.exists() for f in companions)
     assert _rows() == {}
@@ -203,36 +267,52 @@ def test_delete_removes_file_row_links_and_companions(out):
 
 
 def test_delete_keeps_audio_outside_output_root(out, tmp_path):
-    _md(out, "s01")
+    md = _md(out, "s01")
+    tid = ts.register(md, origin="job")
     outside = tmp_path / "user-file.wav"
     outside.write_bytes(b"audio")
     (out / "s01_diar.json").write_text(json.dumps({"input_path": str(outside)}), encoding="utf-8")
-    ts.delete_transcript("s01")
+    ts.delete_transcript(tid)
     assert outside.exists()
 
 
 def test_delete_escapes_glob_in_stem(out):
     # "[1]" is a glob character class that's also a legal Windows filename.
-    _md(out, "mix[1]")
+    md = _md(out, "mix[1]")
+    tid = ts.register(md, origin="job")
     other_clip = out / "mix1_excerpt_SPEAKER_00.mp3"   # matched by an unescaped "mix[1]_excerpt_*"
     own_clip = out / "mix[1]_excerpt_SPEAKER_00.mp3"
     other_clip.write_bytes(b"x")
     own_clip.write_bytes(b"x")
-    ts.delete_transcript("mix[1]")
+    ts.delete_transcript(tid)
     assert other_clip.exists()
     assert not own_clip.exists()
 
 
+def test_delete_only_that_campaigns_copy_when_two_share_a_stem(out):
+    ca, _, folda = _claimed_campaign("A")
+    cb, _, foldb = _claimed_campaign("B")
+    ta = _insert_session("S", ca, 0)
+    tb = _insert_session("S", cb, 0)
+    _place(out, out / folda, "S", ta)
+    _place(out, out / foldb, "S", tb)
+
+    assert ts.delete_transcript(ta) == "deleted"
+    assert not (out / folda / "S.md").exists()
+    assert (out / foldb / "S.md").exists()
+    with db.connection() as conn:
+        assert [r[0] for r in conn.execute("SELECT id FROM transcripts")] == [tb]
+
+
 def test_delete_missing_transcript_still_removes_row(out):
     create_campaign("Game")
-    move_transcript_to_campaign("gone", "game")
-    assert ts.delete_transcript("gone") is True
+    _seed.seed_transcript("gone", campaign="game")
+    assert ts.delete_transcript(_tid("gone")) == "deleted"
     assert _rows() == {}
 
 
-@pytest.mark.parametrize("bad", ["", "../x", "a/b", "..", "x\x00y"])
-def test_delete_refuses_unsafe_stem(bad):
-    assert ts.delete_transcript(bad) is False
+def test_delete_absent_id_is_absent(out):
+    assert ts.delete_transcript(999999) == "absent"
 
 
 def test_delete_reverts_recording_link(out):
@@ -242,11 +322,12 @@ def test_delete_reverts_recording_link(out):
 
     rec = create_recording("VC1", "G1")
     update_recording_status(rec.id, "completed")
-    ts.register(rec.id, origin="job")
-    link_transcript(rec.id, _md(out, rec.id))
+    md = _md(out, rec.id)
+    tid = ts.register(md, origin="job")
+    link_transcript(rec.id, tid)
     assert load_recordings()[rec.id].status == "transcribed"
 
-    ts.delete_transcript(rec.id)
+    ts.delete_transcript(tid)
 
     loaded = load_recordings()[rec.id]
     assert loaded.transcript_path is None
@@ -256,7 +337,7 @@ def test_delete_reverts_recording_link(out):
 def test_row_delete_happens_after_md_unlink(out, monkeypatch):
     """Ordering rule: if the .md can't be removed, the row stays."""
     md = _md(out, "s01")
-    ts.register("s01", origin="job")
+    tid = ts.register(md, origin="job")
     real_unlink = Path.unlink
 
     def refuse(self, *a, **k):
@@ -265,7 +346,7 @@ def test_row_delete_happens_after_md_unlink(out, monkeypatch):
         return real_unlink(self, *a, **k)
 
     monkeypatch.setattr(Path, "unlink", refuse)
-    ts.delete_transcript("s01")
+    assert ts.delete_transcript(tid) == "kept"
     assert md.exists()
     assert _rows() == {"s01": False}
 
@@ -332,9 +413,9 @@ def test_reconcile_registers_new_files(out, case_sensitive):
 def test_reconcile_flags_missing_keeps_order_and_restores(out, case_sensitive):
     create_campaign("Game")
     for stem in ("s01", "s02", "s03"):
-        _md(out, stem)
-        ts.register(stem, origin="job")
-        move_transcript_to_campaign(stem, "game")
+        md = _md(out, stem)
+        tid = ts.register(md, origin="job")
+        _seed.move_to_campaign(stem, "game")
     companion = out / "s02.summary.md"
     companion.write_text("x", encoding="utf-8")
 
@@ -352,9 +433,9 @@ def test_reconcile_flags_missing_keeps_order_and_restores(out, case_sensitive):
 def test_reconcile_case_only_rename_keeps_row(out, monkeypatch):
     monkeypatch.setattr(ts, "_is_case_insensitive", lambda d: True)
     create_campaign("Game")
-    _md(out, "session one")
-    ts.register("session one", origin="job")
-    move_transcript_to_campaign("session one", "game")
+    md = _md(out, "session one")
+    tid = ts.register(md, origin="job")
+    _seed.move_to_campaign("session one", "game")
 
     (out / "session one.md").rename(out / "Session One.md")
     counts = ts.reconcile(out)
@@ -367,7 +448,7 @@ def test_reconcile_maps_nfd_filenames_to_nfc_rows(out, case_sensitive):
     import unicodedata
 
     nfc_name = unicodedata.normalize("NFC", "Café")
-    ts.register(nfc_name, origin="job")
+    ts.register(out / f"{nfc_name}.md", origin="job")
     _md(out, unicodedata.normalize("NFD", "Café"))
     counts = ts.reconcile(out)
     assert counts["added"] == 0
@@ -377,8 +458,8 @@ def test_reconcile_maps_nfd_filenames_to_nfc_rows(out, case_sensitive):
 def test_reconcile_sweeps_old_temps_but_never_a_companion(out, case_sensitive):
     import time as _time
 
-    _md(out, "kept")
-    ts.register("kept", origin="job")
+    md = _md(out, "kept")
+    ts.register(md, origin="job")
     companions = ["kept.summary.md", "gone_diar.json", "gone_excerpt_SPEAKER_00.mp3",
                   "gone.summary.md", "gone.md.bak", "gone.flac", "random-audio.wav"]
     for name in companions:
@@ -412,22 +493,21 @@ def test_case_probe_leaves_no_file(out):
 
 def _missing_entry(out):
     create_campaign("Game")
-    _md(out, "old name")
-    ts.register("old name", origin="job")
-    move_transcript_to_campaign("old name", "game")
+    md = _md(out, "old name")
+    tid = ts.register(md, origin="job")
+    _seed.move_to_campaign("old name", "game")
     (out / "old name.md").rename(out / "new name.md")
     # A new mtime, so reconcile can't prove the rename and lists it for relink.
     os.utime(out / "new name.md", ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
     ts.reconcile(out)  # old flagged missing, new registered
+    return tid
 
 
 def test_relink_moves_identity_to_new_file(out, case_sensitive):
-    _missing_entry(out)
-    with db.connection() as conn:
-        old_id = conn.execute("SELECT id FROM transcripts WHERE stem = 'old name'").fetchone()[0]
-    assert ts.relink_candidates() == ["new name"]
+    old_id = _missing_entry(out)
+    assert [c.stem for c in ts.relink_candidates()] == ["new name"]
 
-    ts.relink("old name", "new name")
+    ts.relink(old_id, out / "new name.md")
 
     with db.connection() as conn:
         rows = [tuple(r) for r in conn.execute("SELECT id, stem, missing_since FROM transcripts")]
@@ -437,18 +517,15 @@ def test_relink_moves_identity_to_new_file(out, case_sensitive):
 
 
 def test_relink_refuses_present_source_and_linked_target(out, case_sensitive):
-    _missing_entry(out)
-    _md(out, "present")
-    ts.register("present", origin="job")
+    old_id = _missing_entry(out)
+    present = _md(out, "present")
+    present_id = ts.register(present, origin="job")
     with pytest.raises(ValueError):
-        ts.relink("present", "new name")          # not missing
-    move_transcript_to_campaign("new name", "game")
+        ts.relink(present_id, out / "new name.md")   # not missing
+    _seed.move_to_campaign("new name", "game")
     with pytest.raises(ValueError):
-        ts.relink("old name", "new name")         # target already in a campaign
-    with pytest.raises(KeyError):
-        ts.relink("old name", "no such file")
-    with pytest.raises(ValueError):
-        ts.relink("old name", "../escape")
+        ts.relink(old_id, out / "new name.md")       # target already in a campaign    with pytest.raises(KeyError):
+        ts.relink(old_id, out / "no such file.md")
 
 
 # ---------------------------------------------------------------------------
@@ -462,8 +539,8 @@ _COMPANION_SUFFIXES = (".summary.md", "_diar.json", "_excerpt_SPEAKER_00.mp3",
 
 def _session(out: Path, stem: str) -> int:
     """A registered transcript with a summary, sidecar, two excerpts, a backup, and audio."""
-    _md(out, stem)
-    tid = ts.register(stem, origin="job")
+    md = _md(out, stem)
+    tid = ts.register(md, origin="job")
     for suffix in _COMPANION_SUFFIXES:
         (out / f"{stem}{suffix}").write_text(suffix, encoding="utf-8")
     file_registry.add(out / f"{stem}.flac", kind="audio",
@@ -490,7 +567,7 @@ def test_relink_carries_every_companion(out, case_sensitive):
     ts.reconcile(out, sweep=True)
     assert _rows()["Session 5"] is True
 
-    assert ts.relink("Session 5", "Hanataz 05") == []
+    assert ts.relink(tid, out / "Hanataz 05.md") == []
 
     expected = {"Hanataz 05.md"} | {f"Hanataz 05{s}" for s in _COMPANION_SUFFIXES}
     assert {p.name for p in out.iterdir()} == expected
@@ -506,7 +583,7 @@ def test_relink_conflict_keeps_both_files(out, case_sensitive):
     (out / "Hanataz 05.summary.md").write_text("someone else's", encoding="utf-8")
     ts.reconcile(out)
 
-    kept = ts.relink("Session 5", "Hanataz 05")
+    kept = ts.relink(tid, out / "Hanataz 05.md")
 
     assert kept == [out / "Session 5.summary.md"]
     assert (out / "Session 5.summary.md").read_text(encoding="utf-8") == ".summary.md"
@@ -521,15 +598,15 @@ def test_rename_registers_an_unregistered_companion_first(out, case_sensitive):
     assert "Session 5_excerpt_SPEAKER_02.txt" not in _registered_names(tid)
     _rename_provably_different(out, "Session 5", "Hanataz 05")
     ts.reconcile(out)
-    ts.relink("Session 5", "Hanataz 05")
+    ts.relink(tid, out / "Hanataz 05.md")
     assert (out / "Hanataz 05_excerpt_SPEAKER_02.txt").is_file()
     assert "Hanataz 05_excerpt_SPEAKER_02.txt" in _registered_names(tid)
 
 
 def test_rename_does_not_touch_another_transcripts_files(out, case_sensitive):
-    _session(out, "Session 5")
+    tid = _session(out, "Session 5")
     other = _session(out, "Session 5 B")
-    ts.rename_companions(file_registry.Owner.for_stem("Session 5").id, "Session 5", "Hanataz 05")
+    ts.rename_companions(tid, "Session 5", "Hanataz 05", src_dir=out)
     assert (out / "Session 5 B.summary.md").is_file()
     assert "Session 5 B.summary.md" in _registered_names(other)
     assert (out / "Hanataz 05.summary.md").is_file()
@@ -538,9 +615,9 @@ def test_rename_does_not_touch_another_transcripts_files(out, case_sensitive):
 def test_automatic_match_renames_the_transcript_and_its_files(out, case_sensitive):
     create_campaign("Game")
     for stem in ("s01", "Session 5", "s03"):
-        _session(out, stem)
-        move_transcript_to_campaign(stem, "game")
-    tid = file_registry.Owner.for_stem("Session 5").id
+        sid = _session(out, stem)
+        _seed.move_to_campaign(stem, "game")
+    tid = _tid("Session 5")
     ts.write_sidecar(out / "Session 5.md", {"diarization_segments": _SEGS,
                                             "speaker_map": {"SPEAKER_00": "Alice"},
                                             "input_path": str(out / "Session 5.flac")})
@@ -560,9 +637,9 @@ def test_automatic_match_renames_the_transcript_and_its_files(out, case_sensitiv
 
 def test_automatic_match_needs_one_missing_row_and_one_new_file(out, case_sensitive):
     for stem in ("a", "b"):
-        _md(out, stem)
+        md = _md(out, stem)
         os.utime(out / f"{stem}.md", ns=(_BUMP_NS, _BUMP_NS))
-        ts.register(stem, origin="job")
+        ts.register(md, origin="job")
     os.replace(out / "a.md", out / "c.md")
     (out / "b.md").unlink()                    # two missing rows share c.md's size and mtime
     counts = ts.reconcile(out)
@@ -573,8 +650,8 @@ def test_automatic_match_needs_one_missing_row_and_one_new_file(out, case_sensit
 def test_automatic_match_refuses_two_new_files_with_one_stat(out, case_sensitive):
     import shutil
 
-    _md(out, "a")
-    ts.register("a", origin="job")
+    md = _md(out, "a")
+    ts.register(md, origin="job")
     os.replace(out / "a.md", out / "c.md")
     shutil.copy2(out / "c.md", out / "d.md")   # same size and mtime
     counts = ts.reconcile(out)
@@ -602,7 +679,7 @@ def test_a_locked_companion_stays_put_and_is_reported(out, case_sensitive, monke
         raise PermissionError(32, "in use")
 
     monkeypatch.setattr(ts.os, "replace", locked)
-    kept = ts.rename_companions(tid, "s", "t")
+    kept = ts.rename_companions(tid, "s", "t", src_dir=out)
 
     assert {p.name for p in kept} == {f"s{s}" for s in _COMPANION_SUFFIXES}
     assert all((out / f"s{s}").is_file() for s in _COMPANION_SUFFIXES)
@@ -611,8 +688,24 @@ def test_a_locked_companion_stays_put_and_is_reported(out, case_sensitive, monke
 
 def test_rename_companions_ignores_an_unchanged_stem(out, case_sensitive):
     tid = _session(out, "s")
-    assert ts.rename_companions(tid, "s", "s") == []
+    assert ts.rename_companions(tid, "s", "s", src_dir=out) == []
     assert (out / "s.summary.md").is_file()
+
+
+def test_rename_companions_moves_registered_leftovers_to_dst(out, case_sensitive):
+    """A companion left under an older name by a partial rename moves with dst_dir."""
+    tid = _session(out, "Session 5")
+    old_sidecar = out / "Old name_diar.json"
+    old_sidecar.write_text("{}", encoding="utf-8")
+    file_registry.add(old_sidecar, kind="sidecar", owner=file_registry.Owner("transcript", tid),
+                      output_dir=out)
+    dst = out / "Camp"
+    dst.mkdir()
+
+    kept = ts.rename_companions(tid, "Session 5", "Session 5", src_dir=out, dst_dir=dst)
+
+    assert kept == []
+    assert (dst / "Old name_diar.json").is_file()
 
 
 # ---------------------------------------------------------------------------
@@ -622,9 +715,9 @@ def test_rename_companions_ignores_an_unchanged_stem(out, case_sensitive):
 def test_needs_attention_lists_orphans_and_vanished_files(out, case_sensitive):
     create_campaign("Game")
     _session(out, "kept")
-    _md(out, "lost")
-    ts.register("lost", origin="job")
-    move_transcript_to_campaign("lost", "game")
+    lost = _md(out, "lost")
+    lost_id = ts.register(lost, origin="job")
+    _seed.move_to_campaign("lost", "game")
     (out / "lost.md").unlink()
     (out / "ghost.summary.md").write_text("orphan", encoding="utf-8")
     (out / "kept.summary.md").unlink()
@@ -708,7 +801,7 @@ def test_sidecar_round_trip(out):
     np.testing.assert_allclose(diar["speaker_embeddings"]["SPEAKER_00"], [0.6, 0.8], rtol=1e-6)
     assert os.path.realpath(diar["input_path"]) == os.path.realpath(audio)
     with db.connection() as conn:
-        owner = file_registry.Owner.for_stem("s01", conn=conn)
+        owner = file_registry.Owner("transcript", ts.locate_path(md, conn=conn).id)
         assert file_registry.file_for(owner, "audio", conn=conn).rel_path == "s01_1.wav"
 
 
@@ -744,10 +837,11 @@ def test_rewrite_with_new_audio_deletes_the_old_copy(out):
 
 def test_delete_uses_stored_audio_path(out):
     md = _md(out, "s01")
+    tid = ts.register(md, origin="job")
     audio = out / "s01_1.wav"
     audio.write_bytes(b"a")
     ts.write_sidecar(md, _full_diar(audio))
-    ts.delete_transcript("s01")
+    ts.delete_transcript(tid)
     assert not audio.exists()
     with db.connection() as conn:
         assert conn.execute("SELECT count(*) FROM transcript_speakers").fetchone()[0] == 0
@@ -759,7 +853,7 @@ def test_audio_path_resolves_flac_recording_and_unlinked(out):
     from ._seed import seed_recording
 
     md = _md(out, "s01")
-    ts.register("s01", origin="job")
+    ts.register(md, origin="job")
     assert ts.audio_path(md) is None  # unlinked, no audio row
 
     flac = out / "s01.flac"
@@ -768,9 +862,9 @@ def test_audio_path_resolves_flac_recording_and_unlinked(out):
     assert ts.audio_path(md) == flac
 
     rec_md = _md(out, "rec")
-    ts.register("rec", origin="job")
+    rec_tid = ts.register(rec_md, origin="job")
     rec = seed_recording()
-    link_transcript(rec.id, rec_md)  # no audio row and no _diar.json
+    link_transcript(rec.id, rec_tid)  # no audio row and no _diar.json
     assert ts.audio_path(rec_md) == rec.combined_path
 
 
@@ -780,9 +874,9 @@ def test_read_sidecar_input_path_for_a_recording_without_speaker_rows(out):
     from ._seed import seed_recording
 
     md = _md(out, "rec")
-    ts.register("rec", origin="job")
+    rec_tid = ts.register(md, origin="job")
     rec = seed_recording()
-    link_transcript(rec.id, md)
+    link_transcript(rec.id, rec_tid)
     (out / "rec_diar.json").write_text(json.dumps({"diarization_segments": []}), encoding="utf-8")
 
     diar = ts.read_sidecar(md)
@@ -840,7 +934,7 @@ def test_recording_transcript_in_the_data_dir_has_no_audio_row_and_keeps_combine
     def _process(path, _result_store=None, job_id=None, **kwargs):
         md = data / (kwargs["output_stem"] + ".md")
         md.write_text("# t", encoding="utf-8")
-        ts.register(md.stem, origin="job")
+        ts.register(md, origin="job")
         _result_store["diarization_segments"] = [
             DiarizationSegment(start=0.0, end=1.0, speaker="SPEAKER_00")]
         return md
@@ -851,12 +945,12 @@ def test_recording_transcript_in_the_data_dir_has_no_audio_row_and_keeps_combine
 
     assert job.status == "completed"
     md = data / f"{rec.id}.md"
-    owner = file_registry.Owner.for_stem(rec.id)
+    owner = file_registry.Owner("transcript", ts.locate_path(md).id)
     assert file_registry.file_for(owner, "audio") is None
-    link_transcript(rec.id, md)
+    link_transcript(rec.id, owner.id)
     assert ts.audio_path(md) == combined
 
-    ts.delete_transcript(rec.id)
+    ts.delete_transcript(owner.id)
 
     assert combined.exists()
     assert not md.exists()
@@ -865,7 +959,7 @@ def test_recording_transcript_in_the_data_dir_has_no_audio_row_and_keeps_combine
 def test_overwrite_clears_stale_speakers_and_segments(out):
     md = _md(out, "s01")
     ts.write_sidecar(md, _full_diar(out / "none.wav"))
-    ts.register("s01", origin="job")      # e.g. `wisper transcribe --overwrite`
+    ts.register(md, origin="job")      # e.g. `wisper transcribe --overwrite`
     assert ts.read_sidecar(md) is None
     with db.connection() as conn:
         assert conn.execute("SELECT count(*) FROM transcript_speakers").fetchone()[0] == 0
@@ -946,7 +1040,7 @@ def test_nfd_file_is_found_indexed_and_deleted(out):
     assert search_index.progress() == (1, 1)
     assert [g.stem for g in search_index.search("croissants").groups] == [
         unicodedata.normalize("NFC", "Café night")]
-    ts.delete_transcript(unicodedata.normalize("NFC", "Café night"))
+    ts.delete_transcript(_tid(unicodedata.normalize("NFC", "Café night")))
     assert not any(p.suffix == ".md" for p in out.iterdir())
 
 
@@ -1132,4 +1226,75 @@ def test_companion_prefers_the_registered_path(out):
     loc = ts.locate(tid)
     assert loc.companion(".flac") == audio                    # registered row, any suffix
     assert loc.companion(".summary.md") == out / "s01.summary.md"  # derived name
+
+
+def test_registry_paths_for_a_session_seeded_in_a_folder(out):
+    """A session in a campaign folder registers every file under ``Folder/``."""
+    cid, slug, folder = _claimed_campaign("Game")
+    tid = _seed.seed_transcript("S", campaign=slug)
+    md = _place(out, out / folder, "S", tid)
+    ts.register(md, origin="job")
+    audio = out / folder / "S.flac"
+    audio.write_bytes(b"a")
+    ts.set_audio(md, audio)
+    ts.write_sidecar(md, {"diarization_segments": []})
+
+    with db.connection() as conn:
+        paths = [r[0] for r in conn.execute(
+            "SELECT rel_path FROM files WHERE transcript_id = ?", (tid,))]
+    assert paths and all(p.startswith(f"{folder}/") for p in paths), paths
+
+
+def test_set_speaker_names_on_an_existing_session_keeps_other_speakers(out):
+    """No second transaction: the rename doesn't clear the session's other speakers."""
+    md = _md(out, "s01")
+    ts.write_sidecar(md, {"diarization_segments": [],
+                          "speaker_map": {"SPEAKER_00": "Alice", "SPEAKER_01": "Bob"},
+                          "speaker_map_source": {"SPEAKER_00": "auto", "SPEAKER_01": "auto"}})
+    ts.set_speaker_names(md, {"SPEAKER_00": "Zanthor"}, {"SPEAKER_00": "manual"})
+    assert _speaker_rows("s01") == {"SPEAKER_00": ("Zanthor", "manual", False),
+                                    "SPEAKER_01": ("Bob", "auto", False)}
+
+
+def test_register_same_stem_in_root_and_folder_leaves_the_root_sidecar(out):
+    """Registering ``Folder/S.md`` doesn't touch root session ``S``'s sidecar."""
+    cid, slug, folder = _claimed_campaign("Game")
+    root_tid = _seed.seed_transcript("S", write_md=True)
+    root_sidecar = out / "S_diar.json"
+    root_sidecar.write_text("{}", encoding="utf-8")
+    file_registry.add(root_sidecar, kind="sidecar", owner=file_registry.Owner("transcript", root_tid),
+                      output_dir=out)
+
+    camp_tid = _insert_session("S", cid, 0)
+    md = _place(out, out / folder, "S", camp_tid)
+    ts.register(md, origin="job")
+
+    loc = ts.locate(root_tid)
+    assert loc.companions[("sidecar", "")] == root_sidecar
+    assert ts.locate(camp_tid).id == camp_tid
+
+
+def test_register_job_in_a_folder_does_not_delete_a_root_sessions_sidecar(out):
+    """A job overwrite of ``Folder/S.md`` deletes only its own folder sidecar.
+
+    The stale-sidecar fallback must resolve beside the ``.md`` being registered,
+    never the output root, so a same-named root session keeps its ``S_diar.json``.
+    """
+    cid, slug, folder = _claimed_campaign("Game")
+    root_tid = _seed.seed_transcript("S", write_md=True)
+    root_sidecar = out / "S_diar.json"
+    root_sidecar.write_text("{}", encoding="utf-8")
+    file_registry.add(root_sidecar, kind="sidecar", owner=file_registry.Owner("transcript", root_tid),
+                      output_dir=out)
+
+    camp_tid = _insert_session("S", cid, 0)
+    md = _place(out, out / folder, "S", camp_tid)
+    folder_sidecar = out / folder / "S_diar.json"    # unregistered, beside the .md
+    folder_sidecar.write_text("{}", encoding="utf-8")
+    ts.register(md, origin="job")                    # e.g. a web job overwriting it
+
+    assert root_sidecar.exists()
+    assert not folder_sidecar.exists()
+    loc = ts.locate(root_tid)
+    assert loc.companions[("sidecar", "")] == root_sidecar
 

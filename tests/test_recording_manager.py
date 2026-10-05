@@ -178,11 +178,12 @@ def test_transcribed_follows_the_transcript_link(tmp_path, monkeypatch):
     update_recording_status(rec.id, "completed", tmp_path)
     md = get_output_dir() / f"{rec.id}.md"
     md.write_text("x", encoding="utf-8")
-    link_transcript(rec.id, md, tmp_path)
+    tid = transcript_store.register(md, origin="job")
+    link_transcript(rec.id, tid, tmp_path)
     r = load_recordings(tmp_path)[rec.id]
     assert r.status == "transcribed" and r.transcript_path == md
 
-    transcript_store.delete_transcript(rec.id)       # ON DELETE SET NULL
+    transcript_store.delete_transcript(tid)       # ON DELETE SET NULL
     r = load_recordings(tmp_path)[rec.id]
     assert r.status == "completed" and r.transcript_path is None
 
@@ -743,6 +744,7 @@ def test_bind_after_trim_deletes_that_users_track(tmp_path):
 
 def _transcribed_in_campaign(tmp_path, monkeypatch, slug="dnd"):
     from wisper_transcribe import campaign_manager as cm
+    from wisper_transcribe import transcript_store
     from wisper_transcribe.path_utils import get_output_dir
 
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
@@ -752,7 +754,8 @@ def _transcribed_in_campaign(tmp_path, monkeypatch, slug="dnd"):
     update_recording_status(rec.id, "completed", tmp_path)
     md = get_output_dir() / "s1.md"
     md.write_text("x", encoding="utf-8")
-    link_transcript(rec.id, md, tmp_path)
+    tid = transcript_store.register(md, origin="job")
+    link_transcript(rec.id, tid, tmp_path)
     return rec, md
 
 
@@ -765,16 +768,18 @@ def _stored_campaign_id(rec_id, tmp_path):
 def test_transcribed_recording_campaign_follows_its_transcript(tmp_path, monkeypatch):
     from wisper_transcribe import campaign_manager as cm
     from wisper_transcribe import transcript_store
+    from wisper_transcribe.path_utils import get_output_dir
 
     rec, md = _transcribed_in_campaign(tmp_path, monkeypatch)
+    tid = transcript_store.locate_path(md).id
     stored = _stored_campaign_id(rec.id, tmp_path)
     assert rm.load_recording(rec.id, tmp_path).campaign_slug is None  # transcript in no campaign
-    cm.move_transcript_to_campaign("s1", "other", tmp_path)
+    cm.move_transcript_to_campaign(tid, "other", tmp_path)
     assert rm.load_recording(rec.id, tmp_path).campaign_slug == "other"
     assert _stored_campaign_id(rec.id, tmp_path) == stored
-    cm.remove_transcript_from_campaign("s1", tmp_path)
+    cm.remove_transcript_from_campaign(tid, tmp_path)
     assert rm.load_recording(rec.id, tmp_path).campaign_slug is None
-    transcript_store.delete_transcript("s1")
+    transcript_store.delete_transcript(tid)
     assert rm.load_recording(rec.id, tmp_path).campaign_slug == "dnd"
 
 
@@ -782,8 +787,11 @@ def test_save_recording_keeps_a_transcribed_recordings_stored_campaign(tmp_path,
     from wisper_transcribe import campaign_manager as cm
 
     rec, md = _transcribed_in_campaign(tmp_path, monkeypatch)
+    from wisper_transcribe import transcript_store
+
+    tid = transcript_store.locate_path(md).id
     stored = _stored_campaign_id(rec.id, tmp_path)
-    cm.move_transcript_to_campaign("s1", "other", tmp_path)
+    cm.move_transcript_to_campaign(tid, "other", tmp_path)
     loaded = rm.load_recording(rec.id, tmp_path)
     loaded.name = "renamed"
     save_recording(loaded, tmp_path)

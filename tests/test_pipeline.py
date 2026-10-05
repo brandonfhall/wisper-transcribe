@@ -1761,9 +1761,11 @@ def test_cli_skip_message_names_the_campaign(tmp_path, capsys):
 
     audio = tmp_path / "session01.mp3"
     audio.write_bytes(b"fake audio")
-    (get_output_dir() / "session01.md").write_text("old", encoding="utf-8")
     cm.create_campaign("Game")
-    cm.move_transcript_to_campaign("session01", "game")
+    from ._seed import seed_transcript
+    seed_transcript("session01", campaign="game", write_md=True, data_dir=None)
+    md = get_output_dir() / "session01.md"
+    md.write_text("old", encoding="utf-8")
     out = _run_process_file(audio, output_dir=get_output_dir())
     assert out.read_text(encoding="utf-8") == "old"
     assert "already processed (in campaign 'game')" in capsys.readouterr().out

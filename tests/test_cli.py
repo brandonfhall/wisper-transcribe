@@ -15,6 +15,8 @@ import pytest
 from click.testing import CliRunner
 
 from wisper_transcribe.cli import main
+
+from . import _seed
 # Import these before any autouse patch replaces them in the module namespace.
 from wisper_transcribe.cli import _get_ollama_models as _real_get_ollama_models
 from wisper_transcribe.cli import _get_lmstudio_models as _real_get_lmstudio_models
@@ -1173,7 +1175,7 @@ def test_campaigns_reorder_up(tmp_path, monkeypatch):
     runner = CliRunner()
     runner.invoke(main, ["campaigns", "create", "Test Campaign"])
     for stem in ("s1", "s2", "s3"):
-        move_transcript_to_campaign(stem, "test-campaign", data_dir=tmp_path)
+        _seed.move_to_campaign(stem, "test-campaign", data_dir=tmp_path)
 
     result = runner.invoke(main, ["campaigns", "reorder", "test-campaign", "s3", "--up"])
     assert result.exit_code == 0, result.output
@@ -1188,7 +1190,7 @@ def test_campaigns_reorder_set(tmp_path, monkeypatch):
     runner = CliRunner()
     runner.invoke(main, ["campaigns", "create", "Test Campaign"])
     for stem in ("s1", "s2", "s3"):
-        move_transcript_to_campaign(stem, "test-campaign", data_dir=tmp_path)
+        _seed.move_to_campaign(stem, "test-campaign", data_dir=tmp_path)
 
     result = runner.invoke(main, ["campaigns", "reorder", "test-campaign", "--set", "s3,s1,s2"])
     assert result.exit_code == 0, result.output
@@ -1200,7 +1202,7 @@ def test_campaigns_reorder_set_rejects_non_permutation(tmp_path, monkeypatch):
     from wisper_transcribe.campaign_manager import move_transcript_to_campaign
     runner = CliRunner()
     runner.invoke(main, ["campaigns", "create", "Test Campaign"])
-    move_transcript_to_campaign("s1", "test-campaign", data_dir=tmp_path)
+    _seed.move_to_campaign("s1", "test-campaign", data_dir=tmp_path)
 
     result = runner.invoke(main, ["campaigns", "reorder", "test-campaign", "--set", "s1,ghost"])
     assert result.exit_code != 0
@@ -1211,7 +1213,7 @@ def test_campaigns_reorder_requires_up_or_down(tmp_path, monkeypatch):
     from wisper_transcribe.campaign_manager import move_transcript_to_campaign
     runner = CliRunner()
     runner.invoke(main, ["campaigns", "create", "Test Campaign"])
-    move_transcript_to_campaign("s1", "test-campaign", data_dir=tmp_path)
+    _seed.move_to_campaign("s1", "test-campaign", data_dir=tmp_path)
 
     result = runner.invoke(main, ["campaigns", "reorder", "test-campaign", "s1"])
     assert result.exit_code != 0
@@ -1249,14 +1251,14 @@ def test_campaigns_delete_with_yes(tmp_path, monkeypatch):
 
 def _campaign_with_transcript(out):
     from wisper_transcribe import transcript_store
-    from wisper_transcribe.campaign_manager import move_transcript_to_campaign
 
     runner = CliRunner()
     runner.invoke(main, ["campaigns", "create", "Test Campaign"])
-    (out / "s01.md").write_text("x", encoding="utf-8")
-    transcript_store.register("s01", origin="job")
+    md = out / "s01.md"
+    md.write_text("x", encoding="utf-8")
+    transcript_store.register(md, origin="job")
     (out / "s01.summary.md").write_text("sum", encoding="utf-8")
-    move_transcript_to_campaign("s01", "test-campaign")
+    _seed.move_to_campaign("s01", "test-campaign")
     return runner
 
 
@@ -1396,7 +1398,7 @@ def test_transcripts_list_grouped_by_campaign(tmp_path, monkeypatch):
     (out / "session01.md").write_text("hello")
     from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
     create_campaign("D&D Mondays", data_dir=tmp_path)
-    move_transcript_to_campaign("session01", "d-d-mondays", data_dir=tmp_path)
+    _seed.move_to_campaign("session01", "d-d-mondays", data_dir=tmp_path)
     result = CliRunner().invoke(main, ["transcripts", "list"])
     assert result.exit_code == 0
     assert "D&D Mondays" in result.output
@@ -1411,7 +1413,7 @@ def test_transcripts_list_campaign_filter(tmp_path, monkeypatch):
     (out / "session02.md").write_text("hello")
     from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
     create_campaign("Alpha", data_dir=tmp_path)
-    move_transcript_to_campaign("session01", "alpha", data_dir=tmp_path)
+    _seed.move_to_campaign("session01", "alpha", data_dir=tmp_path)
     result = CliRunner().invoke(main, ["transcripts", "list", "--campaign", "alpha"])
     assert result.exit_code == 0
     assert "session01" in result.output
@@ -1422,21 +1424,24 @@ def test_transcripts_move_assigns_campaign(tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     from wisper_transcribe.campaign_manager import create_campaign, get_campaign_for_transcript
     create_campaign("Alpha", data_dir=tmp_path)
+    _seed.seed_transcript("session01", data_dir=tmp_path)
     result = CliRunner().invoke(main, ["transcripts", "move", "session01", "--campaign", "alpha"])
     assert result.exit_code == 0
-    assert get_campaign_for_transcript("session01", data_dir=tmp_path) == "alpha"
+    assert get_campaign_for_transcript(_seed.transcript_id("session01", data_dir=tmp_path),
+                                       data_dir=tmp_path) == "alpha"
 
 
 def test_transcripts_move_unlinks(tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     from wisper_transcribe.campaign_manager import (
-        create_campaign, move_transcript_to_campaign, get_campaign_for_transcript
+        create_campaign, get_campaign_for_transcript
     )
     create_campaign("Alpha", data_dir=tmp_path)
-    move_transcript_to_campaign("session01", "alpha", data_dir=tmp_path)
+    _seed.move_to_campaign("session01", "alpha", data_dir=tmp_path)
     result = CliRunner().invoke(main, ["transcripts", "move", "session01", "--no-campaign"])
     assert result.exit_code == 0
-    assert get_campaign_for_transcript("session01", data_dir=tmp_path) is None
+    assert get_campaign_for_transcript(_seed.transcript_id("session01", data_dir=tmp_path),
+                                       data_dir=tmp_path) is None
 
 
 def test_transcripts_move_invalid_slug_rejected(tmp_path, monkeypatch):
@@ -1607,7 +1612,7 @@ def test_transcripts_list_marks_missing_entries_in_campaign_order(tmp_path, monk
     create_campaign("Game")
     for stem in ("s02", "s01"):
         (out / f"{stem}.md").write_text("x", encoding="utf-8")
-        move_transcript_to_campaign(stem, "game")
+        _seed.move_to_campaign(stem, "game")
     (out / "s02.md").unlink()
 
     result = CliRunner().invoke(main, ["transcripts", "list", "--campaign", "game"])

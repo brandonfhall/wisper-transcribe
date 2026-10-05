@@ -14,6 +14,8 @@ from wisper_transcribe.campaign_manager import (
     move_transcript_to_campaign,
 )
 
+from . import _seed
+
 
 class FakeClient:
     """Minimal stand-in for LLMClient: records prompts, returns a canned body.
@@ -110,7 +112,7 @@ def test_parse_journal_no_frontmatter():
 def test_unjournalled_lists_only_summarized_sessions(tmp_path, out_dir):
     create_campaign("My Game", data_dir=tmp_path)
     for stem in ("s1", "s2", "s3"):
-        move_transcript_to_campaign(stem, "my-game", data_dir=tmp_path)
+        _seed.seed_transcript(stem, campaign="my-game", write_md=True, data_dir=tmp_path)
     _write_summary(out_dir, "s1")
     _write_summary(out_dir, "s3")  # s2 has no summary → skipped
 
@@ -120,8 +122,8 @@ def test_unjournalled_lists_only_summarized_sessions(tmp_path, out_dir):
 
 def test_unjournalled_excludes_already_folded(tmp_path, out_dir):
     create_campaign("My Game", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
-    move_transcript_to_campaign("s2", "my-game", data_dir=tmp_path)
+    _seed.seed_transcript("s1", campaign="my-game", write_md=True, data_dir=tmp_path)
+    _seed.seed_transcript("s2", campaign="my-game", write_md=True, data_dir=tmp_path)
     _write_summary(out_dir, "s1")
     _write_summary(out_dir, "s2")
 
@@ -140,7 +142,7 @@ def test_unjournalled_invalid_slug_returns_empty(tmp_path):
 
 def test_update_journal_first_fold_writes_file(tmp_path, out_dir):
     create_campaign("My Game", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
+    _seed.seed_transcript("s1", campaign="my-game", write_md=True, data_dir=tmp_path)
     _write_summary(out_dir, "s1", "The party met in a tavern.")
     client = FakeClient(body="## Story So Far\n\nThe party met.")
 
@@ -160,8 +162,8 @@ def test_update_journal_first_fold_writes_file(tmp_path, out_dir):
 
 def test_update_journal_second_fold_includes_prior_journal(tmp_path, out_dir):
     create_campaign("My Game", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
-    move_transcript_to_campaign("s2", "my-game", data_dir=tmp_path)
+    _seed.seed_transcript("s1", campaign="my-game", write_md=True, data_dir=tmp_path)
+    _seed.seed_transcript("s2", campaign="my-game", write_md=True, data_dir=tmp_path)
     _write_summary(out_dir, "s1")
     _write_summary(out_dir, "s2")
 
@@ -179,8 +181,8 @@ def test_update_journal_second_fold_includes_prior_journal(tmp_path, out_dir):
 
 def test_update_journal_explicit_session(tmp_path, out_dir):
     create_campaign("My Game", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
-    move_transcript_to_campaign("s2", "my-game", data_dir=tmp_path)
+    _seed.seed_transcript("s1", campaign="my-game", write_md=True, data_dir=tmp_path)
+    _seed.seed_transcript("s2", campaign="my-game", write_md=True, data_dir=tmp_path)
     _write_summary(out_dir, "s1")
     _write_summary(out_dir, "s2")
 
@@ -193,7 +195,7 @@ def test_update_journal_explicit_session(tmp_path, out_dir):
 
 def test_update_journal_nothing_pending_returns_none(tmp_path, out_dir):
     create_campaign("My Game", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
+    _seed.seed_transcript("s1", campaign="my-game", write_md=True, data_dir=tmp_path)
     # no summary written → nothing to fold
     result = journal.update_journal("my-game", FakeClient(), {}, data_dir=tmp_path)
     assert result is None
@@ -201,7 +203,7 @@ def test_update_journal_nothing_pending_returns_none(tmp_path, out_dir):
 
 def test_update_journal_explicit_missing_summary_raises(tmp_path, out_dir):
     create_campaign("My Game", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
+    _seed.seed_transcript("s1", campaign="my-game", write_md=True, data_dir=tmp_path)
     with pytest.raises(FileNotFoundError):
         journal.update_journal(
             "my-game", FakeClient(), {}, session_stem="s1", data_dir=tmp_path
@@ -220,7 +222,7 @@ def test_update_journal_invalid_slug_raises(tmp_path, out_dir):
 
 def test_update_journal_strips_code_fence(tmp_path, out_dir):
     create_campaign("My Game", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
+    _seed.seed_transcript("s1", campaign="my-game", write_md=True, data_dir=tmp_path)
     _write_summary(out_dir, "s1")
     client = FakeClient(body="```markdown\n## Story So Far\n\nFenced.\n```")
 
@@ -236,8 +238,8 @@ def test_update_journal_strips_code_fence(tmp_path, out_dir):
 
 def test_rebuild_campaign_resummarizes_and_refolds(tmp_path, out_dir):
     create_campaign("My Game", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
-    move_transcript_to_campaign("s2", "my-game", data_dir=tmp_path)
+    _seed.seed_transcript("s1", campaign="my-game", write_md=True, data_dir=tmp_path)
+    _seed.seed_transcript("s2", campaign="my-game", write_md=True, data_dir=tmp_path)
     _write_transcript(out_dir, "s1", "**A:** First session stuff.\n")
     _write_transcript(out_dir, "s2", "**A:** Second session stuff.\n")
     # Stale summaries from a previous run -- must be overwritten, not reused.
@@ -266,7 +268,7 @@ def test_rebuild_campaign_resummarizes_and_refolds(tmp_path, out_dir):
 
 def test_rebuild_campaign_resets_journal_instead_of_building_on_stale_content(tmp_path, out_dir):
     create_campaign("My Game", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
+    _seed.seed_transcript("s1", campaign="my-game", write_md=True, data_dir=tmp_path)
     _write_transcript(out_dir, "s1")
     _write_summary(out_dir, "s1")
 
@@ -285,8 +287,8 @@ def test_rebuild_campaign_resets_journal_instead_of_building_on_stale_content(tm
 
 def test_rebuild_campaign_skips_missing_transcript(tmp_path, out_dir):
     create_campaign("My Game", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
-    move_transcript_to_campaign("ghost", "my-game", data_dir=tmp_path)
+    _seed.seed_transcript("s1", campaign="my-game", write_md=True, data_dir=tmp_path)
+    _seed.seed_transcript("ghost", campaign="my-game", data_dir=tmp_path)
     _write_transcript(out_dir, "s1")
     # "ghost" has no .md on disk at all.
 
@@ -303,8 +305,8 @@ def test_rebuild_campaign_skips_llm_failure_and_continues(tmp_path, out_dir):
     from wisper_transcribe.llm.errors import LLMResponseError
 
     create_campaign("My Game", data_dir=tmp_path)
-    move_transcript_to_campaign("bad", "my-game", data_dir=tmp_path)
-    move_transcript_to_campaign("good", "my-game", data_dir=tmp_path)
+    _seed.seed_transcript("bad", campaign="my-game", write_md=True, data_dir=tmp_path)
+    _seed.seed_transcript("good", campaign="my-game", write_md=True, data_dir=tmp_path)
     _write_transcript(out_dir, "bad")
     _write_transcript(out_dir, "good")
 
@@ -323,8 +325,8 @@ def test_rebuild_campaign_partial_llm_failure_still_folds_successes(tmp_path, ou
     from wisper_transcribe.llm.errors import LLMResponseError
 
     create_campaign("My Game", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
-    move_transcript_to_campaign("s2", "my-game", data_dir=tmp_path)
+    _seed.seed_transcript("s1", campaign="my-game", write_md=True, data_dir=tmp_path)
+    _seed.seed_transcript("s2", campaign="my-game", write_md=True, data_dir=tmp_path)
     _write_transcript(out_dir, "s1")
     _write_transcript(out_dir, "s2")
 
@@ -356,7 +358,7 @@ def test_rebuild_campaign_invalid_slug_raises(tmp_path, out_dir):
 
 def test_rebuild_campaign_reports_progress(tmp_path, out_dir):
     create_campaign("My Game", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
+    _seed.seed_transcript("s1", campaign="my-game", write_md=True, data_dir=tmp_path)
     _write_transcript(out_dir, "s1")
 
     messages: list[str] = []
@@ -377,7 +379,7 @@ def test_cli_campaigns_journal_folds_next(tmp_path, out_dir, monkeypatch):
 
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     create_campaign("My Game", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
+    _seed.seed_transcript("s1", campaign="my-game", write_md=True, data_dir=tmp_path)
     _write_summary(out_dir, "s1")
 
     monkeypatch.setattr(cli, "_get_llm_client", lambda *a, **k: FakeClient())
@@ -393,7 +395,7 @@ def test_cli_campaigns_journal_nothing_to_do(tmp_path, out_dir, monkeypatch):
 
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     create_campaign("My Game", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
+    _seed.seed_transcript("s1", campaign="my-game", write_md=True, data_dir=tmp_path)
     # no summary → nothing to fold; must not call the LLM
     called = {"n": 0}
 
@@ -424,7 +426,7 @@ def test_cli_campaigns_journal_rebuild_with_yes(tmp_path, out_dir, monkeypatch):
 
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     create_campaign("My Game", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
+    _seed.seed_transcript("s1", campaign="my-game", write_md=True, data_dir=tmp_path)
     _write_transcript(out_dir, "s1")
 
     monkeypatch.setattr(cli, "_get_llm_client", lambda *a, **k: FakeClient())
@@ -443,7 +445,7 @@ def _cli_game(tmp_path, out_dir, monkeypatch, client):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out_dir))
     create_campaign("My Game", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
+    _seed.seed_transcript("s1", campaign="my-game", write_md=True, data_dir=tmp_path)
     _write_transcript(out_dir, "s1")
     _write_summary(out_dir, "s1", "KEEP ME")
     monkeypatch.setattr(cli, "_get_llm_client", lambda *a, **k: client)
@@ -507,7 +509,7 @@ def test_cli_campaigns_show_reports_stale_journal(tmp_path, out_dir, monkeypatch
     journal.update_journal("my-game", FakeClient(), {}, session_stem="s1")
     result = CliRunner().invoke(cli.main, ["campaigns", "show", "my-game"])
     assert "Journal:  up to date" in result.output
-    remove_transcript_from_campaign("s1")
+    _seed.remove_from_campaign("s1")
     result = CliRunner().invoke(cli.main, ["campaigns", "show", "my-game"])
     assert "STALE since" in result.output
     assert "--rebuild" in result.output
@@ -519,7 +521,7 @@ def test_cli_campaigns_journal_rebuild_prompts_without_yes(tmp_path, out_dir, mo
 
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     create_campaign("My Game", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
+    _seed.seed_transcript("s1", campaign="my-game", write_md=True, data_dir=tmp_path)
     _write_transcript(out_dir, "s1")
     monkeypatch.setattr(cli, "_get_llm_client", lambda *a, **k: FakeClient())
 
@@ -569,7 +571,7 @@ def test_run_journal_job_folds_and_completes(tmp_path, out_dir, monkeypatch):
     from wisper_transcribe.web import jobs as jobs_mod
 
     create_campaign("My Game", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
+    _seed.seed_transcript("s1", campaign="my-game", write_md=True, data_dir=tmp_path)
     _write_summary(out_dir, "s1")
 
     # The worker resolves get_client from config — hand it our FakeClient.
@@ -592,7 +594,7 @@ def test_run_journal_job_rebuild_resummarizes_and_completes(tmp_path, out_dir, m
     from wisper_transcribe.web import jobs as jobs_mod
 
     create_campaign("My Game", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
+    _seed.seed_transcript("s1", campaign="my-game", write_md=True, data_dir=tmp_path)
     _write_transcript(out_dir, "s1")
     _write_summary(out_dir, "s1", "STALE")
 
@@ -620,7 +622,7 @@ def test_run_journal_job_rebuild_refolds_existing_summaries(tmp_path, out_dir, m
     from wisper_transcribe.web import jobs as jobs_mod
 
     create_campaign("My Game", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
+    _seed.seed_transcript("s1", campaign="my-game", write_md=True, data_dir=tmp_path)
     _write_transcript(out_dir, "s1")
     _write_summary(out_dir, "s1", "KEEP ME")
     client = FakeClient()
@@ -666,7 +668,7 @@ def _campaign_row(data_dir, slug="my-game"):
 def _folded_game(tmp_path, out_dir, stems=("s1", "s2")):
     create_campaign("My Game", data_dir=tmp_path)
     for stem in stems:
-        move_transcript_to_campaign(stem, "my-game", data_dir=tmp_path)
+        _seed.seed_transcript(stem, campaign="my-game", write_md=True, data_dir=tmp_path)
         _write_summary(out_dir, stem)
         journal.update_journal("my-game", FakeClient(), {}, session_stem=stem, data_dir=tmp_path)
     return journal.journal_path("my-game", data_dir=tmp_path)
@@ -726,7 +728,7 @@ def test_edited_journal_keeps_entries_and_adopts_hash(tmp_path, out_dir):
 
 def test_fold_aborts_if_journal_changed_during_llm_call(tmp_path, out_dir):
     jpath = _folded_game(tmp_path, out_dir, ("s1",))
-    move_transcript_to_campaign("s2", "my-game", data_dir=tmp_path)
+    _seed.seed_transcript("s2", campaign="my-game", write_md=True, data_dir=tmp_path)
     _write_summary(out_dir, "s2")
 
     class RacingClient(FakeClient):
@@ -765,7 +767,7 @@ def test_reorder_keeps_entries_and_not_stale(tmp_path, out_dir):
 def test_move_to_other_campaign_drops_entry_and_marks_stale(tmp_path, out_dir):
     _folded_game(tmp_path, out_dir)
     create_campaign("Other", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "other", data_dir=tmp_path)
+    _seed.move_to_campaign("s1", "other", data_dir=tmp_path)
     assert journal.journaled_stems("my-game", data_dir=tmp_path) == ["s2"]
     assert journal.journal_stale_since("my-game", data_dir=tmp_path) is not None
     assert journal.journal_stale_since("other", data_dir=tmp_path) is None
@@ -775,7 +777,7 @@ def test_unassign_marks_stale(tmp_path, out_dir):
     from wisper_transcribe.campaign_manager import remove_transcript_from_campaign
 
     _folded_game(tmp_path, out_dir)
-    remove_transcript_from_campaign("s1", data_dir=tmp_path)
+    _seed.remove_from_campaign("s1", data_dir=tmp_path)
     assert journal.journal_stale_since("my-game", data_dir=tmp_path) is not None
 
 
@@ -784,7 +786,8 @@ def test_transcript_delete_marks_stale(tmp_path, out_dir, monkeypatch):
 
     _folded_game(tmp_path, out_dir)
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-    transcript_store.delete_transcript("s1", output_dir=out_dir)
+    tid = _seed.transcript_id("s1", data_dir=tmp_path)
+    transcript_store.delete_transcript(tid)
     assert journal.journaled_stems("my-game") == ["s2"]
     assert journal.journal_stale_since("my-game") is not None
 
@@ -794,7 +797,7 @@ def test_retranscribe_of_journaled_session_marks_stale(tmp_path, out_dir, monkey
 
     _folded_game(tmp_path, out_dir)
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-    transcript_store.register("s1", origin="job")
+    transcript_store.register(out_dir / "s1.md", origin="job")
     assert journal.journaled_stems("my-game") == ["s1", "s2"]  # never un-folded
     assert journal.journal_stale_since("my-game") is not None
 
@@ -804,14 +807,14 @@ def test_register_from_reconcile_does_not_mark_stale(tmp_path, out_dir, monkeypa
 
     _folded_game(tmp_path, out_dir)
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-    transcript_store.register("s1", origin="reconcile")
+    transcript_store.register(out_dir / "s1.md", origin="reconcile")
     assert journal.journal_stale_since("my-game") is None
 
 
 def test_moving_a_session_to_another_campaign_drops_its_journal_entry(tmp_path, out_dir):
     _folded_game(tmp_path, out_dir, ("s1",))
     create_campaign("Other", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "other", data_dir=tmp_path)
+    _seed.move_to_campaign("s1", "other", data_dir=tmp_path)
     assert journal.journaled_stems("my-game", data_dir=tmp_path) == []
     assert journal.journal_stale_since("my-game", data_dir=tmp_path) is not None
 
@@ -824,8 +827,8 @@ def test_refold_uses_existing_summaries_one_call_each(tmp_path, out_dir):
     jpath = _folded_game(tmp_path, out_dir, ("s1", "s2"))
     _write_summary(out_dir, "s1", "Edited by hand.")
     create_campaign("Other", data_dir=tmp_path)
-    move_transcript_to_campaign("s2", "other", data_dir=tmp_path)  # marks stale
-    move_transcript_to_campaign("s3", "my-game", data_dir=tmp_path)
+    _seed.move_to_campaign("s2", "other", data_dir=tmp_path)  # marks stale
+    _seed.seed_transcript("s3", campaign="my-game", write_md=True, data_dir=tmp_path)
     _write_transcript(out_dir, "s3")  # no summary yet
     client = FakeClient(body="## Story So Far\n\nRefolded.")
 
@@ -848,7 +851,7 @@ def test_rebuild_clears_stale(tmp_path, out_dir):
     for stem in ("s1", "s2"):
         _write_transcript(out_dir, stem)
     from wisper_transcribe.campaign_manager import remove_transcript_from_campaign
-    remove_transcript_from_campaign("s2", data_dir=tmp_path)
+    _seed.remove_from_campaign("s2", data_dir=tmp_path)
     journal.rebuild_campaign("my-game", FakeClient(), {}, data_dir=tmp_path)
     assert _campaign_row(tmp_path)["journal_stale_since"] is None
     assert journal.journaled_stems("my-game", data_dir=tmp_path) == ["s1"]
@@ -869,7 +872,7 @@ def _legacy_campaign(tmp_path, folded=("s1", "s2"), text=LEGACY_TEXT):
 
     create_campaign("My Game", data_dir=tmp_path)
     for stem in folded:
-        move_transcript_to_campaign(stem, "my-game", data_dir=tmp_path)
+        _seed.seed_transcript(stem, campaign="my-game", write_md=True, data_dir=tmp_path)
     legacy = journal.legacy_journal_path("my-game", tmp_path)
     legacy.parent.mkdir(parents=True)
     legacy.write_text(text, encoding="utf-8")
@@ -1065,7 +1068,7 @@ def test_an_unclaimed_folders_note_survives_a_read_a_rebuild_and_a_campaign_dele
     from wisper_transcribe.campaign_manager import delete_campaign
 
     create_campaign("My Game", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
+    _seed.seed_transcript("s1", campaign="my-game", write_md=True, data_dir=tmp_path)
     note = out_dir / "My Game" / "My Game Journal.md"
     note.parent.mkdir()
     note.write_text("my own notes", encoding="utf-8")

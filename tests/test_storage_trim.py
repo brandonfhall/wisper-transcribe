@@ -57,8 +57,9 @@ def _transcript(out: Path, stem: str, audio_name: str, *, embedded: bool = True,
 
 
 def _audio_row(md: Path):
-    owner = file_registry.Owner.for_stem(md.stem, output_dir=md.parent)
-    return file_registry.file_for(owner, "audio", output_dir=md.parent)
+    loc = transcript_store.locate_path(md)
+    owner = file_registry.Owner("transcript", loc.id)
+    return file_registry.file_for(owner, "audio")
 
 
 def _tree(root: Path) -> list[tuple[str, int]]:
@@ -152,7 +153,8 @@ def test_foreign_flac_is_never_overwritten(out, encode, probe):
 def test_recording_linked_copy_is_dropped(out, encode, probe):
     rec = seed_recording()
     md = _transcript(out, "Rec", f"{rec.id}.wav")
-    recording_manager.link_transcript(rec.id, md)
+    tid = transcript_store.locate_path(md).id
+    recording_manager.link_transcript(rec.id, tid)
     report = storage_trim.apply()
     assert not (out / f"{rec.id}.wav").exists()
     assert _audio_row(md) is None
@@ -222,7 +224,7 @@ def test_plan_changes_nothing(out, encode, probe):
     rec = seed_recording()
     _transcript(out, "A", "A.mp4", embedded=False)
     md = _transcript(out, "B", f"{rec.id}.wav")
-    recording_manager.link_transcript(rec.id, md)
+    recording_manager.link_transcript(rec.id, transcript_store.locate_path(md).id)
     (out / f"{uuid.uuid4()}.wav").write_bytes(b"w")
     (out / "stray.flac").write_bytes(b"s")
     (out / "ghost.summary.md").write_text("g", encoding="utf-8")
@@ -237,7 +239,7 @@ def test_second_run_is_a_noop(out, encode, probe):
     rec = seed_recording()
     _transcript(out, "A", "A.mp4")
     md = _transcript(out, "B", f"{rec.id}.wav")
-    recording_manager.link_transcript(rec.id, md)
+    recording_manager.link_transcript(rec.id, transcript_store.locate_path(md).id)
     (out / f"{uuid.uuid4()}.wav").write_bytes(b"w")
     storage_trim.apply()
     assert storage_trim.plan().actions == []

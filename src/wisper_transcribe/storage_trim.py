@@ -50,6 +50,7 @@ class Action:
     path: Path
     size: int                       # bytes on disk now (for a trim: bytes it frees)
     stem: Optional[str] = None      # transcript actions
+    transcript_id: Optional[int] = None
     recording_id: Optional[str] = None
     note: str = ""
 
@@ -166,7 +167,7 @@ def plan(data_dir: Optional[Path] = None, output_dir: Optional[Path] = None) -> 
     data, output = file_registry._dirs(data_dir, output_dir)
     result = TrimPlan(output_dir=output, data_dir=data)
 
-    rows: list[tuple[str, file_registry.FileRow, Optional[str]]] = []
+    rows: list[tuple[str, int, file_registry.FileRow, Optional[str]]] = []
     with db.connection(data) as conn:
         recordings = {r["id"]: r["capture_status"]
                       for r in conn.execute("SELECT id, capture_status FROM recordings")}
@@ -177,15 +178,16 @@ def plan(data_dir: Optional[Path] = None, output_dir: Optional[Path] = None) -> 
                 file_registry.Owner("transcript", t["id"]), "audio",
                 conn=conn, data_dir=data, output_dir=output)
             if row is not None and row.path.is_file():
-                rows.append((t["stem"], row, linked.get(t["id"])))
+                rows.append((t["stem"], t["id"], row, linked.get(t["id"])))
 
-    for stem, row, rec_id in rows:
+    for stem, tid, row, rec_id in rows:
         if rec_id is not None and recording_manager.combined_path_for(rec_id, data).is_file():
             result.actions.append(Action(
-                DROP_COPY, row.path, _size(row.path), stem=stem, recording_id=rec_id,
-                note="the recording's combined.wav is the audio"))
+                DROP_COPY, row.path, _size(row.path), stem=stem, transcript_id=tid,
+                recording_id=rec_id, note="the recording's combined.wav is the audio"))
         elif not _is_kept_flac(row, stem):
-            result.actions.append(Action(CONVERT, row.path, _size(row.path), stem=stem))
+            result.actions.append(Action(CONVERT, row.path, _size(row.path), stem=stem,
+                                         transcript_id=tid))
 
     for path in _find_orphans(output, set(recordings), data):
         result.actions.append(Action(ORPHAN, path, _size(path)))
@@ -209,28 +211,26 @@ def plan(data_dir: Optional[Path] = None, output_dir: Optional[Path] = None) -> 
 # Apply
 # ---------------------------------------------------------------------------
 
-def _store_missing_embeddings(md_path: Path, audio: Path, data: Path, device: str,
+def _store_missing_embeddings(loc, audio: Path, data: Path, device: str,
                               report: TrimReport) -> None:
     """Extract and store the voice embeddings a transcript lacks, from ``audio``."""
     from . import speaker_registry, transcript_store
     from .models import DiarizationSegment
 
+    md_path = loc.md
+    if md_path is None or not md_path.exists():
+        return
     diar = transcript_store.read_sidecar(md_path, data)
     if diar is None or not diar.get("diarization_segments"):
         return
     segments = [DiarizationSegment(start=s["start"], end=s["end"], speaker=s["speaker"])
                 for s in diar["diarization_segments"]]
     with db.connection(data) as conn:
-        tid = conn.execute("SELECT id FROM transcripts WHERE stem = ?",
-                           (transcript_store.nfc(md_path.stem),)).fetchone()
-        stored = {}
-        named: list[str] = []
-        if tid is not None:
-            stored = {r["label"]: r["embedding_space"] for r in conn.execute(
-                "SELECT label, embedding_space FROM transcript_speakers "
-                "WHERE transcript_id = ? AND embedding IS NOT NULL", (tid["id"],))}
-            named = [r["label"] for r in conn.execute(
-                "SELECT label FROM transcript_speakers WHERE transcript_id = ?", (tid["id"],))]
+        stored = {r["label"]: r["embedding_space"] for r in conn.execute(
+            "SELECT label, embedding_space FROM transcript_speakers "
+            "WHERE transcript_id = ? AND embedding IS NOT NULL", (loc.id,))}
+        named = [r["label"] for r in conn.execute(
+            "SELECT label FROM transcript_speakers WHERE transcript_id = ?", (loc.id,))]
     labels = set(named) or {s.speaker for s in segments}
     missing = {label for label in labels if stored.get(label) != EMBEDDING_SPACE}
     if not missing:
@@ -240,41 +240,41 @@ def _store_missing_embeddings(md_path: Path, audio: Path, data: Path, device: st
     try:
         found = speaker_registry._backfill_embeddings(diar, segments, device)
     except Exception as exc:
-        report.errors.append(f"{md_path.stem}: voices not extracted ({type(exc).__name__})")
-        log.warning("Embedding backfill failed for %s", md_path.stem, exc_info=True)
+        report.errors.append(f"{loc.stem}: voices not extracted ({type(exc).__name__})")
+        log.warning("Embedding backfill failed for %s", loc.stem, exc_info=True)
         return
     if not found:
-        report.errors.append(f"{md_path.stem}: voices not extracted")
+        report.errors.append(f"{loc.stem}: voices not extracted")
         return
     keep = {label: vec for label, vec in found.items() if label in missing}
     if keep:
         transcript_store.set_speaker_embeddings(md_path, keep, EMBEDDING_SPACE, data)
-        report.embeddings.append(md_path.stem)
+        report.embeddings.append(loc.stem)
 
 
-def _convert(action: Action, output: Path, data: Path, report: TrimReport) -> None:
+def _convert(loc, action: Action, output: Path, data: Path, report: TrimReport) -> None:
     from . import transcript_store
     from .audio_utils import encode_flac
 
-    md_path = output / f"{action.stem}.md"
+    md_path = loc.md
     src = action.path
     before = _size(src)
-    target = transcript_store.safe_path(action.stem, ".flac", output)
+    target = transcript_store.safe_path(loc.stem, ".flac", loc.dir)
     if target is None:
-        report.errors.append(f"{action.stem}: unsafe transcript name")
+        report.errors.append(f"{loc.stem}: unsafe transcript name")
         return
     in_place = target.exists() and transcript_store._same_file(src, target)
     if target.exists() and not in_place:
         owner = ("belongs to another transcript"
                  if file_registry.is_registered(target, data_dir=data, output_dir=output)
                  else "already exists and is not this transcript's")
-        report.errors.append(f"{action.stem}: {target.name} {owner}; audio left as it is")
+        report.errors.append(f"{loc.stem}: {target.name} {owner}; audio left as it is")
         return
 
     created = not in_place
     try:
         if in_place:
-            tmp = output / f"{transcript_store.TEMP_PREFIX}trim-{target.name}"
+            tmp = target.parent / f"{transcript_store.TEMP_PREFIX}trim-{target.name}"
             try:
                 encode_flac(src, tmp)
                 os.replace(tmp, target)
@@ -283,22 +283,22 @@ def _convert(action: Action, output: Path, data: Path, report: TrimReport) -> No
         else:
             encode_flac(src, target)
     except Exception as exc:
-        report.errors.append(f"{action.stem}: could not convert ({type(exc).__name__})")
-        log.warning("Could not convert audio for %s", action.stem, exc_info=True)
+        report.errors.append(f"{loc.stem}: could not convert ({type(exc).__name__})")
+        log.warning("Could not convert audio for %s", loc.stem, exc_info=True)
         return
     try:
         transcript_store.set_audio(md_path, target, data_dir=data, output_dir=output)
     except Exception as exc:
-        report.errors.append(f"{action.stem}: could not record the new audio ({type(exc).__name__})")
-        log.warning("Could not record audio for %s", action.stem, exc_info=True)
+        report.errors.append(f"{loc.stem}: could not record the new audio ({type(exc).__name__})")
+        log.warning("Could not record audio for %s", loc.stem, exc_info=True)
         if created:
             target.unlink(missing_ok=True)
         return
-    report.converted.append(action.stem)
+    report.converted.append(loc.stem)
     report.freed_bytes += before - _size(target)
 
 
-def _drop_copy(action: Action, output: Path, data: Path, report: TrimReport) -> None:
+def _drop_copy(loc, action: Action, output: Path, data: Path, report: TrimReport) -> None:
     from . import recording_manager, transcript_store
 
     if action.recording_id is None or not recording_manager.combined_path_for(
@@ -306,15 +306,14 @@ def _drop_copy(action: Action, output: Path, data: Path, report: TrimReport) -> 
         return
     before = _size(action.path)
     try:
-        transcript_store.set_audio(output / f"{action.stem}.md", None,
-                                   data_dir=data, output_dir=output)
+        transcript_store.set_audio(loc.md, None, data_dir=data, output_dir=output)
     except Exception as exc:
-        report.errors.append(f"{action.stem}: could not drop the copy ({type(exc).__name__})")
+        report.errors.append(f"{loc.stem}: could not drop the copy ({type(exc).__name__})")
         return
     if action.path.exists():
         report.errors.append(f"{action.path.name}: could not be deleted")
         return
-    report.dropped.append(action.stem or "")
+    report.dropped.append(loc.stem or "")
     report.freed_bytes += before
 
 
@@ -340,17 +339,20 @@ def apply(plan_: Optional[TrimPlan] = None, device: str = "auto",
 
     shrink = [a for a in current.actions if a.kind in (CONVERT, DROP_COPY)]
     for action in shrink:
-        md_path = output / f"{action.stem}.md"
+        loc = transcript_store.locate(action.transcript_id, data_dir=data, output_dir=output)
+        if loc is None:
+            report.errors.append(f"transcript {action.transcript_id}: not found")
+            continue
         say(f"{KIND_LABELS[action.kind]}: {action.path.name}")
         try:
-            _store_missing_embeddings(md_path, action.path, data, device, report)
+            _store_missing_embeddings(loc, action.path, data, device, report)
         except Exception as exc:
-            report.errors.append(f"{action.stem}: voices not stored ({type(exc).__name__})")
-            log.warning("Could not store voices for %s", action.stem, exc_info=True)
+            report.errors.append(f"{loc.stem}: voices not stored ({type(exc).__name__})")
+            log.warning("Could not store voices for %s", loc.stem, exc_info=True)
         if action.kind == DROP_COPY:
-            _drop_copy(action, output, data, report)
+            _drop_copy(loc, action, output, data, report)
         else:
-            _convert(action, output, data, report)
+            _convert(loc, action, output, data, report)
 
     with db.connection(data) as conn:
         ids = {r["id"] for r in conn.execute("SELECT id FROM recordings")}

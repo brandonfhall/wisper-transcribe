@@ -67,7 +67,7 @@ def _subject_ids(conn, job: Any) -> tuple[Optional[int], Optional[int], Optional
 
     Links only to rows that exist; a job never creates them.
     """
-    from .transcript_store import nfc
+    from .transcript_store import locate_path
 
     transcript_id = campaign_id = recording_id = None
     job_type = getattr(job, "job_type", "")
@@ -79,9 +79,8 @@ def _subject_ids(conn, job: Any) -> tuple[Optional[int], Optional[int], Optional
     elif job_type == "enroll":
         path = getattr(job, "enroll_md_path", None)
     if path:
-        row = conn.execute("SELECT id FROM transcripts WHERE stem = ?",
-                           (nfc(Path(path).stem),)).fetchone()
-        transcript_id = row[0] if row else None
+        loc = locate_path(Path(path), conn=conn)
+        transcript_id = loc.id if loc is not None else None
     if job_type in ("campaign_journal", "speaker_relabel"):
         slug = (getattr(job, "kwargs", {}) or {}).get("slug")
         if slug:

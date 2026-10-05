@@ -13,6 +13,8 @@ from wisper_transcribe import db, search_index as si, transcript_store as ts
 from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
 from wisper_transcribe.path_utils import get_output_dir
 
+from . import _seed
+
 SRC = Path(__file__).parent.parent / "src" / "wisper_transcribe"
 
 TRANSCRIPT = """---
@@ -69,7 +71,7 @@ def _write(out: Path, stem: str, text: str = TRANSCRIPT, *, summary: str | None 
 def _add(out: Path, stem: str, text: str = TRANSCRIPT, *, summary: str | None = None) -> Path:
     """A transcript the app just wrote: registered and indexed."""
     md = _write(out, stem, text, summary=summary)
-    ts.register(stem, origin="job")
+    ts.register(md, origin="job")
     return md
 
 
@@ -172,7 +174,7 @@ def test_reindex_replaces_old_blocks(out):
 
 def test_unregistered_or_outside_root_is_not_indexed(out, tmp_path):
     _write(out, "loose")
-    assert si.reindex("loose") is False
+    assert si.reindex(999999) is False
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     ts.save_transcript(elsewhere / "x.md", TRANSCRIPT)
@@ -183,7 +185,7 @@ def test_unregistered_or_outside_root_is_not_indexed(out, tmp_path):
 def test_undecodable_file_is_indexed_once(out):
     md = out / "bad.md"
     md.write_bytes(b"**Alice** *(00:01)*: caf\xe9 \xff broken\n")
-    ts.register("bad", origin="job")
+    ts.register(md, origin="job")
     assert _indexed("bad") == {"transcript"}
     assert si.run_backfill() == 0
 
@@ -206,7 +208,7 @@ def test_unreadable_file_is_indexed_empty(out, monkeypatch):
 def test_delete_cascades_to_fts(out):
     _add(out, "s1", summary=SUMMARY)
     _add(out, "s2")
-    ts.delete_transcript("s1")
+    ts.delete_transcript(ts.locate_path(out / "s1.md").id)
     with db.connection() as conn:
         tid2 = conn.execute("SELECT id FROM transcripts WHERE stem = 's2'").fetchone()[0]
         owners = {r[0] for r in conn.execute("SELECT transcript_id FROM search_blocks")}
@@ -234,13 +236,13 @@ def test_rebuild_drops_and_rebuilds(out):
 
 
 def test_relink_reindexes_new_file(out):
-    _add(out, "old")
+    tid = ts.locate_path(_add(out, "old")).id
     create_campaign("Curse")
-    move_transcript_to_campaign("old", "curse")
+    _seed.move_to_campaign("old", "curse")
     (out / "old.md").unlink()
     ts.reconcile(out)
-    _write(out, "new", TRANSCRIPT.replace("Strahd", "Rahadin"))
-    ts.relink("old", "new")
+    new_md = _write(out, "new", TRANSCRIPT.replace("Strahd", "Rahadin"))
+    ts.relink(tid, new_md)
     assert _indexed("new") == {"transcript"}
     assert _fts_hits("strahd") == [] and _fts_hits("rahadin")
 
@@ -418,7 +420,7 @@ def test_filters_campaign_speaker_kind(out):
     _add(out, "s1", summary=SUMMARY)
     _add(out, "s2")
     create_campaign("Curse")
-    move_transcript_to_campaign("s1", "curse")
+    _seed.move_to_campaign("s1", "curse")
     assert _stems(si.search("strahd", campaign="curse")) == ["s1"]
     assert si.search("strahd", campaign="curse").groups[0].campaign_name == "Curse"
     assert sorted(_stems(si.search("strahd"))) == ["s1", "s2"]
@@ -455,7 +457,7 @@ def test_title_matches_follow_filters(out):
     _add(out, "Cumstone one")
     _add(out, "Cumstone two")
     create_campaign("Curse")
-    move_transcript_to_campaign("Cumstone one", "curse")
+    _seed.move_to_campaign("Cumstone one", "curse")
     assert _stems(si.search("cumstone", campaign="curse")) == ["Cumstone one"]
     assert len(si.search("cumstone", kind="transcript").groups) == 2
     assert si.search("cumstone", kind="summary").groups == []
@@ -464,15 +466,16 @@ def test_title_matches_follow_filters(out):
 
 def test_title_index_follows_register_rename_and_delete(out):
     md = _add(out, "Old name")
+    old_id = ts.locate_path(md).id
     assert _stems(si.search("old")) == ["Old name"]
     md.rename(out / "New name.md")
     os.utime(out / "New name.md", ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
     ts.reconcile(out)                                 # Old name missing, New name registered
-    ts.delete_transcript("New name")                  # drop the new row so relink can take it
+    ts.delete_transcript(ts.locate_path(out / "New name.md").id)  # drop the new row so relink can take it
     (out / "New name.md").write_text(TRANSCRIPT, encoding="utf-8")
-    ts.relink("Old name", "New name")                 # UPDATE transcripts SET stem
+    ts.relink(old_id, out / "New name.md")            # UPDATE transcripts SET stem
     assert si.search("old").groups == [] and _stems(si.search("new")) == ["New name"]
-    ts.delete_transcript("New name")
+    ts.delete_transcript(ts.locate_path(out / "New name.md").id)
     assert si.search("new").groups == []
     with db.connection() as conn:
         conn.execute("INSERT INTO transcript_titles (transcript_titles, rank) VALUES ('integrity-check', 1)")
@@ -612,8 +615,9 @@ def _cli(*args: str):
 
 def test_cli_search_indexes_first_and_prints_hits(out):
     _write(out, "s1", summary=SUMMARY)  # on disk, never indexed
+    ts.register(out / "s1.md", origin="reconcile")
     create_campaign("Curse")
-    move_transcript_to_campaign("s1", "curse")
+    _seed.move_to_campaign("s1", "curse")
     result = _cli("search", "fights")
     assert result.exit_code == 0, result.output
     assert "Indexing 1 transcript(s)" in result.output

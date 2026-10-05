@@ -1174,7 +1174,6 @@ def campaigns_journal(slug: str, session: Optional[str], fold_all: bool,
     from .journal import (
         export_journal, rebuild_campaign, refold_campaign, unjournalled_sessions, update_journal,
     )
-    from .path_utils import get_output_dir
     from .llm.errors import LLMResponseError, LLMUnavailableError
     from .speaker_manager import load_profiles
 
@@ -1215,8 +1214,13 @@ def campaigns_journal(slug: str, session: Optional[str], fold_all: bool,
                         f"session(s), overwriting their summaries, and regenerate the journal "
                         f"from scratch? This is {calls} LLM calls.")
         else:
-            out_dir = get_output_dir()
-            unsummarized = sum(1 for st in stems if not (out_dir / f"{st}.summary.md").exists())
+            from .transcript_store import find_by_stem
+            campaign_id = load_campaigns()[safe].id
+            unsummarized = sum(
+                1 for st in stems
+                if not any(loc.companion(".summary.md").exists()
+                           for loc in find_by_stem(st, campaign_id=campaign_id))
+            )
             calls = transcript_count + unsummarized
             extra = f" ({unsummarized} need a summary first)" if unsummarized else ""
             question = (f"Rebuild {safe!r}: start the journal over from the {transcript_count} "
@@ -1362,10 +1366,21 @@ def transcripts_move(stem: str, campaign: Optional[str], unlink: bool):
         remove_transcript_from_campaign,
         _validate_campaign_slug,
     )
+    from .transcript_store import find_by_stem
+
+    found = find_by_stem(stem)
+    if len(found) > 1:
+        raise click.ClickException(f"{stem!r} is in several campaigns; rename one first.")
+    if not found:
+        raise click.ClickException(
+            f"No transcript named {stem!r}. Run `wisper transcripts list`; a file just added "
+            "is picked up by the next scan."
+        )
+    tid = found[0].id
 
     if unlink:
         try:
-            remove_transcript_from_campaign(stem)
+            remove_transcript_from_campaign(tid)
         except ValueError as exc:
             raise click.ClickException(str(exc))
         click.echo(f"Unlinked {stem!r} from its campaign.")
@@ -1379,7 +1394,7 @@ def transcripts_move(stem: str, campaign: Optional[str], unlink: bool):
         raise click.ClickException("Invalid campaign slug")
 
     try:
-        move_transcript_to_campaign(stem, safe)
+        move_transcript_to_campaign(tid, safe)
     except (KeyError, ValueError) as exc:
         raise click.ClickException(str(exc))
 
@@ -1542,7 +1557,7 @@ def refine(transcript: Path, tasks_raw: str, provider: Optional[str],
     backup = transcript.with_suffix(transcript.suffix + ".bak")
     atomic_write_text(backup, original)
     file_registry.add_if_owned(
-        backup, kind="backup", owner=file_registry.Owner.for_stem(transcript.stem))
+        backup, kind="backup", owner=file_registry.Owner.for_path(transcript))
     save_transcript(transcript, refined_md)
     click.echo(f"\nWrote {transcript}. Backup at {backup}.")
 
@@ -1637,7 +1652,7 @@ def summarize(transcript: Path, provider: Optional[str], model: Optional[str],
             backup = transcript.with_suffix(transcript.suffix + ".bak")
             atomic_write_text(backup, current_md)
             file_registry.add_if_owned(
-                backup, kind="backup", owner=file_registry.Owner.for_stem(transcript.stem))
+                backup, kind="backup", owner=file_registry.Owner.for_path(transcript))
             save_transcript(transcript, refined_md)
             click.echo(f"Refine applied {len(applied_edits)} edit(s). "
                        f"Backup: {backup}")

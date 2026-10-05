@@ -116,8 +116,8 @@ def _use(conn: Optional[sqlite3.Connection], data_dir: Optional[Path], *,
 def _dirs(data_dir: Optional[Path], output_dir: Optional[Path]) -> tuple[Path, Path]:
     data = db._data_dir(data_dir)
     if output_dir is None:
-        from .path_utils import get_output_dir
-        output = get_output_dir()
+        from .config import get_output_root
+        output = get_output_root()
     else:
         output = Path(output_dir)
     return data, output
@@ -157,21 +157,14 @@ class Owner:
     id: int | str
 
     @classmethod
-    def for_stem(cls, stem: str, conn: Optional[sqlite3.Connection] = None, *,
+    def for_path(cls, md_path: Path, conn: Optional[sqlite3.Connection] = None, *,
                  data_dir: Optional[Path] = None,
                  output_dir: Optional[Path] = None) -> Optional["Owner"]:
-        stem = _nfc(stem)
-        with _use(conn, data_dir, write=False) as c:
-            row = c.execute("SELECT id FROM transcripts WHERE stem = ?", (stem,)).fetchone()
-            if row is None:
-                _, output = _dirs(data_dir, output_dir)
-                if _fold(output):
-                    want = stem.casefold()
-                    for r in c.execute("SELECT id, stem FROM transcripts"):
-                        if r["stem"].casefold() == want:
-                            row = r
-                            break
-        return cls("transcript", row["id"]) if row else None
+        """The transcript owner of the ``.md`` at ``md_path``, or None."""
+        from .transcript_store import locate_path
+
+        loc = locate_path(Path(md_path), conn=conn, data_dir=data_dir, output_dir=output_dir)
+        return cls("transcript", loc.id) if loc else None
 
     @classmethod
     def for_profile_key(cls, key: str, conn: Optional[sqlite3.Connection] = None, *,

@@ -536,18 +536,14 @@ def _purge_recording_files(recording, data_dir: Path) -> None:
     if recording.status in ACTIVE_STATUSES:
         return
 
-    from wisper_transcribe.path_utils import get_output_dir
     from wisper_transcribe.transcript_store import delete_transcript
 
     rec_dir = data_dir / "recordings" / recording.id
     shutil.rmtree(rec_dir, ignore_errors=True)
 
-    # The transcript is deleted only when it's the one under the output root
-    # (the only place the hand-off writes); anything else isn't ours to delete.
-    if recording.transcript_path is not None:
-        out_dir = os.path.abspath(str(get_output_dir()))
-        if os.path.dirname(os.path.abspath(str(recording.transcript_path))) == out_dir:
-            delete_transcript(recording.transcript_path.stem)
+    # A linked transcript is always wisper's, wherever its .md is.
+    if recording.transcript_id is not None:
+        delete_transcript(recording.transcript_id, data_dir=data_dir)
 
 
 @router.post("/api/recordings/{recording_id}/delete")
@@ -981,7 +977,10 @@ def _submit_recording_transcription(recording, request: Request, data_dir: Path)
         if not job.output_path:
             return
         try:
-            link_transcript(recording.id, Path(job.output_path), data_dir)
+            from wisper_transcribe.transcript_store import locate_path
+            loc = locate_path(Path(job.output_path))
+            if loc is not None:
+                link_transcript(recording.id, loc.id, data_dir)
         except Exception:
             log.warning("Failed to link transcript to recording %s", recording.id, exc_info=True)
 

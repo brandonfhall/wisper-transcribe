@@ -680,15 +680,14 @@ def process_file(
 
         # Register it (the .md first, then the row) and associate its
         # campaign — only under the output root, the web UI's scope.
-        if _under_output_root(out_path):
-            register(out_path.stem, origin="job")
-            if campaign:
-                try:
-                    from .campaign_manager import move_transcript_to_campaign
-                    move_transcript_to_campaign(out_path.stem, campaign)
-                except Exception:
-                    tqdm.write(f"  Warning: could not add it to campaign {campaign!r}")
-        elif campaign:
+        tid = register(out_path, origin="job")
+        if tid is not None and campaign:
+            try:
+                from .campaign_manager import move_transcript_to_campaign
+                move_transcript_to_campaign(tid, campaign)
+            except Exception:
+                tqdm.write(f"  Warning: could not add it to campaign {campaign!r}")
+        elif tid is None and campaign:
             tqdm.write(
                 f"  Note: not added to campaign {campaign!r} — {out_path.parent} is outside "
                 "the transcripts folder, so the web UI won't see it "
@@ -703,22 +702,14 @@ def process_file(
 
 def _campaign_note(out_path: Path) -> str:
     """`` (in campaign <slug>)`` for an existing transcript that belongs to one."""
-    if not _under_output_root(out_path):
-        return ""
     try:
         from .campaign_manager import get_campaign_for_transcript
-        slug = get_campaign_for_transcript(out_path.stem)
+        from .transcript_store import locate_path
+        loc = locate_path(out_path)
+        slug = get_campaign_for_transcript(loc.id) if loc is not None else None
     except Exception:
         return ""
     return f" (in campaign {slug!r})" if slug else ""
-
-
-def _under_output_root(out_path: Path) -> bool:
-    """True when ``out_path`` is directly in the transcript output root."""
-    import os
-
-    from .path_utils import get_output_dir
-    return os.path.realpath(out_path.parent) == os.path.realpath(get_output_dir())
 
 
 def _folder_output_path(input_path: Path, output_dir: Optional[Path], folder: Path) -> Path:

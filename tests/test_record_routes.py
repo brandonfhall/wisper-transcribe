@@ -978,7 +978,9 @@ def test_recording_detail_shows_retranscribe_button_when_transcribed(client):
     rec = seed_recording(tmp_path)
     md = get_output_dir() / f"{rec.id}.md"
     md.write_text("x", encoding="utf-8")
-    link_transcript(rec.id, md, tmp_path)   # "transcribed" = has a transcript
+    from wisper_transcribe import transcript_store
+    tid = transcript_store.register(md, origin="job")
+    link_transcript(rec.id, tid, tmp_path)   # "transcribed" = has a transcript
     resp = c.get(f"/recordings/{rec.id}")
     assert resp.status_code == 200
     assert "Re-transcribe" in resp.text
@@ -1174,6 +1176,8 @@ def _make_transcribed_recording_with_files(tmp_path):
     out_dir.mkdir(parents=True, exist_ok=True)
     md_path = out_dir / f"{rec.id}.md"
     md_path.write_text("# transcript", encoding="utf-8")
+    from wisper_transcribe import transcript_store
+    rec.transcript_id = transcript_store.register(md_path, origin="reconcile")
     summary_path = out_dir / f"{rec.id}.summary.md"
     summary_path.write_text("# summary", encoding="utf-8")
     audio_path = out_dir / f"{rec.id}.wav"
@@ -1537,7 +1541,7 @@ def _run_handed_off_job(call, out_dir, *, fail=False):
             raise RuntimeError("boom")
         md = out_dir / (kwargs["output_stem"] + ".md")
         md.write_text("# t", encoding="utf-8")
-        transcript_store.register(md.stem, origin="job")
+        transcript_store.register(md, origin="job")
         return md
 
     queue = JobQueue()
@@ -1587,9 +1591,9 @@ def test_retranscribe_after_rename_replaces_the_renamed_transcript(client):
     out.mkdir(parents=True, exist_ok=True)
     renamed = out / "Session 14.md"
     renamed.write_text("old", encoding="utf-8")
-    transcript_store.register("Session 14", origin="job")
-    move_transcript_to_campaign("Session 14", "my-game", data_dir=tmp_path)
-    link_transcript(rec.id, renamed, tmp_path)
+    tid = transcript_store.register(renamed, origin="job")
+    move_transcript_to_campaign(tid, "my-game", data_dir=tmp_path)
+    link_transcript(rec.id, tid, tmp_path)
 
     call = _hand_off(c, tmp_path, rec)
     assert call.kwargs["original_stem"] == "Session 14"
@@ -1702,7 +1706,8 @@ def test_failed_retranscribe_keeps_the_existing_transcript(client):
     rec = seed_recording(tmp_path)
     md = get_output_dir() / f"{rec.id}.md"
     md.write_text("x", encoding="utf-8")
-    link_transcript(rec.id, md, tmp_path)
+    from wisper_transcribe import transcript_store
+    link_transcript(rec.id, transcript_store.register(md, origin="job"), tmp_path)
     fake_job = JobCls(
         id=str(_uuid.uuid4()), status="pending", created_at=rec.started_at,
         input_path=str(tmp_path / "recordings" / rec.id / "combined.wav"), kwargs={}, name=rec.id,
@@ -1981,7 +1986,9 @@ def test_recording_purge_removes_campaign_entry(client):
     rec, paths = _make_transcribed_recording_with_files(tmp_path)
     # campaign_manager resolves the data dir itself (WISPER_DATA_DIR, from conftest).
     camp = create_campaign("Purge Test")
-    move_transcript_to_campaign(paths["md_path"].stem, camp.slug)
+    from wisper_transcribe.recording_manager import load_recording
+    loaded = load_recording(rec.id, tmp_path)
+    move_transcript_to_campaign(loaded.transcript_id, camp.slug)
 
     c.post(f"/recordings/{rec.id}/delete", follow_redirects=False)
 
@@ -2086,8 +2093,8 @@ def test_trimmed_recording_retranscribe_submits_combined_wav(client):
     out.mkdir(parents=True, exist_ok=True)
     md = out / "Session 3.md"
     md.write_text("old", encoding="utf-8")
-    transcript_store.register("Session 3", origin="job")
-    link_transcript(rec.id, md, tmp_path)
+    tid = transcript_store.register(md, origin="job")
+    link_transcript(rec.id, tid, tmp_path)
 
     call = _hand_off(c, tmp_path, rec)
 

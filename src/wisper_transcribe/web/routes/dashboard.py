@@ -57,7 +57,10 @@ def job_campaigns(jobs: list) -> dict[str, str]:
             path = (getattr(job, "output_path", None) or getattr(job, "llm_transcript_path", None)
                     or getattr(job, "enroll_md_path", None))
             if path:
-                slug = get_campaign_for_transcript(Path(path).stem)
+                from wisper_transcribe.transcript_store import locate_path
+                loc = locate_path(Path(path))
+                if loc is not None:
+                    slug = get_campaign_for_transcript(loc.id)
             rid = getattr(job, "recording_id", None) or getattr(job, "live_recording_id", None)
             if slug is None and rid:
                 rec = load_recording(rid)

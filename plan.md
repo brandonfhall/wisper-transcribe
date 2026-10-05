@@ -67,7 +67,7 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 | Planning: gate review, design, reviewer cycles | complete (5 review cycles) | |
 | 1 — Schema v11; campaign queries; journal into the campaign folder | done | ffd78f4 |
 | 2a — Location API (`transcript_store.locate` and friends), no callers changed | done (opencode; Claude review fixes) | a051bf1 + next |
-| 2b — Every caller resolves through the location API | not started | |
+| 2b — Every caller resolves through the location API | done (opencode; Claude review fixes) | |
 | 3 — Transcript URLs by id; lists from the database | not started | |
 | 4 — Scan campaign folders: reconcile, sync, Needs attention | not started | |
 | 5 — Write into campaign folders: uploads, recordings, re-transcribe, CLI | not started | |
@@ -77,21 +77,21 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 | 9 — Holistic docs, comments, and tests review | not started | |
 | 10 — Final review and rehearsals (orchestrator) | not started | |
 
-### Hand-off: Phase 2a to opencode (2026-10-05)
+### Hand-offs to opencode (2026-10-05)
 
-Brandon is trying a non-Claude agent (opencode with DeepSeek) on Phase 2a. Claude reviews and fixes it afterwards, then decides whether opencode takes the mechanical phases (2b, 3c, 8, 9).
+Brandon is trying a non-Claude agent (opencode with DeepSeek) on the mechanical phases. Claude launches each hand-off headless (`opencode run`), reviews the diff, sends fixes back to the same opencode session, and commits. Phase 2a went this way (`a051bf1`, review fixes `553b9d8`).
 
-**opencode: do Phase 2a only, then stop.**
-- **Setup:** none. Work in Brandon's Mac checkout and use its existing `.venv` (`.venv/bin/pytest`, `.venv/bin/python`). Stay on `feat/campaign-folders`.
-- **Read first:** `CLAUDE.md`; this section's "How to run this plan", "Test standard", "Documentation standard", "Findings", "Decisions", "Schema v11"; then Phase 2a and its **Read first** list.
-- **Scope:** Phase 2a's steps and tests only (a new "Locations" section in `transcript_store.py` and its tests). No caller changes: that's Phase 2b. Don't edit any migration in `db.py`. When the code disagrees with the plan, stop and write the disagreement into the commit message instead of improvising a design.
+**opencode: do only the hand-off named in your prompt, then stop.**
+- **Setup:** none. Work in Brandon's Mac checkout with its existing `.venv` (`.venv/bin/pytest`, `.venv/bin/python`). Stay on `feat/campaign-folders`.
+- **Read first:** `CLAUDE.md`; this section's "How to run this plan", "Test standard", "Documentation standard", "Findings", "Decisions", "Schema v11"; then your phase, its **Read first** list, and the code your hand-off changes. For a phase that changes a web route, also `.claude/rules/web-security.md`.
+- **Scope:** only your hand-off's steps, modules, and their tests. Don't edit any migration in `db.py`. When the code disagrees with the plan, stop and say so in your final message instead of improvising a design.
+- **Lessons from the Phase 2a review:**
+  - Look rows up through the indexes: `campaign_id = ? AND stem = ?` or `campaign_id IS NULL AND stem = ?`, never `campaign_id IS ?`, and never load a whole table to filter it in Python on a per-call path.
+  - Reuse the existing helpers (`file_registry._find_by_path`, `transcript_store._stem_row`, `campaign_folders.holds_only_wisper`, `locate`/`locate_path`/`find_by_stem`) instead of re-implementing them.
 - **No real data:** tests use tmp dirs only; never set `WISPER_DATA_DIR` or `WISPER_OUTPUT_DIR` to a real folder, and never run `wisper` against Brandon's data dir (`~/Library/Application Support/wisper-transcribe`).
-- **Before committing** (Claude Code's pre-commit hook doesn't run for you, so do its job):
-  1. `.venv/bin/pytest tests/ -q` is fully green (no new skips).
-  2. `.venv/bin/python -m wisper_transcribe.tailwind`, then `git add src/wisper_transcribe/static/tailwind.min.css` if it changed.
-  3. Docs per the Documentation standard (`architecture.md` module map / design notes for the Locations API).
-  4. In this file, set the 2a Status row to `done (opencode)` and add a one-line note under the Phase 2a heading for anything that differed from the plan.
-- **Commit:** one commit on `feat/campaign-folders`, message `feat(campaign-folders): phase 2a location API`. Don't push, don't open a PR, don't start Phase 2b.
+- **Tests:** while iterating run your modules' test files; at the end run `.venv/bin/pytest tests/ -q -p no:cacheprovider`. Between hand-offs of one phase, failures in modules a later hand-off converts are expected; list them in your final message.
+- **Don't commit, push, or stage.** Leave your changes in the working tree; Claude reviews `git diff` and stages what it accepts. Don't edit this file's Status table.
+- **Final message** (at most ~400 words): files changed; each step done or not; test counts; expected failures; any disagreement with the plan.
 
 ### How to run this plan
 
@@ -870,6 +870,8 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
 ---
 
 ### Phase 2b — Every caller resolves through the location API
+
+*Done (opencode, three hand-offs). Claude's review fixed `register`'s stale-sidecar fallback (it looked in the root, so a campaign-folder re-transcribe could delete a same-named root session's sidecar) and a test that set `WISPER_OUTPUT_DIR` without `monkeypatch`. Rehearsed on a scratch copy of the Mac data: every page 200, including a transcript and its edit page.*
 
 **Goal:**
 - Nothing outside `transcript_store`, `file_registry`, and `campaign_folders` builds `<output root>/<stem><suffix>` or looks a session up by bare stem.

@@ -187,21 +187,24 @@ def _name_clashes(filename: Optional[str]) -> dict:
     gone: a new job would reuse its row, audio and speakers). ``md`` and
     ``flac`` are the clashing paths, for their modified times.
     """
-    from wisper_transcribe import db, file_registry
-    from wisper_transcribe.transcript_store import _same_file, nfc, safe_path
+    from wisper_transcribe import db
+    from wisper_transcribe.transcript_store import _same_file, locate_path, nfc, safe_path
 
     stem = _upload_stem(filename)
     out = get_output_dir()
     md = safe_path(stem, ".md", out)
     flac = safe_path(stem, ".flac", out)
-    result: dict = {"clashes": [], "stem": stem, "md": None, "flac": None}
+    result: dict = {"clashes": [], "stem": stem, "md": None, "flac": None, "loc": None}
     if md is not None and md.is_file():
         result["clashes"].append("md")
         result["md"] = md
+    loc = locate_path(md, output_dir=out) if md is not None else None
+    result["loc"] = loc
     if flac is not None and flac.is_file():
-        owner = file_registry.Owner.for_stem(stem, output_dir=out)
-        own = file_registry.file_for(owner, "audio", output_dir=out) if owner else None
-        if own is None or not _same_file(own.path, flac):
+        own = None
+        if loc is not None:
+            own = loc.companions.get(("audio", ""))
+        if own is None or not _same_file(own, flac):
             result["clashes"].append("flac")
             result["flac"] = flac
     if md is not None and result["md"] is None:
@@ -223,13 +226,13 @@ async def name_check(filename: str = "") -> Response:
     ``modified`` is the clashing file's last-modified time (the ``.md``'s when
     both clash). The filename is never echoed back.
     """
-    from wisper_transcribe.campaign_manager import get_campaign_for_transcript
-
     found = _name_clashes(filename)
     clashes = found["clashes"]
     campaign_name = None
     if "md" in clashes or "missing" in clashes:
-        slug = get_campaign_for_transcript(found["stem"])
+        from wisper_transcribe.campaign_manager import get_campaign_for_transcript
+        loc = found["loc"]
+        slug = get_campaign_for_transcript(loc.id) if loc is not None else None
         campaign = load_campaigns().get(slug) if slug else None
         campaign_name = campaign.display_name if campaign else None
     clashing = found["md"] or found["flac"]

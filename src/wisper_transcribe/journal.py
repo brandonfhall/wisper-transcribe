@@ -62,8 +62,7 @@ from .campaign_manager import (
 from .llm import LLMClient
 from .models import SpeakerProfile
 from .config import get_output_root
-from .path_utils import get_output_dir
-from .transcript_store import TEMP_PREFIX, atomic_write_text
+from .transcript_store import TEMP_PREFIX, atomic_write_text, find_by_stem
 
 log = logging.getLogger(__name__)
 
@@ -169,14 +168,18 @@ def legacy_journal_path(slug: str, data_dir: Optional[Path] = None) -> Path:
     return get_campaigns_dir(data_dir) / slug / "journal.md"
 
 
-def _summary_path(stem: str) -> Path:
-    """Return the ``<stem>.summary.md`` sidecar path in the output dir."""
-    return get_output_dir() / f"{stem}.summary.md"
+def _summary_path(campaign_id: int, stem: str, data_dir: Optional[Path] = None) -> Optional[Path]:
+    """The ``<stem>.summary.md`` sidecar of a campaign's session, or None."""
+    found = find_by_stem(stem, campaign_id=campaign_id, data_dir=data_dir)
+    if not found:
+        return None
+    return found[0].companion(".summary.md")
 
 
-def _transcript_path(stem: str) -> Path:
-    """Return the ``<stem>.md`` transcript path in the output dir."""
-    return get_output_dir() / f"{stem}.md"
+def _transcript_path(campaign_id: int, stem: str, data_dir: Optional[Path] = None) -> Optional[Path]:
+    """The ``<stem>.md`` path of a campaign's session, or None."""
+    found = find_by_stem(stem, campaign_id=campaign_id, data_dir=data_dir)
+    return found[0].md if found else None
 
 
 # ---------------------------------------------------------------------------
@@ -475,12 +478,18 @@ def unjournalled_sessions(slug: str, data_dir: Optional[Path] = None) -> list[st
     if safe is None:
         return []
     sync_journal(safe, data_dir)
+    with db.connection(data_dir) as conn:
+        row = conn.execute("SELECT id FROM campaigns WHERE slug = ?", (safe,)).fetchone()
+    if row is None:
+        return []
+    cid = row[0]
     journaled = set(journaled_stems(safe, data_dir))
     out: list[str] = []
     for stem in get_transcripts_for_campaign(safe, data_dir):
         if stem in journaled:
             continue
-        if _summary_path(stem).exists():
+        summary = _summary_path(cid, stem, data_dir)
+        if summary is not None and summary.exists():
             out.append(stem)
     return out
 
@@ -571,8 +580,8 @@ def update_journal(slug: str, client: LLMClient,
             return None
         target = pending[0]
 
-    summary_file = _summary_path(target)
-    if not summary_file.exists():
+    summary_file = _summary_path(cid, target, data_dir)
+    if summary_file is None or not summary_file.exists():
         raise FileNotFoundError(
             f"No summary for session {target!r}. Run `wisper summarize` on it first."
         )
@@ -670,17 +679,18 @@ def _check_campaign(slug: str, data_dir: Optional[Path]) -> str:
     return safe
 
 
-def _summarize_into_sidecar(stem: str, client: LLMClient,
+def _summarize_into_sidecar(campaign_id: int, stem: str, client: LLMClient,
                             profiles: dict[str, SpeakerProfile],
                             sections: Optional[list[str]], result: RebuildResult,
-                            report: Callable[[str], None]) -> bool:
-    """Summarize ``<stem>.md`` into ``<stem>.summary.md``. False = skipped."""
+                            report: Callable[[str], None],
+                            data_dir: Optional[Path] = None) -> bool:
+    """Summarize a campaign session's ``.md`` into its ``.summary.md``. False = skipped."""
     from .llm.errors import LLMResponseError, LLMUnavailableError
     from .summarize import default_summary_path, render_markdown, summarize_transcript
     from .transcript_store import save_summary
 
-    transcript_path = _transcript_path(stem)
-    if not transcript_path.exists():
+    transcript_path = _transcript_path(campaign_id, stem, data_dir)
+    if transcript_path is None or not transcript_path.exists():
         result.skipped.append((stem, "transcript .md not found"))
         report(f"Skipping {stem}: transcript .md not found")
         return False
@@ -735,12 +745,15 @@ def refold_campaign(slug: str, client: LLMClient,
     safe = _check_campaign(slug, data_dir)
     report = on_progress or (lambda msg: None)
     result = RebuildResult()
+    with db.connection(data_dir) as conn:
+        cid = conn.execute("SELECT id FROM campaigns WHERE slug = ?", (safe,)).fetchone()[0]
 
     foldable: list[str] = []
     for stem in get_transcripts_for_campaign(safe, data_dir):
-        if _summary_path(stem).exists():
+        summary = _summary_path(cid, stem, data_dir)
+        if summary is not None and summary.exists():
             foldable.append(stem)
-        elif _summarize_into_sidecar(stem, client, profiles, sections, result, report):
+        elif _summarize_into_sidecar(cid, stem, client, profiles, sections, result, report, data_dir):
             foldable.append(stem)
 
     reset_journal(safe, data_dir)
@@ -771,9 +784,11 @@ def rebuild_campaign(slug: str, client: LLMClient,
     safe = _check_campaign(slug, data_dir)
     report = on_progress or (lambda msg: None)
     result = RebuildResult()
+    with db.connection(data_dir) as conn:
+        cid = conn.execute("SELECT id FROM campaigns WHERE slug = ?", (safe,)).fetchone()[0]
 
     for stem in get_transcripts_for_campaign(safe, data_dir):
-        _summarize_into_sidecar(stem, client, profiles, sections, result, report)
+        _summarize_into_sidecar(cid, stem, client, profiles, sections, result, report, data_dir)
 
     # Reset so the fold pass starts clean rather than building on stale content.
     reset_journal(safe, data_dir)

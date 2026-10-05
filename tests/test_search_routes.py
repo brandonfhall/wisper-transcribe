@@ -11,6 +11,8 @@ from wisper_transcribe import search_index as si, transcript_store as ts
 from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
 from wisper_transcribe.path_utils import get_output_dir
 
+from . import _seed
+
 from .test_search_index import SUMMARY, TRANSCRIPT, _bump
 
 
@@ -33,7 +35,7 @@ def _add(out: Path, stem: str, text: str = TRANSCRIPT, summary: str | None = Non
     md.write_text(text, encoding="utf-8")
     if summary is not None:
         (out / f"{stem}.summary.md").write_text(summary, encoding="utf-8")
-    ts.register(stem, origin="job")
+    ts.register(md, origin="job")
     return md
 
 
@@ -85,7 +87,7 @@ def test_filters_and_unknown_values_ignored(out, client):
     _add(out, "s1")
     _add(out, "s2")
     create_campaign("Curse")
-    move_transcript_to_campaign("s1", "curse")
+    _seed.move_to_campaign("s1", "curse")
     r = client.get("/search", params={"q": "strahd", "campaign": "curse"})
     assert r.text.count('data-testid="search-group"') == 1
     assert "Curse" in r.text

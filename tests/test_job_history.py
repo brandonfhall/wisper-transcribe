@@ -53,9 +53,10 @@ def test_links_only_existing_subjects():
     from wisper_transcribe.path_utils import get_output_dir
     from wisper_transcribe.transcript_store import register
 
-    (get_output_dir() / "s1.md").write_text("x", encoding="utf-8")
-    register("s1", origin="job")
-    job_history.record(_job(status="completed", output_path=str(get_output_dir() / "s1.md"),
+    md = get_output_dir() / "s1.md"
+    md.write_text("x", encoding="utf-8")
+    register(md, origin="job")
+    job_history.record(_job(status="completed", output_path=str(md),
                             recording_id="22222222-2222-4222-8222-222222222222"))
     row = _row()
     assert row["transcript_id"] is not None and row["recording_id"] is None
@@ -133,7 +134,7 @@ def _transcript_job(job_id, stem, **kw):
     md = get_output_dir() / f"{stem}.md"
     md.parent.mkdir(parents=True, exist_ok=True)
     md.write_text("x", encoding="utf-8")
-    register(stem, origin="job")
+    register(md, origin="job")
     job_history.record(_job(id=job_id, status="completed", output_path=str(md), **kw))
 
 
@@ -143,12 +144,13 @@ def test_campaign_comes_from_the_transcripts_current_campaign():
     create_campaign("Curse")
     create_campaign("Other")
     _transcript_job(JID, "s1")
-    move_transcript_to_campaign("s1", "curse")
+    tid = _tid("s1")
+    move_transcript_to_campaign(tid, "curse")
     (rec,) = job_history.list_jobs(campaign="curse")[0]
     assert (rec.id, rec.campaign_slug, rec.campaign_name) == (JID, "curse", "Curse")
     assert job_history.get_job(JID).campaign_name == "Curse"
 
-    move_transcript_to_campaign("s1", "other")  # the job follows its transcript
+    move_transcript_to_campaign(tid, "other")  # the job follows its transcript
     assert job_history.list_jobs(campaign="curse")[0] == []
     assert [r.id for r in job_history.list_jobs(campaign="other")[0]] == [JID]
 
@@ -182,7 +184,7 @@ def test_dashboard_campaign_column(tmp_path):
 
     create_campaign("Curse")
     _transcript_job(JID, "s1")
-    move_transcript_to_campaign("s1", "curse")
+    move_transcript_to_campaign(_tid("s1"), "curse")
     with TestClient(create_app()) as client:
         queue = client.app.state.job_queue
         live = queue.submit(str(tmp_path / "wisper_upload_x.mp3"), campaign="curse")
@@ -213,7 +215,7 @@ def _transcript_row(tmp_path, monkeypatch, stem="s1"):
     monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
     (out / f"{stem}.md").write_text("x", encoding="utf-8")
     from wisper_transcribe import transcript_store as ts
-    ts.register(stem, origin="job")
+    ts.register(out / f"{stem}.md", origin="job")
     return out / f"{stem}.md"
 
 

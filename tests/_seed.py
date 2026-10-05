@@ -10,6 +10,7 @@ from wisper_transcribe import db
 from wisper_transcribe.config import EMBEDDING_SPACE
 from wisper_transcribe import campaign_manager as cm, speaker_manager as sm
 from wisper_transcribe.models import Campaign, SpeakerProfile
+from wisper_transcribe.transcript_store import ANY
 
 
 def unit(vec) -> np.ndarray:
@@ -253,6 +254,57 @@ def seed_transcript(stem: str, *, campaign: Optional[str] = None, write_md: bool
                           output_dir=root, data_dir=data_dir)
         with db.transaction(data_dir) as conn:
             conn.execute("UPDATE transcripts SET missing_since = NULL WHERE id = ?", (tid,))
+    return tid
+
+
+def transcript_id(stem: str, *, campaign_slug=ANY, data_dir: Optional[Path] = None) -> int:
+    """The id of the session named ``stem`` (``KeyError`` if absent).
+
+    ``campaign_slug`` defaults to any campaign (including the root); ``None``
+    means the root only. Raises ``ValueError`` when two rows match.
+    """
+    from wisper_transcribe.transcript_store import find_by_stem
+
+    if campaign_slug is ANY or campaign_slug is None:
+        campaign_id = campaign_slug
+    else:
+        with db.connection(data_dir) as conn:
+            row = conn.execute(
+                "SELECT id FROM campaigns WHERE slug = ?", (campaign_slug,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(campaign_slug)
+        campaign_id = row[0]
+    found = find_by_stem(stem, campaign_id=campaign_id, data_dir=data_dir)
+    if not found:
+        raise KeyError(stem)
+    if len(found) > 1:
+        raise ValueError(f"more than one session is named {stem!r}")
+    return found[0].id
+
+
+def move_to_campaign(stem: str, slug: str, data_dir: Optional[Path] = None) -> int:
+    """Attach the session named ``stem`` (created in the root if absent) to
+    ``slug``; returns its id.
+
+    Test convenience over the id-based ``campaign_manager.move_transcript_to_campaign``.
+    """
+    with db.transaction(data_dir) as conn:
+        tid = _find_or_create_transcript(conn, stem)
+        cid = cm._campaign_id(conn, slug)
+        pos = conn.execute(
+            "SELECT coalesce(max(position), -1) + 1 FROM transcripts WHERE campaign_id = ?",
+            (cid,),
+        ).fetchone()[0]
+        conn.execute("UPDATE transcripts SET campaign_id = ?, position = ? WHERE id = ?",
+                     (cid, pos, tid))
+    return tid
+
+
+def remove_from_campaign(stem: str, data_dir: Optional[Path] = None) -> int:
+    """Unassign the session named ``stem`` (any campaign); returns its id."""
+    tid = transcript_id(stem, data_dir=data_dir)
+    cm.remove_transcript_from_campaign(tid, data_dir=data_dir)
     return tid
 
 

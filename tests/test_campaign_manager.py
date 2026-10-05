@@ -27,7 +27,21 @@ from wisper_transcribe.campaign_manager import (
 from wisper_transcribe import db
 from wisper_transcribe.models import Campaign, CampaignMember
 
-from ._seed import save_campaigns, seed_profiles
+from ._seed import save_campaigns, seed_profiles, transcript_id
+
+
+def _tid(stem, data_dir=None):
+    """The id of the session named ``stem`` (any campaign or the root)."""
+    return transcript_id(stem, data_dir=data_dir)
+
+
+def _move(stem, slug, data_dir=None):
+    """Seed/attach a session named ``stem`` to ``slug``; returns its id."""
+    from ._seed import seed_transcript
+
+    tid = seed_transcript(stem, campaign=slug, data_dir=data_dir)
+    move_transcript_to_campaign(tid, slug, data_dir=data_dir)
+    return tid
 
 
 @pytest.fixture(autouse=True)
@@ -116,7 +130,7 @@ def test_create_campaign_persists_created_date(tmp_path):
 def test_delete_campaign_removes_entry_only(tmp_path):
     create_campaign("Test Campaign", data_dir=tmp_path)
     add_member("test-campaign", "alice", data_dir=tmp_path)
-    move_transcript_to_campaign("s01", "test-campaign", data_dir=tmp_path)
+    _move("s01", "test-campaign", data_dir=tmp_path)
     delete_campaign("test-campaign", data_dir=tmp_path)
 
     assert "test-campaign" not in load_campaigns(tmp_path)
@@ -142,9 +156,9 @@ def _campaign_with_two_sessions():
     campaign_folders.ensure_folder(create_campaign("Game").id)
     for stem in ("s01", "s02"):
         (out / f"{stem}.md").write_text("x", encoding="utf-8")
-        ts.register(stem, origin="job")
+        ts.register(out / f"{stem}.md", origin="job")
         (out / f"{stem}.summary.md").write_text("sum", encoding="utf-8")
-        move_transcript_to_campaign(stem, "game")
+        _move(stem, "game")
     journal = out / "Game" / "Game Journal.md"
     journal.write_text("journal", encoding="utf-8")
     file_registry.sync(out)
@@ -172,7 +186,7 @@ def test_delete_campaign_keep_the_files_leaves_the_journal_untracked():
     delete_campaign("game")
 
     assert (out / "s01.md").exists() and (out / "s02.summary.md").exists() and journal.exists()
-    assert get_campaign_for_transcript("s01") is None
+    assert get_campaign_for_transcript(_tid("s01")) is None
     assert file_registry.sync(out).unclaimed == []  # the deleted campaign claims nothing
     assert ts.needs_attention(out).unclaimed == []
     with db.connection() as conn:
@@ -197,7 +211,7 @@ def test_delete_campaign_everything_keeps_a_transcript_it_cannot_delete(monkeypa
     assert "game" not in load_campaigns()
     assert (out / "s01.md").exists() and not (out / "s02.md").exists()
     assert not journal.exists()
-    assert get_campaign_for_transcript("s01") is None
+    assert get_campaign_for_transcript(_tid("s01")) is None
     assert [m.stem for m in ts.needs_attention(out).missing_transcripts] == []
 
 
@@ -313,15 +327,15 @@ def test_validate_campaign_slug_rejects_invalid(slug):
 
 def test_move_transcript_to_campaign(tmp_path):
     create_campaign("Alpha", data_dir=tmp_path)
-    move_transcript_to_campaign("session01", "alpha", data_dir=tmp_path)
+    _move("session01", "alpha", data_dir=tmp_path)
     assert "session01" in get_transcripts_for_campaign("alpha", data_dir=tmp_path)
 
 
 def test_move_transcript_changes_campaign(tmp_path):
     create_campaign("Alpha", data_dir=tmp_path)
     create_campaign("Beta", data_dir=tmp_path)
-    move_transcript_to_campaign("session01", "alpha", data_dir=tmp_path)
-    move_transcript_to_campaign("session01", "beta", data_dir=tmp_path)
+    _move("session01", "alpha", data_dir=tmp_path)
+    _move("session01", "beta", data_dir=tmp_path)
     assert "session01" not in get_transcripts_for_campaign("alpha", data_dir=tmp_path)
     assert "session01" in get_transcripts_for_campaign("beta", data_dir=tmp_path)
 
@@ -333,8 +347,8 @@ def test_move_transcript_unknown_campaign_raises(tmp_path):
 
 def test_remove_transcript_from_campaign(tmp_path):
     create_campaign("Alpha", data_dir=tmp_path)
-    move_transcript_to_campaign("session01", "alpha", data_dir=tmp_path)
-    remove_transcript_from_campaign("session01", data_dir=tmp_path)
+    tid = _move("session01", "alpha", data_dir=tmp_path)
+    remove_transcript_from_campaign(tid, data_dir=tmp_path)
     assert "session01" not in get_transcripts_for_campaign("alpha", data_dir=tmp_path)
 
 
@@ -345,8 +359,8 @@ def test_remove_transcript_noop_when_not_associated(tmp_path):
 
 def test_get_campaign_for_transcript_returns_slug(tmp_path):
     create_campaign("Alpha", data_dir=tmp_path)
-    move_transcript_to_campaign("session01", "alpha", data_dir=tmp_path)
-    assert get_campaign_for_transcript("session01", data_dir=tmp_path) == "alpha"
+    tid = _move("session01", "alpha", data_dir=tmp_path)
+    assert get_campaign_for_transcript(tid, data_dir=tmp_path) == "alpha"
 
 
 # ---------------------------------------------------------------------------
@@ -356,7 +370,7 @@ def test_get_campaign_for_transcript_returns_slug(tmp_path):
 def _seed_three(tmp_path):
     create_campaign("Alpha", data_dir=tmp_path)
     for stem in ("s1", "s2", "s3"):
-        move_transcript_to_campaign(stem, "alpha", data_dir=tmp_path)
+        _move(stem, "alpha", data_dir=tmp_path)
 
 
 def test_reorder_up_swaps_with_previous(tmp_path):
@@ -420,8 +434,12 @@ def test_set_transcript_order_unknown_campaign_raises(tmp_path):
 
 
 def test_get_campaign_for_transcript_returns_none_when_not_associated(tmp_path):
+    from ._seed import seed_transcript
+
     create_campaign("Alpha", data_dir=tmp_path)
-    assert get_campaign_for_transcript("orphan", data_dir=tmp_path) is None
+    tid = seed_transcript("orphan", data_dir=tmp_path)
+    assert get_campaign_for_transcript(tid, data_dir=tmp_path) is None
+    assert get_campaign_for_transcript(999999, data_dir=tmp_path) is None
 
 
 def test_get_transcripts_for_campaign_returns_empty_for_unknown_slug(tmp_path):
@@ -430,7 +448,7 @@ def test_get_transcripts_for_campaign_returns_empty_for_unknown_slug(tmp_path):
 
 def test_transcripts_persisted_in_json(tmp_path):
     create_campaign("Alpha", data_dir=tmp_path)
-    move_transcript_to_campaign("session01", "alpha", data_dir=tmp_path)
+    _move("session01", "alpha", data_dir=tmp_path)
     campaigns = load_campaigns(tmp_path)
     assert "session01" in campaigns["alpha"].transcripts
 
@@ -438,8 +456,8 @@ def test_transcripts_persisted_in_json(tmp_path):
 def test_transcripts_loaded_from_existing_json(tmp_path):
     """Campaigns.json with existing transcripts field loads correctly."""
     create_campaign("Alpha", data_dir=tmp_path)
-    move_transcript_to_campaign("s01", "alpha", data_dir=tmp_path)
-    move_transcript_to_campaign("s02", "alpha", data_dir=tmp_path)
+    _move("s01", "alpha", data_dir=tmp_path)
+    _move("s02", "alpha", data_dir=tmp_path)
     fresh = load_campaigns(tmp_path)
     assert set(fresh["alpha"].transcripts) == {"s01", "s02"}
 
@@ -573,9 +591,9 @@ def test_schema_rejects_discord_id_with_non_digits(tmp_path):
 def test_a_transcript_has_one_campaign_and_a_move_replaces_it(tmp_path):
     create_campaign("Alpha", data_dir=tmp_path)
     create_campaign("Beta", data_dir=tmp_path)
-    move_transcript_to_campaign("s01", "alpha", data_dir=tmp_path)
-    move_transcript_to_campaign("s01", "beta", data_dir=tmp_path)
-    assert get_campaign_for_transcript("s01", data_dir=tmp_path) == "beta"
+    tid = _move("s01", "alpha", data_dir=tmp_path)
+    move_transcript_to_campaign(tid, "beta", data_dir=tmp_path)
+    assert get_campaign_for_transcript(tid, data_dir=tmp_path) == "beta"
     assert get_transcripts_for_campaign("alpha", data_dir=tmp_path) == []
     with db.connection(tmp_path) as conn:
         assert conn.execute("SELECT count(*) FROM transcripts WHERE stem = 's01'").fetchone()[0] == 1
@@ -585,7 +603,7 @@ def test_reorder_rewrites_positions_under_unique_constraint(tmp_path):
     create_campaign("Alpha", data_dir=tmp_path)
     stems = [f"s{i:02d}" for i in range(6)]
     for st in stems:
-        move_transcript_to_campaign(st, "alpha", data_dir=tmp_path)
+        _move(st, "alpha", data_dir=tmp_path)
     set_campaign_transcript_order("alpha", list(reversed(stems)), data_dir=tmp_path)
     assert get_transcripts_for_campaign("alpha", data_dir=tmp_path) == list(reversed(stems))
     reorder_campaign_transcript("alpha", "s00", "up", data_dir=tmp_path)
@@ -599,20 +617,22 @@ def test_reorder_rewrites_positions_under_unique_constraint(tmp_path):
 def test_move_appends_to_end_of_target(tmp_path):
     create_campaign("Alpha", data_dir=tmp_path)
     create_campaign("Beta", data_dir=tmp_path)
-    move_transcript_to_campaign("b1", "beta", data_dir=tmp_path)
-    move_transcript_to_campaign("a1", "alpha", data_dir=tmp_path)
-    move_transcript_to_campaign("a2", "alpha", data_dir=tmp_path)
-    move_transcript_to_campaign("a1", "beta", data_dir=tmp_path)
+    _move("b1", "beta", data_dir=tmp_path)
+    _move("a1", "alpha", data_dir=tmp_path)
+    _move("a2", "alpha", data_dir=tmp_path)
+    _move("a1", "beta", data_dir=tmp_path)
     assert get_transcripts_for_campaign("beta", data_dir=tmp_path) == ["b1", "a1"]
     assert get_transcripts_for_campaign("alpha", data_dir=tmp_path) == ["a2"]
 
 
 def test_stems_are_nfc_normalized(tmp_path):
+    from ._seed import seed_transcript
+
     create_campaign("Alpha", data_dir=tmp_path)
     nfd = unicodedata.normalize("NFD", "Café Session")
-    move_transcript_to_campaign(nfd, "alpha", data_dir=tmp_path)
     nfc = unicodedata.normalize("NFC", "Café Session")
-    assert get_campaign_for_transcript(nfc, data_dir=tmp_path) == "alpha"
+    tid = seed_transcript(nfc, campaign="alpha", data_dir=tmp_path)
+    assert get_campaign_for_transcript(tid, data_dir=tmp_path) == "alpha"
     assert get_transcripts_for_campaign("alpha", data_dir=tmp_path) == [nfc]
 
 
@@ -621,8 +641,8 @@ def test_transcript_without_md_is_registered_missing(tmp_path):
 
     (get_output_dir() / "present.md").write_text("x", encoding="utf-8")
     create_campaign("Alpha", data_dir=tmp_path)
-    move_transcript_to_campaign("present", "alpha", data_dir=tmp_path)
-    move_transcript_to_campaign("absent", "alpha", data_dir=tmp_path)
+    _move("present", "alpha", data_dir=tmp_path)
+    _move("absent", "alpha", data_dir=tmp_path)
     with db.connection(tmp_path) as conn:
         flags = dict(conn.execute("SELECT stem, missing_since IS NOT NULL FROM transcripts"))
     assert flags == {"present": 0, "absent": 1}
@@ -683,7 +703,7 @@ def test_create_campaign_names_its_folder_and_makes_no_directory(tmp_path):
 def test_load_campaigns_lists_transcript_ids_in_order(tmp_path):
     create_campaign("Alpha", data_dir=tmp_path)
     for st in ("b", "a", "c"):
-        move_transcript_to_campaign(st, "alpha", data_dir=tmp_path)
+        _move(st, "alpha", data_dir=tmp_path)
     set_campaign_transcript_order("alpha", ["c", "a", "b"], data_dir=tmp_path)
     c = load_campaigns(tmp_path)["alpha"]
     assert c.transcripts == ["c", "a", "b"]
@@ -692,19 +712,27 @@ def test_load_campaigns_lists_transcript_ids_in_order(tmp_path):
                                                  ).fetchone()[0] for s in c.transcripts]
 
 
-def test_move_by_a_stem_that_names_two_sessions_is_refused(tmp_path):
+def test_move_by_id_is_unambiguous_when_a_stem_is_shared(tmp_path):
     create_campaign("Alpha", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "alpha", data_dir=tmp_path)
+    _move("s1", "alpha", data_dir=tmp_path)
+    create_campaign("Beta", data_dir=tmp_path)
     with db.transaction(tmp_path) as conn:  # a root session with the same name
         conn.execute("INSERT INTO transcripts (stem, created_at) VALUES ('s1', 'now')")
-    with pytest.raises(ValueError, match="more than one"):
-        move_transcript_to_campaign("s1", "alpha", data_dir=tmp_path)
+        root_tid = conn.execute(
+            "SELECT id FROM transcripts WHERE campaign_id IS NULL").fetchone()[0]
+
+    move_transcript_to_campaign(root_tid, "beta", data_dir=tmp_path)
+
+    with db.connection(tmp_path) as conn:
+        bid = conn.execute("SELECT id FROM campaigns WHERE slug='beta'").fetchone()[0]
+        assert conn.execute("SELECT campaign_id FROM transcripts WHERE id = ?",
+                            (root_tid,)).fetchone()[0] == bid
 
 
 def test_assigning_a_session_to_a_campaign_that_has_its_name_is_refused(tmp_path):
     create_campaign("Alpha", data_dir=tmp_path)
     create_campaign("Beta", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "alpha", data_dir=tmp_path)
+    _move("s1", "alpha", data_dir=tmp_path)
     with db.transaction(tmp_path) as conn:
         conn.execute("INSERT INTO transcripts (stem, campaign_id, position, created_at) "
                      "SELECT 's1', id, 0, 'now' FROM campaigns WHERE slug = 'beta'")
@@ -720,12 +748,12 @@ def test_assigning_a_session_to_a_campaign_that_has_its_name_is_refused(tmp_path
 
 def test_unassigning_a_session_whose_name_is_taken_in_the_root_is_refused(tmp_path):
     create_campaign("Alpha", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "alpha", data_dir=tmp_path)
+    tid = _move("s1", "alpha", data_dir=tmp_path)
     with db.transaction(tmp_path) as conn:
         conn.execute("INSERT INTO transcripts (stem, created_at) VALUES ('s1', 'now')")
     before = _transcript_rows(tmp_path)
     with pytest.raises(ValueError, match="already there"):
-        remove_transcript_from_campaign("s1", data_dir=tmp_path)
+        remove_transcript_from_campaign(tid, data_dir=tmp_path)
     with pytest.raises(ValueError, match="already there"):
         delete_campaign("alpha", data_dir=tmp_path)
     assert _transcript_rows(tmp_path) == before and "alpha" in load_campaigns(tmp_path)
@@ -741,7 +769,7 @@ def test_transcript_id_is_read_only_and_campaign_scoped(tmp_path):
 
     create_campaign("Alpha", data_dir=tmp_path)
     create_campaign("Beta", data_dir=tmp_path)
-    move_transcript_to_campaign("s1", "alpha", data_dir=tmp_path)
+    _move("s1", "alpha", data_dir=tmp_path)
     with db.transaction(tmp_path) as conn:
         alpha, beta = cm._campaign_id(conn, "alpha"), cm._campaign_id(conn, "beta")
         assert cm._transcript_id(conn, alpha, "s1") > 0
@@ -755,7 +783,7 @@ def test_transcript_id_is_read_only_and_campaign_scoped(tmp_path):
 def test_delete_campaign_keep_files_leaves_its_transcripts_unassigned(tmp_path):
     create_campaign("Alpha", data_dir=tmp_path)
     for st in ("a", "b"):
-        move_transcript_to_campaign(st, "alpha", data_dir=tmp_path)
+        _move(st, "alpha", data_dir=tmp_path)
     delete_campaign("alpha", data_dir=tmp_path)
     assert [r[1:] for r in _transcript_rows(tmp_path)] == [(None, None), (None, None)]
     assert load_campaigns(tmp_path) == {}
@@ -765,7 +793,7 @@ def test_a_move_drops_the_journal_entry_and_marks_the_old_journal_stale_but_a_re
     create_campaign("Alpha", data_dir=tmp_path)
     create_campaign("Beta", data_dir=tmp_path)
     for st in ("a", "b"):
-        move_transcript_to_campaign(st, "alpha", data_dir=tmp_path)
+        _move(st, "alpha", data_dir=tmp_path)
     with db.transaction(tmp_path) as conn:
         conn.execute("INSERT INTO journal_entries SELECT id, campaign_id, 'now' FROM transcripts")
 
@@ -777,7 +805,7 @@ def test_a_move_drops_the_journal_entry_and_marks_the_old_journal_stale_but_a_re
 
     reorder_campaign_transcript("alpha", "a", "down", data_dir=tmp_path)
     assert state() == (2, None)
-    move_transcript_to_campaign("a", "beta", data_dir=tmp_path)
+    _move("a", "beta", data_dir=tmp_path)
     entries, stale = state()
     assert entries == 1 and stale is not None
 
@@ -795,7 +823,7 @@ def test_save_campaigns_reorders_and_drops_without_colliding(tmp_path):
     save_campaigns({"g": Campaign(slug="g", display_name="G", created="2026-01-01",
                                   transcripts=["b", "c"])}, tmp_path)
     assert get_transcripts_for_campaign("g", tmp_path) == ["b", "c"]
-    assert get_campaign_for_transcript("a", tmp_path) is None
+    assert get_campaign_for_transcript(_tid("a", tmp_path), tmp_path) is None
     assert ("a", None, None) in _transcript_rows(tmp_path)
 
 
@@ -815,7 +843,7 @@ def test_save_campaigns_moves_a_listed_transcript_out_of_another_campaign(tmp_pa
     save_campaigns({"g": Campaign(slug="g", display_name="G", created="2026-01-01"),
                     "h": Campaign(slug="h", display_name="H", created="2026-01-01",
                                   transcripts=["a"])}, tmp_path)
-    assert get_campaign_for_transcript("a", tmp_path) == "h"
+    assert get_campaign_for_transcript(_tid("a", tmp_path), tmp_path) == "h"
 
 
 def test_seed_campaign_and_seed_transcript(tmp_path):
@@ -832,7 +860,7 @@ def test_seed_campaign_and_seed_transcript(tmp_path):
 
     tid = seed_transcript("s1", campaign="hanataz", write_md=True, data_dir=tmp_path)
     assert seed_transcript("s1", data_dir=tmp_path) == tid
-    assert get_campaign_for_transcript("s1", tmp_path) == "hanataz"
+    assert get_campaign_for_transcript(tid, tmp_path) == "hanataz"
     md = file_registry.file_for(file_registry.Owner("transcript", tid), "transcript",
                                 data_dir=tmp_path)
     assert md is not None and md.path == get_output_root() / "s1.md" and md.path.is_file()

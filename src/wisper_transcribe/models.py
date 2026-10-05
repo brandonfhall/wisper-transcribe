@@ -133,6 +133,7 @@ class Recording:
     per_user_dir: Optional[Path]
     transcript_path: Optional[Path]
     rejoin_log: list               # list[RejoinAttempt]
+    transcript_id: Optional[int] = None  # the linked transcript's id, if any
     notes: Optional[str] = None
     unbound_speakers: list = field(default_factory=list)  # discord_user_ids heard but not bound
     job_id: Optional[str] = None  # JobQueue job.id when transcription is in progress or done

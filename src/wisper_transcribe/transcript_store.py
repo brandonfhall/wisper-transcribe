@@ -142,14 +142,14 @@ def save_summary(summary_path: Path, text: str) -> None:
 def _refresh_transcript_row(md_path: Path) -> None:
     """Re-stat the ``transcript`` file row after a rewrite; best-effort."""
     try:
-        owner = file_registry.Owner.for_stem(md_path.stem)
-        if owner is None:
+        loc = locate_path(Path(md_path))
+        if loc is None:
             return
-        row = file_registry.file_for(owner, "transcript")
+        row = file_registry.file_for(file_registry.Owner("transcript", loc.id), "transcript")
         if row is not None:
             file_registry.refresh(row)
     except Exception:
-        log.debug("Could not refresh the file record for %s", md_path.name, exc_info=True)
+        log.debug("Could not refresh the file record for %s", Path(md_path).name, exc_info=True)
 
 
 def _register_summary(summary_path: Path, suffix: str) -> None:
@@ -158,10 +158,14 @@ def _register_summary(summary_path: Path, suffix: str) -> None:
     A file outside the output root (a CLI ``--output``) isn't tracked.
     """
     try:
-        owner = file_registry.Owner.for_stem(summary_path.name[: -len(suffix)])
-        file_registry.add_if_owned(summary_path, kind="summary", owner=owner)
+        summary_path = Path(summary_path)
+        md = summary_path.with_name(f"{summary_path.name[: -len(suffix)]}.md")
+        loc = locate_path(md, output_dir=get_output_root())
+        owner = file_registry.Owner("transcript", loc.id) if loc else None
+        file_registry.add_if_owned(summary_path, kind="summary", owner=owner,
+                                   output_dir=get_output_root())
     except Exception:
-        log.debug("Could not register %s", summary_path.name, exc_info=True)
+        log.debug("Could not register %s", Path(summary_path).name, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -198,8 +202,7 @@ def safe_path(stem: str, suffix: str, output_dir: Optional[Path] = None) -> Opti
     if safe != stem or safe in {".", ".."}:
         return None
     if output_dir is None:
-        from .path_utils import get_output_dir
-        output_dir = get_output_dir()
+        output_dir = get_output_root()
     base = os.path.abspath(str(output_dir))
     if not base.endswith(os.sep):
         base += os.sep
@@ -357,7 +360,10 @@ def dir_campaign(directory: Path, conn: Optional[sqlite3.Connection] = None, *,
 
 
 def _dir_campaign_in(conn: sqlite3.Connection, directory: Path,
-                     output: Path, fold: bool) -> tuple[bool, Optional[int]]:
+                 output: Path, fold: bool) -> tuple[bool, Optional[int]]:
+    """Whether ``directory`` is the output root or a claimed campaign folder."""
+    if _dirs_equal(directory, output, fold):
+        return True, None
     rows = conn.execute(
         "SELECT id, folder, folder_pending, folder_claimed FROM campaigns"
     ).fetchall()
@@ -573,102 +579,152 @@ def _find_ids(conn: sqlite3.Connection, stem: str, campaign_id, present_only: bo
 # Registry
 # ---------------------------------------------------------------------------
 
-def ensure_row(conn: sqlite3.Connection, stem: str, output_dir: Optional[Path] = None) -> int:
-    """The registry row for ``stem``, created if absent (inside ``conn``'s txn).
+def ensure_row(conn: sqlite3.Connection, stem: str, output_dir: Optional[Path] = None,
+               *, campaign_id: Optional[int] = None) -> int:
+    """The registry row for ``stem`` in a campaign, created if absent (in ``conn``).
 
-    A new row whose ``.md`` doesn't exist is flagged ``missing_since`` (e.g.
-    a campaign association made before the transcript was written).
+    ``campaign_id`` ``None`` means the root. A new campaign row is appended to
+    the campaign's order; a root row has no position. A new row whose ``.md``
+    doesn't exist is flagged ``missing_since`` (e.g. a campaign association
+    made before the transcript was written).
     """
     stem = nfc(stem)
-    row = conn.execute("SELECT id FROM transcripts WHERE stem = ?", (stem,)).fetchone()
+    row = _stem_row(conn, campaign_id, stem)
     if row is not None:
         return row[0]
-    md = safe_path(stem, ".md", output_dir)
+    output = Path(output_dir) if output_dir is not None else get_output_root()
+    expected = output if campaign_id is None else expected_dir(campaign_id, conn, output_dir=output)
+    md = safe_path(stem, ".md", expected)
     exists = md is not None and md.is_file()
     now = db.now_utc()
+    position = None
+    if campaign_id is not None:
+        position = conn.execute(
+            "SELECT coalesce(max(position), -1) + 1 FROM transcripts WHERE campaign_id = ?",
+            (campaign_id,),
+        ).fetchone()[0]
     return conn.execute(
-        "INSERT INTO transcripts (stem, created_at, missing_since) VALUES (?, ?, ?) RETURNING id",
-        (stem, _file_timestamp(md) if exists else now, None if exists else now),
+        "INSERT INTO transcripts (stem, campaign_id, position, created_at, missing_since) "
+        "VALUES (?, ?, ?, ?, ?) RETURNING id",
+        (stem, campaign_id, position, _file_timestamp(md) if exists else now,
+         None if exists else now),
     ).fetchone()[0]
 
 
-def register(stem: str, *, origin: Literal["job", "reconcile"],
-             data_dir: Optional[Path] = None) -> int:
-    """Record that ``<stem>.md`` exists under the output root. Returns the row id.
+def _row_for_path(conn: sqlite3.Connection, md_path: Path, *,
+                  data_dir: Optional[Path] = None,
+                  output_dir: Optional[Path] = None) -> Optional[int]:
+    """The transcript row the ``.md`` at ``md_path`` belongs to, else None.
 
-    Call after the ``.md`` is written. An existing row keeps its id, campaign
+    Runs inside the caller's ``conn`` and touches no files or speakers; it may
+    create the row (:func:`ensure_row`) for a new ``.md`` in a transcript folder. A file already registered as
+    some transcript's ``.md`` is that transcript, whatever its campaign (a
+    misplaced session re-transcribed in place keeps its row). Otherwise, in a
+    transcript folder, a row of that campaign and stem is the file's session,
+    unless that row already has a different, present ``.md`` (a misplaced
+    session: the newcomer must not take over the row).
+    """
+    output = Path(output_dir) if output_dir is not None else get_output_root()
+    md_path = Path(md_path)
+    fold = file_registry._fold(output)
+    found = _locate_path_in(conn, md_path, output)
+    if found is not None:
+        return found
+    has_dir, campaign_id = dir_campaign(md_path.parent, conn, output_dir=output)
+    if not has_dir:
+        return None
+    stem = _path_stem(md_path)
+    row = _stem_row(conn, campaign_id, stem)
+    if row is None:
+        return ensure_row(conn, stem, output, campaign_id=campaign_id)
+    registered = conn.execute(
+        "SELECT rel_path FROM files WHERE transcript_id = ? AND kind = 'transcript' LIMIT 1",
+        (row[0],),
+    ).fetchone()
+    if registered is not None:
+        other = db.from_rel(registered[0], output)
+        if _same_file(other, md_path) or not other.is_file():
+            return row[0]
+        return None  # a different, present .md already owns that row
+    return row[0]
+
+
+def register(md_path: Path, *, origin: Literal["job", "reconcile"],
+             data_dir: Optional[Path] = None) -> Optional[int]:
+    """Record that the ``.md`` at ``md_path`` exists. Returns the row id, or None.
+
+    Call after the ``.md`` is written. The row is found (or created) by
+    :func:`_row_for_path`, so a file in a campaign folder joins that campaign and
+    a misplaced session keeps its row. An existing row keeps its id, campaign
     position, and journal entries, so an overwrite or re-transcribe keeps its
-    links; a row flagged missing is un-flagged. ``origin`` is ``"job"`` when
-    the app just wrote the file (an existing, journaled transcript then marks
-    that campaign's journal stale), ``"reconcile"`` when it was found on disk.
+    links; a row flagged missing is un-flagged. ``origin`` is ``"job"`` when the
+    app just wrote the file (an existing, journaled transcript then marks that
+    campaign's journal stale), ``"reconcile"`` when it was found on disk. None
+    means nothing was registered (the file is in no transcript folder).
     """
     if origin not in ("job", "reconcile"):
         raise ValueError(f"invalid origin: {origin!r}")
-    stem = nfc(stem)
+    md_path = Path(md_path)
+    output = get_output_root()
     stale_sidecar = None
     with db.transaction(data_dir) as conn:
-        row = conn.execute(
-            "SELECT id, missing_since FROM transcripts WHERE stem = ?", (stem,)
-        ).fetchone()
-        if row is None:
-            tid = ensure_row(conn, stem)
-        else:
-            tid = row["id"]
-            if row["missing_since"] is not None:
-                conn.execute("UPDATE transcripts SET missing_since = NULL WHERE id = ?", (tid,))
-                if origin == "job":
-                    log.info("Reused the name of a previously missing transcript: %s", stem)
+        tid = _row_for_path(conn, md_path, data_dir=data_dir, output_dir=output)
+        if tid is None:
+            log.warning("Not registering %s: it is not in a transcript folder", md_path.name)
+            return None
+        stem = conn.execute("SELECT stem FROM transcripts WHERE id = ?", (tid,)).fetchone()[0]
+        row = conn.execute("SELECT missing_since FROM transcripts WHERE id = ?", (tid,)).fetchone()
+        if row["missing_since"] is not None:
+            conn.execute("UPDATE transcripts SET missing_since = NULL WHERE id = ?", (tid,))
             if origin == "job":
-                # Overwritten or re-transcribed: a journal that folded the old
-                # text now describes something else. Flag it; never un-fold
-                # automatically.
-                conn.execute(
-                    "UPDATE campaigns SET journal_stale_since = coalesce(journal_stale_since, ?) "
-                    "WHERE id IN (SELECT campaign_id FROM journal_entries WHERE transcript_id = ?)",
-                    (db.now_utc(), tid),
-                )
-                # The old run's speakers describe the old text. A web job writes
-                # fresh ones (write_sidecar) right after; a CLI overwrite has none.
-                conn.execute("DELETE FROM transcript_speakers WHERE transcript_id = ?", (tid,))
-                stale_sidecar = safe_path(stem, SIDECAR_SUFFIX)
-                file_registry.forget_kind(file_registry.Owner("transcript", tid), "sidecar",
-                                          conn=conn, data_dir=data_dir)
-        md = safe_path(stem, ".md")
-        if md is not None:
-            file_registry.add_if_owned(md, kind="transcript",
-                                       owner=file_registry.Owner("transcript", tid),
-                                       conn=conn, data_dir=data_dir, output_dir=md.parent)
+                log.info("Reused the name of a previously missing transcript: %s", stem)
+        if origin == "job":
+            # Overwritten or re-transcribed: a journal that folded the old text
+            # now describes something else. Flag it; never un-fold automatically.
+            conn.execute(
+                "UPDATE campaigns SET journal_stale_since = coalesce(journal_stale_since, ?) "
+                "WHERE id IN (SELECT campaign_id FROM journal_entries WHERE transcript_id = ?)",
+                (db.now_utc(), tid),
+            )
+            # The old run's speakers describe the old text. A web job writes
+            # fresh ones (write_sidecar) right after; a CLI overwrite has none.
+            conn.execute("DELETE FROM transcript_speakers WHERE transcript_id = ?", (tid,))
+            removed = file_registry.forget_kind(file_registry.Owner("transcript", tid), "sidecar",
+                                                conn=conn, data_dir=data_dir, output_dir=output)
+            # Beside this .md: the output root may hold another session of the same name.
+            stale_sidecar = removed[0] if removed else safe_path(stem, SIDECAR_SUFFIX, md_path.parent)
+        file_registry.add_if_owned(md_path, kind="transcript",
+                                   owner=file_registry.Owner("transcript", tid),
+                                   conn=conn, data_dir=data_dir, output_dir=output)
     if stale_sidecar is not None:
         stale_sidecar.unlink(missing_ok=True)
     # The app just wrote this file: index it now. Files found on disk
     # (reconcile) are left to the backfill, so no request parses them.
     if origin == "job":
-        _reindex(stem, data_dir)
+        _reindex(tid, data_dir)
     return tid
 
 
-def _reindex(stem: str, data_dir: Optional[Path]) -> None:
+def _reindex(transcript_id: int, data_dir: Optional[Path]) -> None:
     """Index a transcript the app just wrote or relinked; never fails the write."""
     from .search_index import reindex
     try:
-        reindex(stem, data_dir=data_dir)
+        reindex(transcript_id, data_dir=data_dir)
     except Exception:
-        log.warning("Search reindex failed for %s", stem, exc_info=True)
+        log.warning("Search reindex failed for transcript %s", transcript_id, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
 # Deletion
 # ---------------------------------------------------------------------------
 
-def _companion_paths(md_path: Path, output_dir: Path,
-                     conn: Optional[sqlite3.Connection] = None,
-                     data_dir: Optional[Path] = None) -> list[Path]:
-    """Every file that belongs to a transcript except its ``.md``.
+def _companion_paths(loc: "Located", conn: Optional[sqlite3.Connection] = None) -> list[Path]:
+    """Every file that belongs to ``loc``'s transcript except its ``.md``.
 
     The union of three sources, so unregistered files are still found:
     - the transcript's ``files`` rows (summary, sidecar, audio, excerpts, backup);
-    - the names derived from the stem (summary, sidecar, ``glob.escape``d
-      excerpt clips);
+    - the names derived from the stem, in :attr:`Located.dir` (summary,
+      sidecar, ``glob.escape``d excerpt clips);
     - an old sidecar's ``input_path``, only inside the output root (old
       sidecars point at temp dirs or user files) and never under
       ``<data>/recordings/``.
@@ -676,7 +732,8 @@ def _companion_paths(md_path: Path, output_dir: Path,
     Read before anything is deleted: an audio copy's name can't be derived
     from the stem.
     """
-    stem = nfc(Path(md_path).stem)
+    output_dir = get_output_root()
+    stem = loc.stem
     paths: list[Path] = []
     seen: set[str] = set()
 
@@ -686,44 +743,39 @@ def _companion_paths(md_path: Path, output_dir: Path,
             seen.add(key)
             paths.append(path)
 
-    recordings = Path(os.path.realpath(db._data_dir(data_dir) / "recordings"))
+    recordings = Path(os.path.realpath(db._data_dir(None) / "recordings"))
 
     def in_recordings(path: Path) -> bool:
         return Path(os.path.realpath(path)).is_relative_to(recordings)
 
-    owner = file_registry.Owner.for_stem(stem, conn=conn, data_dir=data_dir, output_dir=output_dir)
-    if owner is not None:
-        for row in file_registry.files_for(owner, conn, data_dir=data_dir, output_dir=output_dir):
-            if row.kind != "transcript" and not (row.kind == "audio" and in_recordings(row.path)):
-                add(row.path)
-    summary = safe_path(stem, ".summary.md", output_dir)
-    if summary is not None:
-        add(summary)
-    sidecar = safe_path(stem, SIDECAR_SUFFIX, output_dir)
-    if sidecar is not None:
-        add(sidecar)
-        try:
-            stored = json.loads(sidecar.read_text(encoding="utf-8")).get("input_path")
-        except (OSError, ValueError, AttributeError):
-            stored = None
-        if stored:
-            base = os.path.abspath(str(output_dir))
-            if not base.endswith(os.sep):
-                base += os.sep
-            candidate = os.path.abspath(stored)
-            if (candidate.startswith(base) and not candidate.endswith(".md")
-                    and not in_recordings(Path(candidate))):
-                add(Path(candidate))
-    md = safe_path(stem, ".md", output_dir)
-    if md is not None:
+    for path in loc.companions.values():
+        if not in_recordings(path):
+            add(path)
+    summary = loc.companion(".summary.md")
+    add(summary)
+    sidecar = loc.companion(SIDECAR_SUFFIX)
+    add(sidecar)
+    try:
+        stored = json.loads(sidecar.read_text(encoding="utf-8")).get("input_path")
+    except (OSError, ValueError, AttributeError):
+        stored = None
+    if stored:
+        base = os.path.abspath(str(loc.dir))
+        if not base.endswith(os.sep):
+            base += os.sep
+        candidate = os.path.abspath(stored)
+        if (candidate.startswith(base) and not candidate.endswith(".md")
+                and not in_recordings(Path(candidate))):
+            add(Path(candidate))
+    if loc.md is not None:
         # glob.escape: a stem like "mix*" must not match other transcripts' clips.
-        for clip in output_dir.glob(f"{glob.escape(md.stem)}_excerpt_*"):
+        for clip in loc.dir.glob(f"{glob.escape(stem)}_excerpt_*"):
             add(clip)
     return paths
 
 
-def delete_transcript(stem: str, data_dir: Optional[Path] = None,
-                      output_dir: Optional[Path] = None) -> bool:
+def delete_transcript(transcript_id: int, data_dir: Optional[Path] = None,
+                      output_dir: Optional[Path] = None) -> Literal["deleted", "kept", "absent"]:
     """Delete a transcript, its links, and its companion files.
 
     The only way a transcript is deleted. Follows the ordering rule: read the
@@ -733,37 +785,32 @@ def delete_transcript(stem: str, data_dir: Optional[Path] = None,
     crash between the last two steps leaves companions with no ``.md`` and
     no row; Needs attention lists them.
 
-    ``output_dir`` defaults to the output root; routes pass the directory they
-    already resolved. Returns False if ``stem`` isn't a safe name; True
-    otherwise (deleting a transcript that doesn't exist is not an error).
+    Returns ``"absent"`` when there is no such row, ``"kept"`` when the ``.md``
+    couldn't be unlinked (the row stays too), else ``"deleted"``.
     """
-    if output_dir is None:
-        from .path_utils import get_output_dir
-        output_dir = get_output_dir()
-    md = safe_path(stem, ".md", output_dir)
-    if md is None:
-        return False
-    stem = nfc(md.stem)
-
     with db.connection(data_dir) as conn:
-        companions = _companion_paths(md, output_dir, conn, data_dir)
+        loc = locate(transcript_id, conn=conn, data_dir=data_dir, output_dir=output_dir)
+        if loc is None:
+            return "absent"
+        companions = _companion_paths(loc, conn)
+    md = loc.md
     try:
         md.unlink(missing_ok=True)
     except OSError as exc:
         log.warning("Could not delete %s: %s", md.name, exc)
-        return True  # the file is still there, so the row stays too
+        return "kept"  # the file is still there, so the row stays too
 
     with db.transaction(data_dir) as conn:
         # Cascades to files/campaign/journal/speaker rows; a recording that
         # produced it goes back to "completed" (recordings.transcript_id SET NULL).
-        conn.execute("DELETE FROM transcripts WHERE stem = ?", (stem,))
+        conn.execute("DELETE FROM transcripts WHERE id = ?", (transcript_id,))
 
     for path in companions:
         try:
             path.unlink(missing_ok=True)
         except OSError:
             pass
-    return True
+    return "deleted"
 
 
 # ---------------------------------------------------------------------------
@@ -851,8 +898,7 @@ def reconcile(output_dir: Optional[Path] = None, data_dir: Optional[Path] = None
     (page loads; a rename forces it), never with ``"never"``.
     """
     if output_dir is None:
-        from .path_utils import get_output_dir
-        output_dir = get_output_dir()
+        output_dir = get_output_root()
     files = _transcript_files(output_dir)
     fold = _is_case_insensitive(output_dir)
     counts = {"added": 0, "missing": 0, "restored": 0, "renamed": 0, "swept": 0}
@@ -936,7 +982,8 @@ def reconcile(output_dir: Optional[Path] = None, data_dir: Optional[Path] = None
             except OSError:
                 pass
     for tid, old_stem, new_stem in pending_moves:
-        kept = rename_companions(tid, old_stem, new_stem, output_dir=output_dir, data_dir=data_dir)
+        kept = rename_companions(tid, old_stem, new_stem, src_dir=output_dir,
+                                 output_dir=output_dir, data_dir=data_dir)
         if kept:
             log.warning("%d file(s) of %r kept their old names: a file with the new name exists",
                         len(kept), new_stem)
@@ -1010,31 +1057,36 @@ def _point_transcript_row(conn: sqlite3.Connection, tid: int, md: Path,
 
 
 def rename_companions(transcript_id: int, old_stem: str, new_stem: str, *,
+                      src_dir: Path, dst_dir: Optional[Path] = None,
                       output_dir: Optional[Path] = None,
                       data_dir: Optional[Path] = None) -> list[Path]:
-    """Rename a transcript's other files from ``old_stem`` to ``new_stem``.
+    """Rename or move a transcript's other files from ``old_stem`` to ``new_stem``.
 
     Call after the ``stem`` change has committed (companion files follow the
-    row), with the stem captured before it. The files are the transcript's
-    ``files`` rows except the ``.md`` itself, plus any summary, sidecar,
-    excerpt, or backup of ``old_stem`` that isn't registered yet (registered
-    first). An unregistered ``.flac`` is never claimed: it may be the
-    user's own.
+    row), with the stem captured before it. ``src_dir`` is where the old files
+    are; with ``dst_dir`` they also move there (a campaign change), otherwise
+    they are renamed in place. The files are the transcript's ``files`` rows
+    except the ``.md`` itself, plus any summary, sidecar, excerpt, or backup of
+    ``old_stem`` found in ``src_dir`` that isn't registered yet (registered
+    first). An unregistered ``.flac`` is never claimed: it may be the user's
+    own. With a ``dst_dir``, every other registered row of the transcript also
+    moves, keeping its file name (a partial rename's leftovers). ``output_dir``
+    is the output root, for ``file_registry``.
 
     A file's new name replaces the ``old_stem`` prefix and keeps the rest
     (``_excerpt_SPEAKER_00.mp3``, ``.summary.md``, ``_1.flac``). Returns the
     files that kept their old name because the new name is taken or the move
     failed (e.g. held open on Windows); their rows are unchanged.
     """
-    if output_dir is None:
-        from .path_utils import get_output_dir
-        output_dir = get_output_dir()
-    output_dir = Path(output_dir)
+    output_dir = Path(output_dir) if output_dir is not None else get_output_root()
+    src_dir = Path(src_dir)
+    dst_dir = Path(dst_dir) if dst_dir is not None else None
     old_stem, new_stem = nfc(old_stem), nfc(new_stem)
-    if old_stem == new_stem:
+    if old_stem == new_stem and dst_dir is None:
         return []
     fold = file_registry._fold(output_dir)
     owner = file_registry.Owner("transcript", transcript_id)
+    target_dir = dst_dir or src_dir
 
     def is_old(name: str) -> bool:
         return nfc(name)[:len(old_stem)].casefold() == old_stem.casefold() if fold \
@@ -1043,7 +1095,7 @@ def rename_companions(transcript_id: int, old_stem: str, new_stem: str, *,
     rows = file_registry.files_for(owner, data_dir=data_dir, output_dir=output_dir)
     taken = {(r.kind, r.label or "") for r in rows}
     try:
-        names = sorted(e.name for e in os.scandir(output_dir) if e.is_file())
+        names = sorted(e.name for e in os.scandir(src_dir) if e.is_file())
     except OSError:
         names = []
     registered = False
@@ -1056,7 +1108,7 @@ def rename_companions(transcript_id: int, old_stem: str, new_stem: str, *,
                 continue
             if (kind, label or "") not in taken:
                 taken.add((kind, label or ""))
-                file_registry.add_if_owned(output_dir / name, kind=kind, owner=owner, label=label,
+                file_registry.add_if_owned(src_dir / name, kind=kind, owner=owner, label=label,
                                            data_dir=data_dir, output_dir=output_dir)
                 registered = True
             break
@@ -1065,76 +1117,82 @@ def rename_companions(transcript_id: int, old_stem: str, new_stem: str, *,
 
     kept: list[Path] = []
     for row in rows:
-        if row.kind == "transcript" or row.root != "output" or not is_old(row.path.name):
+        if row.kind == "transcript" or row.root != "output":
             continue
-        tail = nfc(row.path.name)[len(old_stem):]
-        result = file_registry.move(row, row.path.with_name(new_stem + tail),
-                                    data_dir=data_dir, output_dir=output_dir)
+        if is_old(row.path.name):
+            tail = nfc(row.path.name)[len(old_stem):]
+            target = target_dir / (new_stem + tail)
+        elif dst_dir is not None:
+            target = dst_dir / row.path.name
+        else:
+            continue
+        result = file_registry.move(row, target, data_dir=data_dir, output_dir=output_dir)
         if result in ("conflict", "error"):
             kept.append(row.path)
     return kept
 
 
-def relink(old_stem: str, new_stem: str, data_dir: Optional[Path] = None,
-           output_dir: Optional[Path] = None) -> list[Path]:
+def relink(old_id: int, new_md: Path, data_dir: Optional[Path] = None) -> list[Path]:
     """Give a missing transcript's identity to a file under a new name.
 
-    ``old_stem`` must be flagged missing; ``<new_stem>.md`` must exist and
-    must not be linked to anything yet (no campaign, no journal entry). The
-    old row takes the new name, so its campaign position, journal entry, and
-    speakers are kept; the new name's own row (reconcile may have created one)
-    is removed. The old name's companion files are renamed to match
+    ``old_id`` must be flagged missing; ``new_md`` must exist and its stem must
+    not be linked to anything yet (no campaign, no journal entry). The old row
+    takes the new name, so its campaign position, journal entry, and speakers
+    are kept; the new name's own row (reconcile may have created one) is
+    removed. The old name's companion files are renamed to match
     (:func:`rename_companions`); returns the ones that couldn't be.
 
-    Raises ValueError (unsafe name, not missing, or target already linked)
-    or KeyError (no such transcript).
+    Raises ValueError (not missing, or target already linked) or KeyError (no
+    such file or transcript).
     """
-    if output_dir is None:
-        from .path_utils import get_output_dir
-        output_dir = get_output_dir()
-    old_md = safe_path(old_stem, ".md", output_dir)
-    new_md = safe_path(new_stem, ".md", output_dir)
-    if old_md is None or new_md is None:
-        raise ValueError("invalid transcript name")
-    old_stem, new_stem = nfc(old_md.stem), nfc(new_md.stem)
+    new_md = Path(new_md)
+    output = get_output_root()
     if not new_md.is_file():
-        raise KeyError(f"No transcript file named {new_stem!r}")
+        raise KeyError(f"No transcript file named {new_md.stem!r}")
+    new_stem = nfc(new_md.stem)
+    old_loc = locate(old_id, data_dir=data_dir)
+    if old_loc is None:
+        raise KeyError(f"No transcript with id {old_id}")
+    if not old_loc.missing:
+        raise ValueError(f"{old_loc.stem!r} is not missing")
     with db.transaction(data_dir) as conn:
-        old = conn.execute(
-            "SELECT id, missing_since FROM transcripts WHERE stem = ?", (old_stem,)
-        ).fetchone()
-        if old is None:
-            raise KeyError(f"No transcript named {old_stem!r}")
-        if old["missing_since"] is None:
-            raise ValueError(f"{old_stem!r} is not missing")
-        new = conn.execute("SELECT id FROM transcripts WHERE stem = ?", (new_stem,)).fetchone()
-        if new is not None:
+        old = conn.execute("SELECT stem FROM transcripts WHERE id = ?", (old_id,)).fetchone()
+        rows = conn.execute(
+            "SELECT id FROM transcripts WHERE stem = ? LIMIT 2", (new_stem,)
+        ).fetchall()
+        if len(rows) > 1:
+            raise ValueError(f"more than one session is named {new_stem!r}")
+        if rows:
             linked = conn.execute(
                 "SELECT 1 FROM transcripts WHERE id = ? AND campaign_id IS NOT NULL "
                 "UNION SELECT 1 FROM journal_entries WHERE transcript_id = ?",
-                (new["id"], new["id"]),
+                (rows[0][0], rows[0][0]),
             ).fetchone()
             if linked:
                 raise ValueError(f"{new_stem!r} already belongs to a campaign")
-            conn.execute("DELETE FROM transcripts WHERE id = ?", (new["id"],))
+            conn.execute("DELETE FROM transcripts WHERE id = ?", (rows[0][0],))
         conn.execute("UPDATE transcripts SET stem = ?, missing_since = NULL WHERE id = ?",
-                     (new_stem, old["id"]))
-        _point_transcript_row(conn, old["id"], new_md, data_dir, output_dir)
-        old_id = old["id"]
-    kept = rename_companions(old_id, old_stem, new_stem, output_dir=output_dir, data_dir=data_dir)
-    _reindex(new_stem, data_dir)  # the old identity's index described the old file
+                     (new_stem, old_id))
+        _point_transcript_row(conn, old_id, new_md, data_dir, output)
+    kept = rename_companions(old_id, old["stem"], new_stem, src_dir=old_loc.dir,
+                             dst_dir=new_md.parent, output_dir=output, data_dir=data_dir)
+    _reindex(old_id, data_dir)  # the old identity's index described the old file
     return kept
 
 
-def relink_candidates(data_dir: Optional[Path] = None) -> list[str]:
+def relink_candidates(data_dir: Optional[Path] = None,
+                      output_dir: Optional[Path] = None) -> list["Located"]:
     """Present transcripts not linked to any campaign, newest first — the
     files a missing campaign entry can be relinked to."""
     with db.connection(data_dir) as conn:
-        return [r[0] for r in conn.execute(
-            "SELECT t.stem FROM transcripts t WHERE t.missing_since IS NULL "
+        ids = [r[0] for r in conn.execute(
+            "SELECT t.id FROM transcripts t WHERE t.missing_since IS NULL "
             "AND t.campaign_id IS NULL "
             "ORDER BY t.created_at DESC, t.stem"
         )]
+        return [loc for loc in
+                (locate(tid, conn=conn, data_dir=data_dir, output_dir=output_dir) for tid in ids)
+                if loc is not None]
 
 
 # ---------------------------------------------------------------------------
@@ -1143,6 +1201,7 @@ def relink_candidates(data_dir: Optional[Path] = None) -> list[str]:
 
 @dataclass
 class MissingTranscript:
+    id: int
     stem: str
     campaign: Optional[str]   # the campaign's display name
 
@@ -1174,15 +1233,14 @@ def needs_attention(output_dir: Optional[Path] = None,
     are re-checked against the disk.
     """
     if output_dir is None:
-        from .path_utils import get_output_dir
-        output_dir = get_output_dir()
+        output_dir = get_output_root()
     if report is None:
         report = file_registry.last_report(data_dir, output_dir)
     if report is None:
         report = file_registry.sync(output_dir, data_dir)
     with db.connection(data_dir) as conn:
-        missing = [MissingTranscript(r["stem"], r["display_name"]) for r in conn.execute(
-            "SELECT t.stem, c.display_name FROM transcripts t "
+        missing = [MissingTranscript(r["id"], r["stem"], r["display_name"]) for r in conn.execute(
+            "SELECT t.id, t.stem, c.display_name FROM transcripts t "
             "LEFT JOIN campaigns c ON c.id = t.campaign_id "
             "WHERE t.missing_since IS NOT NULL ORDER BY t.stem")]
     return Attention(
@@ -1201,8 +1259,7 @@ def delete_unowned_file(path: Path, output_dir: Optional[Path] = None,
     couldn't be removed. Callers decide which names are eligible.
     """
     if output_dir is None:
-        from .path_utils import get_output_dir
-        output_dir = get_output_dir()
+        output_dir = get_output_root()
     base = os.path.abspath(str(output_dir))
     if not base.endswith(os.sep):
         base += os.sep
@@ -1247,7 +1304,8 @@ def read_sidecar(md_path: Path, data_dir: Optional[Path] = None) -> Optional[dic
     """
     import numpy as np
 
-    path = Path(md_path).with_name(Path(md_path).stem + SIDECAR_SUFFIX)
+    md_path = Path(md_path)
+    path = md_path.with_name(md_path.stem + SIDECAR_SUFFIX)
     if not path.exists():
         return None
     try:
@@ -1262,26 +1320,21 @@ def read_sidecar(md_path: Path, data_dir: Optional[Path] = None) -> Optional[dic
             diar[key] = raw[key]
 
     with db.connection(data_dir) as conn:
-        row = conn.execute(
-            "SELECT t.id, c.slug FROM transcripts t "
-            "LEFT JOIN campaigns c ON c.id = t.campaign_id WHERE t.stem = ?",
-            (nfc(Path(md_path).stem),),
-        ).fetchone()
+        loc = locate_path(md_path, conn=conn, data_dir=data_dir)
+        if loc is None:
+            return diar
         speakers = conn.execute(
             "SELECT label, display_name, source, embedding, embedding_space "
             "FROM transcript_speakers WHERE transcript_id = ? ORDER BY label",
-            (row["id"],),
-        ).fetchall() if row else []
-        audio = has_audio_row = None
-        if row is not None:
-            audio = audio_path(md_path, conn=conn, data_dir=data_dir)
-            owner = file_registry.Owner("transcript", row["id"])
-            has_audio_row = file_registry.file_for(
-                owner, "audio", conn=conn, data_dir=data_dir,
-                output_dir=Path(md_path).parent) is not None
-    if row is None:
-        return diar
-    diar["campaign"] = row["slug"]
+            (loc.id,),
+        ).fetchall()
+        audio = audio_path(md_path, conn=conn, data_dir=data_dir)
+        owner = file_registry.Owner("transcript", loc.id)
+        has_audio_row = file_registry.file_for(
+            owner, "audio", conn=conn, data_dir=data_dir) is not None
+        slug = conn.execute("SELECT slug FROM campaigns WHERE id = ?",
+                            (loc.campaign_id,)).fetchone() if loc.campaign_id is not None else None
+    diar["campaign"] = slug[0] if slug is not None else None
     if audio is not None:
         diar["input_path"] = str(audio)
     if not speakers and not has_audio_row:
@@ -1312,20 +1365,22 @@ def audio_path(md_path: Path, conn: Optional[sqlite3.Connection] = None,
     leaves it.
     """
     md_path = Path(md_path)
-    output_dir = md_path.parent if output_dir is None else output_dir
     if conn is None:
         with db.connection(data_dir) as opened:
-            return audio_path(md_path, opened, data_dir, output_dir)
-    owner = file_registry.Owner.for_stem(md_path.stem, conn=conn, data_dir=data_dir,
-                                         output_dir=output_dir)
-    if owner is None:
+            return _audio_for(md_path, opened, data_dir, output_dir)
+    return _audio_for(md_path, conn, data_dir, output_dir)
+
+
+def _audio_for(md_path: Path, conn: sqlite3.Connection, data_dir: Optional[Path],
+               output_dir: Optional[Path]) -> Optional[Path]:
+    loc = locate_path(md_path, conn=conn, data_dir=data_dir, output_dir=output_dir)
+    if loc is None:
         return None
-    row = file_registry.file_for(owner, "audio", conn=conn, data_dir=data_dir,
-                                 output_dir=output_dir)
-    if row is not None and row.path.is_file():
-        return row.path
+    audio = loc.companions.get(("audio", ""))
+    if audio is not None and audio.is_file():
+        return audio
     rec = conn.execute("SELECT id FROM recordings WHERE transcript_id = ?",
-                       (owner.id,)).fetchone()
+                       (loc.id,)).fetchone()
     if rec is not None:
         from .recording_manager import combined_path_for
         combined = combined_path_for(rec["id"], data_dir)
@@ -1348,19 +1403,23 @@ def set_audio(md_path: Path, path: Optional[Path], *, data_dir: Optional[Path] =
     A different file replaced by this call is deleted after the commit, so
     call it after your own transaction. Raises ``ValueError`` for a path
     outside the output root or under ``<data>/recordings/``: a recording's
-    audio belongs to the recording.
+    audio belongs to the recording. Does nothing when the ``.md`` isn't in a
+    transcript folder.
     """
     md_path = Path(md_path)
-    output_dir = md_path.parent if output_dir is None else output_dir
+    output = Path(output_dir) if output_dir is not None else get_output_root()
     with db.transaction(data_dir) as conn:
-        tid = ensure_row(conn, nfc(md_path.stem), output_dir)
+        tid = _row_for_path(conn, md_path, data_dir=data_dir, output_dir=output)
+        if tid is None:
+            log.warning("Not recording audio for %s: it is not in a transcript folder", md_path.name)
+            return
         owner = file_registry.Owner("transcript", tid)
         if path is None:
             replaced = file_registry.forget_kind(owner, "audio", conn=conn,
-                                                 data_dir=data_dir, output_dir=output_dir)
+                                                 data_dir=data_dir, output_dir=output)
         else:
             old = file_registry.add(Path(path), kind="audio", owner=owner, conn=conn,
-                                    data_dir=data_dir, output_dir=output_dir)
+                                    data_dir=data_dir, output_dir=output)
             replaced = [old] if old is not None else []
     for old in replaced:
         if path is not None and _same_file(old, Path(path)):
@@ -1382,13 +1441,12 @@ def write_sidecar(md_path: Path, diar: dict, data_dir: Optional[Path] = None) ->
     ``campaign_id``. ``input_path`` becomes the transcript's ``audio`` file when it lies
     inside the ``.md``'s folder (:func:`set_audio`); any other value clears
     it, and an audio copy replaced by a different one (re-transcribe) is
-    deleted.
+    deleted. Does nothing when the ``.md`` isn't in a transcript folder.
     """
     import numpy as np
 
     md_path = Path(md_path)
-    output_dir = md_path.parent
-    stem = nfc(md_path.stem)
+    output = get_output_root()
     speaker_map = {str(k): str(v) for k, v in (diar.get("speaker_map") or {}).items()}
     sources = dict(diar.get("speaker_map_source") or {})
     space = diar.get("embedding_space")
@@ -1400,14 +1458,21 @@ def write_sidecar(md_path: Path, diar: dict, data_dir: Optional[Path] = None) ->
                 embeddings[str(label)] = arr
     audio: Optional[Path] = None
     if diar.get("input_path"):
+        # The audio copy must sit in the .md's own folder; the registry root is separate.
+        loc_for_audio = locate_path(md_path, data_dir=data_dir, output_dir=output)
+        guard = loc_for_audio.dir if loc_for_audio is not None else md_path.parent
         try:
-            db.to_rel(Path(diar["input_path"]), output_dir)
+            db.to_rel(Path(diar["input_path"]), guard)
             audio = Path(diar["input_path"])
         except ValueError:
-            audio = None  # outside the output root: not ours to track
+            audio = None  # outside the .md's folder: not ours to track
 
     with db.transaction(data_dir) as conn:
-        tid = ensure_row(conn, stem, output_dir)
+        tid = _row_for_path(conn, md_path, data_dir=data_dir, output_dir=output)
+        if tid is None:
+            log.warning("Not storing speaker data for %s: it is not in a transcript folder",
+                        md_path.name)
+            return
         conn.execute("DELETE FROM transcript_speakers WHERE transcript_id = ?", (tid,))
         for label in sorted(set(speaker_map) | set(embeddings)):
             name = speaker_map.get(label, label)
@@ -1428,9 +1493,9 @@ def write_sidecar(md_path: Path, diar: dict, data_dir: Optional[Path] = None) ->
         json.dumps({"diarization_segments": diar.get("diarization_segments") or []}, indent=2),
     )
     file_registry.add_if_owned(sidecar, kind="sidecar", owner=file_registry.Owner("transcript", tid),
-                               data_dir=data_dir, output_dir=output_dir)
+                               data_dir=data_dir, output_dir=output)
     try:
-        set_audio(md_path, audio, data_dir=data_dir, output_dir=output_dir)
+        set_audio(md_path, audio, data_dir=data_dir, output_dir=output)
     except (ValueError, sqlite3.Error, file_registry.OwnershipConflict, OSError) as exc:
         # An input that can't be registered (a recording's audio, a name the
         # schema rejects) is left untracked rather than failing the write.
@@ -1444,11 +1509,16 @@ def set_speaker_names(md_path: Path, names: dict[str, str], sources: dict[str, s
     Only the given labels' names and sources change; embeddings, the audio
     path, and the segments file are left alone. A label with no row yet gets
     one without an embedding. A missing or invalid source is derived from the
-    name (see :func:`derived_source`).
+    name (see :func:`derived_source`). Does nothing when the ``.md`` isn't in
+    a transcript folder.
     """
     md_path = Path(md_path)
     with db.transaction(data_dir) as conn:
-        tid = ensure_row(conn, nfc(md_path.stem), md_path.parent)
+        tid = _row_for_path(conn, md_path)
+        if tid is None:
+            log.warning("Not recording speaker names for %s: it is not in a transcript folder",
+                        md_path.name)
+            return
         for label, name in names.items():
             source = sources.get(label)
             if source not in ("auto", "manual"):
@@ -1465,13 +1535,18 @@ def set_speaker_embeddings(md_path: Path, embeddings: dict, space: str,
                            data_dir: Optional[Path] = None) -> None:
     """Store per-label voice embeddings (the campaign relabel backfill).
 
-    Names are kept; a label with no row yet is named after itself.
+    Names are kept; a label with no row yet is named after itself. Does
+    nothing when the ``.md`` isn't in a transcript folder.
     """
     import numpy as np
 
     md_path = Path(md_path)
     with db.transaction(data_dir) as conn:
-        tid = ensure_row(conn, nfc(md_path.stem), md_path.parent)
+        tid = _row_for_path(conn, md_path)
+        if tid is None:
+            log.warning("Not storing embeddings for %s: it is not in a transcript folder",
+                        md_path.name)
+            return
         for label, vec in embeddings.items():
             blob = np.asarray(vec, dtype=np.float32).reshape(-1).tobytes()
             conn.execute(

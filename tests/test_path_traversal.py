@@ -687,7 +687,8 @@ def test_transcript_retranscribe_error_redirect_quotes_the_stem(client, tmp_path
     out = tmp_path / "out"
     out.mkdir()
     monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
-    (out / "Session — 1!.md").write_text("x", encoding="utf-8")
-    transcript_store.register("Session — 1!", origin="job")
+    md = out / "Session — 1!.md"
+    md.write_text("x", encoding="utf-8")
+    transcript_store.register(md, origin="job")
     resp = client.post(f"/transcripts/{quote('Session — 1!')}/retranscribe", follow_redirects=False)
     assert resp.headers["location"] == f"/transcripts/{quote('Session — 1!')}?error=no_audio"

@@ -215,22 +215,24 @@ def _keep_audio(job: "Job", output_path: "Path") -> None:  # type: ignore[name-d
 
     from wisper_transcribe import transcript_store
     from wisper_transcribe.audio_utils import encode_flac
+    from wisper_transcribe.config import get_output_root
 
     md_path = _Path(output_path)
     out_dir = md_path.parent
+    output = get_output_root()
     stem = md_path.stem
     wav = _Path(job.input_path)
     target = transcript_store.safe_path(stem, ".flac", out_dir) or (out_dir / f"{stem}.flac")
 
-    owner = file_registry.Owner.for_stem(stem, output_dir=out_dir)
-    previous = (file_registry.file_for(owner, "audio", output_dir=out_dir)
+    owner = file_registry.Owner.for_path(md_path)
+    previous = (file_registry.file_for(owner, "audio", output_dir=output)
                 if owner is not None else None)
     previous_path = previous.path if previous is not None and previous.path.is_file() else None
 
     keep_new = True
     if target.exists():
         own = previous is not None and transcript_store._same_file(previous.path, target)
-        if not own and file_registry.is_registered(target, output_dir=out_dir):
+        if not own and file_registry.is_registered(target, output_dir=output):
             job.append_log(f"Kept no new audio: {target.name} belongs to another transcript")
             keep_new = False
         elif not own and not job.kwargs.get("overwrite"):
@@ -394,15 +396,18 @@ def _extract_speaker_excerpts(job: "Job", output_path: "Path",  # type: ignore[n
 
     # Two labels that sanitise to one name wrote one file; the second add updates its row.
     from wisper_transcribe import db
+    from wisper_transcribe.config import get_output_root
+    from wisper_transcribe.transcript_store import locate_path as _locate_path
     try:
         with db.transaction() as conn:
-            owner = file_registry.Owner.for_stem(stem, conn=conn, output_dir=out_dir)
+            loc = _locate_path(_Path(output_path), conn=conn)
+            owner = file_registry.Owner("transcript", loc.id) if loc is not None else None
             for name in safe_names:
                 for kind, suffix in (("excerpt", ".mp3"), ("excerpt_text", ".txt")):
                     path = out_dir / f"{stem}_excerpt_{name}{suffix}"
                     if path.is_file():
                         file_registry.add_if_owned(path, kind=kind, owner=owner, label=name,
-                                                   conn=conn, output_dir=out_dir)
+                                                   conn=conn, output_dir=get_output_root())
     except Exception:
         log.warning("Could not register speaker excerpts for %s", stem, exc_info=True)
 
@@ -1537,7 +1542,9 @@ class JobQueue:
         ]
         # The transcript's current campaign, not the one it was transcribed for.
         from wisper_transcribe.campaign_manager import get_campaign_for_transcript
-        campaign_slug = get_campaign_for_transcript(md_path.stem)
+        from wisper_transcribe.transcript_store import locate_path
+        _loc = locate_path(md_path)
+        campaign_slug = get_campaign_for_transcript(_loc.id) if _loc is not None else None
 
         def _progress(msg: str) -> None:
             job.append_log(msg)
@@ -1683,7 +1690,7 @@ class JobQueue:
                 backup = transcript_path.with_suffix(transcript_path.suffix + ".bak")
                 atomic_write_text(backup, md)
                 file_registry.add_if_owned(
-                    backup, kind="backup", owner=file_registry.Owner.for_stem(transcript_path.stem))
+                    backup, kind="backup", owner=file_registry.Owner.for_path(transcript_path))
                 save_transcript(transcript_path, refined_md)
                 job.append_log(
                     f"Applied {len(edits)} edit(s). Backup: {backup.name}"

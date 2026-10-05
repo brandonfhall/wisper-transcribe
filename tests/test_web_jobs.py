@@ -720,10 +720,13 @@ def _upload_env(tmp_path, monkeypatch):
 
 
 def _audio_row(out_dir, stem):
-    from wisper_transcribe import file_registry
+    from wisper_transcribe import file_registry, transcript_store
 
-    owner = file_registry.Owner.for_stem(stem, output_dir=out_dir)
-    return file_registry.file_for(owner, "audio", output_dir=out_dir) if owner else None
+    loc = transcript_store.locate_path(out_dir / f"{stem}.md")
+    if loc is None:
+        return None
+    return file_registry.file_for(file_registry.Owner("transcript", loc.id), "audio",
+                                  output_dir=out_dir)
 
 
 def _run_upload_job(tmp_dir, out_dir, *, suffix=".mp4", stem="Session 12", diarize=True,
@@ -1099,7 +1102,14 @@ def _write_sidecar(tmp_path, md_path, input_path, campaign=None):
     seed_sidecar(md_path, diar)
 
 
-def test_run_enroll_job_success_calls_enroll_profiles_and_completes(tmp_path):
+@pytest.fixture
+def out_env(tmp_path, monkeypatch):
+    """Output root == tmp_path, so ``session01.md`` written there is a transcript."""
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(tmp_path))
+    return tmp_path
+
+
+def test_run_enroll_job_success_calls_enroll_profiles_and_completes(tmp_path, out_env):
     """(d) The success path calls enroll_profiles() and sets COMPLETED +
     output_path."""
     from wisper_transcribe.web.jobs import JobQueue, COMPLETED
@@ -1131,7 +1141,7 @@ def test_run_enroll_job_success_calls_enroll_profiles_and_completes(tmp_path):
     assert job.finished_at is not None
 
 
-def test_run_enroll_job_progress_lines_land_in_log(tmp_path):
+def test_run_enroll_job_progress_lines_land_in_log(tmp_path, out_env):
     """(f) Progress lines the runner passes to enroll_profiles() land in
     job.log_lines (so the SSE stream picks them up)."""
     from wisper_transcribe.web.jobs import JobQueue, COMPLETED
@@ -1164,7 +1174,7 @@ def test_run_enroll_job_progress_lines_land_in_log(tmp_path):
     assert any("Alice" in line for line in job.log_lines)
 
 
-def test_run_enroll_job_missing_audio_sets_generic_error(tmp_path):
+def test_run_enroll_job_missing_audio_sets_generic_error(tmp_path, out_env):
     """(e) Missing source audio fails the job with a generic message --
     never the path."""
     from wisper_transcribe.web.jobs import JobQueue, FAILED
@@ -1190,7 +1200,7 @@ def test_run_enroll_job_missing_audio_sets_generic_error(tmp_path):
     assert job.finished_at is not None
 
 
-def test_run_enroll_job_missing_sidecar_sets_generic_error(tmp_path):
+def test_run_enroll_job_missing_sidecar_sets_generic_error(tmp_path, out_env):
     """No _diar.json at all (e.g. deleted between wizard submit and job run)
     also fails generically rather than raising."""
     from wisper_transcribe.web.jobs import JobQueue, FAILED
@@ -1213,7 +1223,7 @@ def test_run_enroll_job_missing_sidecar_sets_generic_error(tmp_path):
     assert job.error == "Source audio not available"
 
 
-def test_run_enroll_job_exception_sets_generic_error_not_path(tmp_path):
+def test_run_enroll_job_exception_sets_generic_error_not_path(tmp_path, out_env):
     """(e) An unexpected exception from enroll_profiles() (e.g. a WAV
     conversion failure whose message contains a path) must never leak that
     path into job.error -- the job detail page renders it directly into
@@ -2068,7 +2078,7 @@ def _seed_stored(tmp_path, vectors, *, audio=False, space=None):
     return md_path
 
 
-def test_run_enroll_job_stored_embeddings_without_audio_completes(tmp_path):
+def test_run_enroll_job_stored_embeddings_without_audio_completes(tmp_path, out_env):
     from wisper_transcribe.web.jobs import JobQueue, COMPLETED
 
     md_path = _seed_stored(tmp_path, {"SPEAKER_00": [1.0, 0.0, 0.0]})
@@ -2083,7 +2093,7 @@ def test_run_enroll_job_stored_embeddings_without_audio_completes(tmp_path):
     assert "alice" in load_profiles()
 
 
-def test_run_enroll_job_partial_logs_skipped_name_and_completes(tmp_path):
+def test_run_enroll_job_partial_logs_skipped_name_and_completes(tmp_path, out_env):
     from wisper_transcribe.web.jobs import JobQueue, COMPLETED
 
     md_path = _seed_stored(tmp_path, {"SPEAKER_00": [1.0, 0.0, 0.0]})
@@ -2099,7 +2109,7 @@ def test_run_enroll_job_partial_logs_skipped_name_and_completes(tmp_path):
     assert "alice" in profiles and "brad" not in profiles
 
 
-def test_run_enroll_job_old_embedding_space_without_audio_fails(tmp_path):
+def test_run_enroll_job_old_embedding_space_without_audio_fails(tmp_path, out_env):
     from wisper_transcribe.web.jobs import JobQueue, FAILED
 
     md_path = _seed_stored(tmp_path, {"SPEAKER_00": [1.0, 0.0, 0.0]}, space="old-model")
@@ -2112,7 +2122,7 @@ def test_run_enroll_job_old_embedding_space_without_audio_fails(tmp_path):
     assert job.error == "Source audio not available"
 
 
-def test_run_enroll_job_old_embedding_space_with_audio_extracts(tmp_path):
+def test_run_enroll_job_old_embedding_space_with_audio_extracts(tmp_path, out_env):
     import numpy as np
     from wisper_transcribe.web.jobs import JobQueue, COMPLETED
 

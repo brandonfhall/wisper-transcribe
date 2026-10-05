@@ -30,6 +30,13 @@ def client(app):
         yield c
 
 
+@pytest.fixture(autouse=True)
+def _output_root(tmp_path, monkeypatch):
+    """tmp_path is the transcript output root, so a ``session01.md`` written
+    there is a registered session (``write_sidecar`` resolves the root)."""
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(tmp_path))
+
+
 _SAMPLE_MD = """\
 ---
 title: Session 01
@@ -81,15 +88,17 @@ def test_sidecar_written_after_job_completes(tmp_path: Path):
     from datetime import datetime
     import uuid
 
+    from wisper_transcribe import transcript_store
     from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
 
     out_md = tmp_path / "session01.md"
     out_md.write_text("# Session 01", encoding="utf-8")
+    tid = transcript_store.register(out_md, origin="job")
     audio = tmp_path / "session01.mp3"   # the durable copy next to the transcript
     audio.write_bytes(b"x")
     input_path_str = str(audio)
     create_campaign("My Campaign")
-    move_transcript_to_campaign("session01", "my-campaign")
+    move_transcript_to_campaign(tid, "my-campaign")
 
     seg = DiarizationSegment(start=1.0, end=5.0, speaker="SPEAKER_00")
     job = Job(
@@ -115,11 +124,13 @@ def test_sidecar_written_after_job_completes(tmp_path: Path):
     assert set(json.loads(sidecar.read_text(encoding="utf-8"))) == {"diarization_segments"}
 
 
-def test_sidecar_audio_outside_transcript_folder_is_not_tracked(tmp_path: Path):
+def test_sidecar_audio_outside_transcript_folder_is_not_tracked(tmp_path: Path, monkeypatch):
     from wisper_transcribe.transcript_store import read_sidecar, write_sidecar
 
-    md = tmp_path / "out" / "s1.md"
-    md.parent.mkdir()
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    md = out / "s1.md"
     md.write_text("x", encoding="utf-8")
     write_sidecar(md, {"input_path": str(tmp_path / "elsewhere.mp3"),
                        "diarization_segments": []})
@@ -199,6 +210,8 @@ def test_wizard_enroll_propagates_to_campaign(tmp_path: Path):
 
     md = tmp_path / "s1.md"
     md.write_text("# s1", encoding="utf-8")
+    from wisper_transcribe import transcript_store
+    tid = transcript_store.register(md, origin="job")
     audio = tmp_path / "s1.wav"
     audio.write_bytes(b"x")
     seed_sidecar(tmp_path / "s1.md", {
@@ -208,7 +221,7 @@ def test_wizard_enroll_propagates_to_campaign(tmp_path: Path):
     # The campaign comes from the transcript's current campaign row.
     from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
     create_campaign("Game")
-    move_transcript_to_campaign("s1", "game")
+    move_transcript_to_campaign(tid, "game")
     job = Job(id=str(uuid.uuid4()), status=COMPLETED, created_at=datetime.now(),
               input_path=str(md), kwargs={}, job_type=JOB_ENROLL,
               enroll_md_path=str(md), enroll_groups={"Alice": ["SPEAKER_00"]})

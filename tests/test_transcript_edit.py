@@ -43,9 +43,13 @@ def client(app):
 
 
 @pytest.fixture()
-def transcript_file(tmp_path: Path) -> Path:
+def transcript_file(tmp_path: Path, monkeypatch) -> Path:
+    from wisper_transcribe import transcript_store
+
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(tmp_path))
     f = tmp_path / "session01.md"
     f.write_text(_SAMPLE_MD, encoding="utf-8")
+    transcript_store.register(f, origin="reconcile")
     return f
 
 

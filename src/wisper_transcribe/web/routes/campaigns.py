@@ -87,21 +87,12 @@ async def campaign_detail(request: Request, slug: str) -> HTMLResponse:
     # Entries whose transcript is gone (deleted outside wisper, renamed, or
     # on an unmounted drive). Shown as missing with Relink, never pruned: an
     # unavailable output dir would otherwise wipe every assignment.
-    base_dir = os.path.abspath(str(get_output_dir()))
-    if not base_dir.endswith(os.sep):
-        base_dir += os.sep
-
-    def _transcript_missing(stem: str) -> bool:
-        # Stems come from the database; same basename + abspath guard as routes.
-        safe = os.path.basename(stem)
-        candidate = os.path.abspath(os.path.join(base_dir, safe + ".md"))
-        return safe != stem or not candidate.startswith(base_dir) or not os.path.exists(candidate)
-
-    missing = {stem for stem in campaign.transcripts if _transcript_missing(stem)}
+    located = {tid: transcript_store.locate(tid) for tid in campaign.transcript_ids}
+    missing = {loc.stem for loc in located.values() if loc is not None and loc.missing}
     # For the rebuild confirmation's LLM-call count: sessions without a summary.
     summarized = sum(
-        1 for stem in campaign.transcripts
-        if os.path.exists(os.path.join(base_dir, f"{os.path.basename(stem)}.summary.md"))
+        1 for loc in located.values()
+        if loc is not None and loc.companion(".summary.md").exists()
     )
 
     return templates.TemplateResponse(
@@ -282,10 +273,13 @@ async def campaign_remove_transcript(
         return error_redirect("/campaigns", "not_found")
 
     if stem in campaign.transcripts:
-        try:
-            remove_transcript_from_campaign(stem)
-        except ValueError:  # an unassigned session already has this name
-            return error_redirect(f"/campaigns/{campaign.slug}", "remove_failed")
+        from wisper_transcribe import transcript_store
+        found = transcript_store.find_by_stem(stem, campaign_id=campaign.id)
+        if found:
+            try:
+                remove_transcript_from_campaign(found[0].id)
+            except ValueError:  # an unassigned session already has this name
+                return error_redirect(f"/campaigns/{campaign.slug}", "remove_failed")
 
     return RedirectResponse(url=f"/campaigns/{campaign.slug}", status_code=303)
 
@@ -478,12 +472,12 @@ async def campaign_relink_transcript(
     from wisper_transcribe.path_utils import get_output_dir
 
     out_dir = get_output_dir()
-    old_md = transcript_store.safe_path(old_stem, ".md", out_dir)
+    found = transcript_store.find_by_stem(old_stem, campaign_id=campaign.id)
     new_md = transcript_store.safe_path(new_stem, ".md", out_dir)
-    if old_md is None or new_md is None or old_md.stem not in campaign.transcripts:
+    if not found or new_md is None:
         return RedirectResponse(url=f"/campaigns/{campaign.slug}?error=relink_failed", status_code=303)
     try:
-        kept = transcript_store.relink(old_md.stem, new_md.stem, output_dir=out_dir)
+        kept = transcript_store.relink(found[0].id, new_md)
     except (KeyError, ValueError):
         return RedirectResponse(url=f"/campaigns/{campaign.slug}?error=relink_failed", status_code=303)
     # campaign.slug comes from the database, not the URL.

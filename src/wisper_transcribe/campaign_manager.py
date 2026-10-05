@@ -224,9 +224,11 @@ def delete_campaign(slug: str, *, delete_transcripts: bool = False,
         from .transcript_store import delete_transcript
 
         with db.connection(data_dir) as conn:
-            _campaign_id(conn, slug)  # KeyError before anything is deleted
-        for stem in get_transcripts_for_campaign(slug, data_dir):
-            delete_transcript(stem, data_dir=data_dir)
+            cid = _campaign_id(conn, slug)  # KeyError before anything is deleted
+            ids = [r[0] for r in conn.execute(
+                "SELECT id FROM transcripts WHERE campaign_id = ? ORDER BY position", (cid,))]
+        for tid in ids:
+            delete_transcript(tid, data_dir=data_dir)
 
     journal_files: list[Path] = []
     with db.transaction(data_dir) as conn:
@@ -361,50 +363,43 @@ def lookup_profile_by_discord_id(
 
 
 def move_transcript_to_campaign(
-    stem: str, slug: str, data_dir: Optional[Path] = None
+    transcript_id: int, slug: str, data_dir: Optional[Path] = None
 ) -> None:
-    """Associate a transcript stem with a campaign, appended at the end.
+    """Associate a transcript with a campaign, appended at the end.
 
     Removes it from any other campaign first (one transcript → one campaign;
-    the schema enforces it) and creates the session row if there is none. A
-    no-op if it's already in this campaign.
-    Raises KeyError if the target campaign slug is not found, ValueError if
-    the stem is ambiguous or the campaign already has a session of that name.
+    the schema enforces it). A no-op if it's already in this campaign.
+    Raises KeyError if the transcript or the target campaign isn't found,
+    ValueError if the campaign already has a session of that name.
     """
-    from .transcript_store import ensure_row
-
-    stem = _nfc(stem)
     with db.transaction(data_dir) as conn:
         cid = _campaign_id(conn, slug)
-        rows = conn.execute(
-            "SELECT id, campaign_id FROM transcripts WHERE stem = ? LIMIT 2", (stem,)
-        ).fetchall()
-        if len(rows) > 1:
-            raise ValueError(f"more than one session is named {stem!r}")
-        if rows:
-            tid, current = rows[0][0], rows[0][1]
-            if current == cid:
-                return
-        else:
-            tid = ensure_row(conn, stem)
+        row = conn.execute(
+            "SELECT campaign_id FROM transcripts WHERE id = ?", (transcript_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"No transcript with id {transcript_id}")
+        if row[0] == cid:
+            return
         pos = conn.execute(
             "SELECT coalesce(max(position), -1) + 1 FROM transcripts WHERE campaign_id = ?",
             (cid,),
         ).fetchone()[0]
-        _set_campaign(conn, tid, cid, pos)
+        _set_campaign(conn, transcript_id, cid, pos)
 
 
-def remove_transcript_from_campaign(stem: str, data_dir: Optional[Path] = None) -> None:
-    """Disassociate a transcript stem from whichever campaign it belongs to (no-op if none).
+def remove_transcript_from_campaign(transcript_id: int, data_dir: Optional[Path] = None) -> None:
+    """Disassociate a transcript from whichever campaign it belongs to (no-op if none).
 
     Raises ValueError if a session of that name is already unassigned.
     """
     with db.transaction(data_dir) as conn:
-        for (tid,) in conn.execute(
-            "SELECT id FROM transcripts WHERE stem = ? AND campaign_id IS NOT NULL",
-            (_nfc(stem),),
-        ).fetchall():
-            _set_campaign(conn, tid, None, None)
+        row = conn.execute(
+            "SELECT campaign_id FROM transcripts WHERE id = ?", (transcript_id,)
+        ).fetchone()
+        if row is None or row[0] is None:
+            return
+        _set_campaign(conn, transcript_id, None, None)
 
 
 def reorder_campaign_transcript(
@@ -467,13 +462,13 @@ def set_campaign_transcript_order(
         _write_order(conn, cid, [_transcript_id(conn, cid, s) for s in order])
 
 
-def get_campaign_for_transcript(stem: str, data_dir: Optional[Path] = None) -> Optional[str]:
-    """Return the slug of the campaign that owns this transcript stem, or None."""
+def get_campaign_for_transcript(transcript_id: int, data_dir: Optional[Path] = None) -> Optional[str]:
+    """Return the slug of the campaign that owns this transcript id, or None."""
     with db.connection(data_dir) as conn:
         row = conn.execute(
             "SELECT c.slug FROM transcripts t JOIN campaigns c ON c.id = t.campaign_id "
-            "WHERE t.stem = ?",
-            (_nfc(stem),),
+            "WHERE t.id = ?",
+            (transcript_id,),
         ).fetchone()
     return row[0] if row else None
 
