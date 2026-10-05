@@ -109,6 +109,72 @@
     </div>
     {% endfor %}
     {% endif %}
+
+    {% if attention.misplaced %}
+    <div class="mono-kicker" style="margin:16px 0 8px">Not in their campaign's folder</div>
+    {% for m in attention.misplaced %}
+    <div data-testid="misplaced-transcript" style="display:flex;gap:12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--color-rule)">
+      <span style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper-faint)">{{ m.stem }}</span>
+      <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint)">{{ m.dir }}</span>
+      <div style="flex:1"></div>
+      <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint)">Run `wisper storage trim --apply`, or use Move files on the session's page</span>
+    </div>
+    {% endfor %}
+    {% endif %}
+
+    {% if attention.pending_folders %}
+    <div class="mono-kicker" style="margin:16px 0 8px">Folder renames to finish</div>
+    {% for name, folder, pending in attention.pending_folders %}
+    <div data-testid="pending-folder" style="display:flex;gap:12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--color-rule)">
+      <span style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper-faint)">{{ name }}</span>
+      <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint)">{{ folder }} → {{ pending }}</span>
+      <div style="flex:1"></div>
+      <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint)">listed only</span>
+    </div>
+    {% endfor %}
+    {% endif %}
+
+    {% if attention.folder_taken %}
+    <div class="mono-kicker" style="margin:16px 0 8px">Folder taken</div>
+    {% for cid, name, folder in attention.folder_taken %}
+    <div data-testid="folder-taken" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--color-rule)">
+      <span style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper-faint)">{{ name }}</span>
+      <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint)">{{ folder }}</span>
+      <div style="flex:1"></div>
+      <span style="font-size:11px;color:var(--color-paper-dim)">A folder named {{ folder }} already exists in your transcripts folder and isn't wisper's. Rename the campaign to use a different folder, or use this folder: every `.md` file in it becomes a session of this campaign.</span>
+      <form method="post" action="/transcripts/needs-attention/claim-folder">
+        <input type="hidden" name="campaign_id" value="{{ cid }}"/>
+        <button type="submit" class="btn btn-secondary btn-sm">Use this folder</button>
+      </form>
+    </div>
+    {% endfor %}
+    {% endif %}
+
+    {% if attention.legacy_journals %}
+    <div class="mono-kicker" style="margin:16px 0 8px">Journals to move</div>
+    {% for name in attention.legacy_journals %}
+    <div data-testid="legacy-journal" style="display:flex;gap:12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--color-rule)">
+      <span style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper-faint)">{{ name }}</span>
+      <span style="font-size:11px;color:var(--color-paper-dim)">The journal couldn't be moved into its folder yet.</span>
+    </div>
+    {% endfor %}
+    {% endif %}
+
+    {% if attention.missing_folders %}
+    <div class="mono-kicker" style="margin:16px 0 8px">Campaign folders missing</div>
+    {% for cid, name, folder in attention.missing_folders %}
+    <div data-testid="missing-folder" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--color-rule)">
+      <span style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper-faint)">{{ name }}</span>
+      <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint)">{{ folder }}</span>
+      <div style="flex:1"></div>
+      <span style="font-size:11px;color:var(--color-paper-dim)">The folder {{ folder }} for campaign {{ name }} isn't in your transcripts folder. If you renamed it, rename the campaign to match; otherwise Recreate folder.</span>
+      <form method="post" action="/transcripts/needs-attention/recreate-folder">
+        <input type="hidden" name="campaign_id" value="{{ cid }}"/>
+        <button type="submit" class="btn btn-secondary btn-sm">Recreate folder</button>
+      </form>
+    </div>
+    {% endfor %}
+    {% endif %}
   </div>
   {% endif %}
 

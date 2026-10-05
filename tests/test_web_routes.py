@@ -4231,3 +4231,113 @@ def _history_job(md):
         log_lines=[], recording_id=None, output_path=str(md), post_refine=False,
         post_summarize=False,
         kwargs={"language": "en", "num_speakers": 3, "model_size": "tiny"})
+
+
+# ---------------------------------------------------------------------------
+# Campaign folders in Needs attention
+# ---------------------------------------------------------------------------
+
+def test_campaign_page_shows_a_folder_session_as_present_and_summarized(client):
+    """A session whose .md and summary are in the campaign's folder."""
+    from wisper_transcribe import campaign_folders, db
+    from wisper_transcribe.campaign_manager import create_campaign
+    from wisper_transcribe.config import get_output_root
+
+    out = get_output_root()
+    c = create_campaign("Game")
+    campaign_folders.ensure_folder(c.id)
+    (out / "Game" / "S.md").write_text("# S\n", encoding="utf-8")
+    (out / "Game" / "S.summary.md").write_text("x", encoding="utf-8")
+    with db.transaction() as conn:
+        tid = conn.execute(
+            "INSERT INTO transcripts (stem, campaign_id, position, created_at) "
+            "VALUES ('S', ?, 0, ?) RETURNING id", (c.id, db.now_utc())).fetchone()[0]
+
+    html = client.get(f"/campaigns/{c.slug}").text
+
+    assert f'href="/transcripts/{tid}"' in html
+    assert "MISSING" not in html
+
+
+def test_use_this_folder_claims_and_the_next_reconcile_registers_its_files(client):
+    from wisper_transcribe import campaign_folders, transcript_store
+    from wisper_transcribe.campaign_manager import create_campaign
+    from wisper_transcribe.config import get_output_root
+
+    out = get_output_root()
+    c = create_campaign("Game")
+    (out / "Game").mkdir()
+    (out / "Game" / "notes.md").write_text("# mine\n", encoding="utf-8")
+
+    assert 'data-testid="folder-taken"' in client.get("/transcripts").text
+    resp = client.post("/transcripts/needs-attention/claim-folder",
+                       data={"campaign_id": str(c.id)}, follow_redirects=False)
+    assert resp.status_code == 303 and resp.headers["location"] == "/transcripts"
+    assert campaign_folders.is_claimed(c.id)
+
+    client.get("/transcripts")   # a page load reconciles and registers notes.md
+    assert transcript_store.find_by_stem("notes", campaign_id=c.id)
+
+
+def test_use_this_folder_refuses_a_non_integer_id_and_an_unclaimed_state(client):
+    assert client.post("/transcripts/needs-attention/claim-folder",
+                       data={"campaign_id": "not-a-number"}).status_code == 400
+    resp = client.post("/transcripts/needs-attention/claim-folder",
+                       data={"campaign_id": "999"}, follow_redirects=False)
+    assert resp.headers["location"] == "/transcripts?error=not_found"
+
+
+def test_recreate_folder_makes_a_missing_folder(client):
+    from wisper_transcribe import campaign_folders
+    from wisper_transcribe.campaign_manager import create_campaign
+    from wisper_transcribe.config import get_output_root
+
+    c = create_campaign("Game")
+    campaign_folders.ensure_folder(c.id)
+    (get_output_root() / "Game").rmdir()
+
+    assert 'data-testid="missing-folder"' in client.get("/transcripts").text
+    resp = client.post("/transcripts/needs-attention/recreate-folder",
+                       data={"campaign_id": str(c.id)}, follow_redirects=False)
+    assert resp.status_code == 303 and (get_output_root() / "Game").is_dir()
+    assert client.post("/transcripts/needs-attention/recreate-folder",
+                       data={"campaign_id": "x"}).status_code == 400
+
+
+def test_the_page_lists_a_misplaced_session(client):
+    from wisper_transcribe.campaign_manager import create_campaign
+    from wisper_transcribe import campaign_folders
+
+    c = create_campaign("Game")
+    campaign_folders.ensure_folder(c.id)
+    _seed.seed_transcript("Stray", campaign=c.slug, write_md=True)  # .md in the root
+
+    page = client.get("/transcripts").text
+
+    assert 'data-testid="misplaced-transcript"' in page and "Stray" in page
+
+
+def test_delete_file_route_deletes_a_campaign_folder_orphan(client):
+    from wisper_transcribe import campaign_folders
+    from wisper_transcribe.campaign_manager import create_campaign
+    from wisper_transcribe.config import get_output_root
+
+    c = create_campaign("Game")
+    campaign_folders.ensure_folder(c.id)
+    orphan = get_output_root() / "Game" / "ghost.summary.md"
+    orphan.write_text("x", encoding="utf-8")
+    assert "Game/ghost.summary.md" in client.get("/transcripts").text
+
+    resp = client.post("/transcripts/needs-attention/delete-file",
+                       data={"name": "Game/ghost.summary.md"}, follow_redirects=False)
+    assert resp.status_code == 303 and resp.headers["location"] == "/transcripts"
+    assert not orphan.exists()
+
+
+@pytest.mark.parametrize("name", ["Other/x.summary.md", "A/../x", "A/B/x", "A\\..\\x", "A:x",
+                                 "../x.summary.md"])
+def test_delete_file_route_refuses_a_bad_path(client, name):
+    resp = client.post("/transcripts/needs-attention/delete-file", data={"name": name},
+                       follow_redirects=False)
+    assert resp.status_code == 400
+    assert name not in resp.text

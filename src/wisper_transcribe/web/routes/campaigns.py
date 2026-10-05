@@ -82,8 +82,8 @@ async def campaign_detail(request: Request, slug: str) -> HTMLResponse:
     unenrolled = {k: v for k, v in profiles.items() if k not in campaign.members}
 
     from wisper_transcribe import transcript_store
-    from wisper_transcribe.path_utils import get_output_dir
-    transcript_store.reconcile(get_output_dir(), sync="throttled")  # flag externally deleted/renamed files
+    from wisper_transcribe.config import get_output_root
+    transcript_store.reconcile(get_output_root(), sync="throttled", blocking=False)
 
     from wisper_transcribe.journal import journal_path, journal_stale_since, unjournalled_sessions
     journal_pending = len(unjournalled_sessions(safe))  # also syncs file ↔ DB

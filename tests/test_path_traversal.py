@@ -700,6 +700,39 @@ def test_needs_attention_delete_file_never_leaves_the_output_dir(client, payload
     assert outside.exists()
 
 
+@pytest.mark.parametrize("payload", ["Game/../../outside.summary.md", "../Game/x.summary.md",
+                                     "Game/sub/x.summary.md", "Game\\x.summary.md",
+                                     "Game/x.summary.md\x00", "Not A Campaign/x.summary.md",
+                                     "Game/..", "/Game/x.summary.md"])
+def test_needs_attention_delete_file_folder_form_stays_in_a_campaign_folder(client, payload):
+    """``<folder>/<file>`` names only a current campaign's folder, one level deep."""
+    from wisper_transcribe.path_utils import get_output_dir
+
+    from . import _seed
+
+    _seed.seed_campaign("Game", claimed=True)
+    out = get_output_dir()
+    outside = out.parent / "outside.summary.md"
+    outside.write_text("keep", encoding="utf-8")
+    resp = client.post("/transcripts/needs-attention/delete-file", data={"name": payload},
+                       follow_redirects=False)
+    assert resp.status_code in (303, 400, 422)
+    assert resp.headers.get("location", "") in ("", "/transcripts?error=delete_failed")
+    assert payload not in resp.text
+    assert outside.exists()
+
+
+@pytest.mark.parametrize("route", ["claim-folder", "recreate-folder"])
+@pytest.mark.parametrize("payload", ["x", "1.5", "../1", "1; DROP TABLE campaigns", "\x00", "",
+                                     "99999"])
+def test_needs_attention_folder_actions_take_only_a_campaign_id(client, route, payload):
+    resp = client.post(f"/transcripts/needs-attention/{route}", data={"campaign_id": payload},
+                       follow_redirects=False)
+    assert resp.status_code in (303, 400, 422)
+    assert resp.headers.get("location", "") in ("", "/transcripts?error=not_found")
+    assert payload not in resp.text or payload == ""
+
+
 @pytest.mark.parametrize("payload", ["x", "1.5", "-1", "1; DROP TABLE files", "\x00", ""])
 def test_needs_attention_forget_takes_only_a_listed_file_id(client, payload):
     resp = client.post("/transcripts/needs-attention/forget", data={"file_id": payload},

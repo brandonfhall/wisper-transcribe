@@ -69,7 +69,7 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 | 2a — Location API (`transcript_store.locate` and friends), no callers changed | done (opencode; Claude review fixes) | a051bf1 + next |
 | 2b — Every caller resolves through the location API | done (opencode; Claude review fixes) | |
 | 3 — Transcript URLs by id; lists from the database | done (opencode; Claude review fixes) | 121ea73 |
-| 4 — Scan campaign folders: reconcile, sync, Needs attention | in progress (opencode, DeepSeek v4 Pro) | |
+| 4 — Scan campaign folders: reconcile, sync, Needs attention | done (opencode; Claude review fixes) | |
 | 5 — Write into campaign folders: uploads, recordings, re-transcribe, CLI | not started | |
 | 6 — Moving a transcript moves its files; clash prompt; Rename | not started | |
 | 7 — Campaign create, rename, and delete with folders | not started | |
@@ -1089,6 +1089,8 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
 ---
 
 ### Phase 4 — Scan campaign folders: reconcile, sync, Needs attention
+
+*Done (opencode, one hand-off). Claude's review fixed two reconcile cases: a misplaced session moved into its folder **and edited** (so its size and time no longer match) now keeps its row instead of being flagged missing beside an unclaimed copy; and "target taken" counts any row of the target campaign with that name, present or not, casefolded. Added path-traversal tests for the folder form of delete-file and the two new folder routes. A folder-pending change by another process skips the whole pass rather than one campaign. Rehearsed on a scratch copy of the Mac data: 4 sessions listed as misplaced; moving one session's files into the claimed folder by hand put it in place with its 17 companions, nothing flagged missing.*
 
 **Goal:**
 - Reconcile and the file registry see the output root **and** each campaign's folder.

@@ -1196,3 +1196,73 @@ def test_sync_registers_only_a_claimed_campaigns_journal(out):
     for camp, expected in ((claimed, True), (unclaimed, False), (renaming, False)):
         row = fr.file_for(fr.Owner("campaign", camp.id), "journal")
         assert (row is not None) is expected, camp.slug
+
+
+# ---------------------------------------------------------------------------
+# Campaign folders: sync scans each claimed folder
+# ---------------------------------------------------------------------------
+
+def test_sync_registers_a_campaign_folders_companions_for_its_transcript(out):
+    from wisper_transcribe import campaign_folders
+    camp = create_campaign("Game")
+    campaign_folders.ensure_folder(camp.id)
+    with db.transaction() as conn:
+        tid = conn.execute(
+            "INSERT INTO transcripts (stem, campaign_id, position, created_at) "
+            "VALUES ('S', ?, 0, ?) RETURNING id", (camp.id, db.now_utc())).fetchone()[0]
+    md = out / "Game" / "S.md"
+    _touch(md)
+    (out / "Game" / "S.summary.md").write_bytes(b"x")
+
+    report = fr.sync()
+
+    assert report.errors == [] and report.unclaimed == []
+    owner = fr.Owner("transcript", tid)
+    assert fr.file_for(owner, "transcript").path == md
+    assert fr.file_for(owner, "summary").path == out / "Game" / "S.summary.md"
+
+
+def test_sync_ignores_files_in_an_unclaimed_folder(out):
+    camp = create_campaign("Unclaimed")          # folder exists but is not claimed
+    _touch(out / "Unclaimed" / "S.md")
+    (out / "Unclaimed" / "S.summary.md").write_bytes(b"x")
+
+    report = fr.sync()
+
+    assert report.registered == [] and _count() == 0
+
+
+def test_sync_never_reads_a_campaign_folders_journal_as_a_transcript(out):
+    from wisper_transcribe import campaign_folders
+    camp = create_campaign("Game")
+    campaign_folders.ensure_folder(camp.id)
+    _touch(out / "Game" / "Game Journal.md")
+
+    report = fr.sync()
+
+    assert report.unclaimed == []
+    assert fr.file_for(fr.Owner.for_campaign_slug("game"), "journal").path == \
+        out / "Game" / "Game Journal.md"
+    assert fr.file_for(_owner("Game Journal"), "transcript") is None
+
+
+def test_sync_assigns_each_folders_companions_to_its_own_same_named_transcript(out):
+    from wisper_transcribe import campaign_folders
+    ca, cb = create_campaign("A"), create_campaign("B")
+    campaign_folders.ensure_folder(ca.id)
+    campaign_folders.ensure_folder(cb.id)
+    ids = {}
+    for c, folder in ((ca, "A"), (cb, "B")):
+        with db.transaction() as conn:
+            ids[c.id] = conn.execute(
+                "INSERT INTO transcripts (stem, campaign_id, position, created_at) "
+                "VALUES ('S', ?, 0, ?) RETURNING id", (c.id, db.now_utc())).fetchone()[0]
+        _touch(out / folder / "S.md")
+        (out / folder / "S.summary.md").write_bytes(b"x")
+
+    fr.sync()
+
+    for c, folder in ((ca, "A"), (cb, "B")):
+        owner = fr.Owner("transcript", ids[c.id])
+        assert fr.file_for(owner, "transcript").path == out / folder / "S.md"
+        assert fr.file_for(owner, "summary").path == out / folder / "S.summary.md"

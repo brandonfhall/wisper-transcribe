@@ -1619,7 +1619,8 @@ def test_transcripts_list_marks_missing_entries_in_campaign_order(tmp_path, monk
     assert result.exit_code == 0, result.output
     lines = result.output.splitlines()
     assert lines[:2] == ["s02  (missing — file not found)", "s01"]
-    assert "1 item needs attention; see the Transcripts page or `wisper storage trim`" in lines[2:]
+    # s02 is missing, s01 is in the root though it belongs to Game.
+    assert "2 items need attention; see the Transcripts page or `wisper storage trim`" in lines[2:]
 
 
 # ---------------------------------------------------------------------------

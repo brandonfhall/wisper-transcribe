@@ -24,7 +24,7 @@ from wisper_transcribe.campaign_manager import (
     remove_transcript_from_campaign,
 )
 from wisper_transcribe.config import get_data_dir, get_output_root
-from wisper_transcribe import file_registry
+from wisper_transcribe import db as _db, file_registry
 from wisper_transcribe.recording_manager import load_recordings, recording_for_transcript
 
 from . import templates
@@ -32,6 +32,19 @@ from wisper_transcribe import transcript_store
 from wisper_transcribe.web._responses import invalid_input_response
 
 router = APIRouter(prefix="/transcripts")
+
+
+db_connection = _db.connection
+
+
+def _as_basename(value: object) -> Optional[str]:
+    """A single path component, or None when it names a path or is empty."""
+    name = str(value)
+    if not name or "\x00" in name or "\\" in name or ":" in name:
+        return None
+    if os.path.basename(name) != name or name in {".", ".."}:
+        return None
+    return name
 
 
 class _HtmlSanitizer(HTMLParser):
@@ -261,7 +274,7 @@ def _pending_recordings(data_dir: Path) -> tuple[list, set[str]]:
 @router.get("", response_class=HTMLResponse)
 async def transcripts_list(request: Request) -> HTMLResponse:
     out_dir = get_output_root()
-    transcript_store.reconcile(out_dir, sync="throttled")  # register new files, flag deleted ones
+    transcript_store.reconcile(out_dir, sync="throttled", blocking=False)
 
     campaigns = load_campaigns()
     campaign_slug_by_id = {c.id: slug for slug, c in campaigns.items()}
@@ -299,8 +312,10 @@ async def transcripts_list(request: Request) -> HTMLResponse:
     )
 
 
-def _attention_context(out_dir: Path) -> Optional[dict]:
+def _attention_context(out_dir: "Path | None") -> Optional[dict]:
     """The Needs attention panel's data, or None when there is nothing to show."""
+    if out_dir is None:
+        out_dir = get_output_root()
     try:
         found = transcript_store.needs_attention(out_dir)
     except Exception:
@@ -309,20 +324,37 @@ def _attention_context(out_dir: Path) -> Optional[dict]:
     if not found.total:
         return None
     base = os.path.abspath(str(out_dir))
-    data_base = os.path.abspath(str(get_data_dir()))
     unclaimed = []
     for path in found.unclaimed:
         try:
             st = path.stat()
         except OSError:
             continue
-        in_output = os.path.dirname(os.path.abspath(path)) == base
+        rel = os.path.relpath(os.path.abspath(path), base)
+        in_output = os.sep not in rel
+        # Only a scanned directory's file with a recognised companion name may
+        # be deleted here; anything else is listed only.
+        deletable = (transcript_store._companion_stem(path.name) is not None
+                     and (in_output or rel.split(os.sep)[0] in _campaign_folder_names()))
         unclaimed.append({
-            "name": path.name if in_output else os.path.relpath(path, data_base),
+            "name": path.name if in_output else rel.replace(os.sep, "/"),
             "size": st.st_size,
             "modified": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
-            # Only an output-root file with a recognised companion name may be deleted here.
-            "deletable": in_output and transcript_store._companion_stem(path.name) is not None,
+            "deletable": deletable,
+        })
+    campaigns = load_campaigns()
+    campaign_name = {c.id: c.display_name for c in campaigns.values()}
+    misplaced = []
+    for loc in found.misplaced:
+        try:
+            where = os.path.relpath(os.path.abspath(loc.dir), base).replace(os.sep, "/")
+        except ValueError:
+            where = str(loc.dir)
+        misplaced.append({
+            "id": loc.id,
+            "stem": loc.stem,
+            "campaign": campaign_name.get(loc.campaign_id),
+            "dir": where,
         })
     return {
         "missing_transcripts": found.missing_transcripts,
@@ -330,7 +362,17 @@ def _attention_context(out_dir: Path) -> Optional[dict]:
             {"id": r.id, "name": r.rel_path, "kind": r.kind} for r in found.missing_files
         ],
         "unclaimed": unclaimed,
+        "misplaced": misplaced,
+        "pending_folders": found.pending_folders,
+        "folder_taken": found.folder_taken,
+        "legacy_journals": found.legacy_journals,
+        "missing_folders": found.missing_folders,
     }
+
+
+def _campaign_folder_names() -> set[str]:
+    """Current campaign folder names, for validating a two-part delete path."""
+    return {c.folder for c in load_campaigns().values()}
 
 
 @router.post("/bulk-delete", response_class=HTMLResponse)
@@ -409,22 +451,80 @@ async def forget_missing_file(request: Request) -> HTMLResponse:
 
 @router.post("/needs-attention/delete-file", response_class=HTMLResponse)
 async def delete_unclaimed_file(request: Request) -> HTMLResponse:
-    """Delete an output-root file with a companion-file name that nothing owns."""
+    """Delete an unowned file with a companion-file name in a scanned directory.
+
+    ``name`` is ``<file>`` or ``<folder>/<file>``; each component is a plain
+    name (no separator, colon, or NUL), and ``<folder>`` must be a current
+    campaign's folder. ``delete_unowned_file`` re-checks the directory.
+    """
     form = await request.form()
-    name = str(form.get("name", ""))
-    safe_name = os.path.basename(name)
-    if (not name or "\x00" in name or safe_name != name or safe_name in {".", ".."}
-            or transcript_store._companion_stem(safe_name) is None):
+    parts = str(form.get("name", "")).split("/")
+    if len(parts) == 1:
+        safe_name = _as_basename(parts[0])
+        folder = None
+    elif len(parts) == 2:
+        folder, safe_name = _as_basename(parts[0]), _as_basename(parts[1])
+        if folder is None or folder not in _campaign_folder_names():
+            return invalid_input_response("Invalid file name")
+    else:
+        return invalid_input_response("Invalid file name")
+    if safe_name is None or transcript_store._companion_stem(safe_name) is None:
         return invalid_input_response("Invalid file name")
     out_dir = get_output_root()
-    base = os.path.abspath(str(out_dir))
-    if not base.endswith(os.sep):
-        base += os.sep
-    target = os.path.abspath(os.path.join(base, safe_name))
-    if not target.startswith(base):
-        return invalid_input_response("Invalid file name")
+    target = out_dir / (safe_name if folder is None else f"{folder}/{safe_name}")
     if not transcript_store.delete_unowned_file(Path(target), output_dir=out_dir):
         return RedirectResponse(url="/transcripts?error=delete_failed", status_code=303)
+    return RedirectResponse(url="/transcripts", status_code=303)
+
+
+@router.post("/needs-attention/claim-folder", response_class=HTMLResponse)
+async def claim_taken_folder(request: Request) -> HTMLResponse:
+    """Claim an existing non-empty folder as the campaign's, for "Use this folder".
+
+    Only a folder-taken campaign qualifies: it exists, wisper doesn't own it,
+    and no rename is pending. The next reconcile registers its `.md` files.
+    """
+    from wisper_transcribe import campaign_folders
+    from wisper_transcribe.config import get_output_root
+
+    form = await request.form()
+    try:
+        campaign_id = int(str(form.get("campaign_id", "")))
+    except ValueError:
+        return invalid_input_response("Invalid campaign id")
+    with db_connection() as conn:
+        row = conn.execute(
+            "SELECT folder, folder_pending, folder_claimed FROM campaigns WHERE id = ?",
+            (campaign_id,),
+        ).fetchone()
+    if row is None or row["folder_pending"] is not None or row["folder_claimed"]:
+        return RedirectResponse(url="/transcripts?error=not_found", status_code=303)
+    folder = get_output_root() / row["folder"]
+    if not folder.is_dir() or campaign_folders.holds_only_wisper(folder, row["folder"]):
+        return RedirectResponse(url="/transcripts?error=not_found", status_code=303)
+    try:
+        campaign_folders.claim_folder(campaign_id)
+    except (KeyError, campaign_folders.FolderPendingError):
+        return RedirectResponse(url="/transcripts?error=not_found", status_code=303)
+    return RedirectResponse(url="/transcripts", status_code=303)
+
+
+@router.post("/needs-attention/recreate-folder", response_class=HTMLResponse)
+async def recreate_missing_folder(request: Request) -> HTMLResponse:
+    """Make a claimed campaign's vanished folder again, for "Recreate folder"."""
+    from wisper_transcribe import campaign_folders
+
+    form = await request.form()
+    try:
+        campaign_id = int(str(form.get("campaign_id", "")))
+    except ValueError:
+        return invalid_input_response("Invalid campaign id")
+    try:
+        campaign_folders.recreate_folder(campaign_id)
+    except KeyError:
+        return RedirectResponse(url="/transcripts?error=not_found", status_code=303)
+    except campaign_folders.FolderTakenError:
+        return RedirectResponse(url="/transcripts?error=not_found", status_code=303)
     return RedirectResponse(url="/transcripts", status_code=303)
 
 

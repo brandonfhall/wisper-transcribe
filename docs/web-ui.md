@@ -203,7 +203,12 @@ The Campaign page's **Rolling journal** panel combines session summaries into on
 **Needs attention:** the Transcripts page shows this panel only when something needs you. Nothing in it is deleted automatically.
 - **Missing transcripts** have a **Relink** dropdown (the renamed file brings its summary, speaker clips, and audio along) and a **Remove** button that deletes the transcript and its files.
 - **Files gone from disk** (a summary or clip you deleted by hand) have a **Forget** button that stops tracking them.
-- **Files with no transcript** show their size and modified time. Summaries, speaker data, clips, backups, and `.flac` audio in the transcripts folder have a **Delete** button; a file in wisper's data folder, such as a recording's `combined.wav`, is listed only.
+- **Not in their campaign's folder:** sessions still in the transcripts root (or elsewhere) that a campaign holds. Run `wisper storage trim --apply`, or move them with **Move files** on the session's page.
+- **Folder renames to finish:** a campaign folder rename that didn't complete. Retry it from the campaign page.
+- **Folder taken:** a folder with the campaign's name already exists and isn't wisper's. Rename the campaign, or **Use this folder** — every `.md` file in it becomes a session of that campaign.
+- **Journals to move:** a journal from an older install that couldn't be moved into its campaign folder.
+- **Campaign folders missing:** a campaign's folder is gone from the transcripts folder. Rename the campaign to match the folder, or **Recreate folder**.
+- **Files with no transcript** show their size and modified time. Summaries, speaker data, clips, backups, and `.flac` audio in a scanned folder have a **Delete** button; a file in wisper's data folder, such as a recording's `combined.wav`, is listed only.
 - wisper logs the counts at startup.
 
 ---

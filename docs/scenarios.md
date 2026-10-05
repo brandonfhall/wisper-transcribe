@@ -154,6 +154,14 @@ If wisper can't be sure (you also edited the file, or two files look alike), the
 
 ---
 
+## I moved a session to another campaign's folder in Obsidian
+
+Drag the session's `.md` (and its summary, speaker data, clips, and audio) from one campaign's folder to another's in Obsidian, or out to the transcripts root. On the next start or page load, wisper recognises the files by size and modified time, moves the session into that campaign (or out of all of them), keeps its place in the folder it stayed in, and brings its companion files along. Its journal entry is dropped and the old campaign's journal is marked for a rebuild.
+
+A `.md` you copy or drop into a campaign folder becomes a session of that campaign, exactly as one in the root belongs to no campaign.
+
+---
+
 ## A recording stopped unexpectedly
 
 If wisper crashes or the machine loses power mid-session, the recording shows **FAILED** after the restart, but everything captured up to the last minute is still on disk. Open the recording and click **Recover recording** (or run `wisper record recover <recording_id>` while `wisper server` runs). The saved pieces are joined into one file, the recording becomes **COMPLETED**, and **Transcribe** works as usual. Expect up to the final minute to be missing.
