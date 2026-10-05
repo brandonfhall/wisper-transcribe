@@ -69,8 +69,8 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 | 2a — Location API (`transcript_store.locate` and friends), no callers changed | done (opencode; Claude review fixes) | a051bf1 + next |
 | 2b — Every caller resolves through the location API | done (opencode; Claude review fixes) | |
 | 3 — Transcript URLs by id; lists from the database | done (opencode; Claude review fixes) | 121ea73 |
-| 4 — Scan campaign folders: reconcile, sync, Needs attention | done (opencode; Claude review fixes) | |
-| 5 — Write into campaign folders: uploads, recordings, re-transcribe, CLI | not started | |
+| 4 — Scan campaign folders: reconcile, sync, Needs attention | done (opencode; Claude review fixes) | 950048e |
+| 5 — Write into campaign folders: uploads, recordings, re-transcribe, CLI | in progress (opencode) | |
 | 6 — Moving a transcript moves its files; clash prompt; Rename | not started | |
 | 7 — Campaign create, rename, and delete with folders | not started | |
 | 8 — `wisper storage trim` organizes folders; prune backups | not started | |
