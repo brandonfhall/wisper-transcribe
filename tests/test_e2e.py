@@ -277,3 +277,81 @@ def test_retranscribe_keeps_campaign_position_and_marks_journal_stale(client, ml
         "Session 1.flac", "Session 2.flac", "Session 3.flac"]
     assert file_registry.file_for(file_registry.Owner("transcript", tid), "audio").path == flac
     assert _row("SELECT journal_stale_since FROM campaigns WHERE slug = 'curse-of-strahd'")[0]
+
+
+# ---------------------------------------------------------------------------
+# Campaign folders: upload, move, rename, rename campaign, organize, delete
+# ---------------------------------------------------------------------------
+
+def test_campaign_folder_lifecycle(client, ml):
+    import os
+
+    from wisper_transcribe import storage_trim, transcript_store
+
+    out = get_output_dir()
+    for name in ("Curse of Strahd", "Tomb of Annihilation"):
+        assert client.post("/campaigns", data={"display_name": name},
+                           follow_redirects=False).status_code == 303
+    strahd, tomb = out / "Curse of Strahd", out / "Tomb of Annihilation"
+
+    def names(folder):
+        return sorted(p.name for p in folder.iterdir())
+
+    # Upload into a campaign: the session and its files land in its folder.
+    _wait(client, _upload(client, "Session 1", "curse-of-strahd"))
+    tid = _row("SELECT id FROM transcripts WHERE stem = 'Session 1'")[0]
+    assert "Session 1.md" in names(strahd) and "Session 1.flac" in names(strahd)
+
+    # Move to another campaign: every file follows.
+    resp = client.post(f"/transcripts/{tid}/campaign", data={"campaign": "tomb-of-annihilation"},
+                       follow_redirects=False)
+    assert resp.status_code == 303
+    assert not [n for n in names(strahd) if n.startswith("Session 1")]
+    assert {"Session 1.md", "Session 1.flac", "Session 1_diar.json"} <= set(names(tomb))
+
+    # Rename the session: the .md and its companions are renamed together.
+    resp = client.post(f"/transcripts/{tid}/rename", data={"new_name": "Session One"},
+                       follow_redirects=False)
+    assert resp.status_code == 303
+    assert not [n for n in names(tomb) if n.startswith("Session 1")]
+    assert {"Session One.md", "Session One.flac", "Session One_diar.json"} <= set(names(tomb))
+
+    # Rename the campaign: its folder moves and the session is found inside it.
+    resp = client.post("/campaigns/tomb-of-annihilation/rename",
+                       data={"display_name": "Tomb Renamed"}, follow_redirects=False)
+    assert resp.headers["location"] == "/campaigns/tomb-renamed"
+    renamed = out / "Tomb Renamed"
+    assert not tomb.exists() and "Session One.md" in names(renamed)
+    assert transcript_store.locate(tid).dir == renamed
+    assert client.get(f"/transcripts/{tid}").status_code == 200
+
+    # A shell mv of the whole session to the root is followed as a move out of
+    # the campaign, with every companion.
+    for path in list(renamed.iterdir()):
+        if path.name.startswith("Session One"):
+            os.replace(path, out / path.name)
+    transcript_store.reconcile(out)
+    loc = transcript_store.locate(tid)
+    assert loc.campaign_id is None and loc.dir == out and not loc.misplaced
+
+    # Assigned to the campaign with its files still in the root (as an upgrade
+    # leaves sessions): misplaced, and storage trim moves the files home.
+    from wisper_transcribe.campaign_manager import _assign
+
+    cid = _row("SELECT id FROM campaigns WHERE slug = 'tomb-renamed'")[0]
+    with db.transaction() as conn:
+        _assign(conn, tid, cid, 0)
+    assert transcript_store.locate(tid).misplaced
+    report = storage_trim.apply()
+    assert report.organized == ["Session One"]
+    assert not transcript_store.locate(tid).misplaced
+    assert "Session One.md" in names(renamed)
+
+    # Delete the campaign, keeping the files: the session moves to the root.
+    resp = client.post("/campaigns/tomb-renamed/delete", data={"mode": "keep"},
+                       follow_redirects=False)
+    assert resp.status_code == 303
+    assert (out / "Session One.md").is_file() and (out / "Session One.flac").is_file()
+    assert not renamed.exists()
+    loc = transcript_store.locate(tid)
+    assert loc.campaign_id is None and loc.dir == out and not loc.misplaced

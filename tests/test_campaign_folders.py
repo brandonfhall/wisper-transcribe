@@ -590,6 +590,22 @@ def test_finish_folder_rename_neither_directory_updates_only_the_database():
     assert _campaign_row(cid) == ("game", "Renamed", None, 0)
 
 
+def test_finish_folder_rename_renames_the_folder_back_when_the_commit_fails(monkeypatch):
+    cid = _seed.seed_campaign("Game", "game", claimed=True)
+    with db.transaction() as conn:
+        conn.execute("UPDATE campaigns SET folder_pending = 'Renamed' WHERE id = ?", (cid,))
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(cf, "_rewrite_prefix", fail)
+    with pytest.raises(RuntimeError):
+        cf.finish_folder_rename(cid)
+    out = get_output_root()
+    assert (out / "Game").is_dir() and not (out / "Renamed").exists()
+    assert _campaign_row(cid) == ("game", "Game", "Renamed", 1)
+
+
 def test_finish_without_folder_finishes_normally_when_the_old_folder_exists():
     cid = _seed.seed_campaign("Game", "game", claimed=True)
     with db.transaction() as conn:
