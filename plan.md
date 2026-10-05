@@ -65,7 +65,7 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 | Phase | State | Commit |
 |---|---|---|
 | Planning: gate review, design, reviewer cycles | complete (5 review cycles) | |
-| 1 — Schema v11; campaign queries; journal into the campaign folder | done | |
+| 1 — Schema v11; campaign queries; journal into the campaign folder | done | ffd78f4 |
 | 2a — Location API (`transcript_store.locate` and friends), no callers changed | handed to OpenClaw (see below) | |
 | 2b — Every caller resolves through the location API | not started | |
 | 3 — Transcript URLs by id; lists from the database | not started | |
