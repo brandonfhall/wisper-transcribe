@@ -9,7 +9,7 @@ description = "Podcast transcription with speaker diarization for tabletop RPG a
 requires-python = ">=3.13"
 dependencies = [
     "faster-whisper>=1.1.0",
-    "av<19",                 # faster-whisper 1.2.1 passes av.open(metadata_errors=), removed in PyAV 19
+    "av<20",                 # faster-whisper 1.2.1 passes av.open(metadata_errors=), removed in PyAV 19
     "pyannote-audio>=4.0",
     "omegaconf>=2.3",        # undeclared transitive dep of pyannote-audio; required at import time
     "transformers>=5.17",    # Qwen3-ForcedAligner (word_alignment)
