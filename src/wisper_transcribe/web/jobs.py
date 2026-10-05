@@ -607,7 +607,8 @@ class JobQueue:
 
         ``on_complete`` / ``on_error`` run in the worker thread when the job
         completes or fails (including cancellation), so callers with external
-        state (e.g. a Recording's status) can update it.
+        state (e.g. a Recording's status) can update it. ``on_complete`` runs
+        before the job reads as completed.
         """
         from pathlib import Path
         import re
@@ -1278,13 +1279,15 @@ class JobQueue:
             if job.post_refine or job.post_summarize:
                 self._run_post_process(job, Path(output_path))
 
-            job.status = COMPLETED
+            # Before COMPLETED, so anyone waiting on the status sees the
+            # callback's effects (the recording hand-off links its transcript).
             _cb = self._on_complete_callbacks.pop(job.id, None)
             if _cb is not None:
                 try:
                     _cb(job)
                 except Exception:
                     pass  # callback failure must not fail the job
+            job.status = COMPLETED
 
         except InterruptedError:
             job.status = FAILED
