@@ -29,39 +29,116 @@ _REGEX_PAYLOADS = [
     "name!@#",
 ]
 
-@pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS)
-def test_transcripts_path_traversal_blocked(client: TestClient, payload: str):
-    """Ensure the transcript routes block directory traversal and null bytes."""
-    safe_url = quote(payload)
-    
-    # 1. Detail view
-    resp = client.get(f"/transcripts/{safe_url}")
-    assert resp.status_code == 400
-    assert "Invalid name" in resp.text
+@pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS + [
+    "../etc/passwd", "id/with/slashes", "evil\r\nLocation: x",
+])
+def test_transcript_routes_take_only_integer_ids(client: TestClient, payload: str):
+    """A non-integer segment never matches a transcript id route.
 
-    # 2. Download
-    resp = client.get(f"/transcripts/{safe_url}/download")
-    assert resp.status_code == 400
+    The GET falls through to the legacy name handler, which redirects without
+    touching a path; every POST is a 404/405. Nothing is deleted or submitted.
+    """
+    safe_url = quote(payload, safe="")
 
-    # 2b. Audio
-    resp = client.get(f"/transcripts/{safe_url}/audio")
-    assert resp.status_code == 400
+    resp = client.get(f"/transcripts/{safe_url}", follow_redirects=False)
+    # 303: the legacy handler found no row; 404: the path never matched a route.
+    assert resp.status_code in (400, 404, 303)
+    location = resp.headers.get("location", "")
+    assert payload not in location
+    assert "\x00" not in location and ".." not in location
 
-    # 3. Delete
-    resp = client.post(f"/transcripts/{safe_url}/delete")
-    assert resp.status_code == 400
+    resp = client.post(f"/transcripts/{safe_url}/delete", follow_redirects=False)
+    assert resp.status_code in (404, 405)
 
-    # 4. Fix speaker
-    resp = client.post(f"/transcripts/{safe_url}/fix-speaker", data={"old_name": "a", "new_name": "b"})
-    assert resp.status_code == 400
 
-    # 5. Edit page (GET)
-    resp = client.get(f"/transcripts/{safe_url}/edit")
-    assert resp.status_code == 400
+@pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS + [
+    "../escape", "..\\escape", "a/b", "evil\r\nLocation: x",
+])
+def test_transcript_excerpt_speaker_name_guard(client: TestClient, payload: str, tmp_path, monkeypatch):
+    """A speaker label on the transcript excerpt route never reaches the
+    filesystem: the integer id resolves the transcript, and the label is
+    sanitised by the shared lookup inside that transcript's folder."""
+    from wisper_transcribe import transcript_store
 
-    # 6. Edit save (POST)
-    resp = client.post(f"/transcripts/{safe_url}/edit", data={"speaker_0": "Alice"})
-    assert resp.status_code == 400
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    md = out / "s1.md"
+    md.write_text("x", encoding="utf-8")
+    tid = transcript_store.register(md, origin="reconcile")
+
+    safe_url = quote(payload, safe="")
+    resp = client.get(f"/transcripts/{tid}/excerpt/{safe_url}", follow_redirects=False)
+    assert resp.status_code in (400, 404)
+    assert payload not in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Legacy /transcripts/{name} redirect
+# ---------------------------------------------------------------------------
+
+def test_legacy_name_url_redirects_to_the_id_when_unique(client, tmp_path, monkeypatch):
+    """An old name link reaches the legacy handler (not a 422/404) and 303s to
+    the id-based URL."""
+    from wisper_transcribe import transcript_store
+
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    md = out / "Session 1.md"
+    md.write_text("x", encoding="utf-8")
+    tid = transcript_store.register(md, origin="reconcile")
+
+    resp = client.get("/transcripts/" + quote("Session 1"), follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/transcripts/{tid}"
+
+
+def test_legacy_name_url_chooses_between_same_named_campaigns(client, tmp_path, monkeypatch):
+    """A name held by two campaigns offers a chooser listing both by id."""
+    from wisper_transcribe import db, file_registry
+    from . import _seed
+
+    data = tmp_path / "data"
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_DATA_DIR", str(data))
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    cid_a = _seed.seed_campaign("Alpha", slug="alpha", claimed=True)
+    cid_b = _seed.seed_campaign("Beta", slug="beta", claimed=True)
+
+    ids = {}
+    for cid, folder in ((cid_a, "Alpha"), (cid_b, "Beta")):
+        md = out / folder / "Session 1.md"
+        md.write_text("x", encoding="utf-8")
+        with db.transaction() as conn:
+            tid = conn.execute(
+                "INSERT INTO transcripts (stem, campaign_id, position, created_at) "
+                "VALUES (?, ?, 0, ?) RETURNING id",
+                ("Session 1", cid, db.now_utc()),
+            ).fetchone()[0]
+        file_registry.add(md, kind="transcript", owner=file_registry.Owner("transcript", tid),
+                          output_dir=out)
+        ids[cid] = tid
+
+    resp = client.get("/transcripts/" + quote("Session 1"), follow_redirects=False)
+    assert resp.status_code == 200
+    assert f"/transcripts/{ids[cid_a]}" in resp.text
+    assert f"/transcripts/{ids[cid_b]}" in resp.text
+    assert "Alpha" in resp.text and "Beta" in resp.text
+
+
+def test_legacy_name_url_unknown_redirects_to_not_found(client):
+    resp = client.get("/transcripts/no-such-session", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/transcripts?error=not_found"
+
+
+def test_not_found_integer_id_redirects_to_not_found(client):
+    resp = client.get("/transcripts/999999", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/transcripts?error=not_found"
+
 
 
 @pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS)
@@ -506,6 +583,19 @@ def test_find_excerpt_clip_missing_returns_none(tmp_path):
     assert find_excerpt_clip(out_dir, "stem", ["SPEAKER_00"]) is None
 
 
+@pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS + [
+    "invalid*name", "invalid+name", "name!@#",
+])
+def test_transcript_bulk_campaign_rejects_a_malformed_campaign_slug(client, payload):
+    """The bulk campaign route is id-based; only the campaign slug is a
+    user string, and it must pass the slug guard."""
+    resp = client.post("/transcripts/bulk-campaign",
+                       data={"transcript_id": ["1"], "campaign": payload},
+                       follow_redirects=False)
+    assert resp.status_code in (303, 400, 422)
+    assert resp.headers.get("location", "") in ("", "/transcripts?error=invalid_campaign")
+
+
 # ---------------------------------------------------------------------------
 # Rename target name (form field) flows into file paths via the profile
 # key — must be guarded like any other path component
@@ -514,7 +604,7 @@ def test_find_excerpt_clip_missing_returns_none(tmp_path):
 @pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS + [
     "../escape", "a/b", "..", "with space/../x",
 ])
-def test_speakers_rename_new_name_path_guard(client: TestClient, payload: str, tmp_path):
+def test_speakers_rename_new_name_path_guard(client: TestClient, payload: str, tmp_path, monkeypatch):
     """The web rename rekeys the profile (moves its .mp3 clip), so the
     submitted new name must pass the path-component guard; hostile names are
     refused with a generic error code and never reflected."""
@@ -527,12 +617,12 @@ def test_speakers_rename_new_name_path_guard(client: TestClient, payload: str, t
     clip.parent.mkdir(parents=True, exist_ok=True)
     clip.write_bytes(b"mp3")
 
-    with patch.dict("os.environ", {"WISPER_DATA_DIR": str(tmp_path)}):
-        resp = client.post(
-            "/speakers/alice/rename",
-            data={"new_name": payload},
-            follow_redirects=False,
-        )
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    resp = client.post(
+        "/speakers/alice/rename",
+        data={"new_name": payload},
+        follow_redirects=False,
+    )
 
     assert resp.status_code == 303
     assert resp.headers["location"] == "/speakers?error=rename_failed"
@@ -560,18 +650,19 @@ def test_transcribe_name_check_never_escapes_output_dir(client, payload, tmp_pat
 @pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS + [
     "../escape", "../../etc/passwd", "a/b", "..", "evil\r\nLocation: x",
 ])
-def test_campaign_relink_rejects_unsafe_stems(client, payload, tmp_path, monkeypatch):
-    """Relink takes two stems from form data; neither may leave the output dir,
-    and neither is ever reflected into the redirect."""
+def test_campaigns_relink_accepts_only_integer_ids(client, payload, tmp_path, monkeypatch):
+    """The campaign relink route takes database ids; a malformed one is
+    refused rather than looked up as a name, and never reflected."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     from wisper_transcribe.campaign_manager import create_campaign
 
     create_campaign("Game")
-    for form in ({"old_stem": payload, "new_stem": "x"}, {"old_stem": "x", "new_stem": payload}):
+    for form in ({"old_id": payload, "new_id": "1"}, {"old_id": "1", "new_id": payload}):
         resp = client.post("/campaigns/game/transcripts/relink", data=form, follow_redirects=False)
         assert resp.status_code in (303, 400, 422)
         location = resp.headers.get("location", "")
         assert location in ("", "/campaigns/game?error=relink_failed")
+        assert payload not in location
 
 
 _UNSAFE_NAMES = _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS + [
@@ -580,10 +671,10 @@ _UNSAFE_NAMES = _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS + [
 
 
 @pytest.mark.parametrize("payload", _UNSAFE_NAMES)
-def test_transcripts_relink_rejects_unsafe_stems(client, payload, tmp_path, monkeypatch):
-    """Both stems come from form data; neither may leave the output dir or be
+def test_transcripts_relink_rejects_non_integer_ids(client, payload, tmp_path, monkeypatch):
+    """Both ids come from form data; a malformed one is refused and never
     reflected into the redirect."""
-    for form in ({"old_stem": payload, "new_stem": "x"}, {"old_stem": "x", "new_stem": payload}):
+    for form in ({"old_id": payload, "new_id": "1"}, {"old_id": "1", "new_id": payload}):
         resp = client.post("/transcripts/relink", data=form, follow_redirects=False)
         assert resp.status_code in (303, 400, 422)
         assert resp.headers.get("location", "") in ("", "/transcripts?error=relink_failed")
@@ -629,11 +720,20 @@ def test_search_params_are_inert(client: TestClient, payload: str):
 
 
 @pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS + ["\x00", '"</script>'])
-def test_transcript_highlight_param_is_inert(client: TestClient, payload: str):
+def test_transcript_highlight_param_is_inert(client: TestClient, payload: str, tmp_path, monkeypatch):
     """The ?q= highlight parameter on transcript and summary pages is never a path."""
-    for url in ("/transcripts/nope", "/transcripts/nope/summary"):
+    from wisper_transcribe import transcript_store
+
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    md = out / "nope.md"
+    md.write_text("x", encoding="utf-8")
+    tid = transcript_store.register(md, origin="reconcile")
+    for url in (f"/transcripts/{tid}", f"/transcripts/{tid}/summary"):
         r = client.get(url, params={"q": payload})
-        assert r.status_code in (400, 404)
+        # The summary has no sidecar yet: 404. The detail page renders: 200.
+        assert r.status_code in (200, 404)
 
 
 @pytest.mark.parametrize("key", ["../outside", "..\\outside", "sub/../../outside", "outside\x00"])
@@ -670,18 +770,17 @@ def test_transcript_audio_rejects_slashes(client: TestClient, payload: str):
 
 @pytest.mark.parametrize("payload", [quote(p, safe="") for p in _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS] + [
     "..%2Foutside", "a%2Fb", "..%5Coutside", "evil%0D%0ALocation:%20x", "%5C%5Cevil.com"])
-def test_transcript_retranscribe_never_submits_for_an_unsafe_name(client, payload, tmp_path, monkeypatch):
-    """The name is guarded before any lookup, and never reaches a redirect."""
-    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(tmp_path))
+def test_transcript_retranscribe_never_submits_for_a_malformed_id(client, payload):
+    """A non-integer transcript id never matches the route, so no job is queued."""
     queue = client.app.state.job_queue
     with patch.object(queue, "submit") as submit:
         resp = client.post(f"/transcripts/{payload}/retranscribe", follow_redirects=False)
-    assert resp.status_code in (400, 404)
+    assert resp.status_code in (404, 405)
     assert "evil" not in resp.headers.get("location", "")
     submit.assert_not_called()
 
 
-def test_transcript_retranscribe_error_redirect_quotes_the_stem(client, tmp_path, monkeypatch):
+def test_transcript_retranscribe_error_redirect_uses_the_id(client, tmp_path, monkeypatch):
     from wisper_transcribe import transcript_store
 
     out = tmp_path / "out"
@@ -689,6 +788,6 @@ def test_transcript_retranscribe_error_redirect_quotes_the_stem(client, tmp_path
     monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
     md = out / "Session — 1!.md"
     md.write_text("x", encoding="utf-8")
-    transcript_store.register(md, origin="job")
-    resp = client.post(f"/transcripts/{quote('Session — 1!')}/retranscribe", follow_redirects=False)
-    assert resp.headers["location"] == f"/transcripts/{quote('Session — 1!')}?error=no_audio"
+    tid = transcript_store.register(md, origin="job")
+    resp = client.post(f"/transcripts/{tid}/retranscribe", follow_redirects=False)
+    assert resp.headers["location"] == f"/transcripts/{tid}?error=no_audio"

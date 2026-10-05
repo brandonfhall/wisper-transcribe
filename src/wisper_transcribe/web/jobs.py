@@ -453,6 +453,8 @@ class Job:
     post_summarize: bool = False
     # For LLM jobs: path to the transcript being processed
     llm_transcript_path: Optional[str] = None
+    # The transcript's row id, resolved from output_path or set at submit.
+    transcript_id: Optional[int] = None
     # For summarize jobs: path to the generated .summary.md file
     summary_path: Optional[str] = None
     # True when input_path came from a wisper_upload_* temp file, judged from

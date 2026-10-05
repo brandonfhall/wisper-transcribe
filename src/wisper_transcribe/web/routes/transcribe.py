@@ -9,7 +9,6 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Optional
-from urllib.parse import quote
 
 from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
@@ -302,8 +301,21 @@ async def job_detail(request: Request, job_id: str) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
         "job_detail.html",
-        {"request": request, "job": job},
+        {"request": request, "job": _with_transcript_id(job)},
     )
+
+
+def _with_transcript_id(job):
+    """A job whose transcript row id isn't set yet (in memory): resolve it from
+    ``output_path`` so the page's completion links use it. Never mutates the job
+    for jobs without an output."""
+    if job.transcript_id is None and job.output_path:
+        from wisper_transcribe import transcript_store
+
+        loc = transcript_store.locate_path(Path(job.output_path))
+        if loc is not None:
+            job.transcript_id = loc.id
+    return job
 
 
 @router.get("/jobs/{job_id}/stream")
@@ -352,11 +364,18 @@ async def job_stream(request: Request, job_id: str, after: int = 0) -> Streaming
             yield f"data: {data}\n\n"
 
             if job.status in (COMPLETED, FAILED):
+                transcript_id = job.transcript_id
+                if transcript_id is None and job.output_path:
+                    from wisper_transcribe import transcript_store
+
+                    loc = transcript_store.locate_path(Path(job.output_path))
+                    transcript_id = loc.id if loc is not None else None
                 final = json.dumps({
                     "type": "done",
                     "status": job.status,
                     "output_path": job.output_path,
                     "summary_path": job.summary_path,
+                    "transcript_id": transcript_id,
                     "job_type": job.job_type,
                     # For campaign-journal jobs there is no transcript — the
                     # completion action links to the campaign journal instead.
@@ -533,7 +552,14 @@ async def enroll_submit(request: Request, job_id: str) -> Response:
             renames[old_name] = str(value).strip()
 
     transcript_name = Path(job.output_path).stem
-    url = f"/transcripts/{quote(transcript_name, safe='')}"
+    # A completed job's transcript is registered, so its row id resolves the
+    # redirect. Without one, the job page still shows the result.
+    from wisper_transcribe import transcript_store
+
+    loc = transcript_store.locate_path(Path(job.output_path))
+    if loc is None:
+        return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
+    url = f"/transcripts/{loc.id}"
 
     if renames:
         # Rename now; embedding extraction runs as a JOB_ENROLL job.

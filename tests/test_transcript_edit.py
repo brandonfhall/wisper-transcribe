@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -53,19 +52,22 @@ def transcript_file(tmp_path: Path, monkeypatch) -> Path:
     return f
 
 
-def _patch_output(tmp_path: Path):
-    return patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path)
+def _tid(md: Path) -> int:
+    from wisper_transcribe import transcript_store
+
+    loc = transcript_store.locate_path(md)
+    assert loc is not None, md
+    return loc.id
 
 
 # ---------------------------------------------------------------------------
-# GET /transcripts/{name}/edit
+# GET /transcripts/{id}/edit
 # ---------------------------------------------------------------------------
 
 
 def test_edit_get_renders_page(client: TestClient, transcript_file: Path):
-    tmp_path = transcript_file.parent
-    with _patch_output(tmp_path):
-        resp = client.get("/transcripts/session01/edit")
+    tid = _tid(transcript_file)
+    resp = client.get(f"/transcripts/{tid}/edit")
     assert resp.status_code == 200
     assert b"Alice" in resp.content
     assert b"Bob" in resp.content
@@ -74,35 +76,33 @@ def test_edit_get_renders_page(client: TestClient, transcript_file: Path):
 
 
 def test_edit_get_shows_all_blocks(client: TestClient, transcript_file: Path):
-    tmp_path = transcript_file.parent
-    with _patch_output(tmp_path):
-        resp = client.get("/transcripts/session01/edit")
+    tid = _tid(transcript_file)
+    resp = client.get(f"/transcripts/{tid}/edit")
     body = resp.content.decode()
     # Three speaker blocks: Alice, Bob, Alice
     assert body.count('name="speaker_') == 3
 
 
-def test_edit_get_missing_transcript_returns_404(client: TestClient, tmp_path: Path):
-    with _patch_output(tmp_path):
-        resp = client.get("/transcripts/nonexistent/edit")
-    assert resp.status_code == 404
+def test_edit_get_unknown_transcript_redirects(client: TestClient):
+    resp = client.get("/transcripts/999999/edit", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/transcripts?error=not_found"
 
 
 # ---------------------------------------------------------------------------
-# POST /transcripts/{name}/edit
+# POST /transcripts/{id}/edit
 # ---------------------------------------------------------------------------
 
 
 def test_edit_post_renames_single_block(client: TestClient, transcript_file: Path):
-    tmp_path = transcript_file.parent
-    with _patch_output(tmp_path):
-        resp = client.post(
-            "/transcripts/session01/edit",
-            data={"speaker_1": "Charlie"},
-            follow_redirects=False,
-        )
+    tid = _tid(transcript_file)
+    resp = client.post(
+        f"/transcripts/{tid}/edit",
+        data={"speaker_1": "Charlie"},
+        follow_redirects=False,
+    )
     assert resp.status_code == 303
-    assert resp.headers["location"] == "/transcripts/session01"
+    assert resp.headers["location"] == f"/transcripts/{tid}"
 
     updated = transcript_file.read_text(encoding="utf-8")
     assert "**Charlie**" in updated
@@ -111,13 +111,12 @@ def test_edit_post_renames_single_block(client: TestClient, transcript_file: Pat
 
 
 def test_edit_post_multiple_changes(client: TestClient, transcript_file: Path):
-    tmp_path = transcript_file.parent
-    with _patch_output(tmp_path):
-        client.post(
-            "/transcripts/session01/edit",
-            data={"speaker_0": "Diana", "speaker_2": "Eve"},
-            follow_redirects=False,
-        )
+    tid = _tid(transcript_file)
+    client.post(
+        f"/transcripts/{tid}/edit",
+        data={"speaker_0": "Diana", "speaker_2": "Eve"},
+        follow_redirects=False,
+    )
     updated = transcript_file.read_text(encoding="utf-8")
     assert "**Diana**" in updated
     assert "**Eve**" in updated
@@ -125,30 +124,28 @@ def test_edit_post_multiple_changes(client: TestClient, transcript_file: Path):
 
 
 def test_edit_post_no_changes_leaves_file_intact(client: TestClient, transcript_file: Path):
-    tmp_path = transcript_file.parent
+    tid = _tid(transcript_file)
     original = transcript_file.read_text(encoding="utf-8")
-    with _patch_output(tmp_path):
-        client.post("/transcripts/session01/edit", data={}, follow_redirects=False)
+    client.post(f"/transcripts/{tid}/edit", data={}, follow_redirects=False)
     assert transcript_file.read_text(encoding="utf-8") == original
 
 
-def test_edit_post_missing_transcript_returns_404(client: TestClient, tmp_path: Path):
-    with _patch_output(tmp_path):
-        resp = client.post(
-            "/transcripts/nonexistent/edit",
-            data={"speaker_0": "Alice"},
-            follow_redirects=False,
-        )
-    assert resp.status_code == 404
+def test_edit_post_unknown_transcript_redirects(client: TestClient):
+    resp = client.post(
+        "/transcripts/999999/edit",
+        data={"speaker_0": "Alice"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/transcripts?error=not_found"
 
 
 def test_edit_post_strips_newlines_from_speaker(client: TestClient, transcript_file: Path):
-    tmp_path = transcript_file.parent
-    with _patch_output(tmp_path):
-        client.post(
-            "/transcripts/session01/edit",
-            data={"speaker_0": "Di\nana"},
-            follow_redirects=False,
-        )
+    tid = _tid(transcript_file)
+    client.post(
+        f"/transcripts/{tid}/edit",
+        data={"speaker_0": "Di\nana"},
+        follow_redirects=False,
+    )
     updated = transcript_file.read_text(encoding="utf-8")
     assert "**Diana**" in updated

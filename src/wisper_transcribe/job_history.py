@@ -156,6 +156,7 @@ class JobRecord:
     campaign_name: Optional[str]
     params: dict
     log_tail: str
+    transcript_id: Optional[int] = None
 
     @property
     def name(self) -> str:
@@ -191,7 +192,7 @@ def _record(r) -> "JobRecord":
         started_at=_dt(r["started_at"]), finished_at=_dt(r["finished_at"]),
         error=r["error_code"], transcript_stem=r["transcript_stem"],
         campaign_slug=r["campaign_slug"], recording_id=r["recording_id"],
-        campaign_name=r["campaign_name"],
+        campaign_name=r["campaign_name"], transcript_id=r["transcript_id"],
         params=json.loads(r["params_json"]), log_tail=r["log_tail"],
     )
 
@@ -202,7 +203,7 @@ def _dt(s: Optional[str]) -> Optional[datetime]:
 
 
 def list_jobs(*, page: int = 1, per_page: int = 50, job_type: Optional[str] = None,
-              status: Optional[str] = None, transcript: Optional[str] = None,
+              status: Optional[str] = None, transcript_id: Optional[int] = None,
               campaign: Optional[str] = None, data_dir: Optional[Path] = None,
               ) -> tuple[list[JobRecord], int]:
     """A page of history, newest first, and the total matching count."""
@@ -213,9 +214,9 @@ def list_jobs(*, page: int = 1, per_page: int = 50, job_type: Optional[str] = No
     if status:
         where.append("j.status = ?")
         params.append(status)
-    if transcript:
-        where.append("t.stem = ?")
-        params.append(transcript)
+    if transcript_id is not None:
+        where.append("t.id = ?")
+        params.append(transcript_id)
     if campaign:
         where.append("c.slug = ?")
         params.append(campaign)

@@ -128,9 +128,8 @@
         </div>
         {% elif recording.status == 'transcribed' %}
         <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
-          {% if recording.transcript_path %}
-          {%- set stem = recording.transcript_path.stem -%}
-          <a href="/transcripts/{{ stem | urlencode }}" class="btn btn-primary">View transcript</a>
+          {% if recording.transcript_id %}
+          <a href="/transcripts/{{ recording.transcript_id }}" class="btn btn-primary">View transcript</a>
           {% endif %}
           <form method="post" action="/recordings/{{ recording.id }}/transcribe" style="display:inline"
                 onsubmit="return confirm('Re-transcribe this recording? Its current transcript is replaced (it stays in its campaign). If it was folded into the campaign journal, the journal is marked as needing a rebuild.')">

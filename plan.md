@@ -68,7 +68,7 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 | 1 — Schema v11; campaign queries; journal into the campaign folder | done | ffd78f4 |
 | 2a — Location API (`transcript_store.locate` and friends), no callers changed | done (opencode; Claude review fixes) | a051bf1 + next |
 | 2b — Every caller resolves through the location API | done (opencode; Claude review fixes) | |
-| 3 — Transcript URLs by id; lists from the database | not started | |
+| 3 — Transcript URLs by id; lists from the database | done (opencode; Claude review fixes) | |
 | 4 — Scan campaign folders: reconcile, sync, Needs attention | not started | |
 | 5 — Write into campaign folders: uploads, recordings, re-transcribe, CLI | not started | |
 | 6 — Moving a transcript moves its files; clash prompt; Rename | not started | |
@@ -987,6 +987,8 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
 
 ### Phase 3 — Transcript URLs by id; lists from the database
 
+*Done (opencode, three hand-offs). Claude's review: the legacy-name chooser shows the stored stem instead of reflecting the URL's name. The test "campaign page shows a folder session as present and summarized" moves to Phase 4, since nothing scans campaign folders before it. Rehearsed on a scratch copy of the Mac data: every page 200, `/transcripts/<name>` redirects to its id, the Transcripts page renders in 13 ms.*
+
 **Goal:**
 - Transcript pages are `/transcripts/{id}/…`. Their path parameter is an integer, so no transcript route builds a path from user input.
 - The transcript lists (Transcripts page, recent partial, dashboard, `wisper transcripts list`) come from the database, not from `glob("*.md")`.
@@ -1778,6 +1780,8 @@ A worker may add tests here (for a Decisions row with none). A test that exposes
 ---
 
 ### Phase 10 — Final review and rehearsals (orchestrator; no new features)
+
+*Carried from the Phase 3 review: `transcript_store.list_transcripts` and the campaign page call `locate` once per session, and each `locate` checks its campaign folder on disk (`_target_blocked`). Fine at today's library size; time the Transcripts page on the rehearsal copy and batch the per-campaign check if it's slow.*
 
 1. **Full suite**, with `--cov`. Add the campaign-folder flow to `tests/test_e2e.py` if Phase 9 didn't:
    - upload into a campaign;

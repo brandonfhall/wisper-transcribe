@@ -1217,6 +1217,27 @@ def test_find_by_stem_two_campaigns_share_a_stem(out):
     assert ts.find_by_stem("no such stem") == []
 
 
+def test_list_transcripts_present_only_newest_first(out):
+    """list_transcripts returns present rows ordered by the transcript file's
+    mtime (newest first), skipping rows flagged missing."""
+    ca, slug_a, folda = _claimed_campaign("A")
+    older = _seed.seed_transcript("Older", write_md=True)
+    newer = _seed.seed_transcript("Newer", write_md=True)
+    os.utime(out / "Older.md", ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+    os.utime(out / "Newer.md", ns=(1_700_000_100_000_000_000, 1_700_000_100_000_000_000))
+    gone = _seed.seed_transcript("Gone")  # no file: flagged missing
+    ts.reconcile(out, sync="never")
+
+    all_ids = [loc.id for loc in ts.list_transcripts()]
+    assert all_ids.index(newer) < all_ids.index(older)
+    assert gone not in all_ids
+
+    camp_tid = _seed.seed_transcript("In A", campaign=slug_a)
+    _place(out, out / folda, "In A", camp_tid)
+    assert [loc.id for loc in ts.list_transcripts(campaign_id=ca)] == [camp_tid]
+    assert all(loc.id != camp_tid for loc in ts.list_transcripts(campaign_id=None))
+
+
 def test_companion_prefers_the_registered_path(out):
     tid = _seed.seed_transcript("s01", write_md=True)
     audio = out / "s01_1.wav"

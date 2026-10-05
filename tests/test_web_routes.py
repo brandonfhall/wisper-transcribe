@@ -53,6 +53,15 @@ def _reg(path, text: str = "", **kwargs) -> Path:
     return path
 
 
+def _tid(md: Path) -> int:
+    """The database id of a registered transcript ``.md``."""
+    from wisper_transcribe import transcript_store
+
+    loc = transcript_store.locate_path(md)
+    assert loc is not None, md
+    return loc.id
+
+
 @pytest.fixture(autouse=True)
 def _output_root(tmp_path, monkeypatch):
     """The output root is the per-test ``tmp_path`` (``WISPER_OUTPUT_DIR``).
@@ -116,8 +125,7 @@ def test_dashboard_html_includes_mtime_cache_buster(client, tmp_path):
 
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.load_config", return_value={}), \
-         patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
-         patch("wisper_transcribe.web.routes.dashboard.get_output_dir", return_value=tmp_path / "output"):
+         patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"):
         resp = client.get("/")
 
     body = resp.text
@@ -128,8 +136,7 @@ def test_dashboard_html_includes_mtime_cache_buster(client, tmp_path):
 def test_dashboard_returns_200(client, tmp_path):
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.load_config", return_value={}), \
-         patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
-         patch("wisper_transcribe.web.routes.dashboard.get_output_dir", return_value=tmp_path / "output"):
+         patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"):
         resp = client.get("/")
     assert resp.status_code == 200
     assert b"wisper" in resp.content
@@ -146,8 +153,7 @@ def test_dashboard_shows_llm_provider_and_model(client, tmp_path, monkeypatch):
     }
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.load_config", return_value=cfg), \
-         patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
-         patch("wisper_transcribe.web.routes.dashboard.get_output_dir", return_value=tmp_path / "output"):
+         patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"):
         resp = client.get("/")
     assert resp.status_code == 200
     body = resp.content.decode()
@@ -168,8 +174,7 @@ def test_dashboard_flags_cloud_provider_missing_key(client, tmp_path, monkeypatc
     }
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.load_config", return_value=cfg), \
-         patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
-         patch("wisper_transcribe.web.routes.dashboard.get_output_dir", return_value=tmp_path / "output"):
+         patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"):
         resp = client.get("/")
     assert resp.status_code == 200
     body = resp.content.decode()
@@ -179,19 +184,19 @@ def test_dashboard_flags_cloud_provider_missing_key(client, tmp_path, monkeypatc
     assert "claude-sonnet-5" in body
 
 
-def test_dashboard_transcript_count_excludes_summaries(client, tmp_path):
+def test_dashboard_transcript_count_excludes_summaries(client, tmp_path, monkeypatch):
     """The dashboard's transcript count must exclude .summary.md sidecars,
     same as the Transcripts page — they are LLM-generated notes, not transcripts."""
     out_dir = tmp_path / "output"
     out_dir.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out_dir))
     _reg(out_dir / "session01.md", "# transcript")
     _reg(out_dir / "session01.summary.md", "# summary")
     _reg(out_dir / "session02.md", "# transcript 2")
 
     with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
          patch("wisper_transcribe.web.routes.dashboard.load_config", return_value={}), \
-         patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"), \
-         patch("wisper_transcribe.web.routes.dashboard.get_output_dir", return_value=out_dir):
+         patch("wisper_transcribe.web.routes.dashboard.get_device", return_value="cpu"):
         resp = client.get("/")
     assert resp.status_code == 200
     body = resp.content.decode()
@@ -455,17 +460,15 @@ def test_cancel_job_redirects(client, tmp_path):
 
 
 def test_transcripts_list_empty(client, tmp_path):
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path), \
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_root", return_value=tmp_path), \
          patch("wisper_transcribe.web.routes.transcripts.get_data_dir", return_value=tmp_path):
         resp = client.get("/transcripts")
     assert resp.status_code == 200
 
 
 def test_transcripts_list_shows_files(client, tmp_path):
-    md = _reg(tmp_path / "session01.md", "---\ntitle: Session 01\n---\n\n**Alice**: Hello.")
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path), \
-         patch("wisper_transcribe.web.routes.transcripts.get_data_dir", return_value=tmp_path):
-        resp = client.get("/transcripts")
+    _reg(tmp_path / "session01.md", "---\ntitle: session01\n---\n\n**Alice**: Hello.")
+    resp = client.get("/transcripts")
     assert resp.status_code == 200
     assert b"session01" in resp.content
 
@@ -569,7 +572,7 @@ def test_pending_recordings_sorted_newest_first(tmp_path):
 
 def test_transcripts_page_shows_awaiting_transcription_section(client, tmp_path):
     rec = _seed_completed_recording(tmp_path, name="Session 14 — the ambush")
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path), \
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_root", return_value=tmp_path), \
          patch("wisper_transcribe.web.routes.transcripts.get_data_dir", return_value=tmp_path):
         resp = client.get("/transcripts")
     assert resp.status_code == 200
@@ -579,27 +582,27 @@ def test_transcripts_page_shows_awaiting_transcription_section(client, tmp_path)
 
 
 def test_transcripts_page_omits_section_when_nothing_pending(client, tmp_path):
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path), \
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_root", return_value=tmp_path), \
          patch("wisper_transcribe.web.routes.transcripts.get_data_dir", return_value=tmp_path):
         resp = client.get("/transcripts")
     assert "Awaiting transcription" not in resp.text
 
 
 def test_transcript_detail_returns_200(client, tmp_path):
-    md = _reg(tmp_path / "session01.md", 
+    md = _reg(tmp_path / "session01.md",
         "---\ntitle: Session 01\ndate_processed: '2026-04-07'\nduration: '1:00:00'\n"
         "speakers:\n  - name: Alice\n    role: DM\n---\n\n**Alice** *(00:00)*: Hello."
     )
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.get("/transcripts/session01")
+    tid = _tid(md)
+    resp = client.get(f"/transcripts/{tid}")
     assert resp.status_code == 200
     assert b"Session 01" in resp.content
 
 
 def test_transcript_detail_not_found(client, tmp_path):
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.get("/transcripts/nonexistent")
-    assert resp.status_code == 404
+    resp = client.get("/transcripts/999999", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/transcripts?error=not_found"
 
 
 def test_transcript_detail_invalid_name_rejected(client):
@@ -611,13 +614,12 @@ def test_transcript_detail_invalid_name_rejected(client):
 def test_transcript_detail_unicode_filename(client, tmp_path):
     """Filenames with spaces, em-dashes, and special chars should work (400 fix)."""
     stem = "Episode 2 \u2013 O Captain! My (Dead) Captain!"
-    md = _reg(tmp_path / f"{stem}.md", 
+    md = _reg(tmp_path / f"{stem}.md",
         "---\ntitle: Episode 2\nspeakers:\n  - name: Alice\n    role: DM\n---\n\n**Alice**: Hello.",
         encoding="utf-8",
     )
-    from urllib.parse import quote
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.get(f"/transcripts/{quote(stem)}")
+    tid = _tid(md)
+    resp = client.get(f"/transcripts/{tid}")
     assert resp.status_code == 200
     assert b"Episode 2" in resp.content
 
@@ -625,17 +627,16 @@ def test_transcript_detail_unicode_filename(client, tmp_path):
 def test_fix_speaker_unicode_filename_no_latin1_error(client, tmp_path):
     """POST /fix-speaker redirect must not raise UnicodeEncodeError for non-ASCII names."""
     stem = "Episode 2 \u2013 O Captain! My (Dead) Captain!"
-    md = _reg(tmp_path / f"{stem}.md", 
+    md = _reg(tmp_path / f"{stem}.md",
         "---\nspeakers:\n  - name: SPEAKER_00\n    role: ''\n---\n\n**SPEAKER_00**: Hello.",
         encoding="utf-8",
     )
-    from urllib.parse import quote
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.post(
-            f"/transcripts/{quote(stem)}/fix-speaker",
-            data={"old_name": "SPEAKER_00", "new_name": "Alice"},
-            follow_redirects=False,
-        )
+    tid = _tid(md)
+    resp = client.post(
+        f"/transcripts/{tid}/fix-speaker",
+        data={"old_name": "SPEAKER_00", "new_name": "Alice"},
+        follow_redirects=False,
+    )
     # Must not 500; redirect Location header must be ASCII-safe (percent-encoded)
     assert resp.status_code == 303
     location = resp.headers["location"]
@@ -644,38 +645,38 @@ def test_fix_speaker_unicode_filename_no_latin1_error(client, tmp_path):
 
 def test_transcript_download(client, tmp_path):
     md = _reg(tmp_path / "session01.md", "# Session 01\n\n**Alice**: Hello.")
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.get("/transcripts/session01/download")
+    tid = _tid(md)
+    resp = client.get(f"/transcripts/{tid}/download")
     assert resp.status_code == 200
     assert b"Session 01" in resp.content
 
 
 def test_delete_transcript(client, tmp_path):
     md = _reg(tmp_path / "session01.md", "# Session 01\n\n**Alice**: Hello.")
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.post("/transcripts/session01/delete", follow_redirects=False)
+    tid = _tid(md)
+    resp = client.post(f"/transcripts/{tid}/delete", follow_redirects=False)
     assert resp.status_code == 303
     assert resp.headers["location"] == "/transcripts"
     assert not md.exists()
 
 
-def test_delete_transcript_nonexistent_is_rejected(client, tmp_path):
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.post("/transcripts/nonexistent/delete", follow_redirects=False)
-    assert resp.status_code == 400  # a name that resolves to no session
+def test_delete_transcript_unknown_id_redirects(client, tmp_path):
+    resp = client.post("/transcripts/999999/delete", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/transcripts?error=not_found"
 
 
 def test_fix_speaker_renames_in_transcript(client, tmp_path):
-    md = _reg(tmp_path / "session01.md", 
+    md = _reg(tmp_path / "session01.md",
         "---\nspeakers:\n  - name: SPEAKER_00\n    role: ''\n---\n"
         "\n**SPEAKER_00** *(00:00)*: Hello."
     )
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.post(
-            "/transcripts/session01/fix-speaker",
-            data={"old_name": "SPEAKER_00", "new_name": "Alice"},
-            follow_redirects=False,
-        )
+    tid = _tid(md)
+    resp = client.post(
+        f"/transcripts/{tid}/fix-speaker",
+        data={"old_name": "SPEAKER_00", "new_name": "Alice"},
+        follow_redirects=False,
+    )
     assert resp.status_code in (303, 200)
     content = md.read_text()
     assert "Alice" in content
@@ -1595,11 +1596,9 @@ _SUMMARY_MD = (
 
 def test_transcripts_list_excludes_summary_files(client, tmp_path):
     """Summary sidecars must not appear as independent cards in the transcript list."""
-    _reg(tmp_path / "session01.md", _TRANSCRIPT_MD)
+    _reg(tmp_path / "session01.md", _TRANSCRIPT_MD.replace("Session 01", "session01"))
     _reg(tmp_path / "session01.summary.md", _SUMMARY_MD)
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path), \
-         patch("wisper_transcribe.web.routes.transcripts.get_data_dir", return_value=tmp_path):
-        resp = client.get("/transcripts")
+    resp = client.get("/transcripts")
     assert resp.status_code == 200
     # The main transcript card should appear once
     assert resp.content.count(b"session01") >= 1
@@ -1611,73 +1610,73 @@ def test_transcripts_list_excludes_summary_files(client, tmp_path):
 
 def test_transcript_detail_shows_summary_link(client, tmp_path):
     """When a .summary.md sidecar exists, the detail page shows the Campaign Notes panel."""
-    _reg(tmp_path / "session01.md", _TRANSCRIPT_MD)
+    md = _reg(tmp_path / "session01.md", _TRANSCRIPT_MD)
     _reg(tmp_path / "session01.summary.md", _SUMMARY_MD)
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.get("/transcripts/session01")
+    tid = _tid(md)
+    resp = client.get(f"/transcripts/{tid}")
     assert resp.status_code == 200
     assert b"Campaign Notes" in resp.content
 
 
 def test_transcript_detail_no_summary_link_when_absent(client, tmp_path):
     """Without a sidecar the Campaign Notes panel must not appear."""
-    _reg(tmp_path / "session01.md", _TRANSCRIPT_MD)
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.get("/transcripts/session01")
+    md = _reg(tmp_path / "session01.md", _TRANSCRIPT_MD)
+    tid = _tid(md)
+    resp = client.get(f"/transcripts/{tid}")
     assert resp.status_code == 200
     assert b"Campaign Notes available" not in resp.content
 
 
 @pytest.mark.filterwarnings("ignore:fix_vocabulary:UserWarning")
 def test_post_refine_queues_job_and_redirects(client, tmp_path):
-    """POST /transcripts/<name>/refine submits an LLM job and redirects."""
-    _reg(tmp_path / "session01.md", _TRANSCRIPT_MD)
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.post("/transcripts/session01/refine", follow_redirects=False)
+    """POST /transcripts/<id>/refine submits an LLM job and redirects."""
+    md = _reg(tmp_path / "session01.md", _TRANSCRIPT_MD)
+    tid = _tid(md)
+    resp = client.post(f"/transcripts/{tid}/refine", follow_redirects=False)
     assert resp.status_code == 303
     assert resp.headers["location"].startswith("/transcribe/jobs/")
 
 
 @pytest.mark.filterwarnings("ignore:fix_vocabulary:UserWarning")
 def test_post_summarize_queues_job_and_redirects(client, tmp_path):
-    """POST /transcripts/<name>/summarize submits an LLM job and redirects."""
-    _reg(tmp_path / "session01.md", _TRANSCRIPT_MD)
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.post("/transcripts/session01/summarize", follow_redirects=False)
+    """POST /transcripts/<id>/summarize submits an LLM job and redirects."""
+    md = _reg(tmp_path / "session01.md", _TRANSCRIPT_MD)
+    tid = _tid(md)
+    resp = client.post(f"/transcripts/{tid}/summarize", follow_redirects=False)
     assert resp.status_code == 303
     assert resp.headers["location"].startswith("/transcribe/jobs/")
 
 
-def test_post_refine_nonexistent_transcript_404(client, tmp_path):
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.post("/transcripts/nonexistent/refine", follow_redirects=False)
-    assert resp.status_code == 404
+def test_post_refine_unknown_transcript_redirects(client, tmp_path):
+    resp = client.post("/transcripts/999999/refine", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/transcripts?error=not_found"
 
 
 def test_summary_detail_renders(client, tmp_path):
-    """GET /transcripts/<name>/summary renders the summary markdown."""
-    _reg(tmp_path / "session01.md", _TRANSCRIPT_MD)
+    """GET /transcripts/<id>/summary renders the summary markdown."""
+    md = _reg(tmp_path / "session01.md", _TRANSCRIPT_MD)
     _reg(tmp_path / "session01.summary.md", _SUMMARY_MD)
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.get("/transcripts/session01/summary")
+    tid = _tid(md)
+    resp = client.get(f"/transcripts/{tid}/summary")
     assert resp.status_code == 200
     assert b"Session 01" in resp.content
     assert b"Transcript" in resp.content  # back-link
 
 
 def test_summary_detail_not_found(client, tmp_path):
-    _reg(tmp_path / "session01.md", _TRANSCRIPT_MD)
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.get("/transcripts/session01/summary")
+    md = _reg(tmp_path / "session01.md", _TRANSCRIPT_MD)
+    tid = _tid(md)
+    resp = client.get(f"/transcripts/{tid}/summary")
     assert resp.status_code == 404
 
 
 def test_summary_download(client, tmp_path):
-    """GET /transcripts/<name>/summary/download serves the .summary.md file."""
-    _reg(tmp_path / "session01.md", _TRANSCRIPT_MD)
+    """GET /transcripts/<id>/summary/download serves the .summary.md file."""
+    md = _reg(tmp_path / "session01.md", _TRANSCRIPT_MD)
     _reg(tmp_path / "session01.summary.md", _SUMMARY_MD)
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.get("/transcripts/session01/summary/download")
+    tid = _tid(md)
+    resp = client.get(f"/transcripts/{tid}/summary/download")
     assert resp.status_code == 200
     assert b"session-summary" in resp.content
 
@@ -1685,10 +1684,10 @@ def test_summary_download(client, tmp_path):
 def test_delete_transcript_also_removes_summary(client, tmp_path):
     """Deleting a transcript removes the .summary.md sidecar too."""
     md = _reg(tmp_path / "session01.md", _TRANSCRIPT_MD)
+    tid = _tid(md)
     sm = tmp_path / "session01.summary.md"
     sm.write_text(_SUMMARY_MD)
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.post("/transcripts/session01/delete", follow_redirects=False)
+    resp = client.post(f"/transcripts/{tid}/delete", follow_redirects=False)
     assert resp.status_code == 303
     assert not md.exists()
     assert not sm.exists()
@@ -1702,6 +1701,7 @@ def test_delete_transcript_also_removes_diar_sidecar_and_audio(client, tmp_path)
     import json
 
     md = _reg(tmp_path / "session01.md", _TRANSCRIPT_MD)
+    tid = _tid(md)
     audio = tmp_path / "session01.mp3"
     audio.write_bytes(b"fake-audio")
     diar = tmp_path / "session01_diar.json"
@@ -1711,8 +1711,7 @@ def test_delete_transcript_also_removes_diar_sidecar_and_audio(client, tmp_path)
         "diarization_segments": [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}],
     }), encoding="utf-8")
 
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.post("/transcripts/session01/delete", follow_redirects=False)
+    resp = client.post(f"/transcripts/{tid}/delete", follow_redirects=False)
 
     assert resp.status_code == 303
     assert not md.exists()
@@ -1724,6 +1723,7 @@ def test_delete_transcript_also_removes_excerpt_clips(client, tmp_path):
     """Deleting a transcript removes its <stem>_excerpt_*.mp3/.txt
     speaker-preview clips."""
     md = _reg(tmp_path / "session01.md", _TRANSCRIPT_MD)
+    tid = _tid(md)
     clip_mp3 = tmp_path / "session01_excerpt_SPEAKER_00.mp3"
     clip_txt = tmp_path / "session01_excerpt_SPEAKER_00.txt"
     clip_mp3.write_bytes(b"fake mp3")
@@ -1732,8 +1732,7 @@ def test_delete_transcript_also_removes_excerpt_clips(client, tmp_path):
     unrelated = tmp_path / "session01x_excerpt_SPEAKER_00.mp3"
     unrelated.write_bytes(b"unrelated")
 
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.post("/transcripts/session01/delete", follow_redirects=False)
+    resp = client.post(f"/transcripts/{tid}/delete", follow_redirects=False)
 
     assert resp.status_code == 303
     assert not md.exists()
@@ -1746,18 +1745,14 @@ def test_delete_transcript_also_removes_excerpt_clips(client, tmp_path):
 @pytest.mark.skipif(sys.platform == "win32", reason="'*' is not a legal filename character on Windows")
 def test_delete_transcript_glob_metacharacter_stem_does_not_leak_other_clips(client, tmp_path):
     """A stem containing glob metacharacters ('mix*') must not delete another transcript's excerpt clips."""
-    from urllib.parse import quote
-
     victim_stem = "mix*"
     victim_md = _reg(tmp_path / f"{victim_stem}.md", _TRANSCRIPT_MD)
+    tid = _tid(victim_md)
 
     bystander_clip = tmp_path / "mix2_excerpt_SPEAKER_00.mp3"
     bystander_clip.write_bytes(b"unrelated transcript's clip")
 
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.post(
-            f"/transcripts/{quote(victim_stem, safe='')}/delete", follow_redirects=False
-        )
+    resp = client.post(f"/transcripts/{tid}/delete", follow_redirects=False)
 
     assert resp.status_code == 303
     assert not victim_md.exists()
@@ -1772,6 +1767,7 @@ def test_delete_transcript_never_deletes_audio_outside_output_dir(client, tmp_pa
     import json
 
     md = _reg(tmp_path / "session01.md", _TRANSCRIPT_MD)
+    tid = _tid(md)
     outside_dir = tmp_path.parent / "outside_audio_dir"
     outside_dir.mkdir(exist_ok=True)
     outside_audio = outside_dir / "session01.mp3"
@@ -1783,8 +1779,7 @@ def test_delete_transcript_never_deletes_audio_outside_output_dir(client, tmp_pa
         "diarization_segments": [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}],
     }), encoding="utf-8")
 
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.post("/transcripts/session01/delete", follow_redirects=False)
+    resp = client.post(f"/transcripts/{tid}/delete", follow_redirects=False)
 
     assert resp.status_code == 303
     assert not md.exists()
@@ -2103,16 +2098,16 @@ def test_campaign_remove_member_does_not_delete_profile(client, tmp_path, monkey
 
 
 def test_campaign_remove_transcript_unlinks_stem(client, tmp_path, monkeypatch):
-    """POST /campaigns/{slug}/transcripts/remove removes the stem from the campaign."""
+    """POST /campaigns/{slug}/transcripts/remove removes the session from the campaign."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign, load_campaigns
+    from wisper_transcribe.campaign_manager import create_campaign, load_campaigns
 
     create_campaign("Test Game", data_dir=tmp_path)
-    _seed.move_to_campaign("session-01", "test-game", data_dir=tmp_path)
+    tid = _seed.move_to_campaign("session-01", "test-game", data_dir=tmp_path)
 
     resp = client.post(
         "/campaigns/test-game/transcripts/remove",
-        data={"stem": "session-01"},
+        data={"transcript_id": str(tid)},
         follow_redirects=False,
     )
     assert resp.status_code == 303
@@ -2120,8 +2115,8 @@ def test_campaign_remove_transcript_unlinks_stem(client, tmp_path, monkeypatch):
     assert "session-01" not in load_campaigns(tmp_path)["test-game"].transcripts
 
 
-def test_campaign_remove_transcript_noop_for_absent_stem(client, tmp_path, monkeypatch):
-    """Removing a stem not in the campaign is a no-op (still redirects cleanly)."""
+def test_campaign_remove_transcript_noop_for_absent_id(client, tmp_path, monkeypatch):
+    """Removing an id not in the campaign redirects with not_found."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     from wisper_transcribe.campaign_manager import create_campaign
 
@@ -2129,41 +2124,42 @@ def test_campaign_remove_transcript_noop_for_absent_stem(client, tmp_path, monke
 
     resp = client.post(
         "/campaigns/test-game/transcripts/remove",
-        data={"stem": "not-in-campaign"},
+        data={"transcript_id": "999999"},
         follow_redirects=False,
     )
     assert resp.status_code == 303
-    assert "/campaigns/test-game" in resp.headers.get("location", "")
+    assert resp.headers["location"] == "/campaigns/test-game?error=not_found"
 
 
-def test_campaign_remove_transcript_rejects_traversal(client, tmp_path, monkeypatch):
-    """Path-traversal and null-byte payloads in stem are rejected with 400."""
+def test_campaign_remove_transcript_rejects_non_integer_id(client, tmp_path, monkeypatch):
+    """A non-integer transcript_id is rejected with 400."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     from wisper_transcribe.campaign_manager import create_campaign
 
     create_campaign("Test Game", data_dir=tmp_path)
 
-    for bad_stem in ["../etc/passwd", "foo/bar", "stem\x00bad"]:
+    for bad_id in ["../etc/passwd", "foo/bar", "stem\x00bad"]:
         resp = client.post(
             "/campaigns/test-game/transcripts/remove",
-            data={"stem": bad_stem},
+            data={"transcript_id": bad_id},
             follow_redirects=False,
         )
-        assert resp.status_code == 400, f"expected 400 for stem={bad_stem!r}, got {resp.status_code}"
+        assert resp.status_code == 400, f"expected 400 for id={bad_id!r}, got {resp.status_code}"
 
 
 def test_campaign_reorder_transcript_moves_up(client, tmp_path, monkeypatch):
-    """POST /campaigns/{slug}/transcripts/reorder moves the stem one position up."""
+    """POST /campaigns/{slug}/transcripts/reorder moves the session one position up."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign, load_campaigns
+    from wisper_transcribe.campaign_manager import create_campaign, load_campaigns
 
     create_campaign("Test Game", data_dir=tmp_path)
+    ids = {}
     for stem in ("s1", "s2", "s3"):
-        _seed.move_to_campaign(stem, "test-game", data_dir=tmp_path)
+        ids[stem] = _seed.move_to_campaign(stem, "test-game", data_dir=tmp_path)
 
     resp = client.post(
         "/campaigns/test-game/transcripts/reorder",
-        data={"stem": "s3", "direction": "up"},
+        data={"transcript_id": str(ids["s3"]), "direction": "up"},
         follow_redirects=False,
     )
     assert resp.status_code == 303
@@ -2173,15 +2169,16 @@ def test_campaign_reorder_transcript_moves_up(client, tmp_path, monkeypatch):
 
 def test_campaign_reorder_transcript_moves_down(client, tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign, load_campaigns
+    from wisper_transcribe.campaign_manager import create_campaign, load_campaigns
 
     create_campaign("Test Game", data_dir=tmp_path)
+    ids = {}
     for stem in ("s1", "s2", "s3"):
-        _seed.move_to_campaign(stem, "test-game", data_dir=tmp_path)
+        ids[stem] = _seed.move_to_campaign(stem, "test-game", data_dir=tmp_path)
 
     resp = client.post(
         "/campaigns/test-game/transcripts/reorder",
-        data={"stem": "s1", "direction": "down"},
+        data={"transcript_id": str(ids["s1"]), "direction": "down"},
         follow_redirects=False,
     )
     assert resp.status_code == 303
@@ -2190,36 +2187,36 @@ def test_campaign_reorder_transcript_moves_down(client, tmp_path, monkeypatch):
 
 def test_campaign_reorder_transcript_invalid_direction_rejected(client, tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    from wisper_transcribe.campaign_manager import create_campaign
 
     create_campaign("Test Game", data_dir=tmp_path)
-    _seed.move_to_campaign("s1", "test-game", data_dir=tmp_path)
+    tid = _seed.move_to_campaign("s1", "test-game", data_dir=tmp_path)
 
     resp = client.post(
         "/campaigns/test-game/transcripts/reorder",
-        data={"stem": "s1", "direction": "sideways"},
+        data={"transcript_id": str(tid), "direction": "sideways"},
         follow_redirects=False,
     )
     assert resp.status_code == 400
 
 
-def test_campaign_reorder_transcript_rejects_traversal(client, tmp_path, monkeypatch):
+def test_campaign_reorder_transcript_rejects_non_integer_id(client, tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     from wisper_transcribe.campaign_manager import create_campaign
 
     create_campaign("Test Game", data_dir=tmp_path)
 
-    for bad_stem in ["../etc/passwd", "foo/bar", "stem\x00bad"]:
+    for bad_id in ["../etc/passwd", "foo/bar", "stem\x00bad"]:
         resp = client.post(
             "/campaigns/test-game/transcripts/reorder",
-            data={"stem": bad_stem, "direction": "up"},
+            data={"transcript_id": bad_id, "direction": "up"},
             follow_redirects=False,
         )
-        assert resp.status_code == 400, f"expected 400 for stem={bad_stem!r}, got {resp.status_code}"
+        assert resp.status_code == 400, f"expected 400 for id={bad_id!r}, got {resp.status_code}"
 
 
-def test_campaign_reorder_transcript_stale_stem_is_noop(client, tmp_path, monkeypatch):
-    """A stem not currently in the campaign (stale form submit) redirects cleanly, no 500."""
+def test_campaign_reorder_transcript_stale_id_is_noop(client, tmp_path, monkeypatch):
+    """An id not currently in the campaign (stale form submit) redirects cleanly, no 500."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     from wisper_transcribe.campaign_manager import create_campaign
 
@@ -2227,10 +2224,11 @@ def test_campaign_reorder_transcript_stale_stem_is_noop(client, tmp_path, monkey
 
     resp = client.post(
         "/campaigns/test-game/transcripts/reorder",
-        data={"stem": "ghost", "direction": "up"},
+        data={"transcript_id": "999999", "direction": "up"},
         follow_redirects=False,
     )
     assert resp.status_code == 303
+    assert resp.headers["location"] == "/campaigns/test-game?error=not_found"
 
 
 def test_campaign_journal_post_submits_job_and_redirects(client, tmp_path, monkeypatch):
@@ -2566,13 +2564,12 @@ def test_transcribe_post_with_campaign_passes_to_queue(client, tmp_path, monkeyp
 def test_transcripts_list_groups_by_campaign(client, tmp_path, monkeypatch):
     """Transcripts belonging to a campaign appear under its folder section."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-    _reg(tmp_path / "session01.md", "---\ntitle: Session 01\n---\n")
+    _reg(tmp_path / "session01.md", "---\ntitle: session01\n---\n")
     from wisper_transcribe.models import Campaign
     campaigns = {"alpha": Campaign(slug="alpha", display_name="Alpha Game",
                                   created="2026-04-28", members={},
                                   transcripts=["session01"])}
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path), \
-         patch("wisper_transcribe.web.routes.transcripts.load_campaigns", return_value=campaigns):
+    with patch("wisper_transcribe.web.routes.transcripts.load_campaigns", return_value=campaigns):
         resp = client.get("/transcripts")
     assert resp.status_code == 200
     assert "Alpha Game" in resp.text
@@ -2583,7 +2580,7 @@ def test_transcripts_list_shows_uncampaigned(client, tmp_path, monkeypatch):
     """Transcripts with no campaign appear in the ungrouped section."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     _reg(tmp_path / "orphan.md", "---\ntitle: Orphan\n---\n")
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path), \
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_root", return_value=tmp_path), \
          patch("wisper_transcribe.web.routes.transcripts.load_campaigns", return_value={}):
         resp = client.get("/transcripts")
     assert resp.status_code == 200
@@ -2594,34 +2591,32 @@ def test_transcript_detail_shows_campaign_dropdown(client, tmp_path, monkeypatch
     """Transcript detail page shows the campaign assignment dropdown when campaigns exist."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     md = _reg(tmp_path / "session01.md", "---\ntitle: Session 01\n---\n\nHello.")
+    tid = _tid(md)
     from wisper_transcribe.models import Campaign
     campaigns = {"alpha": Campaign(slug="alpha", display_name="Alpha Game",
                                   created="2026-04-28", members={}, transcripts=[])}
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path), \
-         patch("wisper_transcribe.web.routes.transcripts.load_campaigns", return_value=campaigns), \
+    with patch("wisper_transcribe.web.routes.transcripts.load_campaigns", return_value=campaigns), \
          patch("wisper_transcribe.web.routes.transcripts.get_campaign_for_transcript",
                return_value=None):
-        resp = client.get("/transcripts/session01")
+        resp = client.get(f"/transcripts/{tid}")
     assert resp.status_code == 200
     assert 'name="campaign"' in resp.text
     assert "Alpha Game" in resp.text
 
 
 def test_assign_campaign_moves_transcript(client, tmp_path, monkeypatch):
-    """POST /transcripts/{name}/campaign persists the assignment."""
+    """POST /transcripts/{id}/campaign persists the assignment."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     md = _reg(tmp_path / "session01.md", "---\ntitle: Session 01\n---\n")
+    tid = _tid(md)
     from wisper_transcribe.campaign_manager import create_campaign, get_campaign_for_transcript
-    from wisper_transcribe import transcript_store as ts
     create_campaign("Test Game", data_dir=tmp_path)
-    tid = ts.locate_path(md).id
 
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.post(
-            "/transcripts/session01/campaign",
-            data={"campaign": "test-game"},
-            follow_redirects=False,
-        )
+    resp = client.post(
+        f"/transcripts/{tid}/campaign",
+        data={"campaign": "test-game"},
+        follow_redirects=False,
+    )
     assert resp.status_code == 303
     assert get_campaign_for_transcript(tid, data_dir=tmp_path) == "test-game"
 
@@ -2630,26 +2625,25 @@ def test_assign_campaign_unlinks_when_empty(client, tmp_path, monkeypatch):
     """POST with empty campaign field removes the association."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     md = _reg(tmp_path / "session01.md", "---\ntitle: Session 01\n---\n")
-    from wisper_transcribe.campaign_manager import (
-        create_campaign, move_transcript_to_campaign, get_campaign_for_transcript
-    )
+    tid = _tid(md)
+    from wisper_transcribe.campaign_manager import create_campaign, get_campaign_for_transcript
     create_campaign("Test Game", data_dir=tmp_path)
     _seed.move_to_campaign("session01", "test-game", data_dir=tmp_path)
 
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.post(
-            "/transcripts/session01/campaign",
-            data={"campaign": ""},
-            follow_redirects=False,
-        )
+    resp = client.post(
+        f"/transcripts/{tid}/campaign",
+        data={"campaign": ""},
+        follow_redirects=False,
+    )
     assert resp.status_code == 303
-    assert get_campaign_for_transcript("session01", data_dir=tmp_path) is None
+    assert get_campaign_for_transcript(tid, data_dir=tmp_path) is None
 
 
 def test_assign_campaign_refused_by_a_name_clash_shows_the_error(client, tmp_path, monkeypatch):
     """A session already in the campaign under that name refuses the move with an error code."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     md = _reg(tmp_path / "session01.md", "---\ntitle: Session 01\n---\n")
+    tid = _tid(md)
     from wisper_transcribe import db
     from wisper_transcribe.campaign_manager import create_campaign
     create_campaign("Test Game", data_dir=tmp_path)
@@ -2657,9 +2651,8 @@ def test_assign_campaign_refused_by_a_name_clash_shows_the_error(client, tmp_pat
         conn.execute("INSERT INTO transcripts (stem, campaign_id, position, created_at) "
                      "SELECT 'session01', id, 0, 'now' FROM campaigns")
 
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.post("/transcripts/session01/campaign", data={"campaign": "test-game"},
-                           follow_redirects=False)
+    resp = client.post(f"/transcripts/{tid}/campaign", data={"campaign": "test-game"},
+                       follow_redirects=False)
     assert resp.status_code == 303
     assert "error=move_failed" in resp.headers["location"]
 
@@ -2742,6 +2735,7 @@ def test_enroll_submit_skips_enroll_when_no_segments(client, tmp_path, monkeypat
     import uuid
 
     transcript = _reg(tmp_path / "session01.md", "---\nspeakers:\n  - name: SPEAKER_00\n---\n\nHello.")
+    tid = _tid(transcript)
     audio = tmp_path / "audio.mp3"
     audio.write_bytes(b"fake")
 
@@ -2763,7 +2757,7 @@ def test_enroll_submit_skips_enroll_when_no_segments(client, tmp_path, monkeypat
     )
 
     assert resp.status_code == 303
-    assert resp.headers["location"] == "/transcripts/session01"
+    assert resp.headers["location"] == f"/transcripts/{tid}"
     assert all(j.job_type != "enroll" for j in client.app.state.job_queue.list_all())
 
 
@@ -3118,18 +3112,17 @@ def test_unchanged_name_with_existing_profile_skips_enroll(client, tmp_path, mon
 
 
 def test_bulk_delete_removes_multiple_transcripts(client, tmp_path, monkeypatch):
-    """POST /transcripts/bulk-delete deletes all listed stems and redirects."""
+    """POST /transcripts/bulk-delete deletes all listed ids and redirects."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-    _reg(tmp_path / "session01.md", "# S1")
-    _reg(tmp_path / "session02.md", "# S2")
+    md1 = _reg(tmp_path / "session01.md", "# S1")
+    md2 = _reg(tmp_path / "session02.md", "# S2")
     _reg(tmp_path / "session02.summary.md", "# notes")
 
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.post(
-            "/transcripts/bulk-delete",
-            data={"stems": ["session01", "session02"]},
-            follow_redirects=False,
-        )
+    resp = client.post(
+        "/transcripts/bulk-delete",
+        data={"transcript_id": [str(_tid(md1)), str(_tid(md2))]},
+        follow_redirects=False,
+    )
 
     assert resp.status_code == 303
     assert resp.headers["location"] == "/transcripts"
@@ -3139,53 +3132,50 @@ def test_bulk_delete_removes_multiple_transcripts(client, tmp_path, monkeypatch)
 
 
 def test_bulk_delete_removes_excerpt_clips(client, tmp_path, monkeypatch):
-    """Bulk-delete removes each stem's excerpt clips too."""
+    """Bulk-delete removes each session's excerpt clips too."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-    _reg(tmp_path / "session01.md", "# S1")
+    md = _reg(tmp_path / "session01.md", "# S1")
     clip = tmp_path / "session01_excerpt_SPEAKER_00.mp3"
     clip.write_bytes(b"fake mp3")
 
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.post(
-            "/transcripts/bulk-delete",
-            data={"stems": ["session01"]},
-            follow_redirects=False,
-        )
+    resp = client.post(
+        "/transcripts/bulk-delete",
+        data={"transcript_id": [str(_tid(md))]},
+        follow_redirects=False,
+    )
 
     assert resp.status_code == 303
     assert not clip.exists()
 
 
-def test_bulk_delete_skips_invalid_stems(client, tmp_path, monkeypatch):
-    """bulk-delete silently skips stems that fail path validation."""
+def test_bulk_delete_skips_invalid_ids(client, tmp_path, monkeypatch):
+    """bulk-delete silently drops malformed ids, keeping the valid ones."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-    _reg(tmp_path / "good.md", "# ok")
+    md = _reg(tmp_path / "good.md", "# ok")
 
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.post(
-            "/transcripts/bulk-delete",
-            data={"stems": ["good", "../../etc/passwd", "\x00bad"]},
-            follow_redirects=False,
-        )
+    resp = client.post(
+        "/transcripts/bulk-delete",
+        data={"transcript_id": [str(_tid(md)), "../../etc/passwd", "\x00bad"]},
+        follow_redirects=False,
+    )
 
     assert resp.status_code == 303
-    assert not (tmp_path / "good.md").exists()  # valid stem deleted
+    assert not (tmp_path / "good.md").exists()  # valid id deleted
 
 
 def test_bulk_campaign_assigns_multiple_transcripts(client, tmp_path, monkeypatch):
-    """POST /transcripts/bulk-campaign moves each named session."""
+    """POST /transcripts/bulk-campaign moves each listed session."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-    _reg(tmp_path / "s1.md", "# S1")
-    _reg(tmp_path / "s2.md", "# S2")
+    md1 = _reg(tmp_path / "s1.md", "# S1")
+    md2 = _reg(tmp_path / "s2.md", "# S2")
     from wisper_transcribe.campaign_manager import create_campaign
     create_campaign("My Campaign", data_dir=tmp_path)
 
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.post(
-            "/transcripts/bulk-campaign",
-            data={"stems": ["s1", "s2"], "campaign": "my-campaign"},
-            follow_redirects=False,
-        )
+    resp = client.post(
+        "/transcripts/bulk-campaign",
+        data={"transcript_id": [str(_tid(md1)), str(_tid(md2))], "campaign": "my-campaign"},
+        follow_redirects=False,
+    )
 
     assert resp.status_code == 303
     from wisper_transcribe.campaign_manager import get_transcripts_for_campaign
@@ -3196,12 +3186,11 @@ def test_bulk_campaign_invalid_slug_redirects_with_error(client, tmp_path, monke
     """bulk-campaign rejects an invalid campaign slug."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
 
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        resp = client.post(
-            "/transcripts/bulk-campaign",
-            data={"stems": ["s1"], "campaign": "../../evil"},
-            follow_redirects=False,
-        )
+    resp = client.post(
+        "/transcripts/bulk-campaign",
+        data={"transcript_id": ["1"], "campaign": "../../evil"},
+        follow_redirects=False,
+    )
 
     assert resp.status_code == 303
     assert "error=invalid_campaign" in resp.headers["location"]
@@ -3330,37 +3319,46 @@ def _campaign_with(stems):
 
 def test_delete_transcript_removes_campaign_entry(client, tmp_path):
     from wisper_transcribe.campaign_manager import get_transcripts_for_campaign
+    from wisper_transcribe.config import get_output_root
+    from wisper_transcribe import transcript_store
+
     slug = _campaign_with(["session01", "session02"])
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        client.post("/transcripts/session01/delete", follow_redirects=False)
+    tid = transcript_store.locate_path(get_output_root() / "session01.md").id
+    client.post(f"/transcripts/{tid}/delete", follow_redirects=False)
     assert get_transcripts_for_campaign(slug) == ["session02"]
 
 
 def test_bulk_delete_removes_campaign_entries(client, tmp_path):
     from wisper_transcribe.campaign_manager import get_transcripts_for_campaign
+    from wisper_transcribe.config import get_output_root
+    from wisper_transcribe import transcript_store
+
     slug = _campaign_with(["a", "b", "c"])
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
-        client.post("/transcripts/bulk-delete", data={"stems": ["a", "c"]}, follow_redirects=False)
+    out = get_output_root()
+    client.post("/transcripts/bulk-delete",
+                data={"transcript_id": [str(transcript_store.locate_path(out / "a.md").id),
+                                        str(transcript_store.locate_path(out / "c.md").id)]},
+                follow_redirects=False)
     assert get_transcripts_for_campaign(slug) == ["b"]
 
 
 def test_campaign_page_marks_missing_transcripts(client, tmp_path):
     from wisper_transcribe.campaign_manager import create_campaign
     from wisper_transcribe.config import get_output_root
+    from wisper_transcribe import transcript_store
 
     c = create_campaign("Test Campaign")
     out = get_output_root()
     _reg(out / "present.md", "#")
-    _seed.move_to_campaign("present", c.slug)
-    _seed.move_to_campaign("gone", c.slug)   # a row with no file
-    with patch("wisper_transcribe.path_utils.get_output_dir", return_value=tmp_path):
-        resp = client.get(f"/campaigns/{c.slug}")
+    present_id = _seed.move_to_campaign("present", c.slug)
+    gone_id = _seed.move_to_campaign("gone", c.slug)   # a row with no file
+    resp = client.get(f"/campaigns/{c.slug}")
     html = resp.text
-    assert 'href="/transcripts/present"' in html
-    assert 'href="/transcripts/gone"' not in html  # no dead link
+    assert f'href="/transcripts/{present_id}"' in html
+    assert f'href="/transcripts/{gone_id}"' not in html  # no dead link
     assert "MISSING" in html
-    # Still listed (not pruned), so the remove button can clear it.
-    assert 'name="stem" value="gone"' in html
+    # Still listed (not pruned), so the remove control can clear it.
+    assert f'name="transcript_id" value="{gone_id}"' in html
 
 
 @pytest.mark.parametrize("will_align", [True, False])
@@ -3527,17 +3525,20 @@ def test_campaign_page_offers_relink_and_relink_route(client, tmp_path, monkeypa
     monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
     from wisper_transcribe import transcript_store as ts
     from wisper_transcribe.campaign_manager import (
-        create_campaign, get_transcripts_for_campaign, move_transcript_to_campaign,
+        create_campaign, get_transcripts_for_campaign,
     )
 
     monkeypatch.setattr(ts, "_is_case_insensitive", lambda d: False)
     create_campaign("Game")
-    _reg(out / "s01.md", "x", encoding="utf-8")
-    ts.register("s01", origin="job")
+    md = _reg(out / "s01.md", "x", encoding="utf-8")
+    old_id = _tid(md)
     _seed.move_to_campaign("s01", "game")
     (out / "s01.md").rename(out / "Session 01 renamed.md")
     import os
     os.utime(out / "Session 01 renamed.md", ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+    # Reconcile registers the renamed file so the relink form has a candidate.
+    ts.reconcile(out)
+    new_id = ts.locate_path(out / "Session 01 renamed.md").id
 
     resp = client.get("/campaigns/game")
     assert "MISSING" in resp.text
@@ -3545,19 +3546,19 @@ def test_campaign_page_offers_relink_and_relink_route(client, tmp_path, monkeypa
     assert "Session 01 renamed" in resp.text
 
     resp = client.post("/campaigns/game/transcripts/relink",
-                       data={"old_stem": "s01", "new_stem": "Session 01 renamed"},
+                       data={"old_id": str(old_id), "new_id": str(new_id)},
                        follow_redirects=False)
     assert resp.status_code == 303 and resp.headers["location"] == "/campaigns/game"
     assert get_transcripts_for_campaign("game") == ["Session 01 renamed"]
 
     resp = client.post("/campaigns/game/transcripts/relink",
-                       data={"old_stem": "s01", "new_stem": "Session 01 renamed"},
+                       data={"old_id": str(old_id), "new_id": str(new_id)},
                        follow_redirects=False)
     assert resp.headers["location"] == "/campaigns/game?error=relink_failed"
 
 
 def test_transcripts_page_has_bulk_actions_wired_to_routes(client, tmp_path, monkeypatch):
-    """The bulk bar posts `stems` (+ `campaign`) to the existing bulk routes."""
+    """The bulk bar posts `transcript_id` (+ `campaign`) to the existing bulk routes."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     out = tmp_path / "out"
     out.mkdir()
@@ -3565,16 +3566,17 @@ def test_transcripts_page_has_bulk_actions_wired_to_routes(client, tmp_path, mon
     from wisper_transcribe.campaign_manager import create_campaign
 
     create_campaign("Game")
-    _reg(out / "s01.md", "---\ntitle: Session One\n---\n\nx\n", encoding="utf-8")
+    md = _reg(out / "s01.md", "---\ntitle: Session One\n---\n\nx\n", encoding="utf-8")
+    tid = _tid(md)
     resp = client.get("/transcripts")
     assert 'data-testid="bulk-transcripts-bar"' in resp.text
-    assert 'class="transcript-select" value="s01"' in resp.text
+    assert f'class="transcript-select" value="{tid}"' in resp.text
     assert 'action="/transcripts/bulk-delete"' in resp.text
     assert 'action="/transcripts/bulk-campaign"' in resp.text
-    assert "input.name = 'stems'" in resp.text
+    assert "input.name = 'transcript_id'" in resp.text
     assert '<option value="game">Game</option>' in resp.text
 
-    resp = client.post("/transcripts/bulk-campaign", data={"stems": ["s01"], "campaign": "game"},
+    resp = client.post("/transcripts/bulk-campaign", data={"transcript_id": [str(tid)], "campaign": "game"},
                        follow_redirects=False)
     from wisper_transcribe.campaign_manager import get_transcripts_for_campaign
     assert get_transcripts_for_campaign("game") == ["s01"]
@@ -3688,6 +3690,7 @@ def test_missing_transcript_is_listed_and_relinked_with_its_files(client):
     import os
 
     out, ts, fr = _attention_setup()
+    old_id = ts.locate_path(out / "kept.md").id
     _reg(out / "kept.summary.md", "mine", encoding="utf-8")
     (out / "kept_diar.json").write_text("{}", encoding="utf-8")
     fr.sync(out)
@@ -3698,8 +3701,9 @@ def test_missing_transcript_is_listed_and_relinked_with_its_files(client):
     assert 'data-testid="missing-transcript"' in page.text
     assert 'data-testid="relink-form"' in page.text
     assert "Its summary, speaker clips, and audio are deleted too." in page.text
+    new_id = ts.locate_path(out / "renamed.md").id
 
-    resp = client.post("/transcripts/relink", data={"old_stem": "kept", "new_stem": "renamed"},
+    resp = client.post("/transcripts/relink", data={"old_id": str(old_id), "new_id": str(new_id)},
                        follow_redirects=False)
     assert resp.status_code == 303 and resp.headers["location"] == "/transcripts"
     assert (out / "renamed.summary.md").exists() and (out / "renamed_diar.json").exists()
@@ -3711,28 +3715,31 @@ def test_relink_route_reports_a_kept_name_and_a_failure(client):
     import os
 
     out, ts, fr = _attention_setup()
+    old_id = ts.locate_path(out / "kept.md").id
     _reg(out / "kept.summary.md", "mine", encoding="utf-8")
     fr.sync(out)
     (out / "kept.md").rename(out / "renamed.md")
     os.utime(out / "renamed.md", ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
     _reg(out / "renamed.summary.md", "theirs", encoding="utf-8")
     client.get("/transcripts")
+    new_id = ts.locate_path(out / "renamed.md").id
 
-    resp = client.post("/transcripts/relink", data={"old_stem": "kept", "new_stem": "renamed"},
+    resp = client.post("/transcripts/relink", data={"old_id": str(old_id), "new_id": str(new_id)},
                        follow_redirects=False)
     assert resp.headers["location"] == "/transcripts?notice=relink_kept_names"
     assert "Some files kept their old name" in client.get(resp.headers["location"]).text
 
-    resp = client.post("/transcripts/relink", data={"old_stem": "kept", "new_stem": "renamed"},
+    resp = client.post("/transcripts/relink", data={"old_id": str(old_id), "new_id": str(new_id)},
                        follow_redirects=False)
     assert resp.headers["location"] == "/transcripts?error=relink_failed"
 
 
 def test_campaign_relink_route_reports_a_kept_name(client):
     import os
-    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    from wisper_transcribe.campaign_manager import create_campaign
 
     out, ts, fr = _attention_setup()
+    old_id = ts.locate_path(out / "kept.md").id
     create_campaign("Game")
     _seed.move_to_campaign("kept", "game")
     _reg(out / "kept.summary.md", "mine", encoding="utf-8")
@@ -3741,9 +3748,10 @@ def test_campaign_relink_route_reports_a_kept_name(client):
     os.utime(out / "renamed.md", ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
     _reg(out / "renamed.summary.md", "theirs", encoding="utf-8")
     client.get("/campaigns/game")
+    new_id = ts.locate_path(out / "renamed.md").id
 
     resp = client.post("/campaigns/game/transcripts/relink",
-                       data={"old_stem": "kept", "new_stem": "renamed"}, follow_redirects=False)
+                       data={"old_id": str(old_id), "new_id": str(new_id)}, follow_redirects=False)
     assert resp.headers["location"] == "/campaigns/game?notice=relink_kept_names"
     assert "Some files kept their old name" in client.get(resp.headers["location"]).text
 
@@ -3909,7 +3917,8 @@ def _recording_for(tmp_path, md):
 def test_audio_route_serves_recording_combined_wav_with_range(client, tmp_path, monkeypatch):
     out, md = _playback_setup(tmp_path, monkeypatch)
     _recording_for(tmp_path, md)  # no _diar.json exists
-    resp = client.get("/transcripts/s1/audio", headers={"Range": "bytes=0-99"})
+    tid = _tid(md)
+    resp = client.get(f"/transcripts/{tid}/audio", headers={"Range": "bytes=0-99"})
     assert resp.status_code == 206
     assert resp.headers["content-type"] == "audio/wav"
     assert len(resp.content) == 100
@@ -3917,51 +3926,56 @@ def test_audio_route_serves_recording_combined_wav_with_range(client, tmp_path, 
 
 def test_audio_route_serves_upload_flac_with_range(client, tmp_path, monkeypatch):
     out, md = _playback_setup(tmp_path, monkeypatch)
-    from ._seed import seed_file
     from wisper_transcribe import transcript_store as ts
     (out / "s1.flac").write_bytes(b"fLaC" + b"\x00" * 200)
     ts.set_audio(md, out / "s1.flac")
-    resp = client.get("/transcripts/s1/audio", headers={"Range": "bytes=0-99"})
+    tid = _tid(md)
+    resp = client.get(f"/transcripts/{tid}/audio", headers={"Range": "bytes=0-99"})
     assert resp.status_code == 206
     assert resp.headers["content-type"] == "audio/flac"
 
 
 def test_audio_route_404_without_audio_or_file(client, tmp_path, monkeypatch):
     out, md = _playback_setup(tmp_path, monkeypatch)
-    assert client.get("/transcripts/s1/audio").status_code == 404
-    assert client.get("/transcripts/missing/audio").status_code == 404
+    tid = _tid(md)
+    assert client.get(f"/transcripts/{tid}/audio").status_code == 404
+    assert client.get("/transcripts/999999/audio", follow_redirects=False).status_code == 303
     rec = _recording_for(tmp_path, md)
     (tmp_path / "recordings" / rec.id / "combined.wav").unlink()
-    assert client.get("/transcripts/s1/audio").status_code == 404
+    assert client.get(f"/transcripts/{tid}/audio").status_code == 404
 
 
 def test_detail_page_player_only_with_audio(client, tmp_path, monkeypatch):
     out, md = _playback_setup(tmp_path, monkeypatch)
-    assert 'id="transcript-audio"' not in client.get("/transcripts/s1").text
+    tid = _tid(md)
+    assert 'id="transcript-audio"' not in client.get(f"/transcripts/{tid}").text
     _recording_for(tmp_path, md)
-    page = client.get("/transcripts/s1").text
+    page = client.get(f"/transcripts/{tid}").text
     assert 'id="transcript-audio"' in page
-    assert 'src="/transcripts/s1/audio"' in page
+    assert f'src="/transcripts/{tid}/audio"' in page
     assert 'id="follow-toggle"' in page
 
 
 def test_detail_page_has_no_follow_toggle_without_timestamps(client, tmp_path, monkeypatch):
     out, md = _playback_setup(tmp_path, monkeypatch, body="**Ann**: plain text\n")
     _recording_for(tmp_path, md)
-    page = client.get("/transcripts/s1").text
+    tid = _tid(md)
+    page = client.get(f"/transcripts/{tid}").text
     assert 'id="transcript-audio"' in page
     assert 'id="follow-toggle"' not in page
 
 
 def test_data_start_survives_sanitizing(client, tmp_path, monkeypatch):
-    _playback_setup(tmp_path, monkeypatch)
-    page = client.get("/transcripts/s1").text
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    tid = _tid(md)
+    page = client.get(f"/transcripts/{tid}").text
     assert 'id="b-0" class="block-anchor" data-start="5"' in page
     assert 'id="b-1" class="block-anchor" data-start="3723"' in page
 
 
 def test_marker_buttons_render_with_times(client, tmp_path, monkeypatch):
     out, md = _playback_setup(tmp_path, monkeypatch)
+    tid = _tid(md)
     rec = _recording_for(tmp_path, md)
     from wisper_transcribe import db
     from wisper_transcribe.recording_manager import _ts, load_recording
@@ -3971,7 +3985,7 @@ def test_marker_buttons_render_with_times(client, tmp_path, monkeypatch):
         for secs in (65, 3725):
             conn.execute("INSERT INTO recording_markers (recording_id, marked_at) VALUES (?, ?)",
                          (rec.id, _ts(started + timedelta(seconds=secs))))
-    page = client.get("/transcripts/s1").text
+    page = client.get(f"/transcripts/{tid}").text
     assert page.count("data-seek=") == 2
     assert 'data-seek="65"' in page and ">0:01:05<" in page
     assert 'data-seek="3725"' in page and ">1:02:05<" in page
@@ -3979,8 +3993,9 @@ def test_marker_buttons_render_with_times(client, tmp_path, monkeypatch):
 
 def test_no_marker_list_without_markers(client, tmp_path, monkeypatch):
     out, md = _playback_setup(tmp_path, monkeypatch)
+    tid = _tid(md)
     _recording_for(tmp_path, md)
-    assert "data-seek=" not in client.get("/transcripts/s1").text
+    assert "data-seek=" not in client.get(f"/transcripts/{tid}").text
 
 
 # ---------------------------------------------------------------------------
@@ -4003,6 +4018,7 @@ def _submit_spy(client):
 def test_retranscribe_upload_submits_the_flac_in_place(client, tmp_path, monkeypatch):
     out, md = _flac_transcript(tmp_path, monkeypatch)
     _reg(md, "---\ntitle: Session One\nsource_file: Session 1.mp4\n---\n\nbody\n")
+    tid = _tid(md)
     from wisper_transcribe import campaign_manager as cm
     from wisper_transcribe import job_history
     from ._seed import move_to_campaign
@@ -4011,7 +4027,7 @@ def test_retranscribe_upload_submits_the_flac_in_place(client, tmp_path, monkeyp
     move_to_campaign("s1", "b", tmp_path)
     job_history.record(_history_job(md))
     with _submit_spy(client) as submit:
-        resp = client.post("/transcripts/s1/retranscribe", follow_redirects=False)
+        resp = client.post(f"/transcripts/{tid}/retranscribe", follow_redirects=False)
     assert resp.status_code == 303
     assert resp.headers["location"] == "/transcribe/jobs/11111111-1111-4111-8111-111111111111"
     args, kw = submit.call_args
@@ -4026,8 +4042,9 @@ def test_retranscribe_upload_submits_the_flac_in_place(client, tmp_path, monkeyp
 
 def test_retranscribe_without_campaign_or_history_passes_neither(client, tmp_path, monkeypatch):
     out, md = _flac_transcript(tmp_path, monkeypatch)
+    tid = _tid(md)
     with _submit_spy(client) as submit:
-        client.post("/transcripts/s1/retranscribe", follow_redirects=False)
+        client.post(f"/transcripts/{tid}/retranscribe", follow_redirects=False)
     kw = submit.call_args.kwargs
     assert "campaign" not in kw and "language" not in kw
     assert kw["source_name"] == "s1.flac"
@@ -4035,11 +4052,12 @@ def test_retranscribe_without_campaign_or_history_passes_neither(client, tmp_pat
 
 def test_retranscribe_recording_uses_the_hand_off(client, tmp_path, monkeypatch):
     out, md = _playback_setup(tmp_path, monkeypatch)
+    tid = _tid(md)
     _recording_for(tmp_path, md)
     job = MagicMock(id="11111111-1111-4111-8111-111111111111")
     with patch("wisper_transcribe.web.routes.record._submit_recording_transcription",
                return_value=(job, None)) as hand_off, _submit_spy(client) as submit:
-        resp = client.post("/transcripts/s1/retranscribe", follow_redirects=False)
+        resp = client.post(f"/transcripts/{tid}/retranscribe", follow_redirects=False)
     assert resp.headers["location"] == "/transcribe/jobs/11111111-1111-4111-8111-111111111111"
     hand_off.assert_called_once()
     submit.assert_not_called()
@@ -4047,38 +4065,160 @@ def test_retranscribe_recording_uses_the_hand_off(client, tmp_path, monkeypatch)
 
 def test_retranscribe_recording_error_redirects_to_the_page(client, tmp_path, monkeypatch):
     out, md = _playback_setup(tmp_path, monkeypatch)
+    tid = _tid(md)
     _recording_for(tmp_path, md)
     with patch("wisper_transcribe.web.routes.record._submit_recording_transcription",
                return_value=(None, "not_ready")):
-        resp = client.post("/transcripts/s1/retranscribe", follow_redirects=False)
-    assert resp.headers["location"] == "/transcripts/s1?error=not_ready"
-    assert "isn&#39;t ready" in client.get("/transcripts/s1?error=not_ready").text
+        resp = client.post(f"/transcripts/{tid}/retranscribe", follow_redirects=False)
+    assert resp.headers["location"] == f"/transcripts/{tid}?error=not_ready"
+    assert "isn&#39;t ready" in client.get(f"/transcripts/{tid}?error=not_ready").text
 
 
 def test_retranscribe_without_audio_redirects_and_submits_nothing(client, tmp_path, monkeypatch):
-    _playback_setup(tmp_path, monkeypatch)
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    tid = _tid(md)
     with _submit_spy(client) as submit:
-        resp = client.post("/transcripts/s1/retranscribe", follow_redirects=False)
-    assert resp.headers["location"] == "/transcripts/s1?error=no_audio"
+        resp = client.post(f"/transcripts/{tid}/retranscribe", follow_redirects=False)
+    assert resp.headers["location"] == f"/transcripts/{tid}?error=no_audio"
     submit.assert_not_called()
-    assert "no saved audio to re-transcribe" in client.get("/transcripts/s1?error=no_audio").text
+    assert "no saved audio to re-transcribe" in client.get(f"/transcripts/{tid}?error=no_audio").text
 
 
-def test_retranscribe_missing_transcript_is_404(client, tmp_path, monkeypatch):
+def test_retranscribe_unknown_transcript_redirects(client, tmp_path, monkeypatch):
     _playback_setup(tmp_path, monkeypatch)
-    assert client.post("/transcripts/nope/retranscribe").status_code == 404
+    resp = client.post("/transcripts/999999/retranscribe", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/transcripts?error=not_found"
 
 
 def test_retranscribe_button_only_with_audio_and_confirm_survives_tojson(client, tmp_path, monkeypatch):
     out, md = _playback_setup(tmp_path, monkeypatch)
-    assert "/retranscribe" not in client.get("/transcripts/s1").text
+    tid = _tid(md)
+    assert "/retranscribe" not in client.get(f"/transcripts/{tid}").text
     from wisper_transcribe import transcript_store as ts
     (out / "s1.flac").write_bytes(b"fLaC" + b"\x00" * 200)
     ts.set_audio(md, out / "s1.flac")
-    page = client.get("/transcripts/s1").text
-    assert 'action="/transcripts/s1/retranscribe"' in page
+    page = client.get(f"/transcripts/{tid}").text
+    assert f'action="/transcripts/{tid}/retranscribe"' in page
     assert "aren\\u0027t reused" in page
     assert "onsubmit='return confirm(\"Re-transcribe" in page
+
+
+def test_transcripts_list_links_by_id_and_orders_newest_first(client, tmp_path, monkeypatch):
+    """The Transcripts page links and bulk select carry ids, and the list is
+    ordered by the files' modified times (newest first)."""
+    from wisper_transcribe import transcript_store
+
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    import os
+
+    older = out / "older.md"
+    older.write_text("---\ntitle: Older\n---\n\nx\n", encoding="utf-8")
+    older_id = transcript_store.register(older, origin="reconcile")
+    newer = out / "newer.md"
+    newer.write_text("---\ntitle: Newer\n---\n\nx\n", encoding="utf-8")
+    newer_id = transcript_store.register(newer, origin="reconcile")
+    os.utime(older, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+    os.utime(newer, ns=(1_700_000_100_000_000_000, 1_700_000_100_000_000_000))
+
+    page = client.get("/transcripts").text
+    assert f'href="/transcripts/{older_id}"' in page
+    assert f'href="/transcripts/{newer_id}"' in page
+    # Newest first.
+    assert page.index(f'href="/transcripts/{newer_id}"') < page.index(f'href="/transcripts/{older_id}"')
+    assert f'class="transcript-select" value="{older_id}"' in page
+
+
+def test_job_stream_done_event_carries_transcript_id(client, tmp_path, monkeypatch):
+    """A completed transcription's SSE `done` event carries the transcript id,
+    and the rendered script links by id (no stem)."""
+    from datetime import datetime
+
+    from wisper_transcribe import transcript_store
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    md = out / "s1.md"
+    md.write_text("# x\n", encoding="utf-8")
+    tid = transcript_store.register(md, origin="reconcile")
+
+    job = Job(id="done-id-job", status=COMPLETED, created_at=datetime.now(),
+              input_path=str(tmp_path / "a.mp3"), kwargs={}, job_type="transcription",
+              output_path=str(md), finished_at=datetime.now())
+    client.app.state.job_queue._jobs[job.id] = job
+
+    with client.stream("GET", f"/transcribe/jobs/{job.id}/stream") as resp:
+        body = "".join(resp.iter_text())
+    assert f'"transcript_id": {tid}' in body
+    # The rendered script links by id, not a stem.
+    assert "${enc}" not in client.get(f"/transcribe/jobs/{job.id}").text
+
+
+def test_job_stream_done_transcript_id_null_without_a_row(client, tmp_path, monkeypatch):
+    """A completed job whose output isn't a registered transcript carries a null
+    transcript_id, so the page shows no transcript buttons."""
+    from datetime import datetime
+
+    from wisper_transcribe.web.jobs import Job, COMPLETED
+
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    job = Job(id="done-null-job", status=COMPLETED, created_at=datetime.now(),
+              input_path=str(tmp_path / "a.mp3"), kwargs={}, job_type="transcription",
+              output_path=str(out / "unregistered.md"), finished_at=datetime.now())
+    client.app.state.job_queue._jobs[job.id] = job
+    with client.stream("GET", f"/transcribe/jobs/{job.id}/stream") as resp:
+        body = "".join(resp.iter_text())
+    assert '"transcript_id": null' in body
+
+
+def test_job_stream_done_carries_transcript_id_for_a_summarize_job(client, tmp_path, monkeypatch):
+    """A summarize job's `done` event carries its transcript id too."""
+    from datetime import datetime
+
+    from wisper_transcribe import transcript_store
+    from wisper_transcribe.web.jobs import Job, COMPLETED, JOB_SUMMARIZE
+
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    md = out / "s1.md"
+    md.write_text("# x\n", encoding="utf-8")
+    tid = transcript_store.register(md, origin="reconcile")
+    job = Job(id="done-summarize-job", status=COMPLETED, created_at=datetime.now(),
+              input_path=str(md), kwargs={}, job_type=JOB_SUMMARIZE,
+              llm_transcript_path=str(md), output_path=str(md), finished_at=datetime.now())
+    client.app.state.job_queue._jobs[job.id] = job
+    with client.stream("GET", f"/transcribe/jobs/{job.id}/stream") as resp:
+        body = "".join(resp.iter_text())
+    assert f'"transcript_id": {tid}' in body
+
+
+def test_bulk_delete_with_a_valid_and_a_bogus_id_deletes_only_the_valid(client, tmp_path, monkeypatch):
+    """A malformed id in the bulk form is dropped; the valid one is deleted."""
+    from wisper_transcribe import transcript_store
+
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    keep = out / "keep.md"
+    keep.write_text("# x\n", encoding="utf-8")
+    transcript_store.register(keep, origin="reconcile")
+    drop = out / "drop.md"
+    drop.write_text("# x\n", encoding="utf-8")
+    drop_id = transcript_store.register(drop, origin="reconcile")
+
+    resp = client.post("/transcripts/bulk-delete",
+                       data={"transcript_id": [str(drop_id), "not-an-id", "999999"]},
+                       follow_redirects=False)
+    assert resp.status_code == 303
+    assert not drop.exists()
+    assert keep.exists()
 
 
 def _history_job(md):

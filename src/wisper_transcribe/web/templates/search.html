@@ -55,7 +55,7 @@
     {% for g in results.groups %}
     <section data-testid="search-group" style="padding:16px 0;border-top:1px solid var(--color-rule)">
       <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:8px">
-        <a href="/transcripts/{{ g.stem | urlencode }}" style="font-family:var(--font-serif);font-size:17px;color:var(--color-paper);text-decoration:none">{{ g.stem }}</a>
+        <a href="/transcripts/{{ g.transcript_id }}" style="font-family:var(--font-serif);font-size:17px;color:var(--color-paper);text-decoration:none">{{ g.stem }}</a>
         {% if g.campaign_name %}<span class="pill pill-dim">{{ g.campaign_name }}</span>{% endif %}
         <span style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);letter-spacing:0.1em">{{ g.total_hits }} MATCH{{ 'ES' if g.total_hits != 1 }}</span>
       </div>
@@ -64,11 +64,11 @@
       {% else %}
       {% for h in g.hits %}
       {%- if h.kind == 'title' -%}
-        {%- set href = '/transcripts/' ~ (g.stem | urlencode) ~ '?q=' ~ (q | urlencode) -%}
+        {%- set href = '/transcripts/' ~ g.transcript_id ~ '?q=' ~ (q | urlencode) -%}
       {%- elif h.kind == 'summary' -%}
-        {%- set href = '/transcripts/' ~ (g.stem | urlencode) ~ '/summary?q=' ~ (q | urlencode) ~ '#' ~ h.anchor -%}
+        {%- set href = '/transcripts/' ~ g.transcript_id ~ '/summary?q=' ~ (q | urlencode) ~ '#' ~ h.anchor -%}
       {%- else -%}
-        {%- set href = '/transcripts/' ~ (g.stem | urlencode) ~ '?q=' ~ (q | urlencode) ~ '#' ~ h.anchor -%}
+        {%- set href = '/transcripts/' ~ g.transcript_id ~ '?q=' ~ (q | urlencode) ~ '#' ~ h.anchor -%}
       {%- endif -%}
       <a href="{{ href }}" data-testid="search-hit"
          style="display:grid;grid-template-columns:130px 1fr;gap:14px;padding:6px 0;text-decoration:none;color:inherit">

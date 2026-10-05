@@ -35,6 +35,8 @@ The web UI is a **single-user tool with no authentication and no CSRF protection
 | Recordings | `/recordings` | Browse recordings by campaign; detail, transcribe, and delete |
 | Config | `/config` | All settings, including LLM provider and Discord bot |
 
+Transcript pages are addressed by their database id (`/transcripts/{id}`). Old links that named a session still work: when exactly one transcript has that name the link redirects to the id; when several do (the same name in two campaigns) it lists them to choose from.
+
 While a recording is active, every page shows a banner with the elapsed time and a **Stop recording** button.
 
 ---
@@ -119,7 +121,7 @@ The wizard enrolls from voice data saved when the transcript was made, so it doe
 
 **Standalone enrollment** (`/speakers` → Enroll) takes a clean reference clip for one speaker and runs as a background job.
 
-**Per-line edits:** `/transcripts/{name}/edit` reassigns individual lines to a different speaker.
+**Per-line edits:** `/transcripts/{id}/edit` reassigns individual lines to a different speaker.
 
 ---
 

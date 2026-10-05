@@ -575,6 +575,50 @@ def _find_ids(conn: sqlite3.Connection, stem: str, campaign_id, present_only: bo
     return sorted(ids)
 
 
+def list_transcripts(conn: Optional[sqlite3.Connection] = None, *,
+                     campaign_id: object = ANY,
+                     data_dir: Optional[Path] = None,
+                     output_dir: Optional[Path] = None) -> list["Located"]:
+    """Every **present** transcript, newest file first.
+
+    ``campaign_id`` defaults to :data:`ANY`; ``None`` means the root only, an
+    int one campaign. Ordered by the ``transcript`` row's ``mtime_ns``
+    descending (rows without a fingerprint last), then ``created_at``
+    descending, then ``id``. Rows flagged missing are left out; they belong to
+    Needs attention and their campaign page.
+    """
+    output = Path(output_dir) if output_dir is not None else get_output_root()
+    if conn is not None:
+        ids = _list_ids(conn, campaign_id)
+    else:
+        with db.connection(data_dir) as c:
+            ids = _list_ids(c, campaign_id)
+    found = []
+    for tid in ids:
+        loc = locate(tid, conn=conn, data_dir=data_dir, output_dir=output)
+        if loc is not None:
+            found.append(loc)
+    return found
+
+
+def _list_ids(conn: sqlite3.Connection, campaign_id: object) -> list[int]:
+    """Ids of present transcripts in the required order (see list_transcripts)."""
+    if campaign_id is ANY:
+        where, params = "t.missing_since IS NULL", []
+    elif campaign_id is None:
+        where, params = "t.missing_since IS NULL AND t.campaign_id IS NULL", []
+    else:
+        where, params = "t.missing_since IS NULL AND t.campaign_id = ?", [campaign_id]
+    rows = conn.execute(
+        "SELECT t.id FROM transcripts t "
+        "LEFT JOIN files f ON f.transcript_id = t.id AND f.kind = 'transcript' "
+        f"WHERE {where} "
+        "ORDER BY (f.mtime_ns IS NULL), f.mtime_ns DESC, t.created_at DESC, t.id",
+        params,
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------

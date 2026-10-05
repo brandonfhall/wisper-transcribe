@@ -114,7 +114,7 @@ python scripts/alignment_eval.py score alignment-eval/*/
 |------|-----|
 | Always `pathlib.Path`, never string paths | Cross-platform (Windows backslash) |
 | Always `get_data_dir()` from `config.py` for user data | Respects `WISPER_DATA_DIR` env var (Docker) |
-| URL-encode transcript stems in templates with `\| urlencode` filter | Filenames may contain em-dashes, spaces, `!`, `()` |
+| Link transcripts by id (`/transcripts/{{ t.id }}`); stems aren't unique across campaigns | Names repeat per campaign; an integer path parameter also removes the path-traversal surface |
 | Use `os.path.basename` + `abspath/startswith` for path guards, not `Path.resolve()` | CodeQL only recognises `os.path` as a path sanitiser |
 | Use `_validate_job_id()` then redirect via `job.id` (UUID) | `_validate_job_id` gates access; `job.id` (uuid4, untainted) breaks CodeQL taint chain in redirect URL |
 | Redirect `Location` headers use `urllib.parse.quote(name)` | latin-1 codec rejects non-ASCII characters |

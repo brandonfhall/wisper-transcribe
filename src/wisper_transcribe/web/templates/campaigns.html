@@ -172,17 +172,17 @@
           </div>
         </div>
         <div style="border-top:1px solid var(--color-rule)">
-          {% for stem in active_campaign.transcripts %}
+          {% for s in sessions %}
           <div style="display:grid;grid-template-columns:60px 1fr 90px 22px 22px 32px;gap:10px;padding:14px 0;border-bottom:1px solid var(--color-rule);align-items:center">
             <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint);letter-spacing:0.06em">{{ "%02d"|format(loop.index) }}</div>
-            {% if stem in missing_transcripts %}
+            {% if s.missing %}
             <div>
-              <span title="The transcript file isn't in the transcripts folder. If it was renamed, relink it; otherwise remove it from the campaign with ✕." style="font-family:var(--font-serif);font-size:16px;color:var(--color-paper-faint)">{{ stem | replace('-', ' ') | title }}</span>
+              <span title="The transcript file isn't in the transcripts folder. If it was renamed, relink it; otherwise remove it from the campaign with ✕." style="font-family:var(--font-serif);font-size:16px;color:var(--color-paper-faint)">{{ s.stem | replace('-', ' ') | title }}</span>
               {% if relink_candidates %}
               <form method="post" action="/campaigns/{{ slug }}/transcripts/relink" data-testid="relink-form" style="display:flex;gap:6px;align-items:center;margin-top:6px">
-                <input type="hidden" name="old_stem" value="{{ stem }}"/>
-                <select name="new_stem" aria-label="Relink to" style="background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:3px 6px;border-radius:4px;font-size:12px;max-width:260px">
-                  {% for cand in relink_candidates %}<option value="{{ cand.stem }}">{{ cand.stem }}</option>{% endfor %}
+                <input type="hidden" name="old_id" value="{{ s.id }}"/>
+                <select name="new_id" aria-label="Relink to" style="background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:3px 6px;border-radius:4px;font-size:12px;max-width:260px">
+                  {% for cand in relink_candidates %}<option value="{{ cand.id }}">{{ cand.stem }}</option>{% endfor %}
                 </select>
                 <button type="submit" class="btn btn-secondary btn-sm" title="Use this file for the missing session, keeping its place, journal entry, and speakers">Relink</button>
               </form>
@@ -192,27 +192,27 @@
               <span class="pill pill-rose">MISSING</span>
             </div>
             {% else %}
-            <a href="/transcripts/{{ stem | urlencode }}" style="font-family:var(--font-serif);font-size:16px;color:var(--color-paper);text-decoration:none">{{ stem | replace('-', ' ') | title }}</a>
+            <a href="/transcripts/{{ s.id }}" style="font-family:var(--font-serif);font-size:16px;color:var(--color-paper);text-decoration:none">{{ s.stem | replace('-', ' ') | title }}</a>
             <div style="text-align:right">
               <span class="pill pill-green">TRANSCRIBED</span>
             </div>
             {% endif %}
             {% if not loop.first %}
             <form method="post" action="/campaigns/{{ slug }}/transcripts/reorder" style="display:flex">
-              <input type="hidden" name="stem" value="{{ stem }}"/>
+              <input type="hidden" name="transcript_id" value="{{ s.id }}"/>
               <input type="hidden" name="direction" value="up"/>
               <button type="submit" title="Move earlier" style="background:none;border:none;color:var(--color-paper-faint);font-size:12px;cursor:pointer;padding:0;line-height:1" onmouseover="this.style.color='var(--color-accent)'" onmouseout="this.style.color='var(--color-paper-faint)'">&#9650;</button>
             </form>
             {% endif %}
             {% if not loop.last %}
             <form method="post" action="/campaigns/{{ slug }}/transcripts/reorder" style="display:flex">
-              <input type="hidden" name="stem" value="{{ stem }}"/>
+              <input type="hidden" name="transcript_id" value="{{ s.id }}"/>
               <input type="hidden" name="direction" value="down"/>
               <button type="submit" title="Move later" style="background:none;border:none;color:var(--color-paper-faint);font-size:12px;cursor:pointer;padding:0;line-height:1" onmouseover="this.style.color='var(--color-accent)'" onmouseout="this.style.color='var(--color-paper-faint)'">&#9660;</button>
             </form>
             {% endif %}
             <form method="post" action="/campaigns/{{ slug }}/transcripts/remove" style="display:flex;align-items:center;justify-content:flex-end">
-              <input type="hidden" name="stem" value="{{ stem }}"/>
+              <input type="hidden" name="transcript_id" value="{{ s.id }}"/>
               <button type="submit" title="Remove from campaign" style="background:none;border:none;color:var(--color-paper-faint);font-size:14px;cursor:pointer;padding:0;line-height:1" onmouseover="this.style.color='var(--color-signal-rose)'" onmouseout="this.style.color='var(--color-paper-faint)'">✕</button>
             </form>
           </div>

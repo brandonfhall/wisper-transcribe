@@ -1,7 +1,6 @@
 """Campaigns route — manage per-campaign speaker rosters."""
 from __future__ import annotations
 
-import os
 import re
 from typing import Annotated, Optional
 
@@ -25,6 +24,14 @@ from wisper_transcribe.speaker_manager import load_profiles
 from wisper_transcribe.web._responses import error_redirect, invalid_input_response
 
 router = APIRouter(prefix="/campaigns")
+
+
+def _parse_transcript_id(value: object) -> Optional[int]:
+    """A transcript id posted in a form, or None when it isn't a whole number."""
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
 
 
 @router.get("", response_class=HTMLResponse)
@@ -88,12 +95,18 @@ async def campaign_detail(request: Request, slug: str) -> HTMLResponse:
     # on an unmounted drive). Shown as missing with Relink, never pruned: an
     # unavailable output dir would otherwise wipe every assignment.
     located = {tid: transcript_store.locate(tid) for tid in campaign.transcript_ids}
-    missing = {loc.stem for loc in located.values() if loc is not None and loc.missing}
-    # For the rebuild confirmation's LLM-call count: sessions without a summary.
-    summarized = sum(
-        1 for loc in located.values()
-        if loc is not None and loc.companion(".summary.md").exists()
-    )
+    sessions = []
+    for stem, tid in zip(campaign.transcripts, campaign.transcript_ids):
+        loc = located.get(tid)
+        sessions.append({
+            "id": tid,
+            "stem": stem,
+            "missing": loc.missing if loc is not None else True,
+            "summarized": bool(loc is not None and loc.companion(".summary.md").exists()),
+        })
+    missing = {s["stem"] for s in sessions if s["missing"]}
+    # For the rebuild confirmation's LLM-call count: sessions with a summary.
+    summarized = sum(1 for s in sessions if s["summarized"])
 
     return templates.TemplateResponse(
         request,
@@ -103,6 +116,7 @@ async def campaign_detail(request: Request, slug: str) -> HTMLResponse:
             "campaigns": campaigns,
             "profiles": profiles,
             "active_campaign": campaign,
+            "sessions": sessions,
             "unenrolled": unenrolled,
             "journal_exists": journal_exists,
             "journal_pending": journal_pending,
@@ -247,39 +261,30 @@ async def campaign_bind_discord_id(
 async def campaign_remove_transcript(
     request: Request,
     slug: str,
-    stem: Annotated[str, Form()],
+    transcript_id: Annotated[str, Form()],
 ) -> RedirectResponse:
     safe_slug = _validate_campaign_slug(slug)
     if safe_slug is None:
         return invalid_input_response("Invalid campaign slug")
 
-    # Stem validation: no null bytes, no path separators, not empty, not a dot path.
-    # The stem only selects a transcripts row — no file paths are
-    # constructed from it — but we still reject traversal-style payloads.
-    if (
-        not stem
-        or "\x00" in stem
-        or os.sep in stem
-        or "/" in stem
-        or "\\" in stem
-        or stem.strip(".") == ""
-        or len(stem) > 512
-    ):
-        return invalid_input_response("Invalid transcript stem")
+    tid = _parse_transcript_id(transcript_id)
+    if tid is None:
+        return invalid_input_response("Invalid transcript id")
 
     campaigns = load_campaigns()
     campaign = campaigns.get(safe_slug)
     if campaign is None:
         return error_redirect("/campaigns", "not_found")
 
-    if stem in campaign.transcripts:
-        from wisper_transcribe import transcript_store
-        found = transcript_store.find_by_stem(stem, campaign_id=campaign.id)
-        if found:
-            try:
-                remove_transcript_from_campaign(found[0].id)
-            except ValueError:  # an unassigned session already has this name
-                return error_redirect(f"/campaigns/{campaign.slug}", "remove_failed")
+    from wisper_transcribe import transcript_store
+    loc = transcript_store.locate(tid)
+    if loc is None or loc.campaign_id != campaign.id:
+        return error_redirect(f"/campaigns/{campaign.slug}", "not_found")
+
+    try:
+        remove_transcript_from_campaign(loc.id)
+    except ValueError:  # an unassigned session already has this name
+        return error_redirect(f"/campaigns/{campaign.slug}", "remove_failed")
 
     return RedirectResponse(url=f"/campaigns/{campaign.slug}", status_code=303)
 
@@ -288,7 +293,7 @@ async def campaign_remove_transcript(
 async def campaign_reorder_transcript(
     request: Request,
     slug: str,
-    stem: Annotated[str, Form()],
+    transcript_id: Annotated[str, Form()],
     direction: Annotated[str, Form()],
 ) -> RedirectResponse:
     """Move one transcript one position up/down in the campaign's transcript
@@ -298,19 +303,9 @@ async def campaign_reorder_transcript(
     if safe_slug is None:
         return invalid_input_response("Invalid campaign slug")
 
-    # Same stem-validation as /transcripts/remove: never used in a file path
-    # (only a transcripts row), but still reject traversal-style
-    # payloads defensively.
-    if (
-        not stem
-        or "\x00" in stem
-        or os.sep in stem
-        or "/" in stem
-        or "\\" in stem
-        or stem.strip(".") == ""
-        or len(stem) > 512
-    ):
-        return invalid_input_response("Invalid transcript stem")
+    tid = _parse_transcript_id(transcript_id)
+    if tid is None:
+        return invalid_input_response("Invalid transcript id")
 
     if direction not in ("up", "down"):
         return invalid_input_response("Invalid direction")
@@ -319,10 +314,15 @@ async def campaign_reorder_transcript(
     if campaign is None:
         return error_redirect("/campaigns", "not_found")
 
+    from wisper_transcribe import transcript_store
+    loc = transcript_store.locate(tid)
+    if loc is None or loc.campaign_id != campaign.id:
+        return error_redirect(f"/campaigns/{campaign.slug}", "not_found")
+
     try:
-        reorder_campaign_transcript(safe_slug, stem, direction)
+        reorder_campaign_transcript(safe_slug, loc.stem, direction)
     except ValueError:
-        pass  # stem not in this campaign (stale form) — no-op, just redirect back
+        pass  # no-op when already at that end of the list
 
     return RedirectResponse(url=f"/campaigns/{campaign.slug}", status_code=303)
 
@@ -452,14 +452,14 @@ async def campaign_journal_download(slug: str) -> Response:
 async def campaign_relink_transcript(
     request: Request,
     slug: str,
-    old_stem: Annotated[str, Form()],
-    new_stem: Annotated[str, Form()],
+    old_id: Annotated[str, Form()],
+    new_id: Annotated[str, Form()],
 ) -> RedirectResponse:
     """Point a missing campaign entry at a transcript file under a new name.
 
     The entry keeps its position, journal entry, and speakers
-    (``transcript_store.relink``). Both stems are path-guarded here and again
-    in the store.
+    (``transcript_store.relink``). Both ids index the database; neither is
+    turned into a path, so no name guard is needed.
     """
     safe_slug = _validate_campaign_slug(slug)
     if safe_slug is None:
@@ -468,16 +468,24 @@ async def campaign_relink_transcript(
     if campaign is None:
         return error_redirect("/campaigns", "not_found")
 
-    from wisper_transcribe import transcript_store
-    from wisper_transcribe.path_utils import get_output_dir
+    old_tid = _parse_transcript_id(old_id)
+    new_tid = _parse_transcript_id(new_id)
+    if old_tid is None or new_tid is None:
+        return RedirectResponse(url=f"/campaigns/{campaign.slug}?error=relink_failed",
+                                status_code=303)
 
-    out_dir = get_output_dir()
-    found = transcript_store.find_by_stem(old_stem, campaign_id=campaign.id)
-    new_md = transcript_store.safe_path(new_stem, ".md", out_dir)
-    if not found or new_md is None:
-        return RedirectResponse(url=f"/campaigns/{campaign.slug}?error=relink_failed", status_code=303)
+    from wisper_transcribe import transcript_store
+
+    old_loc = transcript_store.locate(old_tid)
+    if old_loc is None or old_loc.campaign_id != campaign.id:
+        return RedirectResponse(url=f"/campaigns/{campaign.slug}?error=relink_failed",
+                                status_code=303)
+    new_loc = transcript_store.locate(new_tid)
+    if new_loc is None:
+        return RedirectResponse(url=f"/campaigns/{campaign.slug}?error=relink_failed",
+                                status_code=303)
     try:
-        kept = transcript_store.relink(found[0].id, new_md)
+        kept = transcript_store.relink(old_tid, new_loc.md)
     except (KeyError, ValueError):
         return RedirectResponse(url=f"/campaigns/{campaign.slug}?error=relink_failed", status_code=303)
     # campaign.slug comes from the database, not the URL.

@@ -1299,11 +1299,12 @@ def transcripts_list(campaign: Optional[str]):
             raise click.ClickException("Invalid campaign slug")
 
     out_dir = get_output_dir()
-    from .transcript_store import reconcile
+    from .transcript_store import list_transcripts, reconcile
     reconcile(out_dir)  # register new files, flag ones deleted outside wisper
 
-    all_stems = sorted(p.stem for p in out_dir.glob("*.md")
-                       if not p.stem.endswith(".summary") and not p.name.startswith("."))
+    # Present sessions from the database, newest first (same order as the page).
+    present_locs = list_transcripts(output_dir=out_dir)
+    all_stems = list(dict.fromkeys(loc.stem for loc in present_locs))
     present = set(all_stems)
 
     campaigns = load_campaigns()

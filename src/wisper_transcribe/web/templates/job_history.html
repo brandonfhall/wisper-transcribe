@@ -25,8 +25,8 @@
       <option value="">All statuses</option>
       {% for st in statuses %}<option value="{{ st }}" {% if st == status_filter %}selected{% endif %}>{{ st }}</option>{% endfor %}
     </select>
-    {% if transcript_filter %}<input type="hidden" name="transcript" value="{{ transcript_filter }}"/>
-      <span class="pill pill-dim">transcript: {{ transcript_filter }}</span>{% endif %}
+    {% if transcript_filter %}<input type="hidden" name="transcript_id" value="{{ transcript_filter }}"/>
+      <span class="pill pill-dim">transcript #{{ transcript_filter }}</span>{% endif %}
     {% if campaign_filter %}<input type="hidden" name="campaign" value="{{ campaign_filter }}"/>
       <span class="pill pill-dim">campaign: {{ campaign_filter }}</span>{% endif %}
     <button type="submit" class="btn btn-secondary btn-sm">Filter</button>
@@ -57,7 +57,7 @@
   {% endfor %}
 
   {% if pages > 1 %}
-  {%- set qs = '&type=' ~ (type_filter | urlencode) ~ '&status=' ~ (status_filter | urlencode) ~ '&transcript=' ~ (transcript_filter | urlencode) ~ '&campaign=' ~ (campaign_filter | urlencode) -%}
+  {%- set qs = '&type=' ~ (type_filter | urlencode) ~ '&status=' ~ (status_filter | urlencode) ~ '&transcript_id=' ~ (transcript_filter if transcript_filter is not none else '') ~ '&campaign=' ~ (campaign_filter | urlencode) -%}
   <div style="display:flex;gap:14px;align-items:center;margin-top:18px;font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">
     {% if page > 1 %}<a href="/jobs/history?page={{ page - 1 }}{{ qs }}" style="color:var(--color-accent)">← newer</a>{% endif %}
     <span>page {{ page }} of {{ pages }}</span>

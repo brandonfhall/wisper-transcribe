@@ -123,6 +123,50 @@ def test_history_page_and_detail_fallback(tmp_path):
         assert JID[:8] in client.get("/").text
 
 
+def test_transcript_id_filter_lists_only_that_session(tmp_path):
+    """`?transcript_id=` narrows job history to one session even when another
+    campaign holds a session of the same name."""
+    from fastapi.testclient import TestClient
+
+    from wisper_transcribe import db, file_registry
+    from wisper_transcribe.config import get_output_root
+    from wisper_transcribe.web.app import create_app
+
+    from . import _seed
+
+    out = get_output_root()
+    c1 = _seed.seed_campaign("Alpha", slug="alpha", claimed=True)
+    c2 = _seed.seed_campaign("Beta", slug="beta", claimed=True)
+    ids = {}
+    for jid, cid, folder in (
+        ("11111111-1111-4111-8111-111111111111", c1, "Alpha"),
+        ("22222222-2222-4222-8222-222222222222", c2, "Beta"),
+    ):
+        md = out / folder / "Same.md"
+        md.parent.mkdir(parents=True, exist_ok=True)
+        md.write_text("x", encoding="utf-8")
+        with db.transaction() as conn:
+            tid = conn.execute(
+                "INSERT INTO transcripts (stem, campaign_id, position, created_at) "
+                "VALUES (?, ?, 0, ?)",
+                ("Same", cid, db.now_utc()),
+            ).lastrowid
+        file_registry.add(md, kind="transcript",
+                          owner=file_registry.Owner("transcript", tid), output_dir=out)
+        job_history.record(_job(id=jid, status="completed", output_path=str(md)))
+        ids[cid] = tid
+
+    with TestClient(create_app()) as client:
+        filtered = client.get(f"/jobs/history?transcript_id={ids[c1]}")
+    assert "11111111" in filtered.text and "22222222" not in filtered.text
+    with db.connection() as conn:
+        row = conn.execute("SELECT transcript_id FROM jobs WHERE id = ?",
+                           ("11111111-1111-4111-8111-111111111111",)).fetchone()
+    assert row["transcript_id"] == ids[c1]
+    rec, total = job_history.list_jobs(transcript_id=ids[c2])
+    assert total == 1 and rec[0].id == "22222222-2222-4222-8222-222222222222"
+
+
 # ---------------------------------------------------------------------------
 # A job's campaign is derived: subject, transcript, recording, submit params
 # ---------------------------------------------------------------------------

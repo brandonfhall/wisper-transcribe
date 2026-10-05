@@ -150,7 +150,7 @@ def test_full_session_lifecycle(client, ml):
     assert [g.stem for g in search_index.search("ravenloft").groups] == ["Session 1"]
 
     # Summarize.
-    _wait(client, _job_from(client.post("/transcripts/Session%201/summarize", follow_redirects=False)))
+    _wait(client, _job_from(client.post(f"/transcripts/{tid}/summarize", follow_redirects=False)))
     assert (out / "Session 1.summary.md").is_file()
     hits = search_index.search("summoned", kind="summary").groups
     assert [g.stem for g in hits] == ["Session 1"]
@@ -162,7 +162,7 @@ def test_full_session_lifecycle(client, ml):
     assert _row("SELECT journal_sha256 FROM campaigns WHERE slug = 'curse-of-strahd'")[0]
 
     # Rename a speaker in the wizard.
-    resp = client.post("/transcripts/Session%201/enroll", data={"speaker_SPEAKER_01": "Ezmerelda"},
+    resp = client.post(f"/transcripts/{tid}/enroll", data={"speaker_SPEAKER_01": "Ezmerelda"},
                        follow_redirects=False)
     assert resp.status_code == 303
     location = resp.headers["location"]
@@ -176,7 +176,7 @@ def test_full_session_lifecycle(client, ml):
     assert 'data-testid="search-hit"' in page and "#b-1" in page
 
     # Delete: file, row, links, index, companions; the journal goes stale.
-    assert client.post("/transcripts/Session%201/delete", follow_redirects=False).status_code == 303
+    assert client.post(f"/transcripts/{tid}/delete", follow_redirects=False).status_code == 303
     assert not md.exists() and not (out / "Session 1.summary.md").exists()
     assert not (out / "Session 1_diar.json").exists() and not audio.path.exists()
     for table in ("transcripts", "journal_entries", "transcript_speakers",
@@ -211,7 +211,8 @@ def test_legacy_install_imports_then_works(ml, tmp_path, monkeypatch):
         assert "**Alice**" in md.read_text(encoding="utf-8")
         assert [g.stem for g in search_index.search("gate", speaker="Alice").groups] == []
         assert [g.stem for g in search_index.search("ravenloft", speaker="Alice").groups] == ["Session 2"]
-        assert client.post("/transcripts/Session%202/delete", follow_redirects=False).status_code == 303
+        tid = _row("SELECT id FROM transcripts WHERE stem = 'Session 2'")[0]
+        assert client.post(f"/transcripts/{tid}/delete", follow_redirects=False).status_code == 303
         assert _count("SELECT count(*) FROM transcripts") == 0
 
 
@@ -234,8 +235,9 @@ def test_recording_transcript_delete_reopens_recording(client, ml):
     assert done.status == "transcribed" and done.transcript_path is not None
     stem = Path(done.transcript_path).stem
     assert search_index.search("ravenloft").groups[0].stem == stem
+    tid = _row("SELECT id FROM transcripts WHERE stem = ?", stem)[0]
 
-    assert client.post(f"/transcripts/{stem}/delete", follow_redirects=False).status_code == 303
+    assert client.post(f"/transcripts/{tid}/delete", follow_redirects=False).status_code == 303
     again = load_recording(rec.id)
     assert again.status == "completed" and again.transcript_path is None
     assert "Transcribe" in client.get(f"/recordings/{rec.id}").text
@@ -253,7 +255,8 @@ def test_retranscribe_keeps_campaign_position_and_marks_journal_stale(client, ml
                        follow_redirects=False).status_code == 303
     for stem in ("Session 1", "Session 2", "Session 3"):
         _wait(client, _upload(client, stem, "curse-of-strahd"))
-    _wait(client, _job_from(client.post("/transcripts/Session%201/summarize", follow_redirects=False)))
+    s1_id = _row("SELECT id FROM transcripts WHERE stem = 'Session 1'")[0]
+    _wait(client, _job_from(client.post(f"/transcripts/{s1_id}/summarize", follow_redirects=False)))
     _wait(client, _job_from(client.post("/campaigns/curse-of-strahd/journal", data={"mode": "next"},
                                         follow_redirects=False)))
     tid, stem = _row("SELECT t.id, t.stem FROM journal_entries je "
@@ -262,7 +265,7 @@ def test_retranscribe_keeps_campaign_position_and_marks_journal_stale(client, ml
     flac = out / f"{stem}.flac"
     order = get_transcripts_for_campaign("curse-of-strahd")
 
-    _wait(client, _job_from(client.post(f"/transcripts/{stem.replace(' ', '%20')}/retranscribe",
+    _wait(client, _job_from(client.post(f"/transcripts/{tid}/retranscribe",
                                         follow_redirects=False)))
 
     assert get_transcripts_for_campaign("curse-of-strahd") == order

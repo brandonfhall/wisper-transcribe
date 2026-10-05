@@ -580,15 +580,17 @@ def client():
 
 
 def test_edit_page_save_reindexes(out, client):
-    _add(out, "s1")
-    r = client.post("/transcripts/s1/edit", data={"speaker_1": "Zanthor"}, follow_redirects=False)
+    md = _add(out, "s1")
+    tid = ts.locate_path(md).id
+    r = client.post(f"/transcripts/{tid}/edit", data={"speaker_1": "Zanthor"}, follow_redirects=False)
     assert r.status_code == 303
     assert si.search("fight", speaker="Zanthor").groups
 
 
 def test_fix_speaker_reindexes(out, client):
-    _add(out, "s1")
-    client.post("/transcripts/s1/fix-speaker", data={"old_name": "Bob", "new_name": "Rudolph"})
+    md = _add(out, "s1")
+    tid = ts.locate_path(md).id
+    client.post(f"/transcripts/{tid}/fix-speaker", data={"old_name": "Bob", "new_name": "Rudolph"})
     assert si.speakers() == ["Alice", "Rudolph"]
 
 
