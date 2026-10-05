@@ -955,7 +955,7 @@ def _submit_recording_transcription(recording, request: Request, data_dir: Path)
     """Validate a recording and submit its transcription job.
 
     Shared by the HTML and JSON transcribe routes. Returns ``(job, None)`` or
-    ``(None, "not_ready" | "no_audio")``.
+    ``(None, "not_ready" | "no_audio" | "folder_taken" | "output_unavailable")``.
     """
     if recording.status not in ("completed", "transcribed"):
         return None, "not_ready"
@@ -963,13 +963,38 @@ def _submit_recording_transcription(recording, request: Request, data_dir: Path)
     if recording.combined_path is None or not recording.combined_path.exists():
         return None, "no_audio"
 
-    from wisper_transcribe.path_utils import get_output_dir
+    from wisper_transcribe import campaign_folders, db
+    from wisper_transcribe.transcript_store import locate
 
-    output_dir = get_output_dir()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    # A re-transcribe replaces the recording's transcript in place, under its
-    # current name (it may have been renamed); a first run uses the recording id.
-    stem = recording.transcript_path.stem if recording.transcript_path else recording.id
+    if recording.transcript_id is not None:
+        # A re-transcribe replaces the recording's transcript where its .md is,
+        # under its current name (it may have been renamed).
+        loc = locate(recording.transcript_id, data_dir=data_dir)
+        if loc is None:
+            return None, "not_ready"
+        output_dir = loc.dir
+        stem = loc.stem
+    else:
+        # A first run lands in the campaign folder, or in the root.
+        campaign_id = None
+        if recording.campaign_slug:
+            with db.connection(data_dir) as conn:
+                row = conn.execute("SELECT id FROM campaigns WHERE slug = ?",
+                                   (recording.campaign_slug,)).fetchone()
+            campaign_id = row[0] if row is not None else None
+        if campaign_id is not None:
+            try:
+                output_dir = campaign_folders.ensure_folder(campaign_id, data_dir=data_dir)
+            except campaign_folders.FolderTakenError:
+                return None, "folder_taken"
+            except FileNotFoundError:
+                return None, "output_unavailable"
+        else:
+            from wisper_transcribe.config import get_output_root
+            output_dir = get_output_root()
+            if not output_dir.is_dir():
+                return None, "output_unavailable"
+        stem = recording.id
 
     # On success, link the transcript. Nothing to undo on failure: the
     # recording reads as "transcribing" only while this job is active.
@@ -991,7 +1016,7 @@ def _submit_recording_transcription(recording, request: Request, data_dir: Path)
         source_name=recording.name or recording.id,
         recording_id=recording.id,
         output_dir=str(output_dir),
-        # process_file associates the transcript with this campaign.
+        # The campaign is the roster filter only; the folder decides assignment.
         campaign=recording.campaign_slug or "",
         title=recording.name,
         # The output is the recording's own transcript, so re-transcribing

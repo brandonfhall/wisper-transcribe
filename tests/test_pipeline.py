@@ -1709,17 +1709,17 @@ def _run_process_file(audio, extra_patches=(), **kwargs):
         return process_file(audio, device="cpu", no_diarize=True, **kwargs)
 
 
-def test_output_in_root_is_registered_and_joins_campaign(tmp_path, capsys):
-    from wisper_transcribe import db
+def test_output_in_campaign_folder_is_registered_and_joins_campaign(tmp_path, capsys):
+    from wisper_transcribe import db, campaign_folders
     import wisper_transcribe.campaign_manager as cm
-    from wisper_transcribe.path_utils import get_output_dir
 
     audio = tmp_path / "session01.mp3"
     audio.write_bytes(b"fake audio")
-    cm.create_campaign("Game")
-    out = _run_process_file(audio, output_dir=get_output_dir(), campaign="game")
+    campaign = cm.create_campaign("Game")
+    folder = campaign_folders.ensure_folder(campaign.id)
+    out = _run_process_file(audio, output_dir=folder, campaign="game")
 
-    assert out.exists()
+    assert out.exists() and out.parent == folder
     with db.connection() as conn:
         rows = conn.execute("SELECT stem, missing_since FROM transcripts").fetchall()
     assert [tuple(r) for r in rows] == [("session01", None)]
@@ -1739,7 +1739,7 @@ def test_output_outside_root_skips_campaign_with_note(tmp_path, capsys):
     assert cm.get_transcripts_for_campaign("game") == []
     with db.connection() as conn:
         assert conn.execute("SELECT count(*) FROM transcripts").fetchone()[0] == 0
-    assert "outside the transcripts folder" in capsys.readouterr().out
+    assert "isn't the transcripts folder" in capsys.readouterr().out
 
 
 def test_existing_output_fails_for_web_jobs(tmp_path):
@@ -1793,16 +1793,16 @@ def test_output_appearing_during_the_run_is_not_clobbered(tmp_path):
 
 def test_overwrite_keeps_transcript_identity_and_campaign(tmp_path):
     import wisper_transcribe.campaign_manager as cm
-    from wisper_transcribe import db
-    from wisper_transcribe.path_utils import get_output_dir
+    from wisper_transcribe import db, campaign_folders
 
     audio = tmp_path / "session01.mp3"
     audio.write_bytes(b"fake audio")
-    cm.create_campaign("Game")
-    _run_process_file(audio, output_dir=get_output_dir(), campaign="game")
+    campaign = cm.create_campaign("Game")
+    folder = campaign_folders.ensure_folder(campaign.id)
+    _run_process_file(audio, output_dir=folder, campaign="game")
     with db.connection() as conn:
         first_id = conn.execute("SELECT id FROM transcripts").fetchone()[0]
-    _run_process_file(audio, output_dir=get_output_dir(), overwrite=True)
+    _run_process_file(audio, output_dir=folder, overwrite=True)
     with db.connection() as conn:
         assert conn.execute("SELECT id FROM transcripts").fetchall()[0][0] == first_id
     assert cm.get_transcripts_for_campaign("game") == ["session01"]

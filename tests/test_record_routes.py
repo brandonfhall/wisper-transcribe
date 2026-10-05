@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 def client(tmp_path):
     """TestClient with server.json writing patched to tmp_path."""
     import wisper_transcribe.web.app as app_module
+    (tmp_path / "output").mkdir()  # the root get_output_root() resolves to
     with patch("wisper_transcribe.config.get_data_dir", return_value=tmp_path), \
          patch("wisper_transcribe.web.routes.record.get_data_dir", return_value=tmp_path):
         from wisper_transcribe.web.app import create_app
@@ -1900,6 +1901,76 @@ def test_api_recording_delete_unknown_id_returns_404(client):
     resp = c.post(f"/api/recordings/{uuid.uuid4()}/delete")
     assert resp.status_code == 404
     assert resp.json() == {"error": "not_found"}
+
+
+def test_recording_first_run_lands_in_the_campaign_folder(client):
+    """A first transcription writes into the campaign's folder, at the recording id."""
+    from wisper_transcribe import campaign_folders
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    from ._seed import seed_recording
+
+    c, tmp_path = client
+    campaign = create_campaign("My Game", data_dir=tmp_path)
+    folder = campaign_folders.ensure_folder(campaign.id, data_dir=tmp_path)
+    rec = seed_recording(tmp_path, campaign_slug="my-game")
+
+    call = _hand_off(c, tmp_path, rec)
+    assert Path(call.kwargs["output_dir"]) == folder
+    assert call.kwargs["original_stem"] == rec.id
+
+    job = _run_handed_off_job(call, folder)
+    assert job.status == "completed"
+    assert (folder / f"{rec.id}.md").is_file()
+
+
+def test_recording_retranscribe_writes_where_a_misplaced_md_is(client):
+    """Re-transcribing a misplaced transcript writes where its .md actually is."""
+    from wisper_transcribe import transcript_store
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    from wisper_transcribe.path_utils import get_output_dir
+    from wisper_transcribe.recording_manager import link_transcript
+
+    from ._seed import seed_recording
+
+    c, tmp_path = client
+    create_campaign("My Game", data_dir=tmp_path)
+    rec = seed_recording(tmp_path)
+    out = get_output_dir()
+    out.mkdir(parents=True, exist_ok=True)
+    misplaced = out / "Session 01.md"
+    misplaced.write_text("old", encoding="utf-8")
+    tid = transcript_store.register(misplaced, origin="job")
+    move_transcript_to_campaign(tid, "my-game", data_dir=tmp_path)
+    link_transcript(rec.id, tid, tmp_path)
+
+    call = _hand_off(c, tmp_path, rec)
+    assert Path(call.kwargs["output_dir"]) == out
+    assert call.kwargs["original_stem"] == "Session 01"
+
+    job = _run_handed_off_job(call, out)
+    assert job.status == "completed"
+    assert misplaced.is_file()
+    assert not (tmp_path / "output" / "My Game" / "Session 01.md").exists()
+
+
+def test_recording_hand_off_folder_taken_redirects(client):
+    """A campaign folder wisper doesn't own refuses the hand-off."""
+    from wisper_transcribe.campaign_manager import create_campaign
+    from wisper_transcribe.path_utils import get_output_dir
+
+    from ._seed import seed_recording
+
+    c, tmp_path = client
+    create_campaign("My Game", data_dir=tmp_path)
+    out = get_output_dir()
+    (out / "My Game").mkdir()
+    (out / "My Game" / "notes.md").write_text("user's")
+    rec = seed_recording(tmp_path, campaign_slug="my-game")
+
+    resp = c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "error=folder_taken" in resp.headers["location"]
 
 
 def test_api_recording_transcribe_handoff(client):

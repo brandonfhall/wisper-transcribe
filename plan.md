@@ -8,7 +8,7 @@ Active plans, open bugs, and parked designs. Shipped work is removed; its design
 
 ### Missing transcript file after a successful Transcribe job
 
-A local-recording transcription once reported COMPLETED ("Wrote `<id>.md`") but the file never existed; root cause unknown. **Detection is in place:** the job fails with "Transcript file missing after write" and logs the transcripts folder, and job history keeps that log across restarts. **Next step:** if it recurs, check `/jobs/history` for the job's log and output root; run with `WISPER_DEBUG=1` to capture more (`LIVE_AUDIO_TEST_PLAN.md` §4a). The recording hand-off no longer copies `combined.wav` into the output dir (it reads it in place), so the job's input is `recordings/<id>/combined.wav` and the output is named by `output_stem`.
+A local-recording transcription once reported COMPLETED ("Wrote `<id>.md`") but the file never existed; root cause unknown. **Detection is in place:** the job fails with "Transcript file missing after write" and logs the job's output dir (the transcripts folder, or the campaign's folder in it), and job history keeps that log across restarts. **Next step:** if it recurs, check `/jobs/history` for the job's log and output root; run with `WISPER_DEBUG=1` to capture more (`LIVE_AUDIO_TEST_PLAN.md` §4a). The recording hand-off no longer copies `combined.wav` into the output dir (it reads it in place), so the job's input is `recordings/<id>/combined.wav` and the output is named by `output_stem`.
 
 ### Docker Desktop + native CLI on one data dir can corrupt the DB
 
@@ -70,7 +70,7 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 | 2b — Every caller resolves through the location API | done (opencode; Claude review fixes) | |
 | 3 — Transcript URLs by id; lists from the database | done (opencode; Claude review fixes) | 121ea73 |
 | 4 — Scan campaign folders: reconcile, sync, Needs attention | done (opencode; Claude review fixes) | 950048e |
-| 5 — Write into campaign folders: uploads, recordings, re-transcribe, CLI | in progress (opencode) | |
+| 5 — Write into campaign folders: uploads, recordings, re-transcribe, CLI | done (opencode; Claude review fixes) | |
 | 6 — Moving a transcript moves its files; clash prompt; Rename | not started | |
 | 7 — Campaign create, rename, and delete with folders | not started | |
 | 8 — `wisper storage trim` organizes folders; prune backups | not started | |
@@ -295,7 +295,7 @@ Brandon's answers are dated 2026-10-04 unless noted. Rows marked *default* are t
 | **Deleting a campaign:**<br>• **Delete everything** deletes its transcripts, their files, and the journal, then removes the folder only if it's empty.<br>• **Keep the files** moves its transcripts to the output root (a clash becomes `<name> (2)` and is reported). The journal and the folder stay on disk, untracked; creating a campaign of the same name later re-claims that folder and its journal.<br>• If any session can't be deleted or moved (a file open in another program), the campaign is **kept** with what's left, and the result says which. This replaces the earlier "delete the rest and leave the locked one unassigned" rule, which can't hold now that a campaign can't be deleted while it holds sessions.<br>(*default*) | `transcripts.campaign_id` refuses deleting a campaign that still holds transcripts. wisper never deletes a folder holding files it doesn't own. |
 | A new transcript's campaign is the folder it's written into. An upload chosen for a campaign is written into that campaign's folder. | One rule for the web, recordings, the CLI, and files that appear on disk. |
 | A `.md` that appears in a campaign folder (copied there or dropped in Obsidian) becomes a transcript of that campaign, exactly as a `.md` in the root becomes an unassigned one. A transcript dragged from one folder to another (matched by size and mtime, as renames are) changes campaign, and its companions follow. | Folders mean campaigns. Brandon keeps personal notes outside the output folder (2026-10-04), so no wisper-marker check is needed. |
-| `wisper transcribe --campaign X` without `-o`, or with `-o` naming the output root, writes into X's folder (so it joins X). With `-o` elsewhere, `--campaign` is roster-only and a file outside the output root isn't registered, as today (*default*). | Brandon asked that CLI runs land in the right folder. |
+| `wisper transcribe --campaign X` without `-o`, or with `-o` naming the output root, writes into X's folder (so it joins X). With `-o` elsewhere, `--campaign` is roster-only and a file outside the output root isn't registered, as today (*default*). A name already in the campaign is refused unless `--keep-both` or `--overwrite` is given: `--overwrite` writes to that session's `.md` (keeping its row), and `--keep-both` names the new copy after the run's local start time — `f"{stem} ({start:%Y-%m-%d %H%M})"`, e.g. `Session 3 (2026-10-05 0142)`, with the colon-free suffix Windows requires; a second clash adds ` (2)`. The web's Keep both keeps ` (2)`. | Brandon asked that CLI runs land in the right folder and that its Keep both not clash on ` (2)`. |
 | Existing transcripts move into their campaign folders through `wisper storage trim` (dry run, then `--apply`), as one more action. The migration moves no files. Until then they're misplaced, and everything still works. | Brandon: fold it into storage trim, no new command. Migrations are frozen and must not move user files. |
 | A journal still at `<data>/campaigns/<slug>/journal.md` moves into the campaign folder the first time its campaign's journal is read. That happens on any page or command that touches the journal, and at startup. | No journal is ever reset by a missing-file check before it's moved. |
 | v11 keeps the last 5 `backups/wisper-v*.db` snapshots after a migration (*default*). | Each migration adds a snapshot; Brandon agreed to fold this in. |
@@ -1219,6 +1219,8 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
 ---
 
 ### Phase 5 — Write into campaign folders: uploads, recordings, re-transcribe, CLI
+
+*Done (opencode, one hand-off). Claude's review fixed CLI `--campaign --overwrite`: it found the session by its folder path, so a misplaced session (still in the root) or an unregistered file of that name was refused despite `--overwrite`; it now looks the row up by campaign and name and writes where its `.md` is. Readings opencode flagged: the name check offers overwrite for a session flagged missing; a CLI folder run leaves per-file clashes to `process_file`'s skip/overwrite. Rehearsed the name check on a scratch copy of the Mac data (clash in the campaign, clash with the root copy, new name, journal name reserved). Uploads and recordings weren't run end to end: that needs the ML models; Phase 10 covers it.*
 
 **Goal:**
 - A new transcript for a campaign is written into that campaign's folder.

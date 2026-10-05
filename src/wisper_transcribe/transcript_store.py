@@ -581,6 +581,58 @@ def _find_ids(conn: sqlite3.Connection, stem: str, campaign_id, present_only: bo
     return sorted(ids)
 
 
+def next_free_stem(directory: Path, stem: str, campaign_id: Optional[int],
+                   conn: Optional[sqlite3.Connection] = None) -> str:
+    """A free session name in ``directory`` for campaign ``campaign_id``.
+
+    ``stem``, else ``stem (2)``, ``stem (3)``, …: the first with no
+    ``<name>.md`` or ``<name>.flac`` in ``directory``, no ``(campaign_id, name)``
+    row (casefolded where the filesystem ignores case), and not the folder's
+    journal name. ``campaign_id`` ``None`` means the output root.
+    """
+    from .campaign_folders import journal_name
+
+    directory = Path(directory)
+    fold = file_registry._fold(directory)
+    journal = journal_name(directory.name) if campaign_id is not None else None
+
+    def taken(name: str) -> bool:
+        for suffix in (".md", ".flac"):
+            path = safe_path(name, suffix, directory)
+            if path is not None and path.is_file():
+                return True
+        if journal is not None and file_registry._key(name, fold) == file_registry._key(journal, fold):
+            return True
+        if conn is not None:
+            return _stem_taken(conn, campaign_id, name, fold)
+        with db.connection() as c:
+            return _stem_taken(c, campaign_id, name, fold)
+
+    candidate = nfc(stem)
+    if not taken(candidate):
+        return candidate
+    n = 2
+    while True:
+        candidate = f"{nfc(stem)} ({n})"
+        if not taken(candidate):
+            return candidate
+        n += 1
+
+
+def _stem_taken(conn: sqlite3.Connection, campaign_id: Optional[int], stem: str,
+                fold: bool) -> bool:
+    if _stem_row(conn, campaign_id, stem) is not None:
+        return True
+    if not fold:
+        return False
+    if campaign_id is None:
+        rows = conn.execute("SELECT stem FROM transcripts WHERE campaign_id IS NULL")
+    else:
+        rows = conn.execute("SELECT stem FROM transcripts WHERE campaign_id = ?", (campaign_id,))
+    want = file_registry._key(stem, fold)
+    return any(file_registry._key(r[0], fold) == want for r in rows)
+
+
 def list_transcripts(conn: Optional[sqlite3.Connection] = None, *,
                      campaign_id: object = ANY,
                      data_dir: Optional[Path] = None,

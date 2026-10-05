@@ -2034,6 +2034,57 @@ def test_job_fails_when_reported_transcript_is_missing(tmp_path):
     assert any("Transcripts folder:" in line for line in job.log_lines)
 
 
+def test_job_target_is_recorded_at_submit(tmp_path):
+    """A re-transcribe submitted through JobQueue.submit carries its
+    transcript_id while still pending, so the busy guard can see it."""
+    from wisper_transcribe import db, transcript_store
+    from wisper_transcribe.web.jobs import JobQueue
+
+    out = tmp_path / "out"
+    out.mkdir()
+    md = out / "Session 01.md"
+    md.write_text("# t", encoding="utf-8")
+    tid = transcript_store.register(md, origin="reconcile")
+
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    q = JobQueue()
+    job = q.submit(str(audio), original_stem="Session 01", output_dir=str(out), overwrite=True)
+    assert job.status == "pending"
+    assert job.transcript_id == tid
+    # History recorded it too, so the busy guard sees a queued re-transcribe.
+    with db.connection() as conn:
+        row = conn.execute("SELECT transcript_id FROM jobs WHERE id = ?", (job.id,)).fetchone()
+    assert row["transcript_id"] == tid
+
+
+def test_job_target_is_none_for_a_new_name(tmp_path):
+    from wisper_transcribe.web.jobs import JobQueue
+
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    q = JobQueue()
+    job = q.submit(str(audio), original_stem="brand-new", output_dir=str(tmp_path))
+    assert job.transcript_id is None
+
+
+def test_missing_transcript_after_write_names_a_campaign_folder(tmp_path):
+    from wisper_transcribe.web.jobs import FAILED, JobQueue, TranscriptMissingError
+
+    folder = tmp_path / "Game"
+    folder.mkdir()
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    q = JobQueue()
+    job = q.submit(str(audio), original_stem="session", output_dir=str(folder))
+    with patch("wisper_transcribe.web.jobs.process_file", return_value=folder / "nowhere.md"):
+        with pytest.raises(TranscriptMissingError):
+            q._run_transcription_job(job)
+    assert job.status == FAILED
+    assert job.error == "Transcript file missing after write"
+    assert any(str(folder) in line for line in job.log_lines)
+
+
 def test_recording_is_transcribing_only_while_its_job_is_pending_or_running(tmp_path):
     """A cancelled pending job never runs its callbacks; the recording must
     still come back as transcribable (status is derived from the queue)."""

@@ -45,7 +45,9 @@ def test_lifecycle_rows_satisfy_constraints():
 def test_params_are_allowlisted_and_record_output_root():
     job_history.record(_job())
     params = json.loads(_row()["params_json"])
-    assert params["model_size"] == "small" and params["output_root"]
+    assert params["model_size"] == "small"
+    # The job's own output dir, so the evidence names a campaign folder too.
+    assert params["output_root"] == "/tmp/x"
     assert "output_dir" not in params and "input_path" not in params and "hotwords" not in params
 
 

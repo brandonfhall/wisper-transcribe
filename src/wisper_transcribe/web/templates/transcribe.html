@@ -60,11 +60,10 @@
     <!-- Name collision: shown when a transcript with this file's name exists -->
     <div id="name-collision" data-testid="name-collision" style="display:none;margin-top:12px;padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:6px;font-size:12.5px;color:var(--color-signal-amber)">
       <div id="name-collision-text">A transcript with this name already exists.</div>
+      <input type="hidden" id="clash-input" name="clash" value=""/>
       <div style="display:flex;gap:14px;align-items:center;margin-top:10px">
-        <label style="display:flex;gap:6px;align-items:center;color:var(--color-paper);cursor:pointer">
-          <input type="checkbox" id="overwrite-input" name="overwrite" value="on"/>
-          Overwrite it (keeps its campaign; the old text is replaced)
-        </label>
+        <button type="button" id="overwrite-btn" class="btn btn-secondary btn-sm" onclick="wisperChooseClash('overwrite')">Overwrite it (keeps its campaign; the old text is replaced)</button>
+        <button type="button" id="keep-both-btn" class="btn btn-secondary btn-sm" onclick="wisperChooseClash('keep_both')">Keep both (saved as <span id="keep-both-name">Name (2)</span>)</button>
         <button type="button" class="btn btn-secondary btn-sm" onclick="wisperClearFile()">Cancel</button>
       </div>
     </div>
@@ -82,8 +81,24 @@
 
     {% if request.query_params.get('error') == 'name_exists' %}
     <div style="margin-top:12px;padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber)">
-      A transcript or audio file with that file's name already exists, so nothing was started. Pick the file again and tick
-      <strong>Overwrite it</strong>, or rename the file.
+      A transcript or audio file with that file's name already exists, so nothing was started. Pick the file again and choose
+      <strong>Overwrite it</strong> or <strong>Keep both</strong>, or rename the file.
+    </div>
+    {% elif request.query_params.get('error') == 'folder_taken' %}
+    <div style="margin-top:12px;padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber)">
+      That campaign's folder name is taken by another folder, so nothing was started. Rename the campaign, or use that folder from the Transcripts page.
+    </div>
+    {% elif request.query_params.get('error') == 'output_unavailable' %}
+    <div style="margin-top:12px;padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber)">
+      The transcripts folder isn't available, so nothing was started.
+    </div>
+    {% elif request.query_params.get('error') == 'rename_pending' %}
+    <div style="margin-top:12px;padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber)">
+      This campaign's folder is being renamed, so nothing was started. Try again in a moment.
+    </div>
+    {% elif request.query_params.get('error') == 'folder_missing' %}
+    <div style="margin-top:12px;padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber)">
+      This campaign's folder is gone from the transcripts folder, so nothing was started. Recreate it or rename the campaign from the Transcripts page.
     </div>
     {% elif request.query_params.get('error') %}
     <div style="margin-top:12px;padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber)">
@@ -103,7 +118,7 @@
           <div class="mono-kicker">Campaign</div>
           <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint)">--campaign</div>
         </div>
-        <select name="campaign" style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:8px 10px;border-radius:5px;font-size:13px;font-family:var(--font-sans)">
+        <select name="campaign" id="campaign-select" onchange="wisperCampaignChanged(this)" style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:8px 10px;border-radius:5px;font-size:13px;font-family:var(--font-sans)">
           <option value="">— None —</option>
           {% for slug, c in campaigns.items() %}
           <option value="{{ slug }}">{{ c.display_name }}</option>
@@ -229,35 +244,64 @@ function wisperFileSelected(input) {
     document.getElementById('sel-size').textContent = f.name;
     document.getElementById('sel-mb').textContent = (f.size / 1048576).toFixed(1) + ' MB';
   }
+  wisperPendingFile = f.name;
   wisperCheckName(f.name);
 }
 // Name collision: ask before uploading, not after. The server refuses a
-// taken name without overwrite=on anyway (?error=name_exists).
+// taken name without clash=overwrite or clash=keep_both (?error=name_exists).
 var wisperNameTaken = false;
+var wisperClashChoice = '';
+var wisperPendingFile = null;
+var wisperClashInfo = {};
 function wisperCheckName(filename) {
   wisperNameTaken = false;
+  wisperClashChoice = '';
   wisperShowCollision(false, {});
-  fetch('/transcribe/name-check?filename=' + encodeURIComponent(filename))
+  var campaign = document.getElementById('campaign-select');
+  var campaignSlug = campaign ? campaign.value : '';
+  fetch('/transcribe/name-check?filename=' + encodeURIComponent(filename)
+        + '&campaign=' + encodeURIComponent(campaignSlug))
     .then(function(r) { return r.ok ? r.json() : {exists: false}; })
     .then(function(data) {
+      wisperClashInfo = data;
       wisperNameTaken = !!data.exists;
       wisperShowCollision(wisperNameTaken, data);
     })
     .catch(function() {});
 }
+function wisperCampaignChanged(select) {
+  if (wisperPendingFile) wisperCheckName(wisperPendingFile);
+}
+function wisperChooseClash(choice) {
+  wisperClashChoice = choice;
+  var input = document.getElementById('clash-input');
+  if (input) input.value = choice;
+  var form = document.getElementById('transcribe-form');
+  if (form) form.requestSubmit();
+}
 function wisperShowCollision(show, info) {
   var box = document.getElementById('name-collision');
-  var cb = document.getElementById('overwrite-input');
   if (!box) return;
   box.style.display = show ? 'block' : 'none';
-  if (cb) cb.checked = false;
   var text = document.getElementById('name-collision-text');
   if (!text) return;
   info = info || {};
   var clashes = info.clashes || [];
   var when = info.modified ? ', last modified ' + info.modified : '';
   var where = info.campaign ? ' (in campaign "' + info.campaign + '")' : '';
-  if (clashes.indexOf('md') !== -1) {
+  var overwriteBtn = document.getElementById('overwrite-btn');
+  var keepBothBtn = document.getElementById('keep-both-btn');
+  var allowed = info.overwrite_allowed !== false;
+  if (overwriteBtn) overwriteBtn.style.display = allowed ? '' : 'none';
+  var keepBothName = document.getElementById('keep-both-name');
+  if (keepBothName) keepBothName.textContent = (info.stem || 'Name') + ' (2)';
+  if (keepBothBtn) keepBothBtn.style.display = (clashes.indexOf('reserved') !== -1
+      || clashes.indexOf('folder_taken') !== -1) ? 'none' : '';
+  if (clashes.indexOf('reserved') !== -1) {
+    text.textContent = 'That name is reserved for the campaign journal. Rename the file.';
+  } else if (clashes.indexOf('folder_taken') !== -1) {
+    text.textContent = "This campaign's folder exists and isn't wisper's. Rename the campaign, or use this folder from the Transcripts page.";
+  } else if (clashes.indexOf('md') !== -1) {
     text.textContent = 'A transcript with this name already exists' + where + when + '.';
   } else if (clashes.indexOf('missing') !== -1) {
     text.textContent = 'A transcript with this name is missing (renamed or deleted outside wisper). ' +
@@ -271,6 +315,10 @@ function wisperClearFile() {
   var el = document.getElementById('selected-file');
   if (el) el.style.display = 'none';
   wisperNameTaken = false;
+  wisperClashChoice = '';
+  wisperPendingFile = null;
+  var input = document.getElementById('clash-input');
+  if (input) input.value = '';
   wisperShowCollision(false, {});
 }
 function wisperModelSelect(radio) {
@@ -363,8 +411,7 @@ function wisperToggleDiarize(wrap, evt) {
   form.addEventListener('submit', function(evt) {
     evt.preventDefault();
 
-    var overwrite = document.getElementById('overwrite-input');
-    if (wisperNameTaken && !(overwrite && overwrite.checked)) {
+    if (wisperNameTaken && !wisperClashChoice) {
       var box = document.getElementById('name-collision');
       if (box) box.scrollIntoView({block: 'center'});
       return;  // don't upload a file the server will refuse

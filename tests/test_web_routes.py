@@ -1820,7 +1820,7 @@ def test_transcribe_post_no_diarize_round_trips_to_queue(client, tmp_path, monke
     fake_job = MagicMock(spec=Job)
     fake_job.id = str(uuid.uuid4())
 
-    with patch("wisper_transcribe.web.routes.transcribe.get_output_dir", return_value=tmp_path), \
+    with patch("wisper_transcribe.web.routes.transcribe.get_output_root", return_value=tmp_path), \
          patch.object(client.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
         resp = client.post(
             "/transcribe",
@@ -1844,7 +1844,7 @@ def test_transcribe_post_default_no_diarize_is_false(client, tmp_path, monkeypat
     fake_job = MagicMock(spec=Job)
     fake_job.id = str(uuid.uuid4())
 
-    with patch("wisper_transcribe.web.routes.transcribe.get_output_dir", return_value=tmp_path), \
+    with patch("wisper_transcribe.web.routes.transcribe.get_output_root", return_value=tmp_path), \
          patch.object(client.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
         resp = client.post(
             "/transcribe",
@@ -1868,7 +1868,7 @@ def test_transcribe_post_with_vocab_file_sets_hotwords(client, tmp_path, monkeyp
 
     vocab_content = b"# comment line\nAragorn\nGandalf\n\n  Frodo  \n"
 
-    with patch("wisper_transcribe.web.routes.transcribe.get_output_dir", return_value=tmp_path), \
+    with patch("wisper_transcribe.web.routes.transcribe.get_output_root", return_value=tmp_path), \
          patch.object(client.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
         resp = client.post(
             "/transcribe",
@@ -1893,7 +1893,7 @@ def test_transcribe_post_no_vocab_file_hotwords_is_none(client, tmp_path, monkey
     fake_job = MagicMock(spec=Job)
     fake_job.id = str(uuid.uuid4())
 
-    with patch("wisper_transcribe.web.routes.transcribe.get_output_dir", return_value=tmp_path), \
+    with patch("wisper_transcribe.web.routes.transcribe.get_output_root", return_value=tmp_path), \
          patch.object(client.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
         resp = client.post(
             "/transcribe",
@@ -2539,7 +2539,7 @@ def test_transcribe_post_with_campaign_passes_to_queue(client, tmp_path, monkeyp
     fake_job.id = str(uuid.uuid4())
 
     with patch("wisper_transcribe.web.routes.transcribe.load_campaigns", return_value={}), \
-         patch("wisper_transcribe.web.routes.transcribe.get_output_dir",
+         patch("wisper_transcribe.web.routes.transcribe.get_output_root",
                return_value=tmp_path), \
          patch.object(
              client.app.state.job_queue, "submit", return_value=fake_job
@@ -3382,17 +3382,17 @@ def test_job_detail_align_step_only_when_aligning(client, will_align):
 # Upload name collisions: never silently reuse or replace a transcript
 # ---------------------------------------------------------------------------
 
-def _post_upload(client, out_dir, **data):
+def _post_upload(client, out_dir, filename="session.mp3", **data):
     from wisper_transcribe.web.jobs import Job
     import uuid
 
     fake_job = MagicMock(spec=Job)
     fake_job.id = str(uuid.uuid4())
-    with patch("wisper_transcribe.web.routes.transcribe.get_output_dir", return_value=out_dir), \
+    with patch("wisper_transcribe.web.routes.transcribe.get_output_root", return_value=out_dir), \
          patch.object(client.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
         resp = client.post(
             "/transcribe",
-            files={"file": ("session.mp3", b"fake audio", "audio/mpeg")},
+            files={"file": (filename, b"fake audio", "audio/mpeg")},
             data=data, follow_redirects=False,
         )
     return resp, mock_submit
@@ -3409,7 +3409,7 @@ def test_upload_with_taken_name_is_refused(client, tmp_path):
 
 def test_upload_with_taken_name_and_overwrite_submits(client, tmp_path):
     _reg(tmp_path / "session.md", "old", encoding="utf-8")
-    resp, mock_submit = _post_upload(client, tmp_path, overwrite="on")
+    resp, mock_submit = _post_upload(client, tmp_path, clash="overwrite")
     assert resp.status_code == 303
     assert mock_submit.call_args.kwargs["overwrite"] is True
 
@@ -3443,10 +3443,10 @@ def test_name_check_reports_existing_transcript_and_campaign(client, tmp_path, m
 
     data = client.get("/transcribe/name-check", params={"filename": "session 1.mp3"}).json()
     assert data == {"exists": True, "campaign": "The Game", "modified": "2026-09-12 21:40",
-                    "missing": False, "clashes": ["md"]}
+                    "missing": False, "clashes": ["md"], "overwrite_allowed": True}
     data = client.get("/transcribe/name-check", params={"filename": "other.mp3"}).json()
     assert data == {"exists": False, "campaign": None, "modified": None,
-                    "missing": False, "clashes": []}
+                    "missing": False, "clashes": [], "overwrite_allowed": True}
 
 
 def test_name_check_reports_a_foreign_flac(client, tmp_path, monkeypatch):
@@ -3508,14 +3508,183 @@ def test_upload_refused_for_a_flac_only_clash_without_overwrite(client, tmp_path
     assert resp.headers["location"] == "/transcribe?error=name_exists"
     mock_submit.assert_not_called()
 
-    resp, mock_submit = _post_upload(client, out, overwrite="on")
-    assert mock_submit.call_args.kwargs["overwrite"] is True
+    # A foreign .flac can't be overwritten: only Keep both or Cancel.
+    data = client.get("/transcribe/name-check", params={"filename": "session.mp4"}).json()
+    assert data["clashes"] == ["flac"] and data["overwrite_allowed"] is False
+
+    resp, mock_submit = _post_upload(client, out, clash="keep_both")
+    assert mock_submit.call_args.kwargs["original_stem"] == "session (2)"
+    assert mock_submit.call_args.kwargs["overwrite"] is False
 
 
 def test_upload_passes_the_original_filename_as_source_name(client, tmp_path):
     resp, mock_submit = _post_upload(client, tmp_path)
     assert mock_submit.call_args.kwargs["source_name"] == "session.mp3"
     assert mock_submit.call_args.kwargs["original_stem"] == "session"
+
+
+def _run_upload_job(call):
+    """Run the job a /transcribe POST submitted, with process_file writing
+    what the pipeline writes (the .md and its registration)."""
+    from wisper_transcribe import transcript_store
+    from wisper_transcribe.web.jobs import JobQueue
+
+    out_dir = Path(call.kwargs["output_dir"])
+
+    def _process(path, _result_store=None, job_id=None, **kwargs):
+        md = out_dir / (kwargs["output_stem"] + ".md")
+        md.write_text("# t", encoding="utf-8")
+        transcript_store.register(md, origin="job")
+        return md
+
+    queue = JobQueue()
+    job = queue.submit(*call.args, **call.kwargs)
+    with patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=lambda p, **kw: Path(p)), \
+         patch("wisper_transcribe.web.jobs.process_file", side_effect=_process):
+        queue._run_job(job)
+    return job
+
+
+def _campaign_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    out = tmp_path / "out"
+    out.mkdir(exist_ok=True)
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    return out
+
+
+def test_upload_with_a_campaign_lands_in_its_folder(client, tmp_path, monkeypatch):
+    out = _campaign_env(tmp_path, monkeypatch)
+    from wisper_transcribe import campaign_folders
+    from wisper_transcribe.campaign_manager import get_transcripts_for_campaign
+
+    cid = _seed.seed_campaign("The Game", data_dir=tmp_path)
+    folder = campaign_folders.ensure_folder(cid, data_dir=tmp_path)
+
+    resp, mock_submit = _post_upload(client, out, campaign="the-game")
+    assert resp.status_code == 303
+    assert Path(mock_submit.call_args.kwargs["output_dir"]) == folder
+
+    _run_upload_job(mock_submit.call_args)
+    assert (folder / "session.md").is_file()
+    assert get_transcripts_for_campaign("the-game") == ["session"]
+
+
+def test_upload_same_name_in_another_campaign_is_no_clash(client, tmp_path, monkeypatch):
+    out = _campaign_env(tmp_path, monkeypatch)
+    from wisper_transcribe import campaign_folders
+
+    a = _seed.seed_campaign("Alpha", slug="alpha", data_dir=tmp_path)
+    b = _seed.seed_campaign("Beta", slug="beta", data_dir=tmp_path)
+    folder_a = campaign_folders.ensure_folder(a, data_dir=tmp_path)
+    folder_b = campaign_folders.ensure_folder(b, data_dir=tmp_path)
+    (folder_a / "session.md").write_text("x")
+    from wisper_transcribe import transcript_store
+    transcript_store.register(folder_a / "session.md", origin="job")
+
+    resp, mock_submit = _post_upload(client, out, campaign="beta")
+    assert resp.status_code == 303 and mock_submit.called
+    assert Path(mock_submit.call_args.kwargs["output_dir"]) == folder_b
+
+
+def test_upload_same_name_in_same_campaign_keep_both(client, tmp_path, monkeypatch):
+    out = _campaign_env(tmp_path, monkeypatch)
+    from wisper_transcribe import campaign_folders
+    from wisper_transcribe.campaign_manager import get_transcripts_for_campaign
+
+    cid = _seed.seed_campaign("The Game", data_dir=tmp_path)
+    folder = campaign_folders.ensure_folder(cid, data_dir=tmp_path)
+    (folder / "session.md").write_text("old", encoding="utf-8")
+    from wisper_transcribe import transcript_store
+    transcript_store.register(folder / "session.md", origin="job")
+
+    resp, mock_submit = _post_upload(client, out, campaign="the-game")
+    assert resp.headers["location"] == "/transcribe?error=name_exists"
+
+    resp, mock_submit = _post_upload(client, out, campaign="the-game", clash="keep_both")
+    assert mock_submit.call_args.kwargs["original_stem"] == "session (2)"
+    _run_upload_job(mock_submit.call_args)
+    assert (folder / "session (2).md").is_file()
+    assert (folder / "session.md").read_text(encoding="utf-8") == "old"
+
+
+def test_upload_name_equal_to_the_journal_name_is_reserved(client, tmp_path, monkeypatch):
+    out = _campaign_env(tmp_path, monkeypatch)
+    from wisper_transcribe import campaign_folders
+
+    cid = _seed.seed_campaign("The Game", data_dir=tmp_path)
+    campaign_folders.ensure_folder(cid, data_dir=tmp_path)
+
+    # The folder is "The Game"; its journal is "The Game Journal.md".
+    data = client.get("/transcribe/name-check",
+                      params={"filename": "The Game Journal.md", "campaign": "the-game"}).json()
+    assert data["clashes"] == ["reserved"] and data["overwrite_allowed"] is False
+
+    resp, _ = _post_upload(client, out, campaign="the-game",
+                           filename="The Game Journal.md")
+    assert resp.status_code == 303
+
+
+def test_upload_into_a_taken_folder_is_refused(client, tmp_path, monkeypatch):
+    out = _campaign_env(tmp_path, monkeypatch)
+    _seed.seed_campaign("The Game", data_dir=tmp_path)
+    (out / "The Game").mkdir()
+    (out / "The Game" / "notes.md").write_text("user's own")
+
+    with patch.object(client.app.state.job_queue, "submit") as submit, \
+         patch("tempfile.NamedTemporaryFile") as spy:
+        resp = client.post("/transcribe", files={"file": ("session.mp3", b"x", "audio/mpeg")},
+                           data={"campaign": "the-game"}, follow_redirects=False)
+    assert resp.headers["location"] == "/transcribe?error=folder_taken"
+    assert spy.call_count == 0 and submit.call_count == 0
+    assert (out / "The Game" / "notes.md").read_text() == "user's own"
+
+
+def test_name_check_on_a_taken_folder_returns_folder_taken(client, tmp_path, monkeypatch):
+    out = _campaign_env(tmp_path, monkeypatch)
+    _seed.seed_campaign("The Game", data_dir=tmp_path)
+    (out / "The Game").mkdir()
+    (out / "The Game" / "notes.md").write_text("user's own")
+
+    data = client.get("/transcribe/name-check",
+                      params={"filename": "session.mp3", "campaign": "the-game"}).json()
+    assert data["clashes"] == ["folder_taken"] and data["overwrite_allowed"] is False
+    assert (out / "The Game" / "notes.md").exists()  # nothing created
+
+
+def test_upload_names_are_made_safe():
+    from wisper_transcribe.web.routes.transcribe import _upload_stem
+
+    assert _upload_stem(".wisper-tmp-x.mp3") == "wisper-tmp-x"
+    assert _upload_stem("CON.mp3") == "CON_"
+    assert len(_upload_stem("a" * 150 + ".mp3")) == 100
+
+
+def test_upload_overwrite_of_a_misplaced_session_reuses_its_row(client, tmp_path, monkeypatch):
+    """Overwriting a misplaced session writes where its .md is: one row, one file."""
+    out = _campaign_env(tmp_path, monkeypatch)
+    from wisper_transcribe import campaign_folders, db, transcript_store
+    from wisper_transcribe.campaign_manager import get_transcripts_for_campaign
+
+    cid = _seed.seed_campaign("The Game", data_dir=tmp_path)
+    folder = campaign_folders.ensure_folder(cid, data_dir=tmp_path)
+    misplaced = out / "session.md"
+    misplaced.write_text("old", encoding="utf-8")
+    tid = transcript_store.register(misplaced, origin="job")
+    _seed.move_to_campaign("session", "the-game", data_dir=tmp_path)
+
+    resp, mock_submit = _post_upload(client, out, campaign="the-game", clash="overwrite")
+    assert resp.status_code == 303
+    assert Path(mock_submit.call_args.kwargs["output_dir"]) == out
+    assert mock_submit.call_args.kwargs["original_stem"] == "session"
+
+    _run_upload_job(mock_submit.call_args)
+    with db.connection() as conn:
+        ids = [r[0] for r in conn.execute("SELECT id FROM transcripts")]
+    assert ids == [tid]
+    assert misplaced.is_file()
+    assert not (folder / "session.md").exists()
+    assert get_transcripts_for_campaign("the-game") == ["session"]
 
 
 def test_campaign_page_offers_relink_and_relink_route(client, tmp_path, monkeypatch):

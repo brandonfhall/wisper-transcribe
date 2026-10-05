@@ -672,26 +672,23 @@ def process_file(
             include_timestamps=include_timestamps,
         )
 
-        from .transcript_store import TranscriptExistsError, atomic_write_text, register
+        from .transcript_store import (
+            TranscriptExistsError, atomic_write_text, dir_campaign, register,
+        )
         if out_path.exists() and not overwrite:
             raise TranscriptExistsError(out_path.stem)  # appeared while we worked
         atomic_write_text(out_path, content)
         tqdm.write(f"  Wrote {out_path.name}")
 
-        # Register it (the .md first, then the row) and associate its
-        # campaign — only under the output root, the web UI's scope.
-        tid = register(out_path, origin="job")
-        if tid is not None and campaign:
-            try:
-                from .campaign_manager import move_transcript_to_campaign
-                move_transcript_to_campaign(tid, campaign)
-            except Exception:
-                tqdm.write(f"  Warning: could not add it to campaign {campaign!r}")
-        elif tid is None and campaign:
+        # Register it (the .md first, then the row). The folder it landed in
+        # decides its campaign; an output outside the transcripts folder is
+        # left untracked.
+        if dir_campaign(out_path.parent)[0]:
+            register(out_path, origin="job")
+        elif campaign:
             tqdm.write(
-                f"  Note: not added to campaign {campaign!r} — {out_path.parent} is outside "
-                "the transcripts folder, so the web UI won't see it "
-                "(see `wisper config set output_dir`)."
+                f"  Note: {out_path.parent} isn't the transcripts folder; "
+                "the transcript isn't tracked."
             )
 
         return out_path

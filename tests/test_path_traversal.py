@@ -643,7 +643,24 @@ def test_transcribe_name_check_never_escapes_output_dir(client, payload, tmp_pat
     resp = client.get("/transcribe/name-check", params={"filename": payload})
     assert resp.status_code == 200
     assert resp.json() == {"exists": False, "campaign": None, "modified": None,
-                           "missing": False, "clashes": []}
+                           "missing": False, "clashes": [], "overwrite_allowed": True}
+    assert payload not in resp.text
+
+
+@pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS + [
+    "../escape", "../../etc/passwd", "a/b", "..", "evil\r\nLocation: x",
+])
+def test_transcribe_name_check_campaign_param_is_inert(client, payload, tmp_path, monkeypatch):
+    """The campaign slug is only a lookup key; a malformed one resolves to
+    the root and is never reflected or used as a path."""
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    resp = client.get("/transcribe/name-check",
+                      params={"filename": "session.mp3", "campaign": payload})
+    assert resp.status_code == 200
+    assert resp.json() == {"exists": False, "campaign": None, "modified": None,
+                           "missing": False, "clashes": [], "overwrite_allowed": True}
     assert payload not in resp.text
 
 

@@ -56,9 +56,10 @@ def _params(job: Any) -> str:
         if getattr(job, flag, False):
             out[flag] = True
     if getattr(job, "job_type", "") == "transcription":
-        from .path_utils import get_output_dir
         # Where it wrote: evidence for "the job said done but the file is missing".
-        out["output_root"] = str(get_output_dir())
+        output_dir = kwargs.get("output_dir")
+        if output_dir:
+            out["output_root"] = str(output_dir)
     return json.dumps(out, sort_keys=True)
 
 
@@ -73,12 +74,13 @@ def _subject_ids(conn, job: Any) -> tuple[Optional[int], Optional[int], Optional
     job_type = getattr(job, "job_type", "")
     path = None
     if job_type == "transcription":
+        transcript_id = getattr(job, "transcript_id", None)
         path = getattr(job, "output_path", None)
     elif job_type in ("refine", "summarize"):
         path = getattr(job, "llm_transcript_path", None)
     elif job_type == "enroll":
         path = getattr(job, "enroll_md_path", None)
-    if path:
+    if transcript_id is None and path:
         loc = locate_path(Path(path), conn=conn)
         transcript_id = loc.id if loc is not None else None
     if job_type in ("campaign_journal", "speaker_relabel"):

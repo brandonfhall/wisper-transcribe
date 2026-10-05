@@ -158,15 +158,19 @@ wisper transcribe <path>
   --overwrite              Re-process files that already have output. Without it an existing
                            transcript is skipped ("already processed (in campaign 'x')"); with it
                            the transcript keeps its campaign place, and a folded journal is
-                           marked as needing a rebuild.
+                           marked as needing a rebuild. With --campaign, replaces a same-named
+                           session in the campaign's folder, keeping its identity.
+  --keep-both              With --campaign: a name already in the campaign writes this run as a
+                           new copy named after the run's start time, e.g.
+                           `Session 3 (2026-10-05 0142)` (a second clash adds ` (2)`).
   --workers INT            Parallel workers for folder processing — CPU only;
                            clamped to 1 on GPU (default: 1)
-  --campaign SLUG          Restrict speaker matching to this campaign's roster, and add the
-                           transcript to the campaign. Run `wisper campaigns list` for slugs.
-                           Only when the output lands in the transcripts folder (the default
-                           output is next to the input, so pass -o <transcripts folder> unless
-                           the audio is already there); elsewhere it prints a note and skips the
-                           association. Transcripts written there are also indexed for search.
+  --campaign SLUG          Write into the campaign's folder and use its roster. Run
+                           `wisper campaigns list` for slugs. With no -o, or with -o naming the
+                           transcripts folder, the transcript is written into the campaign's
+                           folder; with -o elsewhere it is a roster filter only and the file
+                           beside the input isn't tracked. A name already in the campaign is
+                           refused unless --keep-both or --overwrite is given.
   --verbose                Show detailed progress; surfaces ML library log output
                            (pyannote, faster-whisper) on the console at DEBUG level
   --debug                  Write a full timestamped log to ./logs/wisper_<timestamp>.log
@@ -286,7 +290,7 @@ A session is "pending" once it has a `.summary.md`. With no flags the command fo
 wisper transcribe session12.mp3 --campaign d-d-mondays --num-speakers 5
 ```
 
-With `--campaign`, speaker matching is restricted to that campaign's enrolled members — players from other campaigns won't appear in the output.
+With `--campaign`, speaker matching is restricted to that campaign's enrolled members — players from other campaigns won't appear in the output — and, when the output lands in the transcripts folder (no `-o`, or `-o` naming it), the transcript is written into the campaign's folder. A name already in the campaign is refused unless `--keep-both` or `--overwrite` is passed. With `-o` elsewhere the campaign is a roster filter only and the file beside the input isn't tracked.
 
 **Voice transfer between campaigns:** Because embeddings are stored globally, adding an existing speaker profile to a new campaign automatically gives that campaign the benefit of all previously recorded voice data. No re-enrollment needed.
 
@@ -559,7 +563,7 @@ All formats are converted to 16kHz mono WAV internally before transcription.
 
 ## Output Format
 
-`wisper transcribe` writes one `.md` per audio file next to the input (or in `--output`); web uploads and recordings go to the transcripts folder ([configuration.md](configuration.md#transcripts-folder)). Timestamps are `mm:ss`, or `hh:mm:ss` past the first hour:
+`wisper transcribe` writes one `.md` per audio file next to the input (or in `--output`, or in `--campaign`'s folder when the output lands in the transcripts folder); web uploads and recordings go to the transcripts folder — an upload or recording with a campaign into that campaign's folder ([configuration.md](configuration.md#transcripts-folder)). Timestamps are `mm:ss`, or `hh:mm:ss` past the first hour:
 
 ```markdown
 ---

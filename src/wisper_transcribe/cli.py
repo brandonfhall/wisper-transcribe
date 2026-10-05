@@ -90,7 +90,9 @@ def main():
 @click.option("--debug", is_flag=True, default=False,
               help="Write full debug log to ./logs/wisper_<timestamp>.log")
 @click.option("--campaign", default=None,
-              help="Scope speaker matching to this campaign's roster (slug, e.g. dnd-mondays)")
+              help="Campaign slug: write into its folder and use its roster")
+@click.option("--keep-both", "keep_both", is_flag=True, default=False,
+              help="A name already in the campaign: save this run as a new copy")
 def transcribe(
     path: Path,
     output_dir: Optional[Path],
@@ -114,6 +116,7 @@ def transcribe(
     verbose: bool,
     debug: bool,
     campaign: Optional[str],
+    keep_both: bool,
 ):
     """Transcribe an audio file (or folder of files) to markdown.
 
@@ -134,13 +137,19 @@ def transcribe(
         lines = Path(vocab_file).read_text(encoding="utf-8").splitlines()
         hotwords = [ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")]
 
+    extra: dict = {}
+    if campaign:
+        extra.update(_campaign_output_args(campaign, output_dir, path, keep_both, overwrite))
+    out_dir = extra.pop("output_dir", output_dir)
+    out_overwrite = extra.pop("overwrite", overwrite)
+
     kwargs = dict(
-        output_dir=output_dir,
+        output_dir=out_dir,
         model_size=model_size,
         device=device,
         language=language,
         include_timestamps=timestamps,
-        overwrite=overwrite,
+        overwrite=out_overwrite,
         no_diarize=no_diarize,
         num_speakers=num_speakers,
         min_speakers=min_speakers,
@@ -153,6 +162,7 @@ def transcribe(
         hotwords=hotwords,
         campaign=campaign,
         forced_alignment=None if forced_align is None else str(forced_align).lower(),
+        **extra,
     )
 
     if path.is_dir():
@@ -167,6 +177,93 @@ def transcribe(
             click.echo(f"Done: {out}")
         except Exception as e:
             raise click.ClickException(str(e))
+
+
+def _keep_both_suffix() -> str:
+    """The timestamp a CLI ``--keep-both`` copy is named after.
+
+    The run's local start time, e.g. ``2026-10-05 0142``. No colon, which
+    Windows forbids; colons separate a time on Windows drives.
+    """
+    from datetime import datetime
+
+    return datetime.now().strftime("%Y-%m-%d %H%M")
+
+
+def _campaign_output_args(campaign: str, output_dir: Optional[Path], path: Path,
+                          keep_both: bool, overwrite: bool) -> dict:
+    """Resolve a CLI run's output into a campaign folder, and name clashes.
+
+    ``--campaign`` writes into the campaign's folder when no ``-o`` names
+    somewhere else; a name already in the campaign is refused unless
+    ``--keep-both`` or ``--overwrite`` is given. Returns the extra kwargs
+    (``output_dir``, ``output_stem``, ``overwrite``); an unknown slug or a
+    taken folder is a ``ClickException``.
+    """
+    from . import campaign_folders, db
+    from .config import get_output_root
+    from .transcript_store import _stem_row, nfc, next_free_stem
+
+    root = get_output_root()
+    with db.connection() as conn:
+        row = conn.execute("SELECT id FROM campaigns WHERE slug = ?", (campaign,)).fetchone()
+    if row is None:
+        raise click.ClickException(f"No campaign with slug {campaign!r}. Run `wisper campaigns list`.")
+    campaign_id = row[0]
+
+    if output_dir is not None:
+        try:
+            same = Path(os.path.realpath(output_dir)) == Path(os.path.realpath(root))
+        except OSError:
+            same = False
+        if not same:
+            return {}  # -o elsewhere: roster-only, unchanged
+
+    try:
+        out = campaign_folders.ensure_folder(campaign_id)
+    except campaign_folders.FolderTakenError as exc:
+        raise click.ClickException(
+            f"The campaign's folder name is taken by another folder: {exc}."
+        ) from None
+    except FileNotFoundError:
+        raise click.ClickException("The transcripts folder isn't available.")
+
+    source = path if path.is_file() else None
+    stem = nfc(source.stem) if source is not None else None
+    result: dict = {"output_dir": out}
+    if stem is None:
+        # A folder run names each member after its input file; process_file
+        # skips (or overwrites) an existing output there.
+        return result
+
+    with db.connection() as conn:
+        same = _stem_row(conn, campaign_id, stem)
+    taken = same is not None
+    md = out / f"{stem}.md"
+    flac = out / f"{stem}.flac"
+    if not (taken or md.is_file() or flac.is_file()):
+        return result
+    if keep_both:
+        suffix = _keep_both_suffix()
+        room = max(1, 100 - len(suffix) - 3)
+        named = f"{stem[:room].rstrip()} ({suffix})"
+        result["output_stem"] = next_free_stem(out, named, campaign_id)
+        return result
+    if overwrite:
+        from .transcript_store import locate
+        loc = locate(same[0]) if taken else None
+        if loc is not None:
+            # Reuse the row: write where its .md is (a misplaced session's is
+            # still in the root), under its current name.
+            result["output_dir"] = loc.dir
+            result["output_stem"] = loc.stem
+        else:
+            result["output_stem"] = stem  # an unregistered file of that name
+        return result
+    raise click.ClickException(
+        f"{stem!r} is already in the campaign. Pass --keep-both to save a new "
+        "copy, or --overwrite to replace it."
+    )
 
 
 def _audio_extensions():

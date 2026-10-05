@@ -47,12 +47,14 @@ Drag a file onto `/transcribe` and choose options:
 
 - **Whisper model** — preselected from your config (`large-v3-turbo` if the configured model isn't one of the options shown).
 - **Detect speakers** — on by default. Turn it off for audiobooks or lectures to skip diarization. When on, pick **?** (auto-detect) or pin a count of 1–10.
-- **Campaign** — restricts speaker matching to that campaign's roster.
+- **Campaign** — restricts speaker matching to that campaign's roster, and chooses the folder the transcript is written into.
 - **Refine** / **Summarize** — LLM post-processing that runs after transcription in the same job.
 
 Large uploads show a byte-level progress bar ("Uploading… N%", then "Processing…") before the job page opens.
 
-**Name already taken:** the transcript is named after the file. If a transcript or an audio file (`<name>.flac`) with that name exists, the page says so as soon as you pick the file (which campaign it's in, and when the existing file was last modified), before anything uploads. A transcript of that name that is missing (renamed or deleted outside wisper) is flagged too: overwriting replaces its audio and speakers, so relink it first to keep them. Tick **Overwrite it** to replace it — it keeps its campaign place, and if it was folded into the campaign journal the journal is marked as needing a rebuild — or **Cancel** and rename the file. A job never reports success without writing its transcript: if a same-named transcript appears while the job runs, the job fails with "Transcript already exists", and a job whose transcript file isn't there afterwards fails with "Transcript file missing after write" (the job log shows the transcripts folder it used).
+A transcript uploaded with a campaign is written into that campaign's folder in the transcripts folder; without one it goes to the transcripts folder's root. A campaign whose folder name is taken by a folder wisper doesn't own refuses the upload ("folder taken"); the campaign page lists it under Needs attention.
+
+**Name already taken:** the transcript is named after the file. If a transcript or an audio file (`<name>.flac`) with that name exists in the target folder, the page says so as soon as you pick the file (which campaign it's in, and when the existing file was last modified), before anything uploads. A transcript of that name that is missing (renamed or deleted outside wisper) is flagged too: overwriting replaces its audio and speakers, so relink it first to keep them. Choose **Overwrite it** to replace it — it keeps its campaign place, and if it was folded into the campaign journal the journal is marked as needing a rebuild — **Keep both** to save the new run as `<name> (2)`, or **Cancel** and rename the file. Overwrite is offered only when the existing file is a wisper transcript; a stray `.flac` with no transcript, or a name that would collide with the campaign journal, can only be kept as a new copy. A job never reports success without writing its transcript: if a same-named transcript appears while the job runs, the job fails with "Transcript already exists", and a job whose transcript file isn't there afterwards fails with "Transcript file missing after write" (the job log shows the transcripts folder it used).
 
 ### Job page
 

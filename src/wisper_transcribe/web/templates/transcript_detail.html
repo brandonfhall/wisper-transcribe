@@ -51,6 +51,8 @@
   {% set retranscribe_errors = {
     'no_audio': 'This transcript has no saved audio to re-transcribe from.',
     'not_ready': "The recording isn't ready to transcribe.",
+    'folder_taken': "The campaign's folder name is taken by another folder; rename the campaign.",
+    'output_unavailable': "The transcripts folder isn't available.",
   } %}
   {% set err = retranscribe_errors.get(request.query_params.get('error')) %}
   {% if err %}

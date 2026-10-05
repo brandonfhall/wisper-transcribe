@@ -679,6 +679,15 @@ class JobQueue:
             self._on_complete_callbacks[job.id] = on_complete
         if on_error is not None:
             self._on_error_callbacks[job.id] = on_error
+        # Record the transcript the job will write, resolved from the output
+        # dir at submit, so a pending re-transcribe or overwrite is found by
+        # the busy guard and job history even before the file exists.
+        output_dir = kwargs.get("output_dir")
+        if output_dir:
+            from wisper_transcribe.transcript_store import locate_path
+            loc = locate_path(Path(output_dir) / f"{original_stem}.md")
+            if loc is not None:
+                job.transcript_id = loc.id
         self._enqueue(job)
         return job
 
@@ -1241,8 +1250,8 @@ class JobQueue:
             output_path = process_file(Path(job.input_path), _result_store=_result_store,
                                        job_id=job.id, skip_existing=False, **job.kwargs)
             if not Path(output_path).is_file():
-                from wisper_transcribe.path_utils import get_output_dir
-                job.append_log(f"Transcripts folder: {get_output_dir()}")
+                from wisper_transcribe.config import get_output_root
+                job.append_log(f"Transcripts folder: {job.kwargs.get('output_dir') or get_output_root()}")
                 raise TranscriptMissingError(Path(output_path).name)
             job.diarization_segments = _result_store.get("diarization_segments", [])
             job.speaker_map = _result_store.get("speaker_map", {})

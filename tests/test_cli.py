@@ -1352,8 +1352,11 @@ def test_campaigns_invalid_slug_rejected(tmp_path, monkeypatch):
 def test_transcribe_passes_campaign_to_process_file(tmp_path, monkeypatch):
     """--campaign is forwarded to process_file as the campaign kwarg."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    (tmp_path / "output").mkdir()
     audio = tmp_path / "session.mp3"
     audio.write_bytes(b"fake")
+    from wisper_transcribe.campaign_manager import create_campaign
+    create_campaign("D&D Mondays", data_dir=tmp_path)
 
     captured = {}
 
@@ -1363,10 +1366,173 @@ def test_transcribe_passes_campaign_to_process_file(tmp_path, monkeypatch):
 
     with patch("wisper_transcribe.pipeline.process_file", side_effect=fake_process_file):
         result = CliRunner().invoke(
-            main, ["transcribe", str(audio), "--campaign", "dnd-mondays"]
+            main, ["transcribe", str(audio), "--campaign", "d-d-mondays"]
         )
 
-    assert captured.get("campaign") == "dnd-mondays", result.output
+    assert captured.get("campaign") == "d-d-mondays", result.output
+
+
+def test_cli_campaign_writes_into_the_folder(tmp_path, monkeypatch):
+    """--campaign without -o writes into the campaign's folder."""
+    from unittest.mock import patch
+    from wisper_transcribe import campaign_folders
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    (tmp_path / "output").mkdir()
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    campaign = create_campaign("D&D Mondays", data_dir=tmp_path)
+    folder = campaign_folders.ensure_folder(campaign.id, data_dir=tmp_path)
+
+    captured = {}
+    with patch("wisper_transcribe.pipeline.process_file",
+               side_effect=lambda path, **kw: (captured.update(kw), tmp_path / "session.md")[1]):
+        result = CliRunner().invoke(main, ["transcribe", str(audio), "--campaign", "d-d-mondays"])
+    assert result.exit_code == 0, result.output
+    assert Path(captured["output_dir"]) == folder
+
+
+def test_cli_campaign_with_output_root_writes_into_the_folder(tmp_path, monkeypatch):
+    """-o naming the output root writes into the campaign's folder."""
+    from unittest.mock import patch
+    from wisper_transcribe import campaign_folders
+    from wisper_transcribe.campaign_manager import create_campaign
+    from wisper_transcribe.config import get_output_root
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    (tmp_path / "output").mkdir()
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    campaign = create_campaign("D&D Mondays", data_dir=tmp_path)
+    folder = campaign_folders.ensure_folder(campaign.id, data_dir=tmp_path)
+
+    captured = {}
+    with patch("wisper_transcribe.pipeline.process_file",
+               side_effect=lambda path, **kw: (captured.update(kw), tmp_path / "s.md")[1]):
+        result = CliRunner().invoke(
+            main, ["transcribe", str(audio), "--campaign", "d-d-mondays",
+                   "-o", str(get_output_root())])
+    assert result.exit_code == 0, result.output
+    assert Path(captured["output_dir"]) == folder
+
+
+def test_cli_campaign_with_output_elsewhere_is_roster_only(tmp_path, monkeypatch):
+    """-o elsewhere leaves the output beside the input (roster-only)."""
+    from unittest.mock import patch
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    (tmp_path / "output").mkdir()
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    create_campaign("D&D Mondays", data_dir=tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+
+    captured = {}
+    with patch("wisper_transcribe.pipeline.process_file",
+               side_effect=lambda path, **kw: (captured.update(kw), tmp_path / "s.md")[1]):
+        result = CliRunner().invoke(
+            main, ["transcribe", str(audio), "--campaign", "d-d-mondays", "-o", str(elsewhere)])
+    assert result.exit_code == 0, result.output
+    assert Path(captured["output_dir"]) == elsewhere
+
+
+def test_cli_campaign_name_clash_is_refused(tmp_path, monkeypatch):
+    from unittest.mock import patch
+    from wisper_transcribe import campaign_folders
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    (tmp_path / "output").mkdir()
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    campaign = create_campaign("Game", data_dir=tmp_path)
+    folder = campaign_folders.ensure_folder(campaign.id, data_dir=tmp_path)
+    (folder / "session.md").write_text("old")
+
+    with patch("wisper_transcribe.pipeline.process_file") as mock_pf:
+        result = CliRunner().invoke(main, ["transcribe", str(audio), "--campaign", "game"])
+    assert result.exit_code != 0
+    assert "already in the campaign" in result.output
+    mock_pf.assert_not_called()
+    assert (folder / "session.md").read_text() == "old"
+
+
+def test_cli_campaign_keep_both_uses_the_timestamp(tmp_path, monkeypatch):
+    from unittest.mock import patch
+    from datetime import datetime
+    from wisper_transcribe import campaign_folders
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    (tmp_path / "output").mkdir()
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    campaign = create_campaign("Game", data_dir=tmp_path)
+    folder = campaign_folders.ensure_folder(campaign.id, data_dir=tmp_path)
+    (folder / "session.md").write_text("old")
+
+    captured = {}
+    with patch("wisper_transcribe.pipeline.process_file",
+               side_effect=lambda path, **kw: (captured.update(kw), tmp_path / "s.md")[1]), \
+         patch("wisper_transcribe.cli._keep_both_suffix", return_value="2026-10-05 0142"):
+        result = CliRunner().invoke(
+            main, ["transcribe", str(audio), "--campaign", "game", "--keep-both"])
+    assert result.exit_code == 0, result.output
+    assert captured["output_stem"] == "session (2026-10-05 0142)"
+
+    # A second clash in the same minute gets "(2)" appended.
+    (folder / "session (2026-10-05 0142).md").write_text("prior")
+    with patch("wisper_transcribe.pipeline.process_file",
+               side_effect=lambda path, **kw: (captured.update(kw), tmp_path / "s.md")[1]), \
+         patch("wisper_transcribe.cli._keep_both_suffix", return_value="2026-10-05 0142"):
+        result = CliRunner().invoke(
+            main, ["transcribe", str(audio), "--campaign", "game", "--keep-both"])
+    assert result.exit_code == 0, result.output
+    assert captured["output_stem"] == "session (2026-10-05 0142) (2)"
+
+
+def test_cli_campaign_overwrite_writes_over_a_misplaced_session_where_it_is(tmp_path, monkeypatch):
+    """--overwrite keeps the row: a session still in the root is overwritten there."""
+    from unittest.mock import patch
+    from wisper_transcribe import campaign_folders, transcript_store
+    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    root = tmp_path / "output"
+    root.mkdir()
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    campaign = create_campaign("Game", data_dir=tmp_path)
+    campaign_folders.ensure_folder(campaign.id, data_dir=tmp_path)
+    (root / "session.md").write_text("old")
+    tid = transcript_store.register(root / "session.md", origin="reconcile")
+    move_transcript_to_campaign(tid, "game")  # misplaced: its .md stays in the root
+
+    captured = {}
+    with patch("wisper_transcribe.pipeline.process_file",
+               side_effect=lambda path, **kw: (captured.update(kw), tmp_path / "s.md")[1]):
+        result = CliRunner().invoke(
+            main, ["transcribe", str(audio), "--campaign", "game", "--overwrite"])
+    assert result.exit_code == 0, result.output
+    assert Path(captured["output_dir"]) == root
+    assert captured["output_stem"] == "session"
+
+
+def test_cli_campaign_unknown_slug_is_refused(tmp_path, monkeypatch):
+    from unittest.mock import patch
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    (tmp_path / "output").mkdir()
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+
+    with patch("wisper_transcribe.pipeline.process_file") as mock_pf:
+        result = CliRunner().invoke(main, ["transcribe", str(audio), "--campaign", "nope"])
+    assert result.exit_code != 0
+    assert "No campaign" in result.output
+    mock_pf.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
