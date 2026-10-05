@@ -71,8 +71,8 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 | 3 — Transcript URLs by id; lists from the database | done (opencode; Claude review fixes) | 121ea73 |
 | 4 — Scan campaign folders: reconcile, sync, Needs attention | done (opencode; Claude review fixes) | 950048e |
 | 5 — Write into campaign folders: uploads, recordings, re-transcribe, CLI | done (opencode; Claude review fixes) | 63d3357 |
-| 6 — Moving a transcript moves its files; clash prompt; Rename | done (opencode; Claude review fixes) | |
-| 7 — Campaign create, rename, and delete with folders | not started | |
+| 6 — Moving a transcript moves its files; clash prompt; Rename | done (opencode; Claude review fixes) | 4223250 |
+| 7 — Campaign create, rename, and delete with folders | in progress (opencode: 7a) | |
 | 8 — `wisper storage trim` organizes folders; prune backups | not started | |
 | 9 — Holistic docs, comments, and tests review | not started | |
 | 10 — Final review and rehearsals (orchestrator) | not started | |
