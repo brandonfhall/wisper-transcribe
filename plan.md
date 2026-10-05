@@ -74,7 +74,7 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 | 6 — Moving a transcript moves its files; clash prompt; Rename | done (opencode; Claude review fixes) | 4223250 |
 | 7 — Campaign create, rename, and delete with folders | done (opencode; Claude review fixes) | 11b89bf |
 | 8 — `wisper storage trim` organizes folders; prune backups | done (opencode; Claude review fixes) | c01f510 |
-| 9 — Holistic docs, comments, and tests review | in progress (opencode: 9) | |
+| 9 — Holistic docs, comments, and tests review | done (opencode; Claude review fixes) | (this commit) |
 | 10 — Final review and rehearsals (orchestrator) | not started | |
 
 ### Hand-offs to opencode (2026-10-05)
@@ -1736,6 +1736,8 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
 ---
 
 ### Phase 9 — Holistic docs, comments, and tests review (worker, read and fix; no behaviour changes)
+
+*Done (opencode; Claude review fixes). The worker found no bugs and added tests for Decisions rows 12, 17, 18 and 28. The orchestrator's read-through fixed `architecture.md`'s flat output-tree diagram, the lock's home, and the create/delete folder wording.*
 
 A worker may add tests here (for a Decisions row with none). A test that exposes a bug is reported to the orchestrator, marked in the report, and not fixed in this phase; the orchestrator decides whether a fix phase runs before Phase 10.
 

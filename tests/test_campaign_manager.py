@@ -47,7 +47,7 @@ def _move(stem, slug, data_dir=None):
 
 @pytest.fixture(autouse=True)
 def _profiles(tmp_path):
-    """Members must be real profiles now (campaign_members has a foreign key)."""
+    """Members must be real profiles (campaign_members has a foreign key)."""
     seed_profiles("alice", "bob", data_dir=tmp_path)
 
 
@@ -677,7 +677,7 @@ def test_profile_removal_drops_its_memberships(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Constraints the schema now enforces
+# Constraints the schema enforces
 # ---------------------------------------------------------------------------
 
 def test_add_member_requires_existing_profile(tmp_path):

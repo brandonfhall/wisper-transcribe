@@ -1438,8 +1438,8 @@ def test_process_file_explicit_medium_not_overridden_by_config(
     mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg, tmp_path
 ):
     """A caller who explicitly asks for 'medium' must get
-    'medium', even though config specifies a different model. Before the
-    fix, 'medium' was itself the sentinel and got silently overridden."""
+    'medium', even though config specifies a different model: 'medium' is a
+    real value, not the 'unset' sentinel."""
     audio = tmp_path / "ep.mp3"
     audio.write_bytes(b"fake")
     mock_convert.return_value = audio

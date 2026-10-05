@@ -1473,7 +1473,7 @@ def register(md_path: Path, *, origin: Literal["job", "reconcile"],
                 log.info("Reused the name of a previously missing transcript: %s", stem)
         if origin == "job":
             # Overwritten or re-transcribed: a journal that folded the old text
-            # now describes something else. Flag it; never un-fold automatically.
+            # describes something else. Flag it; never un-fold automatically.
             conn.execute(
                 "UPDATE campaigns SET journal_stale_since = coalesce(journal_stale_since, ?) "
                 "WHERE id IN (SELECT campaign_id FROM journal_entries WHERE transcript_id = ?)",

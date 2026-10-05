@@ -202,6 +202,21 @@ def test_campaign_comes_from_the_transcripts_current_campaign():
     assert [r.id for r in job_history.list_jobs(campaign="other")[0]] == [JID]
 
 
+def test_campaign_rename_drops_a_params_only_jobs_link():
+    """A job whose only campaign link is the slug in params_json loses it after
+    the campaign is renamed: the stored slug no longer resolves."""
+    from wisper_transcribe.campaign_folders import rename_campaign
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    create_campaign("Game")
+    job_history.record(_job(status="completed", kwargs={"campaign": "game"}))
+    assert job_history.get_job(JID).campaign_name == "Game"
+
+    assert rename_campaign("game", "Renamed").status == "renamed"
+    assert job_history.get_job(JID).campaign_name is None
+    assert job_history.get_job(JID).campaign_slug is None
+
+
 def test_campaign_falls_back_to_recording_then_submit_params():
     from wisper_transcribe.campaign_manager import create_campaign
 

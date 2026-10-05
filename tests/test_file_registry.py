@@ -1000,7 +1000,7 @@ def test_deleting_a_campaign_keeps_the_journal_file_untracked(out, data):
     result = journal.update_journal("my-game", _Client(), {})
     delete_campaign("my-game")
     assert result.path.is_file() and _count() == 1  # only the transcript row is left
-    assert result.path not in fr.sync(out, data).unclaimed  # no campaign claims its folder now
+    assert result.path not in fr.sync(out, data).unclaimed  # no campaign claims its folder
 
 
 def test_local_finalise_registers_combined_per_user_and_the_live_draft(data, monkeypatch):

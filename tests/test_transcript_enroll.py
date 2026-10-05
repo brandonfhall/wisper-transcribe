@@ -262,7 +262,7 @@ def test_sidecar_not_written_when_no_segments(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# GET /transcripts/{name}/enroll
+# GET /transcripts/{id}/enroll
 # ---------------------------------------------------------------------------
 
 def test_enroll_form_renders_with_sidecar(client: TestClient, tmp_path: Path):
@@ -335,7 +335,7 @@ def test_enroll_form_orders_speakers_by_first_appearance(client: TestClient, tmp
 
 
 # ---------------------------------------------------------------------------
-# POST /transcripts/{name}/enroll
+# POST /transcripts/{id}/enroll
 # ---------------------------------------------------------------------------
 
 def test_enroll_submit_renames_transcript(client: TestClient, tmp_path: Path):
@@ -952,7 +952,7 @@ def test_enroll_submit_no_renames_redirects_without_write(
 
 
 # ---------------------------------------------------------------------------
-# GET /transcripts/{name}/excerpt/{speaker_name}
+# GET /transcripts/{id}/excerpt/{speaker_name}
 # ---------------------------------------------------------------------------
 
 def test_excerpt_serves_clip(client: TestClient, tmp_path: Path):

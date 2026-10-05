@@ -56,7 +56,7 @@ def seed_profiles(*keys: str, data_dir: Optional[Path] = None) -> None:
 
 
 def sidecar_data(sidecar_path: Path) -> dict:
-    """What a ``<stem>_diar.json`` means now: its segments plus the speaker
+    """What a ``<stem>_diar.json`` holds: its segments plus the speaker
     fields stored in the database (``transcript_store.read_sidecar``)."""
     from wisper_transcribe.transcript_store import SIDECAR_SUFFIX, read_sidecar
 

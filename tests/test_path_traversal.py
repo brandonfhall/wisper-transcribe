@@ -128,6 +128,23 @@ def test_legacy_name_url_chooses_between_same_named_campaigns(client, tmp_path, 
     assert "Alpha" in resp.text and "Beta" in resp.text
 
 
+def test_legacy_name_url_subpage_does_not_redirect(client, tmp_path, monkeypatch):
+    """Only the page URL redirects by name; an old sub-page URL (``/summary``,
+    ``/audio``, ``/edit``) isn't resolved by name and returns 404."""
+    from wisper_transcribe import transcript_store
+
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    md = out / "Session 1.md"
+    md.write_text("x", encoding="utf-8")
+    transcript_store.register(md, origin="reconcile")
+
+    for suffix in ("summary", "audio", "edit"):
+        resp = client.get(f"/transcripts/Session%201/{suffix}", follow_redirects=False)
+        assert resp.status_code == 404, suffix
+
+
 def test_legacy_name_url_unknown_redirects_to_not_found(client):
     resp = client.get("/transcripts/no-such-session", follow_redirects=False)
     assert resp.status_code == 303

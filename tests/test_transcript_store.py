@@ -1292,6 +1292,23 @@ def test_check_move_clash_names_the_existing_transcript(out):
     assert check.overwrite_allowed is True and check.clash_modified
 
 
+def test_check_move_clash_ignores_case_on_a_case_insensitive_filesystem(out, monkeypatch):
+    """A rename differing only in case clashes with another session there."""
+    cid, slug, folder = _claimed_campaign("Game")
+    mover = _seed.seed_transcript("Session", write_md=True)
+    other = _insert_session("Other", campaign_id=cid, position=0)
+    md = out / folder / "Other.md"
+    md.write_text("x", encoding="utf-8")
+    file_registry.add(md, kind="transcript",
+                      owner=file_registry.Owner("transcript", other), output_dir=out)
+    with db.transaction() as conn:
+        conn.execute("UPDATE transcripts SET missing_since = NULL WHERE id = ?", (other,))
+
+    monkeypatch.setattr(file_registry, "_fold", lambda d: True)
+    check = ts.check_move(mover, slug, new_stem="other")
+    assert check.status == "clash" and check.existing_id == other
+
+
 def test_check_move_reserved_when_the_name_is_the_journal(out):
     cid, slug, folder = _claimed_campaign("Game")
     tid = _seed.seed_transcript("S", write_md=True)
@@ -1632,7 +1649,7 @@ def test_drag_a_misplaced_session_home_keeps_id_and_position(out):
 
 
 def test_drag_a_misplaced_session_home_after_editing_it_keeps_its_row(out):
-    # Its size and modified time no longer match the registry, so only the
+    # Its size and modified time disagree with the registry, so only the
     # (campaign, name) row can claim it: the row's own .md is gone.
     cid, slug, folder = _claimed_campaign("Game")
     tid = _seed.seed_transcript("Session 1", campaign=slug)
@@ -2075,6 +2092,32 @@ def test_move_overwrite_locked_target_returns_locked_and_changes_nothing(out, mo
     assert outcome.status == "locked"
     assert other_md.exists() and md.exists()
     assert ts.locate(other).stem == "S" and ts.locate(mover).campaign_id is None
+
+
+def test_move_overwrite_locked_mover_keeps_the_deleted_target(out, monkeypatch):
+    """When Overwrite deletes the target and the mover's own move is then
+    refused, the overwritten session stays deleted and the mover is unchanged."""
+    from ._moves import claimed_campaign, placed_session
+
+    cid, slug, folder = claimed_campaign("Game")
+    other, other_md = placed_session("S", campaign=slug, directory=out / folder)
+    mover, md = placed_session("S")
+
+    real_replace = os.replace
+
+    def guarded(src, dst, *a, **k):
+        if Path(dst).name == "S.md" and Path(dst).parent.name == folder:
+            raise PermissionError(32, "The process cannot access the file")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", guarded)
+    monkeypatch.setattr(os, "rename", guarded)
+
+    outcome = ts.move_transcript(mover, slug, clash="overwrite")
+    assert outcome.status == "locked"
+    assert not other_md.exists()          # the overwritten session's file is gone
+    assert ts.locate(other) is None       # the overwritten session stays deleted
+    assert md.exists() and ts.locate(mover).campaign_id is None
 
 
 def test_move_overwrite_refused_late_by_a_job_on_the_target(out, tmp_path):

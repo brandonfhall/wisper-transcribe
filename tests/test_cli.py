@@ -395,7 +395,7 @@ def test_transcribe_cli_raises_click_exception_on_error(tmp_path):
 def test_transcribe_cli_language_auto_passes_through(tmp_path):
     """--language auto is forwarded as the literal string "auto" — process_file
     (not the CLI) is responsible for turning it into None for auto-detection,
-    since None is now the CLI's own "unset, use config" sentinel."""
+    since None is the CLI's own "unset, use config" sentinel."""
     audio = tmp_path / "test.mp3"
     audio.write_bytes(b"fake")
 

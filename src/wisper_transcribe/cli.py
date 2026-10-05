@@ -1333,13 +1333,14 @@ def campaigns_journal(slug: str, session: Optional[str], fold_all: bool,
     """Fold session summaries into a rolling campaign journal.
 
     The journal is a single living document at
-    ``campaigns/<slug>/journal.md`` that the LLM rewrites as each new session
-    is folded in. With no flags it folds the next unjournalled session (one
-    that has a ``.summary.md`` from `wisper summarize`). Pass ``--all`` to fold
-    every pending session, ``--session <stem>`` to fold a specific one,
-    ``--rebuild`` to start the journal over from the existing summaries
-    (add ``--resummarize`` to re-summarize the transcripts first), or
-    ``--export`` to print it with its folded-session list.
+    ``<output root>/<folder>/<folder> Journal.md`` in the campaign's folder,
+    which the LLM rewrites as each new session is folded in. With no flags it
+    folds the next unjournalled session (one that has a ``.summary.md`` from
+    `wisper summarize`). Pass ``--all`` to fold every pending session,
+    ``--session <stem>`` to fold a specific one, ``--rebuild`` to start the
+    journal over from the existing summaries (add ``--resummarize`` to
+    re-summarize the transcripts first), or ``--export`` to print it with its
+    folded-session list.
     """
     from .campaign_manager import _validate_campaign_slug, get_transcripts_for_campaign, load_campaigns
     from .journal import (
