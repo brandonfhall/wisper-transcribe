@@ -68,8 +68,8 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 | 1 — Schema v11; campaign queries; journal into the campaign folder | done | ffd78f4 |
 | 2a — Location API (`transcript_store.locate` and friends), no callers changed | done (opencode; Claude review fixes) | a051bf1 + next |
 | 2b — Every caller resolves through the location API | done (opencode; Claude review fixes) | |
-| 3 — Transcript URLs by id; lists from the database | done (opencode; Claude review fixes) | |
-| 4 — Scan campaign folders: reconcile, sync, Needs attention | not started | |
+| 3 — Transcript URLs by id; lists from the database | done (opencode; Claude review fixes) | 121ea73 |
+| 4 — Scan campaign folders: reconcile, sync, Needs attention | in progress (opencode, DeepSeek v4 Pro) | |
 | 5 — Write into campaign folders: uploads, recordings, re-transcribe, CLI | not started | |
 | 6 — Moving a transcript moves its files; clash prompt; Rename | not started | |
 | 7 — Campaign create, rename, and delete with folders | not started | |
@@ -90,6 +90,7 @@ Brandon is trying a non-Claude agent (opencode with DeepSeek) on the mechanical 
   - Reuse the existing helpers (`file_registry._find_by_path`, `transcript_store._stem_row`, `campaign_folders.holds_only_wisper`, `locate`/`locate_path`/`find_by_stem`) instead of re-implementing them.
 - **No real data:** tests use tmp dirs only; never set `WISPER_DATA_DIR` or `WISPER_OUTPUT_DIR` to a real folder, and never run `wisper` against Brandon's data dir (`~/Library/Application Support/wisper-transcribe`).
 - **Tests:** while iterating run your modules' test files; at the end run `.venv/bin/pytest tests/ -q -p no:cacheprovider`. Between hand-offs of one phase, failures in modules a later hand-off converts are expected; list them in your final message.
+- **One fresh session per hand-off:** resuming a long session hung opencode at startup once (Phase 3c).
 - **Don't commit, push, or stage.** Leave your changes in the working tree; Claude reviews `git diff` and stages what it accepts. Don't edit this file's Status table.
 - **Final message** (at most ~400 words): files changed; each step done or not; test counts; expected failures; any disagreement with the plan.
 
@@ -1172,6 +1173,7 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
 - Reconcile and sync tests that assert a full set of scanned files may need the journal-file exclusion. Otherwise none; root behaviour is unchanged.
 
 **New tests** (`tests/test_transcript_store.py`, `tests/test_file_registry.py`):
+- (moved from Phase 3, `tests/test_web_routes.py`) the campaign page shows a session whose `.md` and summary are in the campaign folder as present and summarized (seeded by hand).
 - A `.md` copied into a campaign folder becomes that campaign's transcript, at the end.
 - **Drag between campaigns** (`os.replace` keeps mtime): the transcript moves from A to B with its summary, sidecar, excerpts, and audio. Its journal entry is gone, and A's journal is stale.
 - A drag into the root unassigns the transcript.
