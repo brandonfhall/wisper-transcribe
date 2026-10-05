@@ -124,13 +124,13 @@ The sheet lists rows marked `discriminating` first: those are the words where th
 
 ## Free up disk space used by older transcripts
 
-Older uploads keep the whole original file (often a video), and older recordings keep several copies of their audio. The server reminds you once, on the start that upgrades the database, when there is something to trim.
+Older uploads keep the whole original file (often a video), and older recordings keep several copies of their audio. The server reminds you once, on the start that upgrades the database, when there is something to trim or existing sessions to move into their campaign folders.
 
 1. Stop the web server.
 2. Run `wisper storage trim` and review the list. Nothing is changed.
 3. Run `wisper storage trim --apply`.
 
-Each transcript keeps one compact `<name>.flac`, and each recording keeps `combined.wav`. See [cli-reference.md](cli-reference.md#wisper-storage).
+Each session moves into its campaign's folder with its summary, speaker data, clips, and audio, each transcript keeps one compact `<name>.flac`, and each recording keeps `combined.wav`. See [cli-reference.md](cli-reference.md#wisper-storage).
 
 ---
 

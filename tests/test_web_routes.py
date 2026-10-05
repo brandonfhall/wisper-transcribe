@@ -4278,35 +4278,84 @@ def test_startup_logs_what_needs_attention(tmp_path, monkeypatch, caplog):
     assert (get_output_dir() / "ghost.summary.md").exists()
 
 
-def _start_after_v8(monkeypatch, caplog, audio_name=None):
-    """Start the app on a v8 database (one transcript, with ``audio_name`` as
-    its audio file if given) and return the startup warnings."""
+def _start_after(monkeypatch, caplog, *, version, seed=None):
+    """Start the app on a database stopped at ``version`` and return its
+    startup warnings. ``seed`` runs against that older schema; the app's first
+    ``connect()`` migrates it to ``db.LATEST_VERSION``."""
     import logging
     from fastapi.testclient import TestClient
     from wisper_transcribe import db
-    from wisper_transcribe.path_utils import get_output_dir
     from wisper_transcribe.web.app import create_app
 
     with monkeypatch.context() as patched:
-        patched.setattr(db, "MIGRATIONS", db.MIGRATIONS[:8])
-        patched.setattr(db, "LATEST_VERSION", 8)
+        patched.setattr(db, "MIGRATIONS", db.MIGRATIONS[:version])
+        patched.setattr(db, "LATEST_VERSION", version)
         db.migrate()
-        with db.transaction() as conn:
-            conn.execute("INSERT INTO transcripts (stem, created_at, audio_rel_path) "
-                         "VALUES ('s1', 'now', ?)", (audio_name,))
-    (get_output_dir() / "s1.md").write_text("# s1", encoding="utf-8")
-    if audio_name:
-        (get_output_dir() / audio_name).write_bytes(b"not really video")
+        if seed is not None:
+            seed()
     with caplog.at_level(logging.WARNING):
         with TestClient(create_app()):
             pass
     return [r.getMessage() for r in caplog.records]
 
 
+def test_wisper_server_reports_the_upgrade_its_own_connect_applied(monkeypatch, caplog):
+    """`wisper server` migrates before the app starts, so it reports the upgrade."""
+    import logging
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+    from wisper_transcribe import db
+    from wisper_transcribe.cli import main
+
+    with monkeypatch.context() as patched:
+        patched.setattr(db, "MIGRATIONS", db.MIGRATIONS[:8])
+        patched.setattr(db, "LATEST_VERSION", 8)
+        db.migrate()
+    with caplog.at_level(logging.WARNING), patch("uvicorn.run"):
+        result = CliRunner().invoke(main, ["server", "--port", "8099"])
+    assert result.exit_code == 0, result.output
+    assert any(r.getMessage().startswith("Database upgraded from version 8")
+               for r in caplog.records)
+
+
+def _seed_v8_transcript(audio_name=None):
+    """A v8 database with one root transcript and, if given, its audio file."""
+    from wisper_transcribe import db
+    from wisper_transcribe.path_utils import get_output_dir
+
+    def seed():
+        with db.transaction() as conn:
+            conn.execute("INSERT INTO transcripts (stem, created_at, audio_rel_path) "
+                         "VALUES ('s1', 'now', ?)", (audio_name,))
+        (get_output_dir() / "s1.md").write_text("# s1", encoding="utf-8")
+        if audio_name:
+            (get_output_dir() / audio_name).write_bytes(b"not really video")
+    return seed
+
+
+def _seed_campaign_transcript():
+    """An older database with one campaign and one session assigned to it, its
+    ``.md`` in the root (so v11 reads it as misplaced). No audio to convert."""
+    from wisper_transcribe import db
+    from wisper_transcribe.path_utils import get_output_dir
+
+    def seed():
+        with db.transaction() as conn:
+            conn.execute("INSERT INTO campaigns (id, slug, display_name, created_at) "
+                         "VALUES (1, 'game', 'Game', 'now')")
+            conn.execute("INSERT INTO transcripts (id, stem, created_at) VALUES (1, 's1', 'now')")
+            conn.execute("INSERT INTO campaign_transcripts (transcript_id, campaign_id, position) "
+                         "VALUES (1, 1, 0)")
+        (get_output_dir() / "s1.md").write_text("# s1", encoding="utf-8")
+    return seed
+
+
 def test_startup_reports_a_database_upgrade_and_suggests_a_trim(monkeypatch, caplog):
     from wisper_transcribe import db
 
-    messages = _start_after_v8(monkeypatch, caplog, "s1.mp4")
+    messages = _start_after(monkeypatch, caplog, version=8,
+                            seed=_seed_v8_transcript("s1.mp4"))
     (upgraded,) = [m for m in messages if m.startswith("Database upgraded")]
     assert upgraded.startswith(f"Database upgraded from version 8 to {db.LATEST_VERSION}; "
                                "previous copy in backups/wisper-v8-")
@@ -4314,9 +4363,23 @@ def test_startup_reports_a_database_upgrade_and_suggests_a_trim(monkeypatch, cap
 
 
 def test_startup_upgrade_without_audio_to_trim_has_no_trim_hint(monkeypatch, caplog):
-    messages = _start_after_v8(monkeypatch, caplog)
+    messages = _start_after(monkeypatch, caplog, version=8, seed=_seed_v8_transcript())
     assert any(m.startswith("Database upgraded from version 8") for m in messages)
     assert not any("wisper storage trim" in m for m in messages)
+
+
+def test_startup_after_v10_assigned_session_suggests_organizing(monkeypatch, caplog):
+    messages = _start_after(monkeypatch, caplog, version=10,
+                            seed=_seed_campaign_transcript())
+    assert any("move existing sessions into their campaign folders" in m for m in messages)
+    assert not any("Stored audio can be shrunk" in m for m in messages)
+
+
+def test_startup_after_v8_assigned_session_suggests_only_organizing(monkeypatch, caplog):
+    messages = _start_after(monkeypatch, caplog, version=8,
+                            seed=_seed_campaign_transcript())
+    assert any("move existing sessions into their campaign folders" in m for m in messages)
+    assert not any("Stored audio can be shrunk" in m for m in messages)
 
 
 def test_startup_on_a_new_database_reports_no_upgrade(caplog):
@@ -4327,7 +4390,10 @@ def test_startup_on_a_new_database_reports_no_upgrade(caplog):
     with caplog.at_level(logging.WARNING):
         with TestClient(create_app()):
             pass
-    assert not any("Database upgraded" in r.getMessage() for r in caplog.records)
+    messages = [r.getMessage() for r in caplog.records]
+    assert not any("Database upgraded" in m for m in messages)
+    assert not any("campaign folders" in m for m in messages)
+    assert not any("Stored audio" in m for m in messages)
 
 
 # ---------------------------------------------------------------------------

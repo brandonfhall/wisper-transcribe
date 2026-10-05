@@ -249,6 +249,119 @@ def test_second_run_is_a_noop(out, encode, probe):
     assert _snapshot(out) == before
 
 
+# --- organize: move sessions into their campaign folders ---------------------
+
+def _campaign_with_misplaced(stem: str, *, display: str = "Game"):
+    """A claimed campaign and a session assigned to it whose files are in the root.
+
+    Returns ``(slug, folder, tid, md)``.
+    """
+    from tests._moves import claimed_campaign, placed_session
+
+    _cid, slug, folder = claimed_campaign(display)
+    tid, md = placed_session(stem, campaign=slug)
+    return slug, folder, tid, md
+
+
+def test_plan_lists_misplaced_sessions_and_moves_nothing(out):
+    _slug, folder, tid, md = _campaign_with_misplaced("Stray")
+    before = _tree(out)
+    plan = storage_trim.plan()
+
+    moves = [a for a in plan.actions if a.kind == storage_trim.ORGANIZE]
+    assert [(a.stem, a.transcript_id, a.path.name, a.note) for a in moves] == [
+        ("Stray", tid, "Stray.md", f"→ {folder}/")]
+    assert plan.move_bytes >= md.stat().st_size
+    assert _tree(out) == before          # a plan changes nothing
+    assert plan.attention.misplaced and plan.attention.total
+
+
+def test_apply_moves_every_file_into_the_folder_and_a_rerun_plans_nothing(out, encode, probe):
+    from tests._moves import add_companion
+
+    _slug, folder, tid, md = _campaign_with_misplaced("Stray")
+    add_companion(tid, md, ".summary.md")
+    add_companion(tid, md, "_diar.json")
+    add_companion(tid, md, ".flac")
+
+    report = storage_trim.apply()
+    assert report.organized == ["Stray"] and not report.errors
+    assert (out / folder / "Stray.md").is_file()
+    assert (out / folder / "Stray.summary.md").is_file()
+    assert (out / folder / "Stray_diar.json").is_file()
+    assert (out / folder / "Stray.flac").is_file()
+    assert not (out / "Stray.md").exists()
+    assert transcript_store.locate(tid).misplaced is False
+    assert not [a for a in storage_trim.plan().actions if a.kind == storage_trim.ORGANIZE]
+
+
+def test_organize_clash_is_reported_and_skipped(out, encode, probe):
+    _slug, folder, _tid, md = _campaign_with_misplaced("Stray")
+    (out / folder / "Stray.md").write_text("someone else\n", encoding="utf-8")
+
+    report = storage_trim.apply()
+    assert any("Stray: a file with that name is already in Game" in e for e in report.errors)
+    assert not report.organized
+    assert md.is_file() and (out / folder / "Stray.md").read_text(encoding="utf-8") == "someone else\n"
+
+
+def test_organize_moves_a_legacy_journal(out, encode, probe):
+    from tests._seed import seed_campaign
+    from wisper_transcribe import journal
+
+    seed_campaign("Game", slug="game")   # unclaimed: adoption claims the folder
+    legacy = journal.legacy_journal_path("game")
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("---\ntitle: Game\n---\n## Story So Far\n", encoding="utf-8")
+
+    plan = storage_trim.plan()
+    assert any(a.slug == "game" and a.note == "journal" for a in plan.actions)
+
+    report = storage_trim.apply()
+    target = out / "Game" / "Game Journal.md"
+    assert target.is_file() and "## Story So Far" in target.read_text(encoding="utf-8")
+    assert not legacy.exists()
+    assert (legacy.parent / "journal.md.v11-adopted").is_file()
+    assert report.organized == ["game"]
+
+
+def test_organize_runs_before_convert_so_the_flac_lands_in_the_folder(out, encode, probe):
+    from tests import _seed
+
+    slug, folder, tid, _md = _campaign_with_misplaced("Session 1")
+    audio = out / "Session 1.mp4"
+    audio.write_bytes(b"v" * 64)
+    file_registry.add(audio, kind="audio",
+                      owner=file_registry.Owner("transcript", tid),
+                      output_dir=out)
+
+    plan = storage_trim.plan()
+    kinds = [a.kind for a in plan.actions]
+    assert kinds.index(storage_trim.ORGANIZE) < kinds.index(storage_trim.CONVERT)
+
+    storage_trim.apply()
+    assert (out / folder / "Session 1.flac").is_file()
+    assert not (out / folder / "Session 1.mp4").exists()
+    assert not (out / "Session 1.mp4").exists() and not (out / "Session 1.flac").exists()
+    assert transcript_store.locate(tid).misplaced is False
+
+
+def test_blocked_campaign_is_reported_not_planned_on_every_run(out):
+    from tests import _seed
+
+    cid = _seed.seed_campaign("Game", slug="game")   # unclaimed
+    (out / "Game").mkdir()
+    (out / "Game" / "notes.md").write_text("# mine\n", encoding="utf-8")
+    tid = _seed.seed_transcript("Stray", campaign="game", write_md=True)
+
+    for _ in range(2):
+        plan = storage_trim.plan()
+        assert [a for a in plan.actions if a.kind == storage_trim.ORGANIZE] == []
+        assert plan.blocked == [("Game", 1, "folder taken")]
+        assert _seed.transcript_id("Stray") == tid
+    assert (out / "Stray.md").is_file()
+
+
 # --- locks -------------------------------------------------------------------
 
 def test_server_lock_is_exclusive_within_a_process(tmp_path):

@@ -73,7 +73,7 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 | 5 — Write into campaign folders: uploads, recordings, re-transcribe, CLI | done (opencode; Claude review fixes) | 63d3357 |
 | 6 — Moving a transcript moves its files; clash prompt; Rename | done (opencode; Claude review fixes) | 4223250 |
 | 7 — Campaign create, rename, and delete with folders | done (opencode; Claude review fixes) | 11b89bf |
-| 8 — `wisper storage trim` organizes folders; prune backups | in progress (opencode: 8) | |
+| 8 — `wisper storage trim` organizes folders; prune backups | done (opencode; Claude review fixes) | (this commit) |
 | 9 — Holistic docs, comments, and tests review | not started | |
 | 10 — Final review and rehearsals (orchestrator) | not started | |
 
@@ -1672,6 +1672,8 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
 ---
 
 ### Phase 8 — `wisper storage trim` organizes folders; prune backups
+
+*Done (opencode; Claude review fixes). Differs from the plan: `TrimPlan.blocked` carries the blocked-campaign lines; `wisper server` reports the upgrade itself, because its pre-start `connect()` migrates before the app's lifespan sees the old version (this hid PR #69's notice too); the dry run's "Needs attention (N)" counts only what it lists below it.*
 
 **Goal:**
 - Existing transcripts move into their campaign folders through `wisper storage trim`.

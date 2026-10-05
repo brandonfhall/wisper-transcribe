@@ -999,6 +999,29 @@ def _snapshot(path: Path, data_dir: Path, version: int) -> Path:
     return dest
 
 
+_SNAPSHOT_RE = re.compile(r"^wisper-v\d+-(\d{8}T\d{6}Z)\.db$")
+
+
+def _prune_snapshots(data_dir: Path, keep: int = 5) -> None:
+    """Delete all but the newest ``keep`` migration snapshots in ``backups/``.
+
+    Sorts by the parsed ``-<stamp>.db`` part, not the whole name (``v10`` sorts
+    before ``v9`` as text). Only ``wisper-v<N>-<stamp>.db`` files are touched;
+    legacy import dirs and reports are left alone.
+    """
+    try:
+        found: list[tuple[str, Path]] = []
+        for path in (data_dir / "backups").iterdir():
+            match = _SNAPSHOT_RE.match(path.name)
+            if match is not None and path.is_file():
+                found.append((match.group(1), path))
+        found.sort(key=lambda pair: pair[0])
+        for _stamp, path in found[:-keep]:
+            path.unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning("Could not prune old database snapshots: %s", exc)
+
+
 def migrate(data_dir: Optional[Path] = None) -> list[int]:
     """Bring the database up to :data:`LATEST_VERSION`. Returns versions applied.
 
@@ -1036,10 +1059,10 @@ def migrate(data_dir: Optional[Path] = None) -> list[int]:
             return applied
 
         conn.execute("BEGIN IMMEDIATE")
+        snapshot = None
         try:
             current = _user_version(conn)  # re-read under the write lock
             _check_not_too_new(current)
-            snapshot = None
             if 0 < current < LATEST_VERSION:
                 snapshot = _snapshot(path, data_dir, current)
             for m in MIGRATIONS:
@@ -1071,6 +1094,9 @@ def migrate(data_dir: Optional[Path] = None) -> list[int]:
             raise
     finally:
         conn.close()
+
+    if snapshot is not None:
+        _prune_snapshots(data_dir)
 
     _write_report(data_dir, contexts)
     for ctx in contexts:

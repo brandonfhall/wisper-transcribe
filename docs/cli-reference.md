@@ -510,7 +510,7 @@ Every command that uses the database stops with a clear message, not a traceback
 
 ### `wisper storage`
 
-Reclaim disk space used by older transcripts and recordings.
+Move sessions into their campaign folders, and reclaim disk space used by older transcripts and recordings.
 
 ```bash
 wisper storage trim                  # dry run: list what would change
@@ -518,8 +518,9 @@ wisper storage trim --apply          # do it
 wisper storage trim --apply --device cpu
 ```
 
-`trim` is a dry run unless you pass `--apply`. It prints one line per action (what it does, the file's current size, the file), the space the deletions free, the size of the files to convert, and the Needs-attention list, and changes nothing. The actions, in order:
+`trim` is a dry run unless you pass `--apply`. It prints one line per action (what it does, the file or session, its current size, and where a session is going), the space the deletions free, the size of the files to convert, and the Needs-attention list, and changes nothing. The actions, in order:
 
+- **Move sessions into campaign folders.** A session still in the transcripts root (or elsewhere) that a campaign holds moves into that campaign's folder, with its summary, speaker data, clips, and audio. A campaign journal still in the data dir moves into the campaign folder too. Run this once after upgrading; a campaign whose folder is taken, mid-rename, or missing is reported instead, to fix from the Transcripts page.
 - **Match renames.** Transcripts renamed outside wisper are matched first, as at server start.
 - **Convert transcript audio.** Each transcript's audio becomes a 16 kHz mono `<name>.flac`, the form new uploads keep. Speaker voices the transcript lacks are extracted from the original audio first. A `.flac` already at 16 kHz mono is left alone. If a conversion fails, the original stays and the failure is listed.
   - A video or a large WAV shrinks to about 90 MB per hour of audio.
@@ -528,7 +529,7 @@ wisper storage trim --apply --device cpu
 - **Delete recording copies.** A transcript made from a recording uses the recording's `combined.wav`, so its own copy is deleted. A `<recording-id>.wav` in the transcripts folder that no transcript uses is deleted too.
 - **Trim recordings.** Segment and per-user audio is removed once `combined.wav` is verified complete.
 
-It deletes only files wisper tracks, plus those unused `<recording-id>.wav` copies. Other files in the transcripts folder are never touched. Needs-attention items (missing transcripts, missing files, files with no transcript) are listed, never deleted.
+It moves only sessions a campaign holds and deletes only files wisper tracks, plus those unused `<recording-id>.wav` copies. Other files in the transcripts folder are never touched. Needs-attention items (missing transcripts, missing files, files with no transcript) are listed, never deleted.
 
 | Flag | Meaning |
 |------|---------|

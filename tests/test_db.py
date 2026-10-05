@@ -238,6 +238,70 @@ def test_upgrade_snapshots_existing_db(monkeypatch, data_dir):
         assert conn.execute("PRAGMA user_version").fetchone()[0] == NEXT - 1
 
 
+def _write_snapshots(data_dir, pairs) -> None:
+    backups = data_dir / "backups"
+    backups.mkdir(parents=True, exist_ok=True)
+    for version, stamp in pairs:
+        (backups / f"wisper-v{version}-{stamp}.db").write_bytes(b"db")
+
+
+def test_prune_snapshots_keeps_newest_five_by_stamp(data_dir):
+    # Interleaved versions, so a whole-name sort (which ranks every v10 before
+    # every v9) would keep the wrong five.
+    pairs = [("10", "20260101T000000Z"), ("9", "20260102T000000Z"),
+             ("10", "20260103T000000Z"), ("9", "20260104T000000Z"),
+             ("10", "20260105T000000Z"), ("9", "20260106T000000Z"),
+             ("10", "20260107T000000Z")]
+    _write_snapshots(data_dir, pairs)
+    backups = data_dir / "backups"
+    legacy = backups / "pre-sqlite-v4-20260101T000000Z"
+    legacy.mkdir()
+    (legacy / "legacy.json").write_text("{}", encoding="utf-8")
+    report = backups / "import-report-20260101T000000Z.txt"
+    report.write_text("x", encoding="utf-8")
+
+    db._prune_snapshots(data_dir)
+
+    remaining = sorted(p.name for p in backups.glob("wisper-v*.db"))
+    assert remaining == [
+        "wisper-v10-20260103T000000Z.db", "wisper-v10-20260105T000000Z.db",
+        "wisper-v10-20260107T000000Z.db", "wisper-v9-20260104T000000Z.db",
+        "wisper-v9-20260106T000000Z.db",
+    ]
+    assert legacy.is_dir() and (legacy / "legacy.json").is_file()
+    assert report.is_file()
+
+
+def test_prune_snapshots_tolerates_a_missing_backups_dir(data_dir):
+    db._prune_snapshots(data_dir)  # never raises
+
+
+def test_migrate_prunes_snapshots(monkeypatch, data_dir):
+    db.migrate()
+    _write_snapshots(data_dir, [(f"1{i}", f"2026010{i}T000000Z") for i in range(1, 7)])
+    _fake_migration(monkeypatch, db.Migration(NEXT, "more", "CREATE TABLE t2 (x INTEGER) STRICT;"))
+    assert db.migrate() == [NEXT]
+    snaps = list((data_dir / "backups").glob("wisper-v*.db"))
+    assert len(snaps) == 5
+    # The migration's own snapshot is the newest and survives.
+    with db.connection() as conn:
+        backup_dir = conn.execute(
+            "SELECT backup_dir FROM migrations WHERE version = ?", (NEXT,)).fetchone()[0]
+    assert (data_dir / backup_dir).exists()
+
+
+def test_cli_db_status_marks_a_pruned_backup(tmp_path, data_dir):
+    from wisper_transcribe.cli import main
+
+    db.migrate()
+    missing = "backups/wisper-v9-20200101T000000Z.db"
+    with sqlite3.connect(data_dir / db.DB_FILENAME) as conn:
+        conn.execute("UPDATE migrations SET backup_dir = ? WHERE version = 1", (missing,))
+    result = CliRunner().invoke(main, ["db", "status"])
+    assert result.exit_code == 0, result.output
+    assert f"backup {missing} (pruned)" in result.output
+
+
 def test_import_report_and_after_commit(monkeypatch, data_dir):
     data_dir.mkdir(parents=True, exist_ok=True)
     legacy = data_dir / "legacy.json"

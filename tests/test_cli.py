@@ -2039,6 +2039,49 @@ def test_server_releases_its_lock_on_exit():
     db.ServerLock().acquire().release()
 
 
+def test_storage_trim_organizes_sessions_into_campaign_folders(tmp_path, monkeypatch):
+    out = tmp_path / "trim_out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    from tests._moves import claimed_campaign, placed_session
+
+    _cid, slug, folder = claimed_campaign("Game")
+    tid, md = placed_session("Stray", campaign=slug)
+
+    dry = CliRunner().invoke(main, ["storage", "trim"])
+    assert dry.exit_code == 0, dry.output
+    lines = dry.output.splitlines()
+    assert lines[0].startswith("move into campaign folder") and "Stray.md" in lines[0]
+    assert any(line.startswith("Move 1 session") and "nothing deleted" in line
+               for line in lines)
+    assert md.is_file()
+
+    with patch("wisper_transcribe.audio_utils.encode_flac", side_effect=_fake_flac), \
+         patch("wisper_transcribe.audio_utils.probe_format", return_value=(16000, 1)):
+        applied = CliRunner().invoke(main, ["storage", "trim", "--apply"])
+    assert applied.exit_code == 0, applied.output
+    assert "Moved 1 into campaign folders" in applied.output
+    assert (out / folder / "Stray.md").is_file() and not md.exists()
+
+    again = CliRunner().invoke(main, ["storage", "trim"])
+    assert again.exit_code == 0 and "Nothing to trim." in again.output
+
+
+def test_storage_trim_reports_a_blocked_campaign(tmp_path, monkeypatch):
+    out = tmp_path / "trim_out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    _seed.seed_campaign("Game", slug="game")   # unclaimed
+    (out / "Game").mkdir()
+    (out / "Game" / "notes.md").write_text("# mine\n", encoding="utf-8")
+    _seed.seed_transcript("Stray", campaign="game", write_md=True)
+
+    result = CliRunner().invoke(main, ["storage", "trim"])
+    assert result.exit_code == 0, result.output
+    assert "Game: 1 session can't be organized (folder taken; see Needs attention)" \
+        in result.output
+
+
 def test_storage_trim_container_refused_on_fresh_host_lease(tmp_path, monkeypatch):
     import sqlite3
     from datetime import UTC, datetime

@@ -316,7 +316,12 @@ def server(host: str, port: int, reload: bool, debug: bool) -> None:
     try:
         # Fail before serving if the database can't be used (the lifespan checks
         # again for `uvicorn` launched directly and --reload subprocesses).
+        # This connect migrates, so the lifespan sees no upgrade: report it here.
+        before = db.schema_version()
         db.connect().close()
+        if 0 < before < db.LATEST_VERSION:
+            from .web.app import _report_upgrade
+            _report_upgrade(before)
 
         # Publish bind address so app.py can write server.json for CLI discovery.
         os.environ["WISPER_BIND"] = f"{host}:{port}"
@@ -2335,7 +2340,11 @@ def db_status():
     if not st.frozen:
         click.echo("Build          : unmerged development build (schema not frozen)")
     for m in st.migrations:
-        backup = f", backup {m['backup_dir']}" if m["backup_dir"] else ""
+        backup = ""
+        if m["backup_dir"]:
+            backup = f", backup {m['backup_dir']}"
+            if not (st.path.parent / m["backup_dir"]).exists():
+                backup += " (pruned)"
         click.echo(f"  v{m['version']} applied {m['applied_at']}{backup}")
     if st.leases:
         click.echo("Runtime leases :")
@@ -2418,10 +2427,16 @@ def storage_group():
 
 
 def _echo_attention(attention) -> None:
-    if attention is None or not attention.total:
+    # Misplaced sessions, legacy journals, and blocked campaign folders are
+    # listed above as organize actions or blocked lines; count only these.
+    if attention is None:
+        return
+    count = (len(attention.missing_transcripts) + len(attention.missing_files)
+             + len(attention.unclaimed))
+    if not count:
         return
     click.echo("")
-    click.echo(f"Needs attention ({attention.total}):")
+    click.echo(f"Needs attention ({count}):")
     for m in attention.missing_transcripts:
         where = f" [{m.campaign}]" if m.campaign else ""
         click.echo(f"  missing transcript: {m.stem}{where}")
@@ -2437,12 +2452,14 @@ def _echo_attention(attention) -> None:
 @click.option("--device", default="auto", show_default=True, type=click.Choice(_config.DEVICES),
               help="Compute device for extracting missing speaker voices")
 def storage_trim(apply_: bool, device: str):
-    """Shrink stored audio to one compact copy per transcript.
+    """Move sessions into their campaign folders, then shrink stored audio.
 
-    Converts each transcript's audio to a 16 kHz mono FLAC (extracting any
-    speaker voices it lacks first), deletes orphaned recording hand-off
-    copies, and removes the segment and per-user audio a recording's
-    combined.wav makes redundant. Only files wisper tracks are touched.
+    Moves every misplaced session's files into its campaign's folder and moves
+    legacy journals out of the data dir, extracts any speaker voices a
+    transcript lacks, converts each transcript's audio to a 16 kHz mono FLAC,
+    deletes orphaned recording hand-off copies, and removes the segment and
+    per-user audio a recording's combined.wav makes redundant. Only files
+    wisper tracks are touched.
 
     Dry run by default. With --apply the web server must be stopped.
     """
@@ -2468,7 +2485,8 @@ def storage_trim(apply_: bool, device: str):
             lock.release()
         click.echo("")
         click.echo(
-            f"Converted {len(report.converted)}, deleted {len(report.dropped)} copy(ies) and "
+            f"Moved {len(report.organized)} into campaign folders; "
+            f"converted {len(report.converted)}, deleted {len(report.dropped)} copy(ies) and "
             f"{len(report.orphans)} orphan(s), trimmed {len(report.trimmed)} recording(s); "
             + (f"freed {_fmt_bytes(report.freed_bytes)}." if report.freed_bytes >= 0
                else f"used {_fmt_bytes(-report.freed_bytes)} more."))
@@ -2488,13 +2506,22 @@ def storage_trim(apply_: bool, device: str):
 
 
 def _echo_plan(current) -> None:
-    from .storage_trim import KIND_LABELS
+    from .storage_trim import KIND_LABELS, ORGANIZE
 
-    if not current.actions:
+    if not current.actions and not current.blocked:
         click.echo("Nothing to trim.")
     for a in current.actions:
-        click.echo(f"{KIND_LABELS[a.kind]:<16} {_fmt_bytes(a.size):>10}  {a.path}")
+        note = f"  {a.note}" if a.note and a.kind == ORGANIZE else ""
+        click.echo(f"{KIND_LABELS[a.kind]:<16} {_fmt_bytes(a.size):>10}  {a.path}{note}")
+    for name, sessions, why in current.blocked:
+        noun = "session" if sessions == 1 else "sessions"
+        click.echo(f"{name}: {sessions} {noun} can't be organized ({why}; "
+                   "see Needs attention)")
     if current.actions:
+        if current.move_bytes:
+            n = len(current.moves)
+            click.echo(f"Move {n} session{'s' if n != 1 else ''} into their campaign "
+                       f"folders ({_fmt_bytes(current.move_bytes)}, nothing deleted)")
         if current.total_bytes:
             click.echo(f"{'Deletions free':<16} {_fmt_bytes(current.total_bytes):>10}")
         if current.convert_bytes:
