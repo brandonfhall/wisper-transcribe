@@ -82,30 +82,50 @@ def _transcript_id(conn: sqlite3.Connection, campaign_id: int, stem: str) -> int
     return row[0]
 
 
-def _set_campaign(conn: sqlite3.Connection, tid: int, campaign_id: Optional[int],
-                  position: Optional[int]) -> None:
-    """Assign a session to a campaign slot, or unassign it with ``None, None``.
+def _assign(conn: sqlite3.Connection, tid: int, campaign_id: Optional[int],
+            position: Optional[int], stem: Optional[str] = None) -> None:
+    """Set a session's campaign slot, and its stem when ``stem`` is given.
 
-    A name already taken in the target (a campaign, or the root) violates a
-    partial unique index; that is reported as a ValueError.
+    The one primitive that writes a session's assignment; only
+    ``transcript_store.move_transcript`` moves a session between campaigns. A
+    name already taken in the target (a campaign, or the root) violates a
+    partial unique index; that is reported as a ValueError. The ``stem`` column
+    is written only when it changes, so a plain assignment doesn't re-fire the
+    title trigger.
     """
+    row = conn.execute("SELECT stem FROM transcripts WHERE id = ?", (tid,)).fetchone()
+    if row is None:
+        raise KeyError(f"No transcript with id {tid}")
+    new_stem = row[0] if stem is None else stem
     try:
-        conn.execute(
-            "UPDATE transcripts SET campaign_id = ?, position = ? WHERE id = ?",
-            (campaign_id, position, tid),
-        )
+        if new_stem != row[0]:
+            conn.execute(
+                "UPDATE transcripts SET campaign_id = ?, position = ?, stem = ? WHERE id = ?",
+                (campaign_id, position, new_stem, tid),
+            )
+        else:
+            conn.execute(
+                "UPDATE transcripts SET campaign_id = ?, position = ? WHERE id = ?",
+                (campaign_id, position, tid),
+            )
     except sqlite3.IntegrityError:
-        stem = conn.execute("SELECT stem FROM transcripts WHERE id = ?", (tid,)).fetchone()[0]
-        raise ValueError(f"a session named {stem!r} is already there") from None
+        raise ValueError(f"a session named {new_stem!r} is already there") from None
 
 
 def _write_order(conn: sqlite3.Connection, campaign_id: int, transcript_ids: list[int]) -> None:
-    """Set the campaign's rows to exactly ``transcript_ids``, in that order.
+    """Set the campaign's rows to ``transcript_ids``, in that order.
 
+    Every id must already belong to the campaign (``ValueError`` otherwise):
+    moving a session in or out goes through ``move_transcript``, so this never
+    changes membership and never unassigns a row it wasn't given.
     ``UNIQUE(campaign_id, position)`` is checked row by row, so positions are
-    written in two steps: shift every row above the current maximum, then
-    write the final positions. Rows left out are unassigned.
+    written in two steps: shift every row above the current maximum, then write
+    the final positions.
     """
+    for tid in transcript_ids:
+        row = conn.execute("SELECT campaign_id FROM transcripts WHERE id = ?", (tid,)).fetchone()
+        if row is None or row[0] != campaign_id:
+            raise ValueError(f"transcript {tid} is not in this campaign")
     shift = conn.execute(
         "SELECT coalesce(max(position), -1) + 1 FROM transcripts WHERE campaign_id = ?",
         (campaign_id,),
@@ -114,15 +134,8 @@ def _write_order(conn: sqlite3.Connection, campaign_id: int, transcript_ids: lis
         "UPDATE transcripts SET position = position + ? WHERE campaign_id = ?",
         (shift, campaign_id),
     )
-    # A session moving in from another campaign changes campaign_id here;
-    # transcripts_campaign_bu then drops its journal entry.
     for pos, tid in enumerate(transcript_ids):
-        _set_campaign(conn, tid, campaign_id, pos)
-    for (tid,) in conn.execute(
-        "SELECT id FROM transcripts WHERE campaign_id = ? AND position >= ?",
-        (campaign_id, shift),
-    ).fetchall():
-        _set_campaign(conn, tid, None, None)
+        conn.execute("UPDATE transcripts SET position = ? WHERE id = ?", (pos, tid))
 
 
 def _stems(conn: sqlite3.Connection, campaign_id: int) -> list[str]:
@@ -236,11 +249,12 @@ def delete_campaign(slug: str, *, delete_transcripts: bool = False,
         if delete_transcripts:
             owner = file_registry.Owner("campaign", cid)
             journal_files = file_registry.paths_for_delete(owner, conn, data_dir=data_dir)
-        # transcripts.campaign_id refuses deleting a campaign that still holds sessions.
+        # transcripts.campaign_id refuses deleting a campaign that still holds sessions,
+        # so a campaign that still holds any is emptied first.
         for (tid,) in conn.execute(
             "SELECT id FROM transcripts WHERE campaign_id = ?", (cid,)
         ).fetchall():
-            _set_campaign(conn, tid, None, None)
+            _assign(conn, tid, None, None)
         conn.execute("DELETE FROM campaigns WHERE id = ?", (cid,))
     if journal_files:
         file_registry.unlink_paths(journal_files)
@@ -362,46 +376,6 @@ def lookup_profile_by_discord_id(
 # ---------------------------------------------------------------------------
 
 
-def move_transcript_to_campaign(
-    transcript_id: int, slug: str, data_dir: Optional[Path] = None
-) -> None:
-    """Associate a transcript with a campaign, appended at the end.
-
-    Removes it from any other campaign first (one transcript → one campaign;
-    the schema enforces it). A no-op if it's already in this campaign.
-    Raises KeyError if the transcript or the target campaign isn't found,
-    ValueError if the campaign already has a session of that name.
-    """
-    with db.transaction(data_dir) as conn:
-        cid = _campaign_id(conn, slug)
-        row = conn.execute(
-            "SELECT campaign_id FROM transcripts WHERE id = ?", (transcript_id,)
-        ).fetchone()
-        if row is None:
-            raise KeyError(f"No transcript with id {transcript_id}")
-        if row[0] == cid:
-            return
-        pos = conn.execute(
-            "SELECT coalesce(max(position), -1) + 1 FROM transcripts WHERE campaign_id = ?",
-            (cid,),
-        ).fetchone()[0]
-        _set_campaign(conn, transcript_id, cid, pos)
-
-
-def remove_transcript_from_campaign(transcript_id: int, data_dir: Optional[Path] = None) -> None:
-    """Disassociate a transcript from whichever campaign it belongs to (no-op if none).
-
-    Raises ValueError if a session of that name is already unassigned.
-    """
-    with db.transaction(data_dir) as conn:
-        row = conn.execute(
-            "SELECT campaign_id FROM transcripts WHERE id = ?", (transcript_id,)
-        ).fetchone()
-        if row is None or row[0] is None:
-            return
-        _set_campaign(conn, transcript_id, None, None)
-
-
 def reorder_campaign_transcript(
     slug: str, stem: str, direction: str, data_dir: Optional[Path] = None
 ) -> None:
@@ -440,11 +414,11 @@ def set_campaign_transcript_order(
     """Replace a campaign's whole transcript order in one call.
 
     ``order`` must be exactly a permutation of the campaign's current
-    transcripts (same set, no additions/removals) — use
-    ``move_transcript_to_campaign``/``remove_transcript_from_campaign`` to
-    change membership. Bulk counterpart to ``reorder_campaign_transcript``'s
-    single-step move, for fixing a badly-out-of-order campaign (e.g. from
-    the CLI) without many individual up/down calls.
+    transcripts (same set, no additions/removals) — a session joins or leaves a
+    campaign only through ``transcript_store.move_transcript``. Bulk
+    counterpart to ``reorder_campaign_transcript``'s single-step move, for
+    fixing a badly-out-of-order campaign (e.g. from the CLI) without many
+    individual up/down calls.
 
     Raises:
         KeyError: campaign not found.

@@ -936,8 +936,6 @@ def test_resetting_profiles_deletes_every_clip_and_row(data):
 
 
 def _fold_setup(out):
-    from wisper_transcribe.campaign_manager import move_transcript_to_campaign
-
     create_campaign("My Game")
     _touch(out / "s1.md")
     ts.register(out / "s1.md", origin="job")

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -97,37 +98,96 @@ def _subject_ids(conn, job: Any) -> tuple[Optional[int], Optional[int], Optional
     return transcript_id, campaign_id, recording_id
 
 
+def _write(job: Any, data_dir: Optional[Path] = None) -> None:
+    """Upsert one job's row from the in-memory ``Job``. May raise."""
+    status = job.status if job.status in JOB_STATUSES else "failed"
+    terminal = status in ("completed", "failed")
+    started = getattr(job, "started_at", None)
+    if status == "pending":
+        started = None
+    elif status == "running" and started is None:
+        started = datetime.now()
+    finished = (job.finished_at or datetime.now()) if terminal else None
+    error = (job.error or "Job failed") if status == "failed" else None
+    log_tail = "\n".join(list(getattr(job, "log_lines", []) or [])[-LOG_TAIL_LINES:]) if terminal else ""
+    with db.transaction(data_dir) as conn:
+        transcript_id, campaign_id, recording_id = _subject_ids(conn, job)
+        conn.execute(
+            "INSERT INTO jobs (id, type, status, created_at, started_at, finished_at, error_code, "
+            "transcript_id, campaign_id, recording_id, params_json, log_tail) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET "
+            "status = excluded.status, started_at = excluded.started_at, "
+            "finished_at = excluded.finished_at, error_code = excluded.error_code, "
+            "transcript_id = coalesce(excluded.transcript_id, jobs.transcript_id), "
+            "campaign_id = coalesce(excluded.campaign_id, jobs.campaign_id), "
+            "recording_id = coalesce(excluded.recording_id, jobs.recording_id), "
+            "params_json = excluded.params_json, log_tail = excluded.log_tail",
+            (job.id, job.job_type, status, _utc(job.created_at), _utc(started), _utc(finished),
+             error, transcript_id, campaign_id, recording_id, _params(job), log_tail),
+        )
+
+
 def record(job: Any, data_dir: Optional[Path] = None) -> None:
     """Upsert one job's row from the in-memory ``Job``. Never raises: a
     history write must not break the job itself."""
     try:
-        status = job.status if job.status in JOB_STATUSES else "failed"
-        terminal = status in ("completed", "failed")
-        started = getattr(job, "started_at", None)
-        if status == "pending":
-            started = None
-        elif status == "running" and started is None:
-            started = datetime.now()
-        finished = (job.finished_at or datetime.now()) if terminal else None
-        error = (job.error or "Job failed") if status == "failed" else None
-        log_tail = "\n".join(list(getattr(job, "log_lines", []) or [])[-LOG_TAIL_LINES:]) if terminal else ""
-        with db.transaction(data_dir) as conn:
-            transcript_id, campaign_id, recording_id = _subject_ids(conn, job)
-            conn.execute(
-                "INSERT INTO jobs (id, type, status, created_at, started_at, finished_at, error_code, "
-                "transcript_id, campaign_id, recording_id, params_json, log_tail) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET "
-                "status = excluded.status, started_at = excluded.started_at, "
-                "finished_at = excluded.finished_at, error_code = excluded.error_code, "
-                "transcript_id = coalesce(excluded.transcript_id, jobs.transcript_id), "
-                "campaign_id = coalesce(excluded.campaign_id, jobs.campaign_id), "
-                "recording_id = coalesce(excluded.recording_id, jobs.recording_id), "
-                "params_json = excluded.params_json, log_tail = excluded.log_tail",
-                (job.id, job.job_type, status, _utc(job.created_at), _utc(started), _utc(finished),
-                 error, transcript_id, campaign_id, recording_id, _params(job), log_tail),
-            )
+        _write(job, data_dir)
     except Exception:
         log.warning("Could not record job %s in history", getattr(job, "id", "?"), exc_info=True)
+
+
+def record_required(job: Any, data_dir: Optional[Path] = None) -> None:
+    """Like :func:`record`, but re-raises.
+
+    The busy guard reads a job's row, so a job whose row can't be written must
+    not be queued: submit fails instead.
+    """
+    _write(job, data_dir)
+
+
+# One job is busy when it is pending or running and targets the transcript, a
+# campaign (its own, its transcript's, or the slug in params_json). The status
+# is spelled exactly as the ``jobs_active`` partial index does so the index is used.
+_ACTIVE_JOBS_SQL = (
+    "SELECT j.id FROM jobs j "
+    "LEFT JOIN transcripts t ON t.id = j.transcript_id "
+    "WHERE j.status IN ('pending', 'running') AND ("
+    "j.transcript_id = :transcript_id "
+    "OR j.campaign_id IN (SELECT value FROM json_each(:campaign_ids)) "
+    "OR t.campaign_id IN (SELECT value FROM json_each(:campaign_ids)) "
+    "OR json_extract(j.params_json, '$.campaign') IN (SELECT value FROM json_each(:campaign_slugs)))"
+)
+
+
+def active_jobs(conn: sqlite3.Connection, *, transcript_id: Optional[int] = None,
+                campaign_ids: tuple = (), campaign_slugs: tuple = ()) -> list[str]:
+    """The ids of jobs and captures that make a move, rename, or delete unsafe.
+
+    A job counts when its ``status`` is pending or running and it targets the
+    transcript, one of the campaigns (its own, its transcript's, or the slug
+    it was submitted with). A capture counts when its ``campaign_id`` or
+    ``transcript_id`` matches: a Discord or local capture holds its campaign
+    without a ``jobs`` row. Empty means free.
+
+    Call inside the write transaction so a job submitted between check and
+    write can't be missed: submit writes its row first.
+    """
+    from . import file_registry
+
+    params = {
+        "transcript_id": transcript_id,
+        "campaign_ids": json.dumps(sorted({int(c) for c in campaign_ids if c is not None})),
+        "campaign_slugs": json.dumps(sorted({str(s) for s in campaign_slugs if s is not None})),
+    }
+    found = [r[0] for r in conn.execute(_ACTIVE_JOBS_SQL, params)]
+    active = tuple(file_registry._ACTIVE_CAPTURE)
+    placeholders = ", ".join("?" * len(active))
+    found += [r[0] for r in conn.execute(
+        f"SELECT id FROM recordings WHERE capture_status IN ({placeholders}) AND ("
+        "campaign_id IN (SELECT value FROM json_each(?)) OR transcript_id = ?)",
+        (*active, params["campaign_ids"], transcript_id),
+    )]
+    return list(dict.fromkeys(found))
 
 
 def mark_interrupted(data_dir: Optional[Path] = None) -> int:

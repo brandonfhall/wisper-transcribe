@@ -227,6 +227,45 @@ def _file_timestamp(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _modified_local(path: Optional[Path]) -> Optional[str]:
+    """A file's last-modified time as ``%Y-%m-%d %H:%M`` local, or None."""
+    if path is None:
+        return None
+    from datetime import datetime
+    try:
+        return datetime.fromtimestamp(Path(path).stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+    except OSError:
+        return None
+
+
+def validate_new_stem(name: str) -> Optional[str]:
+    """``name`` as a new session stem, or None when it is refused.
+
+    NFC-normalized and stripped. Non-empty and at most 100 characters; no
+    path separators (``/ \\ : * ? " < > |``) or control characters or DEL; no
+    leading dot (which also refuses an atomic-write temp name); no trailing dot
+    or space; not ending in ``.summary`` or ``.md`` (case-insensitive); and not
+    a Windows device name.
+    """
+    from .campaign_folders import is_reserved
+
+    if not name:
+        return None
+    name = nfc(name).strip()
+    if not name or len(name) > 100:
+        return None
+    if any(c in '/\\:*?"<>|' or ord(c) < 32 or ord(c) == 127 for c in name):
+        return None
+    if name.startswith(".") or name.endswith((".", " ")):
+        return None
+    low = name.casefold()
+    if low.endswith((".summary", ".md")):
+        return None
+    if is_reserved(name):
+        return None
+    return name
+
+
 # ---------------------------------------------------------------------------
 # Locations: where a transcript's files are, and where they should be
 # ---------------------------------------------------------------------------
@@ -631,6 +670,657 @@ def _stem_taken(conn: sqlite3.Connection, campaign_id: Optional[int], stem: str,
         rows = conn.execute("SELECT stem FROM transcripts WHERE campaign_id = ?", (campaign_id,))
     want = file_registry._key(stem, fold)
     return any(file_registry._key(r[0], fold) == want for r in rows)
+
+
+@dataclass(frozen=True)
+class MoveCheck:
+    """Whether a transcript can move or rename, and where it would land.
+
+    Pure: :func:`check_move` computes it with reads only, never a ``mkdir`` or a
+    write, so the clash page can render it. ``clash_modified`` is the clashing
+    file's last-modified time for the prompt. ``overwrite_allowed`` is true only
+    when the clashing file is a registered session (``existing_id`` set).
+    """
+
+    status: str
+    dst_dir: Path
+    stem: str
+    clash_modified: Optional[str]
+    overwrite_allowed: bool
+    existing_id: Optional[int]
+    _files_move: bool = True
+
+    @property
+    def files_move(self) -> bool:
+        """False when there is nothing to move on disk: the session is flagged
+        missing, or the ``.md`` is already in ``dst_dir`` under ``stem``."""
+        return self._files_move
+
+
+def _stem_row_folded(conn: sqlite3.Connection, campaign_id: Optional[int], stem: str, fold: bool):
+    """The row named ``stem`` in a campaign (or the root), ignoring case when
+    the filesystem does. Uses the partial unique index for the exact match."""
+    row = _stem_row(conn, campaign_id, stem)
+    if row is not None or not fold:
+        return row
+    if campaign_id is None:
+        rows = conn.execute("SELECT id, stem FROM transcripts WHERE campaign_id IS NULL")
+    else:
+        rows = conn.execute(
+            "SELECT id, stem FROM transcripts WHERE campaign_id = ?", (campaign_id,))
+    want = file_registry._key(stem, fold)
+    for candidate in rows:
+        if file_registry._key(candidate[1], fold) == want:
+            return candidate
+    return None
+
+
+def _clash_path(directory: Path, stem: str, fold: bool) -> Optional[Path]:
+    """An existing ``<stem>.md`` in ``directory``, ignoring case when ``fold``."""
+    target = safe_path(stem, ".md", directory)
+    if target is not None and target.is_file():
+        return target
+    if not fold:
+        return None
+    want = file_registry._key(f"{nfc(stem)}.md", fold)
+    try:
+        entries = os.scandir(directory)
+    except OSError:
+        return None
+    with entries:
+        for entry in entries:
+            try:
+                if entry.is_file() and file_registry._key(entry.name, fold) == want:
+                    return Path(entry.path)
+            except OSError:
+                continue
+    return None
+
+
+def check_move(transcript_id: int, campaign_slug: Optional[str], *, new_stem: Optional[str] = None,
+               conn: Optional[sqlite3.Connection] = None, data_dir: Optional[Path] = None,
+               output_dir: Optional[Path] = None) -> MoveCheck:
+    """Whether transcript ``transcript_id`` can move to ``campaign_slug`` (or the
+    root for None), optionally renamed to ``new_stem``.
+
+    Pure: no ``mkdir`` and no writes. Validation runs before any disk access on
+    the name, so a query-string name is a path guard too. Status is ``ok`` when
+    the move may proceed, else ``unchanged``, ``invalid``, ``busy``,
+    ``folder_taken``, ``reserved``, or ``clash``.
+    """
+    if conn is not None:
+        return _check_move_in(conn, transcript_id, campaign_slug, new_stem, output_dir)
+    with db.connection(data_dir) as c:
+        return _check_move_in(c, transcript_id, campaign_slug, new_stem, output_dir)
+
+
+def _check_move_in(conn: sqlite3.Connection, transcript_id: int, campaign_slug: Optional[str],
+                   new_stem: Optional[str], output_dir: Optional[Path]) -> MoveCheck:
+    from .campaign_folders import _fold, holds_only_wisper, journal_name
+
+    output = Path(output_dir) if output_dir is not None else get_output_root()
+    target_cid: Optional[int] = None
+    target_folder: Optional[str] = None
+    target_pending: Optional[str] = None
+    target_claimed = False
+    if campaign_slug is None:
+        target_dir = output
+    else:
+        row = conn.execute(
+            "SELECT id, folder, folder_pending, folder_claimed FROM campaigns WHERE slug = ?",
+            (campaign_slug,),
+        ).fetchone()
+        if row is None:
+            return MoveCheck("invalid", output, nfc(new_stem or ""), None, False, None)
+        target_cid, target_folder, target_pending, target_claimed = (
+            row[0], row[1], row[2], bool(row[3]))
+        target_dir = output / target_folder
+
+    stem = ""
+    if new_stem is not None:
+        cleaned = validate_new_stem(new_stem)
+        if cleaned is None or safe_path(cleaned, ".md", target_dir) is None:
+            return MoveCheck("invalid", target_dir, cleaned or nfc(new_stem.strip()), None, False, None)
+        stem = cleaned
+
+    loc = _locate_in(conn, transcript_id, output)
+    if loc is None:
+        return MoveCheck("invalid", target_dir, stem, None, False, None)
+    if new_stem is None:
+        stem = loc.stem
+
+    fold = loc.fold
+    same_dir = _dirs_equal(loc.dir, target_dir, loc.fold)
+    files_move = not loc.missing and not (same_dir and nfc(stem) == nfc(loc.stem))
+
+    def unchanged() -> MoveCheck:
+        return MoveCheck("unchanged", target_dir, stem, None, False, None, _files_move=files_move)
+
+    if loc.campaign_id == target_cid and nfc(stem) == nfc(loc.stem):
+        return unchanged()
+
+    source_slug = None
+    if loc.campaign_id is not None:
+        r = conn.execute("SELECT slug FROM campaigns WHERE id = ?", (loc.campaign_id,)).fetchone()
+        source_slug = r[0] if r is not None else None
+
+    from .job_history import active_jobs
+    if active_jobs(conn, transcript_id=transcript_id,
+                   campaign_ids={loc.campaign_id, target_cid} - {None},
+                   campaign_slugs={source_slug, campaign_slug} - {None}):
+        return MoveCheck("busy", target_dir, stem, None, False, None, _files_move=files_move)
+
+    if target_cid is not None:
+        if target_pending is not None:
+            return MoveCheck("folder_taken", target_dir, stem, None, False, None)
+        if target_claimed and not target_dir.is_dir():
+            return MoveCheck("folder_taken", target_dir, stem, None, False, None)
+        if (not target_claimed and target_dir.is_dir()
+                and not holds_only_wisper(target_dir, target_folder)):
+            return MoveCheck("folder_taken", target_dir, stem, None, False, None)
+        if _fold(stem) == _fold(Path(journal_name(target_folder)).stem):
+            return MoveCheck("reserved", target_dir, stem, None, False, None)
+
+    clash_file = _clash_path(target_dir, stem, fold)
+    if clash_file is not None and _same_file(clash_file, loc.md):
+        clash_file = None
+    existing = _stem_row_folded(conn, target_cid, stem, fold)
+    existing_id = existing[0] if existing is not None and existing[0] != transcript_id else None
+    if clash_file is None and existing_id is None:
+        return MoveCheck("ok", target_dir, stem, None, False, None, _files_move=files_move)
+
+    if existing_id is None and clash_file is not None:
+        hit = _locate_path_in(conn, clash_file, output)
+        existing_id = None if hit == transcript_id else hit
+    if clash_file is not None:
+        modified = _modified_local(clash_file)
+    elif existing_id is not None:
+        other = _locate_in(conn, existing_id, output)
+        modified = _modified_local(other.md) if other is not None else None
+    else:
+        modified = None
+    return MoveCheck("clash", target_dir, stem, modified, existing_id is not None, existing_id,
+                     _files_move=files_move)
+
+
+@dataclass(frozen=True)
+class MoveOutcome:
+    """What a move, rename, or move-home did.
+
+    ``status`` is ``moved``, ``unchanged``, ``invalid``, ``busy``,
+    ``folder_taken``, ``unavailable``, ``clash``, ``reserved``, ``locked``, or
+    ``partial``. ``detail`` carries ``folder_pending``/``folder_missing`` for
+    ``folder_taken`` and ``source_missing`` for ``locked``. ``kept`` names the
+    files left behind (a ``partial``); ``busy`` the job ids that refused it.
+    """
+
+    status: str
+    detail: Optional[str] = None
+    new_stem: Optional[str] = None
+    clash_modified: Optional[str] = None
+    overwrite_allowed: bool = False
+    kept: list[Path] = field(default_factory=list)
+    busy: list[str] = field(default_factory=list)
+
+
+def _slug_of(conn: sqlite3.Connection, campaign_id: Optional[int]) -> Optional[str]:
+    if campaign_id is None:
+        return None
+    row = conn.execute("SELECT slug FROM campaigns WHERE id = ?", (campaign_id,)).fetchone()
+    return row[0] if row is not None else None
+
+
+def _target_cid(conn: sqlite3.Connection, campaign_slug: Optional[str]) -> Optional[int]:
+    if campaign_slug is None:
+        return None
+    row = conn.execute("SELECT id FROM campaigns WHERE slug = ?", (campaign_slug,)).fetchone()
+    return row[0] if row is not None else None
+
+
+def _move_busy_ids(conn: sqlite3.Connection, transcript_id: int, campaign_slug: Optional[str],
+                   output: Path, extra_transcript_id: Optional[int] = None) -> list:
+    """The active job ids that make a move of ``transcript_id`` unsafe.
+
+    The whole source and target campaign is in scope, because journal and
+    relabel jobs read every session of their campaign. ``extra_transcript_id``
+    adds the transcript an Overwrite would delete.
+    """
+    from .job_history import active_jobs
+
+    loc = _locate_in(conn, transcript_id, output)
+    if loc is None:
+        return []
+    campaign_ids = {loc.campaign_id, _target_cid(conn, campaign_slug)} - {None}
+    campaign_slugs = {_slug_of(conn, loc.campaign_id), campaign_slug} - {None}
+    ids: set = set()
+    for tid in (transcript_id, extra_transcript_id):
+        if tid is None:
+            continue
+        ids.update(active_jobs(conn, transcript_id=tid,
+                               campaign_ids=campaign_ids, campaign_slugs=campaign_slugs))
+    return sorted(ids)
+
+
+def _folder_taken_detail(campaign_slug: Optional[str], data_dir: Optional[Path],
+                         output: Path) -> Optional[str]:
+    if campaign_slug is None:
+        return None
+    with db.connection(data_dir) as conn:
+        row = conn.execute(
+            "SELECT folder, folder_pending, folder_claimed FROM campaigns WHERE slug = ?",
+            (campaign_slug,)).fetchone()
+    if row is None:
+        return None
+    folder, pending, claimed = row[0], row[1], bool(row[2])
+    if pending is not None:
+        return "folder_pending"
+    if claimed and not (output / folder).is_dir():
+        return "folder_missing"
+    return None
+
+
+def _outcome_from_check(check: MoveCheck, transcript_id: int, campaign_slug: Optional[str],
+                        data_dir: Optional[Path], output: Path) -> MoveOutcome:
+    """Map a non-``ok`` :class:`MoveCheck` to a :class:`MoveOutcome`."""
+    if check.status == "busy":
+        with db.connection(data_dir) as conn:
+            return MoveOutcome("busy", busy=_move_busy_ids(conn, transcript_id, campaign_slug, output))
+    if check.status == "folder_taken":
+        return MoveOutcome("folder_taken", detail=_folder_taken_detail(campaign_slug, data_dir, output))
+    return MoveOutcome(check.status, new_stem=check.stem, clash_modified=check.clash_modified,
+                       overwrite_allowed=check.overwrite_allowed)
+
+
+def _move_md(transcript_id: int, old_md: Path, target_md: Path, data_dir: Optional[Path],
+             output: Path) -> tuple:
+    """Move a transcript's ``.md`` through its registry row (``files follow rows``).
+
+    Returns ``(result, had_row)`` with the :func:`file_registry.move` result, or
+    ``os.replace`` + :func:`file_registry.add` when the row isn't registered yet.
+    """
+    owner = file_registry.Owner("transcript", transcript_id)
+    row = file_registry.file_for(owner, "transcript", data_dir=data_dir, output_dir=output)
+    if row is not None:
+        return file_registry.move(row, target_md, data_dir=data_dir, output_dir=output), True
+    try:
+        os.replace(old_md, target_md)
+    except OSError as exc:
+        log.warning("Could not move %s to %s: %s", old_md, target_md, exc)
+        return "error", False
+    file_registry.add(target_md, kind="transcript", owner=owner, data_dir=data_dir, output_dir=output)
+    return "moved", False
+
+
+def _revert_move(transcript_id: int, *, old_cid: Optional[int], old_stem: str,
+                 old_pos: Optional[int], new_cid: Optional[int], new_stem: str,
+                 data_dir: Optional[Path]) -> int:
+    """Undo step 5's assignment after a failed file move, compare-and-swapped.
+
+    Only a row still at ``(new_cid, new_stem)`` is reverted. The old position is
+    kept when its slot is free, else the row is appended; the root has none.
+    Returns the rows changed (0 when the swap lost a race or the old name was
+    taken, or an ``IntegrityError``).
+    """
+    with db.transaction(data_dir) as conn:
+        pos = old_pos
+        if old_cid is None:
+            pos = None
+        elif old_pos is None or conn.execute(
+                "SELECT 1 FROM transcripts WHERE campaign_id = ? AND position = ? AND id <> ?",
+                (old_cid, old_pos, transcript_id)).fetchone():
+            pos = conn.execute(
+                "SELECT coalesce(max(position), -1) + 1 FROM transcripts WHERE campaign_id = ?",
+                (old_cid,)).fetchone()[0]
+        try:
+            cur = conn.execute(
+                "UPDATE transcripts SET campaign_id = :oc, stem = :os, position = :op "
+                "WHERE id = :id AND campaign_id IS :nc AND stem = :ns",
+                {"oc": old_cid, "os": old_stem, "op": pos, "id": transcript_id,
+                 "nc": new_cid, "ns": new_stem})
+        except sqlite3.IntegrityError:
+            return 0
+        return cur.rowcount
+
+
+def _revert_stem(transcript_id: int, *, old_stem: str, new_stem: str,
+                 data_dir: Optional[Path]) -> int:
+    """Undo a rename after a failed ``.md`` move, compare-and-swapped on the stem."""
+    with db.transaction(data_dir) as conn:
+        try:
+            cur = conn.execute("UPDATE transcripts SET stem = ? WHERE id = ? AND stem = ?",
+                               (old_stem, transcript_id, new_stem))
+        except sqlite3.IntegrityError:
+            return 0
+        return cur.rowcount
+
+
+def _recheck_clash(conn: sqlite3.Connection, transcript_id: int, target_cid: Optional[int],
+                   directory: Path, stem: str, loc: Located, output: Path):
+    """Re-run a move's clash check inside the write transaction.
+
+    Returns ``(clash_file, existing_id)``; both None means free. The session's
+    own file and row are excluded, so a misplaced move-home or a case-only
+    rename isn't a clash with itself.
+    """
+    fold = file_registry._fold(output)
+    clash_file = _clash_path(directory, stem, fold)
+    if clash_file is not None and _same_file(clash_file, loc.md):
+        clash_file = None
+    existing = _stem_row_folded(conn, target_cid, stem, fold)
+    existing_id = existing[0] if existing is not None and existing[0] != transcript_id else None
+    return clash_file, existing_id
+
+
+def move_transcript(transcript_id: int, campaign_slug: Optional[str], *,
+                    clash: Literal["ask", "overwrite", "keep_both", "skip"] = "ask",
+                    data_dir: Optional[Path] = None,
+                    output_dir: Optional[Path] = None) -> MoveOutcome:
+    """Move a transcript to a campaign (or the root) and move its files.
+
+    Rows change first; the files follow after the commit (``files follow rows``).
+    ``_LOCATION_LOCK`` is held from before the first write transaction until the
+    files have moved, so no reconcile races the swap. A failed ``.md`` move is
+    reverted with a compare-and-swap on the whole assignment; a companion that
+    can't move stays registered, and the result is ``partial``. ``clash``
+    chooses the clash behaviour: ``ask``/``skip`` return ``clash`` unchanged,
+    ``keep_both`` appends `` (2)``, ``overwrite`` deletes the clashing session
+    first (only when it is a registered transcript).
+    """
+    output = Path(output_dir) if output_dir is not None else get_output_root()
+    check = check_move(transcript_id, campaign_slug, data_dir=data_dir, output_dir=output)
+
+    if check.status == "clash":
+        if clash == "overwrite" and not check.overwrite_allowed:
+            return MoveOutcome("clash", new_stem=check.stem,
+                               clash_modified=check.clash_modified, overwrite_allowed=False)
+        if clash in ("ask", "skip"):
+            return MoveOutcome("clash", new_stem=check.stem,
+                               clash_modified=check.clash_modified,
+                               overwrite_allowed=check.overwrite_allowed)
+    elif check.status != "ok":
+        return _outcome_from_check(check, transcript_id, campaign_slug, data_dir, output)
+
+    files_move = check.files_move
+    dst_dir = check.dst_dir
+
+    with _LOCATION_LOCK:
+        with db.connection(data_dir) as conn:
+            target_cid = _target_cid(conn, campaign_slug)
+        if campaign_slug is not None and target_cid is None:
+            return MoveOutcome("invalid")
+
+        # Step 2: the target folder (or the root) when there is a file to move.
+        if files_move:
+            if target_cid is not None:
+                from .campaign_folders import (FolderMissingError, FolderPendingError,
+                                               FolderTakenError, ensure_folder)
+                try:
+                    dst_dir = ensure_folder(target_cid, data_dir=data_dir, output_dir=output)
+                except FolderPendingError:
+                    return MoveOutcome("folder_taken", detail="folder_pending")
+                except FolderMissingError:
+                    return MoveOutcome("folder_taken", detail="folder_missing")
+                except FolderTakenError:
+                    return MoveOutcome("folder_taken")
+                except FileNotFoundError:
+                    return MoveOutcome("unavailable")
+            else:
+                dst_dir = output
+                if not dst_dir.is_dir():
+                    return MoveOutcome("unavailable")
+
+        # Step 3: overwrite deletes the clashing session first.
+        if check.status == "clash" and clash == "overwrite" and check.existing_id is not None:
+            with db.transaction(data_dir) as conn:
+                ids = _move_busy_ids(conn, transcript_id, campaign_slug, output,
+                                     extra_transcript_id=check.existing_id)
+                if ids:
+                    return MoveOutcome("busy", busy=ids)
+            if delete_transcript(check.existing_id, data_dir=data_dir, output_dir=output) == "kept":
+                return MoveOutcome("locked")
+
+        # Step 4: keep both picks a free name in the target folder.
+        new_stem = check.stem
+        if check.status == "clash" and clash == "keep_both":
+            with db.connection(data_dir) as conn:
+                new_stem = next_free_stem(dst_dir, check.stem, target_cid, conn=conn)
+
+        # Step 5: one transaction, re-checking busy and clash under the write lock.
+        with db.transaction(data_dir) as conn:
+            ids = _move_busy_ids(conn, transcript_id, campaign_slug, output)
+            if ids:
+                return MoveOutcome("busy", busy=ids)
+            loc = _locate_in(conn, transcript_id, output)
+            if loc is None:
+                return MoveOutcome("invalid")
+            clash_file, existing_id = _recheck_clash(
+                conn, transcript_id, target_cid, dst_dir, new_stem, loc, output)
+            if clash_file is not None or existing_id is not None:
+                modified = _modified_local(clash_file) if clash_file is not None else None
+                return MoveOutcome("clash", new_stem=new_stem, clash_modified=modified,
+                                   overwrite_allowed=existing_id is not None)
+            old = conn.execute(
+                "SELECT campaign_id, stem, position FROM transcripts WHERE id = ?",
+                (transcript_id,)).fetchone()
+            old_cid, old_stem, old_pos = old[0], old[1], old[2]
+            old_dir, old_md = loc.dir, loc.md
+            if target_cid is None:
+                new_pos = None
+            else:
+                new_pos = conn.execute(
+                    "SELECT coalesce(max(position), -1) + 1 FROM transcripts WHERE campaign_id = ?",
+                    (target_cid,)).fetchone()[0]
+            from .campaign_manager import _assign
+            _assign(conn, transcript_id, target_cid, new_pos, stem=new_stem)
+
+        # Step 6: the files follow the rows.
+        if not files_move:
+            return MoveOutcome("moved", new_stem=new_stem)
+        target_md = dst_dir / f"{new_stem}.md"
+        result, had_row = _move_md(transcript_id, old_md, target_md, data_dir, output)
+        if result in ("error", "conflict", "missing"):
+            if result == "missing" and had_row:
+                file_registry.add(old_md, kind="transcript",
+                                  owner=file_registry.Owner("transcript", transcript_id),
+                                  data_dir=data_dir, output_dir=output)
+            changed = _revert_move(transcript_id, old_cid=old_cid, old_stem=old_stem,
+                                   old_pos=old_pos, new_cid=target_cid, new_stem=new_stem,
+                                   data_dir=data_dir)
+            if changed:
+                detail = "source_missing" if result == "missing" else None
+                return MoveOutcome("locked", detail=detail, kept=[old_md])
+            return MoveOutcome("partial", new_stem=new_stem)
+        kept = rename_companions(transcript_id, old_stem, new_stem, src_dir=old_dir,
+                                 dst_dir=dst_dir, output_dir=output, data_dir=data_dir)
+        if kept:
+            return MoveOutcome("partial", new_stem=new_stem, kept=kept)
+        return MoveOutcome("moved", new_stem=new_stem)
+
+
+def move_files_home(transcript_id: int, *, data_dir: Optional[Path] = None,
+                     output_dir: Optional[Path] = None) -> MoveOutcome:
+    """Move a misplaced session's files into the folder its campaign names.
+
+    The assignment doesn't change, so no ``transcripts`` row is written; every
+    registered file moves. A name already in the target folder is a ``clash``:
+    it is never overwritten or renamed automatically. A missing session changes
+    nothing (``unchanged``). Used by Needs attention and ``storage trim``.
+
+    ``_LOCATION_LOCK`` is held from the busy check until the files have moved,
+    so neither a reconcile nor another move runs in between.
+    """
+    with _LOCATION_LOCK:
+        return _move_files_home_locked(transcript_id, data_dir=data_dir, output_dir=output_dir)
+
+
+def _move_files_home_locked(transcript_id: int, *, data_dir: Optional[Path],
+                            output_dir: Optional[Path]) -> MoveOutcome:
+    output = Path(output_dir) if output_dir is not None else get_output_root()
+    with db.transaction(data_dir) as conn:
+        loc = _locate_in(conn, transcript_id, output)
+        if loc is None:
+            return MoveOutcome("invalid")
+        campaign_slug = _slug_of(conn, loc.campaign_id)
+        ids = _move_busy_ids(conn, transcript_id, campaign_slug, output)
+        if ids:
+            return MoveOutcome("busy", busy=ids)
+        target_cid = loc.campaign_id
+        stem = loc.stem
+        old_dir = loc.dir
+        md = loc.md
+        companions = dict(loc.companions)
+        missing = loc.missing
+        fold = loc.fold
+
+    if missing:
+        return MoveOutcome("unchanged", new_stem=stem)
+    if target_cid is not None:
+        from .campaign_folders import (FolderMissingError, FolderPendingError,
+                                       FolderTakenError, ensure_folder)
+        try:
+            expected = ensure_folder(target_cid, data_dir=data_dir, output_dir=output)
+        except FolderPendingError:
+            return MoveOutcome("folder_taken", detail="folder_pending")
+        except FolderMissingError:
+            return MoveOutcome("folder_taken", detail="folder_missing")
+        except FolderTakenError:
+            return MoveOutcome("folder_taken")
+        except FileNotFoundError:
+            return MoveOutcome("unavailable")
+    else:
+        expected = output
+        if not expected.is_dir():
+            return MoveOutcome("unavailable")
+
+    md_moves = not _dirs_equal(old_dir, expected, fold)
+    if not md_moves and all(_dirs_equal(p.parent, expected, fold) for p in companions.values()):
+        return MoveOutcome("unchanged", new_stem=stem)
+
+    targets = [(path, expected / path.name) for path in companions.values()
+               if os.path.lexists(path) and not _dirs_equal(path.parent, expected, fold)]
+    if md_moves:
+        targets.insert(0, (md, expected / f"{stem}.md"))
+    for src, dst in targets:
+        if os.path.lexists(dst) and not _same_file(src, dst):
+            return MoveOutcome("clash", new_stem=stem, clash_modified=_modified_local(dst))
+
+    owner = file_registry.Owner("transcript", transcript_id)
+    rows = {(r.kind, r.label or ""): r for r in
+            file_registry.files_for(owner, data_dir=data_dir, output_dir=output)}
+    kept: list = []
+    if md_moves:
+        result, had_row = _move_md(transcript_id, md, expected / f"{stem}.md", data_dir, output)
+        if result in ("error", "conflict", "missing"):
+            if result == "missing" and had_row:
+                file_registry.add(md, kind="transcript", owner=owner,
+                                  data_dir=data_dir, output_dir=output)
+            return MoveOutcome("locked", kept=[md])
+    for key, path in companions.items():
+        if _dirs_equal(path.parent, expected, fold):
+            continue
+        row = rows.get(key)
+        if row is None:
+            continue
+        if file_registry.move(row, expected / path.name,
+                              data_dir=data_dir, output_dir=output) in ("conflict", "error"):
+            kept.append(path)
+    if kept:
+        return MoveOutcome("partial", new_stem=stem, kept=kept)
+    return MoveOutcome("moved", new_stem=stem)
+
+
+def rename_transcript(transcript_id: int, new_name: str, *,
+                      clash: Literal["ask", "overwrite", "keep_both", "skip"] = "ask",
+                      data_dir: Optional[Path] = None,
+                      output_dir: Optional[Path] = None) -> MoveOutcome:
+    """Rename a transcript's ``.md`` and every companion together.
+
+    The stem changes in one transaction; the files follow after the commit,
+    holding ``_LOCATION_LOCK``. The same clash rule as a move applies. A failed
+    ``.md`` move restores the old stem (compare-and-swapped) and returns
+    ``locked``; a companion that can't move is a ``partial``. Case-only renames
+    are allowed.
+    """
+    output = Path(output_dir) if output_dir is not None else get_output_root()
+    cleaned = validate_new_stem(new_name)
+    if cleaned is None:
+        return MoveOutcome("invalid")
+    with db.connection(data_dir) as conn:
+        loc = _locate_in(conn, transcript_id, output)
+        if loc is None:
+            return MoveOutcome("invalid")
+        campaign_slug = _slug_of(conn, loc.campaign_id)
+        current_cid = loc.campaign_id
+        old_dir = loc.dir
+        old_md = loc.md
+        missing = loc.missing
+
+    check = check_move(transcript_id, campaign_slug, new_stem=cleaned,
+                       data_dir=data_dir, output_dir=output)
+    if check.status == "clash":
+        if clash == "overwrite" and not check.overwrite_allowed:
+            return MoveOutcome("clash", new_stem=check.stem,
+                               clash_modified=check.clash_modified, overwrite_allowed=False)
+        if clash in ("ask", "skip"):
+            return MoveOutcome("clash", new_stem=check.stem,
+                               clash_modified=check.clash_modified,
+                               overwrite_allowed=check.overwrite_allowed)
+    elif check.status != "ok":
+        return _outcome_from_check(check, transcript_id, campaign_slug, data_dir, output)
+
+    with _LOCATION_LOCK:
+        if check.status == "clash" and clash == "overwrite" and check.existing_id is not None:
+            with db.transaction(data_dir) as conn:
+                ids = _move_busy_ids(conn, transcript_id, campaign_slug, output,
+                                     extra_transcript_id=check.existing_id)
+                if ids:
+                    return MoveOutcome("busy", busy=ids)
+            if delete_transcript(check.existing_id, data_dir=data_dir, output_dir=output) == "kept":
+                return MoveOutcome("locked")
+
+        new_stem = cleaned
+        if check.status == "clash" and clash == "keep_both":
+            with db.connection(data_dir) as conn:
+                new_stem = next_free_stem(old_dir, cleaned, current_cid, conn=conn)
+
+        with db.transaction(data_dir) as conn:
+            ids = _move_busy_ids(conn, transcript_id, campaign_slug, output)
+            if ids:
+                return MoveOutcome("busy", busy=ids)
+            loc = _locate_in(conn, transcript_id, output)
+            if loc is None:
+                return MoveOutcome("invalid")
+            old = conn.execute("SELECT stem FROM transcripts WHERE id = ?",
+                               (transcript_id,)).fetchone()
+            old_stem = old[0]
+            old_dir, old_md = loc.dir, loc.md
+            clash_file, existing_id = _recheck_clash(
+                conn, transcript_id, current_cid, old_dir, new_stem, loc, output)
+            if clash_file is not None or existing_id is not None:
+                modified = _modified_local(clash_file) if clash_file is not None else None
+                return MoveOutcome("clash", new_stem=new_stem, clash_modified=modified,
+                                   overwrite_allowed=existing_id is not None)
+            conn.execute("UPDATE transcripts SET stem = ? WHERE id = ?", (new_stem, transcript_id))
+
+        if missing:
+            return MoveOutcome("moved", new_stem=new_stem)
+        target_md = old_dir / f"{new_stem}.md"
+        result, had_row = _move_md(transcript_id, old_md, target_md, data_dir, output)
+        if result in ("error", "conflict", "missing"):
+            if result == "missing" and had_row:
+                file_registry.add(old_md, kind="transcript",
+                                  owner=file_registry.Owner("transcript", transcript_id),
+                                  data_dir=data_dir, output_dir=output)
+            changed = _revert_stem(transcript_id, old_stem=old_stem, new_stem=new_stem,
+                                   data_dir=data_dir)
+            if changed:
+                return MoveOutcome("locked", kept=[old_md])
+            return MoveOutcome("partial", new_stem=new_stem)
+        kept = rename_companions(transcript_id, old_stem, new_stem, src_dir=old_dir,
+                                 output_dir=output, data_dir=data_dir)
+        if kept:
+            return MoveOutcome("partial", new_stem=new_stem, kept=kept)
+        return MoveOutcome("moved", new_stem=new_stem)
 
 
 def list_transcripts(conn: Optional[sqlite3.Connection] = None, *,

@@ -18,9 +18,7 @@ from wisper_transcribe.campaign_manager import (
     get_transcripts_for_campaign,
     load_campaigns,
     lookup_profile_by_discord_id,
-    move_transcript_to_campaign,
     remove_member,
-    remove_transcript_from_campaign,
     reorder_campaign_transcript,
     set_campaign_transcript_order,
 )
@@ -36,12 +34,14 @@ def _tid(stem, data_dir=None):
 
 
 def _move(stem, slug, data_dir=None):
-    """Seed/attach a session named ``stem`` to ``slug``; returns its id."""
+    """Seed/attach a session named ``stem`` to ``slug``; returns its id.
+
+    A direct seed (no files move), so the session reads misplaced; use
+    ``transcript_store.move_transcript`` where the file move matters.
+    """
     from ._seed import seed_transcript
 
-    tid = seed_transcript(stem, campaign=slug, data_dir=data_dir)
-    move_transcript_to_campaign(tid, slug, data_dir=data_dir)
-    return tid
+    return seed_transcript(stem, campaign=slug, data_dir=data_dir)
 
 
 @pytest.fixture(autouse=True)
@@ -325,36 +325,57 @@ def test_validate_campaign_slug_rejects_invalid(slug):
 # ---------------------------------------------------------------------------
 
 
-def test_move_transcript_to_campaign(tmp_path):
+def test_move_transcript_assigns_campaign(tmp_path):
+    from ._seed import seed_transcript
+    from wisper_transcribe import transcript_store as ts
+
     create_campaign("Alpha", data_dir=tmp_path)
-    _move("session01", "alpha", data_dir=tmp_path)
+    tid = seed_transcript("session01", data_dir=tmp_path)  # missing: a database-only move
+    assert ts.move_transcript(tid, "alpha", data_dir=tmp_path).status == "moved"
     assert "session01" in get_transcripts_for_campaign("alpha", data_dir=tmp_path)
 
 
+def test_move_transcript_noop_when_already_there(tmp_path):
+    from ._seed import seed_transcript
+    from wisper_transcribe import transcript_store as ts
+
+    create_campaign("Alpha", data_dir=tmp_path)
+    tid = seed_transcript("session01", campaign="alpha", data_dir=tmp_path)
+    assert ts.move_transcript(tid, "alpha", data_dir=tmp_path).status == "unchanged"
+
+
 def test_move_transcript_changes_campaign(tmp_path):
+    from wisper_transcribe import transcript_store as ts
+
     create_campaign("Alpha", data_dir=tmp_path)
     create_campaign("Beta", data_dir=tmp_path)
-    _move("session01", "alpha", data_dir=tmp_path)
-    _move("session01", "beta", data_dir=tmp_path)
+    tid = _move("session01", "alpha", data_dir=tmp_path)
+    assert ts.move_transcript(tid, "beta", data_dir=tmp_path).status == "moved"
     assert "session01" not in get_transcripts_for_campaign("alpha", data_dir=tmp_path)
     assert "session01" in get_transcripts_for_campaign("beta", data_dir=tmp_path)
 
 
-def test_move_transcript_unknown_campaign_raises(tmp_path):
-    with pytest.raises(KeyError):
-        move_transcript_to_campaign("session01", "no-such-slug", data_dir=tmp_path)
+def test_move_transcript_unknown_campaign_is_invalid(tmp_path):
+    from ._seed import seed_transcript
+    from wisper_transcribe import transcript_store as ts
+
+    tid = seed_transcript("session01", data_dir=tmp_path)
+    assert ts.move_transcript(tid, "no-such-slug", data_dir=tmp_path).status == "invalid"
 
 
-def test_remove_transcript_from_campaign(tmp_path):
+def test_move_transcript_to_root(tmp_path):
+    from wisper_transcribe import transcript_store as ts
+
     create_campaign("Alpha", data_dir=tmp_path)
     tid = _move("session01", "alpha", data_dir=tmp_path)
-    remove_transcript_from_campaign(tid, data_dir=tmp_path)
+    assert ts.move_transcript(tid, None, data_dir=tmp_path).status == "moved"
     assert "session01" not in get_transcripts_for_campaign("alpha", data_dir=tmp_path)
 
 
-def test_remove_transcript_noop_when_not_associated(tmp_path):
-    create_campaign("Alpha", data_dir=tmp_path)
-    remove_transcript_from_campaign("orphan", data_dir=tmp_path)  # must not raise
+def test_move_transcript_unknown_id_is_invalid(tmp_path):
+    from wisper_transcribe import transcript_store as ts
+
+    assert ts.move_transcript(999999, None, data_dir=tmp_path).status == "invalid"
 
 
 def test_get_campaign_for_transcript_returns_slug(tmp_path):
@@ -589,10 +610,12 @@ def test_schema_rejects_discord_id_with_non_digits(tmp_path):
 
 
 def test_a_transcript_has_one_campaign_and_a_move_replaces_it(tmp_path):
+    from wisper_transcribe import transcript_store as ts
+
     create_campaign("Alpha", data_dir=tmp_path)
     create_campaign("Beta", data_dir=tmp_path)
     tid = _move("s01", "alpha", data_dir=tmp_path)
-    move_transcript_to_campaign(tid, "beta", data_dir=tmp_path)
+    assert ts.move_transcript(tid, "beta", data_dir=tmp_path).status == "moved"
     assert get_campaign_for_transcript(tid, data_dir=tmp_path) == "beta"
     assert get_transcripts_for_campaign("alpha", data_dir=tmp_path) == []
     with db.connection(tmp_path) as conn:
@@ -713,15 +736,18 @@ def test_load_campaigns_lists_transcript_ids_in_order(tmp_path):
 
 
 def test_move_by_id_is_unambiguous_when_a_stem_is_shared(tmp_path):
+    from wisper_transcribe import transcript_store as ts
+
     create_campaign("Alpha", data_dir=tmp_path)
     _move("s1", "alpha", data_dir=tmp_path)
     create_campaign("Beta", data_dir=tmp_path)
-    with db.transaction(tmp_path) as conn:  # a root session with the same name
-        conn.execute("INSERT INTO transcripts (stem, created_at) VALUES ('s1', 'now')")
+    with db.transaction(tmp_path) as conn:  # a missing root session with the same name
+        conn.execute("INSERT INTO transcripts (stem, created_at, missing_since) "
+                     "VALUES ('s1', 'now', 'now')")
         root_tid = conn.execute(
             "SELECT id FROM transcripts WHERE campaign_id IS NULL").fetchone()[0]
 
-    move_transcript_to_campaign(root_tid, "beta", data_dir=tmp_path)
+    assert ts.move_transcript(root_tid, "beta", data_dir=tmp_path).status == "moved"
 
     with db.connection(tmp_path) as conn:
         bid = conn.execute("SELECT id FROM campaigns WHERE slug='beta'").fetchone()[0]
@@ -730,6 +756,8 @@ def test_move_by_id_is_unambiguous_when_a_stem_is_shared(tmp_path):
 
 
 def test_assigning_a_session_to_a_campaign_that_has_its_name_is_refused(tmp_path):
+    from wisper_transcribe import campaign_manager as cm
+
     create_campaign("Alpha", data_dir=tmp_path)
     create_campaign("Beta", data_dir=tmp_path)
     _move("s1", "alpha", data_dir=tmp_path)
@@ -740,28 +768,30 @@ def test_assigning_a_session_to_a_campaign_that_has_its_name_is_refused(tmp_path
                      "WHERE stem = 's1' AND campaign_id = (SELECT id FROM campaigns WHERE slug = 'alpha')")
     with pytest.raises(ValueError, match="already there"):
         with db.transaction(tmp_path) as conn:
-            from wisper_transcribe import campaign_manager as cm
-
             tid = conn.execute("SELECT id FROM transcripts WHERE campaign_id IS NULL").fetchone()[0]
-            cm._set_campaign(conn, tid, cm._campaign_id(conn, "beta"), 5)
+            cm._assign(conn, tid, cm._campaign_id(conn, "beta"), 5)
 
 
 def test_unassigning_a_session_whose_name_is_taken_in_the_root_is_refused(tmp_path):
+    from wisper_transcribe import campaign_manager as cm
+    from wisper_transcribe import transcript_store as ts
+
     create_campaign("Alpha", data_dir=tmp_path)
     tid = _move("s1", "alpha", data_dir=tmp_path)
     with db.transaction(tmp_path) as conn:
         conn.execute("INSERT INTO transcripts (stem, created_at) VALUES ('s1', 'now')")
     before = _transcript_rows(tmp_path)
-    with pytest.raises(ValueError, match="already there"):
-        remove_transcript_from_campaign(tid, data_dir=tmp_path)
+
+    assert ts.move_transcript(tid, None, data_dir=tmp_path).status == "clash"
     with pytest.raises(ValueError, match="already there"):
         delete_campaign("alpha", data_dir=tmp_path)
     assert _transcript_rows(tmp_path) == before and "alpha" in load_campaigns(tmp_path)
-    from wisper_transcribe import campaign_manager as cm
 
-    with pytest.raises(ValueError, match="already there"):
-        with db.transaction(tmp_path) as conn:
-            cm._write_order(conn, cm._campaign_id(conn, "alpha"), [])
+    # ``_write_order`` only reorders members: it never unassigns a session, so
+    # an empty order leaves the campaign's session in place.
+    with db.transaction(tmp_path) as conn:
+        cm._write_order(conn, cm._campaign_id(conn, "alpha"), [])
+    assert get_transcripts_for_campaign("alpha", data_dir=tmp_path) == ["s1"]
 
 
 def test_transcript_id_is_read_only_and_campaign_scoped(tmp_path):

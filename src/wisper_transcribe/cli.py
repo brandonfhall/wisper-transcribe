@@ -1380,7 +1380,7 @@ def campaigns_journal(slug: str, session: Optional[str], fold_all: bool,
 
 @main.group()
 def transcripts():
-    """Manage transcripts — list, move to campaign, or unlink from a campaign."""
+    """Manage transcripts — list, move between campaigns, or rename."""
 
 
 @transcripts.command("list")
@@ -1453,50 +1453,158 @@ def transcripts_list(campaign: Optional[str]):
     _attention_note()
 
 
-@transcripts.command("move")
-@click.argument("stem")
-@click.option("--campaign", default=None, help="Campaign slug to assign (omit to unlink)")
-@click.option("--no-campaign", "unlink", is_flag=True, default=False, help="Remove campaign association")
-def transcripts_move(stem: str, campaign: Optional[str], unlink: bool):
-    """Assign a transcript to a campaign, or remove its campaign association."""
-    from wisper_transcribe.campaign_manager import (
-        move_transcript_to_campaign,
-        remove_transcript_from_campaign,
-        _validate_campaign_slug,
-    )
+def _find_transcript(name: str, from_slug: Optional[str], *, exclude_slug: Optional[str] = None,
+                     data_dir=None):
+    """One :class:`Located` named ``name``, narrowed by ``from_slug``.
+
+    A name in several campaigns is refused unless ``--from`` (the source
+    campaign) picks one; for a move, the target campaign is dropped from the
+    candidates first, so a name already in the target identifies the session
+    coming in. The error names the campaigns.
+    """
+    from . import db
+    from wisper_transcribe.campaign_manager import _validate_campaign_slug
     from .transcript_store import find_by_stem
 
-    found = find_by_stem(stem)
-    if len(found) > 1:
-        raise click.ClickException(f"{stem!r} is in several campaigns; rename one first.")
+    def campaign_id(slug: str) -> int:
+        safe = _validate_campaign_slug(slug)
+        if safe is None:
+            raise click.ClickException("Invalid campaign slug")
+        with db.connection(data_dir) as conn:
+            row = conn.execute("SELECT id FROM campaigns WHERE slug = ?", (safe,)).fetchone()
+        if row is None:
+            raise click.ClickException(f"Campaign {safe!r} not found.")
+        return row[0]
+
+    if from_slug:
+        found = find_by_stem(name, campaign_id=campaign_id(from_slug), data_dir=data_dir)
+    else:
+        found = find_by_stem(name, data_dir=data_dir)
+
     if not found:
         raise click.ClickException(
-            f"No transcript named {stem!r}. Run `wisper transcripts list`; a file just added "
+            f"No transcript named {name!r}. Run `wisper transcripts list`; a file just added "
             "is picked up by the next scan."
         )
-    tid = found[0].id
+    if len(found) > 1 and exclude_slug:
+        excluded = campaign_id(exclude_slug)
+        remaining = [loc for loc in found if loc.campaign_id != excluded]
+        if remaining:
+            found = remaining
+    if len(found) > 1:
+        with db.connection(data_dir) as conn:
+            slugs = [conn.execute("SELECT slug FROM campaigns WHERE id = ?",
+                                  (loc.campaign_id,)).fetchone() for loc in found]
+        places = sorted(r[0] if r else "no campaign" for r in slugs)
+        raise click.ClickException(
+            f"{name!r} is in several campaigns ({', '.join(places)}); pass --from <slug>."
+        )
+    return found[0]
 
-    if unlink:
-        try:
-            remove_transcript_from_campaign(tid)
-        except ValueError as exc:
-            raise click.ClickException(str(exc))
-        click.echo(f"Unlinked {stem!r} from its campaign.")
-        return
 
-    if not campaign:
+def _clash_flag(keep_both: bool, overwrite: bool) -> str:
+    if keep_both and overwrite:
+        raise click.ClickException("Pass only one of --keep-both or --overwrite.")
+    return "keep_both" if keep_both else "overwrite" if overwrite else "ask"
+
+
+def _report_move(outcome, stem: str, target_slug: Optional[str]) -> None:
+    """Print a :class:`MoveOutcome` and exit 1 for the statuses that failed."""
+    where = f"campaign {target_slug!r}" if target_slug else "the transcripts folder"
+    if outcome.status == "moved":
+        click.echo(f"Moved {stem!r} to {where}.")
+    elif outcome.status == "unchanged":
+        click.echo(f"{stem!r} is already there.")
+    elif outcome.status == "partial":
+        names = ", ".join(p.name for p in outcome.kept)
+        click.echo(f"Moved {stem!r} to {where}; kept in place: {names}.")
+    elif outcome.status == "invalid":
+        raise click.ClickException(f"{stem!r} is not a valid session name.")
+    elif outcome.status == "busy":
+        ids = ", ".join(outcome.busy)
+        raise click.ClickException(
+            f"A job is running for this session ({ids}). If no wisper server is running, these "
+            "are left over from a crash: start the server once to clear them."
+        )
+    elif outcome.status == "folder_taken":
+        raise click.ClickException(
+            f"The campaign's folder isn't available ({outcome.detail or 'folder taken'})."
+        )
+    elif outcome.status == "unavailable":
+        raise click.ClickException("The transcripts folder isn't available.")
+    elif outcome.status == "clash":
+        when = f" (last modified {outcome.clash_modified})" if outcome.clash_modified else ""
+        raise click.ClickException(
+            f"A file with that name is already there{when}. Use --keep-both or --overwrite."
+        )
+    elif outcome.status == "reserved":
+        raise click.ClickException("That name is the campaign journal's.")
+    elif outcome.status == "locked":
+        raise click.ClickException("A file is open in another program; nothing was moved.")
+    else:
+        raise click.ClickException(f"Could not complete the move ({outcome.status}).")
+
+
+@transcripts.command("move")
+@click.argument("stem")
+@click.option("--campaign", default=None, help="Campaign slug to move the session into")
+@click.option("--no-campaign", "unlink", is_flag=True, default=False,
+              help="Move the session to the transcripts folder root")
+@click.option("--from", "from_slug", default=None,
+              help="Disambiguate a name that is in several campaigns")
+@click.option("--keep-both", is_flag=True, default=False,
+              help="On a name clash, save the moved session as '<name> (2)'")
+@click.option("--overwrite", is_flag=True, default=False,
+              help="On a name clash, replace the existing session")
+def transcripts_move(stem: str, campaign: Optional[str], unlink: bool, from_slug: Optional[str],
+                      keep_both: bool, overwrite: bool):
+    """Move a transcript to a campaign, or out of all of them, moving its files."""
+    from wisper_transcribe.campaign_manager import _validate_campaign_slug
+    from .transcript_store import move_transcript
+
+    if unlink and campaign:
+        raise click.ClickException("Pass only one of --campaign or --no-campaign.")
+    if not unlink and not campaign:
         raise click.ClickException("Provide --campaign <slug> or --no-campaign")
+    clash = _clash_flag(keep_both, overwrite)
 
-    safe = _validate_campaign_slug(campaign)
-    if safe is None:
-        raise click.ClickException("Invalid campaign slug")
+    target = None
+    if campaign:
+        target = _validate_campaign_slug(campaign)
+        if target is None:
+            raise click.ClickException("Invalid campaign slug")
+    loc = _find_transcript(stem, from_slug, exclude_slug=target)
+    outcome = move_transcript(loc.id, target, clash=clash)
+    _report_move(outcome, loc.stem, target)
 
-    try:
-        move_transcript_to_campaign(tid, safe)
-    except (KeyError, ValueError) as exc:
-        raise click.ClickException(str(exc))
 
-    click.echo(f"Moved {stem!r} → campaign {safe!r}.")
+@transcripts.command("rename")
+@click.argument("name")
+@click.argument("new_name")
+@click.option("--campaign", default=None, help="Disambiguate a name that is in several campaigns")
+@click.option("--keep-both", is_flag=True, default=False,
+              help="On a name clash, use the next free '<new_name> (2)'")
+@click.option("--overwrite", is_flag=True, default=False,
+              help="On a name clash, replace the existing session")
+def transcripts_rename(name: str, new_name: str, campaign: Optional[str],
+                       keep_both: bool, overwrite: bool):
+    """Rename a transcript and its companion files."""
+    from .transcript_store import rename_transcript
+
+    clash = _clash_flag(keep_both, overwrite)
+    loc = _find_transcript(name, campaign)
+    outcome = rename_transcript(loc.id, new_name, clash=clash)
+    if outcome.status == "moved":
+        click.echo(f"Renamed {loc.stem!r} to {outcome.new_stem!r}.")
+        return
+    if outcome.status == "unchanged":
+        click.echo(f"{loc.stem!r} is already named that.")
+        return
+    if outcome.status == "partial":
+        names = ", ".join(p.name for p in outcome.kept)
+        click.echo(f"Renamed {loc.stem!r} to {outcome.new_stem!r}; kept in place: {names}.")
+        return
+    _report_move(outcome, new_name, campaign)
 
 
 # ---------------------------------------------------------------------------

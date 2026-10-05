@@ -667,6 +667,47 @@ def test_submit_non_upload_path_not_flagged(tmp_path):
     assert job.upload_dir == ""
 
 
+def test_submit_fails_and_removes_the_upload_when_history_cannot_be_written(tmp_path):
+    """A job type the busy guard reads must not be queued when its history row
+    can't be written: submit raises, queues nothing, and drops the upload."""
+    from wisper_transcribe import job_history
+
+    q = _make_queue()
+    upload = tmp_path / "wisper_upload_abc123.mp3"
+    upload.write_bytes(b"fake-audio")
+    calls = []
+
+    def boom(job, data_dir=None):
+        calls.append(job)
+        raise RuntimeError("database busy")
+
+    with patch.object(job_history, "record_required", boom):
+        with pytest.raises(RuntimeError):
+            q.submit(str(upload), original_stem="My Session")
+
+    assert q.list_all() == []
+    assert q.active_count() == 0
+    assert not any(p.name.startswith("wisper_upload_") for p in tmp_path.iterdir())
+
+
+def test_submit_llm_keeps_swallowing_a_history_failure(tmp_path):
+    """A job type the busy guard ignores (an LLM rerun) still queues when its
+    history write fails; only the guard's job types are required."""
+    from wisper_transcribe import job_history
+    from wisper_transcribe.web.jobs import JOB_REFINE
+
+    q = _make_queue()
+
+    def boom(job, data_dir=None):
+        raise RuntimeError("database busy")
+
+    with patch.object(job_history, "record_required", boom), \
+            patch.object(job_history, "record", lambda job, data_dir=None: None):
+        job = q.submit_llm(str(tmp_path / "s1.md"), JOB_REFINE)
+
+    assert q.get(job.id) is job and q.active_count() == 1
+
+
 def test_non_temp_input_not_moved(tmp_path):
     """(b) A non-temp (e.g. recording-sourced) input must never be moved,
     even though it lives next to (or anywhere relative to) the output dir."""

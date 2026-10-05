@@ -71,7 +71,7 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 | 3 — Transcript URLs by id; lists from the database | done (opencode; Claude review fixes) | 121ea73 |
 | 4 — Scan campaign folders: reconcile, sync, Needs attention | done (opencode; Claude review fixes) | 950048e |
 | 5 — Write into campaign folders: uploads, recordings, re-transcribe, CLI | done (opencode; Claude review fixes) | 63d3357 |
-| 6 — Moving a transcript moves its files; clash prompt; Rename | in progress (opencode: 6a1) | |
+| 6 — Moving a transcript moves its files; clash prompt; Rename | done (opencode; Claude review fixes) | |
 | 7 — Campaign create, rename, and delete with folders | not started | |
 | 8 — `wisper storage trim` organizes folders; prune backups | not started | |
 | 9 — Holistic docs, comments, and tests review | not started | |
@@ -1320,6 +1320,8 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
 ---
 
 ### Phase 6 — Moving a transcript moves its files; clash prompt; Rename
+
+*Done (opencode, three hand-offs). Claude's review: `move_files_home` now holds `_LOCATION_LOCK` from its busy check until the files have moved (it checked busy before taking the lock), and a locked `.md` reports `detail="source_missing"` only when the source really is missing. Rehearsed on a scratch copy of the Mac data through the web routes: Move files (18 files into the campaign folder), a move to a new campaign (17 files), a rename (every companion renamed), and a move back to the root; no companion left behind, every page 200.*
 
 **Goal:**
 - Changing a transcript's campaign moves its files.

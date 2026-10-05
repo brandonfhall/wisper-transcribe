@@ -315,11 +315,16 @@ Organize and view transcript-to-campaign associations from the command line:
 ```bash
 wisper transcripts list                          # list all transcripts, grouped by campaign
 wisper transcripts list --campaign d-d-mondays  # show only transcripts for a specific campaign
-wisper transcripts move session12 --campaign d-d-mondays   # assign a transcript to a campaign
-wisper transcripts move session12 --no-campaign            # remove campaign association
+wisper transcripts move session12 --campaign d-d-mondays   # move a transcript into a campaign
+wisper transcripts move session12 --no-campaign            # move a transcript to the root
+wisper transcripts move session12 --campaign d-d-mondays --from old-campaign  # disambiguate
+wisper transcripts move session12 --campaign d-d-mondays --keep-both          # on a name clash
+wisper transcripts rename session12 session-13              # rename a transcript and its files
 ```
 
 - `session12` is the transcript stem (filename without `.md`).
+- `move` and `rename` move the `.md` and its companion files (summary, sidecar, excerpts, audio, backup) together. A clash with an existing file prints its last-modified time and exits 1 unless `--keep-both` (`<name> (2)`) or `--overwrite` is given; `--overwrite` is offered only for a registered session.
+- A name in several campaigns is refused unless `--from <slug>` (for `move`) or `--campaign <slug>` (for `rename`) picks the source.
 - A transcript can belong to at most one campaign at a time.
 - When a transcript or file needs a decision (a missing transcript, a file gone from disk, a file with no transcript), the listing ends with "N items need attention; see the Transcripts page".
 

@@ -26,6 +26,7 @@ from wisper_transcribe.recording_manager import (
     update_recording_status,
 )
 
+from . import _seed
 from ._seed import seed_profile
 
 
@@ -774,10 +775,10 @@ def test_transcribed_recording_campaign_follows_its_transcript(tmp_path, monkeyp
     tid = transcript_store.locate_path(md).id
     stored = _stored_campaign_id(rec.id, tmp_path)
     assert rm.load_recording(rec.id, tmp_path).campaign_slug is None  # transcript in no campaign
-    cm.move_transcript_to_campaign(tid, "other", tmp_path)
+    _seed.assign_campaign(tid, "other", data_dir=tmp_path)
     assert rm.load_recording(rec.id, tmp_path).campaign_slug == "other"
     assert _stored_campaign_id(rec.id, tmp_path) == stored
-    cm.remove_transcript_from_campaign(tid, tmp_path)
+    _seed.unassign_campaign(tid, data_dir=tmp_path)
     assert rm.load_recording(rec.id, tmp_path).campaign_slug is None
     transcript_store.delete_transcript(tid)
     assert rm.load_recording(rec.id, tmp_path).campaign_slug == "dnd"
@@ -791,7 +792,7 @@ def test_save_recording_keeps_a_transcribed_recordings_stored_campaign(tmp_path,
 
     tid = transcript_store.locate_path(md).id
     stored = _stored_campaign_id(rec.id, tmp_path)
-    cm.move_transcript_to_campaign(tid, "other", tmp_path)
+    _seed.assign_campaign(tid, "other", data_dir=tmp_path)
     loaded = rm.load_recording(rec.id, tmp_path)
     loaded.name = "renamed"
     save_recording(loaded, tmp_path)

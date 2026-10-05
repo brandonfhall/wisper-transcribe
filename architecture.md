@@ -41,7 +41,7 @@ src/wisper_transcribe/
 ├── audio_utils.py       validate_audio(), convert_to_wav(), encode_flac(), get_duration(), load_wav_as_tensor()
 ├── time_utils.py        format_timestamp(), format_duration(), parse_timestamp()
 ├── path_utils.py        validate_path_component() (CodeQL-safe guard), get_output_dir()
-├── transcript_store.py  Transcript registry rows, delete_transcript() (the only delete path), atomic_write_text(), save_transcript()/save_summary()
+├── transcript_store.py  Transcript registry rows, delete_transcript() (the only delete path), move_transcript()/rename_transcript()/move_files_home() (rows first, then files), locate()/check_move(), atomic_write_text(), save_transcript()/save_summary()
 ├── search_index.py      Full-text search: FTS5 index over transcript blocks and summary sections, freshness, backfill worker, search() (see "Search index")
 ├── file_registry.py     The `files` table: one row per file wisper owns (owner, kind, path, last-seen stats); add/forget/move/unlink helpers and `sync()` against the disk (see "Database")
 ├── legacy_import.py     Frozen importers for the JSON-era stores (run inside their migration)
@@ -537,8 +537,64 @@ belongs*: the output root, or `<root>/<campaigns.folder>`.
 - `find_by_stem(stem, campaign_id=ANY)` is the reverse lookup once a stem can be
   ambiguous across campaigns (`ANY` means any, `None` means the root);
   `expected_dir(campaign_id)` is where a session belongs.
+- `check_move(transcript_id, campaign_slug, new_stem=…)` is the pure read a
+  move or rename consults before changing anything: no `mkdir` and no writes.
+  It validates `new_stem` (`validate_new_stem`, then `safe_path`) before any
+  disk access, so a name from a query string is a path guard too. It returns a
+  `MoveCheck` with the status (`ok`, `unchanged`, `invalid`, `busy`,
+  `folder_taken`, `reserved`, `clash`), the destination directory and stem, the
+  clashing file's modified time, whether Overwrite is offered (only when the
+  clashing file is a registered transcript), that transcript's id, and
+  `files_move` (false when the session is flagged missing or the `.md` is
+  already in the destination under the same stem, so the move is a database
+  change only). A clash excludes the session itself (the registered `.md`, by
+  `samefile` or path), so a misplaced session moved home or a case-only rename
+  isn't a clash with itself. `validate_new_stem(name)` returns the cleaned NFC
+  name or None: non-empty, at most 100 characters, no path separators or
+  control characters, no leading dot, no trailing dot or space, not ending
+  `.summary`/`.md`, and not a Windows device name.
+- `move_transcript(transcript_id, campaign_slug, clash=…)` moves a session
+  between campaigns (or to the root) and its files. The rule is *rows first,
+  then files*: `check_move` runs read-only, the assignment is written in one
+  transaction, and only after the commit does the `.md` (`file_registry.move`)
+  and then `rename_companions` follow. `_LOCATION_LOCK` is held from before the
+  first write until the files have moved, so no reconcile races the swap. A
+  `clash` may be asked (returned), kept as `<name> (2)` (`keep_both`), or
+  replaced (`overwrite`, offered only for a registered transcript, whose
+  session is deleted first). When the `.md` can't move (held open on Windows),
+  the whole assignment is reverted with a compare-and-swap on what was written,
+  and the result is `locked`; if the revert loses a race or the old name is
+  taken, the row is left as written and the result is `partial`. A companion
+  that can't move stays registered and the result is `partial`, so the session
+  reads misplaced until `move_files_home` finishes it.
+- `move_files_home(transcript_id)` puts a misplaced session's files into the
+  folder its campaign names, without changing the assignment. A name already in
+  the target folder is a `clash`: it is never overwritten or renamed
+  automatically. A missing session changes nothing. Used by Needs attention and
+  `storage trim`.
+- `rename_transcript(transcript_id, new_name, clash=…)` renames the `.md` and
+  every companion together, with the same clash rule and the same revert: a
+  failed `.md` move restores the old stem (compare-and-swapped). Case-only
+  renames are allowed.
+- The busy guard (`job_history.active_jobs`) refuses a move, rename, or
+  campaign delete while a job is pending or running for that transcript, its
+  source or target campaign, or an upload into either, or while a recording of
+  either campaign is capturing. `move_transcript`, `rename_transcript`,
+  `move_files_home`, and the campaign page's remove all check it inside the
+  write transaction, so a job submitted between check and write can't be
+  missed; `_enqueue` records the guard's job types through
+  `job_history.record_required` before queueing.
+- `campaign_manager._assign` is the one primitive that writes a session's
+  assignment; only `move_transcript` moves a session between campaigns.
+  `set_campaign_transcript_order` and `_write_order` reorder a campaign's
+  existing members only: a session that isn't already in the campaign is
+  refused, and a session is never unassigned by a reorder.
 
-Nothing here creates the output root or a campaign folder.
+The read functions (`locate`, `locate_path`, `dir_campaign`, `find_by_stem`,
+`check_move`) never create the output root or a campaign folder. A move claims
+the target folder through `campaign_folders.ensure_folder` when it has files to
+move; the output root is never created here, and an absent one means
+"unavailable".
 
 ### Storage trim (`storage_trim.py`)
 `plan()` only reads: it never reconciles or writes the registry, and takes the Needs-attention list from `file_registry.sync(scan_only=True)`. `apply()` runs, in order:
@@ -735,6 +791,7 @@ Tokens in `input.css` `@theme`: `--color-ink-*` backgrounds, `--color-paper*` te
 In-memory `dict[str, Job]` drained by one asyncio task; each job runs via `asyncio.to_thread()`. **One job at a time** for every type, because the model globals aren't thread-safe. The queue itself isn't persisted: after a restart nothing resumes, but every job's record survives in job history (below).
 
 **Job history** (`job_history.py`, migration v6 `jobs`): every job is written through at submit (`JobQueue._enqueue()`), when the worker starts it, at its terminal state, and on a pending cancel. Rows keep the generic error text (never exception text), the last 200 log lines, an allowlisted `params_json` (no paths, secrets, or free text; transcription jobs add the resolved `output_root`, which can be a campaign folder), and the job's direct subject (`transcript_id`, `campaign_id`, `recording_id`, all `ON DELETE SET NULL`, linked only to rows that exist). At startup, rows left `pending`/`running` become `failed` / "Interrupted by restart"; jobs are never resumed. A clean shutdown records the running job the same way as it happens: `stop()` cancels the worker, and `_worker` catches `asyncio.CancelledError` (a `BaseException`, so `except Exception` misses it) to mark the job failed and delete its temp upload; the `finally` would otherwise record a still-`RUNNING` job as completed. The in-memory queue keeps its 50-job cap; the database keeps every job. A job's campaign is derived, not stored for jobs whose subject isn't a campaign: its transcript's current campaign, else its recording's, else the `campaign` it was submitted with (`params_json`). History queries (`job_history._FROM`) and the dashboard's Campaign column (`dashboard.job_campaigns()`, for jobs still in memory) apply the same rule, so a moved transcript's jobs follow it and `?campaign=` lists a campaign's transcription jobs. The dashboard merges live jobs with history (20 newest); `/jobs/history` pages all of it (50 per page, filter by type/status, or `?transcript_id=<id>`/`?campaign=` from the "Jobs" links on those pages); `/transcribe/jobs/{id}` falls back to the stored record when the job is gone from memory. A recording's `transcribing` state and job link come from `jobs.recording_id`. `test_enum_checks_mirror_python_constants` fails if a `JOB_*` type, status, capture state, or speaker source is added without a migration.
+- **The busy guard's row is required, not best-effort.** `job_history.active_jobs(conn, transcript_id=, campaign_ids=, campaign_slugs=)` reads the whole source and target campaign, because journal and relabel jobs read every session of their campaign: a job counts by its `transcript_id`, its `campaign_id`, its transcript's campaign, or the `campaign` in `params_json`; a Discord or local capture (no `jobs` row) counts by its `campaign_id` or `transcript_id`. The query spells `status IN ('pending', 'running')` exactly as the `jobs_active` partial index does, so it uses the index. It takes the caller's `conn` and runs inside the write transaction, so a job submitted between check and write can't be missed. `_enqueue()` records the jobs the guard reads (transcription, `campaign_journal`, `speaker_relabel`) through `job_history.record_required()` **before** tracking and queueing them, and re-raises: a submit whose row can't be written fails, the job isn't queued, and the upload is removed. The other job types keep the swallowing `record()`, as do all status updates. Not covered, accepted: a CLI `wisper transcribe` run writes no `jobs` row, so it isn't seen; rows left pending/running by a crashed server count as busy until the next start runs `mark_interrupted`.
 
 Job types:
 - **Transcription** — `process_file()`, optionally chaining refine/summarize (`post_refine`/`post_summarize`) in the same thread.

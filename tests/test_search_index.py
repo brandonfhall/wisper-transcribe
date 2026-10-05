@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from wisper_transcribe import db, search_index as si, transcript_store as ts
-from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+from wisper_transcribe.campaign_manager import create_campaign
 from wisper_transcribe.path_utils import get_output_dir
 
 from . import _seed

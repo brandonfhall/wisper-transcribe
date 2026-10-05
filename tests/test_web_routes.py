@@ -238,6 +238,34 @@ def test_transcribe_post_queues_job_and_redirects(client, tmp_path):
     assert location.startswith("/transcribe/jobs/")
 
 
+def test_transcribe_post_submit_failure_deletes_the_upload(client, tmp_path, monkeypatch):
+    """When the job's history row can't be written, the upload is refused with
+    submit_failed and its temp folder is removed."""
+    import tempfile
+    from wisper_transcribe import job_history
+
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+
+    def boom(job, data_dir=None):
+        raise RuntimeError("database busy")
+
+    monkeypatch.setattr(job_history, "record_required", boom)
+    audio_file = tmp_path / "test.mp3"
+    audio_file.write_bytes(b"fake mp3")
+
+    with open(audio_file, "rb") as f:
+        resp = client.post(
+            "/transcribe",
+            files={"file": ("test.mp3", f, "audio/mpeg")},
+            data={"model_size": "tiny"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/transcribe?error=submit_failed"
+    assert not any(p.name.startswith("wisper_upload_") for p in tmp_path.iterdir())
+
+
 def test_transcribe_post_streams_large_upload_correctly(client, tmp_path):
     """Uploads are streamed to disk in 1 MiB chunks rather than
     buffered whole into memory. A payload spanning multiple chunks must
@@ -1973,10 +2001,10 @@ def test_campaigns_create_empty_name_rejected(client, tmp_path, monkeypatch):
 
 def test_campaign_detail_shows_rebuild_button_with_transcripts(client, tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    from wisper_transcribe.campaign_manager import create_campaign
 
     create_campaign("My Game", data_dir=tmp_path)
-    _seed.move_to_campaign("s1", "my-game", data_dir=tmp_path)
+    _seed.move_to_campaign("s1", "my-game")
 
     resp = client.get("/campaigns/my-game")
     assert resp.status_code == 200
@@ -1987,7 +2015,7 @@ def test_campaign_detail_shows_rebuild_button_with_transcripts(client, tmp_path,
 def test_campaign_detail_reorder_arrows_hidden_at_boundaries(client, tmp_path, monkeypatch):
     """First row has no 'move up' arrow, last row has no 'move down' arrow."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    from wisper_transcribe.campaign_manager import create_campaign
 
     create_campaign("My Game", data_dir=tmp_path)
     for stem in ("s1", "s2", "s3"):
@@ -2147,6 +2175,43 @@ def test_campaign_remove_transcript_rejects_non_integer_id(client, tmp_path, mon
         assert resp.status_code == 400, f"expected 400 for id={bad_id!r}, got {resp.status_code}"
 
 
+def test_campaign_remove_transcript_moves_it_to_the_root(client, tmp_path, monkeypatch):
+    """Removing a session from a campaign moves its files to the root (keep both on a clash)."""
+    from ._moves import claimed_campaign, placed_session
+    from wisper_transcribe import transcript_store as ts
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    cid, slug, folder = claimed_campaign("Test Game")
+    tid, md = placed_session("S", campaign=slug, directory=tmp_path / folder)
+
+    resp = client.post(f"/campaigns/{slug}/transcripts/remove",
+                       data={"transcript_id": str(tid)}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/campaigns/{slug}"
+    assert (tmp_path / "S.md").exists()
+    assert ts.locate(tid).campaign_id is None
+
+
+def test_campaign_remove_transcript_locked_maps_to_a_fixed_code(client, tmp_path, monkeypatch):
+    """A locked .md refuses the remove with ?error=locked and leaves the row in place."""
+    from ._moves import claimed_campaign, placed_session, lock_os_replace
+    from wisper_transcribe import transcript_store as ts
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    cid, slug, folder = claimed_campaign("Test Game")
+    tid, md = placed_session("S", campaign=slug, directory=tmp_path / folder)
+    lock_os_replace(monkeypatch, {"S.md"})
+
+    resp = client.post(f"/campaigns/{slug}/transcripts/remove",
+                       data={"transcript_id": str(tid)}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/campaigns/{slug}?error=locked"
+    assert ts.locate(tid).campaign_id == cid  # unchanged
+
+    page = client.get(resp.headers["location"]).text
+    assert 'data-testid="move-error"' in page
+
+
 def test_campaign_reorder_transcript_moves_up(client, tmp_path, monkeypatch):
     """POST /campaigns/{slug}/transcripts/reorder moves the session one position up."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
@@ -2253,6 +2318,23 @@ def test_campaign_journal_post_submits_job_and_redirects(client, tmp_path, monke
     assert mock_submit.call_args.kwargs.get("fold_all") is False
 
 
+def test_campaign_journal_post_submit_failure_redirects_with_submit_failed(
+        client, tmp_path, monkeypatch):
+    """A journal job whose history row can't be written redirects with submit_failed."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    create_campaign("My Game", data_dir=tmp_path)
+
+    with patch.object(client.app.state.job_queue, "submit_journal",
+                      side_effect=RuntimeError("database busy")):
+        resp = client.post("/campaigns/my-game/journal",
+                           data={"mode": "next"}, follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/campaigns/my-game?error=submit_failed"
+
+
 def test_campaign_journal_post_fold_all(client, tmp_path, monkeypatch):
     """mode=all sets fold_all=True on the submitted job."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
@@ -2321,7 +2403,7 @@ def _journaled_game(tmp_path, monkeypatch):
     out.mkdir()
     monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
     from wisper_transcribe import journal as journal_mod
-    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    from wisper_transcribe.campaign_manager import create_campaign
 
     create_campaign("My Game")
     _reg(out / "s1.md", "x")
@@ -2339,8 +2421,7 @@ def _journaled_game(tmp_path, monkeypatch):
 
 
 def test_campaign_page_shows_stale_banner(client, tmp_path, monkeypatch):
-    from wisper_transcribe.campaign_manager import remove_transcript_from_campaign
-
+    
     _journaled_game(tmp_path, monkeypatch)
     resp = client.get("/campaigns/my-game")
     assert 'data-testid="journal-stale"' not in resp.text
@@ -2401,6 +2482,22 @@ def test_campaign_relabel_post_submits_job_and_redirects(client, tmp_path, monke
     assert resp.status_code == 303
     assert resp.headers["location"] == f"/transcribe/jobs/{fake_job.id}"
     assert mock_submit.call_args.args[0] == "my-game"
+
+
+def test_campaign_relabel_post_submit_failure_redirects_with_submit_failed(
+        client, tmp_path, monkeypatch):
+    """A relabel job whose history row can't be written redirects with submit_failed."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    create_campaign("My Game", data_dir=tmp_path)
+
+    with patch.object(client.app.state.job_queue, "submit_relabel",
+                      side_effect=RuntimeError("database busy")):
+        resp = client.post("/campaigns/my-game/relabel", follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/campaigns/my-game?error=submit_failed"
 
 
 def test_campaign_relabel_post_unknown_campaign(client, tmp_path, monkeypatch):
@@ -2639,8 +2736,9 @@ def test_assign_campaign_unlinks_when_empty(client, tmp_path, monkeypatch):
     assert get_campaign_for_transcript(tid, data_dir=tmp_path) is None
 
 
-def test_assign_campaign_refused_by_a_name_clash_shows_the_error(client, tmp_path, monkeypatch):
-    """A session already in the campaign under that name refuses the move with an error code."""
+def test_assign_campaign_on_a_name_clash_shows_the_prompt(client, tmp_path, monkeypatch):
+    """A name already in the target campaign returns to the page with the clash
+    panel, which recomputes the clash server-side and offers Overwrite/Keep both."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     md = _reg(tmp_path / "session01.md", "---\ntitle: Session 01\n---\n")
     tid = _tid(md)
@@ -2654,7 +2752,219 @@ def test_assign_campaign_refused_by_a_name_clash_shows_the_error(client, tmp_pat
     resp = client.post(f"/transcripts/{tid}/campaign", data={"campaign": "test-game"},
                        follow_redirects=False)
     assert resp.status_code == 303
-    assert "error=move_failed" in resp.headers["location"]
+    assert resp.headers["location"] == f"/transcripts/{tid}?clash=move&to=test-game"
+
+    page = client.get(resp.headers["location"]).text
+    assert 'data-testid="clash-panel"' in page
+    assert 'value="keep_both"' in page
+    assert 'value="overwrite"' in page  # the clashing session is a wisper transcript
+
+
+def _move_setup(tmp_path, monkeypatch):
+    """A claimed campaign ``game`` with a folder, and a root session ``S``."""
+    from ._moves import claimed_campaign, placed_session
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    cid, slug, folder = claimed_campaign("Game")
+    tid, md = placed_session("S")
+    return cid, slug, folder, tid, md
+
+
+def test_assign_campaign_keep_both_resolves_the_clash(client, tmp_path, monkeypatch):
+    """POST clash=keep_both moves the session and writes <name> (2)."""
+    from ._moves import placed_session
+
+    cid, slug, folder, tid, md = _move_setup(tmp_path, monkeypatch)
+    other, _ = placed_session("S", campaign=slug, directory=tmp_path / folder)
+
+    resp = client.post(f"/transcripts/{tid}/campaign",
+                       data={"campaign": slug, "clash": "keep_both"},
+                       follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/transcripts/{tid}"
+    assert (tmp_path / folder / "S (2).md").exists()
+
+
+def test_assign_campaign_overwrite_deletes_the_target(client, tmp_path, monkeypatch):
+    """POST clash=overwrite deletes the clashing session, then moves the chosen one in."""
+    from wisper_transcribe import transcript_store as ts
+    from ._moves import placed_session
+
+    cid, slug, folder, tid, md = _move_setup(tmp_path, monkeypatch)
+    other, other_md = placed_session("S", campaign=slug, directory=tmp_path / folder)
+
+    resp = client.post(f"/transcripts/{tid}/campaign",
+                       data={"campaign": slug, "clash": "overwrite"},
+                       follow_redirects=False)
+    assert resp.status_code == 303
+    assert ts.locate(other) is None
+    assert (tmp_path / folder / "S.md").exists()
+
+
+def test_assign_campaign_maps_a_refused_status_to_a_fixed_code(client, tmp_path, monkeypatch):
+    """A busy move redirects with ?error=busy and touches no file."""
+    import uuid
+
+    from ._moves import placed_session
+
+    cid, slug, folder, tid, md = _move_setup(tmp_path, monkeypatch)
+    _ = placed_session
+    # A pending journal job for the target campaign makes the move busy.
+    from wisper_transcribe import db
+    with db.transaction(tmp_path) as conn:
+        conn.execute(
+            "INSERT INTO jobs (id, type, status, created_at, campaign_id, params_json, log_tail) "
+            "VALUES (?, 'campaign_journal', 'pending', ?, ?, '{}', '')",
+            (str(uuid.uuid4()), db.now_utc(), cid))
+
+    resp = client.post(f"/transcripts/{tid}/campaign", data={"campaign": slug},
+                       follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/transcripts/{tid}?error=busy"
+    assert md.exists()
+
+
+def test_rename_route_renames_the_file(client, tmp_path, monkeypatch):
+    """POST /transcripts/{id}/rename renames the .md and redirects to the page."""
+    from ._moves import add_companion
+
+    cid, slug, folder, tid, md = _move_setup(tmp_path, monkeypatch)
+    add_companion(tid, md, ".summary.md", "sum")
+
+    resp = client.post(f"/transcripts/{tid}/rename", data={"new_name": "Renamed"},
+                       follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/transcripts/{tid}"
+    assert (tmp_path / "Renamed.md").exists() and (tmp_path / "Renamed.summary.md").exists()
+    assert not md.exists()
+
+
+def test_rename_route_invalid_name_redirects_with_code(client, tmp_path, monkeypatch):
+    """An invalid new name is refused with ?error=invalid_name and nothing moves."""
+    cid, slug, folder, tid, md = _move_setup(tmp_path, monkeypatch)
+
+    resp = client.post(f"/transcripts/{tid}/rename", data={"new_name": "../evil"},
+                       follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/transcripts/{tid}?error=invalid_name"
+    assert md.exists()
+
+
+def test_rename_route_clash_opens_the_prompt(client, tmp_path, monkeypatch):
+    """A name already taken returns with ?clash=rename&name=<cleaned> and shows the panel."""
+    from ._moves import placed_session
+
+    cid, slug, folder, tid, md = _move_setup(tmp_path, monkeypatch)
+    placed_session("Taken", directory=tmp_path)
+
+    resp = client.post(f"/transcripts/{tid}/rename", data={"new_name": "Taken"},
+                       follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/transcripts/{tid}?clash=rename&name=Taken"
+
+    page = client.get(resp.headers["location"]).text
+    assert 'data-testid="clash-panel"' in page
+    assert 'value="keep_both"' in page
+
+
+def test_move_files_route_moves_a_misplaced_session(client, tmp_path, monkeypatch):
+    """POST /transcripts/{id}/move-files finishes a partial move."""
+    from ._moves import add_companion
+
+    cid, slug, folder, tid, md = _move_setup(tmp_path, monkeypatch)
+    from wisper_transcribe import db as _db
+    with _db.transaction(tmp_path) as conn:
+        conn.execute("UPDATE transcripts SET campaign_id = ?, position = 0 WHERE id = ?",
+                     (cid, tid))
+    (tmp_path / folder).mkdir(exist_ok=True)
+    add_companion(tid, md, ".summary.md", "sum")
+
+    resp = client.post(f"/transcripts/{tid}/move-files", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/transcripts/{tid}"
+    assert (tmp_path / folder / "S.md").exists()
+
+
+def test_move_files_route_clash_is_reported(client, tmp_path, monkeypatch):
+    """Move files never overwrites: a name in the target redirects with a clash page error."""
+    cid, slug, folder, tid, md = _move_setup(tmp_path, monkeypatch)
+    from wisper_transcribe import db as _db
+    with _db.transaction(tmp_path) as conn:
+        conn.execute("UPDATE transcripts SET campaign_id = ?, position = 0 WHERE id = ?",
+                     (cid, tid))
+    (tmp_path / folder).mkdir(exist_ok=True)
+    (tmp_path / folder / "S.md").write_text("# other\n", encoding="utf-8")
+
+    resp = client.post(f"/transcripts/{tid}/move-files", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "error=" in resp.headers["location"]
+    assert md.exists()
+
+
+def test_transcript_detail_shows_the_move_files_button_for_a_misplaced_session(
+        client, tmp_path, monkeypatch):
+    cid, slug, folder, tid, md = _move_setup(tmp_path, monkeypatch)
+    from wisper_transcribe import db as _db
+    with _db.transaction(tmp_path) as conn:
+        conn.execute("UPDATE transcripts SET campaign_id = ?, position = 0 WHERE id = ?",
+                     (cid, tid))
+
+    page = client.get(f"/transcripts/{tid}").text
+    assert 'data-testid="misplaced-note"' in page
+    assert f'action="/transcripts/{tid}/move-files"' in page
+
+
+def test_bulk_campaign_reports_counts_in_the_redirect(client, tmp_path, monkeypatch):
+    """bulk-campaign redirects with integer moved/skipped/busy counts."""
+    from ._moves import placed_session
+
+    cid, slug, folder, tid, md = _move_setup(tmp_path, monkeypatch)
+    other, other_md = placed_session("S", campaign=slug, directory=tmp_path / folder)
+
+    resp = client.post("/transcripts/bulk-campaign",
+                       data={"transcript_id": [str(tid)], "campaign": slug},
+                       follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/transcripts?moved=0&skipped=1&busy=0"
+
+    page = client.get(resp.headers["location"]).text
+    assert 'data-testid="bulk-move-result"' in page
+
+
+def test_bulk_campaign_moves_the_rest_when_one_clashes(client, tmp_path, monkeypatch):
+    """With one clash, bulk-campaign moves the others and counts the clash as skipped."""
+    from ._moves import claimed_campaign, placed_session
+    from wisper_transcribe import transcript_store as ts
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    cid, slug, folder = claimed_campaign("Game")
+    clash, _ = placed_session("S", campaign=slug, directory=tmp_path / folder)
+    mover, _ = placed_session("S")
+    clean, clean_md = placed_session("T")
+
+    resp = client.post("/transcripts/bulk-campaign",
+                       data={"transcript_id": [str(mover), str(clean)], "campaign": slug},
+                       follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/transcripts?moved=1&skipped=1&busy=0"
+    assert ts.locate(clean).campaign_id == cid          # the clean one moved
+    assert ts.locate(mover).campaign_id is None         # the clashing one stayed put
+
+
+def test_clash_page_render_creates_no_directory(client, tmp_path, monkeypatch):
+    """check_move is pure: rendering ?clash=rename creates no campaign folder."""
+    from ._moves import placed_session
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    _seed.seed_campaign("Game", slug="game", data_dir=tmp_path)  # unclaimed, no folder
+    tid, md = placed_session("S")
+    _seed.seed_transcript("Taken", campaign="game", data_dir=tmp_path)
+    _seed.assign_campaign(tid, "game", data_dir=tmp_path)
+
+    page = client.get(f"/transcripts/{tid}", params={"clash": "rename", "name": "Taken"})
+    assert page.status_code == 200
+    assert 'data-testid="clash-panel"' in page.text
+    assert not (tmp_path / "Game").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -3429,7 +3739,7 @@ def test_name_check_reports_existing_transcript_and_campaign(client, tmp_path, m
     out = tmp_path / "out"
     out.mkdir()
     monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
-    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    from wisper_transcribe.campaign_manager import create_campaign
 
     _reg(out / "session 1.md", "x", encoding="utf-8")
     create_campaign("The Game")
@@ -3999,7 +4309,7 @@ def test_startup_on_a_new_database_reports_no_upgrade(caplog):
 
 def _campaign_with_session():
     from wisper_transcribe import file_registry, transcript_store as ts
-    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    from wisper_transcribe.campaign_manager import create_campaign
     from wisper_transcribe import campaign_folders
     from wisper_transcribe.path_utils import get_output_dir
 

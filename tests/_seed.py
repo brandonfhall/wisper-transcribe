@@ -287,7 +287,8 @@ def move_to_campaign(stem: str, slug: str, data_dir: Optional[Path] = None) -> i
     """Attach the session named ``stem`` (created in the root if absent) to
     ``slug``; returns its id.
 
-    Test convenience over the id-based ``campaign_manager.move_transcript_to_campaign``.
+    A direct ``UPDATE`` (test seeding): it moves no files, so the session reads
+    misplaced until ``transcript_store.move_files_home``.
     """
     with db.transaction(data_dir) as conn:
         tid = _find_or_create_transcript(conn, stem)
@@ -302,10 +303,34 @@ def move_to_campaign(stem: str, slug: str, data_dir: Optional[Path] = None) -> i
 
 
 def remove_from_campaign(stem: str, data_dir: Optional[Path] = None) -> int:
-    """Unassign the session named ``stem`` (any campaign); returns its id."""
-    tid = transcript_id(stem, data_dir=data_dir)
-    cm.remove_transcript_from_campaign(tid, data_dir=data_dir)
+    """Unassign the session named ``stem`` (any campaign); returns its id.
+
+    A direct ``UPDATE`` (test seeding): it moves no files.
+    """
+    with db.transaction(data_dir) as conn:
+        tid = _find_or_create_transcript(conn, stem)
+        conn.execute("UPDATE transcripts SET campaign_id = NULL, position = NULL WHERE id = ?",
+                     (tid,))
     return tid
+
+
+def assign_campaign(tid: int, slug: str, data_dir: Optional[Path] = None) -> None:
+    """Attach an existing session id to ``slug`` (test seeding, moves no files)."""
+    with db.transaction(data_dir) as conn:
+        cid = cm._campaign_id(conn, slug)
+        pos = conn.execute(
+            "SELECT coalesce(max(position), -1) + 1 FROM transcripts WHERE campaign_id = ?",
+            (cid,),
+        ).fetchone()[0]
+        conn.execute("UPDATE transcripts SET campaign_id = ?, position = ? WHERE id = ?",
+                     (cid, pos, tid))
+
+
+def unassign_campaign(tid: int, data_dir: Optional[Path] = None) -> None:
+    """Detach an existing session id from any campaign (test seeding, moves no files)."""
+    with db.transaction(data_dir) as conn:
+        conn.execute("UPDATE transcripts SET campaign_id = NULL, position = NULL WHERE id = ?",
+                     (tid,))
 
 
 def seed_sidecar(md_path: Path, diar: dict, data_dir: Optional[Path] = None) -> None:

@@ -6,6 +6,7 @@ from typing import Annotated, Optional
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 from . import get_queue, templates
 from wisper_transcribe.campaign_manager import (
@@ -17,7 +18,6 @@ from wisper_transcribe.campaign_manager import (
     delete_campaign,
     load_campaigns,
     remove_member,
-    remove_transcript_from_campaign,
     reorder_campaign_transcript,
 )
 from wisper_transcribe.speaker_manager import load_profiles
@@ -281,12 +281,12 @@ async def campaign_remove_transcript(
     if loc is None or loc.campaign_id != campaign.id:
         return error_redirect(f"/campaigns/{campaign.slug}", "not_found")
 
-    try:
-        remove_transcript_from_campaign(loc.id)
-    except ValueError:  # an unassigned session already has this name
-        return error_redirect(f"/campaigns/{campaign.slug}", "remove_failed")
-
-    return RedirectResponse(url=f"/campaigns/{campaign.slug}", status_code=303)
+    outcome = await run_in_threadpool(
+        transcript_store.move_transcript, loc.id, None, clash="keep_both")
+    if outcome.status in ("moved", "unchanged", "partial"):
+        return RedirectResponse(url=f"/campaigns/{campaign.slug}", status_code=303)
+    from .transcripts import _move_error_code
+    return error_redirect(f"/campaigns/{campaign.slug}", _move_error_code(outcome))
 
 
 @router.post("/{slug}/transcripts/reorder", response_class=HTMLResponse)
@@ -350,17 +350,21 @@ async def campaign_journal_update(
         return error_redirect("/campaigns", "not_found")
 
     queue = get_queue(request)
-    if mode in ("rebuild", "resummarize"):
-        resummarize = mode == "resummarize"
-        label = "Rebuild journal from transcripts" if resummarize else "Rebuild journal"
-        job = queue.submit_journal(
-            safe, name=f"{label}: {campaign.display_name}",
-            rebuild=True, resummarize=resummarize,
-        )
-    else:
-        job = queue.submit_journal(
-            safe, name=f"Journal: {campaign.display_name}", fold_all=(mode == "all")
-        )
+    try:
+        if mode in ("rebuild", "resummarize"):
+            resummarize = mode == "resummarize"
+            label = "Rebuild journal from transcripts" if resummarize else "Rebuild journal"
+            job = queue.submit_journal(
+                safe, name=f"{label}: {campaign.display_name}",
+                rebuild=True, resummarize=resummarize,
+            )
+        else:
+            job = queue.submit_journal(
+                safe, name=f"Journal: {campaign.display_name}", fold_all=(mode == "all")
+            )
+    except Exception:
+        # The job's history row couldn't be written, so it wasn't queued.
+        return error_redirect(f"/campaigns/{safe}", "submit_failed")
     # job.id is a server-generated uuid4 — never user input (CodeQL-safe redirect).
     return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
 
@@ -376,9 +380,13 @@ async def campaign_relabel(request: Request, slug: str) -> RedirectResponse:
     if campaign is None:
         return error_redirect("/campaigns", "not_found")
 
-    job = get_queue(request).submit_relabel(
-        safe, name=f"Re-match speakers: {campaign.display_name}"
-    )
+    try:
+        job = get_queue(request).submit_relabel(
+            safe, name=f"Re-match speakers: {campaign.display_name}"
+        )
+    except Exception:
+        # The job's history row couldn't be written, so it wasn't queued.
+        return error_redirect(f"/campaigns/{safe}", "submit_failed")
     # job.id is a server-generated uuid4 — never user input (CodeQL-safe redirect).
     return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
 

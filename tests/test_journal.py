@@ -11,7 +11,6 @@ from wisper_transcribe import campaign_folders, journal
 from wisper_transcribe.campaign_manager import (
     create_campaign,
     load_campaigns,
-    move_transcript_to_campaign,
 )
 
 from . import _seed
@@ -503,8 +502,6 @@ def test_cli_export_includes_journaled_sessions(tmp_path, out_dir, monkeypatch):
 def test_cli_campaigns_show_reports_stale_journal(tmp_path, out_dir, monkeypatch):
     from click.testing import CliRunner
 
-    from wisper_transcribe.campaign_manager import remove_transcript_from_campaign
-
     cli = _cli_game(tmp_path, out_dir, monkeypatch, FakeClient())
     journal.update_journal("my-game", FakeClient(), {}, session_stem="s1")
     result = CliRunner().invoke(cli.main, ["campaigns", "show", "my-game"])
@@ -774,8 +771,6 @@ def test_move_to_other_campaign_drops_entry_and_marks_stale(tmp_path, out_dir):
 
 
 def test_unassign_marks_stale(tmp_path, out_dir):
-    from wisper_transcribe.campaign_manager import remove_transcript_from_campaign
-
     _folded_game(tmp_path, out_dir)
     _seed.remove_from_campaign("s1", data_dir=tmp_path)
     assert journal.journal_stale_since("my-game", data_dir=tmp_path) is not None
@@ -850,7 +845,6 @@ def test_rebuild_clears_stale(tmp_path, out_dir):
     _folded_game(tmp_path, out_dir)
     for stem in ("s1", "s2"):
         _write_transcript(out_dir, stem)
-    from wisper_transcribe.campaign_manager import remove_transcript_from_campaign
     _seed.remove_from_campaign("s2", data_dir=tmp_path)
     journal.rebuild_campaign("my-game", FakeClient(), {}, data_dir=tmp_path)
     assert _campaign_row(tmp_path)["journal_stale_since"] is None

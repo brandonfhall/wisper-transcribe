@@ -1010,21 +1010,25 @@ def _submit_recording_transcription(recording, request: Request, data_dir: Path)
             log.warning("Failed to link transcript to recording %s", recording.id, exc_info=True)
 
     queue = request.app.state.job_queue
-    job = queue.submit(
-        str(recording.combined_path),
-        original_stem=stem,
-        source_name=recording.name or recording.id,
-        recording_id=recording.id,
-        output_dir=str(output_dir),
-        # The campaign is the roster filter only; the folder decides assignment.
-        campaign=recording.campaign_slug or "",
-        title=recording.name,
-        # The output is the recording's own transcript, so re-transcribing
-        # replaces it (keeping its identity and campaign; a folded journal goes
-        # stale). The page asks for confirmation first.
-        overwrite=True,
-        on_complete=_on_complete,
-    )
+    try:
+        job = queue.submit(
+            str(recording.combined_path),
+            original_stem=stem,
+            source_name=recording.name or recording.id,
+            recording_id=recording.id,
+            output_dir=str(output_dir),
+            # The campaign is the roster filter only; the folder decides assignment.
+            campaign=recording.campaign_slug or "",
+            title=recording.name,
+            # The output is the recording's own transcript, so re-transcribing
+            # replaces it (keeping its identity and campaign; a folded journal goes
+            # stale). The page asks for confirmation first.
+            overwrite=True,
+            on_complete=_on_complete,
+        )
+    except Exception:
+        # The job's history row couldn't be written, so it wasn't queued.
+        return None, "submit_failed"
     return job, None
 
 

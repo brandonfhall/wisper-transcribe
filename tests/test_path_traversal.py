@@ -841,3 +841,98 @@ def test_transcript_retranscribe_error_redirect_uses_the_id(client, tmp_path, mo
     tid = transcript_store.register(md, origin="job")
     resp = client.post(f"/transcripts/{tid}/retranscribe", follow_redirects=False)
     assert resp.headers["location"] == f"/transcripts/{tid}?error=no_audio"
+
+
+# ---------------------------------------------------------------------------
+# Move / rename: the new_name form field and the GET clash page's query values
+# ---------------------------------------------------------------------------
+
+def _moved_setup(tmp_path, monkeypatch):
+    """A registered session in the root; returns (id, md)."""
+    from wisper_transcribe import transcript_store
+
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    md = out / "Session 1.md"
+    md.write_text("x", encoding="utf-8")
+    return transcript_store.register(md, origin="job"), md
+
+
+@pytest.mark.parametrize("payload", ["\x00", "some\x00name", "invalid*name", "../escape",
+                                    "../../etc/passwd", "a/b", "..", "evil\r\nLocation: x",
+                                    ".hidden", ".wisper-tmp-1", "COM1", "x" * 101,
+                                    "Notes.md", "x.summary"])
+def test_rename_route_rejects_every_unsafe_new_name(client, payload, tmp_path, monkeypatch):
+    """A hostile or invalid new_name is refused with a fixed code, no file
+    touched, and never reflected into the response."""
+    tid, md = _moved_setup(tmp_path, monkeypatch)
+
+    resp = client.post(f"/transcripts/{tid}/rename", data={"new_name": payload},
+                       follow_redirects=False)
+    assert resp.status_code in (303, 400, 422)
+    assert resp.headers.get("location", "") == f"/transcripts/{tid}?error=invalid_name"
+    assert payload not in resp.text
+    assert md.exists() and md.read_text(encoding="utf-8") == "x"
+
+
+def test_rename_route_renames_only_within_its_folder(client, tmp_path, monkeypatch):
+    """A valid rename keeps the file in its folder and never escapes it."""
+    tid, md = _moved_setup(tmp_path, monkeypatch)
+    resp = client.post(f"/transcripts/{tid}/rename", data={"new_name": "Renamed"},
+                       follow_redirects=False)
+    assert resp.headers["location"] == f"/transcripts/{tid}"
+    assert (md.parent / "Renamed.md").exists() and not md.exists()
+
+
+@pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS + [
+    "../escape", "../../etc/passwd", "a/b", "..", "evil\r\nLocation: x",
+    ".hidden", ".wisper-tmp-1", "COM1", "x" * 101,
+])
+def test_rename_clash_page_query_name_is_validated_before_disk_access(
+        client, payload, tmp_path, monkeypatch):
+    """?clash=rename&name=… is validated by validate_new_stem; an unsafe name
+    renders no clash panel and touches no disk."""
+    tid, md = _moved_setup(tmp_path, monkeypatch)
+    resp = client.get(f"/transcripts/{tid}", params={"clash": "rename", "name": payload})
+    assert resp.status_code == 200
+    assert 'data-testid="clash-panel"' not in resp.text
+    assert payload not in resp.text or payload == ""
+    assert md.exists()
+
+
+@pytest.mark.parametrize("payload", _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS + [
+    "../escape", "../../etc/passwd", "a/b", "..", "evil\r\nLocation: x",
+])
+def test_move_clash_page_query_slug_is_validated(client, payload, tmp_path, monkeypatch):
+    """?clash=move&to=… is validated with the campaign-slug guard; a hostile
+    slug renders no panel and never leaks into the page."""
+    tid, md = _moved_setup(tmp_path, monkeypatch)
+    resp = client.get(f"/transcripts/{tid}", params={"clash": "move", "to": payload})
+    assert resp.status_code == 200
+    assert payload not in resp.text or payload == ""
+    assert md.exists()
+
+
+@pytest.mark.parametrize("payload", ["x", "1.5", "-1", "1; DROP TABLE transcripts", ""])
+def test_move_files_route_takes_only_an_integer_id(client, payload, tmp_path, monkeypatch):
+    """The move-files route is id-based; a malformed id never matches, so no move happens."""
+    resp = client.post(f"/transcripts/{payload}/move-files", follow_redirects=False)
+    assert resp.status_code in (400, 404, 405)
+    assert "\x00" not in resp.headers.get("location", "")
+
+
+@pytest.mark.parametrize("payload", ["\x00", "some\x00name", "invalid*name", "invalid+name",
+                                    "../escape", "../../etc/passwd", "a/b", "..",
+                                    "evil\r\nLocation: x", "javascript:alert(1)"])
+def test_assign_campaign_form_slug_is_guarded(client, payload, tmp_path, monkeypatch):
+    """The campaign form field is a lookup key and never a path; a malformed
+    slug is refused with a fixed code and never reflected."""
+    tid, md = _moved_setup(tmp_path, monkeypatch)
+
+    resp = client.post(f"/transcripts/{tid}/campaign", data={"campaign": payload},
+                       follow_redirects=False)
+    assert resp.status_code in (303, 400, 422)
+    assert resp.headers.get("location", "") == f"/transcripts/{tid}?error=invalid_campaign"
+    assert payload not in resp.text
+    assert md.exists()

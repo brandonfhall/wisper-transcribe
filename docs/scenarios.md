@@ -162,6 +162,16 @@ A `.md` you copy or drop into a campaign folder becomes a session of that campai
 
 ---
 
+## A session's files didn't all move
+
+Moving a session between campaigns, or renaming it, moves its `.md` and every registered companion (summary, speaker data, excerpt clips, audio, backup) together. If one of those files is open in another program — Obsidian, a player, Explorer, a sync client — Windows won't let it move. The `.md` is the exception: if it can't move, the whole move is undone, and nothing changes.
+
+When only a companion is left behind, the session still works everywhere: it reads as **misplaced** under **Needs attention** on the Transcripts page, because a file isn't in the session's folder. Close the program holding it and click **Move files** for that session (or run `wisper storage trim --apply`) to finish the move. The file keeps its registered name and is found wherever it is in the meantime.
+
+A move or rename is refused while a job is pending or running for the session, its campaign, or a recording of it; finish or cancel the job and try again. The clash prompt (when a name is already taken) offers **Overwrite** only for a session wisper owns; a file it doesn't own can only be kept as a new copy.
+
+---
+
 ## A recording stopped unexpectedly
 
 If wisper crashes or the machine loses power mid-session, the recording shows **FAILED** after the restart, but everything captured up to the last minute is still on disk. Open the recording and click **Recover recording** (or run `wisper record recover <recording_id>` while `wisper server` runs). The saved pieces are joined into one file, the recording becomes **COMPLETED**, and **Transcribe** works as usual. Expect up to the final minute to be missing.

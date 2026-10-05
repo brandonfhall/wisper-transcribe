@@ -34,6 +34,9 @@
   {% elif err == 'delete_failed' %}
   <div style="margin-bottom:16px;color:var(--color-signal-amber);font-size:12.5px">Couldn't delete that file: it may be open in another program, or it now belongs to a transcript.</div>
   {% endif %}
+  {% if request.query_params.get('moved') %}
+  <div data-testid="bulk-move-result" style="margin-bottom:16px;color:var(--color-signal-amber);font-size:12.5px">Moved {{ request.query_params.get('moved') }}, skipped {{ request.query_params.get('skipped', '0') }} (name already in the target folder), {{ request.query_params.get('busy', '0') }} busy.</div>
+  {% endif %}
   {% if request.query_params.get('notice') == 'relink_kept_names' %}
   <div style="margin-bottom:16px;color:var(--color-signal-amber);font-size:12.5px">Relinked. Some files kept their old name because a file with the new name already exists; see Needs attention below.</div>
   {% endif %}
@@ -113,11 +116,14 @@
     {% if attention.misplaced %}
     <div class="mono-kicker" style="margin:16px 0 8px">Not in their campaign's folder</div>
     {% for m in attention.misplaced %}
-    <div data-testid="misplaced-transcript" style="display:flex;gap:12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--color-rule)">
+    <div data-testid="misplaced-transcript" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--color-rule)">
       <span style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper-faint)">{{ m.stem }}</span>
+      {% if m.campaign %}<span class="pill pill-dim">{{ m.campaign }}</span>{% endif %}
       <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint)">{{ m.dir }}</span>
       <div style="flex:1"></div>
-      <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint)">Run `wisper storage trim --apply`, or use Move files on the session's page</span>
+      <form method="post" action="/transcripts/{{ m.id }}/move-files">
+        <button type="submit" class="btn btn-secondary btn-sm" title="Move this session's files into its campaign's folder">Move files</button>
+      </form>
     </div>
     {% endfor %}
     {% endif %}

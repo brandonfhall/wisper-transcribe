@@ -65,10 +65,17 @@ _GENERIC_JOB_ERRORS = {
 }
 
 
-def _record_history(job: "Job") -> None:
-    """Write the job's current state to the ``jobs`` table (never raises)."""
+def _record_history(job: "Job", *, required: bool = False) -> None:
+    """Write the job's current state to the ``jobs`` table.
+
+    ``required=True`` re-raises (a submit whose row can't be written must not
+    queue); the default swallows, so a status update never breaks the job.
+    """
     from wisper_transcribe import job_history
-    job_history.record(job)
+    if required:
+        job_history.record_required(job)
+    else:
+        job_history.record(job)
 
 
 class TranscriptMissingError(RuntimeError):
@@ -564,9 +571,16 @@ class JobQueue:
         self._on_error_callbacks: dict[str, Callable[["Job"], None]] = {}
 
     def _enqueue(self, job: Job) -> None:
-        """Track a new job, record it in history, and queue it."""
+        """Record the job in history, then track and queue it.
+
+        The job types the busy guard reads (transcription, journal, relabel)
+        write their row first and re-raise: a job whose row can't be written
+        must not be queued, or a move could miss it. The others keep the
+        swallowing ``record``.
+        """
+        required = job.job_type in (JOB_TRANSCRIPTION, JOB_CAMPAIGN_JOURNAL, JOB_SPEAKER_RELABEL)
+        _record_history(job, required=required)
         self._jobs[job.id] = job
-        _record_history(job)
         self._queue.put_nowait(job.id)
 
     # ------------------------------------------------------------------
@@ -688,7 +702,15 @@ class JobQueue:
             loc = locate_path(Path(output_dir) / f"{original_stem}.md")
             if loc is not None:
                 job.transcript_id = loc.id
-        self._enqueue(job)
+        try:
+            self._enqueue(job)
+        except Exception:
+            # The row could not be written, so the job must not be queued: drop
+            # the temp upload it would have owned and let the caller report it.
+            self._on_complete_callbacks.pop(job.id, None)
+            self._on_error_callbacks.pop(job.id, None)
+            _delete_temp_upload(job)
+            raise
         return job
 
     def submit_llm(

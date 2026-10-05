@@ -9,9 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from ._seed import seed_sidecar
-
-from ._seed import seed_profile, sidecar_data
+from ._seed import assign_campaign, seed_profile, seed_sidecar, sidecar_data
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +92,7 @@ def test_sidecar_written_after_job_completes(tmp_path: Path):
     import uuid
 
     from wisper_transcribe import transcript_store
-    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    from wisper_transcribe.campaign_manager import create_campaign
 
     out_md = tmp_path / "session01.md"
     out_md.write_text("# Session 01", encoding="utf-8")
@@ -103,7 +101,7 @@ def test_sidecar_written_after_job_completes(tmp_path: Path):
     audio.write_bytes(b"x")
     input_path_str = str(audio)
     create_campaign("My Campaign")
-    move_transcript_to_campaign(tid, "my-campaign")
+    assign_campaign(tid, "my-campaign")
 
     seg = DiarizationSegment(start=1.0, end=5.0, speaker="SPEAKER_00")
     job = Job(
@@ -224,9 +222,9 @@ def test_wizard_enroll_propagates_to_campaign(tmp_path: Path):
         "diarization_segments": [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"}],
     })
     # The campaign comes from the transcript's current campaign row.
-    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    from wisper_transcribe.campaign_manager import create_campaign
     create_campaign("Game")
-    move_transcript_to_campaign(tid, "game")
+    assign_campaign(tid, "game")
     job = Job(id=str(uuid.uuid4()), status=COMPLETED, created_at=datetime.now(),
               input_path=str(md), kwargs={}, job_type=JOB_ENROLL,
               enroll_md_path=str(md), enroll_groups={"Alice": ["SPEAKER_00"]})

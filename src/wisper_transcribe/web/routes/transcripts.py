@@ -10,18 +10,18 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 log = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 from wisper_transcribe.campaign_manager import (
     _validate_campaign_slug,
     get_campaign_for_transcript,
     load_campaigns,
-    move_transcript_to_campaign,
-    remove_transcript_from_campaign,
 )
 from wisper_transcribe.config import get_data_dir, get_output_root
 from wisper_transcribe import db as _db, file_registry
@@ -229,6 +229,97 @@ def _parse_transcript_ids(values: list) -> list[int]:
     return ids
 
 
+#: The fixed ``?error=`` code for each refused move or rename status.
+_MOVE_ERROR_CODES = {
+    "invalid": "invalid_name",
+    "busy": "busy",
+    "folder_taken": "folder_taken",
+    "unavailable": "output_unavailable",
+    "reserved": "reserved",
+    "locked": "locked",
+}
+
+
+def _move_error_code(outcome: "transcript_store.MoveOutcome") -> str:
+    """The ``?error=`` code for a refused move or rename."""
+    if outcome.status == "folder_taken" and outcome.detail in ("folder_pending", "folder_missing"):
+        return "rename_pending" if outcome.detail == "folder_pending" else "folder_missing"
+    return _MOVE_ERROR_CODES.get(outcome.status, "move_failed")
+
+
+def _move_outcome_redirect(tid: int, outcome: "transcript_store.MoveOutcome", *,
+                           page: Optional[str] = None) -> RedirectResponse:
+    """Map a move/rename outcome to a redirect (the status table's route column)."""
+    page = page or f"/transcripts/{tid}"
+    if outcome.status in ("moved", "unchanged"):
+        return RedirectResponse(url=page, status_code=303)
+    if outcome.status == "partial":
+        return RedirectResponse(url=f"{page}?notice=partial_move", status_code=303)
+    return RedirectResponse(url=f"{page}?error={_move_error_code(outcome)}", status_code=303)
+
+
+def _move_clash_redirect(tid: int, target_slug: Optional[str]) -> RedirectResponse:
+    """The clash page for a move, with the target slug taken from the database row."""
+    if target_slug:
+        return RedirectResponse(
+            url=f"/transcripts/{tid}?clash=move&to={quote(target_slug, safe='')}", status_code=303)
+    return RedirectResponse(url=f"/transcripts/{tid}?clash=move", status_code=303)
+
+
+def _clash_context(loc: "transcript_store.Located", request: Request) -> Optional[dict]:
+    """The clash panel for ``?clash=move`` / ``?clash=rename``, recomputed server-side.
+
+    The query string only names a campaign slug or a new name; both are validated
+    here and the clash is recomputed with the pure :func:`check_move`, so nothing
+    from the URL builds a path or a link. Returns None unless it is a real clash.
+    """
+    kind = request.query_params.get("clash")
+    if kind not in ("move", "rename"):
+        return None
+    if kind == "move":
+        raw = request.query_params.get("to", "").strip()
+        target_slug = _validate_campaign_slug(raw) if raw else None
+        if raw and target_slug is None:
+            return None
+        check = transcript_store.check_move(loc.id, target_slug)
+        if check.status != "clash":
+            return None
+        campaign = load_campaigns().get(target_slug) if target_slug else None
+        return {
+            "kind": "move",
+            "to": campaign.slug if campaign else "",
+            "target_name": campaign.display_name if campaign else "Uncategorized",
+            "name": "",
+            "modified": check.clash_modified,
+            "overwrite_allowed": check.overwrite_allowed,
+        }
+    cleaned = transcript_store.validate_new_stem(request.query_params.get("name", ""))
+    if cleaned is None:
+        return None
+    current_slug = get_campaign_for_transcript(loc.id)
+    check = transcript_store.check_move(loc.id, current_slug, new_stem=cleaned)
+    if check.status != "clash":
+        return None
+    return {
+        "kind": "rename",
+        "to": "",
+        "target_name": "",
+        "name": check.stem,
+        "modified": check.clash_modified,
+        "overwrite_allowed": check.overwrite_allowed,
+    }
+
+
+def _misplaced_note(loc: "transcript_store.Located") -> Optional[dict]:
+    """Where a misplaced session's files are, and the folder they belong in."""
+    if not loc.misplaced:
+        return None
+    root = get_output_root()
+    where = ("the transcripts folder's root"
+             if transcript_store._dirs_equal(loc.dir, root, loc.fold) else loc.dir.name)
+    return {"where": where, "target": loc.expected_dir.name}
+
+
 @router.get("/partials/recent", response_class=HTMLResponse)
 async def recent_transcripts_partial(request: Request) -> HTMLResponse:
     """HTMX partial: 6 most recent transcripts for the dashboard archive section."""
@@ -386,7 +477,11 @@ async def bulk_delete_transcripts(request: Request) -> HTMLResponse:
 
 @router.post("/bulk-campaign", response_class=HTMLResponse)
 async def bulk_assign_campaign(request: Request) -> HTMLResponse:
-    """Assign or remove a campaign for multiple transcripts in one request."""
+    """Move multiple transcripts to a campaign in one request.
+
+    A clashing session stays where it is and is counted as skipped; a busy
+    session is counted as busy. The counts (ints) go in the redirect.
+    """
     form = await request.form()
     campaign = str(form.get("campaign", "")).strip()
 
@@ -399,16 +494,25 @@ async def bulk_assign_campaign(request: Request) -> HTMLResponse:
                 headers={"Location": "/transcripts?error=invalid_campaign"},
             )
 
+    moved = skipped = busy = 0
     for tid in _parse_transcript_ids(form.getlist("transcript_id")):
         try:
-            if safe_slug:
-                move_transcript_to_campaign(tid, safe_slug)
-            else:
-                remove_transcript_from_campaign(tid)
+            outcome = await run_in_threadpool(
+                transcript_store.move_transcript, tid, safe_slug, clash="skip")
         except Exception:
-            pass
+            skipped += 1
+            continue
+        if outcome.status in ("moved", "unchanged", "partial"):
+            moved += 1
+        elif outcome.status == "busy":
+            busy += 1
+        else:
+            skipped += 1
 
-    return HTMLResponse(content="", status_code=303, headers={"Location": "/transcripts"})
+    return HTMLResponse(
+        content="", status_code=303,
+        headers={"Location": f"/transcripts?moved={moved}&skipped={skipped}&busy={busy}"},
+    )
 
 
 @router.post("/relink", response_class=HTMLResponse)
@@ -577,6 +681,8 @@ async def transcript_detail(request: Request, transcript_id: int, q: str = "") -
             "llm_model": llm_model,
             "campaigns": campaigns,
             "current_campaign_slug": current_campaign_slug,
+            "clash": _clash_context(loc, request),
+            "misplaced": _misplaced_note(loc),
             "highlight": _highlight(q),
             "audio_url": audio_url,
             "markers": markers,
@@ -832,51 +938,71 @@ async def summary_download(request: Request, transcript_id: int):
 
 @router.post("/{transcript_id:int}/campaign", response_class=HTMLResponse)
 async def assign_campaign(request: Request, transcript_id: int) -> Response:
-    """Assign or remove a campaign association for a transcript."""
+    """Move a transcript to a campaign (or the root) and move its files.
+
+    ``clash=overwrite|keep_both`` resolves a name clash; the default returns to
+    the transcript page with the clash panel. The status table's route column
+    maps every other outcome to a fixed ``?error=`` code or ``?notice=``.
+    """
     loc = _located_or_redirect(transcript_id)
     if isinstance(loc, RedirectResponse):
         return loc
 
     form = await request.form()
     campaign_slug = str(form.get("campaign", "")).strip()
+    clash = str(form.get("clash", "")).strip()
 
+    target_slug: Optional[str] = None
     if campaign_slug:
-        safe_slug = _validate_campaign_slug(campaign_slug)
-        if safe_slug is None:
+        target_slug = _validate_campaign_slug(campaign_slug)
+        if target_slug is None:
             return HTMLResponse(
-                content="",
-                status_code=303,
+                content="", status_code=303,
                 headers={"Location": f"/transcripts/{loc.id}?error=invalid_campaign"},
             )
-        try:
-            move_transcript_to_campaign(loc.id, safe_slug)
-        except KeyError:
-            return HTMLResponse(
-                content="",
-                status_code=303,
-                headers={"Location": f"/transcripts/{loc.id}?error=not_found"},
-            )
-        except ValueError:  # a session with that name is already in the campaign
-            return HTMLResponse(
-                content="",
-                status_code=303,
-                headers={"Location": f"/transcripts/{loc.id}?error=move_failed"},
-            )
-    else:
-        try:
-            remove_transcript_from_campaign(loc.id)
-        except ValueError:  # an unassigned session already has this name
-            return HTMLResponse(
-                content="",
-                status_code=303,
-                headers={"Location": f"/transcripts/{loc.id}?error=move_failed"},
-            )
 
-    return HTMLResponse(
-        content="",
-        status_code=303,
-        headers={"Location": f"/transcripts/{loc.id}"},
-    )
+    mode = clash if clash in ("overwrite", "keep_both") else "ask"
+    outcome = await run_in_threadpool(
+        transcript_store.move_transcript, loc.id, target_slug, clash=mode)
+    if outcome.status == "clash":
+        campaign = load_campaigns().get(target_slug) if target_slug else None
+        return _move_clash_redirect(loc.id, campaign.slug if campaign else None)
+    return _move_outcome_redirect(loc.id, outcome)
+
+
+@router.post("/{transcript_id:int}/rename", response_class=HTMLResponse)
+async def rename_transcript(request: Request, transcript_id: int) -> Response:
+    """Rename a transcript's ``.md`` and every companion together.
+
+    ``clash=overwrite|keep_both`` resolves a name clash; the default returns to
+    the transcript page with the clash panel.
+    """
+    loc = _located_or_redirect(transcript_id)
+    if isinstance(loc, RedirectResponse):
+        return loc
+
+    form = await request.form()
+    new_name = str(form.get("new_name", ""))
+    clash = str(form.get("clash", "")).strip()
+    mode = clash if clash in ("overwrite", "keep_both") else "ask"
+
+    outcome = await run_in_threadpool(
+        transcript_store.rename_transcript, loc.id, new_name, clash=mode)
+    if outcome.status == "clash" and outcome.new_stem:
+        return RedirectResponse(
+            url=f"/transcripts/{loc.id}?clash=rename&name={quote(outcome.new_stem, safe='')}",
+            status_code=303)
+    return _move_outcome_redirect(loc.id, outcome)
+
+
+@router.post("/{transcript_id:int}/move-files", response_class=HTMLResponse)
+async def move_files_home(request: Request, transcript_id: int) -> Response:
+    """Put a misplaced session's files into its campaign's folder."""
+    loc = _located_or_redirect(transcript_id)
+    if isinstance(loc, RedirectResponse):
+        return loc
+    outcome = await run_in_threadpool(transcript_store.move_files_home, loc.id)
+    return _move_outcome_redirect(loc.id, outcome)
 
 
 _RETRANSCRIBE_ERRORS = {"no_audio", "not_ready"}

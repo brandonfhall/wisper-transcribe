@@ -173,30 +173,35 @@ async def start_transcribe(
         vad_filter = False
 
     queue = _get_queue(request)
-    job = queue.submit(
-        input_path=tmp.name,
-        original_stem=original_stem,
-        source_name=os.path.basename(file.filename or "") or (original_stem + suffix),
-        model_size=model_size,
-        # Pass "auto" through: process_file treats None as "use config".
-        language=language,
-        device=device,
-        num_speakers=_int_or_none(num_speakers),
-        min_speakers=_int_or_none(min_speakers),
-        max_speakers=_int_or_none(max_speakers),
-        no_diarize=no_diarize,
-        compute_type=compute_type,
-        vad_filter=vad_filter,
-        include_timestamps=include_timestamps,
-        initial_prompt=initial_prompt or None,
-        output_dir=out_path,
-        enroll_speakers=False,  # Web enrollment is post-job wizard
-        post_refine=bool(post_refine),
-        post_summarize=bool(post_summarize),
-        campaign=safe_campaign,
-        hotwords=hotwords,
-        overwrite=replace_existing,
-    )
+    try:
+        job = queue.submit(
+            input_path=tmp.name,
+            original_stem=original_stem,
+            source_name=os.path.basename(file.filename or "") or (original_stem + suffix),
+            model_size=model_size,
+            # Pass "auto" through: process_file treats None as "use config".
+            language=language,
+            device=device,
+            num_speakers=_int_or_none(num_speakers),
+            min_speakers=_int_or_none(min_speakers),
+            max_speakers=_int_or_none(max_speakers),
+            no_diarize=no_diarize,
+            compute_type=compute_type,
+            vad_filter=vad_filter,
+            include_timestamps=include_timestamps,
+            initial_prompt=initial_prompt or None,
+            output_dir=out_path,
+            enroll_speakers=False,  # Web enrollment is post-job wizard
+            post_refine=bool(post_refine),
+            post_summarize=bool(post_summarize),
+            campaign=safe_campaign,
+            hotwords=hotwords,
+            overwrite=replace_existing,
+        )
+    except Exception:
+        # The job's history row couldn't be written, so it wasn't queued; the
+        # temp upload is already deleted. A move must not miss this job.
+        return error_redirect("/transcribe", "submit_failed")
 
     return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
 

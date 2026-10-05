@@ -100,6 +100,10 @@
     <div style="margin-top:12px;padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber)">
       This campaign's folder is gone from the transcripts folder, so nothing was started. Recreate it or rename the campaign from the Transcripts page.
     </div>
+    {% elif request.query_params.get('error') == 'submit_failed' %}
+    <div style="margin-top:12px;padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber)">
+      The upload could not be queued, so nothing was started. Try again.
+    </div>
     {% elif request.query_params.get('error') %}
     <div style="margin-top:12px;padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber)">
       Upload error: {{ request.query_params.get('error') }}. Please try again.

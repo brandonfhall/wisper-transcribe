@@ -51,6 +51,29 @@
 <div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Couldn't delete: an unassigned session already has the same name as one of its sessions.</div>
 {% elif request.query_params.get('error') == 'relink_failed' %}
 <div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Couldn't relink: that file may already belong to a campaign, or the session is no longer missing.</div>
+{% elif request.query_params.get('error') == 'submit_failed' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">The job could not be queued, so nothing was started. Try again.</div>
+{% endif %}
+{% set _move_error = request.query_params.get('error') %}
+{% if _move_error in ('busy', 'locked', 'reserved', 'folder_taken', 'rename_pending', 'folder_missing', 'output_unavailable', 'invalid_name', 'move_failed') %}
+<div data-testid="move-error" style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">
+  {%- if _move_error == 'busy' -%}
+  A job is running for that session or this campaign; try again when it finishes.
+  {%- elif _move_error == 'locked' -%}
+  A file is open in another program, so that session didn't move. Close it and try again.
+  {%- elif _move_error == 'reserved' -%}
+  That name is the journal's; choose another.
+  {%- elif _move_error in ('folder_taken', 'rename_pending', 'folder_missing') -%}
+  This campaign's folder isn't available; fix it from the Transcripts page.
+  {%- elif _move_error == 'output_unavailable' -%}
+  The transcripts folder isn't available.
+  {%- else -%}
+  That session didn't move; see Needs attention on the Transcripts page.
+  {%- endif -%}
+</div>
+{% endif %}
+{% if request.query_params.get('notice') == 'partial_move' %}
+<div data-testid="move-notice" style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">The session moved, but a file was open in another program and stayed behind. Use Move files to finish it.</div>
 {% endif %}
 {% if request.query_params.get('notice') == 'relink_kept_names' %}
 <div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Relinked. Some files kept their old name because a file with the new name already exists; see Needs attention on the Transcripts page.</div>

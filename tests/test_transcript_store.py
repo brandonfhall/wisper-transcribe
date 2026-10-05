@@ -13,7 +13,6 @@ from wisper_transcribe import db, file_registry, transcript_store as ts
 from wisper_transcribe.campaign_manager import (
     create_campaign,
     get_transcripts_for_campaign,
-    move_transcript_to_campaign,
 )
 from wisper_transcribe.path_utils import get_output_dir
 
@@ -1220,6 +1219,132 @@ def test_find_by_stem_two_campaigns_share_a_stem(out):
     assert ts.find_by_stem("no such stem") == []
 
 
+# ---------------------------------------------------------------------------
+# check_move: pure clash / busy / validation for a move or rename
+# ---------------------------------------------------------------------------
+
+def test_validate_new_stem_accepts_and_refuses():
+    assert ts.validate_new_stem("  Session 3  ") == "Session 3"
+    assert ts.validate_new_stem("Café") == "Café"
+    for name in ("", "   ", ".hidden", ".wisper-tmp-1", "COM1", "nul", "x" * 101,
+                 "a/b", "a\\b", "a:b", "a*b", "a?b", 'a"b', "a<b", "a>b", "a|b",
+                 "trailing.", "a\x00b", "a\x1fb", "a\x7fb", "Notes.md",
+                 "Notes.SUMMARY", "Notes.summary"):
+        assert ts.validate_new_stem(name) is None, name
+
+    # Strip removes a surrounding space, so only a dot can trail.
+    assert ts.validate_new_stem("trailing ") == "trailing"
+
+
+def _campaign_slug(cid: int) -> str:
+    with db.connection() as conn:
+        return conn.execute("SELECT slug FROM campaigns WHERE id = ?", (cid,)).fetchone()[0]
+
+
+def test_check_move_to_a_campaign_is_ok_and_creates_nothing(out):
+    cid, slug, folder = _claimed_campaign("Game")
+    tid = _seed.seed_transcript("S", write_md=True)
+
+    check = ts.check_move(tid, slug)
+    assert check.status == "ok" and check.dst_dir == out / folder and check.stem == "S"
+    assert check.files_move is True and check.existing_id is None
+    # Pure: no mkdir, and no write.
+    before = {p.name for p in out.iterdir()}
+    ts.check_move(tid, slug)
+    assert {p.name for p in out.iterdir()} == before
+
+
+def test_check_move_unchanged_when_campaign_and_stem_match(out):
+    tid = _seed.seed_transcript("S", write_md=True)
+    check = ts.check_move(tid, None)
+    assert check.status == "unchanged" and check.files_move is False
+
+
+def test_check_move_invalid_name_returns_invalid_without_disk_access(out):
+    cid, slug, folder = _claimed_campaign("Game")
+    tid = _seed.seed_transcript("S", write_md=True)
+    for name in ("../x", "a/b", ".hidden", "COM1", "x" * 101):
+        check = ts.check_move(tid, slug, new_stem=name)
+        assert check.status == "invalid", name
+
+    # An invalid name never reaches the disk: an unclaimed folder stays absent.
+    other = _seed.seed_campaign("Unclaimed")  # no folder on disk
+    with db.connection() as conn:
+        other_slug = conn.execute(
+            "SELECT slug FROM campaigns WHERE id = ?", (other,)).fetchone()[0]
+    check = ts.check_move(tid, other_slug, new_stem="../x")
+    assert check.status == "invalid"
+
+
+def test_check_move_clash_names_the_existing_transcript(out):
+    cid, slug, folder = _claimed_campaign("Game")
+    moved = _seed.seed_transcript("S", write_md=True)
+    other = _insert_session("S", campaign_id=cid, position=0)
+    md = out / folder / "S.md"
+    md.write_text("x", encoding="utf-8")
+    file_registry.add(md, kind="transcript",
+                      owner=file_registry.Owner("transcript", other), output_dir=out)
+    with db.transaction() as conn:
+        conn.execute("UPDATE transcripts SET missing_since = NULL WHERE id = ?", (other,))
+
+    check = ts.check_move(moved, slug)
+    assert check.status == "clash" and check.existing_id == other
+    assert check.overwrite_allowed is True and check.clash_modified
+
+
+def test_check_move_reserved_when_the_name_is_the_journal(out):
+    cid, slug, folder = _claimed_campaign("Game")
+    tid = _seed.seed_transcript("S", write_md=True)
+    check = ts.check_move(tid, slug, new_stem=f"{folder} Journal")
+    assert check.status == "reserved"
+
+
+def test_check_move_busy_when_a_job_targets_the_campaign(out):
+    from wisper_transcribe.web.jobs import JobQueue
+
+    cid, slug, folder = _claimed_campaign("Game")
+    tid = _seed.seed_transcript("S", write_md=True)
+
+    q = JobQueue()
+    job = q.submit(str(out / "s.mp3"), original_stem="S", campaign=slug,
+                   output_dir=str(out / folder))
+    assert ts.check_move(tid, slug).status == "busy"
+
+    job.status = "failed"
+    from datetime import datetime
+    job.finished_at = datetime.now()
+    job.error = "x"
+    from wisper_transcribe import job_history
+    job_history.record(job)
+    assert ts.check_move(tid, slug).status == "ok"
+
+
+def test_check_move_missing_session_moves_as_a_database_change_only(out):
+    cid, slug, folder = _claimed_campaign("Game")
+    tid = _insert_session("Gone", campaign_id=cid, position=0)
+    with db.transaction() as conn:
+        conn.execute("UPDATE transcripts SET missing_since = ? WHERE id = ?", (db.now_utc(), tid))
+    check = ts.check_move(tid, None)
+    assert check.status == "ok" and check.files_move is False
+
+
+def test_check_move_misplaced_session_is_not_its_own_clash(out):
+    """Removing a misplaced session (its .md in the root) from its campaign is
+    a move to the root, not a clash with the .md that is already there, and
+    moves nothing on disk."""
+    cid, slug, folder = _claimed_campaign("Game")
+    tid = _seed.seed_transcript("S", campaign=slug, write_md=True)  # .md in the root
+    check = ts.check_move(tid, None)
+    assert check.status == "ok" and check.files_move is False
+
+
+def test_check_move_case_only_rename_on_a_case_insensitive_filesystem(out, monkeypatch):
+    monkeypatch.setattr(file_registry, "_fold", lambda d: True)
+    tid = _seed.seed_transcript("Session", write_md=True)
+    check = ts.check_move(tid, None, new_stem="SESSION")
+    assert check.status == "ok" and check.files_move is True
+
+
 def test_list_transcripts_present_only_newest_first(out):
     """list_transcripts returns present rows ordered by the transcript file's
     mtime (newest first), skipping rows flagged missing."""
@@ -1744,4 +1869,434 @@ def test_delete_unowned_file_refuses_a_folder_that_isnt_a_campaign(out):
     assert ts.delete_unowned_file(orphan, out) is False
     assert ts.delete_unowned_file(nested / "ghost.summary.md", out) is False
     assert orphan.exists()
+
+
+# ---------------------------------------------------------------------------
+# move_transcript: rows first, then files
+# ---------------------------------------------------------------------------
+
+def _files_root_rel(tid: int) -> list[str]:
+    with db.connection() as conn:
+        return [r[0] for r in conn.execute(
+            "SELECT rel_path FROM files WHERE transcript_id = ? ORDER BY id", (tid,))]
+
+
+def test_move_carries_every_registered_file(out, tmp_path):
+    from ._moves import add_companion, claimed_campaign, placed_session
+
+    cid, slug, folder = claimed_campaign("Game")
+    tid, md = placed_session("S")
+    add_companion(tid, md, ".summary.md", "sum")
+    add_companion(tid, md, "_diar.json", "{}")
+    add_companion(tid, md, ".flac", "x")
+
+    outcome = ts.move_transcript(tid, slug)
+    assert outcome.status == "moved" and outcome.new_stem == "S"
+    assert not md.exists()
+    assert sorted(p.name for p in (out / folder).iterdir()) == [
+        "S.flac", "S.md", "S.summary.md", "S_diar.json"]
+    assert all(rel.startswith(f"{folder}/") for rel in _files_root_rel(tid))
+    assert ts.locate(tid).misplaced is False
+
+
+def test_move_to_the_root(out, tmp_path):
+    from ._moves import claimed_campaign, placed_session
+
+    cid, slug, folder = claimed_campaign("Game")
+    tid, md = placed_session("S", campaign=slug, directory=out / folder)
+
+    outcome = ts.move_transcript(tid, None)
+    assert outcome.status == "moved"
+    assert (out / "S.md").exists() and not md.exists()
+    assert ts.locate(tid).campaign_id is None
+
+
+def test_move_ask_on_a_clash_changes_nothing(out, tmp_path):
+    from ._moves import claimed_campaign, placed_session
+
+    cid, slug, folder = claimed_campaign("Game")
+    other, other_md = placed_session("S", campaign=slug, directory=out / folder)
+    mover, md = placed_session("S")
+
+    before = _files_root_rel(mover)
+    outcome = ts.move_transcript(mover, slug)
+    assert outcome.status == "clash" and outcome.overwrite_allowed is True
+    assert md.exists() and other_md.exists()
+    assert _files_root_rel(mover) == before
+    assert ts.locate(mover).campaign_id is None
+
+
+def test_move_keep_both_picks_the_next_free_name(out, tmp_path):
+    from ._moves import claimed_campaign, placed_session
+
+    cid, slug, folder = claimed_campaign("Game")
+    other, other_md = placed_session("S", campaign=slug, directory=out / folder)
+    mover, md = placed_session("S")
+
+    outcome = ts.move_transcript(mover, slug, clash="keep_both")
+    assert outcome.status == "moved" and outcome.new_stem == "S (2)"
+    assert (out / folder / "S (2).md").exists() and other_md.exists()
+
+
+def test_move_overwrite_deletes_the_target(out, tmp_path):
+    from ._moves import claimed_campaign, placed_session
+
+    cid, slug, folder = claimed_campaign("Game")
+    other, other_md = placed_session("S", campaign=slug, directory=out / folder)
+    mover, md = placed_session("S")
+
+    outcome = ts.move_transcript(mover, slug, clash="overwrite")
+    assert outcome.status == "moved"
+    assert other_md.exists()  # the moved file took the overwritten session's place
+    assert ts.locate(other) is None  # the overwritten session is gone
+    assert not md.exists()
+    with db.connection() as conn:
+        assert conn.execute("SELECT count(*) FROM transcripts").fetchone()[0] == 1
+
+
+def test_move_overwrite_refuses_an_unregistered_md(out, tmp_path):
+    from ._moves import claimed_campaign, placed_session
+
+    cid, slug, folder = claimed_campaign("Game")
+    (out / folder / "S.md").write_text("mine", encoding="utf-8")  # no row
+    mover, md = placed_session("S")
+
+    outcome = ts.move_transcript(mover, slug, clash="overwrite")
+    assert outcome.status == "clash" and outcome.overwrite_allowed is False
+    assert (out / folder / "S.md").read_text(encoding="utf-8") == "mine"
+    assert md.exists()
+
+
+def test_move_locked_md_returns_locked_and_leaves_the_row_home(out, monkeypatch):
+    from ._moves import add_companion, claimed_campaign, lock_os_replace, placed_session
+
+    cid, slug, folder = claimed_campaign("Game")
+    tid, md = placed_session("S")
+    add_companion(tid, md, ".summary.md")
+    lock_os_replace(monkeypatch, {"S.md"})
+
+    outcome = ts.move_transcript(tid, slug)
+    assert outcome.status == "locked" and md in outcome.kept
+    assert md.exists() and (out / "S.summary.md").exists()
+    assert not (out / folder).exists() or not list((out / folder).iterdir())
+    loc = ts.locate(tid)
+    assert loc.campaign_id is None and loc.dir == out and loc.misplaced is False
+
+
+def test_move_locked_flac_is_partial_and_move_files_home_finishes(out, monkeypatch):
+    from ._moves import add_companion, claimed_campaign, lock_os_replace, placed_session
+
+    cid, slug, folder = claimed_campaign("Game")
+    tid, md = placed_session("S")
+    flac = add_companion(tid, md, ".flac")
+    state = lock_os_replace(monkeypatch, {"S.flac"})
+
+    outcome = ts.move_transcript(tid, slug)
+    assert outcome.status == "partial" and flac in outcome.kept
+    loc = ts.locate(tid)
+    assert loc.campaign_id == cid and loc.md == out / folder / "S.md"
+    assert loc.misplaced is True  # the .flac stayed in the root
+    assert flac.exists()
+
+    state["lock"] = False  # "close the file" without undoing any fixture
+    done = ts.move_files_home(tid)
+    assert done.status == "moved"
+    assert (out / folder / "S.flac").exists() and not flac.exists()
+    assert ts.locate(tid).misplaced is False
+
+
+def test_move_locked_md_with_keep_both_reverts_the_whole_assignment(out, monkeypatch):
+    from ._moves import claimed_campaign, lock_os_replace, placed_session
+
+    cid, slug, folder = claimed_campaign("Game")
+    other, other_md = placed_session("S", campaign=slug, directory=out / folder)
+    tid, md = placed_session("S")
+    lock_os_replace(monkeypatch, {"S.md"})
+
+    outcome = ts.move_transcript(tid, slug, clash="keep_both")
+    assert outcome.status == "locked" and md in outcome.kept
+    assert other_md.exists()
+    loc = ts.locate(tid)
+    assert loc.campaign_id is None and loc.stem == "S"   # its old name, back home
+    assert loc.dir == out and loc.misplaced is False
+
+
+def test_move_keep_both_revert_blocked_by_a_new_source_name_is_partial(out, monkeypatch):
+    from ._moves import claimed_campaign, placed_session
+
+    cid, slug, folder = claimed_campaign("Game")
+    other, other_md = placed_session("S", campaign=slug, directory=out / folder)
+    source_cid, source_slug, source_folder = claimed_campaign("Source")
+    tid, md = placed_session("S", campaign=source_slug, directory=out)
+
+    real_replace = os.replace
+
+    def guarded(src, dst, *a, **k):
+        if Path(dst).name == "S (2).md" and Path(dst).parent.name == folder:
+            # The source campaign gains its own "S" between step 5 and the revert.
+            with db.transaction() as conn:
+                conn.execute(
+                    "INSERT INTO transcripts (stem, campaign_id, position, created_at) "
+                    "VALUES ('S', ?, 0, ?)", (source_cid, db.now_utc()))
+            raise PermissionError(32, "The process cannot access the file")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", guarded)
+    monkeypatch.setattr(os, "rename", guarded)
+
+    outcome = ts.move_transcript(tid, slug, clash="keep_both")
+    assert outcome.status == "partial"
+    loc = ts.locate(tid)
+    assert loc.stem == "S (2)" and loc.campaign_id == cid  # left as step 5 wrote it
+
+
+def test_move_overwrite_locked_target_returns_locked_and_changes_nothing(out, monkeypatch):
+    from ._moves import claimed_campaign, lock_os_replace, placed_session
+
+    cid, slug, folder = claimed_campaign("Game")
+    other, other_md = placed_session("S", campaign=slug, directory=out / folder)
+    mover, md = placed_session("S")
+    lock_os_replace(monkeypatch, {"S.md"})
+
+    # The overwritten session's own delete unlinks its .md directly, so the
+    # delete's unlink is what a lock must stop (patch it, not os.replace).
+    real_unlink = Path.unlink
+
+    def guarded_unlink(self, *a, **k):
+        if state["lock"] and self == other_md:
+            raise PermissionError(32, "The process cannot access the file")
+        return real_unlink(self, *a, **k)
+
+    state = lock_os_replace(monkeypatch, set())  # arms the toggle, locks nothing yet
+    monkeypatch.setattr(Path, "unlink", guarded_unlink)
+
+    outcome = ts.move_transcript(mover, slug, clash="overwrite")
+    assert outcome.status == "locked"
+    assert other_md.exists() and md.exists()
+    assert ts.locate(other).stem == "S" and ts.locate(mover).campaign_id is None
+
+
+def test_move_overwrite_refused_late_by_a_job_on_the_target(out, tmp_path):
+    from ._moves import claimed_campaign, placed_session
+    from wisper_transcribe.web.jobs import JobQueue
+
+    cid, slug, folder = claimed_campaign("Game")
+    other, other_md = placed_session("S", campaign=slug, directory=out / folder)
+    mover, md = placed_session("S")
+
+    q = JobQueue()
+    job = q.submit(str(out / "upload.mp3"), original_stem="S", campaign=slug,
+                   output_dir=str(out / folder))
+    job.transcript_id = other
+    from wisper_transcribe import job_history
+    job_history.record_required(job)
+
+    outcome = ts.move_transcript(mover, slug, clash="overwrite")
+    assert outcome.status == "busy" and job.id in outcome.busy
+    assert other_md.exists() and ts.locate(other) is not None
+    assert md.exists() and ts.locate(mover).campaign_id is None
+
+
+def test_move_missing_session_changes_only_its_row(out, tmp_path):
+    from ._moves import claimed_campaign
+
+    cid, slug, folder = claimed_campaign("Game")
+    tid = _insert_session("Gone")
+    with db.transaction() as conn:
+        conn.execute("UPDATE transcripts SET missing_since = ? WHERE id = ?", (db.now_utc(), tid))
+
+    outcome = ts.move_transcript(tid, slug)
+    assert outcome.status == "moved"
+    assert not (out / folder).exists() or not list((out / folder).iterdir())
+    assert ts.locate(tid).campaign_id == cid
+
+
+def test_move_misplaced_self_removal_is_not_a_clash(out, tmp_path):
+    from ._moves import claimed_campaign
+
+    cid, slug, folder = claimed_campaign("Game")
+    tid = _insert_session("S", campaign_id=cid, position=0)
+    _place(out, out, "S", tid)  # its .md is in the root, not the folder
+
+    outcome = ts.move_transcript(tid, None)
+    assert outcome.status == "moved"
+    assert (out / "S.md").exists() and not (out / folder / "S.md").exists()
+    assert ts.locate(tid).campaign_id is None
+
+
+def test_move_busy_for_a_pending_upload_into_the_target(out, tmp_path):
+    from ._moves import claimed_campaign, placed_session
+    from wisper_transcribe.web.jobs import JobQueue
+
+    cid, slug, folder = claimed_campaign("Game")
+    tid, md = placed_session("S")
+    q = JobQueue()
+    job = q.submit(str(out / "upload.mp3"), original_stem="T", campaign=slug,
+                   output_dir=str(out / folder))
+
+    outcome = ts.move_transcript(tid, slug)
+    assert outcome.status == "busy" and job.id in outcome.busy
+    assert md.exists() and ts.locate(tid).campaign_id is None
+
+
+def test_move_busy_for_a_queued_re_transcribe_of_the_session(out, tmp_path):
+    from ._moves import claimed_campaign, placed_session
+    from wisper_transcribe.web.jobs import JobQueue
+
+    cid, slug, folder = claimed_campaign("Game")
+    tid, md = placed_session("S", campaign=slug, directory=out / folder)
+    q = JobQueue()
+    job = q.submit(str(out / "s.flac"), original_stem="S", output_dir=str(out / folder))
+    assert job.transcript_id == tid
+
+    assert ts.move_transcript(tid, None).status == "busy"
+
+
+def test_move_busy_for_a_pending_journal_job_on_the_campaign(out, tmp_path):
+    from ._moves import claimed_campaign, placed_session
+    from wisper_transcribe.web.jobs import JobQueue
+
+    cid, slug, folder = claimed_campaign("Game")
+    tid, md = placed_session("S", campaign=slug, directory=out / folder)
+    JobQueue().submit_journal(slug)
+
+    assert ts.move_transcript(tid, None).status == "busy"
+
+
+def test_move_busy_when_a_capture_is_recording_the_campaign(out, tmp_path):
+    from ._moves import claimed_campaign, placed_session
+
+    cid, slug, folder = claimed_campaign("Game")
+    tid, md = placed_session("S")
+    import uuid
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO recordings (id, source, capture_status, started_at, campaign_id) "
+            "VALUES (?, 'discord', 'recording', ?, ?)", (str(uuid.uuid4()), db.now_utc(), cid))
+
+    assert ts.move_transcript(tid, slug).status == "busy"
+
+
+def test_move_out_of_a_journaled_campaign_marks_it_stale(out, tmp_path):
+    from ._moves import claimed_campaign, placed_session
+
+    cid, slug, folder = claimed_campaign("Game")
+    tid = _insert_session("S", campaign_id=cid, position=0)
+    _place(out, out / folder, "S", tid)
+    with db.transaction() as conn:
+        conn.execute("INSERT INTO journal_entries (transcript_id, campaign_id, folded_at) "
+                     "VALUES (?, ?, 'now')", (tid, cid))
+
+    assert ts.move_transcript(tid, None).status == "moved"
+    with db.connection() as conn:
+        assert conn.execute("SELECT journal_stale_since FROM campaigns WHERE id = ?",
+                            (cid,)).fetchone()[0] is not None
+
+
+def test_move_files_home_busy_on_a_job(out, tmp_path):
+    from ._moves import claimed_campaign, placed_session
+    from wisper_transcribe.web.jobs import JobQueue
+
+    cid, slug, folder = claimed_campaign("Game")
+    tid = _insert_session("S", campaign_id=cid, position=0)
+    _place(out, out, "S", tid)
+    q = JobQueue()
+    q.submit(str(out / "upload.mp3"), original_stem="T", campaign=slug,
+             output_dir=str(out / folder))
+
+    assert ts.move_files_home(tid).status == "busy"
+
+
+def test_move_files_home_clash_is_never_overwritten(out, tmp_path):
+    from ._moves import claimed_campaign
+
+    cid, slug, folder = claimed_campaign("Game")
+    tid = _insert_session("S", campaign_id=cid, position=0)
+    _place(out, out, "S", tid)  # the misplaced .md
+    (out / folder).mkdir(exist_ok=True)
+    (out / folder / "S.md").write_text("taken", encoding="utf-8")
+
+    outcome = ts.move_files_home(tid)
+    assert outcome.status == "clash"
+    assert (out / "S.md").exists()
+    assert (out / folder / "S.md").read_text(encoding="utf-8") == "taken"
+
+
+def test_move_no_clash_and_no_missing_folder_is_a_pure_read(out, tmp_path):
+    """check_move renders the clash page with no mkdir: re-run leaves no folder."""
+    from ._moves import claimed_campaign, placed_session
+
+    cid, slug, folder = claimed_campaign("Game")
+    tid, md = placed_session("S")
+    before = sorted(p.name for p in out.iterdir())
+    ts.check_move(tid, slug)
+    assert sorted(p.name for p in out.iterdir()) == before
+
+
+# ---------------------------------------------------------------------------
+# rename_transcript
+# ---------------------------------------------------------------------------
+
+def test_rename_carries_companions(out, tmp_path):
+    from ._moves import add_companion, placed_session
+
+    tid, md = placed_session("Old")
+    add_companion(tid, md, ".summary.md")
+    add_companion(tid, md, "_diar.json", "{}")
+    add_companion(tid, md, ".flac")
+
+    outcome = ts.rename_transcript(tid, "New")
+    assert outcome.status == "moved" and outcome.new_stem == "New"
+    assert not md.exists()
+    assert sorted(p.name for p in out.iterdir()) == ["New.flac", "New.md", "New.summary.md",
+                                                     "New_diar.json"]
+    assert all(rel.startswith("New") for rel in _files_root_rel(tid))
+
+
+def test_rename_reserved_and_invalid_names_are_refused(out, tmp_path):
+    from ._moves import claimed_campaign, placed_session
+
+    cid, slug, folder = claimed_campaign("Game")
+    tid, md = placed_session("S", campaign=slug, directory=out / folder)
+    for bad in (".hidden", "COM1", "x" * 101, "a/b", "Notes.md"):
+        assert ts.rename_transcript(tid, bad).status == "invalid", bad
+    assert ts.rename_transcript(tid, f"{folder} Journal").status == "reserved"
+    assert md.exists() and not (out / folder / "Game Journal.md").exists()
+
+
+def test_rename_clash_ask_and_keep_both(out, tmp_path):
+    from ._moves import placed_session
+
+    tid, md = placed_session("Old")
+    other, other_md = placed_session("New")
+    outcome = ts.rename_transcript(tid, "New")
+    assert outcome.status == "clash" and outcome.overwrite_allowed is True
+    assert md.exists() and other_md.exists()
+
+    outcome = ts.rename_transcript(tid, "New", clash="keep_both")
+    assert outcome.status == "moved" and outcome.new_stem == "New (2)"
+    assert (out / "New (2).md").exists() and other_md.exists()
+
+
+def test_rename_locked_md_restores_the_old_stem(out, monkeypatch):
+    from ._moves import lock_os_replace, placed_session
+
+    tid, md = placed_session("Old")
+    lock_os_replace(monkeypatch, {"New.md"})
+    outcome = ts.rename_transcript(tid, "New")
+    assert outcome.status == "locked" and md in outcome.kept
+    assert md.exists() and ts.locate(tid).stem == "Old"
+
+
+def test_rename_case_only_on_a_case_insensitive_filesystem(out, monkeypatch):
+    from ._moves import placed_session
+
+    tid, md = placed_session("Session")
+    monkeypatch.setattr(file_registry, "_fold", lambda d: True)
+    monkeypatch.setattr(ts, "_clash_path", lambda *a, **k: None)  # fs itself is sensitive
+    outcome = ts.rename_transcript(tid, "SESSION")
+    assert outcome.status == "moved" and outcome.new_stem == "SESSION"
+    with db.connection() as conn:
+        assert conn.execute("SELECT stem FROM transcripts WHERE id = ?", (tid,)).fetchone()[0] == \
+            "SESSION"
 

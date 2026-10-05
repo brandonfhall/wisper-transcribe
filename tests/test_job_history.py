@@ -185,18 +185,19 @@ def _transcript_job(job_id, stem, **kw):
 
 
 def test_campaign_comes_from_the_transcripts_current_campaign():
-    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    from ._seed import assign_campaign
+    from wisper_transcribe.campaign_manager import create_campaign
 
     create_campaign("Curse")
     create_campaign("Other")
     _transcript_job(JID, "s1")
     tid = _tid("s1")
-    move_transcript_to_campaign(tid, "curse")
+    assign_campaign(tid, "curse")
     (rec,) = job_history.list_jobs(campaign="curse")[0]
     assert (rec.id, rec.campaign_slug, rec.campaign_name) == (JID, "curse", "Curse")
     assert job_history.get_job(JID).campaign_name == "Curse"
 
-    move_transcript_to_campaign(tid, "other")  # the job follows its transcript
+    assign_campaign(tid, "other")  # the job follows its transcript
     assert job_history.list_jobs(campaign="curse")[0] == []
     assert [r.id for r in job_history.list_jobs(campaign="other")[0]] == [JID]
 
@@ -224,13 +225,14 @@ def test_campaign_falls_back_to_recording_then_submit_params():
 def test_dashboard_campaign_column(tmp_path):
     from fastapi.testclient import TestClient
 
-    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    from ._seed import assign_campaign
+    from wisper_transcribe.campaign_manager import create_campaign
     from wisper_transcribe.web.app import create_app
     from wisper_transcribe.web.routes.dashboard import job_campaigns
 
     create_campaign("Curse")
     _transcript_job(JID, "s1")
-    move_transcript_to_campaign(_tid("s1"), "curse")
+    assign_campaign(_tid("s1"), "curse")
     with TestClient(create_app()) as client:
         queue = client.app.state.job_queue
         live = queue.submit(str(tmp_path / "wisper_upload_x.mp3"), campaign="curse")
@@ -308,3 +310,117 @@ def test_last_transcription_params_empty_without_history(tmp_path, monkeypatch):
     _transcript_row(tmp_path, monkeypatch)
     assert job_history.last_transcription_params(_tid()) == {}
     assert job_history.last_transcription_params(99999) == {}
+
+
+# ---------------------------------------------------------------------------
+# record_required and active_jobs: the write the busy guard depends on
+# ---------------------------------------------------------------------------
+
+def test_record_required_reraises_and_record_swallows():
+    """A job whose row can't be written fails submit; the ordinary update
+    path still swallows (a status write must not break the job)."""
+    bad = _job(id="not-a-uuid")   # CHECK fails
+    job_history.record(bad)      # swallowed
+    with pytest.raises(sqlite3.IntegrityError):
+        job_history.record_required(bad)
+
+
+def _campaign_with_folder(display_name: str) -> tuple[int, str, str]:
+    """A campaign whose folder exists and is claimed: (id, slug, folder)."""
+    from . import _seed
+
+    cid = _seed.seed_campaign(display_name, claimed=True)
+    with db.connection() as conn:
+        slug, folder = conn.execute(
+            "SELECT slug, folder FROM campaigns WHERE id = ?", (cid,)).fetchone()
+    return cid, slug, folder
+
+
+def _session(stem: str, *, campaign_id=None) -> int:
+    with db.transaction() as conn:
+        return conn.execute(
+            "INSERT INTO transcripts (stem, campaign_id, position, created_at) VALUES (?, ?, ?, ?) "
+            "RETURNING id",
+            (stem, campaign_id, 0 if campaign_id is not None else None, db.now_utc()),
+        ).fetchone()[0]
+
+
+def _recording(campaign_id, *, status: str = "recording",
+               transcript_id=None) -> str:
+    import uuid
+
+    rid = str(uuid.uuid4())
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO recordings (id, source, capture_status, started_at, campaign_id, transcript_id) "
+            "VALUES (?, 'discord', ?, ?, ?, ?)",
+            (rid, status, db.now_utc(), campaign_id, transcript_id),
+        )
+    return rid
+
+
+def test_active_jobs_sees_the_transcript_campaign_and_slug():
+    """A pending transcription job counts by its target transcript, the
+    campaign it targets, its transcript's campaign, or the slug in params_json."""
+    cid, slug, _folder = _campaign_with_folder("Game")
+    tid = _session("S1", campaign_id=cid)
+
+    queued = _job(status="pending", transcript_id=tid)
+    job_history.record_required(queued)
+    with db.connection() as conn:
+        assert job_history.active_jobs(conn, transcript_id=tid) == [queued.id]
+        assert job_history.active_jobs(conn, campaign_ids={cid}) == [queued.id]
+        assert job_history.active_jobs(conn, campaign_slugs={slug}) == []
+        assert job_history.active_jobs(conn, campaign_ids={cid + 100}) == []
+
+    # A job that only names its campaign in params_json counts by slug.
+    upload = _job(id="22222222-2222-4222-8222-222222222222",
+                  kwargs={"campaign": slug})
+    job_history.record_required(upload)
+    with db.connection() as conn:
+        assert job_history.active_jobs(conn, campaign_slugs={slug}) == [upload.id]
+
+
+def test_active_jobs_ignores_terminal_jobs_and_other_subjects():
+    cid, slug, _folder = _campaign_with_folder("Game")
+    other, other_slug, _ = _campaign_with_folder("Other")
+    tid = _session("S1", campaign_id=cid)
+
+    done = _job(status="completed", transcript_id=tid, finished_at=datetime.now())
+    job_history.record_required(done)
+    job_history.record_required(_job(id="33333333-3333-4333-8333-333333333333",
+                                     status="pending", transcript_id=None,
+                                     kwargs={"campaign": other_slug}))
+    with db.connection() as conn:
+        assert job_history.active_jobs(conn, transcript_id=tid) == []
+        assert job_history.active_jobs(conn, campaign_ids={cid}) == []
+        assert job_history.active_jobs(conn, campaign_slugs={slug}) == []
+        assert job_history.active_jobs(conn, campaign_slugs={other_slug}) == [
+            "33333333-3333-4333-8333-333333333333"]
+
+
+def test_active_jobs_sees_a_capturing_recording():
+    cid, slug, _folder = _campaign_with_folder("Game")
+    tid = _session("S1", campaign_id=cid)
+    by_campaign = _recording(cid, status="recording")
+    by_transcript = _recording(None, status="degraded", transcript_id=tid)
+    _recording(cid, status="completed")  # finished: not busy
+
+    with db.connection() as conn:
+        assert set(job_history.active_jobs(conn, transcript_id=tid, campaign_ids={cid})) == {
+            by_campaign, by_transcript}
+
+
+def test_active_jobs_sql_uses_the_jobs_active_partial_index():
+    """The busy guard writes ``status IN ('pending', 'running')`` exactly as the
+    partial index does; SQLite uses a partial index only on an exact match."""
+    with db.connection() as conn:
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+        try:
+            job_history.active_jobs(conn, transcript_id=1, campaign_ids={1}, campaign_slugs={"game"})
+        finally:
+            conn.set_trace_callback(None)
+        sql = next(s for s in reversed(statements) if "FROM jobs" in s)
+        plan = conn.execute("EXPLAIN QUERY PLAN " + sql).fetchall()
+    assert any(r[3].startswith("SEARCH j USING INDEX jobs_active") for r in plan), [tuple(r) for r in plan]
