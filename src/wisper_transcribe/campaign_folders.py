@@ -154,8 +154,11 @@ def _claimable(path: Path, folder: str) -> bool:
     except OSError as exc:
         log.warning("cannot create campaign folder %r: %s (errno %s)", folder, exc, exc.errno)
         return False
-    if not path.is_dir():
-        return False
+    return path.is_dir() and holds_only_wisper(path, folder)
+
+
+def holds_only_wisper(path: Path, folder: str) -> bool:
+    """True when the existing folder is empty or holds only wisper's journal (no mkdir)."""
     try:
         names = [n for n in os.listdir(path) if not is_clutter(n)]
     except OSError:

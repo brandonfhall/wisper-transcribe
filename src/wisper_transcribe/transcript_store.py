@@ -244,7 +244,7 @@ class Located:
 
     Where a transcript *is* comes from its ``transcript`` row and the other
     ``files`` rows; where it *should be* comes from ``transcripts.campaign_id``
-    (``expected_dir``). ``locate` fills the derived facts (``target_blocked``,
+    (``expected_dir``). ``locate`` fills the derived facts (``target_blocked``,
     ``fold``) so the properties on this dataclass stay pure.
     """
 
@@ -379,7 +379,7 @@ def locate(transcript_id: int, conn: Optional[sqlite3.Connection] = None, *,
            output_dir: Optional[Path] = None) -> Optional[Located]:
     """The :class:`Located` for transcript ``transcript_id``, or None.
 
-    One query joins ``transcripts``, ``campaigns``, and the transcript's
+    Reads the ``transcripts`` row with its campaign, then the transcript's
     ``files`` rows.
     """
     output = Path(output_dir) if output_dir is not None else get_output_root()
@@ -428,7 +428,7 @@ def _target_blocked(conn: sqlite3.Connection, campaign_id: Optional[int], output
     folder rename in progress (pending), or a claimed folder gone from disk
     (missing). A plain unassigned transcript (campaign_id None) is never blocked.
     """
-    from .campaign_folders import is_clutter
+    from .campaign_folders import holds_only_wisper
 
     info = _campaign_folder(conn, campaign_id)
     if info is None:
@@ -437,20 +437,9 @@ def _target_blocked(conn: sqlite3.Connection, campaign_id: Optional[int], output
     if pending is not None:
         return True
     path = output / folder
-    if claimed:
-        return not path.is_dir()
-    if not path.is_dir():
-        return False
-    try:
-        names = [n for n in os.listdir(path) if not is_clutter(n)]
-    except OSError:
-        return True
-    if not names:
-        return False
-    if names == [f"{folder} Journal.md"]:
-        from .campaign_folders import _is_wisper_journal
-        return not _is_wisper_journal(path / names[0])
-    return True
+    if claimed or not path.is_dir():
+        return claimed and not path.is_dir()
+    return not holds_only_wisper(path, folder)
 
 
 def locate_path(md_path: Path, conn: Optional[sqlite3.Connection] = None, *,
@@ -482,37 +471,43 @@ def locate_path(md_path: Path, conn: Optional[sqlite3.Connection] = None, *,
 
 def _locate_path_in(conn: sqlite3.Connection, md_path: Path, output: Path) -> Optional[int]:
     fold = file_registry._fold(output)
-    want = file_registry._key(str(_resolved_dir(md_path.parent)), fold) + os.sep \
-        + file_registry._key(md_path.name, fold)
-    row = conn.execute(
-        "SELECT transcript_id, root, rel_path FROM files WHERE kind = 'transcript'"
-    ).fetchall()
-    for transcript_id, root, rel_path in row:
-        if root != "output":
-            continue
-        path = db.from_rel(rel_path, output)
-        got = file_registry._key(str(_resolved_dir(path.parent)), fold) + os.sep \
-            + file_registry._key(path.name, fold)
-        if got == want:
-            return transcript_id
+    try:
+        rel = nfc(db.to_rel(md_path, output))
+    except ValueError:
+        return None  # outside the output root
+    hit = file_registry._find_by_path(conn, "output", rel, fold)
+    if hit is not None:
+        return hit["transcript_id"] if hit["kind"] == "transcript" else None
 
     has_dir, campaign_id = _dir_campaign_in(conn, md_path.parent, output, fold)
     if not has_dir:
         return None
     stem = _path_stem(md_path)
-    rows = conn.execute(
-        "SELECT id FROM transcripts WHERE campaign_id IS ? AND stem = ? LIMIT 2",
-        (campaign_id, stem),
-    ).fetchall()
-    if len(rows) != 1:
+    row = _stem_row(conn, campaign_id, stem)
+    if row is None:
         return None
-    tid = rows[0][0]
+    tid = row[0]
     registered = conn.execute(
         "SELECT 1 FROM files WHERE transcript_id = ? AND kind = 'transcript' LIMIT 1", (tid,)
     ).fetchone()
     if registered is not None:
         return None
     return tid
+
+
+def _stem_row(conn: sqlite3.Connection, campaign_id: Optional[int], stem: str):
+    """The row named ``stem`` in a campaign, or in the root for ``None``.
+
+    Two spellings, so each uses its partial unique index (``campaign_id IS ?``
+    can use neither).
+    """
+    if campaign_id is None:
+        return conn.execute(
+            "SELECT id FROM transcripts WHERE campaign_id IS NULL AND stem = ?", (stem,)
+        ).fetchone()
+    return conn.execute(
+        "SELECT id FROM transcripts WHERE campaign_id = ? AND stem = ?", (campaign_id, stem)
+    ).fetchone()
 
 
 def _path_stem(md_path: Path) -> str:
@@ -546,24 +541,32 @@ def find_by_stem(stem: str, conn: Optional[sqlite3.Connection] = None, *,
 
 def _find_ids(conn: sqlite3.Connection, stem: str, campaign_id, present_only: bool,
               output: Path) -> list[int]:
-    sql = "SELECT id, campaign_id, stem FROM transcripts"
-    params: list = []
-    if campaign_id is not ANY:
-        sql += " WHERE campaign_id IS ?"
-        params.append(campaign_id)
-    rows = conn.execute(sql, params).fetchall()
     fold = file_registry._fold(output)
-    want = file_registry._key(stem, fold)
-    ids = [r[0] for r in rows if file_registry._key(r[2], fold) == want]
-    if not ids:
-        return []
-    placeholders = ",".join("?" * len(ids))
-    if present_only:
-        query = (f"SELECT id FROM transcripts WHERE id IN ({placeholders}) "
-                 "AND missing_since IS NULL ORDER BY id")
-        return [r[0] for r in conn.execute(query, ids)]
-    query = f"SELECT id FROM transcripts WHERE id IN ({placeholders}) ORDER BY id"
-    return [r[0] for r in conn.execute(query, ids)]
+    if campaign_id is ANY:
+        ids = [r[0] for r in conn.execute("SELECT id FROM transcripts WHERE stem = ?", (stem,))]
+    else:
+        row = _stem_row(conn, campaign_id, stem)
+        ids = [] if row is None else [row[0]]
+    if fold:
+        # Other case spellings of the name; the exact match above used an index.
+        want = file_registry._key(stem, fold)
+        if campaign_id is ANY:
+            rows = conn.execute("SELECT id, stem FROM transcripts")
+        elif campaign_id is None:
+            rows = conn.execute("SELECT id, stem FROM transcripts WHERE campaign_id IS NULL")
+        else:
+            rows = conn.execute(
+                "SELECT id, stem FROM transcripts WHERE campaign_id = ?", (campaign_id,)
+            )
+        ids += [r[0] for r in rows if r[0] not in ids and file_registry._key(r[1], fold) == want]
+    if present_only and ids:
+        placeholders = ",".join("?" * len(ids))
+        present = {r[0] for r in conn.execute(
+            f"SELECT id FROM transcripts WHERE id IN ({placeholders}) AND missing_since IS NULL",
+            ids,
+        )}
+        ids = [i for i in ids if i in present]
+    return sorted(ids)
 
 
 # ---------------------------------------------------------------------------
