@@ -29,11 +29,13 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import socket
 import sqlite3
 import threading
 import time
 import tomllib
+import unicodedata
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
@@ -49,7 +51,7 @@ MIN_SQLITE = (3, 43, 0)
 
 # False only on a branch that edits unreleased migrations in place; such a
 # build refuses the default data dir. test_db fails on main unless True.
-SCHEMA_FROZEN = True
+SCHEMA_FROZEN = False
 
 # While the schema is unfrozen, connect() also refuses to run unless
 # WISPER_OUTPUT_DIR is set or the output root lies inside the data dir, so a
@@ -700,6 +702,266 @@ def _v9_import(conn: sqlite3.Connection, ctx: MigrationContext) -> None:
 _V10_DDL = "ALTER TABLE transcripts DROP COLUMN audio_rel_path;"
 
 
+# --- v11: campaign folders ---------------------------------------------------
+
+# A transcript carries its campaign and position; each campaign names a folder
+# under the output root. The folder name is chosen by _v11_import, so the DDL
+# stores a placeholder no sanitised name can equal (it removes DEL).
+_V11_DDL = """
+-- Triggers are recreated below; dropping them first keeps the renames from re-parsing them.
+DROP TRIGGER journal_entries_ad;
+DROP TRIGGER transcript_titles_ai;
+DROP TRIGGER transcript_titles_ad;
+DROP TRIGGER transcript_titles_au;
+DROP TRIGGER files_profile_key_au;
+CREATE TABLE campaigns_new (
+  id             INTEGER PRIMARY KEY,
+  slug           TEXT NOT NULL UNIQUE CHECK (slug <> ''),
+  display_name   TEXT NOT NULL CHECK (display_name <> ''),
+  folder         TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK (folder <> '' AND length(folder) <= 80
+                        AND length(CAST(folder AS BLOB)) <= 200
+                        AND folder NOT GLOB '*[/\\:*?"<>|]*'
+                        AND folder NOT GLOB '.*'
+                        AND folder NOT GLOB '* ' AND folder NOT GLOB '*.'
+                        AND folder NOT GLOB ' *'
+                        AND NOT (folder GLOB '*[' || char(1) || '-' || char(31) || ']*')
+                        AND instr(CAST(folder AS BLOB), x'00') = 0),
+  folder_pending TEXT COLLATE NOCASE UNIQUE CHECK (folder_pending IS NULL OR (folder_pending <> '' AND length(folder_pending) <= 80
+                        AND length(CAST(folder_pending AS BLOB)) <= 200
+                        AND folder_pending NOT GLOB '*[/\\:*?"<>|]*'
+                        AND folder_pending NOT GLOB '.*'
+                        AND folder_pending NOT GLOB '* ' AND folder_pending NOT GLOB '*.'
+                        AND folder_pending NOT GLOB ' *'
+                        AND NOT (folder_pending GLOB '*[' || char(1) || '-' || char(31) || ']*')
+                        AND instr(CAST(folder_pending AS BLOB), x'00') = 0)),
+  folder_claimed INTEGER NOT NULL DEFAULT 0 CHECK (folder_claimed IN (0, 1)),   -- wisper made it, or found it absent or empty
+  created_at     TEXT NOT NULL,
+  journal_sha256 TEXT CHECK (journal_sha256 IS NULL OR length(journal_sha256) = 64),
+  journal_stale_since TEXT,
+  CHECK (folder_pending IS NULL OR folder_pending <> folder COLLATE BINARY)
+) STRICT;
+INSERT INTO campaigns_new (id, slug, display_name, folder, created_at, journal_sha256, journal_stale_since)
+  SELECT id, slug, display_name, '#' || id || char(127), created_at, journal_sha256, journal_stale_since FROM campaigns;
+DROP TABLE campaigns;
+ALTER TABLE campaigns_new RENAME TO campaigns;
+
+CREATE TABLE transcripts_new (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  stem          TEXT NOT NULL CHECK (stem <> '' AND stem NOT GLOB '*[/\\]*'),
+  campaign_id   INTEGER REFERENCES campaigns(id),
+  position      INTEGER CHECK (position IS NULL OR position >= 0),
+  created_at    TEXT NOT NULL,
+  missing_since TEXT,
+  CHECK ((campaign_id IS NULL) = (position IS NULL)),
+  UNIQUE (campaign_id, position),
+  UNIQUE (campaign_id, id)
+) STRICT;
+INSERT INTO transcripts_new (id, stem, campaign_id, position, created_at, missing_since)
+  SELECT t.id, t.stem, ct.campaign_id, ct.position, t.created_at, t.missing_since
+  FROM transcripts t LEFT JOIN campaign_transcripts ct ON ct.transcript_id = t.id;
+CREATE TABLE journal_entries_new (
+  transcript_id INTEGER PRIMARY KEY,
+  campaign_id   INTEGER NOT NULL,
+  folded_at     TEXT NOT NULL,
+  FOREIGN KEY (campaign_id, transcript_id)
+    REFERENCES transcripts(campaign_id, id) ON DELETE CASCADE
+) STRICT;
+INSERT INTO journal_entries_new SELECT transcript_id, campaign_id, folded_at FROM journal_entries;
+DROP TABLE journal_entries;
+DROP TABLE campaign_transcripts;
+DROP TABLE transcripts;
+ALTER TABLE transcripts_new RENAME TO transcripts;
+ALTER TABLE journal_entries_new RENAME TO journal_entries;
+CREATE UNIQUE INDEX transcripts_stem      ON transcripts(campaign_id, stem) WHERE campaign_id IS NOT NULL;
+CREATE UNIQUE INDEX transcripts_root_stem ON transcripts(stem) WHERE campaign_id IS NULL;
+CREATE INDEX transcripts_stem_any ON transcripts(stem);
+
+CREATE TRIGGER transcript_titles_ai AFTER INSERT ON transcripts BEGIN
+  INSERT INTO transcript_titles (rowid, stem) VALUES (new.id, new.stem);
+END;
+CREATE TRIGGER transcript_titles_ad AFTER DELETE ON transcripts BEGIN
+  INSERT INTO transcript_titles (transcript_titles, rowid, stem) VALUES ('delete', old.id, old.stem);
+END;
+CREATE TRIGGER transcript_titles_au AFTER UPDATE OF stem ON transcripts BEGIN
+  INSERT INTO transcript_titles (transcript_titles, rowid, stem) VALUES ('delete', old.id, old.stem);
+  INSERT INTO transcript_titles (rowid, stem) VALUES (new.id, new.stem);
+END;
+INSERT INTO transcript_titles (transcript_titles) VALUES ('rebuild');
+
+CREATE INDEX journal_entries_campaign ON journal_entries(campaign_id, transcript_id);
+CREATE TRIGGER journal_entries_ad AFTER DELETE ON journal_entries BEGIN
+  UPDATE campaigns SET journal_stale_since = coalesce(journal_stale_since, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+   WHERE id = old.campaign_id;
+END;
+CREATE TRIGGER transcripts_stem_journal_au AFTER UPDATE OF stem ON transcripts
+  WHEN old.stem IS NOT new.stem BEGIN
+  UPDATE campaigns SET journal_stale_since = coalesce(journal_stale_since, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+   WHERE id IN (SELECT campaign_id FROM journal_entries WHERE transcript_id = new.id);
+END;
+CREATE TRIGGER campaigns_folder_bi BEFORE INSERT ON campaigns
+  WHEN EXISTS (SELECT 1 FROM campaigns c WHERE c.folder_pending = new.folder COLLATE NOCASE
+                  OR c.folder = new.folder_pending COLLATE NOCASE
+                  OR c.folder_pending = new.folder_pending COLLATE NOCASE) BEGIN
+  SELECT RAISE(ABORT, 'campaign folder taken');
+END;
+CREATE TRIGGER campaigns_folder_bu BEFORE UPDATE OF folder, folder_pending ON campaigns
+  WHEN EXISTS (SELECT 1 FROM campaigns c WHERE c.id <> new.id
+                AND (c.folder_pending = new.folder COLLATE NOCASE
+                  OR c.folder = new.folder_pending COLLATE NOCASE)) BEGIN
+  SELECT RAISE(ABORT, 'campaign folder taken');
+END;
+CREATE TRIGGER transcripts_campaign_bu BEFORE UPDATE OF campaign_id ON transcripts
+  WHEN old.campaign_id IS NOT new.campaign_id BEGIN
+  DELETE FROM journal_entries WHERE transcript_id = old.id;
+END;
+
+CREATE TABLE files_new (
+  id            INTEGER PRIMARY KEY,
+  kind          TEXT NOT NULL CHECK (kind IN ('transcript', 'summary', 'sidecar', 'excerpt', 'excerpt_text', 'audio',
+                                              'backup', 'combined', 'per_user', 'live_draft', 'reference_clip', 'journal')),
+  root          TEXT NOT NULL CHECK (root IN ('output', 'data')),
+  rel_path      TEXT NOT NULL CHECK (rel_path <> '' AND rel_path NOT GLOB '/*' AND rel_path NOT GLOB '*\\*'
+                                     AND rel_path NOT GLOB '[A-Za-z]:*' AND rel_path NOT GLOB '*/'
+                                     AND rel_path NOT GLOB '*//*'
+                                     AND '/' || rel_path || '/' NOT GLOB '*/../*'
+                                     AND '/' || rel_path || '/' NOT GLOB '*/./*'
+                                     AND instr(CAST(rel_path AS BLOB), x'00') = 0),
+  label         TEXT CHECK (label IS NULL OR (label <> '' AND label NOT GLOB '*[/\\:]*')),
+  transcript_id INTEGER REFERENCES transcripts(id) ON DELETE CASCADE,
+  recording_id  TEXT    REFERENCES recordings(id)  ON DELETE CASCADE,
+  profile_id    INTEGER REFERENCES profiles(id)    ON DELETE CASCADE,
+  campaign_id   INTEGER REFERENCES campaigns(id)   ON DELETE CASCADE,
+  size          INTEGER CHECK (size IS NULL OR size >= 0),
+  mtime_ns      INTEGER,
+  UNIQUE (root, rel_path),
+  CHECK ((transcript_id IS NOT NULL) + (recording_id IS NOT NULL)
+         + (profile_id IS NOT NULL) + (campaign_id IS NOT NULL) = 1),
+  CHECK ((kind IN ('transcript', 'summary', 'sidecar', 'excerpt', 'excerpt_text', 'audio', 'backup'))
+         = (transcript_id IS NOT NULL)),
+  CHECK ((kind IN ('combined', 'per_user', 'live_draft')) = (recording_id IS NOT NULL)),
+  CHECK ((kind = 'reference_clip') = (profile_id IS NOT NULL)),
+  CHECK ((kind = 'journal') = (campaign_id IS NOT NULL)),
+  CHECK ((root = 'output') = (kind IN ('transcript', 'summary', 'sidecar', 'excerpt', 'excerpt_text',
+                                       'audio', 'backup', 'journal'))),
+  CHECK (root <> 'output' OR rel_path NOT GLOB '*/*/*'),
+  CHECK ((kind IN ('excerpt', 'excerpt_text', 'per_user')) = (label IS NOT NULL)),
+  CHECK (kind <> 'per_user' OR label IN ('mic', 'system') OR label NOT GLOB '*[^0-9]*'),
+  CHECK ((size IS NULL) = (mtime_ns IS NULL)),
+  CHECK (kind <> 'per_user' OR size IS NULL),
+  CHECK (kind <> 'transcript'   OR (lower(rel_path) GLOB '*.md' AND lower(rel_path) NOT GLOB '*.summary.md')),
+  CHECK (kind <> 'summary'      OR lower(rel_path) GLOB '*.summary.md'),
+  CHECK (kind <> 'sidecar'      OR rel_path GLOB '*_diar.json'),
+  CHECK (kind <> 'excerpt'      OR rel_path GLOB '*_excerpt_*.mp3'),
+  CHECK (kind <> 'excerpt_text' OR rel_path GLOB '*_excerpt_*.txt'),
+  CHECK (kind <> 'audio'        OR lower(rel_path) NOT GLOB '*.md'),
+  CHECK (kind <> 'backup'       OR lower(rel_path) GLOB '*.md.bak'),
+  CHECK (kind <> 'combined'     OR rel_path = 'recordings/' || recording_id || '/combined.wav'),
+  CHECK (kind <> 'per_user'     OR rel_path = 'recordings/' || recording_id || '/per-user/' || label),
+  CHECK (kind <> 'live_draft'   OR rel_path = 'recordings/' || recording_id || '/live_transcript.md'),
+  CHECK (kind <> 'reference_clip' OR rel_path GLOB 'profiles/embeddings/*.mp3'),
+  CHECK (kind <> 'journal'      OR (rel_path GLOB '?*/?* Journal.md' AND rel_path NOT GLOB '*/*/*'))
+) STRICT;
+-- temp.v11_dropped and temp.v11_journals are read and dropped by _v11_import; later migrations must not reuse the names.
+CREATE TEMP TABLE v11_dropped AS
+  SELECT id, kind, rel_path FROM files WHERE root = 'output' AND rel_path GLOB '*/*/*';
+CREATE TEMP TABLE v11_journals AS
+  SELECT c.slug FROM files f JOIN campaigns c ON c.id = f.campaign_id WHERE f.kind = 'journal';
+INSERT INTO files_new SELECT * FROM files
+  WHERE kind <> 'journal' AND NOT (root = 'output' AND rel_path GLOB '*/*/*');
+DROP TABLE files;
+ALTER TABLE files_new RENAME TO files;
+CREATE UNIQUE INDEX files_transcript ON files(transcript_id, kind, coalesce(label, ''));
+CREATE UNIQUE INDEX files_recording  ON files(recording_id, kind, coalesce(label, ''));
+CREATE UNIQUE INDEX files_profile    ON files(profile_id, kind);
+CREATE UNIQUE INDEX files_campaign   ON files(campaign_id, kind);
+CREATE TRIGGER files_profile_key_au AFTER UPDATE OF key ON profiles BEGIN
+  UPDATE files SET rel_path = 'profiles/embeddings/' || new.key || '.mp3'
+   WHERE profile_id = new.id AND kind = 'reference_clip';
+END;
+CREATE INDEX jobs_active ON jobs(status) WHERE status IN ('pending', 'running');
+"""
+
+
+# Microsoft "Naming Files, Paths, and Namespaces": COM0-9, LPT0-9, and the superscript ¹²³ forms.
+_V11_RESERVED = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+                 *(f"{p}{d}" for p in ("COM", "LPT") for d in "0123456789\u00b9\u00b2\u00b3")}
+
+def _v11_trim(s: str) -> str:
+    while True:
+        t = s.strip().lstrip(".").rstrip(". ")
+        if t == s:
+            return s
+        s = t
+
+def _v11_cut(s: str, room: int, byte_room: int) -> str:
+    # 80 characters, and at most byte_room UTF-8 bytes: ext4 and APFS cap a name at 255 bytes.
+    s = s[:room]
+    while len(s.encode("utf-8")) > byte_room:
+        s = s[:-1]
+    return s
+
+def _v11_folder_name(display_name: str, room: int = 80, byte_room: int = 200) -> str:
+    s = unicodedata.normalize("NFC", display_name)
+    s = re.sub(r'[\x00-\x1f\x7f/\\:*?"<>|]', " ", s)
+    s = re.sub(r"\s+", " ", s)
+    s = _v11_trim(_v11_cut(_v11_trim(s), room, byte_room))
+    head, dot, tail = s.partition(".")
+    core = head.rstrip()  # Windows ignores spaces before the extension: "nul .txt" is NUL
+    if core.upper() in _V11_RESERVED:
+        s = _v11_trim(_v11_cut(core + "_" + head[len(core):] + dot + tail, room, byte_room))
+    return s or "Campaign"
+
+
+def _v11_import(conn: sqlite3.Connection, ctx: MigrationContext) -> None:
+    """Name each campaign's folder and register every transcript's ``.md``.
+
+    Self-contained: shipped migrations never call application modules. Reads
+    and writes no files.
+    """
+    for row in conn.execute("SELECT kind, rel_path FROM temp.v11_dropped ORDER BY id").fetchall():
+        ctx.note(f"file record {row[1]!r} ({row[0]}) was more than one folder deep; dropped")
+    conn.execute("DROP TABLE temp.v11_dropped")
+    for row in conn.execute("SELECT slug FROM temp.v11_journals ORDER BY slug").fetchall():
+        ctx.note(f"campaign {row[0]}: journal record dropped; the file moves into the "
+                 "campaign folder on first read")
+    conn.execute("DROP TABLE temp.v11_journals")
+
+    taken: set[str] = set()
+    for row in conn.execute("SELECT id, slug, display_name FROM campaigns ORDER BY id").fetchall():
+        cid, slug, display_name = row[0], row[1], row[2]
+        folder = _v11_folder_name(display_name)
+        n = 2
+        while folder.casefold() in taken:
+            sfx = f" ({n})"
+            folder = _v11_folder_name(display_name, room=80 - len(sfx),
+                                      byte_room=200 - len(sfx.encode())) + sfx
+            n += 1
+        taken.add(folder.casefold())
+        conn.execute("UPDATE campaigns SET folder = ? WHERE id = ?", (folder, cid))
+        if folder != display_name:
+            ctx.note(f"campaign {slug}: folder {folder!r}")
+
+    rows = conn.execute(
+        "SELECT t.id, t.stem FROM transcripts t WHERE NOT EXISTS "
+        "(SELECT 1 FROM files f WHERE f.transcript_id = t.id AND f.kind = 'transcript') "
+        "ORDER BY t.id"
+    ).fetchall()
+    for row in rows:
+        tid, stem = row[0], row[1]
+        try:
+            cur = conn.execute(
+                "INSERT INTO files (kind, root, rel_path, transcript_id) "
+                "VALUES ('transcript', 'output', ?, ?) ON CONFLICT DO NOTHING",
+                (stem + ".md", tid),
+            )
+        except sqlite3.IntegrityError as exc:
+            ctx.note(f"transcript {tid}: {stem!r}.md not registered ({exc})")
+            continue
+        if cur.rowcount == 0:
+            ctx.note(f"transcript {tid}: {stem!r}.md already registered to another "
+                     "transcript; not registered")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "foundation", _V1_DDL, _v1_pin_output_dir),
     Migration(2, "profiles-campaigns", _V2_DDL, _v2_import),
@@ -711,6 +973,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(8, "search-titles", _V8_DDL),
     Migration(9, "file-registry", _V9_DDL, _v9_import),
     Migration(10, "drop-audio-rel-path", _V10_DDL),
+    Migration(11, "campaign-folders", _V11_DDL, _v11_import),
 )
 LATEST_VERSION = MIGRATIONS[-1].version
 

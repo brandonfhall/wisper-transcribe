@@ -4,9 +4,9 @@ Campaigns are an optional layer over the global speaker profiles: a roster of
 profiles with per-campaign role/character overrides and Discord bindings, plus
 the ordered list of the campaign's transcripts.
 
-Data lives in ``wisper.db`` (tables ``campaigns``, ``campaign_members``,
-``campaign_transcripts``); each campaign's journal stays a file under
-``$DATA_DIR/campaigns/<slug>/``. Every change is one ``db.transaction()``, so
+Data lives in ``wisper.db`` (tables ``campaigns``, ``campaign_members``, and
+each transcript's ``campaign_id``/``position``); each campaign's journal is a
+file in its folder under the output root. Every change is one ``db.transaction()``, so
 concurrent requests and processes can't lose each other's updates.
 """
 from __future__ import annotations
@@ -17,7 +17,7 @@ import unicodedata
 from pathlib import Path
 from typing import Optional
 
-from . import db
+from . import campaign_folders, db
 from .config import get_data_dir
 from .models import Campaign, CampaignMember
 from .path_utils import validate_path_component
@@ -72,11 +72,31 @@ def _profile_id(conn: sqlite3.Connection, key: str) -> int:
     return row[0]
 
 
-def _transcript_id(conn: sqlite3.Connection, stem: str) -> int:
-    """The registry row for ``stem``, created if absent."""
-    from .transcript_store import ensure_row
+def _transcript_id(conn: sqlite3.Connection, campaign_id: int, stem: str) -> int:
+    """The id of the campaign's session named ``stem``. Raises KeyError if absent."""
+    row = conn.execute(
+        "SELECT id FROM transcripts WHERE campaign_id = ? AND stem = ?", (campaign_id, stem)
+    ).fetchone()
+    if row is None:
+        raise KeyError(f"Transcript {stem!r} is not in the campaign")
+    return row[0]
 
-    return ensure_row(conn, stem)
+
+def _set_campaign(conn: sqlite3.Connection, tid: int, campaign_id: Optional[int],
+                  position: Optional[int]) -> None:
+    """Assign a session to a campaign slot, or unassign it with ``None, None``.
+
+    A name already taken in the target (a campaign, or the root) violates a
+    partial unique index; that is reported as a ValueError.
+    """
+    try:
+        conn.execute(
+            "UPDATE transcripts SET campaign_id = ?, position = ? WHERE id = ?",
+            (campaign_id, position, tid),
+        )
+    except sqlite3.IntegrityError:
+        stem = conn.execute("SELECT stem FROM transcripts WHERE id = ?", (tid,)).fetchone()[0]
+        raise ValueError(f"a session named {stem!r} is already there") from None
 
 
 def _write_order(conn: sqlite3.Connection, campaign_id: int, transcript_ids: list[int]) -> None:
@@ -84,48 +104,30 @@ def _write_order(conn: sqlite3.Connection, campaign_id: int, transcript_ids: lis
 
     ``UNIQUE(campaign_id, position)`` is checked row by row, so positions are
     written in two steps: shift every row above the current maximum, then
-    write the final positions.
+    write the final positions. Rows left out are unassigned.
     """
-    keep = set(transcript_ids)
-    for (tid,) in conn.execute(
-        "SELECT transcript_id FROM campaign_transcripts WHERE campaign_id = ?", (campaign_id,)
-    ).fetchall():
-        if tid not in keep:
-            conn.execute("DELETE FROM campaign_transcripts WHERE transcript_id = ?", (tid,))
-    top = conn.execute(
-        "SELECT coalesce(max(position), -1) + 1 FROM campaign_transcripts WHERE campaign_id = ?",
+    shift = conn.execute(
+        "SELECT coalesce(max(position), -1) + 1 FROM transcripts WHERE campaign_id = ?",
         (campaign_id,),
-    ).fetchone()[0]
-    offset = top + len(transcript_ids)
+    ).fetchone()[0] + len(transcript_ids)
     conn.execute(
-        "UPDATE campaign_transcripts SET position = position + ? WHERE campaign_id = ?",
-        (offset, campaign_id),
+        "UPDATE transcripts SET position = position + ? WHERE campaign_id = ?",
+        (shift, campaign_id),
     )
+    # A session moving in from another campaign changes campaign_id here;
+    # transcripts_campaign_bu then drops its journal entry.
     for pos, tid in enumerate(transcript_ids):
-        current = conn.execute(
-            "SELECT campaign_id FROM campaign_transcripts WHERE transcript_id = ?", (tid,)
-        ).fetchone()
-        if current is not None and current[0] == campaign_id:
-            # Already here: position only. Never rewrite campaign_id in place —
-            # journal_entries' composite FK refuses that.
-            conn.execute(
-                "UPDATE campaign_transcripts SET position = ? WHERE transcript_id = ?", (pos, tid)
-            )
-            continue
-        # Moving in from another campaign (one campaign per transcript): delete
-        # and insert, so the old campaign's journal entry cascades and its
-        # journal is marked stale.
-        conn.execute("DELETE FROM campaign_transcripts WHERE transcript_id = ?", (tid,))
-        conn.execute(
-            "INSERT INTO campaign_transcripts (transcript_id, campaign_id, position) VALUES (?, ?, ?)",
-            (tid, campaign_id, pos),
-        )
+        _set_campaign(conn, tid, campaign_id, pos)
+    for (tid,) in conn.execute(
+        "SELECT id FROM transcripts WHERE campaign_id = ? AND position >= ?",
+        (campaign_id, shift),
+    ).fetchall():
+        _set_campaign(conn, tid, None, None)
 
 
 def _stems(conn: sqlite3.Connection, campaign_id: int) -> list[str]:
     return [r[0] for r in conn.execute(
-        "SELECT t.stem FROM campaign_transcripts ct JOIN transcripts t ON t.id = ct.transcript_id "
-        "WHERE ct.campaign_id = ? ORDER BY ct.position",
+        "SELECT stem FROM transcripts WHERE campaign_id = ? ORDER BY position",
         (campaign_id,),
     )]
 
@@ -143,8 +145,8 @@ def load_campaigns(data_dir: Optional[Path] = None) -> dict[str, Campaign]:
             "FROM campaign_members m JOIN profiles p ON p.id = m.profile_id ORDER BY m.rowid"
         ).fetchall()
         transcripts = conn.execute(
-            "SELECT ct.campaign_id, t.stem FROM campaign_transcripts ct "
-            "JOIN transcripts t ON t.id = ct.transcript_id ORDER BY ct.campaign_id, ct.position"
+            "SELECT campaign_id, id, stem FROM transcripts "
+            "WHERE campaign_id IS NOT NULL ORDER BY campaign_id, position"
         ).fetchall()
 
     by_id: dict[int, Campaign] = {}
@@ -156,6 +158,8 @@ def load_campaigns(data_dir: Optional[Path] = None) -> dict[str, Campaign]:
             created=r["created_at"][:10],
             members={},
             transcripts=[],
+            id=r["id"],
+            folder=r["folder"],
         )
         by_id[r["id"]] = c
         campaigns[c.slug] = c
@@ -166,6 +170,7 @@ def load_campaigns(data_dir: Optional[Path] = None) -> dict[str, Campaign]:
         )
     for t in transcripts:
         by_id[t["campaign_id"]].transcripts.append(t["stem"])
+        by_id[t["campaign_id"]].transcript_ids.append(t["id"])
     return campaigns
 
 
@@ -187,11 +192,14 @@ def create_campaign(display_name: str, data_dir: Optional[Path] = None) -> Campa
     with db.transaction(data_dir) as conn:
         if conn.execute("SELECT 1 FROM campaigns WHERE slug = ?", (slug,)).fetchone():
             raise ValueError(f"Campaign with slug {slug!r} already exists")
-        conn.execute(
-            "INSERT INTO campaigns (slug, display_name, created_at) VALUES (?, ?, ?)",
-            (slug, display_name, created),
-        )
-    return Campaign(slug=slug, display_name=display_name, created=created[:10], members={})
+        folder = campaign_folders.unique_folder(display_name, conn)
+        cid = conn.execute(
+            "INSERT INTO campaigns (slug, display_name, folder, created_at) "
+            "VALUES (?, ?, ?, ?) RETURNING id",
+            (slug, display_name, folder, created),
+        ).fetchone()[0]
+    return Campaign(slug=slug, display_name=display_name, created=created[:10], members={},
+                    id=cid, folder=folder)
 
 
 def delete_campaign(slug: str, *, delete_transcripts: bool = False,
@@ -204,8 +212,11 @@ def delete_campaign(slug: str, *, delete_transcripts: bool = False,
 
     With ``delete_transcripts``, each transcript goes through
     ``transcript_store.delete_transcript`` (row, files, speakers, search
-    entries), then the campaign and its journal file. A transcript whose
-    ``.md`` can't be deleted (held open on Windows) is kept, unassigned.
+    entries), then the campaign and its registered journal file. A transcript
+    whose ``.md`` can't be deleted (held open on Windows) is kept, unassigned.
+
+    Raises ValueError when unassigning a session would collide with a root
+    session of the same name; nothing is deleted then.
     """
     from . import file_registry
 
@@ -223,19 +234,23 @@ def delete_campaign(slug: str, *, delete_transcripts: bool = False,
         if delete_transcripts:
             owner = file_registry.Owner("campaign", cid)
             journal_files = file_registry.paths_for_delete(owner, conn, data_dir=data_dir)
-            if not journal_files:  # a journal file that was never registered
-                from .journal import journal_path
-                path = journal_path(slug, data_dir)
-                if path is not None and path.is_file():
-                    journal_files = [path]
+        # transcripts.campaign_id refuses deleting a campaign that still holds sessions.
+        for (tid,) in conn.execute(
+            "SELECT id FROM transcripts WHERE campaign_id = ?", (cid,)
+        ).fetchall():
+            _set_campaign(conn, tid, None, None)
         conn.execute("DELETE FROM campaigns WHERE id = ?", (cid,))
     if journal_files:
         file_registry.unlink_paths(journal_files)
-        for path in journal_files:
-            try:
-                path.parent.rmdir()  # the campaign's folder, if nothing else is in it
-            except OSError:
-                pass
+    # A later campaign with this slug must not adopt this one's journal.
+    from .journal import ADOPTED_SUFFIX, _pending_path, legacy_journal_path
+
+    legacy = legacy_journal_path(slug, data_dir)
+    for path in (legacy, _pending_path(legacy), legacy.with_name(legacy.name + ADOPTED_SUFFIX)):
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
 
 def add_member(
@@ -351,34 +366,45 @@ def move_transcript_to_campaign(
     """Associate a transcript stem with a campaign, appended at the end.
 
     Removes it from any other campaign first (one transcript → one campaign;
-    the schema enforces it). A no-op if it's already in this campaign.
-    Raises KeyError if the target campaign slug is not found.
+    the schema enforces it) and creates the session row if there is none. A
+    no-op if it's already in this campaign.
+    Raises KeyError if the target campaign slug is not found, ValueError if
+    the stem is ambiguous or the campaign already has a session of that name.
     """
+    from .transcript_store import ensure_row
+
+    stem = _nfc(stem)
     with db.transaction(data_dir) as conn:
         cid = _campaign_id(conn, slug)
-        tid = _transcript_id(conn, stem)
-        current = conn.execute(
-            "SELECT campaign_id FROM campaign_transcripts WHERE transcript_id = ?", (tid,)
-        ).fetchone()
-        if current is not None and current[0] == cid:
-            return
-        conn.execute("DELETE FROM campaign_transcripts WHERE transcript_id = ?", (tid,))
-        conn.execute(
-            "INSERT INTO campaign_transcripts (transcript_id, campaign_id, position) "
-            "VALUES (?, ?, (SELECT coalesce(max(position), -1) + 1 FROM campaign_transcripts "
-            "WHERE campaign_id = ?))",
-            (tid, cid, cid),
-        )
+        rows = conn.execute(
+            "SELECT id, campaign_id FROM transcripts WHERE stem = ? LIMIT 2", (stem,)
+        ).fetchall()
+        if len(rows) > 1:
+            raise ValueError(f"more than one session is named {stem!r}")
+        if rows:
+            tid, current = rows[0][0], rows[0][1]
+            if current == cid:
+                return
+        else:
+            tid = ensure_row(conn, stem)
+        pos = conn.execute(
+            "SELECT coalesce(max(position), -1) + 1 FROM transcripts WHERE campaign_id = ?",
+            (cid,),
+        ).fetchone()[0]
+        _set_campaign(conn, tid, cid, pos)
 
 
 def remove_transcript_from_campaign(stem: str, data_dir: Optional[Path] = None) -> None:
-    """Disassociate a transcript stem from whichever campaign it belongs to (no-op if none)."""
+    """Disassociate a transcript stem from whichever campaign it belongs to (no-op if none).
+
+    Raises ValueError if a session of that name is already unassigned.
+    """
     with db.transaction(data_dir) as conn:
-        conn.execute(
-            "DELETE FROM campaign_transcripts WHERE transcript_id = "
-            "(SELECT id FROM transcripts WHERE stem = ?)",
+        for (tid,) in conn.execute(
+            "SELECT id FROM transcripts WHERE stem = ? AND campaign_id IS NOT NULL",
             (_nfc(stem),),
-        )
+        ).fetchall():
+            _set_campaign(conn, tid, None, None)
 
 
 def reorder_campaign_transcript(
@@ -410,7 +436,7 @@ def reorder_campaign_transcript(
         swap_idx = idx - 1 if direction == "up" else idx + 1
         if 0 <= swap_idx < len(stems):
             stems[idx], stems[swap_idx] = stems[swap_idx], stems[idx]
-            _write_order(conn, cid, [_transcript_id(conn, s) for s in stems])
+            _write_order(conn, cid, [_transcript_id(conn, cid, s) for s in stems])
 
 
 def set_campaign_transcript_order(
@@ -438,15 +464,15 @@ def set_campaign_transcript_order(
                 "order must be a permutation of the campaign's current transcripts "
                 f"(got {sorted(order)!r}, expected {sorted(current)!r})"
             )
-        _write_order(conn, cid, [_transcript_id(conn, s) for s in order])
+        _write_order(conn, cid, [_transcript_id(conn, cid, s) for s in order])
 
 
 def get_campaign_for_transcript(stem: str, data_dir: Optional[Path] = None) -> Optional[str]:
     """Return the slug of the campaign that owns this transcript stem, or None."""
     with db.connection(data_dir) as conn:
         row = conn.execute(
-            "SELECT c.slug FROM transcripts t JOIN campaign_transcripts ct ON ct.transcript_id = t.id "
-            "JOIN campaigns c ON c.id = ct.campaign_id WHERE t.stem = ?",
+            "SELECT c.slug FROM transcripts t JOIN campaigns c ON c.id = t.campaign_id "
+            "WHERE t.stem = ?",
             (_nfc(stem),),
         ).fetchone()
     return row[0] if row else None

@@ -48,8 +48,11 @@ KINDS = (
 _OUTPUT_KINDS = frozenset(
     {"transcript", "summary", "sidecar", "excerpt", "excerpt_text", "audio", "backup"}
 )
+# A journal lives in its campaign's folder, so it is under the output root
+# though a campaign (not a transcript) owns it.
+_OUTPUT_ROOT_KINDS = _OUTPUT_KINDS | {"journal"}
 ROOT_OF_KIND: dict[str, str] = {
-    k: ("output" if k in _OUTPUT_KINDS else "data") for k in KINDS
+    k: ("output" if k in _OUTPUT_ROOT_KINDS else "data") for k in KINDS
 }
 # Kinds with one file per owner; the rest are unique per (owner, label).
 SINGLE_KINDS = frozenset(set(KINDS) - {"excerpt", "excerpt_text", "per_user"})
@@ -677,8 +680,8 @@ def _scan_output(output: Path, owners: dict[str, Owner], fold: bool) -> list[_Fo
     return found
 
 
-def _scan_data(data: Path, in_output, recordings: dict[str, str], profiles: dict[str, Owner],
-               campaigns: dict[str, Owner]) -> list[_Found]:
+def _scan_data(data: Path, in_output, recordings: dict[str, str],
+               profiles: dict[str, Owner]) -> list[_Found]:
     found = []
 
     def listing(directory: Path) -> list[Path]:
@@ -707,12 +710,19 @@ def _scan_data(data: Path, in_output, recordings: dict[str, str], profiles: dict
         for clip in listing(clips):
             if clip.suffix == ".mp3" and clip.is_file():
                 found.append(_Found("reference_clip", clip, "data", profiles.get(_nfc(clip.stem))))
-    camp_root = data / "campaigns"
-    if not in_output(camp_root):
-        for camp_dir in listing(camp_root):
-            journal = camp_dir / "journal.md"
-            if camp_dir.is_dir() and not in_output(camp_dir) and journal.is_file():
-                found.append(_Found("journal", journal, "data", campaigns.get(_nfc(camp_dir.name))))
+    return found
+
+
+def _scan_journals(output: Path, folders: list[tuple[int, str]]) -> list[_Found]:
+    """A claimed campaign's journal, if the file is there. Unclaimed folders and
+    folders mid-rename are not wisper's to read."""
+    from .campaign_folders import journal_name
+
+    found = []
+    for cid, folder in folders:
+        path = output / folder / journal_name(folder)
+        if path.is_file():
+            found.append(_Found("journal", path, "output", Owner("campaign", cid)))
     return found
 
 
@@ -770,8 +780,8 @@ def _sync(report: SyncReport, data: Path, output: Path, data_dir_arg: Optional[P
                       for r in c.execute("SELECT id, capture_status FROM recordings")}
         profiles = {_nfc(r["key"]): Owner("profile", r["id"])
                     for r in c.execute("SELECT id, key FROM profiles")}
-        campaigns = {_nfc(r["slug"]): Owner("campaign", r["id"])
-                     for r in c.execute("SELECT id, slug FROM campaigns")}
+        journal_folders = [(r["id"], r["folder"]) for r in c.execute(
+            "SELECT id, folder FROM campaigns WHERE folder_claimed = 1 AND folder_pending IS NULL")]
         db_rows = c.execute("SELECT * FROM files ORDER BY id").fetchall()
 
     owners = {_key(stem, fold): Owner("transcript", tid) for tid, stem in stems.items()}
@@ -796,8 +806,9 @@ def _sync(report: SyncReport, data: Path, output: Path, data_dir_arg: Optional[P
             refresh_rows.append((r, size, mtime))
 
     # Files: register what has an owner and an empty slot, list the rest.
-    scanned = _scan_output(output, owners, fold) + _scan_data(
-        data, in_output, recordings, profiles, campaigns)
+    scanned = (_scan_output(output, owners, fold)
+               + _scan_data(data, in_output, recordings, profiles)
+               + _scan_journals(output, journal_folders))
     new_files: list[_Found] = []
     for f in scanned:
         rel_root = _root_dir(f.root, data, output)

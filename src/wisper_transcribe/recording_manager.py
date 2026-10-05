@@ -124,10 +124,9 @@ def _load(conn: sqlite3.Connection, data_dir: Optional[Path],
         "EXISTS (SELECT 1 FROM jobs j WHERE j.recording_id = r.id AND j.type = 'transcription' "
         " AND j.status IN ('pending', 'running')) AS job_active "
         "FROM recordings r "
-        "LEFT JOIN campaign_transcripts ct ON ct.transcript_id = r.transcript_id "
-        "LEFT JOIN campaigns c ON c.id = "
-        "CASE WHEN r.transcript_id IS NOT NULL THEN ct.campaign_id ELSE r.campaign_id END "
         "LEFT JOIN transcripts t ON t.id = r.transcript_id "
+        "LEFT JOIN campaigns c ON c.id = "
+        "CASE WHEN r.transcript_id IS NOT NULL THEN t.campaign_id ELSE r.campaign_id END "
         "LEFT JOIN recording_discord d ON d.recording_id = r.id "
         f"{where} ORDER BY r.rowid",
         params,

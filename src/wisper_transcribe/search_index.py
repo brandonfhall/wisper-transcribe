@@ -578,8 +578,7 @@ def search(query: str, *, campaign: Optional[str] = None, speaker: Optional[str]
         output_dir = get_output_dir()
 
     filters, params = ["search_fts MATCH ?", "t.missing_since IS NULL"], [match]
-    campaign_filter = ("t.id IN (SELECT ct.transcript_id FROM campaign_transcripts ct "
-                       "JOIN campaigns c ON c.id = ct.campaign_id WHERE c.slug = ?)")
+    campaign_filter = "t.campaign_id = (SELECT id FROM campaigns WHERE slug = ?)"
     if kind:
         filters.append("b.kind = ?")
         params.append(kind)
@@ -625,8 +624,7 @@ def search(query: str, *, campaign: Optional[str] = None, speaker: Optional[str]
         FROM ranked r
         JOIN groups g USING (transcript_id)
         JOIN transcripts t ON t.id = r.transcript_id
-        LEFT JOIN campaign_transcripts ct ON ct.transcript_id = t.id
-        LEFT JOIN campaigns c ON c.id = ct.campaign_id
+        LEFT JOIN campaigns c ON c.id = t.campaign_id
         WHERE r.rn <= ?
         ORDER BY g.best, r.transcript_id, r.rn
     """

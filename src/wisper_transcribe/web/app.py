@@ -217,6 +217,15 @@ def create_app() -> FastAPI:
             import logging
             logging.getLogger(__name__).warning("Could not mark interrupted jobs", exc_info=True)
 
+        # Move journals from the data dir into their campaign folders. After
+        # mark_interrupted, so leftover job rows don't read as busy.
+        try:
+            from wisper_transcribe import journal
+            journal.adopt_legacy_journals()
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning("Could not adopt legacy journals", exc_info=True)
+
         # Register transcripts added while the server was down, flag deleted
         # ones, match renames, and sweep crash leftover temp files.
         try:

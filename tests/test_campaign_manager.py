@@ -135,17 +135,17 @@ def test_delete_campaign_raises_keyerror_if_missing(tmp_path):
 def _campaign_with_two_sessions():
     """A campaign whose transcripts have summaries, and a journal file."""
     from wisper_transcribe import file_registry, transcript_store as ts
+    from wisper_transcribe import campaign_folders
     from wisper_transcribe.path_utils import get_output_dir
 
     out = get_output_dir()
-    create_campaign("Game")
+    campaign_folders.ensure_folder(create_campaign("Game").id)
     for stem in ("s01", "s02"):
         (out / f"{stem}.md").write_text("x", encoding="utf-8")
         ts.register(stem, origin="job")
         (out / f"{stem}.summary.md").write_text("sum", encoding="utf-8")
         move_transcript_to_campaign(stem, "game")
-    journal = get_campaigns_dir() / "game" / "journal.md"
-    journal.parent.mkdir(parents=True)
+    journal = out / "Game" / "Game Journal.md"
     journal.write_text("journal", encoding="utf-8")
     file_registry.sync(out)
     return out, journal
@@ -158,14 +158,14 @@ def test_delete_campaign_everything_removes_transcripts_files_and_journal():
     delete_campaign("game", delete_transcripts=True)
 
     assert "game" not in load_campaigns()
-    assert not list(out.iterdir()) and not journal.exists()
+    assert [p.name for p in out.iterdir()] == ["Game"] and not journal.exists()
     with db.connection() as conn:
         assert conn.execute("SELECT count(*) FROM transcripts").fetchone()[0] == 0
         assert conn.execute("SELECT count(*) FROM files").fetchone()[0] == 0
     assert file_registry.sync(out).unclaimed == []
 
 
-def test_delete_campaign_keep_the_files_lists_the_journal_as_unclaimed():
+def test_delete_campaign_keep_the_files_leaves_the_journal_untracked():
     from wisper_transcribe import file_registry, transcript_store as ts
 
     out, journal = _campaign_with_two_sessions()
@@ -173,8 +173,10 @@ def test_delete_campaign_keep_the_files_lists_the_journal_as_unclaimed():
 
     assert (out / "s01.md").exists() and (out / "s02.summary.md").exists() and journal.exists()
     assert get_campaign_for_transcript("s01") is None
-    assert file_registry.sync(out).unclaimed == [journal]
-    assert ts.needs_attention(out).unclaimed == [journal]
+    assert file_registry.sync(out).unclaimed == []  # the deleted campaign claims nothing
+    assert ts.needs_attention(out).unclaimed == []
+    with db.connection() as conn:
+        assert conn.execute("SELECT count(*) FROM files WHERE kind = 'journal'").fetchone()[0] == 0
 
 
 def test_delete_campaign_everything_keeps_a_transcript_it_cannot_delete(monkeypatch):
@@ -568,16 +570,15 @@ def test_schema_rejects_discord_id_with_non_digits(tmp_path):
                 conn.execute("UPDATE campaign_members SET discord_user_id = ?", (bad,))
 
 
-def test_transcript_belongs_to_one_campaign_in_schema(tmp_path):
+def test_a_transcript_has_one_campaign_and_a_move_replaces_it(tmp_path):
     create_campaign("Alpha", data_dir=tmp_path)
     create_campaign("Beta", data_dir=tmp_path)
     move_transcript_to_campaign("s01", "alpha", data_dir=tmp_path)
-    with pytest.raises(sqlite3.IntegrityError):
-        with db.transaction(tmp_path) as conn:
-            conn.execute(
-                "INSERT INTO campaign_transcripts (transcript_id, campaign_id, position) "
-                "SELECT t.id, c.id, 5 FROM transcripts t, campaigns c "
-                "WHERE t.stem = 's01' AND c.slug = 'beta'")
+    move_transcript_to_campaign("s01", "beta", data_dir=tmp_path)
+    assert get_campaign_for_transcript("s01", data_dir=tmp_path) == "beta"
+    assert get_transcripts_for_campaign("alpha", data_dir=tmp_path) == []
+    with db.connection(tmp_path) as conn:
+        assert conn.execute("SELECT count(*) FROM transcripts WHERE stem = 's01'").fetchone()[0] == 1
 
 
 def test_reorder_rewrites_positions_under_unique_constraint(tmp_path):
@@ -591,7 +592,7 @@ def test_reorder_rewrites_positions_under_unique_constraint(tmp_path):
     assert get_transcripts_for_campaign("alpha", data_dir=tmp_path)[-2:] == ["s00", "s01"]
     with db.connection(tmp_path) as conn:
         positions = [r[0] for r in conn.execute(
-            "SELECT position FROM campaign_transcripts ORDER BY position")]
+            "SELECT position FROM transcripts WHERE campaign_id IS NOT NULL ORDER BY position")]
     assert positions == list(range(6))
 
 
@@ -654,3 +655,203 @@ def test_add_member_atomic_under_concurrent_calls(tmp_path):
     assert len(loaded[campaign.slug].members) == n
     for i in range(n):
         assert f"member_{i:02d}" in loaded[campaign.slug].members
+
+
+# ---------------------------------------------------------------------------
+# campaign assignment on transcripts
+# ---------------------------------------------------------------------------
+
+def _transcript_rows(tmp_path):
+    with db.connection(tmp_path) as conn:
+        return [tuple(r) for r in conn.execute(
+            "SELECT stem, campaign_id, position FROM transcripts ORDER BY id")]
+
+
+def test_create_campaign_names_its_folder_and_makes_no_directory(tmp_path):
+    from wisper_transcribe.config import get_output_root
+
+    c = create_campaign("Hanataz: Act I?", data_dir=tmp_path)
+    from ._seed import seed_campaign
+
+    seed_campaign("HANATAZ act i", "twin", data_dir=tmp_path)
+    assert c.folder == "Hanataz Act I"
+    assert load_campaigns(tmp_path)["twin"].folder == "HANATAZ act i (2)"
+    assert load_campaigns(tmp_path)[c.slug].folder == "Hanataz Act I" and c.id > 0
+    assert not (get_output_root() / "Hanataz Act I").exists()
+
+
+def test_load_campaigns_lists_transcript_ids_in_order(tmp_path):
+    create_campaign("Alpha", data_dir=tmp_path)
+    for st in ("b", "a", "c"):
+        move_transcript_to_campaign(st, "alpha", data_dir=tmp_path)
+    set_campaign_transcript_order("alpha", ["c", "a", "b"], data_dir=tmp_path)
+    c = load_campaigns(tmp_path)["alpha"]
+    assert c.transcripts == ["c", "a", "b"]
+    with db.connection(tmp_path) as conn:
+        assert c.transcript_ids == [conn.execute("SELECT id FROM transcripts WHERE stem = ?", (s,)
+                                                 ).fetchone()[0] for s in c.transcripts]
+
+
+def test_move_by_a_stem_that_names_two_sessions_is_refused(tmp_path):
+    create_campaign("Alpha", data_dir=tmp_path)
+    move_transcript_to_campaign("s1", "alpha", data_dir=tmp_path)
+    with db.transaction(tmp_path) as conn:  # a root session with the same name
+        conn.execute("INSERT INTO transcripts (stem, created_at) VALUES ('s1', 'now')")
+    with pytest.raises(ValueError, match="more than one"):
+        move_transcript_to_campaign("s1", "alpha", data_dir=tmp_path)
+
+
+def test_assigning_a_session_to_a_campaign_that_has_its_name_is_refused(tmp_path):
+    create_campaign("Alpha", data_dir=tmp_path)
+    create_campaign("Beta", data_dir=tmp_path)
+    move_transcript_to_campaign("s1", "alpha", data_dir=tmp_path)
+    with db.transaction(tmp_path) as conn:
+        conn.execute("INSERT INTO transcripts (stem, campaign_id, position, created_at) "
+                     "SELECT 's1', id, 0, 'now' FROM campaigns WHERE slug = 'beta'")
+        conn.execute("UPDATE transcripts SET campaign_id = NULL, position = NULL "
+                     "WHERE stem = 's1' AND campaign_id = (SELECT id FROM campaigns WHERE slug = 'alpha')")
+    with pytest.raises(ValueError, match="already there"):
+        with db.transaction(tmp_path) as conn:
+            from wisper_transcribe import campaign_manager as cm
+
+            tid = conn.execute("SELECT id FROM transcripts WHERE campaign_id IS NULL").fetchone()[0]
+            cm._set_campaign(conn, tid, cm._campaign_id(conn, "beta"), 5)
+
+
+def test_unassigning_a_session_whose_name_is_taken_in_the_root_is_refused(tmp_path):
+    create_campaign("Alpha", data_dir=tmp_path)
+    move_transcript_to_campaign("s1", "alpha", data_dir=tmp_path)
+    with db.transaction(tmp_path) as conn:
+        conn.execute("INSERT INTO transcripts (stem, created_at) VALUES ('s1', 'now')")
+    before = _transcript_rows(tmp_path)
+    with pytest.raises(ValueError, match="already there"):
+        remove_transcript_from_campaign("s1", data_dir=tmp_path)
+    with pytest.raises(ValueError, match="already there"):
+        delete_campaign("alpha", data_dir=tmp_path)
+    assert _transcript_rows(tmp_path) == before and "alpha" in load_campaigns(tmp_path)
+    from wisper_transcribe import campaign_manager as cm
+
+    with pytest.raises(ValueError, match="already there"):
+        with db.transaction(tmp_path) as conn:
+            cm._write_order(conn, cm._campaign_id(conn, "alpha"), [])
+
+
+def test_transcript_id_is_read_only_and_campaign_scoped(tmp_path):
+    from wisper_transcribe import campaign_manager as cm
+
+    create_campaign("Alpha", data_dir=tmp_path)
+    create_campaign("Beta", data_dir=tmp_path)
+    move_transcript_to_campaign("s1", "alpha", data_dir=tmp_path)
+    with db.transaction(tmp_path) as conn:
+        alpha, beta = cm._campaign_id(conn, "alpha"), cm._campaign_id(conn, "beta")
+        assert cm._transcript_id(conn, alpha, "s1") > 0
+        with pytest.raises(KeyError):
+            cm._transcript_id(conn, beta, "s1")
+        with pytest.raises(KeyError):
+            cm._transcript_id(conn, alpha, "missing")
+        assert conn.execute("SELECT count(*) FROM transcripts").fetchone()[0] == 1
+
+
+def test_delete_campaign_keep_files_leaves_its_transcripts_unassigned(tmp_path):
+    create_campaign("Alpha", data_dir=tmp_path)
+    for st in ("a", "b"):
+        move_transcript_to_campaign(st, "alpha", data_dir=tmp_path)
+    delete_campaign("alpha", data_dir=tmp_path)
+    assert [r[1:] for r in _transcript_rows(tmp_path)] == [(None, None), (None, None)]
+    assert load_campaigns(tmp_path) == {}
+
+
+def test_a_move_drops_the_journal_entry_and_marks_the_old_journal_stale_but_a_reorder_does_not(tmp_path):
+    create_campaign("Alpha", data_dir=tmp_path)
+    create_campaign("Beta", data_dir=tmp_path)
+    for st in ("a", "b"):
+        move_transcript_to_campaign(st, "alpha", data_dir=tmp_path)
+    with db.transaction(tmp_path) as conn:
+        conn.execute("INSERT INTO journal_entries SELECT id, campaign_id, 'now' FROM transcripts")
+
+    def state():
+        with db.connection(tmp_path) as conn:
+            return (conn.execute("SELECT count(*) FROM journal_entries").fetchone()[0],
+                    conn.execute("SELECT journal_stale_since FROM campaigns WHERE slug = 'alpha'"
+                                 ).fetchone()[0])
+
+    reorder_campaign_transcript("alpha", "a", "down", data_dir=tmp_path)
+    assert state() == (2, None)
+    move_transcript_to_campaign("a", "beta", data_dir=tmp_path)
+    entries, stale = state()
+    assert entries == 1 and stale is not None
+
+
+# ---------------------------------------------------------------------------
+# test seeds
+# ---------------------------------------------------------------------------
+
+def test_save_campaigns_reorders_and_drops_without_colliding(tmp_path):
+    save_campaigns({"g": Campaign(slug="g", display_name="G", created="2026-01-01",
+                                  transcripts=["a", "b", "c"])}, tmp_path)
+    save_campaigns({"g": Campaign(slug="g", display_name="G", created="2026-01-01",
+                                  transcripts=["c", "b", "a"])}, tmp_path)
+    assert get_transcripts_for_campaign("g", tmp_path) == ["c", "b", "a"]
+    save_campaigns({"g": Campaign(slug="g", display_name="G", created="2026-01-01",
+                                  transcripts=["b", "c"])}, tmp_path)
+    assert get_transcripts_for_campaign("g", tmp_path) == ["b", "c"]
+    assert get_campaign_for_transcript("a", tmp_path) is None
+    assert ("a", None, None) in _transcript_rows(tmp_path)
+
+
+def test_save_campaigns_handles_an_empty_campaign_and_a_removed_one(tmp_path):
+    save_campaigns({"g": Campaign(slug="g", display_name="G", created="2026-01-01"),
+                    "h": Campaign(slug="h", display_name="H", created="2026-01-01",
+                                  transcripts=["x"])}, tmp_path)
+    assert get_transcripts_for_campaign("g", tmp_path) == []
+    save_campaigns({"g": Campaign(slug="g", display_name="G", created="2026-01-01")}, tmp_path)
+    assert list(load_campaigns(tmp_path)) == ["g"]
+    assert _transcript_rows(tmp_path) == [("x", None, None)]
+
+
+def test_save_campaigns_moves_a_listed_transcript_out_of_another_campaign(tmp_path):
+    save_campaigns({"g": Campaign(slug="g", display_name="G", created="2026-01-01", transcripts=["a"]),
+                    "h": Campaign(slug="h", display_name="H", created="2026-01-01")}, tmp_path)
+    save_campaigns({"g": Campaign(slug="g", display_name="G", created="2026-01-01"),
+                    "h": Campaign(slug="h", display_name="H", created="2026-01-01",
+                                  transcripts=["a"])}, tmp_path)
+    assert get_campaign_for_transcript("a", tmp_path) == "h"
+
+
+def test_seed_campaign_and_seed_transcript(tmp_path):
+    from wisper_transcribe import file_registry
+    from wisper_transcribe.config import get_output_root
+
+    from ._seed import seed_campaign, seed_transcript
+
+    cid = seed_campaign("Hanataz", claimed=True, data_dir=tmp_path)
+    assert load_campaigns(tmp_path)["hanataz"].id == cid
+    assert (get_output_root() / "Hanataz").is_dir()
+    seed_campaign("Other Game", "custom", data_dir=tmp_path)
+    assert load_campaigns(tmp_path)["custom"].folder == "Other Game"
+
+    tid = seed_transcript("s1", campaign="hanataz", write_md=True, data_dir=tmp_path)
+    assert seed_transcript("s1", data_dir=tmp_path) == tid
+    assert get_campaign_for_transcript("s1", tmp_path) == "hanataz"
+    md = file_registry.file_for(file_registry.Owner("transcript", tid), "transcript",
+                                data_dir=tmp_path)
+    assert md is not None and md.path == get_output_root() / "s1.md" and md.path.is_file()
+
+
+def test_delete_campaign_removes_its_legacy_journal_files_and_spares_an_unclaimed_folder(tmp_path):
+    from wisper_transcribe.config import get_output_root
+
+    create_campaign("Hanataz", data_dir=tmp_path)
+    legacy = get_campaigns_dir(tmp_path) / "hanataz"
+    legacy.mkdir(parents=True)
+    names = ("journal.md", "journal.md.wisper-pending", "journal.md.v11-adopted")
+    for name in names:
+        (legacy / name).write_text("old", encoding="utf-8")
+    note = get_output_root() / "Hanataz" / "Hanataz Journal.md"
+    note.parent.mkdir()
+    note.write_text("my own notes", encoding="utf-8")
+
+    delete_campaign("hanataz", delete_transcripts=True, data_dir=tmp_path)
+
+    assert not any((legacy / name).exists() for name in names)
+    assert note.read_text(encoding="utf-8") == "my own notes"

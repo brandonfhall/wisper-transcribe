@@ -755,7 +755,7 @@ def relink(old_stem: str, new_stem: str, data_dir: Optional[Path] = None,
         new = conn.execute("SELECT id FROM transcripts WHERE stem = ?", (new_stem,)).fetchone()
         if new is not None:
             linked = conn.execute(
-                "SELECT 1 FROM campaign_transcripts WHERE transcript_id = ? "
+                "SELECT 1 FROM transcripts WHERE id = ? AND campaign_id IS NOT NULL "
                 "UNION SELECT 1 FROM journal_entries WHERE transcript_id = ?",
                 (new["id"], new["id"]),
             ).fetchone()
@@ -777,7 +777,7 @@ def relink_candidates(data_dir: Optional[Path] = None) -> list[str]:
     with db.connection(data_dir) as conn:
         return [r[0] for r in conn.execute(
             "SELECT t.stem FROM transcripts t WHERE t.missing_since IS NULL "
-            "AND NOT EXISTS (SELECT 1 FROM campaign_transcripts ct WHERE ct.transcript_id = t.id) "
+            "AND t.campaign_id IS NULL "
             "ORDER BY t.created_at DESC, t.stem"
         )]
 
@@ -828,8 +828,7 @@ def needs_attention(output_dir: Optional[Path] = None,
     with db.connection(data_dir) as conn:
         missing = [MissingTranscript(r["stem"], r["display_name"]) for r in conn.execute(
             "SELECT t.stem, c.display_name FROM transcripts t "
-            "LEFT JOIN campaign_transcripts ct ON ct.transcript_id = t.id "
-            "LEFT JOIN campaigns c ON c.id = ct.campaign_id "
+            "LEFT JOIN campaigns c ON c.id = t.campaign_id "
             "WHERE t.missing_since IS NOT NULL ORDER BY t.stem")]
     return Attention(
         missing_transcripts=missing,
@@ -910,8 +909,7 @@ def read_sidecar(md_path: Path, data_dir: Optional[Path] = None) -> Optional[dic
     with db.connection(data_dir) as conn:
         row = conn.execute(
             "SELECT t.id, c.slug FROM transcripts t "
-            "LEFT JOIN campaign_transcripts ct ON ct.transcript_id = t.id "
-            "LEFT JOIN campaigns c ON c.id = ct.campaign_id WHERE t.stem = ?",
+            "LEFT JOIN campaigns c ON c.id = t.campaign_id WHERE t.stem = ?",
             (nfc(Path(md_path).stem),),
         ).fetchone()
         speakers = conn.execute(
@@ -1025,8 +1023,8 @@ def write_sidecar(md_path: Path, diar: dict, data_dir: Optional[Path] = None) ->
     Speakers (name, provenance, embedding) go to the database in one
     transaction; the segments go to ``<stem>_diar.json`` after it (companion
     files follow the row), and the sidecar is registered. The ``campaign``
-    key is ignored: the campaign is the transcript's ``campaign_transcripts``
-    row. ``input_path`` becomes the transcript's ``audio`` file when it lies
+    key is ignored: the campaign is the transcript's own
+    ``campaign_id``. ``input_path`` becomes the transcript's ``audio`` file when it lies
     inside the ``.md``'s folder (:func:`set_audio`); any other value clears
     it, and an audio copy replaced by a different one (re-transcribe) is
     deleted.

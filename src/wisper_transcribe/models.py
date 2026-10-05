@@ -76,6 +76,9 @@ class Campaign:
     created: str
     members: dict = field(default_factory=dict)       # dict[str, CampaignMember]
     transcripts: list = field(default_factory=list)   # list[str] — transcript stems
+    id: int = 0
+    folder: str = ""                                  # folder name under the output root
+    transcript_ids: list = field(default_factory=list)  # list[int], same order as transcripts
 
 
 # ---------------------------------------------------------------------------

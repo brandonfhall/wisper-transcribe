@@ -260,7 +260,7 @@ Options:
 
 #### `wisper campaigns journal`
 
-Maintains a **rolling campaign journal** — a single living document the LLM rewrites as each new session is folded in. It reads the per-session `.summary.md` sidecars (from `wisper summarize`) and accumulates them into `campaigns/<slug>/journal.md`, tracking story arcs, open plot threads, NPCs, party decisions, and a running loot ledger. Context stays bounded: each fold sends only the current journal plus one new session summary.
+Maintains a **rolling campaign journal** — a single living document the LLM rewrites as each new session is folded in. It reads the per-session `.summary.md` sidecars (from `wisper summarize`) and accumulates them into `<campaign folder>/<campaign folder> Journal.md` in the transcripts folder, tracking story arcs, open plot threads, NPCs, party decisions, and a running loot ledger. Context stays bounded: each fold sends only the current journal plus one new session summary.
 
 ```bash
 wisper campaigns journal d-d-mondays                  # fold the next unjournalled session
@@ -278,7 +278,7 @@ A session is "pending" once it has a `.summary.md`. With no flags the command fo
 
 `--rebuild` starts the journal over from each session's existing `.summary.md`, in campaign order — one LLM call per session, plus one for any session that has no summary yet. Your edits to summaries are kept. Add `--resummarize` to re-summarize every transcript first, overwriting the summaries (two calls per session) — for when the summaries themselves are bad. Both ask for confirmation, showing the call count, unless `--yes` is passed. Sessions whose transcript is missing or whose summary fails are skipped and reported. `--session`, `--all`, `--rebuild`, and `--export` are mutually exclusive.
 
-**Stale journal:** moving a folded session to another campaign, removing it from the campaign, deleting it, or re-transcribing it never edits the journal text; it marks the journal stale instead. `wisper campaigns show <slug>` prints `Journal: STALE since …` with the rebuild command. Deleting `journal.md` by hand starts a fresh journal (every session becomes pending again); editing it by hand is fine, and later folds build on your edits.
+**Stale journal:** moving a folded session to another campaign, removing it from the campaign, deleting it, or re-transcribing it never edits the journal text; it marks the journal stale instead. `wisper campaigns show <slug>` prints `Journal: STALE since …` with the rebuild command. Deleting the journal file by hand starts a fresh journal (every session becomes pending again); editing it by hand is fine, and later folds build on your edits.
 
 **Scoping transcription to a campaign:**
 

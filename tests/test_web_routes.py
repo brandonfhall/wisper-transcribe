@@ -2431,12 +2431,12 @@ def test_campaign_journal_view_renders_body(client, tmp_path, monkeypatch):
     from wisper_transcribe import journal as journal_mod
 
     create_campaign("My Game", data_dir=tmp_path)
-    out = tmp_path / "out"
-    out.mkdir()
-    monkeypatch.setattr(journal_mod, "get_output_dir", lambda: out)
+    from wisper_transcribe import campaign_folders
+    (tmp_path / "output").mkdir(exist_ok=True)
+    campaign_folders.ensure_folder(
+        journal_mod.load_campaigns(tmp_path)["my-game"].id, data_dir=tmp_path)
 
     jpath = journal_mod.journal_path("my-game", data_dir=tmp_path)
-    jpath.parent.mkdir(parents=True, exist_ok=True)
     jpath.write_text(journal_mod.render_journal(
         "my-game", "## Story So Far\n\nThe heroes gathered.", "ollama", "llama3.1:8b"
     ), encoding="utf-8")
@@ -2623,6 +2623,25 @@ def test_assign_campaign_unlinks_when_empty(client, tmp_path, monkeypatch):
         )
     assert resp.status_code == 303
     assert get_campaign_for_transcript("session01", data_dir=tmp_path) is None
+
+
+def test_assign_campaign_refused_by_a_name_clash_shows_the_error(client, tmp_path, monkeypatch):
+    """A session already in the campaign under that name refuses the move with an error code."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    (tmp_path / "session01.md").write_text("---\ntitle: Session 01\n---\n")
+    from wisper_transcribe import db
+    from wisper_transcribe.campaign_manager import create_campaign, get_campaign_for_transcript
+    create_campaign("Test Game", data_dir=tmp_path)
+    with db.transaction(tmp_path) as conn:
+        conn.execute("INSERT INTO transcripts (stem, created_at) VALUES ('session01', 'now')")
+        conn.execute("INSERT INTO transcripts (stem, campaign_id, position, created_at) "
+                     "SELECT 'session01', id, 0, 'now' FROM campaigns")
+
+    with patch("wisper_transcribe.web.routes.transcripts.get_output_dir", return_value=tmp_path):
+        resp = client.post("/transcripts/session01/campaign", data={"campaign": "test-game"},
+                           follow_redirects=False)
+    assert resp.status_code == 303
+    assert "error=move_failed" in resp.headers["location"]
 
 
 # ---------------------------------------------------------------------------
@@ -3780,17 +3799,16 @@ def test_startup_on_a_new_database_reports_no_upgrade(caplog):
 def _campaign_with_session():
     from wisper_transcribe import file_registry, transcript_store as ts
     from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
-    from wisper_transcribe.config import get_data_dir
+    from wisper_transcribe import campaign_folders
     from wisper_transcribe.path_utils import get_output_dir
 
     out = get_output_dir()
-    create_campaign("Game")
+    campaign_folders.ensure_folder(create_campaign("Game").id)
     (out / "s01.md").write_text("x", encoding="utf-8")
     ts.register("s01", origin="job")
     (out / "s01.summary.md").write_text("sum", encoding="utf-8")
     move_transcript_to_campaign("s01", "game")
-    journal = get_data_dir() / "campaigns" / "game" / "journal.md"
-    journal.parent.mkdir(parents=True)
+    journal = out / "Game" / "Game Journal.md"
     journal.write_text("journal", encoding="utf-8")
     file_registry.sync(out)
     return out, journal
@@ -3807,16 +3825,17 @@ def test_campaign_delete_everything_route(client):
     out, journal = _campaign_with_session()
     resp = client.post("/campaigns/game/delete", data={"mode": "everything"}, follow_redirects=False)
     assert resp.status_code == 303
-    assert not list(out.iterdir()) and not journal.exists()
+    assert [p.name for p in out.iterdir()] == ["Game"] and not journal.exists()
+    assert not list((out / "Game").iterdir())  # the emptied folder is left
 
 
-def test_campaign_delete_keep_route_lists_the_journal(client):
+def test_campaign_delete_keep_route_leaves_the_journal_on_disk(client):
     out, journal = _campaign_with_session()
     resp = client.post("/campaigns/game/delete", data={"mode": "keep"}, follow_redirects=False)
     assert resp.status_code == 303
     assert (out / "s01.md").exists() and journal.exists()
-    page = client.get("/transcripts").text
-    assert "journal.md" in page and "listed only" in page
+    from wisper_transcribe.campaign_manager import load_campaigns
+    assert "game" not in load_campaigns()
 
 
 def test_job_page_shows_enroll_audio_missing_notice_only_for_exact_value(client, tmp_path):

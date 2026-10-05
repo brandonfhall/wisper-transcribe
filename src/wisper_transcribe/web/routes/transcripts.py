@@ -772,8 +772,21 @@ async def assign_campaign(request: Request, name: str) -> HTMLResponse:
                 status_code=303,
                 headers={"Location": f"/transcripts/{quote(name)}?error=not_found"},
             )
+        except ValueError:  # a session with that name is already in the campaign
+            return HTMLResponse(
+                content="",
+                status_code=303,
+                headers={"Location": f"/transcripts/{quote(name)}?error=move_failed"},
+            )
     else:
-        remove_transcript_from_campaign(safe_name.stem)
+        try:
+            remove_transcript_from_campaign(safe_name.stem)
+        except ValueError:  # an unassigned session already has this name
+            return HTMLResponse(
+                content="",
+                status_code=303,
+                headers={"Location": f"/transcripts/{quote(name)}?error=move_failed"},
+            )
 
     return HTMLResponse(
         content="",

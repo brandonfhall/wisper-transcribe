@@ -175,13 +175,12 @@ class JobRecord:
 # A job's campaign: its own subject (journal, relabel), else its transcript's
 # current campaign, else its recording's, else the campaign it was submitted
 # with (params_json; a job that never wrote a transcript). Derived, so a moved
-# transcript's jobs follow it. campaign_transcripts allows one row per
-# transcript, so the joins never multiply job rows.
+# transcript's jobs follow it. A transcript has one campaign_id, so the
+# joins never multiply job rows.
 _FROM = (
     "FROM jobs j LEFT JOIN transcripts t ON t.id = j.transcript_id "
-    "LEFT JOIN campaign_transcripts ct ON ct.transcript_id = j.transcript_id "
     "LEFT JOIN recordings rec ON rec.id = j.recording_id "
-    "LEFT JOIN campaigns c ON c.id = coalesce(j.campaign_id, ct.campaign_id, rec.campaign_id, "
+    "LEFT JOIN campaigns c ON c.id = coalesce(j.campaign_id, t.campaign_id, rec.campaign_id, "
     "(SELECT id FROM campaigns WHERE slug = json_extract(j.params_json, '$.campaign'))) "
 )
 _COLUMNS = "j.*, t.stem AS transcript_stem, c.slug AS campaign_slug, c.display_name AS campaign_name"

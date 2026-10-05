@@ -164,7 +164,7 @@ If wisper crashes or the machine loses power mid-session, the recording shows **
 
 - **Rebuild journal** (web) or `wisper campaigns journal <slug> --rebuild` re-folds every session's existing summary: one LLM call per session, and your edits to summaries are kept.
 - **Rebuild from transcripts** / `--rebuild --resummarize` re-summarizes every session first (two calls per session). Use it after switching LLM model or when the summaries are poor.
-- Deleting `journal.md` from `campaigns/<slug>/` also starts over: every summarized session becomes pending again. Editing `journal.md` by hand is fine; later folds build on your version.
+- Deleting the journal file (`<campaign folder> Journal.md`, in the campaign's folder in the transcripts folder) also starts over: every summarized session becomes pending again. Editing it by hand is fine; later folds build on your version.
 
 ---
 

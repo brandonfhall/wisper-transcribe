@@ -64,9 +64,9 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 
 | Phase | State | Commit |
 |---|---|---|
-| Planning: gate review, design, reviewer cycles | complete (5 review cycles; awaiting Brandon's go for Phase 1) | |
-| 1 — Schema v11; campaign queries; journal into the campaign folder | not started | |
-| 2a — Location API (`transcript_store.locate` and friends), no callers changed | not started | |
+| Planning: gate review, design, reviewer cycles | complete (5 review cycles) | |
+| 1 — Schema v11; campaign queries; journal into the campaign folder | done | |
+| 2a — Location API (`transcript_store.locate` and friends), no callers changed | handed to OpenClaw (see below) | |
 | 2b — Every caller resolves through the location API | not started | |
 | 3 — Transcript URLs by id; lists from the database | not started | |
 | 4 — Scan campaign folders: reconcile, sync, Needs attention | not started | |
@@ -76,6 +76,28 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 | 8 — `wisper storage trim` organizes folders; prune backups | not started | |
 | 9 — Holistic docs, comments, and tests review | not started | |
 | 10 — Final review and rehearsals (orchestrator) | not started | |
+
+### Hand-off: Phase 2a to OpenClaw (2026-10-05)
+
+Brandon is trying a non-Claude agent (OpenClaw) on Phase 2a. Claude reviews and fixes it afterwards, then decides whether OpenClaw takes the mechanical phases (2b, 3c, 8, 9).
+
+**OpenClaw: do Phase 2a only, then stop.**
+- **Setup** (the box is short on disk; this keeps the install to about 2–3 GB instead of 5–7 GB):
+  ```bash
+  git fetch origin && git checkout feat/campaign-folders && git pull
+  python3.13 -m venv .venv            # Python 3.13 or newer
+  .venv/bin/pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+  .venv/bin/pip install -e ".[dev]"
+  ```
+- **Read first:** `CLAUDE.md`; this section's "How to run this plan", "Test standard", "Documentation standard", "Findings", "Decisions", "Schema v11"; then Phase 2a and its **Read first** list.
+- **Scope:** Phase 2a's steps and tests only (a new "Locations" section in `transcript_store.py` and its tests). No caller changes: that's Phase 2b. Don't edit any migration in `db.py`. When the code disagrees with the plan, stop and write the disagreement into the commit message instead of improvising a design.
+- **No real data:** tests use tmp dirs only; never set `WISPER_DATA_DIR` or `WISPER_OUTPUT_DIR` to a real folder.
+- **Before committing** (Claude Code's pre-commit hook doesn't run for you, so do its job):
+  1. `.venv/bin/pytest tests/ -q` is fully green (no new skips).
+  2. `.venv/bin/python -m wisper_transcribe.tailwind`, then `git add src/wisper_transcribe/static/tailwind.min.css` if it changed.
+  3. Docs per the Documentation standard (`architecture.md` module map / design notes for the Locations API).
+  4. In this file, set the 2a Status row to `done (OpenClaw)` and add a one-line note under the Phase 2a heading for anything that differed from the plan.
+- **Commit:** one commit on `feat/campaign-folders`, message `feat(campaign-folders): phase 2a location API`. Don't push, don't open a PR, don't start Phase 2b.
 
 ### How to run this plan
 
@@ -582,6 +604,8 @@ def _v11_folder_name(display_name: str, room: int = 80, byte_room: int = 200) ->
 ---
 
 ### Phase 1 — Schema v11; campaign queries; journal into the campaign folder
+
+*Done. Differences from the plan: `export_journal` raises `ValueError` for a bad slug (it returned `None`). After a keep-files campaign delete the journal stays on disk untracked, since no campaign claims the folder; Phase 4 lists the leftover folder. Rehearsed on a scratch copy of the Mac data: v10 → v11, every page 200, a legacy journal adopted into `Impossible Landscapes/`.*
 
 **Goal:**
 - The database is at v11.

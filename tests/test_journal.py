@@ -1,16 +1,16 @@
 """Tests for journal.py — rolling campaign journal.
 
 No real LLM or network: a FakeClient stands in for LLMClient, and session
-``.summary.md`` sidecars are written to a tmp output dir that
-``journal.get_output_dir`` is patched to return.
+``.summary.md`` sidecars are written to a tmp output root (``WISPER_OUTPUT_DIR``).
 """
 from pathlib import Path
 
 import pytest
 
-from wisper_transcribe import journal
+from wisper_transcribe import campaign_folders, journal
 from wisper_transcribe.campaign_manager import (
     create_campaign,
+    load_campaigns,
     move_transcript_to_campaign,
 )
 
@@ -48,10 +48,10 @@ class FakeClient:
 
 @pytest.fixture
 def out_dir(tmp_path, monkeypatch):
-    """A tmp output dir for .summary.md sidecars, wired into journal lookups."""
+    """A tmp output root for .summary.md sidecars and campaign folders."""
     d = tmp_path / "output"
     d.mkdir()
-    monkeypatch.setattr(journal, "get_output_dir", lambda: d)
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(d))
     return d
 
 
@@ -67,9 +67,17 @@ def _write_transcript(out_dir: Path, stem: str, text: str = "**Speaker A:** Hell
 # Paths + frontmatter
 # ---------------------------------------------------------------------------
 
-def test_journal_path_uses_campaign_slug_dir(tmp_path):
-    p = journal.journal_path("my-game", data_dir=tmp_path)
-    assert p == tmp_path / "campaigns" / "my-game" / "journal.md"
+def test_journal_path_is_in_a_claimed_campaign_folder(tmp_path, out_dir):
+    create_campaign("My Game", data_dir=tmp_path)
+    assert journal.journal_path("my-game", data_dir=tmp_path) is None  # unclaimed
+    cid = load_campaigns(tmp_path)["my-game"].id
+    campaign_folders.ensure_folder(cid, data_dir=tmp_path)
+    assert (journal.journal_path("my-game", data_dir=tmp_path)
+            == out_dir / "My Game" / "My Game Journal.md")
+
+
+def test_journal_path_for_an_unknown_campaign_is_none(tmp_path, out_dir):
+    assert journal.journal_path("nope", data_dir=tmp_path) is None
 
 
 def test_journal_path_invalid_slug_returns_none(tmp_path):
@@ -575,7 +583,7 @@ def test_run_journal_job_folds_and_completes(tmp_path, out_dir, monkeypatch):
 
     assert job.status == jobs_mod.COMPLETED
     assert journal.journal_path("my-game", data_dir=tmp_path).exists()
-    assert job.output_path and job.output_path.endswith("journal.md")
+    assert job.output_path and job.output_path.endswith("My Game Journal.md")
 
 
 def test_run_journal_job_rebuild_resummarizes_and_completes(tmp_path, out_dir, monkeypatch):
@@ -602,7 +610,7 @@ def test_run_journal_job_rebuild_resummarizes_and_completes(tmp_path, out_dir, m
     assert job.status == jobs_mod.COMPLETED
     assert "STALE" not in (out_dir / "s1.summary.md").read_text(encoding="utf-8")
     assert "Rebuilt via job." in (out_dir / "s1.summary.md").read_text(encoding="utf-8")
-    assert job.output_path and job.output_path.endswith("journal.md")
+    assert job.output_path and job.output_path.endswith("My Game Journal.md")
     assert any("Summarized: 1" in line for line in job.log_lines)
 
 
@@ -800,15 +808,12 @@ def test_register_from_reconcile_does_not_mark_stale(tmp_path, out_dir, monkeypa
     assert journal.journal_stale_since("my-game") is None
 
 
-def test_composite_fk_refuses_in_place_campaign_change(tmp_path, out_dir):
-    import sqlite3
-
+def test_moving_a_session_to_another_campaign_drops_its_journal_entry(tmp_path, out_dir):
     _folded_game(tmp_path, out_dir, ("s1",))
     create_campaign("Other", data_dir=tmp_path)
-    with pytest.raises(sqlite3.IntegrityError):
-        with db.transaction(tmp_path) as conn:
-            conn.execute("UPDATE campaign_transcripts SET campaign_id = "
-                         "(SELECT id FROM campaigns WHERE slug = 'other')")
+    move_transcript_to_campaign("s1", "other", data_dir=tmp_path)
+    assert journal.journaled_stems("my-game", data_dir=tmp_path) == []
+    assert journal.journal_stale_since("my-game", data_dir=tmp_path) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -847,3 +852,250 @@ def test_rebuild_clears_stale(tmp_path, out_dir):
     journal.rebuild_campaign("my-game", FakeClient(), {}, data_dir=tmp_path)
     assert _campaign_row(tmp_path)["journal_stale_since"] is None
     assert journal.journaled_stems("my-game", data_dir=tmp_path) == ["s1"]
+
+
+# ---------------------------------------------------------------------------
+# Legacy journal adoption
+# ---------------------------------------------------------------------------
+
+LEGACY_TEXT = "---\ntype: campaign-journal\ncampaign: my-game\n---\n\n## Story So Far\n\nOld text.\n"
+
+
+def _legacy_campaign(tmp_path, folded=("s1", "s2"), text=LEGACY_TEXT):
+    """A campaign whose journal still sits at the data-dir location, with entries."""
+    import hashlib
+
+    from wisper_transcribe import db
+
+    create_campaign("My Game", data_dir=tmp_path)
+    for stem in folded:
+        move_transcript_to_campaign(stem, "my-game", data_dir=tmp_path)
+    legacy = journal.legacy_journal_path("my-game", tmp_path)
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(text, encoding="utf-8")
+    sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    with db.transaction(tmp_path) as conn:
+        conn.execute("INSERT INTO journal_entries SELECT id, campaign_id, 'now' FROM transcripts "
+                     "WHERE campaign_id IS NOT NULL")
+        conn.execute("UPDATE campaigns SET journal_sha256 = ?", (sha,))
+    return legacy, sha
+
+
+def _journal_state(tmp_path):
+    from wisper_transcribe import db
+
+    with db.connection(tmp_path) as conn:
+        row = conn.execute("SELECT journal_sha256 FROM campaigns").fetchone()
+        return (journal.journaled_stems("my-game", tmp_path), row[0])
+
+
+def test_a_legacy_journal_moves_into_the_campaign_folder_on_first_read(tmp_path, out_dir):
+    from wisper_transcribe import file_registry
+
+    legacy, sha = _legacy_campaign(tmp_path)
+    journal.unjournalled_sessions("my-game", tmp_path)
+
+    target = out_dir / "My Game" / "My Game Journal.md"
+    assert target.read_text(encoding="utf-8") == LEGACY_TEXT
+    assert _journal_state(tmp_path) == (["s1", "s2"], sha)
+    owner = file_registry.Owner.for_campaign_slug("my-game", data_dir=tmp_path)
+    row = file_registry.file_for(owner, "journal", data_dir=tmp_path)
+    assert row.rel_path == "My Game/My Game Journal.md" and row.root == "output"
+    assert campaign_folders.is_claimed(owner.id, data_dir=tmp_path)
+
+
+def test_adoption_sets_the_old_file_aside(tmp_path, out_dir):
+    legacy, _ = _legacy_campaign(tmp_path)
+    assert journal.adopt_legacy_journal("my-game", tmp_path) == "adopted"
+    assert not legacy.exists()
+    adopted = legacy.with_name("journal.md.v11-adopted")
+    assert adopted.read_text(encoding="utf-8") == LEGACY_TEXT
+    assert journal.adopt_legacy_journal("my-game", tmp_path) == "none"
+
+
+def test_adoption_copies_when_the_first_replace_fails_across_volumes(tmp_path, out_dir, monkeypatch):
+    import errno
+    import os
+
+    legacy, sha = _legacy_campaign(tmp_path)
+    real, calls = os.replace, []
+
+    def flaky(src, dst):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError(errno.EXDEV, "cross-device link")
+        return real(src, dst)
+
+    monkeypatch.setattr(journal.os, "replace", flaky)
+    assert journal.adopt_legacy_journal("my-game", tmp_path) == "adopted"
+    assert (out_dir / "My Game" / "My Game Journal.md").read_text(encoding="utf-8") == LEGACY_TEXT
+    assert not any(p.name.startswith(".wisper-tmp-") for p in (out_dir / "My Game").iterdir())
+
+
+def test_a_failed_copy_keeps_the_legacy_file_and_every_entry(tmp_path, out_dir, monkeypatch):
+    legacy, sha = _legacy_campaign(tmp_path)
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(journal.shutil, "copyfileobj", boom)
+    assert journal.adopt_legacy_journal("my-game", tmp_path) == "failed"
+    journal.unjournalled_sessions("my-game", tmp_path)  # a read must not reset anything
+    assert legacy.exists() and _journal_state(tmp_path) == (["s1", "s2"], sha)
+    assert not any(p.name.startswith(".wisper-tmp-") for p in (out_dir / "My Game").iterdir())
+
+
+def test_a_legacy_pending_file_whose_hash_matches_is_the_one_adopted(tmp_path, out_dir):
+    import hashlib
+
+    legacy, _ = _legacy_campaign(tmp_path)
+    newer = LEGACY_TEXT + "\nNewer fold.\n"
+    pending = legacy.with_name("journal.md.wisper-pending")
+    pending.write_text(newer, encoding="utf-8")
+    with db.transaction(tmp_path) as conn:
+        conn.execute("UPDATE campaigns SET journal_sha256 = ?",
+                     (hashlib.sha256(newer.encode()).hexdigest(),))
+    assert journal.adopt_legacy_journal("my-game", tmp_path) == "adopted"
+    assert (out_dir / "My Game" / "My Game Journal.md").read_text(encoding="utf-8") == newer
+    assert not legacy.exists() and not pending.exists()
+
+
+def test_a_legacy_pending_file_whose_hash_differs_is_deleted(tmp_path, out_dir):
+    legacy, _ = _legacy_campaign(tmp_path)
+    pending = legacy.with_name("journal.md.wisper-pending")
+    pending.write_text("never committed", encoding="utf-8")
+    assert journal.adopt_legacy_journal("my-game", tmp_path) == "adopted"
+    assert not pending.exists()
+    assert (out_dir / "My Game" / "My Game Journal.md").read_text(encoding="utf-8") == LEGACY_TEXT
+
+
+def test_both_journals_present_and_different_changes_nothing(tmp_path, out_dir):
+    legacy, sha = _legacy_campaign(tmp_path)
+    target = out_dir / "My Game" / "My Game Journal.md"
+    target.parent.mkdir()
+    target.write_text("---\ntype: campaign-journal\n---\n\nSomething else.\n", encoding="utf-8")
+    assert journal.adopt_legacy_journal("my-game", tmp_path) == "kept"
+    assert legacy.exists() and target.read_text(encoding="utf-8").endswith("Something else.\n")
+    assert _journal_state(tmp_path) == (["s1", "s2"], sha)
+
+
+def test_update_journal_with_a_kept_legacy_journal_fails_and_changes_nothing(tmp_path, out_dir):
+    legacy, sha = _legacy_campaign(tmp_path)
+    target = out_dir / "My Game" / "My Game Journal.md"
+    target.parent.mkdir()
+    target.write_text("---\ntype: campaign-journal\n---\n\nSomething else.\n", encoding="utf-8")
+    with pytest.raises(journal.JournalLocationError, match="journal_legacy_pending"):
+        journal.update_journal("my-game", FakeClient(), {}, session_stem="s1", data_dir=tmp_path)
+    assert legacy.exists() and _journal_state(tmp_path) == (["s1", "s2"], sha)
+
+
+def test_a_target_already_holding_the_legacy_text_finishes_the_adoption(tmp_path, out_dir):
+    """A crash after the copy and before the old file was set aside."""
+    legacy, _ = _legacy_campaign(tmp_path)
+    target = out_dir / "My Game" / "My Game Journal.md"
+    target.parent.mkdir()
+    target.write_text(LEGACY_TEXT, encoding="utf-8")
+    assert journal.adopt_legacy_journal("my-game", tmp_path) == "adopted"
+    assert not legacy.exists() and legacy.with_name("journal.md.v11-adopted").exists()
+
+
+def test_a_foreign_folder_blocks_adoption_and_nothing_is_written_into_it(tmp_path, out_dir):
+    legacy, _ = _legacy_campaign(tmp_path)
+    folder = out_dir / "My Game"
+    folder.mkdir()
+    (folder / "notes.md").write_text("mine", encoding="utf-8")
+    assert journal.adopt_legacy_journal("my-game", tmp_path) == "folder_taken"
+    assert sorted(p.name for p in folder.iterdir()) == ["notes.md"] and legacy.exists()
+    with pytest.raises(journal.JournalLocationError, match="journal_folder_taken"):
+        journal.update_journal("my-game", FakeClient(), {}, session_stem="s1", data_dir=tmp_path)
+
+
+def test_adoption_with_the_output_root_absent_is_unavailable(tmp_path, out_dir):
+    import shutil
+
+    legacy, sha = _legacy_campaign(tmp_path)
+    shutil.rmtree(out_dir)
+    assert journal.adopt_legacy_journal("my-game", tmp_path) == "unavailable"
+    assert journal.adopt_legacy_journals(tmp_path) == {"my-game": "unavailable"}
+    with pytest.raises(journal.JournalLocationError, match="journal_output_unavailable"):
+        journal.update_journal("my-game", FakeClient(), {}, session_stem="s1", data_dir=tmp_path)
+    assert legacy.exists() and _journal_state(tmp_path) == (["s1", "s2"], sha)
+
+
+def test_adopt_legacy_journals_survives_one_campaign_raising(tmp_path, out_dir, monkeypatch):
+    _legacy_campaign(tmp_path)
+    create_campaign("Other", data_dir=tmp_path)
+    real = journal.adopt_legacy_journal
+
+    def picky(slug, *a, **k):
+        if slug == "other":
+            raise RuntimeError("boom")
+        return real(slug, *a, **k)
+
+    monkeypatch.setattr(journal, "adopt_legacy_journal", picky)
+    assert journal.adopt_legacy_journals(tmp_path) == {"my-game": "adopted", "other": "failed"}
+
+
+def test_reset_journal_removes_the_legacy_files_so_a_rebuild_never_re_adopts(tmp_path, out_dir):
+    legacy, _ = _legacy_campaign(tmp_path)
+    legacy.with_name("journal.md.wisper-pending").write_text("p", encoding="utf-8")
+    legacy.with_name("journal.md.v11-adopted").write_text("a", encoding="utf-8")
+    journal.reset_journal("my-game", tmp_path)
+    assert not any(p.exists() for p in legacy.parent.iterdir())
+    assert _journal_state(tmp_path) == ([], None)
+
+
+def test_reset_journal_with_no_journal_yet_does_not_raise(tmp_path, out_dir):
+    create_campaign("My Game", data_dir=tmp_path)
+    journal.reset_journal("my-game", tmp_path)
+    with pytest.raises(KeyError):
+        journal.reset_journal("nope", tmp_path)
+    with pytest.raises(ValueError):
+        journal.reset_journal("../x", tmp_path)
+
+
+def test_export_journal_returns_the_adopted_text_on_the_first_call(tmp_path, out_dir):
+    _legacy_campaign(tmp_path)
+    text = journal.export_journal("my-game", tmp_path)
+    assert "Old text." in text and "journaled_sessions" in text
+    assert journal.journaled_stems("my-game", tmp_path) == ["s1", "s2"]
+
+
+def test_an_unclaimed_folders_note_survives_a_read_a_rebuild_and_a_campaign_delete(tmp_path, out_dir):
+    from wisper_transcribe.campaign_manager import delete_campaign
+
+    create_campaign("My Game", data_dir=tmp_path)
+    move_transcript_to_campaign("s1", "my-game", data_dir=tmp_path)
+    note = out_dir / "My Game" / "My Game Journal.md"
+    note.parent.mkdir()
+    note.write_text("my own notes", encoding="utf-8")
+
+    assert journal.journal_path("my-game", tmp_path) is None
+    journal.sync_journal("my-game", tmp_path)
+    journal.unjournalled_sessions("my-game", tmp_path)
+    journal.reset_journal("my-game", tmp_path)
+    delete_campaign("my-game", delete_transcripts=True, data_dir=tmp_path)
+    assert note.read_text(encoding="utf-8") == "my own notes"
+
+
+def test_sync_keeps_the_entries_while_the_folder_or_output_root_is_unavailable(tmp_path, out_dir):
+    import shutil
+
+    _legacy_campaign(tmp_path, folded=("s1",))
+    journal.adopt_legacy_journal("my-game", tmp_path)
+    _, sha = _journal_state(tmp_path)
+    folder = out_dir / "My Game"
+    shutil.rmtree(folder)
+    journal.sync_journal("my-game", tmp_path)
+    assert _journal_state(tmp_path) == (["s1"], sha)
+    shutil.rmtree(out_dir)
+    journal.sync_journal("my-game", tmp_path)
+    assert _journal_state(tmp_path) == (["s1"], sha)
+
+
+def test_sync_resets_when_the_folder_is_there_and_only_the_journal_is_gone(tmp_path, out_dir):
+    _legacy_campaign(tmp_path, folded=("s1",))
+    journal.adopt_legacy_journal("my-game", tmp_path)
+    (out_dir / "My Game" / "My Game Journal.md").unlink()
+    journal.sync_journal("my-game", tmp_path)
+    assert _journal_state(tmp_path) == ([], None)

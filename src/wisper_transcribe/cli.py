@@ -933,6 +933,8 @@ def campaigns_delete(slug: str, yes: bool, delete_transcripts: bool):
         delete_campaign(safe, delete_transcripts=delete_transcripts)
     except KeyError:
         raise click.ClickException(f"Campaign {safe!r} not found.")
+    except ValueError as exc:
+        raise click.ClickException(str(exc))
 
     click.echo(f"Deleted campaign {safe!r}.")
 
@@ -1362,7 +1364,10 @@ def transcripts_move(stem: str, campaign: Optional[str], unlink: bool):
     )
 
     if unlink:
-        remove_transcript_from_campaign(stem)
+        try:
+            remove_transcript_from_campaign(stem)
+        except ValueError as exc:
+            raise click.ClickException(str(exc))
         click.echo(f"Unlinked {stem!r} from its campaign.")
         return
 
@@ -1375,7 +1380,7 @@ def transcripts_move(stem: str, campaign: Optional[str], unlink: bool):
 
     try:
         move_transcript_to_campaign(stem, safe)
-    except KeyError as exc:
+    except (KeyError, ValueError) as exc:
         raise click.ClickException(str(exc))
 
     click.echo(f"Moved {stem!r} → campaign {safe!r}.")

@@ -143,8 +143,8 @@ def test_full_session_lifecycle(client, ml):
     tid = _row("SELECT id FROM transcripts WHERE stem = 'Session 1'")[0]
     audio = file_registry.file_for(file_registry.Owner("transcript", tid), "audio")
     assert audio is not None and audio.path == out / "Session 1.flac" and audio.path.is_file()
-    assert _count("SELECT count(*) FROM campaign_transcripts ct JOIN campaigns c ON c.id = ct.campaign_id "
-                  "WHERE ct.transcript_id = ? AND c.slug = 'curse-of-strahd'", tid) == 1
+    assert _count("SELECT count(*) FROM transcripts t JOIN campaigns c ON c.id = t.campaign_id "
+                  "WHERE t.id = ? AND c.slug = 'curse-of-strahd'", tid) == 1
     assert _count("SELECT count(*) FROM transcript_speakers WHERE transcript_id = ?", tid) == 2
     assert (out / "Session 1_diar.json").is_file()
     assert [g.stem for g in search_index.search("ravenloft").groups] == ["Session 1"]
@@ -179,7 +179,7 @@ def test_full_session_lifecycle(client, ml):
     assert client.post("/transcripts/Session%201/delete", follow_redirects=False).status_code == 303
     assert not md.exists() and not (out / "Session 1.summary.md").exists()
     assert not (out / "Session 1_diar.json").exists() and not audio.path.exists()
-    for table in ("transcripts", "campaign_transcripts", "journal_entries", "transcript_speakers",
+    for table in ("transcripts", "journal_entries", "transcript_speakers",
                   "search_index_state", "search_blocks"):
         col = "id" if table == "transcripts" else "transcript_id"
         assert _count(f"SELECT count(*) FROM {table} WHERE {col} = ?", tid) == 0, table

@@ -61,9 +61,9 @@ def _count() -> int:
 
 def test_root_follows_kind():
     assert {k for k, r in fr.ROOT_OF_KIND.items() if r == "output"} == {
-        "transcript", "summary", "sidecar", "excerpt", "excerpt_text", "audio", "backup"}
+        "transcript", "summary", "sidecar", "excerpt", "excerpt_text", "audio", "backup", "journal"}
     assert {k for k, r in fr.ROOT_OF_KIND.items() if r == "data"} == {
-        "combined", "per_user", "live_draft", "reference_clip", "journal"}
+        "combined", "per_user", "live_draft", "reference_clip"}
     assert fr.SINGLE_KINDS == set(fr.KINDS) - {"excerpt", "excerpt_text", "per_user"}
 
 
@@ -110,12 +110,21 @@ def test_add_missing_file_has_no_stats(out):
 
 
 def test_data_kinds_use_the_data_root(data):
+    seed_profile("alice")
+    owner = fr.Owner.for_profile_key("alice")
+    clip = _touch(data / "profiles" / "embeddings" / "alice.mp3")
+    fr.add(clip, kind="reference_clip", owner=owner)
+    row = fr.file_for(owner, "reference_clip")
+    assert row.root == "data" and row.rel_path == "profiles/embeddings/alice.mp3"
+
+
+def test_a_journal_is_registered_under_the_output_root_in_its_campaign_folder(out):
     camp = create_campaign("Camp")
     owner = fr.Owner.for_campaign_slug(camp.slug)
-    journal = _touch(data / "campaigns" / camp.slug / "journal.md")
+    journal = _touch(out / "Camp" / "Camp Journal.md")
     fr.add(journal, kind="journal", owner=owner)
     row = fr.file_for(owner, "journal")
-    assert row.root == "data" and row.rel_path == f"campaigns/{camp.slug}/journal.md"
+    assert row.root == "output" and row.rel_path == "Camp/Camp Journal.md" and row.path == journal
 
 
 @pytest.mark.parametrize("where", ["equal", "inside"])
@@ -125,11 +134,11 @@ def test_output_root_equal_to_or_inside_the_data_dir(data, where):
     camp = create_campaign("Camp")
     cowner = fr.Owner.for_campaign_slug(camp.slug)
     md = _touch(out / "s.md")
-    journal = _touch(data / "campaigns" / camp.slug / "journal.md")
+    journal = _touch(out / "Camp" / "Camp Journal.md")
     fr.add(md, kind="transcript", owner=owner, data_dir=None, output_dir=out)
     fr.add(journal, kind="journal", owner=cowner, output_dir=out)
     assert fr.file_for(owner, "transcript", output_dir=out).path == md
-    assert fr.file_for(cowner, "journal", output_dir=out).root == "data"
+    assert fr.file_for(cowner, "journal", output_dir=out).path == journal
 
 
 def test_outside_the_root_raises_or_returns_none(out, tmp_path):
@@ -426,7 +435,9 @@ def test_sync_registers_data_files_and_skips_active_recordings(data):
     seed_profile("alice")
     _touch(data / "profiles" / "embeddings" / "alice.mp3")
     camp = create_campaign("Camp")
-    _touch(data / "campaigns" / camp.slug / "journal.md")
+    from wisper_transcribe import campaign_folders
+    campaign_folders.ensure_folder(camp.id)
+    _touch(get_output_dir() / "Camp" / "Camp Journal.md")
     with db.transaction() as conn:
         conn.execute("UPDATE recordings SET capture_status = 'degraded' WHERE id = ?",
                      (degraded.id,))
@@ -978,7 +989,7 @@ def test_sync_journal_forgets_the_row_of_a_deleted_journal(out):
     assert fr.file_for(fr.Owner.for_campaign_slug("my-game"), "journal") is None
 
 
-def test_deleting_a_campaign_keeps_the_journal_file_unclaimed(out, data):
+def test_deleting_a_campaign_keeps_the_journal_file_untracked(out, data):
     from wisper_transcribe import journal
     from wisper_transcribe.campaign_manager import delete_campaign
 
@@ -986,7 +997,7 @@ def test_deleting_a_campaign_keeps_the_journal_file_unclaimed(out, data):
     result = journal.update_journal("my-game", _Client(), {})
     delete_campaign("my-game")
     assert result.path.is_file() and _count() == 1  # only the transcript row is left
-    assert result.path in fr.sync(out, data).unclaimed
+    assert result.path not in fr.sync(out, data).unclaimed  # no campaign claims its folder now
 
 
 def test_local_finalise_registers_combined_per_user_and_the_live_draft(data, monkeypatch):
@@ -1163,3 +1174,20 @@ def test_audio_rel_path_lives_only_in_the_migrations_and_the_importer():
     offenders = sorted({rel for rel, _no, line in _src_lines()
                         if "audio_rel_path" in line and rel not in ("db.py", "legacy_import.py")})
     assert offenders == []
+
+
+def test_sync_registers_only_a_claimed_campaigns_journal(out):
+    from wisper_transcribe import campaign_folders
+
+    claimed, unclaimed, renaming = (create_campaign(n) for n in ("Claimed", "Unclaimed", "Renaming"))
+    campaign_folders.ensure_folder(claimed.id)
+    campaign_folders.ensure_folder(renaming.id)
+    with db.transaction() as conn:
+        conn.execute("UPDATE campaigns SET folder_pending = 'Next' WHERE id = ?", (renaming.id,))
+    for folder in ("Claimed", "Unclaimed", "Renaming"):
+        _touch(out / folder / f"{folder} Journal.md")
+
+    fr.sync()
+    for camp, expected in ((claimed, True), (unclaimed, False), (renaming, False)):
+        row = fr.file_for(fr.Owner("campaign", camp.id), "journal")
+        assert (row is not None) is expected, camp.slug

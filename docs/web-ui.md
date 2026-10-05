@@ -186,17 +186,17 @@ The Campaign page's **Rolling journal** panel combines session summaries into on
 - A session is ready to fold in once it has a `.summary.md`.
 - **Update journal** folds the next session; **Fold all** folds every pending one. Each fold is a job.
 - **View journal** shows the rendered result.
-- **View journal** also has **Download**, which saves `journal.md` with the list of folded sessions added to its frontmatter.
+- **View journal** also has **Download**, which saves the journal with the list of folded sessions added to its frontmatter.
 - **Rebuild journal** starts the journal over from each session's existing summary — one LLM call per session (plus one for any session not yet summarized). Your edits to summaries are kept. It asks for confirmation, showing the call count.
 - **Rebuild from transcripts** re-summarizes every session first, overwriting the summaries, then rebuilds — two LLM calls per session. Use it after changing model or provider, or when the summaries themselves are bad.
 - **Stale journal:** moving a folded session to another campaign, removing it, deleting it, or re-transcribing it leaves the journal text alone and shows an amber notice ("This journal mentions sessions that were moved, removed, or re-transcribed…") on the Campaign and Journal pages. **Rebuild journal** is highlighted until you rebuild. Nothing is regenerated automatically.
-- Editing `journal.md` yourself (e.g. in Obsidian) is fine; later folds build on your edits. Deleting it starts a fresh journal.
+- The journal is a file named `<campaign folder> Journal.md` in the campaign's folder inside the transcripts folder. Editing it yourself (e.g. in Obsidian) is fine; later folds build on your edits. Deleting it starts a fresh journal.
 
 **Episode order:** the ▲/▼ arrows on the Episodes list set the order sessions are folded in. Order is when a transcript was added to the campaign, not its date, so check it before rebuilding.
 
 **Deleted transcripts:** deleting a transcript in wisper (single, **Delete selected**, or a recording with its files) removes it from its campaign and its companion files (summary, speaker clips, audio copy). A transcript file that disappears some other way — deleted in Finder, renamed in Obsidian, a sync still in progress, an unplugged drive — keeps its place and shows as **MISSING** on the Campaign page. If the file comes back, the flag clears on its own. If it was renamed, wisper matches it on the next start when the file is unchanged; otherwise pick the new file in the **Relink** dropdown next to it: the session keeps its place, journal entry, speaker names, and its summary, speaker clips, and audio. Otherwise remove it with ✕.
 
-**Deleting a campaign** asks which of two you want. **Delete campaign, keep the files** removes the campaign and leaves its transcripts unassigned; its `journal.md` stays on disk and is listed under Needs attention. **Delete campaign and everything in it** deletes the campaign, every transcript in it with its summary, speaker clips, and audio, and its journal. A transcript that can't be deleted (another program has it open) is kept, unassigned, and listed under Needs attention.
+**Deleting a campaign** asks which of two you want. **Delete campaign, keep the files** removes the campaign and leaves its transcripts unassigned; its journal file stays on disk in the campaign's folder. **Delete campaign and everything in it** deletes the campaign, every transcript in it with its summary, speaker clips, and audio, and its journal. A transcript that can't be deleted (another program has it open) is kept, unassigned, and listed under Needs attention.
 
 **Needs attention:** the Transcripts page shows this panel only when something needs you. Nothing in it is deleted automatically.
 - **Missing transcripts** have a **Relink** dropdown (the renamed file brings its summary, speaker clips, and audio along) and a **Remove** button that deletes the transcript and its files.

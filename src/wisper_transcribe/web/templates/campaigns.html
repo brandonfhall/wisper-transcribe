@@ -47,6 +47,8 @@
 <div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Invalid campaign name.</div>
 {% elif request.query_params.get('error') == 'not_found' %}
 <div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Campaign not found.</div>
+{% elif request.query_params.get('error') == 'delete_failed' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Couldn't delete: an unassigned session already has the same name as one of its sessions.</div>
 {% elif request.query_params.get('error') == 'relink_failed' %}
 <div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Couldn't relink: that file may already belong to a campaign, or the session is no longer missing.</div>
 {% endif %}

@@ -4,7 +4,8 @@ as each new session summary is folded in.
 This is the campaign-level counterpart to per-session ``wisper summarize``.
 Where ``summarize.py`` turns one transcript into one ``<stem>.summary.md``,
 this module accumulates those session summaries into a single
-``data_dir/campaigns/<slug>/journal.md`` that grows with the campaign.
+``<output root>/<folder>/<folder> Journal.md`` in the campaign's folder, a file
+that grows with the campaign.
 
 Design — bounded context:
     On each fold the LLM receives only ``[current journal] + [one new session
@@ -20,15 +21,21 @@ staying in the text.
 
 Journal write rule (the body is a file, the entries are rows):
     1. The LLM call runs outside any transaction.
-    2. The new body goes to ``journal.md.wisper-pending``.
+    2. The new body goes to ``<folder> Journal.md.wisper-pending``.
     3. One transaction inserts the entry and sets ``campaigns.journal_sha256``
        to the pending file's hash — the fold's commit point.
     4. ``os.replace`` moves the pending file into place.
     On the next read, a pending file whose hash matches ``journal_sha256`` was
     committed but not moved (crash between 3 and 4) and is moved into place;
     any other pending file predates a commit and is deleted. A missing
-    ``journal.md`` resets the entries (fresh start); a present one with a
-    different hash was edited by the user, which is allowed.
+    journal file in a claimed folder that exists resets the entries (fresh
+    start); a present one with a different hash was edited by the user, which
+    is allowed. An absent folder or output root means "unavailable", never
+    "deleted".
+
+A journal from an older install sits at ``<data>/campaigns/<slug>/journal.md``.
+:func:`adopt_legacy_journal` moves it into the campaign folder the first time
+the journal is read, and keeps the old file as ``journal.md.v11-adopted``.
 """
 from __future__ import annotations
 
@@ -37,6 +44,7 @@ import hashlib
 import logging
 import os
 import re
+import shutil
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,7 +52,7 @@ from typing import Callable, Optional
 
 import yaml
 
-from . import db, file_registry
+from . import campaign_folders, db, file_registry
 from .campaign_manager import (
     _validate_campaign_slug,
     get_campaigns_dir,
@@ -53,13 +61,14 @@ from .campaign_manager import (
 )
 from .llm import LLMClient
 from .models import SpeakerProfile
+from .config import get_output_root
 from .path_utils import get_output_dir
-from .transcript_store import atomic_write_text
+from .transcript_store import TEMP_PREFIX, atomic_write_text
 
 log = logging.getLogger(__name__)
 
-JOURNAL_FILENAME = "journal.md"
 PENDING_SUFFIX = ".wisper-pending"
+ADOPTED_SUFFIX = ".v11-adopted"
 
 # Strip a wrapping markdown code fence with any (or no) language tag — e.g.
 # ```markdown … ``` or ``` … ```. The prompt tells the model not to use one,
@@ -92,6 +101,19 @@ _SYSTEM_PROMPT = (
 )
 
 
+class JournalLocationError(RuntimeError):
+    """The journal can't be written where it belongs. The message is a fixed
+    code, which a job reports as its error."""
+
+
+_ADOPT_FAILURES = {
+    "folder_taken": "journal_folder_taken",
+    "unavailable": "journal_output_unavailable",
+    "kept": "journal_legacy_pending",
+    "failed": "journal_legacy_pending",
+}
+
+
 @dataclass
 class JournalResult:
     """Outcome of a single ``update_journal`` fold."""
@@ -106,12 +128,45 @@ class JournalResult:
 # Paths
 # ---------------------------------------------------------------------------
 
-def journal_path(slug: str, data_dir: Optional[Path] = None) -> Optional[Path]:
-    """Return ``campaigns/<slug>/journal.md``, or None if the slug is invalid."""
+def journal_path(slug: str, data_dir: Optional[Path] = None, *,
+                 conn: Optional[sqlite3.Connection] = None,
+                 output_dir: Optional[Path] = None) -> Optional[Path]:
+    """The campaign's journal file, or None when there is none to name.
+
+    That is the registered path, else ``<folder>/<folder> Journal.md`` when
+    wisper has claimed the folder. wisper never reads, adopts, or deletes a
+    file in a folder it hasn't claimed. None also for an invalid slug or an
+    unknown campaign.
+    """
     safe = _validate_campaign_slug(slug)
     if safe is None:
         return None
-    return get_campaigns_dir(data_dir) / safe / JOURNAL_FILENAME
+    output = Path(output_dir) if output_dir is not None else get_output_root()
+
+    def lookup(c: sqlite3.Connection) -> Optional[Path]:
+        row = c.execute(
+            "SELECT id, folder, folder_claimed FROM campaigns WHERE slug = ?", (safe,)
+        ).fetchone()
+        if row is None:
+            return None
+        registered = file_registry.file_for(
+            file_registry.Owner("campaign", row["id"]), "journal", conn=c,
+            data_dir=data_dir, output_dir=output)
+        if registered is not None:
+            return registered.path
+        if row["folder_claimed"]:
+            return output / row["folder"] / campaign_folders.journal_name(row["folder"])
+        return None
+
+    if conn is not None:
+        return lookup(conn)
+    with db.connection(data_dir) as c:
+        return lookup(c)
+
+
+def legacy_journal_path(slug: str, data_dir: Optional[Path] = None) -> Path:
+    """Where an older install kept the journal, in the data dir."""
+    return get_campaigns_dir(data_dir) / slug / "journal.md"
 
 
 def _summary_path(stem: str) -> Path:
@@ -174,16 +229,128 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def sync_journal(slug: str, data_dir: Optional[Path] = None) -> None:
-    """Reconcile ``journal.md`` with the database before reading it.
+def _copy_into_place(source: Path, target: Path) -> bool:
+    """Copy ``source`` to ``target`` through a verified temp file in ``target``'s
+    folder. The data dir and the output root can be different volumes."""
+    tmp = target.with_name(f"{TEMP_PREFIX}{target.name}.{os.getpid()}")
+    try:
+        with open(source, "rb") as fin, open(tmp, "wb") as fout:
+            shutil.copyfileobj(fin, fout)
+            fout.flush()
+            os.fsync(fout.fileno())
+        if _sha256(tmp) != _sha256(source):
+            raise OSError("copied journal does not match its source")
+        try:
+            os.replace(tmp, target)
+        except OSError:
+            target.write_bytes(tmp.read_bytes())
+            tmp.unlink(missing_ok=True)
+        return True
+    except OSError as exc:
+        log.warning("Could not copy %s to %s: %s", source, target, exc)
+        tmp.unlink(missing_ok=True)
+        return False
 
-    Finishes a fold that committed but crashed before its file move, deletes
-    an uncommitted pending file, resets the entries when ``journal.md`` was
-    deleted, and adopts the hash of a journal the user edited.
+
+def adopt_legacy_journal(slug: str, data_dir: Optional[Path] = None,
+                         output_dir: Optional[Path] = None) -> str:
+    """Move ``<data>/campaigns/<slug>/journal.md`` into the campaign folder.
+
+    Call with no transaction open. Returns ``"none"`` (nothing to adopt),
+    ``"adopted"``, ``"kept"`` (the folder holds a different journal; nothing
+    changed), ``"folder_taken"``, ``"unavailable"`` (output root absent), or
+    ``"failed"`` (the legacy file stays). The old file is set aside as
+    ``journal.md.v11-adopted``.
     """
     safe = _validate_campaign_slug(slug)
-    jpath = journal_path(safe, data_dir) if safe else None
-    if jpath is None:
+    if safe is None:
+        return "none"
+    legacy = legacy_journal_path(safe, data_dir)
+    legacy_pending = _pending_path(legacy)
+    if not legacy.is_file() and not legacy_pending.is_file():
+        return "none"
+    with db.connection(data_dir) as conn:
+        row = conn.execute(
+            "SELECT id, journal_sha256 FROM campaigns WHERE slug = ?", (safe,)
+        ).fetchone()
+    if row is None:
+        return "none"
+    source = legacy if legacy.is_file() else None
+    if legacy_pending.is_file():
+        # A pending file matching the stored hash is a fold that committed before its move.
+        if row["journal_sha256"] and _sha256(legacy_pending) == row["journal_sha256"]:
+            source = legacy_pending
+        else:
+            legacy_pending.unlink(missing_ok=True)
+    if source is None:
+        return "none"
+    output = Path(output_dir) if output_dir is not None else get_output_root()
+    try:
+        folder = campaign_folders.ensure_folder(row["id"], data_dir=data_dir, output_dir=output)
+    except campaign_folders.FolderTakenError:
+        return "folder_taken"
+    except FileNotFoundError:
+        return "unavailable"
+    target = folder / campaign_folders.journal_name(folder.name)
+    if target.exists():
+        existing = _sha256(target)
+        if existing != _sha256(source) and existing != row["journal_sha256"]:
+            log.warning("Journal for %s not moved: %s already exists and differs", safe, target)
+            return "kept"
+    elif not _copy_into_place(source, target):
+        return "failed"
+    file_registry.add_if_owned(
+        target, kind="journal", owner=file_registry.Owner("campaign", row["id"]),
+        data_dir=data_dir, output_dir=output)
+    try:
+        os.replace(source, legacy.with_name(legacy.name + ADOPTED_SUFFIX))
+        legacy.unlink(missing_ok=True)
+        legacy_pending.unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning("Could not set aside %s: %s", legacy, exc)
+        return "failed"
+    return "adopted"
+
+
+def adopt_legacy_journals(data_dir: Optional[Path] = None,
+                          output_dir: Optional[Path] = None) -> dict[str, str]:
+    """:func:`adopt_legacy_journal` for every campaign. Never raises, so startup
+    can't fail on it."""
+    results: dict[str, str] = {}
+    try:
+        with db.connection(data_dir) as conn:
+            slugs = [r[0] for r in conn.execute("SELECT slug FROM campaigns ORDER BY id")]
+    except sqlite3.Error:
+        log.warning("Could not list campaigns to adopt journals", exc_info=True)
+        return results
+    for slug in slugs:
+        try:
+            results[slug] = adopt_legacy_journal(slug, data_dir, output_dir)
+        except Exception:
+            log.warning("Journal adoption failed for %s", slug, exc_info=True)
+            results[slug] = "failed"
+        if results[slug] != "none":
+            log.info("Journal adoption for %s: %s", slug, results[slug])
+    return results
+
+
+def sync_journal(slug: str, data_dir: Optional[Path] = None) -> None:
+    """Reconcile the journal file with the database before reading it.
+
+    Adopts a legacy journal first, finishes a fold that committed but crashed
+    before its file move, deletes an uncommitted pending file, resets the
+    entries when the journal was deleted, and adopts the hash of a journal
+    the user edited. Does nothing while the folder is unclaimed, a legacy
+    journal is still waiting, or the output root or campaign folder is absent.
+    """
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        return
+    if adopt_legacy_journal(safe, data_dir) not in ("none", "adopted"):
+        return
+    output = get_output_root()
+    jpath = journal_path(safe, data_dir, output_dir=output)
+    if jpath is None or not output.is_dir() or not jpath.parent.is_dir():
         return
     pending = _pending_path(jpath)
     with db.transaction(data_dir) as conn:
@@ -200,7 +367,7 @@ def sync_journal(slug: str, data_dir: Optional[Path] = None) -> None:
                     pending.unlink(missing_ok=True)
                 file_registry.add_if_owned(
                     jpath, kind="journal", owner=file_registry.Owner("campaign", row["id"]),
-                    conn=conn, data_dir=data_dir)
+                    conn=conn, data_dir=data_dir, output_dir=output)
                 log.info("Finished an interrupted journal update for %s", safe)
             else:
                 pending.unlink(missing_ok=True)
@@ -209,9 +376,9 @@ def sync_journal(slug: str, data_dir: Optional[Path] = None) -> None:
                 "SELECT 1 FROM journal_entries WHERE campaign_id = ? LIMIT 1", (row["id"],)
             ).fetchone()
             if has_entries or row["journal_sha256"]:
-                log.info("journal.md for %s was deleted; starting a fresh journal", safe)
+                log.info("The journal for %s was deleted; starting a fresh journal", safe)
             file_registry.forget_kind(file_registry.Owner("campaign", row["id"]), "journal",
-                                      conn=conn, data_dir=data_dir)
+                                      conn=conn, data_dir=data_dir, output_dir=output)
             _reset_rows(conn, row["id"])
             return
         current = _sha256(jpath)
@@ -230,19 +397,27 @@ def _reset_rows(conn, campaign_id: int) -> None:
 
 
 def reset_journal(slug: str, data_dir: Optional[Path] = None) -> None:
-    """Delete the journal file and its entries (the start of a rebuild)."""
+    """Delete the journal file and its entries (the start of a rebuild).
+
+    The legacy journal is deleted too, so a rebuild never re-adopts old text.
+    """
     safe = _validate_campaign_slug(slug)
-    jpath = journal_path(safe, data_dir) if safe else None
-    if jpath is None:
+    if safe is None:
         raise ValueError(f"Invalid campaign slug: {slug!r}")
+    output = get_output_root()
+    jpath = journal_path(safe, data_dir, output_dir=output)
     with db.transaction(data_dir) as conn:
         row = conn.execute("SELECT id FROM campaigns WHERE slug = ?", (safe,)).fetchone()
         if row is None:
             raise KeyError(f"Campaign {safe!r} not found")
         file_registry.forget_kind(file_registry.Owner("campaign", row["id"]), "journal",
-                                  conn=conn, data_dir=data_dir)
+                                  conn=conn, data_dir=data_dir, output_dir=output)
         _reset_rows(conn, row["id"])
-    for path in (jpath, _pending_path(jpath)):
+    legacy = legacy_journal_path(safe, data_dir)
+    doomed = [legacy, _pending_path(legacy), legacy.with_name(legacy.name + ADOPTED_SUFFIX)]
+    if jpath is not None:
+        doomed += [jpath, _pending_path(jpath)]
+    for path in doomed:
         path.unlink(missing_ok=True)
 
 
@@ -251,10 +426,9 @@ def journaled_stems(slug: str, data_dir: Optional[Path] = None) -> list[str]:
     with db.connection(data_dir) as conn:
         return [r[0] for r in conn.execute(
             "SELECT t.stem FROM journal_entries je "
-            "JOIN campaign_transcripts ct ON ct.transcript_id = je.transcript_id "
             "JOIN transcripts t ON t.id = je.transcript_id "
             "JOIN campaigns c ON c.id = je.campaign_id "
-            "WHERE c.slug = ? ORDER BY ct.position",
+            "WHERE c.slug = ? ORDER BY t.position",
             (slug,),
         )]
 
@@ -273,11 +447,11 @@ def export_journal(slug: str, data_dir: Optional[Path] = None) -> Optional[str]:
     """The journal with ``journaled_sessions`` added back into its frontmatter
     (for downloads and ``wisper campaigns journal --export``), or None."""
     safe = _validate_campaign_slug(slug)
-    jpath = journal_path(safe, data_dir) if safe else None
-    if jpath is None:
-        return None
+    if safe is None:
+        raise ValueError("Invalid campaign slug")
     sync_journal(safe, data_dir)
-    if not jpath.exists():
+    jpath = journal_path(safe, data_dir)  # after the sync: adoption can create it
+    if jpath is None or not jpath.exists():
         return None
     meta, body = parse_journal(jpath.read_text(encoding="utf-8"))
     meta.pop("journaled_sessions", None)
@@ -356,6 +530,9 @@ def update_journal(slug: str, client: LLMClient,
         ValueError: invalid slug.
         KeyError: campaign not found.
         FileNotFoundError: the target session has no ``.summary.md`` sidecar.
+        JournalLocationError: the journal's folder or output root is unusable
+            (``journal_folder_taken``, ``journal_output_unavailable``,
+            ``journal_legacy_pending``).
         LLMUnavailableError / LLMResponseError: provider failure (propagated).
     """
     safe = _validate_campaign_slug(slug)
@@ -364,8 +541,20 @@ def update_journal(slug: str, client: LLMClient,
     if safe not in load_campaigns(data_dir):
         raise KeyError(f"Campaign {safe!r} not found")
 
-    jpath = journal_path(safe, data_dir)
+    output = get_output_root()
+    adopted = adopt_legacy_journal(safe, data_dir, output)
+    if adopted not in ("none", "adopted"):
+        raise JournalLocationError(_ADOPT_FAILURES[adopted])
+    with db.connection(data_dir) as conn:
+        cid = conn.execute("SELECT id FROM campaigns WHERE slug = ?", (safe,)).fetchone()["id"]
+    try:
+        campaign_folders.ensure_folder(cid, data_dir=data_dir, output_dir=output)
+    except campaign_folders.FolderTakenError:
+        raise JournalLocationError("journal_folder_taken") from None
+    except FileNotFoundError:
+        raise JournalLocationError("journal_output_unavailable") from None
     sync_journal(safe, data_dir)
+    jpath = journal_path(safe, data_dir, output_dir=output)
     base_sha: Optional[str] = None
     body = ""
     if jpath.exists():
@@ -417,9 +606,7 @@ def update_journal(slug: str, client: LLMClient,
                     "run the update again."
                 )
             member = conn.execute(
-                "SELECT ct.transcript_id FROM campaign_transcripts ct "
-                "JOIN transcripts t ON t.id = ct.transcript_id "
-                "WHERE ct.campaign_id = ? AND t.stem = ?",
+                "SELECT id FROM transcripts WHERE campaign_id = ? AND stem = ?",
                 (campaign["id"], nfc(target)),
             ).fetchone()
             if member is None:
@@ -448,7 +635,7 @@ def update_journal(slug: str, client: LLMClient,
             file_registry.add_if_owned(
                 jpath, kind="journal",
                 owner=file_registry.Owner.for_campaign_slug(safe, conn=conn),
-                conn=conn, data_dir=data_dir)
+                conn=conn, data_dir=data_dir, output_dir=output)
     except sqlite3.Error:
         log.warning("Could not register %s", jpath, exc_info=True)
 

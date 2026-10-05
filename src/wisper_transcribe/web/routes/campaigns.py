@@ -139,6 +139,8 @@ async def campaign_delete(
         delete_campaign(safe, delete_transcripts=(mode == "everything"))
     except KeyError:
         pass  # Already gone — redirect silently
+    except ValueError:  # an unassigned session already has a member's name
+        return error_redirect("/campaigns", "delete_failed")
     else:
         # A kept journal becomes an unowned file; list it without waiting for the throttle.
         from wisper_transcribe import file_registry
@@ -261,7 +263,7 @@ async def campaign_remove_transcript(
         return invalid_input_response("Invalid campaign slug")
 
     # Stem validation: no null bytes, no path separators, not empty, not a dot path.
-    # The stem only selects a campaign_transcripts row — no file paths are
+    # The stem only selects a transcripts row — no file paths are
     # constructed from it — but we still reject traversal-style payloads.
     if (
         not stem
@@ -280,7 +282,10 @@ async def campaign_remove_transcript(
         return error_redirect("/campaigns", "not_found")
 
     if stem in campaign.transcripts:
-        remove_transcript_from_campaign(stem)
+        try:
+            remove_transcript_from_campaign(stem)
+        except ValueError:  # an unassigned session already has this name
+            return error_redirect(f"/campaigns/{campaign.slug}", "remove_failed")
 
     return RedirectResponse(url=f"/campaigns/{campaign.slug}", status_code=303)
 
@@ -300,7 +305,7 @@ async def campaign_reorder_transcript(
         return invalid_input_response("Invalid campaign slug")
 
     # Same stem-validation as /transcripts/remove: never used in a file path
-    # (only a campaign_transcripts row), but still reject traversal-style
+    # (only a transcripts row), but still reject traversal-style
     # payloads defensively.
     if (
         not stem
