@@ -32,12 +32,16 @@ import time
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Final, Literal, Optional
 
 from . import db, file_registry
+from .config import get_output_root
 from .search_index import check_freshness, mark_stale, request_backfill
 
 log = logging.getLogger(__name__)
+
+# ``find_by_stem(campaign_id=...)`` sentinel: any campaign, including the root.
+ANY: Final = object()
 
 # Prefix of atomic-write temp files, so reconcile can sweep crash leftovers.
 TEMP_PREFIX = ".wisper-tmp-"
@@ -212,6 +216,354 @@ def safe_path(stem: str, suffix: str, output_dir: Optional[Path] = None) -> Opti
 def _file_timestamp(path: Path) -> str:
     from datetime import UTC, datetime
     return datetime.fromtimestamp(path.stat().st_mtime, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ---------------------------------------------------------------------------
+# Locations: where a transcript's files are, and where they should be
+# ---------------------------------------------------------------------------
+
+def _resolved_dir(path: Path) -> Path:
+    """A directory identity for comparison: ``realpath``, so symlinked roots match."""
+    return Path(os.path.realpath(path))
+
+
+def _dirs_equal(a: Path, b: Path, fold: bool) -> bool:
+    """Whether two directories name the same place, comparing NFC and case."""
+    ar, br = _resolved_dir(a), _resolved_dir(b)
+    try:
+        if os.path.samefile(ar, br):
+            return True
+    except OSError:
+        pass
+    return file_registry._key(str(ar), fold) == file_registry._key(str(br), fold)
+
+
+@dataclass(frozen=True)
+class Located:
+    """A transcript's identity and where each of its files is.
+
+    Where a transcript *is* comes from its ``transcript`` row and the other
+    ``files`` rows; where it *should be* comes from ``transcripts.campaign_id``
+    (``expected_dir``). ``locate` fills the derived facts (``target_blocked``,
+    ``fold``) so the properties on this dataclass stay pure.
+    """
+
+    id: int
+    stem: str                    # transcripts.stem (NFC)
+    campaign_id: Optional[int]
+    expected_dir: Path           # output root, or output root / campaigns.folder
+    md: Path                     # its `transcript` files row; else expected_dir / f"{stem}.md"
+    missing: bool                # missing_since IS NOT NULL
+    companions: dict             # (kind, label or "") -> Path, from its files rows
+    target_blocked: bool         # campaign folder is taken, pending, or claimed-and-missing
+    fold: bool                   # the output root's file_registry._fold
+
+    @property
+    def dir(self) -> Path:
+        """The directory the ``.md`` is in."""
+        return self.md.parent
+
+    @property
+    def misplaced(self) -> bool:
+        """Whether the files are not where the campaign assignment says.
+
+        False when the target folder can't be written to right now (taken,
+        pending rename, or claimed-and-missing): those have their own Needs
+        attention entries. Otherwise true when the ``.md`` is elsewhere, or a
+        registered companion stayed behind in a different directory.
+        """
+        if self.target_blocked:
+            return False
+        if not _dirs_equal(self.dir, self.expected_dir, self.fold):
+            return True
+        for path in self.companions.values():
+            if not _dirs_equal(path.parent, self.dir, self.fold):
+                return True
+        return False
+
+    def companion(self, suffix: str) -> Path:
+        """The path of a companion with ``suffix`` (``.summary.md``, ``_diar.json``,
+        ``.flac``, ``.md.bak``), preferring its registered ``files`` row.
+
+        Registered rows win, so a partial rename or move still finds its files.
+        Falls back to ``<stem><suffix>`` in :attr:`dir`; raises ``ValueError``
+        when that name could escape the directory.
+        """
+        kind = {
+            ".summary.md": "summary",
+            SIDECAR_SUFFIX: "sidecar",
+            ".flac": "audio",
+            ".md.bak": "backup",
+        }.get(suffix)
+        if kind is not None:
+            row = self.companions.get((kind, ""))
+            if row is not None:
+                return row
+        path = safe_path(self.stem, suffix, self.dir)
+        if path is None:
+            raise ValueError(f"invalid companion name: {self.stem!r}{suffix}")
+        return path
+
+
+def expected_dir(campaign_id: Optional[int], conn: Optional[sqlite3.Connection] = None, *,
+                 output_dir: Optional[Path] = None) -> Path:
+    """Where a transcript assigned to ``campaign_id`` belongs. Never creates it."""
+    output = Path(output_dir) if output_dir is not None else get_output_root()
+    if campaign_id is None:
+        return output
+    if conn is not None:
+        row = conn.execute(
+            "SELECT folder FROM campaigns WHERE id = ?", (campaign_id,)
+        ).fetchone()
+    else:
+        with db.connection() as c:
+            row = c.execute(
+                "SELECT folder FROM campaigns WHERE id = ?", (campaign_id,)
+            ).fetchone()
+    if row is None:
+        return output
+    return output / row[0]
+
+
+def _campaign_folder(conn: sqlite3.Connection, campaign_id: Optional[int]) -> Optional[tuple]:
+    """``(folder, folder_pending, folder_claimed)`` for a campaign, else None."""
+    if campaign_id is None:
+        return None
+    row = conn.execute(
+        "SELECT folder, folder_pending, folder_claimed FROM campaigns WHERE id = ?",
+        (campaign_id,),
+    ).fetchone()
+    return None if row is None else (row[0], row[1], bool(row[2]))
+
+
+def dir_campaign(directory: Path, conn: Optional[sqlite3.Connection] = None, *,
+                 data_dir: Optional[Path] = None,
+                 output_dir: Optional[Path] = None) -> tuple[bool, Optional[int]]:
+    """The campaign a directory belongs to: ``(True, id)`` or ``(False, None)``.
+
+    ``(True, None)`` is the output root. A claimed campaign folder is ``(True,
+    id)``. A folder rename's ``folder_pending`` is accepted only while the old
+    folder is gone or the two are the same directory, so a stale pending name
+    doesn't capture the wrong directory.
+    """
+    output = Path(output_dir) if output_dir is not None else get_output_root()
+    fold = file_registry._fold(output)
+    if _dirs_equal(Path(directory), output, fold):
+        return True, None
+    if conn is not None:
+        return _dir_campaign_in(conn, Path(directory), output, fold)
+    with db.connection(data_dir) as c:
+        return _dir_campaign_in(c, Path(directory), output, fold)
+
+
+def _dir_campaign_in(conn: sqlite3.Connection, directory: Path,
+                     output: Path, fold: bool) -> tuple[bool, Optional[int]]:
+    rows = conn.execute(
+        "SELECT id, folder, folder_pending, folder_claimed FROM campaigns"
+    ).fetchall()
+    for row in rows:
+        cid, folder, pending, claimed = row[0], row[1], row[2], bool(row[3])
+        if not claimed:
+            continue
+        if _dirs_equal(directory, output / folder, fold):
+            return True, cid
+        if pending is not None and _dirs_equal(directory, output / pending, fold):
+            old = output / folder
+            if not old.is_dir() or _dirs_equal(old, output / pending, fold):
+                return True, cid
+    return False, None
+
+
+def locate(transcript_id: int, conn: Optional[sqlite3.Connection] = None, *,
+           data_dir: Optional[Path] = None,
+           output_dir: Optional[Path] = None) -> Optional[Located]:
+    """The :class:`Located` for transcript ``transcript_id``, or None.
+
+    One query joins ``transcripts``, ``campaigns``, and the transcript's
+    ``files`` rows.
+    """
+    output = Path(output_dir) if output_dir is not None else get_output_root()
+    if conn is not None:
+        return _locate_in(conn, transcript_id, output)
+    with db.connection(data_dir) as c:
+        return _locate_in(c, transcript_id, output)
+
+
+def _locate_in(conn: sqlite3.Connection, transcript_id: int, output: Path) -> Optional[Located]:
+    row = conn.execute(
+        "SELECT t.id, t.stem, t.campaign_id, t.missing_since, c.folder "
+        "FROM transcripts t LEFT JOIN campaigns c ON c.id = t.campaign_id "
+        "WHERE t.id = ?",
+        (transcript_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    tid, stem, campaign_id, missing_since = row[0], row[1], row[2], row[3]
+    folder = row[4]
+    expected = output / folder if campaign_id is not None and folder is not None else output
+    files = conn.execute(
+        "SELECT kind, label, root, rel_path FROM files WHERE transcript_id = ? ORDER BY id",
+        (tid,),
+    ).fetchall()
+    md = None
+    companions: dict = {}
+    for kind, label, root, rel_path in files:
+        path = db.from_rel(rel_path, output)
+        if kind == "transcript":
+            if md is None:
+                md = path
+        else:
+            companions.setdefault((kind, label or ""), path)
+    if md is None:
+        md = expected / f"{stem}.md"
+    fold = file_registry._fold(output)
+    return Located(tid, stem, campaign_id, expected, md, missing_since is not None,
+                   companions, _target_blocked(conn, campaign_id, output), fold)
+
+
+def _target_blocked(conn: sqlite3.Connection, campaign_id: Optional[int], output: Path) -> bool:
+    """Whether the campaign's target folder can't be written to right now.
+
+    True for an unclaimed folder holding files wisper doesn't own (taken), a
+    folder rename in progress (pending), or a claimed folder gone from disk
+    (missing). A plain unassigned transcript (campaign_id None) is never blocked.
+    """
+    from .campaign_folders import is_clutter
+
+    info = _campaign_folder(conn, campaign_id)
+    if info is None:
+        return False
+    folder, pending, claimed = info
+    if pending is not None:
+        return True
+    path = output / folder
+    if claimed:
+        return not path.is_dir()
+    if not path.is_dir():
+        return False
+    try:
+        names = [n for n in os.listdir(path) if not is_clutter(n)]
+    except OSError:
+        return True
+    if not names:
+        return False
+    if names == [f"{folder} Journal.md"]:
+        from .campaign_folders import _is_wisper_journal
+        return not _is_wisper_journal(path / names[0])
+    return True
+
+
+def locate_path(md_path: Path, conn: Optional[sqlite3.Connection] = None, *,
+                data_dir: Optional[Path] = None,
+                output_dir: Optional[Path] = None) -> Optional[Located]:
+    """The :class:`Located` for the transcript ``.md`` at ``md_path``, or None.
+
+    1. the ``transcript`` ``files`` row whose path matches (NFC, and casefolded
+       when the filesystem ignores case);
+    2. else, when ``md_path.parent`` is a transcript folder, the row with that
+       campaign (``None`` for the root) and stem, but only if that row has no
+       ``transcript`` files row of its own (a row already registered at another
+       file isn't this file's session: this is a newcomer);
+    3. else None.
+    """
+    md_path = Path(md_path)
+    output = Path(output_dir) if output_dir is not None else get_output_root()
+    if conn is not None:
+        found = _locate_path_in(conn, md_path, output)
+    else:
+        with db.connection(data_dir) as c:
+            found = _locate_path_in(c, md_path, output)
+    if found is not None:
+        loc = locate(found, conn=conn, data_dir=data_dir, output_dir=output)
+        if loc is not None:
+            return loc
+    return None
+
+
+def _locate_path_in(conn: sqlite3.Connection, md_path: Path, output: Path) -> Optional[int]:
+    fold = file_registry._fold(output)
+    want = file_registry._key(str(_resolved_dir(md_path.parent)), fold) + os.sep \
+        + file_registry._key(md_path.name, fold)
+    row = conn.execute(
+        "SELECT transcript_id, root, rel_path FROM files WHERE kind = 'transcript'"
+    ).fetchall()
+    for transcript_id, root, rel_path in row:
+        if root != "output":
+            continue
+        path = db.from_rel(rel_path, output)
+        got = file_registry._key(str(_resolved_dir(path.parent)), fold) + os.sep \
+            + file_registry._key(path.name, fold)
+        if got == want:
+            return transcript_id
+
+    has_dir, campaign_id = _dir_campaign_in(conn, md_path.parent, output, fold)
+    if not has_dir:
+        return None
+    stem = _path_stem(md_path)
+    rows = conn.execute(
+        "SELECT id FROM transcripts WHERE campaign_id IS ? AND stem = ? LIMIT 2",
+        (campaign_id, stem),
+    ).fetchall()
+    if len(rows) != 1:
+        return None
+    tid = rows[0][0]
+    registered = conn.execute(
+        "SELECT 1 FROM files WHERE transcript_id = ? AND kind = 'transcript' LIMIT 1", (tid,)
+    ).fetchone()
+    if registered is not None:
+        return None
+    return tid
+
+
+def _path_stem(md_path: Path) -> str:
+    return nfc(md_path.stem)
+
+
+def find_by_stem(stem: str, conn: Optional[sqlite3.Connection] = None, *,
+                 campaign_id=ANY, present_only: bool = False,
+                 data_dir: Optional[Path] = None,
+                 output_dir: Optional[Path] = None) -> list[Located]:
+    """Every transcript named ``stem`` (NFC, then casefold where the filesystem
+    ignores case), optionally narrowed to one campaign.
+
+    ``campaign_id`` defaults to :data:`ANY`; ``None`` means the root only.
+    ``present_only`` drops rows flagged missing (no disk check).
+    """
+    stem = nfc(stem)
+    output = Path(output_dir) if output_dir is not None else get_output_root()
+    if conn is not None:
+        ids = _find_ids(conn, stem, campaign_id, present_only, output)
+    else:
+        with db.connection(data_dir) as c:
+            ids = _find_ids(c, stem, campaign_id, present_only, output)
+    found = []
+    for tid in ids:
+        loc = locate(tid, conn=conn, data_dir=data_dir, output_dir=output)
+        if loc is not None:
+            found.append(loc)
+    return found
+
+
+def _find_ids(conn: sqlite3.Connection, stem: str, campaign_id, present_only: bool,
+              output: Path) -> list[int]:
+    sql = "SELECT id, campaign_id, stem FROM transcripts"
+    params: list = []
+    if campaign_id is not ANY:
+        sql += " WHERE campaign_id IS ?"
+        params.append(campaign_id)
+    rows = conn.execute(sql, params).fetchall()
+    fold = file_registry._fold(output)
+    want = file_registry._key(stem, fold)
+    ids = [r[0] for r in rows if file_registry._key(r[2], fold) == want]
+    if not ids:
+        return []
+    placeholders = ",".join("?" * len(ids))
+    if present_only:
+        query = (f"SELECT id FROM transcripts WHERE id IN ({placeholders}) "
+                 "AND missing_since IS NULL ORDER BY id")
+        return [r[0] for r in conn.execute(query, ids)]
+    query = f"SELECT id FROM transcripts WHERE id IN ({placeholders}) ORDER BY id"
+    return [r[0] for r in conn.execute(query, ids)]
 
 
 # ---------------------------------------------------------------------------

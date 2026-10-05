@@ -948,3 +948,188 @@ def test_nfd_file_is_found_indexed_and_deleted(out):
         unicodedata.normalize("NFC", "Café night")]
     ts.delete_transcript(unicodedata.normalize("NFC", "Café night"))
     assert not any(p.suffix == ".md" for p in out.iterdir())
+
+
+# ---------------------------------------------------------------------------
+# Locations: locate, locate_path, dir_campaign, find_by_stem, Located
+# ---------------------------------------------------------------------------
+
+from wisper_transcribe import campaign_folders as cf  # noqa: E402
+
+from . import _seed  # noqa: E402
+
+
+def _claimed_campaign(display_name: str) -> tuple[int, str, str]:
+    """A campaign whose folder exists and is claimed. Returns (id, slug, folder)."""
+    cid = _seed.seed_campaign(display_name, claimed=True)
+    with db.connection() as conn:
+        slug, folder = conn.execute(
+            "SELECT slug, folder FROM campaigns WHERE id = ?", (cid,)
+        ).fetchone()
+    return cid, slug, folder
+
+
+def _insert_session(stem: str, campaign_id: int | None = None,
+                    position: int | None = None) -> int:
+    """A transcript row only (two campaigns may share a stem, so no seed helper)."""
+    with db.transaction() as conn:
+        return conn.execute(
+            "INSERT INTO transcripts (stem, campaign_id, position, created_at) "
+            "VALUES (?, ?, ?, ?) RETURNING id",
+            (stem, campaign_id, position, db.now_utc()),
+        ).fetchone()[0]
+
+
+def _place(root: Path, directory: Path, stem: str, tid: int) -> Path:
+    """Write ``<stem>.md`` in ``directory`` and register it as ``tid``'s file."""
+    directory.mkdir(parents=True, exist_ok=True)
+    md = directory / f"{stem}.md"
+    md.write_text(f"# {stem}\n", encoding="utf-8")
+    file_registry.add(md, kind="transcript",
+                      owner=file_registry.Owner("transcript", tid), output_dir=root)
+    with db.transaction() as conn:
+        conn.execute("UPDATE transcripts SET missing_since = NULL WHERE id = ?", (tid,))
+    return md
+
+
+def test_locate_root_and_campaign_sessions(out):
+    cid, slug, folder = _claimed_campaign("Game")
+    root_tid = _seed.seed_transcript("Root Session", write_md=True)
+    camp_tid = _seed.seed_transcript("Camp Session", campaign=slug)
+    md = _place(out, out / folder, "Camp Session", camp_tid)
+
+    root = ts.locate(root_tid)
+    assert root.stem == "Root Session" and root.campaign_id is None
+    assert root.expected_dir == out and root.dir == out
+    assert root.md == out / "Root Session.md"
+    assert root.missing is False and root.misplaced is False
+
+    camp = ts.locate(camp_tid)
+    assert camp.campaign_id == cid and camp.stem == "Camp Session"
+    assert camp.expected_dir == out / folder and camp.dir == out / folder and camp.md == md
+    assert camp.misplaced is False
+
+    assert ts.locate(999999) is None
+
+
+def test_misplaced_is_true_when_a_campaign_session_stays_in_the_root(out):
+    cid, slug, folder = _claimed_campaign("Game")
+    tid = _seed.seed_transcript("Stray", campaign=slug)
+    _place(out, out, "Stray", tid)  # registered in the root though it belongs to Game
+
+    loc = ts.locate(tid)
+    assert loc.expected_dir == out / folder and loc.dir == out
+    assert loc.misplaced is True
+
+
+def test_misplaced_is_false_for_a_case_only_difference_on_a_case_insensitive_filesystem():
+    same = ts.Located(id=1, stem="s", campaign_id=None,
+                      expected_dir=Path("/tmp/Out"), md=Path("/tmp/out/s.md"),
+                      missing=False, companions={}, target_blocked=False, fold=True)
+    assert same.misplaced is False
+    other = ts.Located(id=1, stem="s", campaign_id=None,
+                       expected_dir=Path("/tmp/Out"), md=Path("/tmp/out/s.md"),
+                       missing=False, companions={}, target_blocked=False, fold=False)
+    assert other.misplaced is True
+
+
+def test_misplaced_is_false_when_the_target_folder_is_blocked(out):
+    _seed.seed_campaign("Game")  # unclaimed: the folder is not wisper's
+    (out / "Game").mkdir()
+    (out / "Game" / "notes.md").write_text("mine\n", encoding="utf-8")
+    tid = _seed.seed_transcript("S", campaign="game")
+    _place(out, out, "S", tid)
+
+    loc = ts.locate(tid)
+    assert loc.target_blocked is True and loc.misplaced is False
+
+
+def test_expected_dir(out):
+    cid, slug, folder = _claimed_campaign("Game")
+    assert ts.expected_dir(None) == out
+    assert ts.expected_dir(cid) == out / folder
+
+
+def test_locate_path_by_registered_path_and_by_folder_stem(out):
+    cid, slug, folder = _claimed_campaign("Game")
+    root_tid = _seed.seed_transcript("Root", write_md=True)
+    assert ts.locate_path(out / "Root.md").id == root_tid
+
+    camp_tid = _seed.seed_transcript("Camp", campaign=slug)  # no files row yet
+    loc = ts.locate_path(out / folder / "Camp.md")
+    assert loc is not None and loc.id == camp_tid and loc.dir == out / folder
+
+
+def test_locate_path_matches_nfd_and_case(out, monkeypatch):
+    import unicodedata
+    tid = _seed.seed_transcript("Café night", write_md=True)
+    nfd = unicodedata.normalize("NFD", "Café night")
+    assert ts.locate_path(out / f"{nfd}.md").id == tid
+
+    monkeypatch.setattr(file_registry, "_fold", lambda d: True)
+    assert ts.locate_path(out / "café night.md").id == tid
+
+
+def test_locate_path_of_a_folder_file_that_is_a_newcomer(out):
+    cid, slug, folder = _claimed_campaign("B")
+    tid = _seed.seed_transcript("S", campaign=slug)
+    _place(out, out, "S", tid)  # S's registered .md is in the root
+
+    assert ts.locate_path(out / folder / "S.md") is None
+
+
+def test_dir_campaign(out):
+    assert ts.dir_campaign(out) == (True, None)
+    cid, slug, folder = _claimed_campaign("Game")
+    assert ts.dir_campaign(out / folder) == (True, cid)
+
+    other = _seed.seed_campaign("Other")  # unclaimed
+    with db.connection() as conn:
+        other_folder = conn.execute(
+            "SELECT folder FROM campaigns WHERE id = ?", (other,)).fetchone()[0]
+    (out / other_folder).mkdir(exist_ok=True)
+    assert ts.dir_campaign(out / other_folder) == (False, None)
+
+    assert ts.dir_campaign(out / "unrelated") == (False, None)
+    assert ts.dir_campaign(out.parent) == (False, None)
+
+
+def test_dir_campaign_pending_folder(out):
+    cid, slug, folder = _claimed_campaign("Game")
+    with db.transaction() as conn:
+        conn.execute("UPDATE campaigns SET folder_pending = 'Renamed' WHERE id = ?", (cid,))
+
+    assert ts.dir_campaign(out / folder) == (True, cid)     # old folder still there
+    assert ts.dir_campaign(out / "Renamed") == (False, None)
+    (out / folder).rmdir()
+    assert ts.dir_campaign(out / "Renamed") == (True, cid)  # old gone: pending matches
+
+
+def test_find_by_stem_two_campaigns_share_a_stem(out):
+    ca, _, folda = _claimed_campaign("A")
+    cb, _, foldb = _claimed_campaign("B")
+    ta = _insert_session("S", ca, 0)
+    tb = _insert_session("S", cb, 0)
+    _place(out, out / folda, "S", ta)
+    _place(out, out / foldb, "S", tb)
+    tm = _insert_session("S")  # in the root, and flagged missing
+    with db.transaction() as conn:
+        conn.execute("UPDATE transcripts SET missing_since = ? WHERE id = ?", (db.now_utc(), tm))
+
+    assert {loc.id for loc in ts.find_by_stem("S")} == {ta, tb, tm}
+    assert {loc.id for loc in ts.find_by_stem("S", present_only=True)} == {ta, tb}
+    assert [loc.id for loc in ts.find_by_stem("S", campaign_id=ca)] == [ta]
+    assert [loc.id for loc in ts.find_by_stem("S", campaign_id=None)] == [tm]
+    assert ts.find_by_stem("no such stem") == []
+
+
+def test_companion_prefers_the_registered_path(out):
+    tid = _seed.seed_transcript("s01", write_md=True)
+    audio = out / "s01_1.wav"
+    audio.write_bytes(b"a")
+    ts.set_audio(out / "s01.md", audio)
+
+    loc = ts.locate(tid)
+    assert loc.companion(".flac") == audio                    # registered row, any suffix
+    assert loc.companion(".summary.md") == out / "s01.summary.md"  # derived name
+

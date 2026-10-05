@@ -498,6 +498,35 @@ output/
 - **Registration:** `process_file()` writes the `.md`, then calls `transcript_store.register(stem, origin="job")` when the output is in the output root. An existing row keeps its id and campaign position (overwrite, re-transcribe); a row flagged missing is un-flagged. `--campaign` with output elsewhere prints a note and skips the association, since the web UI only sees the output root.
 - Excerpt clip globs are `glob.escape()`-d so a stem like `mix*` can't match another transcript's clips.
 
+### Locations (`transcript_store`)
+
+Where a transcript's files are versus where they belong. The `files` registry
+is the source of truth for *where*: a transcript's `transcript` row (and its
+other rows) give each file's path, so a misplaced or partially moved session is
+still found. `transcripts.campaign_id` is the source of truth for *where it
+belongs*: the output root, or `<root>/<campaigns.folder>`.
+
+- `Located` is the resolved view of one transcript: its id, stem, campaign,
+  `expected_dir`, the registered `.md` (or the expected `<stem>.md`), whether it
+  is flagged missing, its registered companions, whether the target folder is
+  currently blocked, and the output root's case-folding. `dir` is the `.md`'s
+  folder; `misplaced` is true when `dir`, or a registered companion, is not
+  under `expected_dir`, and false when the target is blocked; `companion(suffix)`
+  prefers the registered row over the name derived from the stem.
+- `locate(transcript_id)` resolves one session. `locate_path(md_path)` resolves
+  the session a `.md` on disk belongs to: first by its registered `transcript`
+  row, then, for a file in a transcript folder, by that campaign's row with the
+  same stem when that row has no `.md` of its own (otherwise the file is a
+  newcomer).
+- `dir_campaign(directory)` maps a directory back to its campaign, or to the
+  root `(True, None)`; a folder rename's `folder_pending` counts only while the
+  old folder is gone or the two are the same directory.
+- `find_by_stem(stem, campaign_id=ANY)` is the reverse lookup once a stem can be
+  ambiguous across campaigns (`ANY` means any, `None` means the root);
+  `expected_dir(campaign_id)` is where a session belongs.
+
+Nothing here creates the output root or a campaign folder.
+
 ### Storage trim (`storage_trim.py`)
 `plan()` only reads: it never reconciles or writes the registry, and takes the Needs-attention list from `file_registry.sync(scan_only=True)`. `apply()` runs, in order:
 1. `reconcile(sweep=True)`, so renames are matched before anything is converted.

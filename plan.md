@@ -66,7 +66,7 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 |---|---|---|
 | Planning: gate review, design, reviewer cycles | complete (5 review cycles) | |
 | 1 — Schema v11; campaign queries; journal into the campaign folder | done | ffd78f4 |
-| 2a — Location API (`transcript_store.locate` and friends), no callers changed | handed to opencode (see below) | |
+| 2a — Location API (`transcript_store.locate` and friends), no callers changed | done (opencode) | |
 | 2b — Every caller resolves through the location API | not started | |
 | 3 — Transcript URLs by id; lists from the database | not started | |
 | 4 — Scan campaign folders: reconcile, sync, Needs attention | not started | |
@@ -791,6 +791,8 @@ def _v11_folder_name(display_name: str, room: int = 80, byte_room: int = 200) ->
 ### Phase 2a — Location API, no callers changed
 
 **Goal:** the lookups every later phase uses, fully tested. Nothing calls them yet, so the suite stays green with no other edits.
+
+*Done (opencode). Nothing in the code disagreed with the plan. Two readings of the spec: `Located.companions` holds every non-`transcript` `files` row keyed `(kind, label or "")` (the `transcript` row is `md`), and `target_blocked` reuses `campaign_folders.is_clutter`/`_is_wisper_journal` (imported inside the function, since `campaign_folders` imports this module) to decide whether an unclaimed folder is "taken".*
 
 **Read first:**
 - `transcript_store.py`: `safe_path` (185), `existing_form` (171), `_is_case_insensitive` (423)
