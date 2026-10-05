@@ -75,7 +75,7 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 | 7 — Campaign create, rename, and delete with folders | done (opencode; Claude review fixes) | 11b89bf |
 | 8 — `wisper storage trim` organizes folders; prune backups | done (opencode; Claude review fixes) | c01f510 |
 | 9 — Holistic docs, comments, and tests review | done (opencode; Claude review fixes) | 67f08c0 |
-| 10 — Final review and rehearsals (orchestrator) | in progress (orchestrator) | |
+| 10 — Final review and rehearsals (orchestrator) | orchestrator steps done; Brandon's steps 6 and 8 open | d8b331c |
 
 ### Hand-offs to opencode (2026-10-05)
 
@@ -1794,6 +1794,15 @@ A worker may add tests here (for a Decisions row with none). A test that exposes
 ---
 
 ### Phase 10 — Final review and rehearsals (orchestrator; no new features)
+
+**Results (orchestrator, 2026-10-05):**
+- **1.** Full suite green with `--cov`: `campaign_folders` 85%, `campaign_manager` 95%, `storage_trim` 84%, `transcript_store` 88%; the uncovered lines are race and error branches. Added `test_campaign_folder_lifecycle` to `test_e2e.py` (upload, move, rename, rename campaign, shell `mv` followed, storage trim organize, delete keep-files) and a test that a failed swap commit renames the folder back.
+- **2.** Greps clean: `campaign_transcripts` only in frozen migrations and `legacy_import`; the removed helpers and `glob("*.md")` have no hits; `get_output_dir() /` none outside the allowed modules; every transcript link in templates is by id and `app.js` builds none; the scar-tissue grep's one hit ("previously missing transcript") is plain wording.
+- **3.** Ten doc statements checked against the code, all accurate (keep-both name format, Needs-attention route order, Forget's file id, the 100-character name limit, the Move files button, storage trim's server lock, `dir_campaign`'s pending rule, backups keep 5, startup order, rename's busy check).
+- **4.** Mac rehearsal on a fresh copy passed: v10 → v11; `storage trim --apply` moved the 4 sessions; a real upload into the campaign (9 files in the folder); move to a new campaign, rename, rename campaign (folder moved, old one gone); a shell `mv` into `Impossible Landscapes/` followed on reload (campaign changed); a recording hand-off wrote into the campaign folder; search hits, playback (206), and old `/transcripts/<name>` URLs redirect to the right id. The Transcripts page renders in 14–38 ms, so the per-session folder check needs no batching. Not run: a real journal fold (Ollama wasn't running locally; `test_e2e.py` covers the fold with a mocked LLM).
+- **7.** Rollback rehearsal passed with a `main` build (restore `wisper-v10-*.db`, move session files to the root): it starts clean, lists every session, the campaign page lists its sessions, and audio plays. The Mac copy has no legacy journal and no journal entries, so "the journal keeps its folded sessions" is unverified on real data.
+- **5.** Docker rehearsal passed (CPU image built from the branch; data and output in named volumes, which are case-sensitive): v10 → v11 and `storage trim --apply` in a one-off container moved the 4 sessions; every page renders from a server container; two campaigns each holding `Session 1.md` get separate rows and pages, and the old `/transcripts/Session 1` URL shows the chooser.
+- **6 (Mac counts):** `files` rows already in a subfolder: 0. Transcripts with no `transcript` file row: 0 (of 4). Windows counts are Brandon's.
 
 *Carried from the Phase 3 review: `transcript_store.list_transcripts` and the campaign page call `locate` once per session, and each `locate` checks its campaign folder on disk (`_target_blocked`). Fine at today's library size; time the Transcripts page on the rehearsal copy and batch the per-campaign check if it's slow.*
 
