@@ -74,8 +74,8 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 | 6 — Moving a transcript moves its files; clash prompt; Rename | done (opencode; Claude review fixes) | 4223250 |
 | 7 — Campaign create, rename, and delete with folders | done (opencode; Claude review fixes) | 11b89bf |
 | 8 — `wisper storage trim` organizes folders; prune backups | done (opencode; Claude review fixes) | c01f510 |
-| 9 — Holistic docs, comments, and tests review | done (opencode; Claude review fixes) | (this commit) |
-| 10 — Final review and rehearsals (orchestrator) | not started | |
+| 9 — Holistic docs, comments, and tests review | done (opencode; Claude review fixes) | 67f08c0 |
+| 10 — Final review and rehearsals (orchestrator) | in progress (orchestrator) | |
 
 ### Hand-offs to opencode (2026-10-05)
 
