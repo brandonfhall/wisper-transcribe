@@ -85,7 +85,8 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
   - A worker never starts the next phase.
   - Review fixes go back to the **same** worker (SendMessage), not a fresh one.
 - **Branch and commits:**
-  - Branch `feat/campaign-folders`, one commit per phase. Push after each commit, and update this section's Status table and phase notes in the same commit.
+  - Branch `feat/campaign-folders`, one commit per phase. Push after each commit.
+  - **Mark progress in this file (Brandon, 2026-10-05):** each phase commit sets that phase's Status row to `done` with its commit hash, and adds a one-line note under the phase heading if anything differed from the plan. When a hand-off of a multi-hand-off phase is graded, its row reads `in progress (1a done)` and so on, in the next commit. The orchestrator checks the row before declaring the phase complete.
   - Brandon waived the between-phase pauses for this run (2026-10-05): run straight through, stopping only for decisions that need him, and pause before the PR.
   - Don't open a PR until Phase 10 passes and Brandon approves.
 - **Worker tool calls stay small:**
