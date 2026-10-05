@@ -44,9 +44,25 @@
 {% if request.query_params.get('error') == 'create_failed' %}
 <div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">A campaign with that name may already exist.</div>
 {% elif request.query_params.get('error') == 'invalid_name' %}
-<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Invalid campaign name.</div>
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Enter a campaign name.</div>
+{% elif request.query_params.get('error') == 'campaign_exists' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">A campaign with that name already exists.</div>
+{% elif request.query_params.get('error') == 'folder_taken' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">A folder with that name already exists in your transcripts folder.</div>
+{% elif request.query_params.get('error') == 'busy' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">A job is running for this campaign; try again when it finishes.</div>
+{% elif request.query_params.get('error') == 'delete_kept' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">The campaign was kept: {{ request.query_params.get('count') }} session(s) were open in another program. Close the file and retry.</div>
+{% elif request.query_params.get('error') == 'delete_incomplete' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">A new session appeared in the campaign while it was being deleted. Nothing else was removed; try again.</div>
 {% elif request.query_params.get('error') == 'not_found' %}
 <div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Campaign not found.</div>
+{% elif request.query_params.get('error') == 'rename_pending' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">The last rename of this campaign's folder hasn't finished; Retry it under Needs attention first.</div>
+{% elif request.query_params.get('error') == 'journal_legacy_pending' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">This campaign's old journal is waiting to be moved; see Needs attention.</div>
+{% elif request.query_params.get('error') == 'rename_failed' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Couldn't rename the campaign.</div>
 {% elif request.query_params.get('error') == 'delete_failed' %}
 <div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Couldn't delete: an unassigned session already has the same name as one of its sessions.</div>
 {% elif request.query_params.get('error') == 'relink_failed' %}
@@ -294,16 +310,27 @@
           </form>
         </div>
 
+        <!-- Rename campaign -->
+        <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--color-rule)">
+          <div class="mono-kicker" style="margin-bottom:10px">Rename campaign</div>
+          <form method="post" action="/campaigns/{{ slug }}/rename" style="display:flex;gap:8px">
+            <input type="text" name="display_name" value="{{ active_campaign.display_name }}" required
+                   style="flex:1;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:7px 10px;border-radius:5px;font-size:12px;font-family:var(--font-sans)"/>
+            <button type="submit" data-testid="rename-campaign" class="btn btn-secondary btn-sm">Rename</button>
+          </form>
+        </div>
+
         <!-- Delete campaign -->
         <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--color-rule)">
           <form method="post" action="/campaigns/{{ slug }}/delete" style="display:flex;flex-direction:column;gap:8px;align-items:flex-start">
             <div class="mono-kicker">Delete campaign</div>
             <button type="submit" name="mode" value="keep" data-testid="delete-campaign-keep"
-                    onclick='return confirm({{ ("Delete campaign " ~ active_campaign.display_name ~ "? Its transcripts and journal file stay; the journal is listed under Needs attention.") | tojson }})'
+                    onclick='return confirm({{ ("Delete campaign " ~ active_campaign.display_name ~ "? Its transcripts move to the output root and the journal file stays; the journal is listed under Needs attention.") | tojson }})'
                     style="background:none;border:none;color:var(--color-signal-rose);font-size:12px;font-family:var(--font-sans);cursor:pointer;padding:0">Delete campaign, keep the files</button>
             <button type="submit" name="mode" value="everything" data-testid="delete-campaign-everything"
-                    onclick='return confirm({{ ("Delete campaign " ~ active_campaign.display_name ~ " and everything in it? Its transcripts, their summaries, speaker clips, and audio, and its journal are deleted. This cannot be undone.") | tojson }})'
+                    onclick='return confirm({{ ("Delete campaign " ~ active_campaign.display_name ~ " and everything in it? " ~ (active_campaign.transcripts | length) ~ " session(s): " ~ (active_campaign.transcripts | join(", ")) ~ ". Every .md file in the campaign's folder is one of these sessions; all of them, with their audio and summaries, are deleted. This cannot be undone.") | tojson }})'
                     style="background:none;border:none;color:var(--color-signal-rose);font-size:12px;font-family:var(--font-sans);cursor:pointer;padding:0">Delete campaign and everything in it</button>
+            <div style="color:var(--color-paper-faint);font-size:11.5px;font-style:italic">If a session's file is open in another program, the campaign is kept until you retry.</div>
           </form>
         </div>
       </div>

@@ -1845,7 +1845,8 @@ def test_folder_taken_and_missing_folder_and_pending_are_listed(out):
 
     assert {cid for cid, _n, _f in found.folder_taken} == {taken}
     assert {cid for cid, _n, _f in found.missing_folders} == {gone}
-    assert {f for _n, f, _p in found.pending_folders} == {"Pend"}
+    assert {p.folder for p in found.pending_folders} == {"Pend"}
+    assert {p.pending for p in found.pending_folders} == {"Pend (2)"}
 
 
 def test_delete_unowned_file_accepts_one_folder_level(out):

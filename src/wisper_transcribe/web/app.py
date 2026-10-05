@@ -226,6 +226,16 @@ def create_app() -> FastAPI:
             import logging
             logging.getLogger(__name__).warning("Could not adopt legacy journals", exc_info=True)
 
+        # Finish a campaign folder rename that a crash or a locked folder left
+        # pending, before reconcile scans the folders.
+        try:
+            from wisper_transcribe import campaign_folders
+            campaign_folders.finish_pending_renames()
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Could not finish pending folder renames", exc_info=True)
+
         # Register transcripts added while the server was down, flag deleted
         # ones, match renames, and sweep crash leftover temp files.
         try:

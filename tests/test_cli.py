@@ -1268,7 +1268,8 @@ def test_campaigns_delete_keeps_transcripts_by_default(tmp_path, monkeypatch):
 
     result = runner.invoke(main, ["campaigns", "delete", "test-campaign"], input="y\n")
     assert result.exit_code == 0, result.output
-    assert "keep its transcripts and journal file" in result.output
+    assert "move its transcripts to the output root" in result.output
+    assert "Deleted campaign" in result.output
     assert (out / "s01.md").exists() and (out / "s01.summary.md").exists()
 
 
@@ -1284,6 +1285,87 @@ def test_campaigns_delete_transcripts_flag_deletes_them(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "delete its transcripts, their files, and its journal" in result.output
     assert not list(out.iterdir())
+
+
+def test_campaigns_delete_reports_a_kept_campaign_and_exits_nonzero(tmp_path, monkeypatch):
+    from wisper_transcribe import transcript_store as ts
+    from wisper_transcribe.path_utils import get_output_dir
+    from unittest.mock import patch
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    out = get_output_dir()
+    runner = _campaign_with_transcript(out)
+
+    with patch("wisper_transcribe.transcript_store.delete_transcript", return_value="kept"):
+        result = runner.invoke(main, ["campaigns", "delete", "test-campaign",
+                                      "--delete-transcripts"], input="y\n")
+
+    assert result.exit_code != 0
+    assert "was kept" in result.output and "s01" in result.output
+    from wisper_transcribe.campaign_manager import load_campaigns
+    assert "test-campaign" in load_campaigns(tmp_path)
+
+
+def test_campaigns_delete_busy_exits_nonzero(tmp_path, monkeypatch):
+    from wisper_transcribe import db
+    from wisper_transcribe.campaign_manager import load_campaigns
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    runner = CliRunner()
+    runner.invoke(main, ["campaigns", "create", "Test Campaign"])
+    with db.connection(tmp_path) as conn:
+        cid = conn.execute("SELECT id FROM campaigns WHERE slug = 'test-campaign'").fetchone()[0]
+    with db.transaction(tmp_path) as conn:
+        conn.execute(
+            "INSERT INTO jobs (id, type, status, created_at, started_at, campaign_id, params_json) "
+            "VALUES ('00000000-0000-0000-0000-000000000002', 'campaign_journal', 'running', "
+            "'now', 'now', ?, '{}')", (cid,))
+
+    result = runner.invoke(main, ["campaigns", "delete", "test-campaign", "--yes"])
+    assert result.exit_code != 0
+    assert "try again when it finishes" in result.output
+    assert "test-campaign" in load_campaigns(tmp_path)
+
+
+def test_campaigns_rename_prints_the_new_slug_and_folder(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    runner = CliRunner()
+    runner.invoke(main, ["campaigns", "create", "Hanataz"])
+
+    result = runner.invoke(main, ["campaigns", "rename", "hanataz", "Hanataz: Act I?"])
+    assert result.exit_code == 0, result.output
+    assert "Hanataz Act I" in result.output
+    assert "hanataz-act-i" in result.output
+
+
+def test_campaigns_rename_missing_slug_exits_nonzero(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    result = CliRunner().invoke(main, ["campaigns", "rename", "ghost", "X"])
+    assert result.exit_code != 0
+    assert "not found" in result.output
+
+
+def test_campaigns_show_prints_the_folder(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    runner = CliRunner()
+    runner.invoke(main, ["campaigns", "create", "Hanataz"])
+
+    result = runner.invoke(main, ["campaigns", "show", "hanataz"])
+    assert result.exit_code == 0, result.output
+    assert "Folder:" in result.output and "Hanataz" in result.output
+
+
+def test_campaigns_show_reports_a_pending_rename(tmp_path, monkeypatch):
+    from wisper_transcribe import db
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    runner = CliRunner()
+    runner.invoke(main, ["campaigns", "create", "Hanataz"])
+    with db.transaction(tmp_path) as conn:
+        conn.execute("UPDATE campaigns SET folder_pending = 'Next' WHERE slug = 'hanataz'")
+
+    result = runner.invoke(main, ["campaigns", "show", "hanataz"])
+    assert "Rename pending → Next" in result.output
 
 
 def test_transcripts_list_points_at_the_attention_page(tmp_path, monkeypatch):

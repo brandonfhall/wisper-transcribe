@@ -444,6 +444,95 @@ def test_campaigns_remove_member_path_traversal_blocked(client, payload):
     assert resp.status_code in (303, 400, 404, 405)
 
 
+@pytest.mark.parametrize("payload", [
+    "../etc/passwd",
+    "..\\escape",
+    "a/b/c",
+    "evil\r\nLocation: x",
+    "name\x00inject",
+])
+def test_campaigns_create_display_name_never_reaches_a_path(client, payload):
+    """A campaign name is sanitized into one folder name; no payload becomes a path."""
+    from wisper_transcribe.config import get_output_root
+
+    resp = client.post("/campaigns", data={"display_name": payload}, follow_redirects=False)
+    assert resp.status_code in (303, 400)
+    location = resp.headers.get("location", "")
+    assert payload not in location
+    assert "\x00" not in location
+    assert "\r" not in location and "\n" not in location
+
+    root = get_output_root()
+    # Nothing was created outside the output root, and no entry escapes it.
+    for entry in root.iterdir():
+        assert entry.resolve().parent == root.resolve()
+
+
+@pytest.mark.parametrize("payload", [
+    "../etc/passwd",
+    "a/b",
+    "a\\b",
+    "evil\r\nLocation: x",
+    "name\x00inject",
+])
+def test_campaigns_rename_route_never_escapes_the_output_root(client, payload):
+    """The rename route's slug and display_name never build a path or leak into a redirect."""
+    from wisper_transcribe.config import get_output_root
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    create_campaign("Game")
+    resp = client.post(f"/campaigns/{quote(payload, safe='')}/rename",
+                       data={"display_name": payload}, follow_redirects=False)
+    assert resp.status_code in (303, 400, 404, 405)
+    location = resp.headers.get("location", "")
+    assert "\x00" not in location
+    assert "\r" not in location and "\n" not in location
+
+    root = get_output_root()
+    for entry in root.iterdir():
+        assert entry.resolve().parent == root.resolve()
+
+
+@pytest.mark.parametrize("payload", [
+    "../etc/passwd",
+    "a/b",
+    "a\\b",
+    "evil\r\nLocation: x",
+    "name\x00inject",
+])
+def test_campaigns_finish_rename_route_rejects_a_bad_slug(client, payload):
+    from wisper_transcribe.config import get_output_root
+
+    resp = client.post(f"/campaigns/{quote(payload, safe='')}/finish-rename",
+                       follow_redirects=False)
+    assert resp.status_code in (303, 400, 404, 405)
+    location = resp.headers.get("location", "")
+    assert "\x00" not in location
+    assert "\r" not in location and "\n" not in location
+    root = get_output_root()
+    for entry in root.iterdir():
+        assert entry.resolve().parent == root.resolve()
+
+
+def test_campaigns_rename_error_does_not_leak_exception(client, tmp_path, monkeypatch):
+    """A rename failure must produce a generic ?error= code, not exception text."""
+    from wisper_transcribe.campaign_folders import RenameOutcome
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+    create_campaign("Game")
+    with patch(
+        "wisper_transcribe.web.routes.campaigns.rename_campaign",
+        return_value=RenameOutcome("internal /home/secret"),
+    ):
+        resp = client.post("/campaigns/game/rename", data={"display_name": "X"},
+                           follow_redirects=False)
+
+    location = resp.headers.get("location", "")
+    assert "error=rename_failed" in location
+    assert "secret" not in location and "home" not in location
+
+
 def test_campaigns_create_error_does_not_leak_exception(client, tmp_path, monkeypatch):
     """A create_campaign failure must produce generic ?error= code, not exception text."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))

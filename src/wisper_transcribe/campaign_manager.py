@@ -14,13 +14,36 @@ from __future__ import annotations
 import re
 import sqlite3
 import unicodedata
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from . import campaign_folders, db
-from .config import get_data_dir
+from .config import get_data_dir, get_output_root
 from .models import Campaign, CampaignMember
 from .path_utils import validate_path_component
+
+
+class CampaignError(ValueError):
+    """A campaign name couldn't be used, with a code from the campaign table."""
+
+    def __init__(self, code: str, message: str = "") -> None:
+        super().__init__(message or code)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class DeleteOutcome:
+    """What a campaign delete did.
+
+    ``status`` is ``deleted``, ``busy`` (a job holds the campaign),
+    ``kept`` (a session's file couldn't be deleted or moved), or
+    ``delete_incomplete`` (a reconcile registered a new session mid-delete).
+    ``kept`` names the sessions left behind.
+    """
+
+    status: Literal["deleted", "busy", "kept", "delete_incomplete"]
+    kept: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -191,73 +214,138 @@ def load_campaigns(data_dir: Optional[Path] = None) -> dict[str, Campaign]:
 # CRUD
 # ---------------------------------------------------------------------------
 
-def create_campaign(display_name: str, data_dir: Optional[Path] = None) -> Campaign:
-    """Create a new campaign. Raises ValueError for empty name or duplicate slug."""
+def create_campaign(display_name: str, data_dir: Optional[Path] = None, *,
+                    output_dir: Optional[Path] = None) -> Campaign:
+    """Create a new campaign and claim its folder.
+
+    Raises ``CampaignError`` with a code from the campaign table (``invalid``,
+    ``slug_taken``, ``taken``, ``folder_exists``). The folder is claimed after
+    the row commits: if that can't happen (an absent output root, or a folder
+    that appeared meanwhile) the campaign still exists and its folder is made
+    and claimed on first write.
+    """
     display_name = display_name.strip()
     if not display_name:
-        raise ValueError("Campaign display name cannot be empty")
+        raise CampaignError("invalid", "Campaign display name cannot be empty")
 
     slug = _make_slug(display_name)
     if not slug:
-        raise ValueError(f"Cannot derive a valid slug from name: {display_name!r}")
+        raise CampaignError("invalid", f"Cannot derive a valid slug from name: {display_name!r}")
+
+    output = Path(output_dir) if output_dir is not None else get_output_root()
+    folder = campaign_folders.folder_name(display_name)
+    # The folder_exists disk check can't be atomic; a folder appearing in between
+    # is caught by ensure_folder. The database check runs inside the transaction.
+    code = campaign_folders.check_available(folder, output_dir=output)
+    if code is not None:
+        raise CampaignError(code, f"A campaign folder named {folder!r} already exists")
 
     created = db.now_utc()
-    with db.transaction(data_dir) as conn:
-        if conn.execute("SELECT 1 FROM campaigns WHERE slug = ?", (slug,)).fetchone():
-            raise ValueError(f"Campaign with slug {slug!r} already exists")
-        folder = campaign_folders.unique_folder(display_name, conn)
-        cid = conn.execute(
-            "INSERT INTO campaigns (slug, display_name, folder, created_at) "
-            "VALUES (?, ?, ?, ?) RETURNING id",
-            (slug, display_name, folder, created),
-        ).fetchone()[0]
+    try:
+        with db.transaction(data_dir) as conn:
+            if conn.execute("SELECT 1 FROM campaigns WHERE slug = ?", (slug,)).fetchone():
+                raise CampaignError("slug_taken", f"Campaign with slug {slug!r} already exists")
+            if campaign_folders.taken_by_campaign(conn, folder):
+                raise CampaignError("taken", f"A campaign folder named {folder!r} already exists")
+            cid = conn.execute(
+                "INSERT INTO campaigns (slug, display_name, folder, created_at) "
+                "VALUES (?, ?, ?, ?) RETURNING id",
+                (slug, display_name, folder, created),
+            ).fetchone()[0]
+    except sqlite3.IntegrityError as exc:
+        raise CampaignError(_integrity_code(exc), str(exc)) from None
+    try:
+        campaign_folders.ensure_folder(cid, data_dir=data_dir, output_dir=output)
+    except (campaign_folders.FolderTakenError, OSError):
+        pass  # claimed on first write
     return Campaign(slug=slug, display_name=display_name, created=created[:10], members={},
                     id=cid, folder=folder)
 
 
+def _integrity_code(exc: sqlite3.IntegrityError) -> str:
+    """Map a campaign write's ``IntegrityError`` to a campaign table code."""
+    text = str(exc)
+    if "slug" in text:
+        return "slug_taken"
+    return "taken"
+
+
 def delete_campaign(slug: str, *, delete_transcripts: bool = False,
-                    data_dir: Optional[Path] = None) -> None:
-    """Delete a campaign and its roster and order. Raises KeyError if not found.
+                    data_dir: Optional[Path] = None,
+                    output_dir: Optional[Path] = None) -> DeleteOutcome:
+    """Delete a campaign and handle its folder. Raises KeyError if not found.
 
-    Profiles are untouched. By default the campaign's transcripts stay,
-    unassigned, and so does its journal file: the journal's ``files`` row goes
-    with the campaign, so ``file_registry.sync`` lists the file as unclaimed.
+    Both ways first refuse while a job is pending or running for the campaign
+    (``busy``). With ``delete_transcripts`` each session goes through
+    ``transcript_store.delete_transcript``; a session whose ``.md`` can't be
+    deleted (held open) stops the delete and the campaign stays with what's
+    left (``kept``). Otherwise each session moves to the output root (a clash
+    becomes ``<name> (2)``); any session that can't move stops the delete
+    (``kept``). Only an empty campaign is deleted, so a session left behind
+    keeps the campaign and its folder.
 
-    With ``delete_transcripts``, each transcript goes through
-    ``transcript_store.delete_transcript`` (row, files, speakers, search
-    entries), then the campaign and its registered journal file. A transcript
-    whose ``.md`` can't be deleted (held open on Windows) is kept, unassigned.
-
-    Raises ValueError when unassigning a session would collide with a root
-    session of the same name; nothing is deleted then.
+    Delete everything deletes the journal file, then the campaign; a claimed
+    folder is removed only when nothing is left in it. Keep the files leaves
+    the journal file and its folder on disk, untracked; either way a claimed
+    folder left empty is removed. Profiles are untouched.
     """
     from . import file_registry
+    from .job_history import active_jobs
+
+    output = Path(output_dir) if output_dir is not None else get_output_root()
+    with db.transaction(data_dir) as conn:
+        cid = _campaign_id(conn, slug)  # KeyError before anything is deleted
+        ids = [r[0] for r in conn.execute(
+            "SELECT id FROM transcripts WHERE campaign_id = ? ORDER BY position", (cid,))]
+        stems = {r[0]: r[1] for r in conn.execute(
+            "SELECT id, stem FROM transcripts WHERE campaign_id = ?", (cid,))}
+        claimed = bool(conn.execute(
+            "SELECT folder_claimed FROM campaigns WHERE id = ?", (cid,)).fetchone()[0])
+        folder = conn.execute("SELECT folder FROM campaigns WHERE id = ?", (cid,)).fetchone()[0]
+        if active_jobs(conn, campaign_ids={cid}, campaign_slugs={slug}):
+            return DeleteOutcome("busy")
 
     if delete_transcripts:
         from .transcript_store import delete_transcript
 
-        with db.connection(data_dir) as conn:
-            cid = _campaign_id(conn, slug)  # KeyError before anything is deleted
-            ids = [r[0] for r in conn.execute(
-                "SELECT id FROM transcripts WHERE campaign_id = ? ORDER BY position", (cid,))]
+        kept = []
         for tid in ids:
-            delete_transcript(tid, data_dir=data_dir)
+            if delete_transcript(tid, data_dir=data_dir, output_dir=output) == "kept":
+                kept.append(stems[tid])
+                break
+        if kept:
+            return DeleteOutcome("kept", kept)
+    else:
+        from .transcript_store import move_transcript
+
+        kept = []
+        for tid in ids:
+            outcome = move_transcript(tid, None, clash="keep_both",
+                                      data_dir=data_dir, output_dir=output)
+            if outcome.status not in ("moved", "unchanged"):
+                kept.append(stems[tid])
+        if kept:
+            return DeleteOutcome("kept", kept)
 
     journal_files: list[Path] = []
-    with db.transaction(data_dir) as conn:
-        cid = _campaign_id(conn, slug)
-        if delete_transcripts:
-            owner = file_registry.Owner("campaign", cid)
-            journal_files = file_registry.paths_for_delete(owner, conn, data_dir=data_dir)
-        # transcripts.campaign_id refuses deleting a campaign that still holds sessions,
-        # so a campaign that still holds any is emptied first.
-        for (tid,) in conn.execute(
-            "SELECT id FROM transcripts WHERE campaign_id = ?", (cid,)
-        ).fetchall():
-            _assign(conn, tid, None, None)
-        conn.execute("DELETE FROM campaigns WHERE id = ?", (cid,))
+    try:
+        with db.transaction(data_dir) as conn:
+            cid = _campaign_id(conn, slug)
+            if delete_transcripts:
+                owner = file_registry.Owner("campaign", cid)
+                journal_files = file_registry.paths_for_delete(owner, conn, data_dir=data_dir,
+                                                               output_dir=output)
+            conn.execute("DELETE FROM campaigns WHERE id = ?", (cid,))
+    except sqlite3.IntegrityError:
+        # A reconcile in another process registered a new .md in the folder.
+        return DeleteOutcome("delete_incomplete")
+
     if journal_files:
         file_registry.unlink_paths(journal_files)
+    if claimed:
+        # Either way an empty folder goes, so re-creating the campaign isn't
+        # refused by a folder wisper left; one holding the journal stays.
+        campaign_folders.rmdir_if_empty(folder, output_dir=output)
     # A later campaign with this slug must not adopt this one's journal.
     from .journal import ADOPTED_SUFFIX, _pending_path, legacy_journal_path
 
@@ -267,6 +355,7 @@ def delete_campaign(slug: str, *, delete_transcripts: bool = False,
             path.unlink()
         except OSError:
             pass
+    return DeleteOutcome("deleted")
 
 
 def add_member(

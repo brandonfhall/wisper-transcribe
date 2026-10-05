@@ -1982,7 +1982,9 @@ def test_recording_hand_off_folder_taken_redirects(client):
     from ._seed import seed_recording
 
     c, tmp_path = client
-    create_campaign("My Game", data_dir=tmp_path)
+    from ._seed import seed_campaign
+
+    seed_campaign("My Game", "my-game", data_dir=tmp_path)  # unclaimed
     out = get_output_dir()
     (out / "My Game").mkdir()
     (out / "My Game" / "notes.md").write_text("user's")

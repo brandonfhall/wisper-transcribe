@@ -1999,6 +1999,34 @@ def test_campaigns_create_empty_name_rejected(client, tmp_path, monkeypatch):
     assert "error=invalid_name" in resp.headers.get("location", "")
 
 
+@pytest.mark.parametrize("code,expected", [
+    ("slug_taken", "campaign_exists"),
+    ("taken", "campaign_exists"),
+    ("folder_exists", "folder_taken"),
+    ("invalid", "invalid_name"),
+])
+def test_campaigns_create_maps_campaign_errors(client, tmp_path, monkeypatch, code, expected):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import CampaignError
+
+    with patch("wisper_transcribe.web.routes.campaigns.create_campaign",
+               side_effect=CampaignError(code)):
+        resp = client.post("/campaigns", data={"display_name": "Game"},
+                           follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/campaigns?error={expected}"
+
+
+def test_campaigns_create_claims_the_folder(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    resp = client.post("/campaigns", data={"display_name": "My Game"},
+                       follow_redirects=False)
+    assert resp.status_code == 303
+    from wisper_transcribe.config import get_output_root
+    assert (get_output_root() / "My Game").is_dir()
+
+
 def test_campaign_detail_shows_rebuild_button_with_transcripts(client, tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     from wisper_transcribe.campaign_manager import create_campaign
@@ -4316,11 +4344,12 @@ def _campaign_with_session():
     out = get_output_dir()
     campaign_folders.ensure_folder(create_campaign("Game").id)
     _reg(out / "s01.md", "x", encoding="utf-8")
-    ts.register("s01", origin="job")
-    _reg(out / "s01.summary.md", "sum", encoding="utf-8")
     _seed.move_to_campaign("s01", "game")
-    journal = _reg(out / "Game" / "Game Journal.md", "journal", encoding="utf-8")
-    file_registry.sync(out)
+    assert ts.move_files_home(_seed.transcript_id("s01")).status == "moved"
+    (out / "Game" / "s01.summary.md").write_text("sum", encoding="utf-8")
+    journal = out / "Game" / "Game Journal.md"
+    journal.write_text("journal", encoding="utf-8")
+    file_registry.sync(out)  # registers the journal under its campaign
     return out, journal
 
 
@@ -4329,14 +4358,17 @@ def test_campaign_page_offers_both_delete_choices(client):
     page = client.get("/campaigns/game").text
     assert 'data-testid="delete-campaign-keep"' in page
     assert 'data-testid="delete-campaign-everything"' in page
+    assert 'name="mode" value="keep"' in page and 'name="mode" value="everything"' in page
+    assert "If a session's file is open in another program" in page
 
 
 def test_campaign_delete_everything_route(client):
     out, journal = _campaign_with_session()
     resp = client.post("/campaigns/game/delete", data={"mode": "everything"}, follow_redirects=False)
     assert resp.status_code == 303
-    assert [p.name for p in out.iterdir()] == ["Game"] and not journal.exists()
-    assert not list((out / "Game").iterdir())  # the emptied folder is left
+    assert list(out.iterdir()) == [] and not journal.exists()
+    from wisper_transcribe.campaign_manager import load_campaigns
+    assert "game" not in load_campaigns()
 
 
 def test_campaign_delete_keep_route_leaves_the_journal_on_disk(client):
@@ -4346,6 +4378,177 @@ def test_campaign_delete_keep_route_leaves_the_journal_on_disk(client):
     assert (out / "s01.md").exists() and journal.exists()
     from wisper_transcribe.campaign_manager import load_campaigns
     assert "game" not in load_campaigns()
+
+
+def test_campaign_delete_kept_redirects_with_the_count(client):
+    from wisper_transcribe import campaign_manager as cm
+
+    _campaign_with_session()
+    with patch("wisper_transcribe.web.routes.campaigns.delete_campaign",
+               return_value=cm.DeleteOutcome("kept", ["s01"])):
+        resp = client.post("/campaigns/game/delete",
+                           data={"mode": "everything"}, follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/campaigns/game?error=delete_kept&count=1"
+
+
+def test_campaign_delete_incomplete_redirects_with_delete_incomplete(client):
+    from wisper_transcribe import campaign_manager as cm
+
+    _campaign_with_session()
+    with patch("wisper_transcribe.web.routes.campaigns.delete_campaign",
+               return_value=cm.DeleteOutcome("delete_incomplete")):
+        resp = client.post("/campaigns/game/delete",
+                           data={"mode": "everything"}, follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/campaigns?error=delete_incomplete"
+
+
+def test_campaign_delete_busy_redirects_with_busy(client):
+    from wisper_transcribe import campaign_manager as cm
+
+    out, journal = _campaign_with_session()
+    with patch("wisper_transcribe.web.routes.campaigns.delete_campaign",
+               return_value=cm.DeleteOutcome("busy")):
+        resp = client.post("/campaigns/game/delete",
+                           data={"mode": "keep"}, follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/campaigns?error=busy"
+    assert journal.exists()
+
+
+def test_campaign_rename_route_moves_the_folder_and_redirects(client):
+    from wisper_transcribe.config import get_output_root
+    from wisper_transcribe.campaign_manager import create_campaign
+    from wisper_transcribe import campaign_folders
+
+    out = get_output_root()
+    c = create_campaign("Game")
+    campaign_folders.ensure_folder(c.id)
+
+    resp = client.post("/campaigns/game/rename", data={"display_name": "Renamed"},
+                       follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/campaigns/renamed"
+    assert (out / "Renamed").is_dir() and not (out / "Game").exists()
+
+
+def test_campaign_rename_route_refuses_taken_and_redirects_with_the_code(client):
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    create_campaign("Game")
+    create_campaign("Other")
+    resp = client.post("/campaigns/game/rename", data={"display_name": "Other"},
+                       follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/campaigns/game?error=campaign_exists"
+
+
+def test_campaign_rename_route_old_slug_url_is_not_found(client):
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    create_campaign("Game")
+    assert client.post("/campaigns/game/rename", data={"display_name": "Renamed"},
+                       follow_redirects=False).status_code == 303
+    assert client.get("/campaigns/game", follow_redirects=False).headers["location"].endswith(
+        "error=not_found")
+
+
+def test_campaign_rename_route_shows_the_form(client):
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    create_campaign("Game")
+    page = client.get("/campaigns/game").text
+    assert 'data-testid="rename-campaign"' in page
+    assert 'action="/campaigns/game/rename"' in page
+
+
+def test_campaign_finish_rename_route_completes_a_pending_rename(client):
+    from wisper_transcribe import campaign_folders
+    from wisper_transcribe import db
+    from wisper_transcribe.config import get_output_root
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    c = create_campaign("Game")
+    out = get_output_root()
+    import os
+    os.rename(out / "Game", out / "Renamed")
+    with db.transaction() as conn:
+        conn.execute("UPDATE campaigns SET folder_pending = 'Renamed' WHERE id = ?", (c.id,))
+
+    resp = client.post("/campaigns/game/finish-rename", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/campaigns/game"
+    assert campaign_folders._row(c.id, None)[:2] == ("Renamed", None)
+
+
+def test_campaign_finish_rename_without_folder_commits_database_only(client):
+    from wisper_transcribe import campaign_folders
+    from wisper_transcribe import db
+    from wisper_transcribe.config import get_output_root
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    c = create_campaign("Game")
+    (get_output_root() / "Game").rmdir()
+    with db.transaction() as conn:
+        conn.execute("UPDATE campaigns SET folder_pending = 'Renamed' WHERE id = ?", (c.id,))
+
+    resp = client.post("/campaigns/game/finish-rename", data={"without_folder": "1"},
+                       follow_redirects=False)
+    assert resp.status_code == 303
+    assert campaign_folders._row(c.id, None)[:2] == ("Renamed", None)
+    assert campaign_folders.is_claimed(c.id) is False
+
+
+def test_campaign_finish_rename_staying_pending_redirects_with_rename_pending(client):
+    from wisper_transcribe import db
+    from wisper_transcribe.config import get_output_root
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    c = create_campaign("Game")
+    # Both directories present: the rename is stuck.
+    (get_output_root() / "Renamed").mkdir()
+    with db.transaction() as conn:
+        conn.execute("UPDATE campaigns SET folder_pending = 'Renamed' WHERE id = ?", (c.id,))
+
+    resp = client.post("/campaigns/game/finish-rename", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/campaigns/game?error=rename_pending"
+
+
+def test_needs_attention_pending_rename_offers_retry(client):
+    from wisper_transcribe import db
+    from wisper_transcribe.config import get_output_root
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    c = create_campaign("Game")
+    (get_output_root() / "Renamed").mkdir()  # both present: still pending
+    with db.transaction() as conn:
+        conn.execute("UPDATE campaigns SET folder_pending = 'Renamed' WHERE id = ?", (c.id,))
+
+    page = client.get("/transcripts").text
+    assert 'data-testid="pending-folder"' in page
+    assert 'action="/campaigns/game/finish-rename"' in page
+    assert "Close it, then Retry." in page
+
+
+def test_needs_attention_neither_directory_offers_finish_without_folder(client):
+    from wisper_transcribe import db
+    from wisper_transcribe.config import get_output_root
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    c = create_campaign("Game")
+    (get_output_root() / "Game").rmdir()
+    with db.transaction() as conn:
+        conn.execute("UPDATE campaigns SET folder_pending = 'Renamed' WHERE id = ?", (c.id,))
+
+    page = client.get("/transcripts").text
+    assert 'data-testid="pending-folder"' in page
+    assert 'name="without_folder" value="1"' in page
+    assert "Finish without folder" in page
 
 
 def test_job_page_shows_enroll_audio_missing_notice_only_for_exact_value(client, tmp_path):
@@ -4744,18 +4947,18 @@ def test_use_this_folder_claims_and_the_next_reconcile_registers_its_files(clien
     from wisper_transcribe.config import get_output_root
 
     out = get_output_root()
-    c = create_campaign("Game")
+    cid = _seed.seed_campaign("Game", "game")  # unclaimed, no folder
     (out / "Game").mkdir()
     (out / "Game" / "notes.md").write_text("# mine\n", encoding="utf-8")
 
     assert 'data-testid="folder-taken"' in client.get("/transcripts").text
     resp = client.post("/transcripts/needs-attention/claim-folder",
-                       data={"campaign_id": str(c.id)}, follow_redirects=False)
+                       data={"campaign_id": str(cid)}, follow_redirects=False)
     assert resp.status_code == 303 and resp.headers["location"] == "/transcripts"
-    assert campaign_folders.is_claimed(c.id)
+    assert campaign_folders.is_claimed(cid)
 
     client.get("/transcripts")   # a page load reconciles and registers notes.md
-    assert transcript_store.find_by_stem("notes", campaign_id=c.id)
+    assert transcript_store.find_by_stem("notes", campaign_id=cid)
 
 
 def test_use_this_folder_refuses_a_non_integer_id_and_an_unclaimed_state(client):

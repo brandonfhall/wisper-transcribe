@@ -1182,18 +1182,22 @@ def test_audio_rel_path_lives_only_in_the_migrations_and_the_importer():
 def test_sync_registers_only_a_claimed_campaigns_journal(out):
     from wisper_transcribe import campaign_folders
 
-    claimed, unclaimed, renaming = (create_campaign(n) for n in ("Claimed", "Unclaimed", "Renaming"))
-    campaign_folders.ensure_folder(claimed.id)
-    campaign_folders.ensure_folder(renaming.id)
+    # A direct seed leaves the folder unclaimed; ensure_folder claims it.
+    claimed = _seed.seed_campaign("Claimed", "claimed")
+    unclaimed = _seed.seed_campaign("Unclaimed", "unclaimed")
+    renaming = _seed.seed_campaign("Renaming", "renaming")
+    campaign_folders.ensure_folder(claimed)
+    campaign_folders.ensure_folder(renaming)
     with db.transaction() as conn:
-        conn.execute("UPDATE campaigns SET folder_pending = 'Next' WHERE id = ?", (renaming.id,))
+        conn.execute("UPDATE campaigns SET folder_pending = 'Next' WHERE id = ?", (renaming,))
     for folder in ("Claimed", "Unclaimed", "Renaming"):
         _touch(out / folder / f"{folder} Journal.md")
 
     fr.sync()
-    for camp, expected in ((claimed, True), (unclaimed, False), (renaming, False)):
-        row = fr.file_for(fr.Owner("campaign", camp.id), "journal")
-        assert (row is not None) is expected, camp.slug
+    for cid, slug, expected in ((claimed, "claimed", True), (unclaimed, "unclaimed", False),
+                                (renaming, "renaming", False)):
+        row = fr.file_for(fr.Owner("campaign", cid), "journal")
+        assert (row is not None) is expected, slug
 
 
 # ---------------------------------------------------------------------------

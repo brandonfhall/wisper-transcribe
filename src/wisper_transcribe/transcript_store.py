@@ -52,7 +52,8 @@ SIDECAR_SUFFIX = "_diar.json"
 # transcript move or rename, and finishing a folder rename all take it before
 # their transaction. A page-load reconcile takes it without blocking and skips
 # when it's held. A second process isn't covered (see architecture.md).
-_LOCATION_LOCK = threading.RLock()
+# campaign_folders owns it: it imports nothing that imports this module.
+from .campaign_folders import _LOCATION_LOCK  # noqa: E402
 
 # os.replace() onto a file another process holds open without
 # FILE_SHARE_DELETE (Obsidian, antivirus, the search indexer) fails on
@@ -2275,6 +2276,17 @@ class MissingTranscript:
 
 
 @dataclass
+class PendingFolderRename:
+    """A campaign folder rename that didn't finish (a file open, or a crash)."""
+
+    slug: str
+    campaign: str        # the campaign's display name
+    folder: str          # the current folder
+    pending: str         # the target folder
+    neither: bool = False  # both directories are gone: Finish without folder
+
+
+@dataclass
 class Attention:
     """Everything the user has to resolve; nothing here is deleted automatically."""
 
@@ -2282,7 +2294,7 @@ class Attention:
     missing_files: list[file_registry.FileRow] = field(default_factory=list)
     unclaimed: list[Path] = field(default_factory=list)
     misplaced: list["Located"] = field(default_factory=list)
-    pending_folders: list[tuple[str, str, str]] = field(default_factory=list)
+    pending_folders: list[PendingFolderRename] = field(default_factory=list)
     folder_taken: list[tuple[int, str, str]] = field(default_factory=list)
     legacy_journals: list[str] = field(default_factory=list)
     missing_folders: list[tuple[int, str, str]] = field(default_factory=list)
@@ -2335,7 +2347,7 @@ def needs_attention(output_dir: Optional[Path] = None,
                                  for tid in present_ids)
                  if loc is not None and loc.misplaced]
 
-    pending_folders: list[tuple[str, str, str]] = []
+    pending_folders: list[PendingFolderRename] = []
     folder_taken: list[tuple[int, str, str]] = []
     legacy_journals: list[str] = []
     missing_folders: list[tuple[int, str, str]] = []
@@ -2345,7 +2357,11 @@ def needs_attention(output_dir: Optional[Path] = None,
         claimed = bool(c["folder_claimed"])
         path = output_dir / folder
         if pending is not None:
-            pending_folders.append((c["display_name"], folder, pending))
+            pending_folders.append(PendingFolderRename(
+                slug=c["slug"], campaign=c["display_name"], folder=folder, pending=pending,
+                neither=root_present and not path.is_dir()
+                and not (output_dir / pending).is_dir(),
+            ))
             continue
         if claimed:
             if root_present and not path.is_dir():

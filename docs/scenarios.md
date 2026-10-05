@@ -172,6 +172,20 @@ A move or rename is refused while a job is pending or running for the session, i
 
 ---
 
+## Renaming a campaign says the folder is busy
+
+Renaming a campaign changes its display name, its page URL, its folder on disk, and its journal file. If a file in the folder is open in another program, Windows won't let the folder move, so the rename stays pending: the name and folder are unchanged, and the Campaign's **Needs attention** entry on the Transcripts page offers **Retry**. Close the program holding the file and Retry; `wisper campaigns show` reports the pending rename in the meantime.
+
+If both the old and the new folder are gone from the transcripts folder (you moved or deleted it outside wisper), the entry offers **Finish without folder**: the new name and folder are committed in the database and the folder is made on the next write.
+
+---
+
+## I renamed or deleted a campaign folder outside wisper
+
+wisper owns a campaign's folder only when it claimed it. Renaming the folder in Finder or Obsidian doesn't rename the campaign: the campaign's folder reads as missing under **Needs attention**, offering **Recreate folder**, or rename the campaign to match the folder you made. Deleting the folder is never recreated silently.
+
+---
+
 ## A recording stopped unexpectedly
 
 If wisper crashes or the machine loses power mid-session, the recording shows **FAILED** after the restart, but everything captured up to the last minute is still on disk. Open the recording and click **Recover recording** (or run `wisper record recover <recording_id>` while `wisper server` runs). The saved pieces are joined into one file, the recording becomes **COMPLETED**, and **Transcribe** works as usual. Expect up to the final minute to be missing.

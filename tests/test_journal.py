@@ -69,8 +69,8 @@ def _write_transcript(out_dir: Path, stem: str, text: str = "**Speaker A:** Hell
 # ---------------------------------------------------------------------------
 
 def test_journal_path_is_in_a_claimed_campaign_folder(tmp_path, out_dir):
-    create_campaign("My Game", data_dir=tmp_path)
-    assert journal.journal_path("my-game", data_dir=tmp_path) is None  # unclaimed
+    _seed.seed_campaign("My Game", "my-game", data_dir=tmp_path)  # unclaimed
+    assert journal.journal_path("my-game", data_dir=tmp_path) is None
     cid = load_campaigns(tmp_path)["my-game"].id
     campaign_folders.ensure_folder(cid, data_dir=tmp_path)
     assert (journal.journal_path("my-game", data_dir=tmp_path)
@@ -864,7 +864,7 @@ def _legacy_campaign(tmp_path, folded=("s1", "s2"), text=LEGACY_TEXT):
 
     from wisper_transcribe import db
 
-    create_campaign("My Game", data_dir=tmp_path)
+    _seed.seed_campaign("My Game", "my-game", data_dir=tmp_path)  # unclaimed
     for stem in folded:
         _seed.seed_transcript(stem, campaign="my-game", write_md=True, data_dir=tmp_path)
     legacy = journal.legacy_journal_path("my-game", tmp_path)
@@ -1061,7 +1061,7 @@ def test_export_journal_returns_the_adopted_text_on_the_first_call(tmp_path, out
 def test_an_unclaimed_folders_note_survives_a_read_a_rebuild_and_a_campaign_delete(tmp_path, out_dir):
     from wisper_transcribe.campaign_manager import delete_campaign
 
-    create_campaign("My Game", data_dir=tmp_path)
+    _seed.seed_campaign("My Game", "my-game", data_dir=tmp_path)  # unclaimed
     _seed.seed_transcript("s1", campaign="my-game", write_md=True, data_dir=tmp_path)
     note = out_dir / "My Game" / "My Game Journal.md"
     note.parent.mkdir()

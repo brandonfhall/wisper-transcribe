@@ -130,12 +130,21 @@
 
     {% if attention.pending_folders %}
     <div class="mono-kicker" style="margin:16px 0 8px">Folder renames to finish</div>
-    {% for name, folder, pending in attention.pending_folders %}
-    <div data-testid="pending-folder" style="display:flex;gap:12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--color-rule)">
-      <span style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper-faint)">{{ name }}</span>
-      <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint)">{{ folder }} → {{ pending }}</span>
+    {% for p in attention.pending_folders %}
+    <div data-testid="pending-folder" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--color-rule)">
+      <span style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper-faint)">{{ p.campaign }}</span>
+      <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint)">{{ p.folder }} → {{ p.pending }}</span>
+      <span style="font-size:11px;color:var(--color-paper-dim)">Rename of folder {{ p.folder }} to {{ p.pending }} didn't finish: a file in it is open in another program. Close it, then Retry.</span>
       <div style="flex:1"></div>
-      <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint)">listed only</span>
+      <form method="post" action="/campaigns/{{ p.slug }}/finish-rename">
+        <button type="submit" class="btn btn-secondary btn-sm">Retry</button>
+      </form>
+      {% if p.neither %}
+      <form method="post" action="/campaigns/{{ p.slug }}/finish-rename">
+        <input type="hidden" name="without_folder" value="1"/>
+        <button type="submit" class="btn btn-secondary btn-sm">Finish without folder</button>
+      </form>
+      {% endif %}
     </div>
     {% endfor %}
     {% endif %}

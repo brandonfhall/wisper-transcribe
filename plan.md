@@ -72,7 +72,7 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 | 4 — Scan campaign folders: reconcile, sync, Needs attention | done (opencode; Claude review fixes) | 950048e |
 | 5 — Write into campaign folders: uploads, recordings, re-transcribe, CLI | done (opencode; Claude review fixes) | 63d3357 |
 | 6 — Moving a transcript moves its files; clash prompt; Rename | done (opencode; Claude review fixes) | 4223250 |
-| 7 — Campaign create, rename, and delete with folders | in progress (opencode: 7a) | |
+| 7 — Campaign create, rename, and delete with folders | done (opencode; Claude review fixes) | (this commit) |
 | 8 — `wisper storage trim` organizes folders; prune backups | not started | |
 | 9 — Holistic docs, comments, and tests review | not started | |
 | 10 — Final review and rehearsals (orchestrator) | not started | |
@@ -1503,6 +1503,8 @@ Seed rows and files by hand: writes into folders arrive in Phase 5.
 ---
 
 ### Phase 7 — Campaign create, rename, and delete with folders
+
+*Done (opencode 7a/7b; Claude review fixes). Differs from the plan: `_LOCATION_LOCK` now lives in `campaign_folders` and `transcript_store` imports it (one lock per process); `Attention.pending_folders` is a `PendingFolderRename` (slug, campaign, folder, pending, neither) because Retry needs the slug; a keep-files delete also removes a claimed folder left empty, so the name can be reused; claiming a folder registers a journal already in it, and a folder rename registers an unregistered journal under the old name before renaming it; `without_folder` is ignored when either folder exists.*
 
 **Goal:**
 - Creating a campaign makes its folder.

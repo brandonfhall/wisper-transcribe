@@ -9,7 +9,9 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from . import get_queue, templates
+from wisper_transcribe.campaign_folders import finish_folder_rename, rename_campaign
 from wisper_transcribe.campaign_manager import (
+    CampaignError,
     _validate_campaign_slug,
     _validate_profile_key,
     add_member,
@@ -24,6 +26,20 @@ from wisper_transcribe.speaker_manager import load_profiles
 from wisper_transcribe.web._responses import error_redirect, invalid_input_response
 
 router = APIRouter(prefix="/campaigns")
+
+#: The ``?error=`` code for each refused campaign rename status.
+_RENAME_ERROR_CODES = {
+    "invalid": "invalid_name",
+    "slug_taken": "campaign_exists",
+    "taken": "campaign_exists",
+    "folder_exists": "folder_taken",
+    "folder_taken": "folder_taken",
+    "busy": "busy",
+    "pending": "rename_pending",
+    "folder_missing": "folder_missing",
+    "reserved": "reserved",
+    "legacy_journal": "journal_legacy_pending",
+}
 
 
 def _parse_transcript_id(value: object) -> Optional[int]:
@@ -56,6 +72,13 @@ async def campaigns_create_post(
 
     try:
         campaign = create_campaign(display_name)
+    except CampaignError as exc:
+        return error_redirect(
+            "/campaigns",
+            {"invalid": "invalid_name", "slug_taken": "campaign_exists",
+             "taken": "campaign_exists", "folder_exists": "folder_taken"}.get(
+                 exc.code, "create_failed"),
+        )
     except ValueError:
         return error_redirect("/campaigns", "create_failed")
 
@@ -128,6 +151,57 @@ async def campaign_detail(request: Request, slug: str) -> HTMLResponse:
     )
 
 
+@router.post("/{slug}/rename", response_class=HTMLResponse)
+async def campaign_rename(
+    request: Request,
+    slug: str,
+    display_name: Annotated[str, Form()],
+) -> RedirectResponse:
+    """Rename a campaign: display name, slug, folder, and journal file."""
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        return invalid_input_response("Invalid campaign slug")
+
+    try:
+        outcome = await run_in_threadpool(rename_campaign, safe, display_name)
+    except KeyError:
+        return error_redirect("/campaigns", "not_found")
+
+    # Both slugs come from the database, never the URL or the form.
+    campaign = load_campaigns().get(outcome.new_slug or safe)
+    if campaign is None:
+        return error_redirect("/campaigns", "not_found")
+    if outcome.status != "renamed":
+        return error_redirect(f"/campaigns/{campaign.slug}",
+                              _RENAME_ERROR_CODES.get(outcome.status, "rename_failed"))
+    return RedirectResponse(url=f"/campaigns/{campaign.slug}", status_code=303)
+
+
+@router.post("/{slug}/finish-rename", response_class=HTMLResponse)
+async def campaign_finish_rename(
+    request: Request,
+    slug: str,
+    without_folder: Annotated[str, Form()] = "",
+) -> RedirectResponse:
+    """Finish a pending folder rename (Retry, or Finish without folder)."""
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        return invalid_input_response("Invalid campaign slug")
+
+    campaign = load_campaigns().get(safe)
+    if campaign is None:
+        return error_redirect("/campaigns", "not_found")
+
+    try:
+        done = await run_in_threadpool(
+            finish_folder_rename, campaign.id, without_folder=bool(without_folder))
+    except KeyError:
+        return error_redirect("/campaigns", "not_found")
+    if not done:
+        return error_redirect(f"/campaigns/{campaign.slug}", "rename_pending")
+    return RedirectResponse(url=f"/campaigns/{campaign.slug}", status_code=303)
+
+
 @router.post("/{slug}/delete", response_class=HTMLResponse)
 async def campaign_delete(
     request: Request,
@@ -141,12 +215,21 @@ async def campaign_delete(
         return invalid_input_response("Invalid campaign slug")
 
     try:
-        delete_campaign(safe, delete_transcripts=(mode == "everything"))
+        outcome = await run_in_threadpool(
+            delete_campaign, safe, delete_transcripts=(mode == "everything"))
     except KeyError:
         pass  # Already gone — redirect silently
-    except ValueError:  # an unassigned session already has a member's name
-        return error_redirect("/campaigns", "delete_failed")
     else:
+        if outcome.status == "busy":
+            return error_redirect("/campaigns", "busy")
+        if outcome.status == "kept":
+            # campaign.slug comes from the database, not the URL.
+            campaign = load_campaigns().get(safe)
+            if campaign is not None:
+                return error_redirect(
+                    f"/campaigns/{campaign.slug}", f"delete_kept&count={len(outcome.kept)}")
+        if outcome.status == "delete_incomplete":
+            return error_redirect("/campaigns", "delete_incomplete")
         # A kept journal becomes an unowned file; list it without waiting for the throttle.
         from wisper_transcribe import file_registry
         from wisper_transcribe.path_utils import get_output_dir

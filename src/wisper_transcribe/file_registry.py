@@ -538,6 +538,11 @@ def repoint(row: FileRow, new_path: Path, conn: Optional[sqlite3.Connection] = N
                   (rel, size, mtime, row.id))
 
 
+def repoint_rel(conn: sqlite3.Connection, file_id: int, rel_path: str) -> None:
+    """Point a row at a new stored path, unchanged on disk (a folder rename)."""
+    conn.execute("UPDATE files SET rel_path = ? WHERE id = ?", (rel_path, file_id))
+
+
 def refresh(row: FileRow, conn: Optional[sqlite3.Connection] = None, *,
             data_dir: Optional[Path] = None) -> None:
     """Re-stat ``row``'s file. A missing file keeps its last observed stats."""

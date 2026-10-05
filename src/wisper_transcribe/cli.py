@@ -969,6 +969,25 @@ def _llm_provider_choice() -> click.Choice:
 
 _LLM_PROVIDER_CHOICE = _llm_provider_choice()
 
+# One table for campaign name/delete refusals, shared with the web's ?error= codes.
+_CAMPAIGN_CODE_MESSAGES = {
+    "invalid": "Enter a campaign name.",
+    "slug_taken": "A campaign with that name already exists.",
+    "taken": "A campaign with that name already exists.",
+    "folder_exists": "A folder with that name already exists in your transcripts folder.",
+    "folder_taken": "A folder with that name already exists in your transcripts folder.",
+    "busy": "A job is running for this campaign; try again when it finishes.",
+    "pending": "The last rename of this campaign's folder hasn't finished; "
+               "Retry it under Needs attention first.",
+    "folder_missing": "The campaign's folder is missing from your transcripts folder; "
+                      "see Needs attention.",
+    "reserved": "A session in this campaign is named like the renamed journal; "
+                "rename that session first.",
+    "legacy_journal": "This campaign's old journal is waiting to be moved; see Needs attention.",
+    "delete_incomplete": "A new session appeared in the campaign while it was being deleted; "
+                         "nothing else was removed.",
+}
+
 
 @main.group()
 def campaigns():
@@ -995,14 +1014,17 @@ def campaigns_list():
 @click.argument("display_name")
 def campaigns_create(display_name: str):
     """Create a new campaign. The slug is auto-derived from the name."""
-    from .campaign_manager import create_campaign
+    from .campaign_manager import CampaignError, create_campaign
 
     try:
         campaign = create_campaign(display_name)
+    except CampaignError as exc:
+        raise click.ClickException(_CAMPAIGN_CODE_MESSAGES.get(exc.code, str(exc)))
     except ValueError as exc:
         raise click.ClickException(str(exc))
 
-    click.echo(f"Created campaign {campaign.display_name!r} (slug: {campaign.slug})")
+    click.echo(f"Created campaign {campaign.display_name!r} (slug: {campaign.slug}) "
+               f"(folder: {campaign.folder})")
 
 
 @campaigns.command("delete")
@@ -1023,17 +1045,56 @@ def campaigns_delete(slug: str, yes: bool, delete_transcripts: bool):
 
     if not yes:
         what = ("and delete its transcripts, their files, and its journal"
-                if delete_transcripts else "and keep its transcripts and journal file")
+                if delete_transcripts else "and move its transcripts to the output root")
         click.confirm(f"Delete campaign {safe!r} {what}?", abort=True)
 
     try:
-        delete_campaign(safe, delete_transcripts=delete_transcripts)
+        outcome = delete_campaign(safe, delete_transcripts=delete_transcripts)
     except KeyError:
         raise click.ClickException(f"Campaign {safe!r} not found.")
-    except ValueError as exc:
-        raise click.ClickException(str(exc))
 
-    click.echo(f"Deleted campaign {safe!r}.")
+    if outcome.status == "deleted":
+        click.echo(f"Deleted campaign {safe!r}.")
+        return
+    if outcome.status == "kept":
+        names = ", ".join(outcome.kept)
+        raise click.ClickException(
+            f"Campaign {safe!r} was kept: {len(outcome.kept)} session(s) didn't "
+            f"{'delete' if delete_transcripts else 'move'} ({names}). "
+            "Close the file in another program and retry."
+        )
+    if outcome.status == "busy":
+        raise click.ClickException(_CAMPAIGN_CODE_MESSAGES["busy"])
+    raise click.ClickException(_CAMPAIGN_CODE_MESSAGES["delete_incomplete"])
+
+
+@campaigns.command("rename")
+@click.argument("slug")
+@click.argument("new_name")
+def campaigns_rename(slug: str, new_name: str):
+    """Rename a campaign: its display name, slug, folder, and journal file."""
+    from .campaign_manager import _validate_campaign_slug, load_campaigns
+    from .campaign_folders import rename_campaign
+
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        raise click.ClickException(f"Invalid campaign slug: {slug!r}")
+
+    try:
+        outcome = rename_campaign(safe, new_name)
+    except KeyError:
+        raise click.ClickException(f"Campaign {safe!r} not found.")
+
+    if outcome.status == "renamed":
+        campaign = load_campaigns().get(outcome.new_slug)
+        if campaign is not None:
+            click.echo(f"Renamed campaign {safe!r} to {campaign.display_name!r} "
+                       f"(slug: {campaign.slug}, folder: {campaign.folder}).")
+            return
+    if outcome.status == "pending":
+        click.echo(_CAMPAIGN_CODE_MESSAGES["pending"])
+        return
+    raise click.ClickException(_CAMPAIGN_CODE_MESSAGES.get(outcome.status, outcome.status))
 
 
 @campaigns.command("show")
@@ -1056,6 +1117,14 @@ def campaigns_show(slug: str):
 
     click.echo(f"Campaign: {campaign.display_name} (slug: {campaign.slug})")
     click.echo(f"Created:  {campaign.created}")
+    from . import db
+    with db.connection() as conn:
+        pending = conn.execute(
+            "SELECT folder_pending FROM campaigns WHERE id = ?", (campaign.id,)
+        ).fetchone()
+    click.echo(f"Folder:   {campaign.folder}")
+    if pending is not None and pending[0] is not None:
+        click.echo(f"Rename pending → {pending[0]}")
     from .journal import journal_path, journal_stale_since, sync_journal
     sync_journal(safe)
     jpath = journal_path(safe)
@@ -1396,7 +1465,9 @@ def transcripts_list(campaign: Optional[str]):
             raise click.ClickException("Invalid campaign slug")
 
     out_dir = get_output_dir()
+    from . import campaign_folders
     from .transcript_store import list_transcripts, reconcile
+    campaign_folders.finish_pending_renames()  # before scanning the folders
     reconcile(out_dir)  # register new files, flag ones deleted outside wisper
 
     # Present sessions from the database, newest first (same order as the page).
@@ -2375,7 +2446,9 @@ def storage_trim(apply_: bool, device: str):
 
     Dry run by default. With --apply the web server must be stopped.
     """
-    from . import db, storage_trim as trim
+    from . import campaign_folders, db, storage_trim as trim
+
+    campaign_folders.finish_pending_renames()  # before scanning the folders
 
     if apply_:
         lock = db.ServerLock()

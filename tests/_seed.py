@@ -209,19 +209,20 @@ def save_campaigns(campaigns: dict[str, Campaign], data_dir: Optional[Path] = No
 def seed_campaign(display_name: str, slug: Optional[str] = None, *, claimed: bool = False,
                   data_dir: Optional[Path] = None) -> int:
     """A campaign row; returns its id. Without ``slug`` the slug derives from the
-    name (``create_campaign``). ``claimed`` also creates and claims its folder."""
+    name. ``claimed`` also creates and claims its folder.
+
+    A direct insert (test seeding): it makes no folder, so a test that needs one
+    on disk makes it, or claims it with ``claimed=True``.
+    """
     from wisper_transcribe import campaign_folders
 
-    if slug is None:
-        cid = cm.create_campaign(display_name, data_dir).id
-    else:
-        with db.transaction(data_dir) as conn:
-            cid = conn.execute(
-                "INSERT INTO campaigns (slug, display_name, folder, created_at) "
-                "VALUES (?, ?, ?, ?) RETURNING id",
-                (slug, display_name, campaign_folders.unique_folder(display_name, conn),
-                 db.now_utc()),
-            ).fetchone()[0]
+    with db.transaction(data_dir) as conn:
+        cid = conn.execute(
+            "INSERT INTO campaigns (slug, display_name, folder, created_at) "
+            "VALUES (?, ?, ?, ?) RETURNING id",
+            (slug or cm._make_slug(display_name), display_name,
+             campaign_folders.unique_folder(display_name, conn), db.now_utc()),
+        ).fetchone()[0]
     if claimed:
         campaign_folders.ensure_folder(cid, data_dir=data_dir)
     return cid

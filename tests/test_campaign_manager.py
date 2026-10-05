@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from wisper_transcribe.campaign_manager import (
+    CampaignError,
     _make_slug,
     _validate_campaign_slug,
     add_member,
@@ -169,14 +170,24 @@ def test_delete_campaign_everything_removes_transcripts_files_and_journal():
     from wisper_transcribe import file_registry
 
     out, journal = _campaign_with_two_sessions()
-    delete_campaign("game", delete_transcripts=True)
+    assert delete_campaign("game", delete_transcripts=True).status == "deleted"
 
     assert "game" not in load_campaigns()
-    assert [p.name for p in out.iterdir()] == ["Game"] and not journal.exists()
+    assert list(out.iterdir()) == []  # the emptied folder is removed too
+    assert not journal.exists()
     with db.connection() as conn:
         assert conn.execute("SELECT count(*) FROM transcripts").fetchone()[0] == 0
         assert conn.execute("SELECT count(*) FROM files").fetchone()[0] == 0
     assert file_registry.sync(out).unclaimed == []
+
+
+def test_delete_campaign_everything_keeps_a_folder_holding_a_user_file():
+    out, _ = _campaign_with_two_sessions()
+    (out / "Game" / "notes.md").write_text("mine", encoding="utf-8")
+    assert delete_campaign("game", delete_transcripts=True).status == "deleted"
+
+    assert "game" not in load_campaigns()
+    assert (out / "Game" / "notes.md").read_text(encoding="utf-8") == "mine"
 
 
 def test_delete_campaign_keep_the_files_leaves_the_journal_untracked():
@@ -194,8 +205,6 @@ def test_delete_campaign_keep_the_files_leaves_the_journal_untracked():
 
 
 def test_delete_campaign_everything_keeps_a_transcript_it_cannot_delete(monkeypatch):
-    from wisper_transcribe import transcript_store as ts
-
     out, journal = _campaign_with_two_sessions()
     real_unlink = Path.unlink
 
@@ -206,18 +215,122 @@ def test_delete_campaign_everything_keeps_a_transcript_it_cannot_delete(monkeypa
 
     with monkeypatch.context() as patched:
         patched.setattr(Path, "unlink", locked)
-        delete_campaign("game", delete_transcripts=True)
+        outcome = delete_campaign("game", delete_transcripts=True)
 
-    assert "game" not in load_campaigns()
-    assert (out / "s01.md").exists() and not (out / "s02.md").exists()
-    assert not journal.exists()
-    assert get_campaign_for_transcript(_tid("s01")) is None
-    assert [m.stem for m in ts.needs_attention(out).missing_transcripts] == []
+    assert outcome.status == "kept" and outcome.kept == ["s01"]
+    assert "game" in load_campaigns()  # the campaign stays with what's left
+    assert (out / "s01.md").exists() and journal.exists()
+    assert get_campaign_for_transcript(_tid("s01")) == "game"
 
 
 def test_delete_campaign_everything_raises_keyerror_before_deleting(tmp_path):
     with pytest.raises(KeyError):
         delete_campaign("nonexistent", delete_transcripts=True)
+
+
+def _campaign_with_files_in_its_folder():
+    """A campaign whose two sessions' files are inside its claimed folder."""
+    from wisper_transcribe import file_registry, transcript_store as ts
+    from wisper_transcribe import campaign_folders
+    from wisper_transcribe.path_utils import get_output_dir
+
+    out = get_output_dir()
+    campaign_folders.ensure_folder(create_campaign("Game").id)
+    for stem in ("s01", "s02"):
+        (out / f"{stem}.md").write_text("x", encoding="utf-8")
+        ts.register(out / f"{stem}.md", origin="job")
+        (out / f"{stem}.summary.md").write_text("sum", encoding="utf-8")
+        _move(stem, "game")
+    for stem in ("s01", "s02"):
+        ts.move_files_home(_tid(stem))
+    journal = out / "Game" / "Game Journal.md"
+    journal.write_text("journal", encoding="utf-8")
+    file_registry.sync(out)
+    return out, journal
+
+
+def test_delete_campaign_keep_files_clashes_into_a_suffixed_name():
+    out, _ = _campaign_with_files_in_its_folder()
+    (out / "s01.md").write_text("a root copy", encoding="utf-8")
+
+    assert delete_campaign("game").status == "deleted"
+
+    assert (out / "s01.md").read_text(encoding="utf-8") == "a root copy"
+    assert (out / "s01 (2).md").read_text(encoding="utf-8") == "x"
+    assert "game" not in load_campaigns()
+
+
+def test_delete_campaign_keep_files_with_a_missing_session_deletes_the_campaign():
+    from wisper_transcribe import transcript_store as ts
+
+    out, _ = _campaign_with_files_in_its_folder()
+    (out / "Game" / "s02.md").unlink()
+    ts.reconcile(out)  # flags s02 missing: its move is database-only
+
+    assert delete_campaign("game").status == "deleted"
+
+    assert (out / "s01.md").exists() and (out / "s01.summary.md").exists()
+    assert get_campaign_for_transcript(_tid("s01")) is None
+    assert get_campaign_for_transcript(_tid("s02")) is None
+
+
+@pytest.mark.parametrize("delete_transcripts", [False, True])
+def test_delete_campaign_is_busy_while_a_job_holds_it(delete_transcripts):
+    out, journal = _campaign_with_two_sessions()
+    with db.connection() as conn:
+        cid = conn.execute("SELECT id FROM campaigns WHERE slug = 'game'").fetchone()[0]
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO jobs (id, type, status, created_at, started_at, campaign_id, params_json) "
+            "VALUES ('00000000-0000-0000-0000-000000000001', 'campaign_journal', 'running', "
+            "'now', 'now', ?, '{}')", (cid,))
+
+    outcome = delete_campaign("game", delete_transcripts=delete_transcripts)
+    assert outcome.status == "busy"
+    assert "game" in load_campaigns()
+    assert (out / "s01.md").exists() and journal.exists()
+
+
+def test_delete_campaign_everything_of_an_unclaimed_campaign_spares_a_user_folder():
+    from wisper_transcribe.config import get_output_root
+
+    from ._seed import seed_campaign
+
+    seed_campaign("Hanataz", "hanataz")
+    folder = get_output_root() / "Hanataz"
+    folder.mkdir()
+    note = folder / "Hanataz Journal.md"
+    note.write_text("my own notes", encoding="utf-8")
+
+    assert delete_campaign("hanataz", delete_transcripts=True).status == "deleted"
+
+    assert note.read_text(encoding="utf-8") == "my own notes"
+    assert "hanataz" not in load_campaigns()
+
+
+def test_delete_campaign_everything_reports_delete_incomplete(monkeypatch):
+    import wisper_transcribe.campaign_manager as cm
+
+    out, journal = _campaign_with_two_sessions()
+    real = cm._campaign_id
+    calls = []
+
+    def register_then_look_up(conn, slug):
+        calls.append(slug)
+        if slug == "game" and len(calls) == 2:  # the final delete transaction
+            cid = conn.execute("SELECT id FROM campaigns WHERE slug = 'game'").fetchone()[0]
+            pos = conn.execute("SELECT coalesce(max(position), -1) + 1 FROM transcripts "
+                               "WHERE campaign_id = ?", (cid,)).fetchone()[0]
+            conn.execute("INSERT INTO transcripts (stem, campaign_id, position, created_at) "
+                         "VALUES ('new', ?, ?, 'now')", (cid, pos))
+        return real(conn, slug)
+
+    monkeypatch.setattr(cm, "_campaign_id", register_then_look_up)
+    outcome = delete_campaign("game", delete_transcripts=True)
+
+    assert outcome.status == "delete_incomplete"
+    assert "game" in load_campaigns()
+    assert journal.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -710,17 +823,53 @@ def _transcript_rows(tmp_path):
             "SELECT stem, campaign_id, position FROM transcripts ORDER BY id")]
 
 
-def test_create_campaign_names_its_folder_and_makes_no_directory(tmp_path):
+def test_create_campaign_names_its_folder_and_claims_it(tmp_path):
+    from wisper_transcribe import campaign_folders
     from wisper_transcribe.config import get_output_root
 
     c = create_campaign("Hanataz: Act I?", data_dir=tmp_path)
+    assert c.folder == "Hanataz Act I" and c.id > 0
+    assert (get_output_root() / "Hanataz Act I").is_dir()
+    assert campaign_folders.is_claimed(c.id, data_dir=tmp_path)
+    assert load_campaigns(tmp_path)[c.slug].folder == "Hanataz Act I"
+
+
+@pytest.mark.parametrize("on_disk", ["Hanataz", "hanataz"])
+def test_create_campaign_refuses_a_folder_that_already_exists(tmp_path, on_disk):
+    from wisper_transcribe.config import get_output_root
+
+    (get_output_root() / on_disk).mkdir()
+    with pytest.raises(CampaignError) as excinfo:
+        create_campaign("Hanataz", data_dir=tmp_path)
+    assert excinfo.value.code == "folder_exists"
+    assert load_campaigns(tmp_path) == {}
+
+
+def test_create_campaign_refuses_another_campaigns_folder(tmp_path):
     from ._seed import seed_campaign
 
-    seed_campaign("HANATAZ act i", "twin", data_dir=tmp_path)
-    assert c.folder == "Hanataz Act I"
-    assert load_campaigns(tmp_path)["twin"].folder == "HANATAZ act i (2)"
-    assert load_campaigns(tmp_path)[c.slug].folder == "Hanataz Act I" and c.id > 0
-    assert not (get_output_root() / "Hanataz Act I").exists()
+    # A different slug sanitizes to the same folder name as an existing campaign's.
+    seed_campaign("Hanataz Act", "hanataz", data_dir=tmp_path)
+    with pytest.raises(CampaignError) as excinfo:
+        create_campaign("Hanataz: Act", data_dir=tmp_path)
+    assert excinfo.value.code == "taken"
+
+
+def test_create_campaign_reclaims_a_folder_left_by_a_keep_files_delete(tmp_path):
+    from wisper_transcribe import campaign_folders, journal
+    from wisper_transcribe.config import get_output_root
+
+    create_campaign("Hanataz", data_dir=tmp_path)
+    folder = get_output_root() / "Hanataz"
+    (folder / "Hanataz Journal.md").write_text(
+        "---\ntype: campaign-journal\n---\n\nbody\n", encoding="utf-8")
+    assert delete_campaign("hanataz", data_dir=tmp_path).status == "deleted"
+    assert folder.is_dir()  # keep-files leaves the folder and journal on disk
+
+    again = create_campaign("Hanataz", data_dir=tmp_path)
+    assert again.folder == "Hanataz"
+    assert campaign_folders.is_claimed(again.id, data_dir=tmp_path)
+    assert journal.journal_path("hanataz", data_dir=tmp_path) == folder / "Hanataz Journal.md"
 
 
 def test_load_campaigns_lists_transcript_ids_in_order(tmp_path):
@@ -772,26 +921,27 @@ def test_assigning_a_session_to_a_campaign_that_has_its_name_is_refused(tmp_path
             cm._assign(conn, tid, cm._campaign_id(conn, "beta"), 5)
 
 
-def test_unassigning_a_session_whose_name_is_taken_in_the_root_is_refused(tmp_path):
+def test_delete_campaign_keep_files_keeps_the_campaign_when_a_name_is_taken_in_the_root(tmp_path):
     from wisper_transcribe import campaign_manager as cm
     from wisper_transcribe import transcript_store as ts
 
     create_campaign("Alpha", data_dir=tmp_path)
+    create_campaign("Beta", data_dir=tmp_path)
     tid = _move("s1", "alpha", data_dir=tmp_path)
-    with db.transaction(tmp_path) as conn:
-        conn.execute("INSERT INTO transcripts (stem, created_at) VALUES ('s1', 'now')")
-    before = _transcript_rows(tmp_path)
-
-    assert ts.move_transcript(tid, None, data_dir=tmp_path).status == "clash"
-    with pytest.raises(ValueError, match="already there"):
-        delete_campaign("alpha", data_dir=tmp_path)
-    assert _transcript_rows(tmp_path) == before and "alpha" in load_campaigns(tmp_path)
+    with db.transaction(tmp_path) as conn:  # a root session with the moved name
+        conn.execute("INSERT INTO transcripts (stem, created_at, missing_since) "
+                     "VALUES ('s1', 'now', 'now')")
 
     # ``_write_order`` only reorders members: it never unassigns a session, so
     # an empty order leaves the campaign's session in place.
     with db.transaction(tmp_path) as conn:
         cm._write_order(conn, cm._campaign_id(conn, "alpha"), [])
     assert get_transcripts_for_campaign("alpha", data_dir=tmp_path) == ["s1"]
+
+    # A keep-files move lands the session as ``s1 (2)``, so the campaign deletes.
+    assert delete_campaign("alpha", data_dir=tmp_path).status == "deleted"
+    assert "alpha" not in load_campaigns(tmp_path)
+    assert sorted(r[0] for r in _transcript_rows(tmp_path)) == ["s1", "s1 (2)"]
 
 
 def test_transcript_id_is_read_only_and_campaign_scoped(tmp_path):
@@ -906,10 +1056,40 @@ def test_delete_campaign_removes_its_legacy_journal_files_and_spares_an_unclaime
     for name in names:
         (legacy / name).write_text("old", encoding="utf-8")
     note = get_output_root() / "Hanataz" / "Hanataz Journal.md"
-    note.parent.mkdir()
-    note.write_text("my own notes", encoding="utf-8")
+    note.write_text("my own notes", encoding="utf-8")  # the create claimed the folder
 
-    delete_campaign("hanataz", delete_transcripts=True, data_dir=tmp_path)
+    assert delete_campaign("hanataz", delete_transcripts=True,
+                           data_dir=tmp_path).status == "deleted"
 
     assert not any((legacy / name).exists() for name in names)
-    assert note.read_text(encoding="utf-8") == "my own notes"
+    assert note.read_text(encoding="utf-8") == "my own notes"  # a user file keeps the folder
+
+
+def test_delete_campaign_keep_files_removes_an_empty_folder_so_the_name_can_be_reused(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    c = create_campaign("Empty Camp", output_dir=out)
+    assert (out / "Empty Camp").is_dir()
+
+    assert delete_campaign(c.slug, output_dir=out).status == "deleted"
+    assert not (out / "Empty Camp").exists()
+    assert create_campaign("Empty Camp", output_dir=out).folder == "Empty Camp"
+
+
+def test_delete_everything_after_reclaiming_a_kept_journal_removes_it_and_the_folder(tmp_path):
+    from wisper_transcribe import file_registry, journal
+    from wisper_transcribe.transcript_store import atomic_write_text
+
+    out = tmp_path / "out"
+    out.mkdir()
+    c = create_campaign("Camp", output_dir=out)
+    jp = journal.journal_path(c.slug, output_dir=out)
+    atomic_write_text(jp, "---\ntype: campaign-journal\n---\n\nbody\n")
+    file_registry.add_if_owned(jp, kind="journal", owner=file_registry.Owner("campaign", c.id),
+                               output_dir=out)
+    assert delete_campaign(c.slug, output_dir=out).status == "deleted"
+    assert jp.is_file()  # keep the files: the journal stays
+
+    again = create_campaign("Camp", output_dir=out)
+    assert delete_campaign(again.slug, delete_transcripts=True, output_dir=out).status == "deleted"
+    assert not (out / "Camp").exists()

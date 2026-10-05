@@ -226,17 +226,22 @@ Campaigns let you track multiple games with separate player rosters. Speaker voi
 
 ```bash
 wisper campaigns list                                    # show all campaigns
-wisper campaigns create "D&D Mondays"                   # create a campaign (prints the slug)
-wisper campaigns show d-d-mondays                       # roster table with roles/characters
+wisper campaigns create "D&D Mondays"                   # create a campaign and its folder (prints the slug and folder)
+wisper campaigns show d-d-mondays                       # roster table with the folder name
+wisper campaigns rename d-d-mondays "D&D Tuesdays"     # rename the display name, slug, folder, and journal file
 wisper campaigns add-member d-d-mondays alice --role DM # add a player (must be enrolled)
 wisper campaigns add-member d-d-mondays bob --role Player --character "Theron"
 wisper campaigns remove-member d-d-mondays charlie      # remove from roster only (keeps voice profile)
-wisper campaigns delete d-d-mondays                     # delete campaign, keep its transcripts and journal file (with confirmation)
+wisper campaigns delete d-d-mondays                     # delete campaign, move its sessions to the output root (with confirmation)
 wisper campaigns delete d-d-mondays --delete-transcripts  # also delete its transcripts, their files, and its journal
 wisper campaigns reorder d-d-mondays s02 --up           # move a session one position earlier
 wisper campaigns reorder d-d-mondays s02 --down         # move a session one position later
 wisper campaigns reorder d-d-mondays --set "s01,s02,s03" # replace the whole order in one shot
 ```
+
+`delete` exits 1 and prints the sessions when any of them can't be deleted or moved (a file open in another program): the campaign is kept with what's left. Without `--delete-transcripts` its journal file and folder stay on disk; creating a campaign of that name again re-claims them.
+
+`rename` changes the display name, the slug, the campaign's folder on disk, and its journal file together. A rename that can't finish (a file open in another program) prints a notice and stays pending; `wisper campaigns show` reports `Rename pending → <folder>`, and the Transcripts page's Needs attention panel offers Retry.
 
 `reorder` sets the order sessions are folded into the journal and numbered on the campaign page. The order is when each transcript was added to the campaign, not its date, so a late-added session can land out of place. `--set` takes every transcript stem in the campaign, comma-separated, and errors unless it is an exact permutation of the current list.
 
