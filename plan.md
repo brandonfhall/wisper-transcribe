@@ -380,69 +380,31 @@ All ML mocked, per CLAUDE.md. New seams are patchable like the existing ones:
 
 ## Job cancellation — stop the GPU on cancel (approved)
 
-**Decided (Brandon, 2026-10-05): option 1** — run the job's ML work in a subprocess and terminate it on cancel. Not started. The `parallel_stages` pool can't be reused as is: it never terminates its workers (below), so this needs a worker process the job owns.
+Today Stop only sets `job._cancel_event`, which the job thread notices on its next `tqdm.write` (`web/jobs.py` `capturing_write`/`ProgressCatcher`). A long model call never writes, so the GPU stays busy until the stage ends. `parallel_stages` doesn't help: its drain thread raises on cancel but the `ProcessPoolExecutor` keeps running.
 
-**Decided (Brandon, 2026-10-06)** — these override the options and recommendations further down:
-- **The whole ML pipeline runs in the worker:** transcribe, diarize, align, and embeddings. The module-level caches (`transcriber._model`, `diarizer._pipeline`, `speaker_manager._embedding_model`, `word_alignment._fa_model`/`_fa_processor`) live in the worker, not the server.
-- **One persistent warm worker,** reused across jobs. Stop kills it, and the next job respawns it lazily and pays the model reload.
-- **Gated by a new config key, `transcribe_subprocess`, on by default.** Off runs today's in-process path. Wire it like `parallel_stages` (`CONFIG_CHOICES`, web Config page, `docs/configuration.md`).
-- **Web jobs only.** CLI `wisper transcribe` stays in-process.
-- **Transcription, enrollment, and relabel jobs** use the worker, so batch jobs share one copy of the models. `JOB_LIVE` stays in-process: its real-time loop can't take a cross-process hop.
-- **Boundary:** the worker computes and returns plain picklable results (segments, embeddings, alignment output). The parent does every DB, `file_registry`, and transcript-store write, and reads speaker profiles (`load_profiles`) to pass in. The worker never opens `wisper.db`.
-- `parallel_stages` inside the worker is out of scope for the first cut; decide while implementing whether it stays in-process-only.
+**Design (Brandon, 2026-10-06): proxy the four GPU calls into one warm worker process.**
 
-**Current behaviour**
-- Cancel sets `job._cancel_event` (`web/jobs.py:1009-1011`); the running job thread only sees it at `capturing_write()`/`ProgressCatcher.write()` (`jobs.py:1216-1245`), i.e. on a tqdm write.
-- `pipeline.process_file()` (`pipeline.py:382-697`) calls `transcribe()` in-process (`:545`) or through `_run_parallel_transcribe_diarize()` (`:541`); neither knows about the cancel event.
-- `_run_parallel_transcribe_diarize()` (`pipeline.py:141-215`) runs `_transcribe_worker`/`_diarize_worker` in a `with ProcessPoolExecutor(...)` block (`:197-206`) and blocks on `future.result()`; its drain thread calls `tqdm.write` (`:183`), so a cancel raises `InterruptedError` in the drain thread only — the pool keeps running.
-- So today `parallel_stages` does **not** actually stop the GPU on cancel. plan.md's "already does this" is not accurate; option 1 needs new plumbing.
-- `_transcribe_worker` (`pipeline.py:121-126`) is already module-level/picklable and calls `_patch_tqdm_for_queue(queue, "transcribe")` (`:75-118`) before ML imports.
-- `jobs._run_transcription_job` wraps `process_file` in layer 2 of the tqdm patching (`jobs.py:1205-1340`); `debug_log.Logger` is layer 1; `_patch_tqdm_for_queue` is layer 3 (`architecture.md` "tqdm patching is load-bearing in three layers").
+- **What runs in the worker:** only `transcriber.transcribe`, `diarizer.diarize`, `word_alignment.align_words`, and `speaker_manager.extract_embedding`. Their module-level model caches (`_model`, `_pipeline`, `_fa_model`/`_fa_processor`, `_embedding_model`) then live in the worker and stay warm between jobs.
+- **What stays in the server:** everything else — `pipeline.process_file`, `match_speakers` (it reads profiles from the DB), enrollment, relabel, ffmpeg work, excerpts, every DB/registry/transcript write. The worker never opens `wisper.db`. All four functions take and return picklable values (paths, dataclass lists, numpy arrays, `AlignmentStats`).
+- **Delegation is per job thread.** A thread-local context (e.g. `ml_worker.delegating(worker, cancel_event, on_log, on_bar)`) set by the job runner and cleared in `finally`. Each of the four functions starts with a guard: if this thread is delegating, send the call to the worker and return its result. Inside the worker, and in the CLI, live recording, and request threads, nothing delegates.
+- **Which jobs delegate:** transcription (`_run_transcription_job`), every enroll job (`_run_enroll_job` and its standalone/recording/wizard paths), and relabel (`_run_relabel_job`). Not `JOB_LIVE` (real-time loop, keeps its own in-process model), not LLM/journal jobs (no GPU).
+- **Config key `ml_worker`, default `true`.** Off runs everything in-process as today. Wire it like `parallel_stages` (`config.DEFAULTS`/`CONFIG_CHOICES`, web Config page, `docs/configuration.md`). The CLI never uses the worker.
+- **`parallel_stages` is ignored while delegating:** the worker runs the stages one after another. Its pool starts from the server, so Stop couldn't kill it and its models would load outside the warm worker. Documented.
 
-**Change**
-- Give the ML pipeline its own long-lived worker process, not a `with`-scoped pool, so the parent holds a `Process` object and can call `.terminate()` (or `.kill()` on Windows) when `job._cancel_event` is set.
-- Add a module-level watcher in `jobs._run_transcription_job`: while the transcription subprocess runs, poll `_cancel_event` (e.g. a `threading.Timer`/thread or a loop with `proc.join(timeout)`) and terminate the process; then raise `InterruptedError` in the job thread so the existing `except InterruptedError` path runs (`jobs.py:1325-1329`).
-- Reuse `_transcribe_worker` + `_patch_tqdm_for_queue` for logs/progress; parent drain thread forwards `"log"` via `tqdm.write` (so layers 1 and 2 still capture) and `"bar"` to `job.progress_channels`.
-- Pass `_cancel_event` awareness **only** in the parent; the subprocess needs no cancel hook — termination is the mechanism.
-- Terminating the worker must leave the job's WAV and any already-written files intact; the job ends Cancelled with nothing half-written.
-- Config: decide whether this is always-on or gated by a new key (e.g. `transcribe_subprocess`), rather than overloading `parallel_stages`. If a key is added, wire `CONFIG_CHOICES`/web Config like `parallel_stages` (`config.py:121-126`, `web/routes/config.py:35`).
+**Worker (`ml_worker.py`)**
+- One `MLWorker` owned by `JobQueue`, started lazily on the first delegated call with `multiprocessing.get_context("spawn")` (same on every OS). The child entry is a module-level function: run `_noise_suppress.suppress_third_party_noise()` before any ML import, reuse `pipeline._patch_tqdm_for_queue` for logs and bars, then loop: receive `(function name, args, kwargs)`, call it from a fixed allow-list of the four functions, send back the result or the error.
+- **Waiting and cancel happen in the job thread**, never in a helper thread: loop on the result with a short timeout, drain the log/bar queue each pass (logs → `on_log`, i.e. `tqdm.write` so the job's capture layer sees them; bars → `on_bar`, i.e. `job.progress`), and check `cancel_event`. On cancel: `terminate()`, `join(timeout)`, `kill()` if still alive, mark the worker dead, raise `InterruptedError` — the existing `except InterruptedError` path marks the job Cancelled. (A drain thread would repeat today's parallel_stages bug: `capturing_write` raises in the wrong thread.)
+- **Errors:** the child sends the exception's type name and message; the parent re-raises a small known set (`RuntimeError`, `ValueError`, `FileNotFoundError`, `MemoryError`, `ImportError`) and uses `RuntimeError` for anything else, since torch/pyannote exceptions often don't unpickle. Messages never go into `job.error` beyond what `_set_job_error` already allows.
+- **Crash:** if the child exits without replying, raise `RuntimeError("ML worker exited unexpectedly")`; the next call respawns it.
+- **Shutdown:** `JobQueue.stop()` and the `CancelledError` path in `_worker` terminate the worker, so it never outlives the server holding the GPU. Check the order in `app.py`'s lifespan shutdown.
+- **Cost:** the first delegated call after start or a cancel loads its models in the worker (seconds to tens of seconds). The server process no longer holds models for these jobs; live recording still loads its own.
 
-**Model-caching cost (the main trade-off)**
-- Today `transcriber._model` lives in the server process and survives across jobs (`transcriber.py:106-175`; `architecture.md` "Module-level model caches"). A per-job subprocess reloads the multi-GB Whisper model every job (~seconds to tens of seconds).
-- Options: (a) accept the reload; (b) a persistent worker subprocess kept warm between jobs, restarted only when it is terminated by cancel or crashes; (c) keep the model in the parent and only offload decode (not possible with CTranslate2).
-- Recommend (b): a single idle worker reused across jobs, killed on cancel and lazily respawned. Keeps the one-job-at-a-time invariant.
+**Tests** (no GPU, network, or real audio)
+- Several tests mock *below* the four functions (`transcriber.WhisperModel`, `diarizer.Pipeline`, `_load_embedding_model`, `word_alignment` model globals). A spawned child doesn't see those mocks and would load real models, so an autouse fixture in `tests/conftest.py` turns delegation off; only the worker's own tests turn it on.
+- Worker tests use a fake-function module under `tests/` (no torch import) through an injectable allow-list: a real spawned child returns results, maps errors, streams logs/bars, dies on cancel (process gone, `InterruptedError`), respawns after cancel or crash, and stops on `JobQueue.stop()`. Keep real-spawn tests few (each is 1–2 s, slower on Windows CI).
+- Jobs tests with a fake `MLWorker`: transcription/enroll/relabel jobs delegate when `ml_worker` is on and don't when off; cancel ends the job Cancelled and deletes the upload; LLM and live jobs never delegate; `parallel_stages` is skipped while delegating.
 
-**Windows spawn semantics**
-- Windows (and macOS) use `spawn`: the child re-imports the package and re-runs module top-level code. `_transcribe_worker` and `_patch_tqdm_for_queue` are already module-level and picklable (`pipeline.py:75-126`), and `_noise_suppress` must run before ML imports in the child (as `_diarize_worker` does, `:129-136`).
-- A persistent worker needs an explicit `multiprocessing.get_context("spawn")` and `freeze_support()` where a frozen entry point exists; the server has no `__main__` guard today.
-- Passing a `multiprocessing.Manager().Queue()` works under spawn (the existing comment at `pipeline.py:162-164` explains why a plain `Queue` can't be pickled).
-
-**One-job-at-a-time invariant**
-- Unchanged: exactly one worker slot (`web/jobs.py:797`). The subprocess is a per-job resource; nothing new runs concurrently.
-- `JobQueue.stop()` (`jobs.py:594-601`) cancels the worker task but cannot stop `asyncio.to_thread`; the new process must be terminated on shutdown too, or it outlives the server and holds the GPU. Add it to the `CancelledError` path (`jobs.py:1074-1082`) and to `stop_all_live`-style shutdown.
-
-**tqdm layers (all three)**
-- Layer 1 `debug_log.Logger` — unchanged; parent `tqdm.write` from the drain thread still tees to the log.
-- Layer 2 `jobs._run_transcription_job` — must keep patching the parent's `tqdm` for `job.log_lines`/`job.progress`; the drain thread calls into it, so a cancel check there can also stop the process.
-- Layer 3 `_patch_tqdm_for_queue` — runs in the child only; never touches the parent's tqdm. Check all three before changing any.
-
-**SSE log streaming / progress**
-- Unchanged path: child → IPC queue → parent drain thread → `tqdm.write`/stderr → `job.log_lines` + `job.progress_channels` → `GET /transcribe/jobs/{id}/stream` (`web/routes/transcribe.py:418-492`).
-- The "done" event and `Cancelled` error must still be emitted (`transcribe.py:463-482`; test `test_record_live_routes.py:399-413`).
-- Parallel-mode UI already reads `progress_channels` (`jobs.py:820`); the single transcribe process should feed the `transcribe` channel so pills/percent still work.
-
-**Tests** (`test_web_jobs.py`, `test_pipeline.py`; no GPU/network/real audio)
-- A fake subprocess whose `terminate()` is asserted when `_cancel_event` is set; the job ends `FAILED`/`Cancelled` and the upload is deleted.
-- Normal completion still runs `process_file` semantics and the post-processing chain.
-- Worker reuse: two jobs, one process (if option (b)); after a cancel the next job respawns.
-- Shutdown mid-job terminates the process and records the job interrupted (`test_web_jobs.py:204-238` pattern).
-- `pipeline` unit tests stay on the in-process path unless `transcribe_subprocess` is explicitly enabled, so existing `process_file` tests are unaffected.
-- `parallel_stages` tests (`test_pipeline.py:807+`, `test_pipeline_folder.py`) must still pass.
-
-**Docs**
-- `architecture.md`: "Parallel stage processing" (or a new "Job cancellation" subsection), the three-layer tqdm note, and the Known Constraints "Cooperative cancellation" row.
-- `docs/web-ui.md:63` (Stop Job wording), `docs/scenarios.md:213` (best-effort cancellation), `docs/configuration.md` if a new key is added, `docs/cli-reference.md` if the CLI gains the subprocess path.
-
+**Docs:** `architecture.md` (module map, a "Job cancellation / ML worker" section, the three-layer tqdm note, "Module-level model caches", Known Constraints "Cooperative cancellation"), `CLAUDE.md` gotchas (one-job-at-a-time and tqdm layers mention the worker), `docs/web-ui.md` (Stop Job), `docs/scenarios.md` (cancellation), `docs/configuration.md` (`ml_worker`).
 
 ---
 
