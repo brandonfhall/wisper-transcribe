@@ -316,6 +316,23 @@ def test_a_crash_leftover_flac_still_plans_the_conversion(out, encode, probe):
     assert _combined_row(rec.id).path == leftover
 
 
+def test_a_wav_left_after_the_repoint_is_converted_and_deleted(out, encode, probe):
+    """A crash after the row re-pointed to the .flac but before the WAV was
+    deleted: the next trim re-verifies and deletes the WAV."""
+    rec = seed_recording()
+    wav = recording_manager.combined_wav_path_for(rec.id)
+    flac = recording_manager.combined_path_for(rec.id)
+    wav_bytes = wav.read_bytes()
+    storage_trim.apply()
+    wav.write_bytes(wav_bytes)  # the WAV the crash left behind
+    assert _combined_row(rec.id).path == flac
+
+    assert [a.kind for a in storage_trim.plan().actions] == [storage_trim.CONVERT_RECORDING]
+    storage_trim.apply()
+    assert flac.is_file() and not wav.exists()
+    assert _combined_row(rec.id).path == flac
+
+
 def test_an_active_capture_is_not_converted(out, encode, probe):
     rec = seed_recording(status="recording")
     plan = storage_trim.plan()

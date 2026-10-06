@@ -547,6 +547,24 @@ async def test_finalise_trims_through_a_worker_thread(tmp_path, trim_mock, monke
     trim_mock.assert_called_once_with(rec.id, tmp_path)
 
 
+async def test_finalise_encodes_the_combined_track_through_a_worker_thread(tmp_path, monkeypatch):
+    """Joining and encoding a long session takes minutes, so it runs off the event loop."""
+    threaded = []
+    real_to_thread = asyncio.to_thread
+
+    async def spy(func, *args, **kwargs):
+        threaded.append(getattr(func, "__name__", func))
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr("wisper_transcribe.web.discord_bot.asyncio.to_thread", spy)
+    bm = BotManager(data_dir=tmp_path, audio_source_factory=scripted_source([]))
+    bm.start()
+    await bm.start_session(None, "VC1", "G1")
+    await asyncio.wait_for(bm._task, timeout=5)
+
+    assert "_store_combined" in threaded
+
+
 async def test_finalise_survives_a_failing_trim(tmp_path, trim_mock):
     trim_mock.side_effect = OSError("disk")
     bm = BotManager(data_dir=tmp_path, audio_source_factory=scripted_source([]))

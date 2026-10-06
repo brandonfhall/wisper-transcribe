@@ -99,7 +99,6 @@ def existing_combined_path(recording_id: str,
     return None
 
 
-
 def segment_path_for(recording_id: str, idx: int, data_dir: Optional[Path] = None) -> Path:
     return get_recording_dir(recording_id, data_dir) / "combined" / f"{idx:04d}.wav"
 
@@ -209,8 +208,8 @@ def _load(conn: sqlite3.Connection, data_dir: Optional[Path],
                               finalized=bool(s["finalized"]))
                 for s in segments.get(rid, [])
             ],
-        combined_path=combined,
-        per_user_dir=get_recording_dir(rid, data_dir) / "per-user",
+            combined_path=combined,
+            per_user_dir=get_recording_dir(rid, data_dir) / "per-user",
             transcript_path=transcript_path,
             transcript_id=tid,
             rejoin_log=[

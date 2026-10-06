@@ -497,6 +497,25 @@ class BotManager:
             await asyncio.sleep(delay)
         return True
 
+    def _store_combined(self, recording_id: str, combined_dir) -> Optional[Path]:
+        """Join the combined-track segments and store them as ``combined.flac``.
+
+        The FLAC is verified before the joined WAV is deleted; on any failure
+        the WAV is kept and becomes the combined file, so the capture still
+        finishes. Returns None when no audio was captured.
+        """
+        combined_out = combined_wav_path_for(recording_id, self._data_dir)
+        combined_out.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            merged = concat_wav_segments(combined_dir, combined_out)
+        except Exception as exc:
+            log.warning("Failed to concatenate combined-track segments: %s", exc)
+            return None
+        if merged is not None and encode_combined_flac(recording_id, merged, self._data_dir) is not None:
+            merged.unlink(missing_ok=True)
+            return combined_path_for(recording_id, self._data_dir)
+        return merged
+
     async def _finalise(self, recording: Recording) -> None:
         """Close all writers, merge the combined track, mark recording completed.
 
@@ -533,19 +552,9 @@ class BotManager:
             self._combined_dir = None
             self._combined_segment_started_at = None
 
-            combined_out = combined_wav_path_for(recording.id, self._data_dir)
-            combined_out.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                merged = concat_wav_segments(combined_dir, combined_out)
-            except Exception as exc:
-                log.warning("Failed to concatenate combined-track segments: %s", exc)
-                merged = None
+            # Joining and encoding a long session takes minutes: off the event loop.
+            merged = await asyncio.to_thread(self._store_combined, recording.id, combined_dir)
             if merged is not None:
-                # Store FLAC and verify it before deleting the WAV; on failure
-                # keep and register the WAV, so the capture still finishes.
-                if encode_combined_flac(recording.id, merged, self._data_dir) is not None:
-                    merged.unlink(missing_ok=True)
-                    merged = combined_path_for(recording.id, self._data_dir)
                 recording.combined_path = merged
                 log.info("Recording %s combined track written to %s", recording.id, merged)
 

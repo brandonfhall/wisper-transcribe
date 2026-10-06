@@ -271,7 +271,7 @@ def probe_format(path: Path) -> tuple[int, int]:
         raise RuntimeError(f"ffprobe gave no audio format for {Path(path).name!r}") from exc
 
 
-def flac_frames(path: Path) -> int:
+def probe_frames(path: Path) -> int:
     """Exact sample-frame count of a FLAC via ffprobe, without decoding it.
 
     FLAC's STREAMINFO header stores the total sample count; FFmpeg's flac
@@ -313,11 +313,6 @@ def flac_frames(path: Path) -> int:
     if rate <= 0 or frames <= 0 or num <= 0 or rate * num != den:
         raise RuntimeError(f"ffprobe gave no reliable frame count for {Path(path).name!r}")
     return frames
-
-
-def probe_frames(path: Path) -> int:
-    """Sample-frame count of a FLAC via ffprobe. See :func:`flac_frames`."""
-    return flac_frames(path)
 
 
 def get_duration(path: Path) -> float:

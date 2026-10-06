@@ -265,10 +265,6 @@ def plan(data_dir: Optional[Path] = None, output_dir: Optional[Path] = None) -> 
                       for r in conn.execute("SELECT id, capture_status FROM recordings")}
         linked = {r["transcript_id"]: r["id"] for r in conn.execute(
             "SELECT id, transcript_id FROM recordings WHERE transcript_id IS NOT NULL")}
-        # A recording's combined row is the authority: it names which file is
-        # current, so a crash's leftover .flac doesn't hide a still-registered .wav.
-        combined_names = {r["recording_id"]: Path(r["rel_path"]).name for r in conn.execute(
-            "SELECT recording_id, rel_path FROM files WHERE kind = 'combined'")}
         for t in conn.execute("SELECT id, stem FROM transcripts ORDER BY stem").fetchall():
             row = file_registry.file_for(
                 file_registry.Owner("transcript", t["id"]), "audio",
@@ -291,8 +287,11 @@ def plan(data_dir: Optional[Path] = None, output_dir: Optional[Path] = None) -> 
     for rid, status in recordings.items():
         if status in file_registry._ACTIVE_CAPTURE:
             continue
+        # Any combined.wav left is converted, even when the row already names the
+        # .flac: a crash between the repoint and the delete leaves the WAV behind,
+        # and re-running the verified encode then deletes it.
         wav = recording_manager.combined_wav_path_for(rid, data)
-        if wav.is_file() and combined_names.get(rid, "combined.wav") != "combined.flac":
+        if wav.is_file():
             result.actions.append(Action(
                 CONVERT_RECORDING, wav, _size(wav), recording_id=rid,
                 note="the recording's combined track is converted to FLAC"))
