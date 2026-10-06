@@ -583,16 +583,18 @@ def register_capture_files(recording_id: str, data_dir: Optional[Path] = None) -
 
 
 def recover_recording(recording_id: str, data_dir: Optional[Path] = None) -> Recording:
-    """Rebuild ``combined.wav`` for a session that crashed, from its segments.
+    """Rebuild the combined track for a session that crashed, from its segments.
 
     Segments are self-contained WAVs (the writer patches each header when it
     closes), so recovery is a plain join; only the last partial minute can be
-    missing. The recording becomes ``completed`` with ``recovered_at`` set and
-    can then be transcribed like any other. Slow for long sessions: call it
-    off the request thread.
+    missing. The join is written as ``combined.wav``, encoded to
+    ``combined.flac`` and verified, and only then is the WAV deleted; if the
+    encode fails the WAV is kept. The recording becomes ``completed`` with
+    ``recovered_at`` set and can then be transcribed like any other. Slow for
+    long sessions: call it off the request thread.
 
     Raises KeyError (unknown id) or ValueError (active, not failed, already
-    has ``combined.wav``, or no readable segments).
+    has a combined track, or no readable segments).
     """
     from .web.audio_writer import concat_wav_segments
 
@@ -607,6 +609,10 @@ def recover_recording(recording_id: str, data_dir: Optional[Path] = None) -> Rec
     merged = concat_wav_segments(combined.parent / "combined", combined)
     if merged is None:
         raise ValueError("no readable audio segments")
+    # Verify the FLAC before deleting the WAV; on failure the WAV is kept and
+    # goes on to be registered as the recording's combined file.
+    if encode_combined_flac(recording_id, merged, data_dir) is not None:
+        merged.unlink(missing_ok=True)
     with db.transaction(data_dir) as conn:
         conn.execute(
             "UPDATE recordings SET capture_status = 'completed', recovered_at = ?, "
@@ -652,6 +658,34 @@ def combined_frames(path: Optional[Path]) -> int:
         except Exception:
             return 0
     return _wav_frames(Path(path))
+
+
+def encode_combined_flac(recording_id: str, wav: Path,
+                         data_dir: Optional[Path] = None) -> Optional[Path]:
+    """Encode a finished ``combined.wav`` to the recording's ``combined.flac``.
+
+    Returns the FLAC path once it verifies (16000 Hz, mono, and exactly the
+    WAV's frame count), else None. A partial or unverifiable ``.flac`` is
+    removed; the ``.wav`` is never deleted, so a capture is never lost to an
+    ffmpeg failure. Callers delete the ``.wav`` only after this returns a path.
+    """
+    from .audio_utils import encode_flac, probe_format
+
+    wav = Path(wav)
+    flac = combined_path_for(recording_id, data_dir)
+    expected = _wav_frames(wav)
+    if expected <= 0:
+        return None
+    try:
+        encode_flac(wav, flac)
+        if probe_format(flac) != (16000, 1) or combined_frames(flac) != expected:
+            raise ValueError("the encoded FLAC did not verify")
+    except Exception:
+        log.warning("Could not store recording %s's combined track as FLAC; keeping the WAV",
+                    recording_id, exc_info=True)
+        flac.unlink(missing_ok=True)
+        return None
+    return flac
 
 
 def _tree_bytes(path: Path) -> int:

@@ -28,6 +28,13 @@ from wisper_transcribe.recording_manager import (
 
 from . import _seed
 from ._seed import seed_profile
+from ._flac_mock import frames, install as install_flac_mock
+
+
+@pytest.fixture(autouse=True)
+def _mock_flac_encode(monkeypatch):
+    """No real ffmpeg: combined-track FLAC encode/probe is mocked for every test."""
+    install_flac_mock(monkeypatch)
 
 
 def _make_recording(tmp_path: Path, **kwargs):
@@ -488,8 +495,9 @@ def test_crashed_session_with_segments_is_recoverable(tmp_path):
 
     assert recovered.status == "completed" and recovered.recovered_at is not None
     assert recovered.combined_path is not None and recovered.recoverable is False
-    with wave.open(str(recovered.combined_path), "rb") as wf:
-        assert wf.getnframes() == 3200
+    assert recovered.combined_path.name == "combined.flac"
+    assert frames(recovered.combined_path) == 3200
+    assert not (tmp_path / "recordings" / rec.id / "combined.wav").exists()
 
 
 def test_crashed_session_without_segments_is_not_recoverable(tmp_path):

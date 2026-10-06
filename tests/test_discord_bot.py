@@ -19,9 +19,17 @@ from tests._discord_fakes import (
     scripted_source,
 )
 
-from ._seed import seed_profiles
+from tests._seed import seed_profiles
+
+from ._flac_mock import install as install_flac_mock
 
 pytestmark = pytest.mark.anyio
+
+
+@pytest.fixture(autouse=True)
+def _mock_flac_encode(monkeypatch):
+    """No real ffmpeg: the combined-track FLAC encode/probe is mocked."""
+    install_flac_mock(monkeypatch)
 
 
 @pytest.fixture(autouse=True)
@@ -411,12 +419,13 @@ async def test_combined_track_duration_matches_wall_clock_not_speaker_count(tmp_
 async def test_finalise_concatenates_combined_segments_and_sets_combined_path(
     tmp_path, monkeypatch
 ):
-    """After several combined-track rotations, `_finalise` merges them into
-    recordings/<id>/combined.wav, sets `combined_path`, and the merged
-    duration equals the sum of the segments'."""
+    """After several combined-track rotations, `_finalise` merges them and
+    stores the merged audio as recordings/<id>/combined.flac, sets
+    `combined_path`, and the merged duration equals the sum of the segments'."""
     import functools
 
     import wisper_transcribe.web.discord_bot as discord_bot_module
+    from tests._flac_mock import frames as combined_frames
     from wisper_transcribe.web.audio_writer import SegmentedWavWriter
 
     # Force short (0.1s = 5 frames) segments so a modest frame count rotates
@@ -441,20 +450,17 @@ async def test_finalise_concatenates_combined_segments_and_sets_combined_path(
     loaded = load_recordings(tmp_path)[rec.id]
     assert loaded.combined_path is not None
     assert loaded.combined_path.exists()
-    assert loaded.combined_path == tmp_path / "recordings" / rec.id / "combined.wav"
+    assert loaded.combined_path == tmp_path / "recordings" / rec.id / "combined.flac"
 
     seg_total = 0
     for seg in segments:
         with wave.open(str(seg), "rb") as wf:
             seg_total += wf.getnframes()
 
-    with wave.open(str(loaded.combined_path), "rb") as wf:
-        assert wf.getframerate() == 16000
-        assert wf.getnchannels() == 1
-        merged_frames = wf.getnframes()
-
+    merged_frames = combined_frames(loaded.combined_path)
     assert merged_frames == seg_total
     assert merged_frames == 13 * 320
+    assert not (tmp_path / "recordings" / rec.id / "combined.wav").exists()
 
 
 async def test_combined_track_rotation_and_finalize_populate_segment_manifest(

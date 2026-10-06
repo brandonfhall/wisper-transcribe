@@ -26,7 +26,10 @@ from wisper_transcribe.models import Recording, RejoinAttempt
 from wisper_transcribe.recording_manager import (
     append_rejoin,
     bind_recording_speaker,
+    combined_path_for,
+    combined_wav_path_for,
     create_recording,
+    encode_combined_flac,
     load_recordings,
     record_completed_wav_segment,
     register_capture_files,
@@ -497,9 +500,11 @@ class BotManager:
     async def _finalise(self, recording: Recording) -> None:
         """Close all writers, merge the combined track, mark recording completed.
 
-        Concatenates the combined-track segments into
-        ``recordings/<id>/combined.wav`` and sets ``combined_path`` when any
-        audio was captured; otherwise it stays None.
+        Concatenates the combined-track segments into a WAV, encodes it to
+        ``recordings/<id>/combined.flac`` and verifies the frame count, then
+        deletes the WAV; when any step fails the WAV is kept. Either way
+        ``combined_path`` points at the file that survived, or stays None when
+        no audio was captured.
         """
         for writer in self._writers.values():
             try:
@@ -528,13 +533,19 @@ class BotManager:
             self._combined_dir = None
             self._combined_segment_started_at = None
 
-            combined_out = self._data_dir / "recordings" / recording.id / "combined.wav"
+            combined_out = combined_wav_path_for(recording.id, self._data_dir)
+            combined_out.parent.mkdir(parents=True, exist_ok=True)
             try:
                 merged = concat_wav_segments(combined_dir, combined_out)
             except Exception as exc:
                 log.warning("Failed to concatenate combined-track segments: %s", exc)
                 merged = None
             if merged is not None:
+                # Store FLAC and verify it before deleting the WAV; on failure
+                # keep and register the WAV, so the capture still finishes.
+                if encode_combined_flac(recording.id, merged, self._data_dir) is not None:
+                    merged.unlink(missing_ok=True)
+                    merged = combined_path_for(recording.id, self._data_dir)
                 recording.combined_path = merged
                 log.info("Recording %s combined track written to %s", recording.id, merged)
 

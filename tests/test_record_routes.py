@@ -10,6 +10,15 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+from ._flac_mock import frames as combined_frames, install as install_flac_mock
+
+
+@pytest.fixture(autouse=True)
+def _mock_flac_encode(monkeypatch):
+    """No real ffmpeg: a real BotManager/LocalCaptureManager finalise encodes a
+    combined track, so mock the FLAC encode/probe for every test in this file."""
+    install_flac_mock(monkeypatch)
+
 
 @pytest.fixture()
 def client(tmp_path):
@@ -1818,10 +1827,8 @@ def test_transcribe_recording_no_audio_regression_after_real_bot_session(client)
 
     assert mock_submit.call_args.args[0] == str(loaded.combined_path)
     assert not list((tmp_path / "output").glob("*.wav"))
-    with wave.open(str(loaded.combined_path), "rb") as wf:
-        assert wf.getframerate() == 16000
-        assert wf.getnchannels() == 1
-        assert wf.getnframes() > 0
+    assert loaded.combined_path.name == "combined.flac"
+    assert combined_frames(loaded.combined_path) > 0
 
 
 def test_transcribe_recording_invalid_id_blocked(client):
