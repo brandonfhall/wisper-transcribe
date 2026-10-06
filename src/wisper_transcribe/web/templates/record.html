@@ -216,6 +216,26 @@
       <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:8px;line-height:1.5">
         Bar shows the live signal on each track; the rose line marks the noise floor. Green means it's clearing the floor and reaching the transcript.
       </div>
+
+      <!-- Switch a track's input device mid-session. -->
+      <div style="border-top:1px solid var(--color-rule);margin-top:16px;padding-top:14px">
+        <div class="mono-kicker" style="margin-bottom:10px">Switch device</div>
+        {% for track, label, list in [("mic", "Mic", local_devices.microphones), ("system", "System", local_devices.loopbacks)] %}
+        <div style="margin-bottom:10px">
+          <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-bottom:4px">{{ label }}</div>
+          <select id="switch-select-{{ track }}" data-track="{{ track }}"
+                  style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:7px 9px;border-radius:5px;font-size:12px;font-family:var(--font-sans)">
+            {% for d in list %}
+            <option value="{{ d.id }}" {% if d.id == current_device_ids.get(track) %}selected{% endif %}>{{ d.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        {% endfor %}
+        <button type="button" id="switch-device-btn" class="btn btn-secondary" style="width:100%;justify-content:center">Switch</button>
+        <div id="switch-device-status" style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:8px;line-height:1.5">
+          Switched tracks pick up on the new device; the session keeps recording.
+        </div>
+      </div>
     </div>
     {% endif %}
 
@@ -256,7 +276,11 @@
 {# ── Idle / start new session ── #}
 <div style="display:flex;gap:32px;flex-wrap:wrap;align-items:flex-start">
 <div style="max-width:640px;flex:1;min-width:320px">
-  <form method="post" action="/record/start-form" style="margin-bottom:32px">
+  <form method="post" action="/record/start-form" style="margin-bottom:32px"
+        id="discord-start-form"
+        data-default-guild="{{ default_guild }}"
+        data-default-channel="{{ default_channel }}"
+        data-presets="{{ discord_presets | tojson | forceescape }}">
     <div class="section-head"><div class="section-head-left"><span class="section-kicker">Discord voice</span><h2 class="section-title">Connect and record</h2></div></div>
     <div style="border-top:1px solid var(--color-rule)">
 
@@ -290,14 +314,32 @@
       {% endif %}
 
       <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
-        <div class="mono-kicker" style="margin-bottom:10px">Guild ID</div>
-        <input type="text" name="guild_id" value="{{ default_guild }}" placeholder="e.g. 987654321098765432"
-               style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:8px 10px;border-radius:5px;font-size:13px;font-family:var(--font-mono)"/>
-      </div>
-      <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
-        <div class="mono-kicker" style="margin-bottom:10px">Voice channel ID</div>
-        <input type="text" name="voice_channel_id" value="{{ default_channel }}" placeholder="e.g. 123456789012345678"
-               style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:8px 10px;border-radius:5px;font-size:13px;font-family:var(--font-mono)"/>
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px">
+          <div class="mono-kicker">Guild &amp; voice channel</div>
+          <button type="button" id="discord-manual-toggle"
+                  style="background:none;border:none;padding:0;cursor:pointer;font-family:var(--font-mono);font-size:10px;color:var(--color-paper-dim);text-decoration:underline">Enter IDs manually</button>
+        </div>
+
+        <!-- Picker: guild / voice-channel selects, populated from Discord. -->
+        <div id="discord-picker">
+          <div id="discord-picker-status" style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint)">Loading channels…</div>
+          <div id="discord-picker-fields" hidden>
+            <label for="discord-guild-select" style="display:block;font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-bottom:4px">Server</label>
+            <select id="discord-guild-select" style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:8px 10px;border-radius:5px;font-size:13px;font-family:var(--font-sans);margin-bottom:12px"></select>
+            <label for="discord-channel-select" style="display:block;font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-bottom:4px">Voice channel</label>
+            <select id="discord-channel-select" style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:8px 10px;border-radius:5px;font-size:13px;font-family:var(--font-sans)"></select>
+          </div>
+        </div>
+
+        <!-- Raw-ID fallback: the actual form fields, hidden by the picker on success. -->
+        <div id="discord-manual-ids">
+          <div class="mono-kicker" style="margin-bottom:8px">Guild ID</div>
+          <input type="text" name="guild_id" id="discord-guild-input" value="{{ default_guild }}" placeholder="e.g. 987654321098765432"
+                 style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:8px 10px;border-radius:5px;font-size:13px;font-family:var(--font-mono);margin-bottom:12px"/>
+          <div class="mono-kicker" style="margin-bottom:8px">Voice channel ID</div>
+          <input type="text" name="voice_channel_id" id="discord-channel-input" value="{{ default_channel }}" placeholder="e.g. 123456789012345678"
+                 style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:8px 10px;border-radius:5px;font-size:13px;font-family:var(--font-mono)"/>
+        </div>
       </div>
 
       <div style="padding:16px 0;border-bottom:1px solid var(--color-rule)">
@@ -416,6 +458,125 @@
 {% endif %}
 </div>
 
+<script>
+// Discord channel picker on the Record page. Fetches the bot's guilds and
+// voice channels (GET /api/record/channels) and fills a guild + channel
+// <select> pair, writing into the same guild_id/voice_channel_id form
+// fields so the start route and "Save as preset" are unchanged. Raw-ID
+// entry stays available as a fallback on any error, or behind a toggle.
+(function(){
+  var form = document.getElementById('discord-start-form');
+  if (!form) return;
+  var picker = document.getElementById('discord-picker');
+  var statusEl = document.getElementById('discord-picker-status');
+  var fields = document.getElementById('discord-picker-fields');
+  var guildSel = document.getElementById('discord-guild-select');
+  var chanSel = document.getElementById('discord-channel-select');
+  var manual = document.getElementById('discord-manual-ids');
+  var guildInput = document.getElementById('discord-guild-input');
+  var chanInput = document.getElementById('discord-channel-input');
+  var toggle = document.getElementById('discord-manual-toggle');
+  if (!picker || !fields || !manual) return;
+
+  var defaultGuild = form.dataset.defaultGuild || '';
+  var defaultChannel = form.dataset.defaultChannel || '';
+  var presets = [];
+  try { presets = JSON.parse(form.dataset.presets || '[]') || []; } catch (e) { presets = []; }
+
+  // After an error there is no list to go back to, so the toggle hides;
+  // when the user chose manual entry it stays, to switch back.
+  function showManual(fromError) {
+    picker.hidden = true;
+    manual.hidden = false;
+    if (toggle) toggle.hidden = !!fromError;
+  }
+  function showPicker() {
+    picker.hidden = false;
+    manual.hidden = true;
+    if (toggle) toggle.hidden = false;
+  }
+  function syncField(input) {
+    // Let the preset-sync script see the new value as if typed.
+    input.dispatchEvent(new Event('input', {bubbles: true}));
+  }
+  // A preset's channel wins over the configured default when both are set.
+  function wanted(guild, field) {
+    for (var i = 0; i < presets.length; i++) {
+      if (presets[i] && presets[i].guild_id === guild && presets[i].channel_id) {
+        return presets[i].channel_id;
+      }
+    }
+    return field;
+  }
+  function fillChannels(guild, wantChannel) {
+    while (chanSel.firstChild) chanSel.removeChild(chanSel.firstChild);
+    var channels = (guild && guild.voice_channels) || [];
+    channels.forEach(function(c) {
+      chanSel.appendChild(new Option(c.name || c.id, c.id));
+    });
+    if (wantChannel) chanSel.value = wantChannel;
+    if (chanSel.value) { chanInput.value = chanSel.value; syncField(chanInput); }
+  }
+  function fillGuilds(guilds) {
+    while (guildSel.firstChild) guildSel.removeChild(guildSel.firstChild);
+    guilds.forEach(function(g) {
+      guildSel.appendChild(new Option(g.name || g.id, g.id));
+    });
+    if (defaultGuild) guildSel.value = defaultGuild;
+    var selected = guilds.find(function(g) { return g.id === guildSel.value; }) || guilds[0];
+    if (selected) {
+      guildSel.value = selected.id;
+      guildInput.value = selected.id;
+      syncField(guildInput);
+      fillChannels(selected, wanted(selected.id, defaultChannel));
+    }
+  }
+  guildSel.addEventListener('change', function() {
+    guildInput.value = guildSel.value;
+    syncField(guildInput);
+    var g = (guildSel._guilds || []).filter(function(x) { return x.id === guildSel.value; })[0];
+    fillChannels(g || { voice_channels: [] }, wanted(guildSel.value, defaultChannel));
+  });
+  chanSel.addEventListener('change', function() {
+    chanInput.value = chanSel.value;
+    syncField(chanInput);
+  });
+  if (toggle) {
+    toggle.addEventListener('click', function() {
+      if (manual.hidden) { showManual(false); toggle.textContent = 'Show channel list'; }
+      else { showPicker(); toggle.textContent = 'Enter IDs manually'; }
+    });
+  }
+
+  fetch('/api/record/channels')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error === 'no_token') {
+        statusEl.textContent = 'No bot token — set one on the Config page, or enter IDs manually.';
+        showManual(true);
+        return;
+      }
+      if (data.error === 'invalid_token') {
+        statusEl.textContent = 'Discord rejected the bot token — check it on the Config page.';
+        showManual(true);
+        return;
+      }
+      if (data.error || !data.guilds || !data.guilds.length) {
+        statusEl.textContent = 'Couldn\'t load channels — enter IDs manually.';
+        showManual(true);
+        return;
+      }
+      guildSel._guilds = data.guilds;
+      fields.hidden = false;
+      showPicker();
+      fillGuilds(data.guilds);
+    })
+    .catch(function() {
+      statusEl.textContent = 'Couldn\'t load channels — enter IDs manually.';
+      showManual(true);
+    });
+})();
+</script>
 <script>
 // Sync guild/channel from start form into the preset hidden fields
 (function(){
@@ -559,6 +720,56 @@
     window.updateThresholdMarkers && window.updateThresholdMarkers(v);
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(function() { send(v); }, 200);
+  });
+})();
+
+// Switch a track's input device mid-session via POST /api/record/switch-device.
+// The session keeps recording; the selected track restarts on the new device.
+(function(){
+  var btn = document.getElementById('switch-device-btn');
+  if (!btn) return;
+  var statusEl = document.getElementById('switch-device-status');
+
+  // Only a track whose selection changed is switched: a switch restarts that
+  // track's capture and leaves a short gap in it.
+  var current = {};
+  ['mic', 'system'].forEach(function(track) {
+    var sel = document.getElementById('switch-select-' + track);
+    if (sel) current[track] = sel.value;
+  });
+
+  btn.addEventListener('click', function() {
+    var requests = [];
+    ['mic', 'system'].forEach(function(track) {
+      var sel = document.getElementById('switch-select-' + track);
+      if (sel && sel.value && sel.value !== current[track]) {
+        var chosen = sel.value;
+        requests.push(fetch('/api/record/switch-device', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({track: track, device_id: chosen}),
+        }).then(function(r) {
+          if (r.ok) current[track] = chosen;
+          return r.ok;
+        }));
+      }
+    });
+    if (!requests.length) {
+      if (statusEl) statusEl.textContent = 'Pick a different device first.';
+      return;
+    }
+    btn.disabled = true;
+    Promise.all(requests)
+      .then(function(oks) {
+        if (statusEl) {
+          statusEl.textContent = oks.every(function(ok) { return ok; })
+            ? 'Switched.' : 'Couldn\'t switch — try again.';
+        }
+      })
+      .catch(function() {
+        if (statusEl) statusEl.textContent = 'Couldn\'t switch — try again.';
+      })
+      .finally(function() { btn.disabled = false; });
   });
 })();
 </script>

@@ -229,16 +229,6 @@ def enumerate_devices() -> dict:
     }
 
 
-def resolve_device_name(devices: list, device_id: str) -> str:
-    """Look up `device_id` in an `enumerate_devices()` list; falls back to
-    echoing the id itself when not found (device ids are never used in a
-    file path, so this is safe -- see .claude/rules/web-security.md)."""
-    for d in devices:
-        if d.get("id") == device_id:
-            return d.get("name", device_id)
-    return device_id
-
-
 # ---------------------------------------------------------------------------
 # LocalCaptureManager
 # ---------------------------------------------------------------------------
@@ -280,6 +270,17 @@ class LocalCaptureManager:
         self._combined_segment_started_at: Optional[datetime] = None
         self._capture_threads: list[threading.Thread] = []
         self._tick_thread: Optional[threading.Thread] = None
+        # Per-track capture state, so switch_device() can retire one track's
+        # thread without touching the other. `_capture_events[track]` is the
+        # generation token: a capture loop checks its own event before every
+        # push, so a retired thread can never push into the FIFO after a
+        # switch (even if it was mid-block in record() when the switch ran).
+        self._track_threads: dict[str, threading.Thread] = {}
+        self._capture_events: dict[str, threading.Event] = {}
+        self._track_device_ids: dict[str, str] = {}
+        # Tracks whose capture thread died on a device error; a new thread on
+        # that track clears it. A degraded session recovers only when empty.
+        self._failed_tracks: set[str] = set()
         # Optional live-transcription tap, called from the tick thread with
         # (mic, system, mixed) bytes each tick. Must not block.
         self._live_sink: Optional[Callable[[bytes, bytes, bytes], None]] = None
@@ -310,6 +311,11 @@ class LocalCaptureManager:
     def active_recording(self) -> Optional[Recording]:
         return self._active_recording
 
+    def current_device_ids(self) -> dict[str, str]:
+        """The device id each track's capture thread is on now (for pre-selecting
+        the switch dropdown). Empty before the first session."""
+        return dict(self._track_device_ids)
+
     def set_live_sink(self, sink: Optional[Callable[[bytes, bytes, bytes], None]]) -> None:
         """Register (or clear with ``None``) the live-transcription tap. Safe at any time."""
         self._live_sink = sink
@@ -329,15 +335,13 @@ class LocalCaptureManager:
         campaign_slug: Optional[str],
         mic_device_id: str,
         system_device_id: str,
-        mic_name: str = "",
-        system_name: str = "",
         name: Optional[str] = None,
     ) -> Recording:
         """Create a Recording and start both capture threads and the tick thread.
 
-        ``mic_name``/``system_name`` are server-resolved device names (falling
-        back to the raw id). ``name`` is a free-text, display-only session
-        title; it never becomes a path.
+        ``name`` is a free-text, display-only session title; it never becomes a
+        path. The device ids are held in memory (``_track_device_ids``), not
+        stored.
         """
         if self._active_recording is not None and self._active_recording.status in ACTIVE_STATUSES:
             raise RuntimeError(f"Session {self._active_recording.id} is already active")
@@ -348,10 +352,6 @@ class LocalCaptureManager:
             campaign_slug=campaign_slug,
             data_dir=self._data_dir,
             source="local",
-            devices={
-                "mic": mic_name or mic_device_id,
-                "system": system_name or system_device_id,
-            },
             name=name,
         )
 
@@ -372,22 +372,13 @@ class LocalCaptureManager:
         # Published before any thread starts: a device that fails at once
         # calls _mark_degraded(), which needs the active recording.
         self._active_recording = recording
-        self._capture_threads = [
-            threading.Thread(
-                target=self._capture_loop,
-                args=("mic", mic_device_id, self._fifos["mic"]),
-                name=f"local-capture-mic-{recording.id[:8]}",
-                daemon=True,
-            ),
-            threading.Thread(
-                target=self._capture_loop,
-                args=("system", system_device_id, self._fifos["system"]),
-                name=f"local-capture-system-{recording.id[:8]}",
-                daemon=True,
-            ),
-        ]
-        for t in self._capture_threads:
-            t.start()
+        self._track_threads = {}
+        self._failed_tracks = set()
+        self._capture_events = {}
+        self._capture_threads = []
+        self._track_device_ids = {"mic": mic_device_id, "system": system_device_id}
+        for track, device_id in (("mic", mic_device_id), ("system", system_device_id)):
+            self._start_capture_thread(track, device_id)
 
         self._tick_thread = threading.Thread(
             target=self._tick_loop,
@@ -420,17 +411,92 @@ class LocalCaptureManager:
     # Capture threads -- fill FIFOs only, never write
     # ------------------------------------------------------------------
 
-    def _capture_loop(self, name: str, device_id: str, fifo: "_ByteFifo") -> None:
+    def _start_capture_thread(
+        self, track: str, device_id: str, event: Optional[threading.Event] = None
+    ) -> threading.Thread:
+        """Start one track's capture thread; returns it and records the state.
+
+        The thread checks its own `event` (never the shared `_stop_event`)
+        before every push, so a `switch_device()` retires the old thread
+        without stopping the session.
+        """
+        if event is None:
+            event = threading.Event()
+        self._capture_events[track] = event
+        self._failed_tracks.discard(track)
+        thread = threading.Thread(
+            target=self._capture_loop,
+            args=(track, device_id, self._fifos[track], event),
+            name=f"local-capture-{track}-{self._active_recording.id[:8]}",
+            daemon=True,
+        )
+        self._track_threads[track] = thread
+        self._track_device_ids[track] = device_id
+        thread.start()
+        # Keep the legacy list in sync (tests and stop_session() join it).
+        self._capture_threads = list(self._track_threads.values())
+        return thread
+
+    def switch_device(self, track: str, device_id: str) -> None:
+        """Restart one track's capture thread on ``device_id``; blocking.
+
+        Only that track is disturbed -- segments, the combined track, the
+        live transcript, and the ``Recording`` continue. The old thread is
+        retired with its own stop event (checked before every FIFO push), so
+        it can never push after the switch even if ``record()`` is mid-block;
+        it is joined with a short timeout. A session that went ``degraded``
+        because this track's device died returns to ``recording``. Call off
+        the request thread (see routes/record.py).
+        """
+        if track not in _TRACKS:
+            raise ValueError(f"unknown track {track!r}")
+        recording = self._active_recording
+        if recording is None or recording.status not in ACTIVE_STATUSES:
+            raise RuntimeError("no active session")
+
+        old_event = self._capture_events.get(track)
+        old_thread = self._track_threads.get(track)
+        if old_event is not None:
+            old_event.set()
+        if old_thread is not None:
+            old_thread.join(timeout=2.0)
+
+        self._start_capture_thread(track, device_id)
+
+        # Recover a track-killed session, but only once no track is still
+        # failed: switching the healthy track leaves the dead one dead. Via the targeted writer (a full-object save is off-limits
+        # during capture).
+        if recording.status == "degraded" and not self._failed_tracks:
+            recording.status = "recording"
+            try:
+                update_recording_status(recording.id, "recording", self._data_dir)
+            except Exception:
+                log.warning("Failed to return recording %s to recording",
+                            recording.id, exc_info=True)
+        log.info("Switched %s capture to device %s on recording %s",
+                 track, device_id, recording.id)
+
+    def _capture_loop(
+        self, track: str, device_id: str, fifo: "_ByteFifo", event: threading.Event
+    ) -> None:
         try:
             for block, samplerate in self._capture_factory(device_id, _DEFAULT_CAPTURE_SAMPLERATE):
-                if self._stop_event.is_set():
+                if self._stop_event.is_set() or event.is_set():
                     return
                 pcm = resample_to_16k_mono(np.asarray(block), samplerate)
                 if pcm:
+                    # Re-check right before the push: a switch that lands
+                    # between the check above and here must still keep the
+                    # old thread out of the FIFO.
+                    if event.is_set() or self._stop_event.is_set():
+                        return
                     fifo.push(pcm)
         except Exception:
-            log.exception("Local capture thread %r failed", name)
-            self._mark_degraded()
+            log.exception("Local capture thread %r failed", track)
+            # Don't degrade a track that a switch already retired.
+            if not event.is_set() and not self._stop_event.is_set():
+                self._failed_tracks.add(track)
+                self._mark_degraded()
 
     def _mark_degraded(self) -> None:
         """Mark the session degraded when a capture thread dies (e.g. device unplugged).

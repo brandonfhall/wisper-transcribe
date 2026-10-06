@@ -1,8 +1,8 @@
 """Recording manager — Discord and local recording sessions.
 
-Data lives in ``wisper.db`` (``recordings`` plus the ``recording_discord`` /
-``recording_devices`` subtypes, ``recording_speakers``, ``recording_segments``,
-``recording_markers``, ``recording_rejoins``). Audio stays on disk in a fixed
+Data lives in ``wisper.db`` (``recordings`` plus the ``recording_discord``
+subtype, ``recording_speakers``, ``recording_segments``, ``recording_markers``,
+``recording_rejoins``). Audio stays on disk in a fixed
 layout under ``$DATA_DIR/recordings/<id>/``:
 
     per-user/<track>/NNNN.wav   60 s segments per Discord user id, or mic/system
@@ -164,7 +164,6 @@ def _load(conn: sqlite3.Connection, data_dir: Optional[Path],
             out.setdefault(row["recording_id"], []).append(row)
         return out
 
-    devices = _children("SELECT * FROM recording_devices WHERE recording_id IN ({marks})")
     speakers = _children(
         "SELECT s.recording_id, s.discord_user_id, p.key FROM recording_speakers s "
         "LEFT JOIN profiles p ON p.id = s.profile_id WHERE s.recording_id IN ({marks}) "
@@ -221,7 +220,6 @@ def _load(conn: sqlite3.Connection, data_dir: Optional[Path],
             unbound_speakers=[s["discord_user_id"] for s in spk if s["key"] is None],
             job_id=r["latest_job_id"],
             source=r["source"],
-            devices={d["role"]: d["device_name"] for d in devices.get(rid, [])},
             name=r["name"],
             markers=[
                 Marker(timestamp=_dt(m["marked_at"]),
@@ -356,14 +354,6 @@ def save_recording(recording: Recording, data_dir: Optional[Path] = None) -> Non
                 )
             for attempt in rec.rejoin_log:
                 _insert_rejoin(conn, rec.id, attempt)
-        else:
-            conn.execute("DELETE FROM recording_devices WHERE recording_id = ?", (rec.id,))
-            for role, name in (rec.devices or {}).items():
-                if role in ("mic", "system") and name:
-                    conn.execute(
-                        "INSERT INTO recording_devices (recording_id, role, device_name) VALUES (?, ?, ?)",
-                        (rec.id, role, str(name)),
-                    )
         for seg in rec.segment_manifest:
             _insert_segment(conn, rec.id, seg)
         for marker in rec.markers:
@@ -403,16 +393,15 @@ def create_recording(
     campaign_slug: Optional[str] = None,
     data_dir: Optional[Path] = None,
     source: str = "discord",
-    devices: Optional[dict] = None,
     name: Optional[str] = None,
 ) -> Recording:
     """Create and persist a new Recording in 'recording' status.
 
-    `source`/`devices` back local capture sessions (`web/local_capture.py`):
-    `voice_channel_id`/`guild_id` are empty strings there, and `devices`
-    carries the chosen mic/system device names for the detail page.
+    `source` backs local capture sessions (`web/local_capture.py`):
+    `voice_channel_id`/`guild_id` are empty strings there.
     `name` is an optional user-supplied session title, set at session
-    start -- display-only, never used in a file path.
+    start -- display-only, never used in a file path. Device names are not
+    stored; capture threads hold device ids in memory.
     """
     recording_id = str(uuid.uuid4())
     recording = Recording(
@@ -430,7 +419,6 @@ def create_recording(
         transcript_path=None,
         rejoin_log=[],
         source=source,
-        devices=devices or {},
         name=name,
     )
     save_recording(recording, data_dir)

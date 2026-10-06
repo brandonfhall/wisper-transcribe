@@ -185,6 +185,27 @@ def test_channels_invalid_token_returns_error(client):
     assert resp.json()["guilds"] == []
 
 
+def test_record_page_renders_channel_picker_and_fallback_inputs(client):
+    """The Record page's Discord form renders the guild/voice-channel picker
+    (filled from /api/record/channels by inline JS) while keeping the raw-ID
+    inputs the picker writes into, so the start route is unchanged even with
+    no token configured (the picker's no-token path falls back to them)."""
+    c, _ = client
+    resp = c.get("/record")
+    assert resp.status_code == 200
+    # Picker container + selects.
+    assert 'id="discord-picker"' in resp.text
+    assert 'id="discord-guild-select"' in resp.text
+    assert 'id="discord-channel-select"' in resp.text
+    # Raw-ID fallback: the actual form fields, and the toggle.
+    assert 'id="discord-manual-ids"' in resp.text
+    assert 'id="discord-manual-toggle"' in resp.text
+    assert 'name="guild_id"' in resp.text
+    assert 'name="voice_channel_id"' in resp.text
+    # Populated from the existing channels API.
+    assert "/api/record/channels" in resp.text
+
+
 # ---------------------------------------------------------------------------
 # Live local recording — device enumeration, start/stop-local,
 # cross-manager (Discord vs local) mutual exclusion
@@ -268,7 +289,7 @@ def test_start_local_success_creates_local_recording(client):
         data = resp.json()
         assert data["status"] == "recording"
         assert data["source"] == "local"
-        assert data["devices"] == {"mic": "Built-in Microphone", "system": "Speakers (loopback)"}
+        assert "devices" not in data
     finally:
         mgr.stop_session()
 
@@ -507,6 +528,89 @@ def test_devices_endpoint_missing_id_field_returns_400(client):
     assert resp.status_code == 400
 
 
+# ---------------------------------------------------------------------------
+# POST /api/record/switch-device
+# ---------------------------------------------------------------------------
+
+def _switch_devices():
+    return {
+        "microphones": [{"id": "mic1", "name": "Mic"}, {"id": "mic2", "name": "USB Mic"}],
+        "loopbacks": [{"id": "loop1", "name": "Loop"}, {"id": "loop2", "name": "Speakers B"}],
+        "available": True,
+    }
+
+
+def test_switch_device_requires_an_active_local_session(client):
+    c, data_dir = client
+    c.app.state.local_capture_manager = _scripted_local_capture_manager(data_dir)
+    with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=_switch_devices()):
+        resp = c.post("/api/record/switch-device", json={"track": "mic", "device_id": "mic2"})
+    assert resp.status_code == 400
+
+
+def test_switch_device_rejects_an_unknown_device_id(client):
+    c, data_dir = client
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=_switch_devices()):
+            c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
+            resp = c.post("/api/record/switch-device",
+                          json={"track": "mic", "device_id": "not-a-device"})
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "unknown device"
+    finally:
+        mgr.stop_session()
+
+
+def test_switch_device_rejects_an_invalid_track(client):
+    c, data_dir = client
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=_switch_devices()):
+            c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
+            resp = c.post("/api/record/switch-device",
+                          json={"track": "webcam", "device_id": "mic2"})
+        assert resp.status_code == 400
+    finally:
+        mgr.stop_session()
+
+
+def test_switch_device_rejects_a_discord_session(client):
+    """A Discord session has no local tracks to switch."""
+    c, data_dir = client
+    from wisper_transcribe.recording_manager import create_recording
+
+    rec = create_recording("VC1", "G1", data_dir=data_dir, source="discord")
+
+    class _FakeBotManager:
+        active_recording = rec
+
+    c.app.state.bot_manager = _FakeBotManager()
+    resp = c.post("/api/record/switch-device", json={"track": "mic", "device_id": "mic2"})
+    # The local manager has no active session, so the route never matches.
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "no active local session"
+
+
+def test_switch_device_switches_and_keeps_the_session_recording(client):
+    c, data_dir = client
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=_switch_devices()):
+            c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
+            resp = c.post("/api/record/switch-device",
+                          json={"track": "mic", "device_id": "mic2"})
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "recording"
+        assert mgr.current_device_ids()["mic"] == "mic2"
+    finally:
+        mgr.stop_session()
+
+
+
 def test_cross_manager_local_active_blocks_discord_start(client):
     """A live local session must 409 an attempt to start a Discord session,
     and vice versa (mutual exclusion across managers)."""
@@ -613,6 +717,40 @@ def test_record_page_shows_local_active_session(client):
 class _FakeBotManagerWithActiveRecording:
     def __init__(self, recording):
         self.active_recording = recording
+
+
+def test_record_page_shows_switch_device_panel_for_local_session(client):
+    """The active local-session panel offers a per-track device switch, with
+    the track's current device pre-selected."""
+    c, data_dir = client
+    fake_result = _switch_devices()
+    mgr = _scripted_local_capture_manager(data_dir)
+    c.app.state.local_capture_manager = mgr
+    try:
+        with patch("wisper_transcribe.web.routes.record.enumerate_devices", return_value=fake_result):
+            c.post("/api/record/start-local", json={"mic_id": "mic1", "system_id": "loop1"})
+            resp = c.get("/record")
+        assert resp.status_code == 200
+        assert 'id="switch-select-mic"' in resp.text
+        assert 'id="switch-select-system"' in resp.text
+        assert 'id="switch-device-btn"' in resp.text
+        assert '<option value="mic1" selected>Mic</option>' in resp.text
+        assert '<option value="loop1" selected>Loop</option>' in resp.text
+    finally:
+        mgr.stop_session()
+
+
+def test_record_page_hides_switch_device_panel_for_discord_session(client):
+    c, data_dir = client
+    from wisper_transcribe.recording_manager import create_recording
+
+    rec = create_recording("VC1", "G1", data_dir=data_dir, source="discord")
+    c.app.state.bot_manager = _FakeBotManagerWithActiveRecording(rec)
+
+    resp = c.get("/record")
+    assert resp.status_code == 200
+    assert 'id="switch-select-mic"' not in resp.text
+    assert "Switch device" not in resp.text
 
 
 def test_record_page_hides_speaker_meters_for_local_session(client):
@@ -819,27 +957,25 @@ def test_recordings_list_shows_local_badge(client):
 
     c, data_dir = client
     create_recording(
-        voice_channel_id="", guild_id="", data_dir=data_dir,
-        source="local", devices={"mic": "Mic", "system": "Speakers"},
+        voice_channel_id="", guild_id="", data_dir=data_dir, source="local",
     )
     resp = c.get("/recordings")
     assert resp.status_code == 200
     assert "LOCAL" in resp.text
 
 
-def test_recording_detail_shows_local_device_names(client):
+def test_recording_detail_shows_local_badge_not_device_names(client):
+    """The detail page marks a local session but no longer shows device names
+    (schema v13)."""
     from wisper_transcribe.recording_manager import create_recording
 
     c, data_dir = client
-    rec = create_recording(
-        voice_channel_id="", guild_id="", data_dir=data_dir,
-        source="local", devices={"mic": "Built-in Microphone", "system": "Speakers (loopback)"},
-    )
+    rec = create_recording(voice_channel_id="", guild_id="", data_dir=data_dir, source="local")
     resp = c.get(f"/recordings/{rec.id}")
     assert resp.status_code == 200
-    assert "Built-in Microphone" in resp.text
-    assert "Speakers (loopback)" in resp.text
     assert "LOCAL" in resp.text
+    assert "mic:" not in resp.text
+    assert "sys:" not in resp.text
 
 
 def test_recording_detail_shows_live_pane_for_active_local_session(client):

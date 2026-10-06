@@ -44,7 +44,6 @@ def _make_recording(tmp_path: Path, **kwargs):
         campaign_slug=kwargs.get("campaign_slug"),
         data_dir=tmp_path,
         source=kwargs.get("source", "discord"),
-        devices=kwargs.get("devices"),
         name=kwargs.get("name"),
     )
 
@@ -80,15 +79,14 @@ def test_load_save_roundtrip(tmp_path):
     assert r.name == "Session 14 — the ambush"
     assert r.started_at == rec.started_at  # microseconds and timezone survive
     assert r.per_user_dir == tmp_path / "recordings" / rec.id / "per-user"
-    assert r.combined_path is None and r.markers == [] and r.devices == {}
+    assert r.combined_path is None and r.markers == []
 
 
-def test_local_source_and_devices_roundtrip(tmp_path):
-    rec = _make_recording(tmp_path, source="local", voice_channel_id="", guild_id="",
-                          devices={"mic": "USB Mic", "system": "BlackHole 2ch"})
+def test_local_source_roundtrip(tmp_path):
+    rec = _make_recording(tmp_path, source="local", voice_channel_id="", guild_id="")
     r = load_recordings(tmp_path)[rec.id]
     assert r.source == "local"
-    assert r.devices == {"mic": "USB Mic", "system": "BlackHole 2ch"}
+    assert r.voice_channel_id == "" and r.guild_id == ""
 
 
 def test_create_recording_generates_uuid(tmp_path):
@@ -319,8 +317,6 @@ def test_subtype_constraints(tmp_path):
     bad = [
         ("INSERT INTO recording_discord (recording_id, guild_id, voice_channel_id) VALUES (?, 'g', 'c')",
          local.id),
-        ("INSERT INTO recording_devices (recording_id, role, device_name) VALUES (?, 'mic', 'x')",
-         discord.id),
         ("INSERT INTO recording_speakers (recording_id, discord_user_id) VALUES (?, '1')", local.id),
         ("INSERT INTO recording_rejoins (recording_id, attempted_at, close_code, attempt_number) "
          "VALUES (?, 'x', 1, 1)", local.id),

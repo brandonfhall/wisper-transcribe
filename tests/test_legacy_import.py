@@ -465,7 +465,7 @@ def test_recording_dirty_fields_repaired_and_reported(data_dir, tmp_path):
     write_speakers(data_dir, {"alice": {}}, {"alice": _vec(1, 0)})
     write_recording(data_dir, RID, campaign_slug="gone", discord_speakers={"111": "deleted_profile"},
                     transcript_path=str(tmp_path / "elsewhere" / "x.md"))
-    write_recording(data_dir, RID2, source="local", devices={"mic": "USB Mic", "bogus": "x"},
+    write_recording(data_dir, RID2, source="local",
                     discord_speakers={"111": ""},
                     segment_manifest=[{"index": 0, "stream": "444", "started_at": "2026-03-01T19:00:00.000000+0000",
                                        "duration_s": 1.0, "path": "/tmp/0000.wav", "finalized": True}])
@@ -473,7 +473,6 @@ def test_recording_dirty_fields_repaired_and_reported(data_dir, tmp_path):
     assert recs[RID].campaign_slug is None
     assert recs[RID].unbound_speakers == ["111"]
     assert recs[RID].transcript_path is None
-    assert recs[RID2].devices == {"mic": "USB Mic"}
     assert recs[RID2].discord_speakers == {} and recs[RID2].segment_manifest == []
     report = _v4_report(data_dir)
     for fragment in ("no longer exists", "missing profile", "outside the transcripts folder",

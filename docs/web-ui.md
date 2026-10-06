@@ -147,6 +147,7 @@ Only one recording — Discord or local — can run at a time.
 The bot joins a voice channel, records each participant on their own track plus a mixed track, and hands the result to the normal transcription pipeline. Setup (bot token, invite, Java 25) is in [docker.md](docker.md#discord-recording-bot).
 
 - Save a guild/channel pair as a preset from the Record page.
+- Pick the server and voice channel from dropdowns (fetched from Discord); the raw guild/channel IDs remain available behind **Enter IDs manually**, and are used automatically if the channel list can't be fetched (`no_token` sends you to the Config page).
 - The Record page shows who is talking in real time.
 
 **Auto-enrollment:** Discord users not yet bound to a campaign member are listed under "Unknown Speakers" on the recording's detail page. Enter a name and click **Enroll** to create a profile from their track; the Discord ID is then bound in the campaign roster, so future sessions tag them automatically.
@@ -166,6 +167,7 @@ While recording:
 
 - **Live preview** — lines appear a few seconds after each pause, labelled **You** (mic) or **Other** (system audio) by whichever track is louder. It is a draft, not diarization: several people on the system side all appear as "Other".
 - **Noise floor** slider and **level gauges** — audio below the floor is ignored, so room noise isn't transcribed as speech. A gauge turns green when its level clears the floor. Changes apply immediately.
+- **Switch device** — change the microphone or system-audio device without stopping: pick it in the active-session panel's **Switch device** card and click **Switch**. The session keeps recording (segments, mix, and live transcript continue) with a brief gap on the switched track. If a track's device died and left the session **DEGRADED**, switching that track back to a working device returns it to **RECORDING**.
 - **Add marker** — bookmarks the current moment; markers are listed on the recording's detail page.
 
 On CPU-only machines, use `base` or `small` so the preview keeps up.

@@ -37,7 +37,6 @@ def conn():
           VALUES ('{R}', 'discord', 'completed', 'now', 1, 3),
                  ('{L}', 'local', 'recording', 'now', NULL, NULL);
         INSERT INTO recording_discord (recording_id, guild_id, voice_channel_id) VALUES ('{R}', 'g', 'v');
-        INSERT INTO recording_devices (recording_id, role, device_name) VALUES ('{L}', 'mic', 'Mic');
         INSERT INTO recording_speakers (recording_id, discord_user_id, profile_id) VALUES ('{R}', '111', 1);
         INSERT INTO recording_segments (recording_id, idx, started_at, duration_s, finalized)
           VALUES ('{R}', 0, 'now', 1.0, 1);
@@ -155,9 +154,6 @@ VIOLATIONS = {
     # subtypes
     "discord row on a local recording": f"INSERT INTO recording_discord (recording_id, guild_id, voice_channel_id) "
                                         f"VALUES ('{L}', 'g', 'v')",
-    "device row on a discord recording": f"INSERT INTO recording_devices (recording_id, role, device_name) "
-                                         f"VALUES ('{R}', 'mic', 'Mic')",
-    "device role enum": f"INSERT INTO recording_devices (recording_id, role, device_name) VALUES ('{L}', 'aux', 'X')",
     "discord subtype source pinned": f"UPDATE recording_discord SET source = 'local' WHERE recording_id = '{R}'",
     "speaker on a local recording": f"INSERT INTO recording_speakers (recording_id, discord_user_id) "
                                     f"VALUES ('{L}', '222')",
@@ -360,7 +356,8 @@ def test_recording_delete_cascades_to_every_child(conn):
     assert _one(conn, f"SELECT recording_id FROM jobs WHERE id = '{J}'") is None
     assert _one(conn, "SELECT count(*) FROM files WHERE recording_id IS NOT NULL") == 0
     conn.execute(f"DELETE FROM recordings WHERE id = '{L}'")
-    assert _one(conn, "SELECT count(*) FROM recording_devices") == 0
+    # v13: device names are no longer stored.
+    assert _one(conn, "SELECT count(*) FROM sqlite_master WHERE name = 'recording_devices'") == 0
 
 
 def _file_count(conn, column, value):
