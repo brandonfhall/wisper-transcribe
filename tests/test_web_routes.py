@@ -2635,7 +2635,26 @@ def test_campaign_digest_view_and_download(client, tmp_path, monkeypatch):
 
     dl = client.get(f"/campaigns/my-game/summaries/{digest.file_id}/download")
     assert dl.status_code == 200
-    assert 'filename="My Game Combined Summary.md"' in dl.headers["content-disposition"]
+    assert "filename*=UTF-8''My%20Game%20Combined%20Summary.md" in dl.headers["content-disposition"]
+
+
+def test_campaign_recap_download_survives_a_non_latin1_name(client, tmp_path, monkeypatch):
+    """Recap names carry an em dash, which a latin-1 header can't hold."""
+    out, cd = _digest_game(tmp_path, monkeypatch)
+
+    class _Client:
+        provider, model = "fake", "m"
+
+        def complete(self, system, user):
+            return "Last time, the heroes gathered."
+
+    cd.generate_recap("my-game", _Client(), {}, sessions=1)
+    recap = cd.list_recaps("my-game")[0]
+    dl = client.get(f"/campaigns/my-game/summaries/{recap.file_id}/download")
+    assert dl.status_code == 200
+    disposition = dl.headers["content-disposition"]
+    assert 'filename="my-game-recap-' in disposition
+    assert "filename*=UTF-8''My%20Game%20Recap%20%E2%80%94%20s2.md" in disposition
 
 
 def test_campaign_digest_of_another_campaign_is_denied(client, tmp_path, monkeypatch):

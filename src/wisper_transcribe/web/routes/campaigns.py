@@ -569,11 +569,16 @@ async def campaign_digest_download(slug: str, file_id: int) -> Response:
     digest = digest_for_file(safe, file_id)
     if digest is None or not digest.path.exists():
         return HTMLResponse(content="Summary not found", status_code=404)
+    # Header values are latin-1, and recap names carry an em dash (and display
+    # names can be anything): an ASCII fallback from the db slug and id, plus
+    # the real name as RFC 5987 filename*.
+    from urllib.parse import quote
+    fallback = f"{campaign.slug}-{digest.kind.replace('_', '-')}-{file_id}.md"
     return Response(
         content=digest.path.read_text(encoding="utf-8"),
         media_type="text/markdown; charset=utf-8",
-        # campaign.slug comes from the database, not the URL.
-        headers={"Content-Disposition": f'attachment; filename="{digest.path.name}"'},
+        headers={"Content-Disposition":
+                 f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(digest.path.name)}"},
     )
 
 
