@@ -72,6 +72,11 @@ python scripts/alignment_eval.py run <audio> --start <s> --duration 180 --out al
 python scripts/alignment_eval.py audit|sheet alignment-eval/<name>
 python scripts/alignment_eval.py score alignment-eval/*/
 # Re-run before changing the aligner, smoothing thresholds, or the forced_alignment default
+
+# Measure live per-speaker labeling offline (output: live-diarization-eval/, gitignored)
+python scripts/live_diarization_eval.py run <transcript-id-or-stem> --threshold 0.55
+python scripts/live_diarization_eval.py score live-diarization-eval/*/
+# Re-run before changing the live voice-pool threshold or embedding model
 ```
 
 ---

@@ -57,7 +57,7 @@ Design in `architecture.md`. Open items:
 ### Research (approved 2026-10-06, no product change yet)
 
 **4. Per-speaker labels on the live system track.** Today the system track is one RMS-attributed "Other": OS loopback is already mixed. Candidate design: for each committed system-track utterance, compute a WeSpeaker embedding (`speaker_manager.extract_embedding`), match it against a per-session pool of voices (cosine, the 0.55 threshold), and match pool voices to the campaign's enrolled profiles so lines read "Alice" instead of "Other". The final transcript stays the full pyannote pass after Stop; live labels are best-effort.
-- First step is an offline harness, `scripts/live_diarization_eval.py`: replay a recorded `combined.flac` (or a transcript's audio) in live-sized utterances using the transcript's diarization as ground truth, and report per-utterance latency, label accuracy against the final diarization, and how often an utterance spans two speakers. Decide on building it from those numbers.
+- First step is an offline harness, `scripts/live_diarization_eval.py`: replay a recorded `combined.flac` (or a transcript's audio) in live-sized utterances using the transcript's diarization as ground truth, and report per-utterance latency, label accuracy against the final diarization, and how often an utterance spans two speakers. Decide on building it from those numbers. Harness built: `scripts/live_diarization_eval.py`; next: run it on real sessions and decide.
 
 ### Parked
 
