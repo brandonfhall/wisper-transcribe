@@ -174,33 +174,20 @@ def _best_mapping(pair_seconds: dict[int, dict[str, float]]) -> dict[int, str]:
     """One-to-one voice->speaker map maximizing the utterance-seconds it explains.
 
     ``pair_seconds[voice][speaker]`` is how many seconds that voice's utterances
-    actually sit under that true speaker. Any voice may be paired with any
-    speaker or left unassigned; every assignment is tried exactly (pool and
-    speaker counts are small). Returns ``voice_id -> speaker``; unmapped voices
-    are absent from the result.
+    actually sit under that true speaker. Solved as an assignment problem
+    (scipy's Hungarian solver): the pool can grow to hundreds of voices when
+    utterance embeddings disagree, which an exhaustive search can't handle.
+    Returns ``voice_id -> speaker``; voices left unpaired are absent.
     """
-    ids = sorted(pair_seconds, key=lambda i: -sum(pair_seconds[i].values()))
-    best: tuple[float, dict[int, str]] = (-1.0, {})
+    from scipy.optimize import linear_sum_assignment
 
-    def walk(i: int, used: frozenset, chosen: dict[int, str], score: float) -> None:
-        nonlocal best
-        if i == len(ids):
-            if score > best[0]:
-                best = (score, dict(chosen))
-            return
-        if score + sum(sum(pair_seconds[j].values()) for j in ids[i:]) <= best[0]:
-            return  # cannot beat the incumbent
-        vid = ids[i]
-        for speaker, seconds in pair_seconds[vid].items():
-            if speaker in used:
-                continue
-            chosen[vid] = speaker
-            walk(i + 1, used | {speaker}, chosen, score + seconds)
-        chosen.pop(vid, None)
-        walk(i + 1, used, chosen, score)  # leave this voice unassigned
-
-    walk(0, frozenset(), {}, 0.0)
-    return best[1]
+    voices = sorted(pair_seconds)
+    speakers = sorted({sp for row in pair_seconds.values() for sp in row})
+    if not voices or not speakers:
+        return {}
+    gain = np.array([[pair_seconds[v].get(sp, 0.0) for sp in speakers] for v in voices])
+    rows, cols = linear_sum_assignment(gain, maximize=True)
+    return {voices[r]: speakers[c] for r, c in zip(rows, cols) if gain[r, c] > 0}
 
 
 def _report_accuracy(windows: list[tuple[float, float]],
@@ -224,36 +211,46 @@ def _report_accuracy(windows: list[tuple[float, float]],
 
 def _evaluate(windows: list[tuple[float, float]],
               segments: list[DiarizationSegment],
-              embed, threshold: float) -> tuple[dict, VoicePool, dict[int, str], list[int]]:
+              embed, threshold: float) -> tuple[dict, VoicePool, dict[int, str], list[int], list[tuple[float, float]]]:
     """Replay the windows: embed each, assign it online, and score the labels.
 
     ``embed(start, end)`` returns one unit embedding for that window (patched in
-    tests). Returns ``(report, pool, mapping, labels)`` where mapping is the best
-    one-to-one voice -> true-speaker assignment and labels is each utterance's
-    pool id.
+    tests). Returns ``(report, pool, mapping, labels, windows)`` where mapping is
+    the best one-to-one voice -> true-speaker assignment, labels is each kept
+    utterance's pool id, and windows are the utterances that embedded (failed
+    ones are skipped and counted).
     """
     coverage = _coverage_by_speaker(segments)
     pool = VoicePool(threshold)
     latencies: list[float] = []
     labels: list[int] = []
+    kept: list[tuple[float, float]] = []
+    failures = 0
     for start, end in windows:
         t0 = time.monotonic()
         try:
             embedding = embed(start, end)
         except InterruptedError:
-            raise  # Stop: not one failed utterance
+            raise
         except Exception:
-            # A sub-100 ms excerpt can fail extraction; treat it as no voice
-            # (a zero vector opens a new pool entry rather than stealing one).
-            embedding = np.zeros(pool.centroids[0].size if pool.centroids else 256, dtype=np.float32)
+            # Skip the utterance (a very short excerpt can fail extraction),
+            # but count it: if many fail, the numbers would describe the
+            # failures, not the voices, so stop.
+            failures += 1
+            if failures > max(3, 0.05 * len(windows)):
+                raise
+            continue
         latencies.append(time.monotonic() - t0)
         labels.append(pool.assign(embedding))
+        kept.append((start, end))
+    windows = kept
 
     accuracy, mapping = _report_accuracy(windows, coverage, pool, labels)
     arr = np.asarray(latencies)
     report = {
         "meta": {
             "utterances": len(windows),
+            "failed_utterances": failures,
             "ground_truth_speakers": len(coverage),
             "threshold": threshold,
             "embedding_dim": int(pool.centroids[0].size) if pool.centroids else 0,
@@ -273,7 +270,7 @@ def _evaluate(windows: list[tuple[float, float]],
             for i in range(len(pool.centroids))
         ],
     }
-    return report, pool, mapping, labels
+    return report, pool, mapping, labels, windows
 
 
 def _profile_match(pool: VoicePool, threshold: float) -> tuple[dict[int, str], bool]:
@@ -329,6 +326,10 @@ def cmd_run(args) -> None:
         sys.exit(f"{loc.stem}: no audio found next to the transcript")
 
     device = get_device() if args.device == "auto" else args.device
+    # extract_embedding reads WAV only (stored audio is FLAC): convert once.
+    from wisper_transcribe.audio_utils import convert_to_wav
+    source = audio
+    audio = convert_to_wav(source)
     max_s = args.max_utterance_s or DEFAULT_MAX_UTTERANCE_S
     windows = _utterances(segments, max_s)
     out = Path(args.out) if args.out else Path("live-diarization-eval") / loc.stem
@@ -341,9 +342,13 @@ def cmd_run(args) -> None:
         one = [DiarizationSegment(start, end, "UTT")]
         return speaker_manager.extract_embedding(audio, one, "UTT", device)
 
-    report, pool, mapping, labels = _evaluate(windows, segments, embed, args.threshold)
+    try:
+        report, pool, mapping, labels, windows = _evaluate(windows, segments, embed, args.threshold)
+    finally:
+        if audio != source:
+            audio.unlink(missing_ok=True)
     report["meta"].update({
-        "transcript": loc.stem, "transcript_id": loc.id, "audio": str(audio),
+        "transcript": loc.stem, "transcript_id": loc.id, "audio": str(source),
         "device": device, "max_utterance_s": max_s,
         "default_max_utterance_s": DEFAULT_MAX_UTTERANCE_S,
     })

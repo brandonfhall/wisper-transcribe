@@ -85,7 +85,7 @@ def test_evaluate_scores_labels_and_overlap():
     def embed(start, end):
         return A if start < 4.0 else B
 
-    report, pool, mapping, labels = lde._evaluate(windows, segs, embed, 0.55)
+    report, pool, mapping, labels, _windows = lde._evaluate(windows, segs, embed, 0.55)
     assert len(pool.centroids) == 2
     assert labels == [0, 1]
     assert mapping == {0: "A", 1: "B"}
@@ -177,7 +177,10 @@ def test_cmd_run_writes_report_json(tmp_path, capsys):
 
     args = SimpleNamespace(transcript=stem, threshold=0.55, max_utterance_s=None,
                            out=str(tmp_path / "run"), device="cpu")
+    wav = out_dir / "converted.wav"
+    wav.write_bytes(b"RIFF")
     with patch.object(lde.speaker_manager, "extract_embedding", side_effect=fake_extract), \
+            patch("wisper_transcribe.audio_utils.convert_to_wav", return_value=wav), \
             patch.object(lde.speaker_manager, "load_profiles", return_value={}), \
             patch("wisper_transcribe.config.get_device", return_value="cpu"):
         lde.cmd_run(args)
@@ -190,3 +193,34 @@ def test_cmd_run_writes_report_json(tmp_path, capsys):
     assert report["label_accuracy"] == pytest.approx(1.0)
     assert set(report["latency_s"]) == {"mean", "p50", "p95", "max"}
     assert report["profiles_enrolled"] is False
+
+
+def test_widespread_extraction_failure_stops_the_run():
+    """If most utterances fail to embed, the report would describe the
+    failures, not the voices (e.g. FLAC passed where WAV is required): stop."""
+    import pytest
+
+    segs = [DiarizationSegment(float(i), float(i) + 1.0, "A") for i in range(40)]
+    windows = [(s.start, s.end) for s in segs]
+
+    def broken(start, end):
+        raise ValueError("File format b'fLaC' not understood")
+
+    with pytest.raises(ValueError, match="fLaC"):
+        lde._evaluate(windows, segs, broken, 0.55)
+
+
+def test_an_occasional_failure_is_skipped_and_counted():
+    segs = [DiarizationSegment(float(i), float(i) + 1.0, "A") for i in range(40)]
+    windows = [(s.start, s.end) for s in segs]
+    vec = np.ones(4, dtype=np.float32) / 2.0
+
+    def flaky(start, end):
+        if start == 7.0:
+            raise ValueError("too short")
+        return vec
+
+    report, pool, mapping, labels, kept = lde._evaluate(windows, segs, flaky, 0.55)
+    assert report["meta"]["failed_utterances"] == 1
+    assert len(kept) == len(labels) == 39
+    assert report["pool_voices"] == 1
