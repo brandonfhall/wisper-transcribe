@@ -483,6 +483,24 @@ def test_output_guard_skips_inspection_commands(monkeypatch, tmp_path):
     db.connect(migrate_schema=False, claim_runtime=False).close()
 
 
+def test_output_guard_refuses_before_a_cli_command_creates_the_folder(monkeypatch, tmp_path):
+    """A refused CLI run leaves the disk untouched.
+
+    ``wisper transcripts list`` used to mkdir the configured output root
+    before ``db.connect()`` ran the guard, so an unmerged build created an
+    empty ``~/elsewhere`` even though it then refused.
+    """
+    from wisper_transcribe.cli import main
+
+    _guard_world(monkeypatch, tmp_path, "~/elsewhere")
+    outside = tmp_path / "home" / "elsewhere"
+
+    result = CliRunner().invoke(main, ["transcripts", "list"])
+
+    assert result.exit_code == 1
+    assert not outside.exists()
+
+
 def test_schema_frozen_on_main():
     """main must never ship SCHEMA_FROZEN = False (a branch-only escape hatch)."""
     base = os.environ.get("GITHUB_BASE_REF", "")

@@ -1463,14 +1463,17 @@ def transcripts():
 def transcripts_list(campaign: Optional[str]):
     """List transcripts, grouped by campaign."""
     from wisper_transcribe.campaign_manager import load_campaigns, _validate_campaign_slug
-    from wisper_transcribe.path_utils import get_output_dir
+    from wisper_transcribe.config import get_output_root
 
     if campaign:
         safe = _validate_campaign_slug(campaign)
         if safe is None:
             raise click.ClickException("Invalid campaign slug")
 
-    out_dir = get_output_dir()
+    # get_output_root(), not get_output_dir(): listing must not create the
+    # output root. An unmerged build's guard (db._check_output_env) refuses
+    # first, and a refused run must leave the disk untouched.
+    out_dir = get_output_root()
     from . import campaign_folders
     from .transcript_store import list_transcripts, reconcile
     campaign_folders.finish_pending_renames()  # before scanning the folders

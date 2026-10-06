@@ -79,8 +79,6 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 - Recording transcribe hand-off submits the `.flac` (`test_record_routes.py`); playback serves `audio/flac`; recover writes FLAC (`test_recording_manager.py:460-466,672-716`).
 - No real audio: FFmpeg mocked as today.
 
-- **Minor** (approved fix, Brandon 2026-10-05; not started): with an unfrozen schema and `WISPER_OUTPUT_DIR` unset, a CLI command creates the configured output folder (empty) before the dev guard refuses (`path_utils.get_output_dir` mkdir; guard at `db.py:1183`). The server path creates nothing. Fix before the FLAC branch, which runs unfrozen.
-
 ---
 
 ## Forced word alignment — follow-ups
