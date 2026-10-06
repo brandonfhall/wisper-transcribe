@@ -239,7 +239,7 @@ wisper campaigns reorder d-d-mondays s02 --down         # move a session one pos
 wisper campaigns reorder d-d-mondays --set "s01,s02,s03" # replace the whole order in one shot
 ```
 
-`delete` exits 1 and prints the sessions when any of them can't be deleted or moved (a file open in another program): the campaign is kept with what's left. Without `--delete-transcripts` its journal file and folder stay on disk; creating a campaign of that name again re-claims them.
+`delete` exits 1 and prints the sessions when any of them can't be deleted or moved (a file open in another program): the campaign is kept with what's left. Without `--delete-transcripts` the campaign's journal, combined summary, and recaps and its folder stay on disk; creating a campaign of that name again re-claims them.
 
 `rename` changes the display name, the slug, the campaign's folder on disk, and its journal file together. A rename that can't finish (a file open in another program) prints a notice and stays pending; `wisper campaigns show` reports `Rename pending → <folder>`, and the Transcripts page's Needs attention panel offers Retry.
 

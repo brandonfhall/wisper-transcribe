@@ -2696,6 +2696,35 @@ def test_campaign_page_disables_digest_buttons_without_summaries(client, tmp_pat
     assert "disabled" in resp.text
 
 
+def test_campaign_page_renders_after_reclaiming_the_kept_documents(client, tmp_path, monkeypatch):
+    """A re-claimed folder's files are registered but have no digest rows: the
+    page shows no generated summary and doesn't error."""
+    out, cd = _digest_game(tmp_path, monkeypatch)
+    from wisper_transcribe.campaign_manager import create_campaign, delete_campaign
+
+    class _Client:
+        provider, model = "fake", "m"
+
+        def complete(self, system, user):
+            return "Last time, the heroes gathered."
+
+    cd.generate_recap("my-game", _Client(), {}, sessions=1)
+    assert delete_campaign("my-game", data_dir=tmp_path).status == "deleted"
+    assert (out / "My Game" / "My Game Combined Summary.md").exists()
+
+    create_campaign("My Game", data_dir=tmp_path)
+    # One summarized session, so the summary panel renders (not the empty note).
+    _reg(out / "s3.md", "x")
+    (out / "s3.summary.md").write_text("A session happened.", encoding="utf-8")
+    _seed.move_to_campaign("s3", "my-game")
+
+    resp = client.get("/campaigns/my-game")
+    assert resp.status_code == 200
+    assert "No combined summary yet" in resp.text
+    assert "0 recaps" in resp.text
+    assert "View summary" not in resp.text
+
+
 def test_campaign_page_shows_combined_stale_notice(client, tmp_path, monkeypatch):
     out, cd = _digest_game(tmp_path, monkeypatch)
     assert 'data-testid="combined-stale"' not in client.get("/campaigns/my-game").text

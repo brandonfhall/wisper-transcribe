@@ -149,6 +149,49 @@ def test_check_available_reclaims_a_folder_holding_only_its_journal():
     assert cf.check_available("Hanataz") is None
 
 
+def test_check_available_reclaims_a_folder_holding_only_its_documents():
+    folder = get_output_root() / "hanataz"
+    folder.mkdir()
+    (folder / "hanataz Journal.md").write_text("---\ntype: campaign-journal\n---\n\nbody\n")
+    (folder / "hanataz Combined Summary.md").write_text("## The Story\n")
+    (folder / "hanataz Recap \u2014 s1.md").write_text("One.\n")
+    assert cf.check_available("Hanataz") is None
+
+
+def test_check_available_refuses_documents_plus_a_stray_file():
+    folder = get_output_root() / "hanataz"
+    folder.mkdir()
+    (folder / "hanataz Journal.md").write_text("---\ntype: campaign-journal\n---\n\nbody\n")
+    (folder / "hanataz Combined Summary.md").write_text("## The Story\n")
+    (folder / "notes.md").write_text("mine\n")
+    assert cf.check_available("Hanataz") == "folder_exists"
+
+
+def test_check_available_refuses_a_subfolder_beside_the_documents():
+    folder = get_output_root() / "hanataz"
+    folder.mkdir()
+    (folder / "hanataz Journal.md").write_text("---\ntype: campaign-journal\n---\n\nbody\n")
+    (folder / "recaps").mkdir()
+    assert cf.check_available("Hanataz") == "folder_exists"
+
+
+def test_check_available_refuses_an_empty_recap_stem():
+    """``Recap \u2014 .md`` (no stem) isn't a document wisper owns."""
+    folder = get_output_root() / "hanataz"
+    folder.mkdir()
+    (folder / "hanataz Journal.md").write_text("---\ntype: campaign-journal\n---\n\nbody\n")
+    (folder / "hanataz Recap \u2014 .md").write_text("x\n")
+    assert cf.check_available("Hanataz") == "folder_exists"
+
+
+def test_check_available_refuses_a_users_note_named_like_the_journal():
+    """A journal-named file that isn't wisper's journal keeps the folder taken."""
+    folder = get_output_root() / "hanataz"
+    folder.mkdir()
+    (folder / "hanataz Journal.md").write_text("my own notes\n")
+    assert cf.check_available("Hanataz") == "folder_exists"
+
+
 def test_check_available_refuses_an_empty_folder():
     (get_output_root() / "hanataz").mkdir()
     assert cf.check_available("Hanataz") == "folder_exists"

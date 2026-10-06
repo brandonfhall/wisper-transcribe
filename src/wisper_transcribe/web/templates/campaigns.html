@@ -380,12 +380,12 @@
           <form method="post" action="/campaigns/{{ slug }}/delete" style="display:flex;flex-direction:column;gap:8px;align-items:flex-start">
             <div class="mono-kicker">Delete campaign</div>
             <button type="submit" name="mode" value="keep" data-testid="delete-campaign-keep"
-                    onclick='return confirm({{ ("Delete campaign " ~ active_campaign.display_name ~ "? Its transcripts move to the output root and the journal file stays; the journal is listed under Needs attention.") | tojson }})'
+                    onclick='return confirm({{ ("Delete campaign " ~ active_campaign.display_name ~ "? Its transcripts move to the output root and its journal, combined summary, and recaps stay in its folder; they are listed under Needs attention.") | tojson }})'
                     style="background:none;border:none;color:var(--color-signal-rose);font-size:12px;font-family:var(--font-sans);cursor:pointer;padding:0">Delete campaign, keep the files</button>
             <button type="submit" name="mode" value="everything" data-testid="delete-campaign-everything"
                     onclick='return confirm({{ ("Delete campaign " ~ active_campaign.display_name ~ " and everything in it? " ~ (active_campaign.transcripts | length) ~ " session(s): " ~ (active_campaign.transcripts | join(", ")) ~ ". Every session .md file in the campaign's folder is one of these; all of them, with their audio and summaries, are deleted, along with the campaign's journal, combined summary, and recaps. This cannot be undone.") | tojson }})'
                     style="background:none;border:none;color:var(--color-signal-rose);font-size:12px;font-family:var(--font-sans);cursor:pointer;padding:0">Delete campaign and everything in it</button>
-            <div style="color:var(--color-paper-faint);font-size:11.5px;font-style:italic">The combined summary and recaps are removed with the campaign either way. If a session's file is open in another program, the campaign is kept until you retry.</div>
+            <div style="color:var(--color-paper-faint);font-size:11.5px;font-style:italic">Delete everything removes the combined summary and recaps with the campaign; keep the files leaves them in the folder, and re-creating the campaign re-claims them. If a session's file is open in another program, the campaign is kept until you retry.</div>
           </form>
         </div>
       </div>

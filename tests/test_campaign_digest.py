@@ -530,17 +530,21 @@ def test_campaign_delete_removes_both_outputs_and_their_rows(tmp_path, out_dir):
         assert conn.execute("SELECT count(*) FROM files WHERE campaign_id IS NOT NULL").fetchone()[0] == 0
 
 
-def test_campaign_delete_keep_files_still_removes_the_digests(tmp_path, out_dir):
-    """A keep-files delete removes the campaign's digests (they are campaign-specific)."""
+def test_campaign_delete_keep_files_keeps_the_digests_on_disk(tmp_path, out_dir):
+    """Keep the files leaves every document in the campaign folder, like the
+    journal; only the rows go."""
     from wisper_transcribe.campaign_manager import delete_campaign
 
     _game(tmp_path, out_dir)
     cd.generate_combined_summary("my-game", FakeClient(), {}, data_dir=tmp_path)
+    recap = cd.generate_recap("my-game", FakeClient(), {}, data_dir=tmp_path)
     delete_campaign("my-game", delete_transcripts=False, data_dir=tmp_path)
 
-    assert not (out_dir / "My Game" / "My Game Combined Summary.md").exists()
+    assert (out_dir / "My Game" / "My Game Combined Summary.md").exists()
+    assert recap.path.exists()
     with db.connection(tmp_path) as conn:
         assert conn.execute("SELECT count(*) FROM campaign_digests").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM files WHERE campaign_id IS NOT NULL").fetchone()[0] == 0
 
 
 def test_folder_rename_carries_the_digests(tmp_path, out_dir):
