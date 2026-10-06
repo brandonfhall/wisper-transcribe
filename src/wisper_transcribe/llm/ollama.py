@@ -77,6 +77,13 @@ class OllamaClient(LLMClient):
                         chunk = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    if chunk.get("error"):
+                        if token_count > 0:
+                            sys.stderr.write("\n")
+                            sys.stderr.flush()
+                        raise LLMUnavailableError(
+                            f"Ollama request failed ({url}): {chunk['error']}"
+                        )
                     token = (chunk.get("message") or {}).get("content", "")
                     if token:
                         if token_count == 0:
@@ -133,7 +140,7 @@ class OllamaClient(LLMClient):
                 {"role": "user", "content": user},
             ],
         }
-        return self._post_chat(payload)
+        return self._retry_on_empty(lambda: self._post_chat(payload))
 
     def complete_json(self, system: str, user: str, schema: dict) -> dict:
         # Ollama supports `format="json"` (free-form JSON) and newer versions
@@ -148,7 +155,7 @@ class OllamaClient(LLMClient):
                 {"role": "user", "content": user},
             ],
         }
-        text = _strip_json_fence(self._post_chat(payload))
+        text = _strip_json_fence(self._retry_on_empty(lambda: self._post_chat(payload)))
         try:
             return json.loads(text)
         except json.JSONDecodeError as exc:

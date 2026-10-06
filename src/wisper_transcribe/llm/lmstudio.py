@@ -68,6 +68,13 @@ class LMStudioClient(LLMClient):
                         chunk = json.loads(line[6:])
                     except json.JSONDecodeError:
                         continue
+                    if chunk.get("error"):
+                        if token_count > 0:
+                            sys.stderr.write("\n")
+                            sys.stderr.flush()
+                        raise LLMUnavailableError(
+                            f"LM Studio request failed ({url}): {chunk['error']}"
+                        )
                     choices = chunk.get("choices") or []
                     token = (choices[0].get("delta") or {}).get("content", "") if choices else ""
                     if token:
@@ -126,7 +133,7 @@ class LMStudioClient(LLMClient):
                 {"role": "user", "content": user},
             ],
         }
-        return self._post_chat(payload)
+        return self._retry_on_empty(lambda: self._post_chat(payload))
 
     def complete_json(self, system: str, user: str, schema: dict) -> dict:
         payload = {
@@ -138,7 +145,7 @@ class LMStudioClient(LLMClient):
                 {"role": "user", "content": user},
             ],
         }
-        text = _strip_json_fence(self._post_chat(payload))
+        text = _strip_json_fence(self._retry_on_empty(lambda: self._post_chat(payload)))
         try:
             return json.loads(text)
         except json.JSONDecodeError as exc:
