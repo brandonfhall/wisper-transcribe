@@ -201,6 +201,61 @@
       </div>
     </div>
 
+    <!-- Campaign-level summaries: combined summary and recaps -->
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 18px;margin-bottom:28px;border:1px solid {{ 'var(--color-signal-amber)' if combined_stale else 'var(--color-rule)' }};border-radius:8px;background:var(--color-ink-900)">
+      <div>
+        <div class="mono-kicker" style="margin-bottom:5px">Combined summary &amp; recap</div>
+        {% if combined_stale %}
+        <div data-testid="combined-stale" style="font-size:13px;color:var(--color-signal-amber);margin-bottom:6px">
+          A session was summarized, re-summarized, added, or removed since this summary was written. Regenerate it to bring it up to date.
+        </div>
+        {% endif %}
+        <div style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper)">
+          {% if summarized %}
+            {% if combined %}Combined summary of {{ combined.sessions | length }} session{{ 's' if combined.sessions | length != 1 else '' }}{% else %}No combined summary yet{% endif %}
+            · {{ recaps | length }} recap{{ 's' if recaps | length != 1 else '' }}
+          {% else %}
+            Summarize a session to enable these.
+          {% endif %}
+        </div>
+        {% if summarized > 40 %}
+        <div style="font-size:12.5px;color:var(--color-signal-amber);margin-top:5px">
+          This campaign has {{ summarized }} summarized sessions; the combined summary sends all of them in one call and may be slow or exceed the model's context.
+        </div>
+        {% endif %}
+        {% if recaps %}
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px">
+          {% for r in recaps %}
+          <span style="display:inline-flex;align-items:center;gap:6px;border:1px solid var(--color-rule);border-radius:5px;padding:3px 8px;font-family:var(--font-mono);font-size:11px;color:var(--color-paper-dim)">
+            <a href="/campaigns/{{ slug }}/summaries/{{ r.file_id }}" style="color:var(--color-paper)">{{ r.label or 'recap' }}</a>
+            <a href="/campaigns/{{ slug }}/summaries/{{ r.file_id }}/download" style="color:var(--color-paper-faint)" title="Download recap">↓</a>
+          </span>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </div>
+      <div style="display:flex;gap:8px;flex-shrink:0;align-items:flex-start">
+        {% if combined %}
+        <a href="/campaigns/{{ slug }}/summaries/{{ combined.file_id }}" class="btn btn-secondary btn-sm"
+           title="View the combined summary">View summary</a>
+        {% endif %}
+        <form method="post" action="/campaigns/{{ slug }}/summarize" style="display:inline">
+          <button type="submit" class="btn btn-primary btn-sm" {% if not summarized %}disabled{% endif %}
+                  title="One LLM pass over every summarized session">Generate combined summary</button>
+        </form>
+        <form method="post" action="/campaigns/{{ slug }}/recap" style="display:flex;gap:6px;align-items:center">
+          <select name="sessions" aria-label="Sessions to recap"
+                  style="background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:4px 6px;border-radius:5px;font-size:12px;font-family:var(--font-sans)">
+            <option value="1">1 session</option>
+            <option value="2">2 sessions</option>
+            <option value="3">3 sessions</option>
+          </select>
+          <button type="submit" class="btn btn-secondary btn-sm" {% if not summarized %}disabled{% endif %}
+                  title="Player-facing, spoiler-free recap of the latest session(s)">Write recap</button>
+        </form>
+      </div>
+    </div>
+
     <div style="display:grid;grid-template-columns:1.4fr 1fr;gap:36px">
       <!-- Sessions / transcripts -->
       <div>
@@ -328,9 +383,9 @@
                     onclick='return confirm({{ ("Delete campaign " ~ active_campaign.display_name ~ "? Its transcripts move to the output root and the journal file stays; the journal is listed under Needs attention.") | tojson }})'
                     style="background:none;border:none;color:var(--color-signal-rose);font-size:12px;font-family:var(--font-sans);cursor:pointer;padding:0">Delete campaign, keep the files</button>
             <button type="submit" name="mode" value="everything" data-testid="delete-campaign-everything"
-                    onclick='return confirm({{ ("Delete campaign " ~ active_campaign.display_name ~ " and everything in it? " ~ (active_campaign.transcripts | length) ~ " session(s): " ~ (active_campaign.transcripts | join(", ")) ~ ". Every .md file in the campaign's folder is one of these sessions; all of them, with their audio and summaries, are deleted. This cannot be undone.") | tojson }})'
+                    onclick='return confirm({{ ("Delete campaign " ~ active_campaign.display_name ~ " and everything in it? " ~ (active_campaign.transcripts | length) ~ " session(s): " ~ (active_campaign.transcripts | join(", ")) ~ ". Every session .md file in the campaign's folder is one of these; all of them, with their audio and summaries, are deleted, along with the campaign's journal, combined summary, and recaps. This cannot be undone.") | tojson }})'
                     style="background:none;border:none;color:var(--color-signal-rose);font-size:12px;font-family:var(--font-sans);cursor:pointer;padding:0">Delete campaign and everything in it</button>
-            <div style="color:var(--color-paper-faint);font-size:11.5px;font-style:italic">If a session's file is open in another program, the campaign is kept until you retry.</div>
+            <div style="color:var(--color-paper-faint);font-size:11.5px;font-style:italic">The combined summary and recaps are removed with the campaign either way. If a session's file is open in another program, the campaign is kept until you retry.</div>
           </form>
         </div>
       </div>

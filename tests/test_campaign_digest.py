@@ -510,6 +510,89 @@ def test_run_digest_job_llm_failure_soft_fails_generic(tmp_path, out_dir, monkey
     assert not (out_dir / "My Game" / "My Game Combined Summary.md").exists()
 
 
+# ---------------------------------------------------------------------------
+# Delete, rename, and the file registry
+# ---------------------------------------------------------------------------
+
+def test_campaign_delete_removes_both_outputs_and_their_rows(tmp_path, out_dir):
+    from wisper_transcribe.campaign_manager import delete_campaign
+
+    _game(tmp_path, out_dir)
+    cd.generate_combined_summary("my-game", FakeClient(), {}, data_dir=tmp_path)
+    recap = cd.generate_recap("my-game", FakeClient(), {}, data_dir=tmp_path)
+
+    delete_campaign("my-game", delete_transcripts=True, data_dir=tmp_path)
+
+    assert not recap.path.exists()
+    assert not (out_dir / "My Game" / "My Game Combined Summary.md").exists()
+    with db.connection(tmp_path) as conn:
+        assert conn.execute("SELECT count(*) FROM campaign_digests").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM files WHERE campaign_id IS NOT NULL").fetchone()[0] == 0
+
+
+def test_campaign_delete_keep_files_still_removes_the_digests(tmp_path, out_dir):
+    """A keep-files delete removes the campaign's digests (they are campaign-specific)."""
+    from wisper_transcribe.campaign_manager import delete_campaign
+
+    _game(tmp_path, out_dir)
+    cd.generate_combined_summary("my-game", FakeClient(), {}, data_dir=tmp_path)
+    delete_campaign("my-game", delete_transcripts=False, data_dir=tmp_path)
+
+    assert not (out_dir / "My Game" / "My Game Combined Summary.md").exists()
+    with db.connection(tmp_path) as conn:
+        assert conn.execute("SELECT count(*) FROM campaign_digests").fetchone()[0] == 0
+
+
+def test_folder_rename_carries_the_digests(tmp_path, out_dir):
+    _game(tmp_path, out_dir)
+    cd.generate_combined_summary("my-game", FakeClient(), {}, data_dir=tmp_path)
+    recap = cd.generate_recap("my-game", FakeClient(), {}, data_dir=tmp_path)
+
+    outcome = campaign_folders.rename_campaign("my-game", "Renamed Game", data_dir=tmp_path)
+    assert outcome.status == "renamed"
+
+    moved = out_dir / "Renamed Game" / "Renamed Game Combined Summary.md"
+    assert moved.exists()
+    assert (out_dir / "Renamed Game"
+            / "Renamed Game Recap \u2014 s3.md").exists()
+    assert not recap.path.exists()
+    owner = file_registry.Owner.for_campaign_slug("renamed-game", data_dir=tmp_path)
+    row = file_registry.file_for(owner, cd.COMBINED_SUMMARY, data_dir=tmp_path)
+    assert row is not None and row.rel_path == "Renamed Game/Renamed Game Combined Summary.md"
+
+
+def test_sync_registers_an_unregistered_digest(tmp_path, out_dir):
+    """A digest written before its register is picked up, not listed as a session."""
+    from wisper_transcribe import file_registry
+
+    _game(tmp_path, out_dir)
+    path = out_dir / "My Game" / "My Game Combined Summary.md"
+    path.write_text("## The Story So Far\n\nText.", encoding="utf-8")
+
+    report = file_registry.sync(output_dir=out_dir, data_dir=tmp_path, scan_only=False)
+    owner = file_registry.Owner.for_campaign_slug("my-game", data_dir=tmp_path)
+    row = file_registry.file_for(owner, cd.COMBINED_SUMMARY, data_dir=tmp_path)
+    assert row is not None
+    assert path not in report.unclaimed
+
+
+def test_sync_does_not_mistake_a_digest_for_a_session(tmp_path, out_dir):
+    """An unregistered recap and combined summary never become transcripts."""
+    from wisper_transcribe import file_registry, transcript_store
+
+    _game(tmp_path, out_dir)
+    (out_dir / "My Game" / "My Game Combined Summary.md").write_text("x", encoding="utf-8")
+    (out_dir / "My Game" / "My Game Recap \u2014 s3.md").write_text("x", encoding="utf-8")
+    file_registry.sync(output_dir=out_dir, data_dir=tmp_path, scan_only=False)
+    found = transcript_store._transcript_files(
+        transcript_store.transcript_dirs(data_dir=tmp_path, output_dir=out_dir),
+        out_dir, False, set())
+    names = {p.name for p in found.values()}
+    assert "My Game Combined Summary.md" not in names
+    assert "My Game Recap \u2014 s3.md" not in names
+
+
+
 def test_digest_job_failure_maps_to_a_generic_error():
     """The queue maps an unhandled digest failure to a generic, path-free message."""
     from wisper_transcribe.web import jobs as jobs_mod

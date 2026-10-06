@@ -520,8 +520,9 @@ def _rename_attempt(cid: int, slug: str, display: str, new_slug: str, new_folder
             return "slug_taken"
         if taken_by_campaign(conn, new_folder, exclude_id=cid):
             return "taken"
-        reserved = _fold(journal_name(new_folder)[:-len(".md")])
-        if any(_fold(s[0]) == reserved for s in conn.execute(
+        reserved = {_fold(journal_name(new_folder)[:-len(".md")]),
+                    _fold(combined_summary_name(new_folder)[:-len(".md")])}
+        if any(_fold(s[0]) in reserved for s in conn.execute(
                 "SELECT stem FROM transcripts WHERE campaign_id = ?", (cid,))):
             return "reserved"
         pending_folder = (new_folder if claimed and new_folder != r["folder"]
@@ -633,6 +634,7 @@ def finish_folder_rename(campaign_id: int, *, without_folder: bool = False,
             raise
 
         _rename_journal(campaign_id, output, old, new, data_dir)
+        _rename_digests(campaign_id, output, old, new, data_dir)
     return True
 
 
@@ -786,6 +788,31 @@ def _rename_journal(campaign_id: int, output: Path, old_folder: str, new_folder:
         return  # a misplaced journal: reconcile lists it, don't move it here
     file_registry.move(row, row.path.parent / target_name,
                        data_dir=data_dir, output_dir=output)
+
+
+def _rename_digests(campaign_id: int, output: Path, old_folder: str, new_folder: str,
+                    data_dir: Optional[Path]) -> None:
+    """Rename the combined summary and each recap to the new folder's name.
+
+    A digest is named after the folder, so a folder rename renames the file too
+    (the same way the journal does). Best effort: a file that can't move keeps
+    its name and row for the next reconcile.
+    """
+    from . import file_registry
+
+    owner = file_registry.Owner("campaign", campaign_id)
+    rows = file_registry.files_for(owner, data_dir=data_dir, output_dir=output)
+    for row in rows:
+        if row.kind == "combined_summary":
+            target_name = combined_summary_name(new_folder)
+        elif row.kind == "recap" and row.label:
+            target_name = recap_name(new_folder, row.label)
+        else:
+            continue
+        if row.path.name == target_name or row.path.parent.name != new_folder:
+            continue
+        file_registry.move(row, row.path.parent / target_name,
+                           data_dir=data_dir, output_dir=output)
 
 
 def finish_pending_renames(data_dir: Optional[Path] = None) -> None:

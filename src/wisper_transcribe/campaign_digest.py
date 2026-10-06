@@ -235,6 +235,34 @@ def combined_summary_digest(slug: str, data_dir: Optional[Path] = None) -> Optio
     return rows[0] if rows else None
 
 
+def digest_for_file(slug: str, file_id: int,
+                    data_dir: Optional[Path] = None) -> Optional[Digest]:
+    """The digest whose file is ``file_id`` and belongs to ``slug``, or None.
+
+    The route layer uses this to serve a recap by its ``files.id`` (an integer
+    path parameter, so no name reaches a path); a file id from another campaign
+    returns None.
+    """
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        return None
+    cid = _campaign_id(safe, data_dir)
+    if cid is None:
+        return None
+    with db.connection(data_dir) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM campaign_digests WHERE campaign_id = ? AND file_id = ?",
+            (cid, file_id),
+        ).fetchone()
+        if row is None:
+            return None
+        for kind in DIGEST_KINDS:
+            for digest in _digest_rows(conn, cid, kind, data_dir=data_dir):
+                if digest.file_id == file_id:
+                    return digest
+    return None
+
+
 def record_digest(slug: str, kind: str, file_id: int, session_stems: list[str],
                   provider: str = "", model: str = "",
                   data_dir: Optional[Path] = None) -> int:

@@ -328,11 +328,19 @@ def delete_campaign(slug: str, *, delete_transcripts: bool = False,
             return DeleteOutcome("kept", kept)
 
     journal_files: list[Path] = []
+    digest_files: list[Path] = []
     try:
         with db.transaction(data_dir) as conn:
             cid = _campaign_id(conn, slug)
+            owner = file_registry.Owner("campaign", cid)
+            # A campaign's digests are derived and campaign-specific, so they go
+            # with it in both modes (the journal file, by contrast, stays when the
+            # files are kept). Their rows go too; deleting the files rows cascades
+            # the campaign_digests rows.
+            for kind in ("combined_summary", "recap"):
+                digest_files += file_registry.forget_kind(
+                    owner, kind, conn=conn, data_dir=data_dir, output_dir=output)
             if delete_transcripts:
-                owner = file_registry.Owner("campaign", cid)
                 journal_files = file_registry.paths_for_delete(owner, conn, data_dir=data_dir,
                                                                output_dir=output)
             conn.execute("DELETE FROM campaigns WHERE id = ?", (cid,))
@@ -340,8 +348,8 @@ def delete_campaign(slug: str, *, delete_transcripts: bool = False,
         # A reconcile in another process registered a new .md in the folder.
         return DeleteOutcome("delete_incomplete")
 
-    if journal_files:
-        file_registry.unlink_paths(journal_files)
+    if journal_files or digest_files:
+        file_registry.unlink_paths([*journal_files, *digest_files])
     if claimed:
         # Either way an empty folder goes, so re-creating the campaign isn't
         # refused by a folder wisper left; one holding the journal stays.

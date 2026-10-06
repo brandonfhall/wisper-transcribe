@@ -114,6 +114,13 @@ async def campaign_detail(request: Request, slug: str) -> HTMLResponse:
     journal_exists = bool(jpath and jpath.exists())
     journal_stale = journal_stale_since(safe) if journal_exists else None
 
+    from wisper_transcribe.campaign_digest import (
+        combined_summary_digest, combined_summary_stale_since, list_recaps,
+    )
+    combined = combined_summary_digest(safe)
+    combined_stale = combined_summary_stale_since(safe) if combined is not None else None
+    recaps = list_recaps(safe)
+
     # Entries whose transcript is gone (deleted outside wisper, renamed, or
     # on an unmounted drive). Shown as missing with Relink, never pruned: an
     # unavailable output dir would otherwise wipe every assignment.
@@ -144,6 +151,10 @@ async def campaign_detail(request: Request, slug: str) -> HTMLResponse:
             "journal_exists": journal_exists,
             "journal_pending": journal_pending,
             "journal_stale": journal_stale,
+            "combined": combined,
+            "combined_stale": combined_stale,
+            "recaps": recaps,
+            "summarized": summarized,
             "sessions_needing_summary": len(campaign.transcripts) - summarized,
             "missing_transcripts": missing,
             "relink_candidates": transcript_store.relink_candidates() if missing else [],
@@ -450,6 +461,120 @@ async def campaign_journal_update(
         return error_redirect(f"/campaigns/{safe}", "submit_failed")
     # job.id is a server-generated uuid4 — never user input (CodeQL-safe redirect).
     return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
+
+
+@router.post("/{slug}/summarize", response_class=HTMLResponse)
+async def campaign_summarize(request: Request, slug: str) -> RedirectResponse:
+    """Submit a combined-summary job and redirect to its progress page."""
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        return invalid_input_response("Invalid campaign slug")
+
+    campaign = load_campaigns().get(safe)
+    if campaign is None:
+        return error_redirect("/campaigns", "not_found")
+
+    try:
+        job = get_queue(request).submit_campaign_summary(
+            safe, name=f"Combined summary: {campaign.display_name}")
+    except Exception:
+        # The job's history row couldn't be written, so it wasn't queued.
+        return error_redirect(f"/campaigns/{safe}", "submit_failed")
+    # job.id is a server-generated uuid4 — never user input (CodeQL-safe redirect).
+    return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
+
+
+@router.post("/{slug}/recap", response_class=HTMLResponse)
+async def campaign_recap(request: Request, slug: str,
+                         sessions: Annotated[str, Form()] = "1") -> RedirectResponse:
+    """Submit a "Previously on…" recap job and redirect to its progress page."""
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        return invalid_input_response("Invalid campaign slug")
+
+    campaign = load_campaigns().get(safe)
+    if campaign is None:
+        return error_redirect("/campaigns", "not_found")
+
+    from wisper_transcribe.campaign_digest import clamp_recap_sessions
+    try:
+        count = clamp_recap_sessions(int(sessions))
+    except (TypeError, ValueError):
+        count = 1
+    try:
+        job = get_queue(request).submit_campaign_recap(
+            safe, sessions=count, name=f"Recap: {campaign.display_name}")
+    except Exception:
+        # The job's history row couldn't be written, so it wasn't queued.
+        return error_redirect(f"/campaigns/{safe}", "submit_failed")
+    # job.id is a server-generated uuid4 — never user input (CodeQL-safe redirect).
+    return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
+
+
+@router.get("/{slug}/summaries/{file_id:int}", response_class=HTMLResponse)
+async def campaign_digest_view(request: Request, slug: str, file_id: int) -> HTMLResponse:
+    """Render a combined summary or recap by its ``files.id``, or 404.
+
+    The digest is resolved from the database by an integer id and must belong to
+    this campaign; no user-supplied name reaches a path.
+    """
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        return invalid_input_response("Invalid campaign slug")
+
+    campaign = load_campaigns().get(safe)
+    if campaign is None:
+        return error_redirect("/campaigns", "not_found")
+
+    from wisper_transcribe.campaign_digest import digest_for_file
+    from .transcripts import _sanitize_html
+
+    digest = digest_for_file(safe, file_id)
+    if digest is None or not digest.path.exists():
+        return error_redirect(f"/campaigns/{campaign.slug}", "not_found")
+
+    raw = digest.path.read_text(encoding="utf-8")
+    from wisper_transcribe.journal import parse_journal
+    meta, body = parse_journal(raw)
+    import markdown as _md
+    html_body = _sanitize_html(_md.markdown(body, extensions=["nl2br"]))
+    return templates.TemplateResponse(
+        request,
+        "campaign_digest.html",
+        {
+            "request": request,
+            "campaign": campaign,
+            "slug": safe,
+            "kind": digest.kind,
+            "file_id": file_id,
+            "meta": meta,
+            "html_body": html_body,
+            "sessions": digest.sessions,
+        },
+    )
+
+
+@router.get("/{slug}/summaries/{file_id:int}/download")
+async def campaign_digest_download(slug: str, file_id: int) -> Response:
+    """Download a combined summary or recap by its ``files.id``, or 404."""
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        return invalid_input_response("Invalid campaign slug")
+
+    from wisper_transcribe.campaign_digest import digest_for_file
+
+    campaign = load_campaigns().get(safe)
+    if campaign is None:
+        return error_redirect("/campaigns", "not_found")
+    digest = digest_for_file(safe, file_id)
+    if digest is None or not digest.path.exists():
+        return HTMLResponse(content="Summary not found", status_code=404)
+    return Response(
+        content=digest.path.read_text(encoding="utf-8"),
+        media_type="text/markdown; charset=utf-8",
+        # campaign.slug comes from the database, not the URL.
+        headers={"Content-Disposition": f'attachment; filename="{digest.path.name}"'},
+    )
 
 
 @router.post("/{slug}/relabel", response_class=HTMLResponse)

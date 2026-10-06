@@ -659,11 +659,29 @@ def _output_candidates(name: str) -> list[tuple[str, str, Optional[str]]]:
     return []
 
 
+def _digest_candidate(name: str, folder: str) -> Optional[tuple[str, Optional[str]]]:
+    """``(kind, label)`` when ``name`` is this campaign's combined summary or a
+    recap, else None."""
+    from .campaign_folders import combined_summary_name, recap_name
+
+    # combined_summary_name/recap_name take the folder, so match the fixed tail.
+    if _key(name, True) == _key(combined_summary_name(folder), True):
+        return ("combined_summary", None)
+    prefix = f"{folder} Recap \u2014 "
+    if name.startswith(prefix) and name.endswith(".md"):
+        stem = name[len(prefix):-3]
+        if stem:
+            return ("recap", stem)
+    return None
+
+
 def _scan_output(directory: Path, owner_by_stem: dict[str, Owner],
-                 fold: bool, journal: Optional[str] = None) -> list[_Found]:
+                 fold: bool, journal: Optional[str] = None,
+                 digest_owner: Optional[Owner] = None) -> list[_Found]:
     """Files in one transcript directory (the root or a campaign folder).
 
-    ``journal`` is the campaign folder's journal file name, never a session.
+    ``journal`` is the campaign folder's journal file name and
+    ``digest_owner`` its campaign: both are never sessions.
     """
     from .transcript_store import TEMP_PREFIX
     found = []
@@ -682,6 +700,12 @@ def _scan_output(directory: Path, owner_by_stem: dict[str, Owner],
                 continue
         except OSError:
             continue
+        if digest_owner is not None:
+            digest = _digest_candidate(name, directory.name)
+            if digest is not None:
+                kind, label = digest
+                found.append(_Found(kind, Path(entry.path), "output", digest_owner, label))
+                continue
         candidates = _output_candidates(name)
         if not candidates:
             continue
@@ -849,7 +873,8 @@ def _sync(report: SyncReport, data: Path, output: Path, data_dir_arg: Optional[P
             if _same_dir(md_dirs.get(tid, output), directory, fold)
         }
         journal = journal_name(directory.name) if cid is not None else None
-        scanned += _scan_output(directory, owner_by_stem, fold, journal)
+        digest_owner = Owner("campaign", cid) if cid is not None else None
+        scanned += _scan_output(directory, owner_by_stem, fold, journal, digest_owner)
     new_files: list[_Found] = []
     for f in scanned:
         rel_root = _root_dir(f.root, data, output)

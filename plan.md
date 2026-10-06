@@ -407,23 +407,9 @@ Nothing else changes; the wire protocol is the stable interface.
 
 ## Campaign-level LLM summaries (DM tools)
 
-**Approved for build (Brandon, 2026-10-06): combined summary and "Previously on…" recap.** Schema v14 (after the live-recording branch's v13). Hierarchical summaries stay deferred.
+**Shipped (Brandon 2026-10-06):** combined summary and "Previously on…" recap (schema v14, CLI `wisper campaigns summarize` / `recap`, Campaign-page buttons, delete/rename). Design in `architecture.md` ("Campaign digests"); history in git.
 
-The rolling journal is the template: output in the campaign's folder registered as campaign-owned `files` rows (a folder rename carries them), `.summary.md` sessions discovered through the DB (`unjournalled_sessions()` pattern), and a `JobQueue.submit_journal` / `_run_journal_job`-style job type per feature on the standard SSE job page. Both read the same per-session `.summary.md` notes (`SummaryNote` carries loot, NPCs, follow-ups). Campaigns with no summarized sessions hide or disable the buttons. LLM errors soft-fail like the journal (`LLMUnavailableError`/`LLMResponseError`), and job errors stay generic.
-
-**1. Combined summary** — one LLM call over every summarized session in campaign order → `<folder> Combined Summary.md`, overwritten on each run (one per campaign). For retrospectives, onboarding a player, or a campaign wiki. ~20 sessions ≈ 20k input tokens; warn on the Campaign page above ~40 sessions. Stale notice on the Campaign page (like the journal's) when a session was summarized, re-summarized, added, or removed since it was generated.
-
-**2. "Previously on…" recap** — 200–400 words, spoiler-free and player-facing (no DM-only notes, no future plans), from the last 1–3 summarized sessions; the count is chosen on the Campaign page each run (default 1). **History is kept:** each run writes `<folder> Recap — <newest session stem>.md`; re-running for the same newest session replaces that one file. The Campaign page lists recaps newest first with view/download.
-
-**Schema v14**
-- `files`: new kinds `combined_summary` and `recap`, campaign-owned, `root = 'output'`, path CHECKs `'?*/?* Combined Summary.md'` and `'?*/?* Recap — ?*.md'` (single folder level, like `journal`). A recap needs a `label` (its newest session's stem) so several can coexist: widen the label CHECK and the `files_campaign` unique index to `(campaign_id, kind, coalesce(label, ''))`. This is a `files` rebuild — mirror v12's exactly.
-- `campaign_digests(id, campaign_id → campaigns ON DELETE CASCADE, kind CHECK IN ('combined_summary','recap'), file_id → files ON DELETE CASCADE UNIQUE, generated_at, provider, model)` and `campaign_digest_sessions(digest_id → campaign_digests ON DELETE CASCADE, transcript_id → transcripts ON DELETE CASCADE, PRIMARY KEY (digest_id, transcript_id))`. Staleness = the campaign's summarized sessions differ from the combined digest's session set, or a covered session's summary file changed after `generated_at`.
-- Prototype the DDL against a real DB copy before writing it (`feedback_db_design`). Extend `test_schema.py`. Develop unfrozen; frozen at merge.
-- Search: index both kinds (new `search_index_state.kind` values) so they show in search like journals — only if the index already keys journals that way; otherwise note it as a follow-up.
-
-**Entry points:** Campaign page buttons ("Generate combined summary", "Write recap" with the 1–3 selector), each submitting a job; CLI `wisper campaigns summarize <slug>` and `wisper campaigns recap <slug> [--sessions N]` mirroring `wisper campaigns journal`. Delete with the campaign (cascade + `paths_for_delete`).
-
-**Docs:** `docs/web-ui.md` (Campaign page), `docs/cli-reference.md`, `architecture.md` (campaign layer, schema v14, storage layout).
+**Search (follow-up):** the combined summary and recaps are **not** indexed. `search_index_state.kind` only covers a transcript's own `transcript`/`summary` files and keys off `transcript_id`; journals are not indexed either. Indexing campaign-level documents would need a new state shape (a campaign/file owner rather than a transcript). Revisit alongside journal search if it is ever wanted.
 
 ### Deferred
 - **Hierarchical summaries** (arcs → campaign overview): only if the rolling journal hits context limits in practice.
