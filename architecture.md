@@ -32,6 +32,7 @@ src/wisper_transcribe/
 ├── cli.py               Click entry points; delegates to pipeline/managers. Setup wizard, server command, --debug/--verbose
 ├── pipeline.py          Orchestrator: process_file(), process_folder(), CLI enrollment prompts
 ├── transcriber.py       faster-whisper wrapper, lazy model cache, CUDA DLL path fix, MLX dispatch
+├── ml_worker.py         Warm spawned child for the four GPU functions; thread-local delegation and Stop → terminate (see "Job cancellation / ML worker")
 ├── diarizer.py          pyannote pipeline wrapper, lazy pipeline cache
 ├── word_alignment.py    Forced word alignment: re-time Whisper words with Qwen3-ForcedAligner (see "Forced word alignment")
 ├── aligner.py           Merge transcription words with diarization turns (see "Alignment")
