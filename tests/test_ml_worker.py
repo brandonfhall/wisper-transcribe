@@ -50,16 +50,14 @@ def test_import_is_cheap():
     assert result.returncode == 0, result.stderr.decode()
 
 
-def test_call_round_trips_a_result(worker):
+def test_call_round_trip_and_error_mapping(worker):
+    """One spawn covers the happy path and both error mappings."""
+    # Picklable value round-trips unchanged.
     assert worker.call("echo", {"a": 1, "b": [1, 2, 3]}) == {"a": 1, "b": [1, 2, 3]}
-
-
-def test_known_error_is_rer_aised(worker):
+    # A known type is re-raised as itself.
     with pytest.raises(ValueError, match="known boom"):
         worker.call("boom")
-
-
-def test_unknown_error_becomes_runtime_error(worker):
+    # Anything else becomes a plain RuntimeError.
     with pytest.raises(RuntimeError, match="unknown nope"):
         worker.call("weird")
 
