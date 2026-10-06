@@ -59,7 +59,7 @@ def conn():
           ('audio',        'output', 's1.flac',                     NULL,          1, NULL, NULL),
           ('backup',       'output', 's1.md.bak',                   NULL,          1, 10, 5);
         INSERT INTO files (kind, root, rel_path, label, recording_id, size, mtime_ns) VALUES
-          ('combined',   'data', 'recordings/{R}/combined.wav',        NULL,     '{R}', 10, 5),
+          ('combined',   'data', 'recordings/{R}/combined.flac',       NULL,     '{R}', 10, 5),
           ('per_user',   'data', 'recordings/{R}/per-user/mic',        'mic',    '{R}', NULL, NULL),
           ('per_user',   'data', 'recordings/{R}/per-user/123456',     '123456', '{R}', NULL, NULL),
           ('live_draft', 'data', 'recordings/{R}/live_transcript.md',  NULL,     '{R}', 10, 5);
@@ -249,6 +249,10 @@ VIOLATIONS = {
     "file path empty": "INSERT INTO files (kind, root, rel_path, transcript_id) VALUES ('audio', 'output', '', 2)",
     "combined path mismatch": f"INSERT INTO files (kind, root, rel_path, recording_id) "
                               f"VALUES ('combined', 'data', 'recordings/{L}/combined.wav', '{R}')",
+    "combined wrong suffix": f"INSERT INTO files (kind, root, rel_path, recording_id) "
+                             f"VALUES ('combined', 'data', 'recordings/{R}/combined.mp3', '{R}')",
+    "combined flac with a mismatched id": f"INSERT INTO files (kind, root, rel_path, recording_id) "
+                                          f"VALUES ('combined', 'data', 'recordings/{L}/combined.flac', '{R}')",
     "per_user path mismatch": f"INSERT INTO files (kind, root, rel_path, label, recording_id) "
                               f"VALUES ('per_user', 'data', 'recordings/{R}/per-user/system', 'mic', '{R}')",
     "live_draft path mismatch": f"INSERT INTO files (kind, root, rel_path, recording_id) "
@@ -476,6 +480,14 @@ def test_a_folder_prefix_rewrite_handles_brackets(conn):
     conn.execute("UPDATE files SET rel_path = 'a[b]/' || substr(rel_path, length('Game/') + 1) "
                  "WHERE kind = 'journal' AND rel_path GLOB '?*/?* Journal.md'")
     assert _one(conn, "SELECT rel_path FROM files WHERE kind = 'journal'") == "a[b]/Game Journal.md"
+
+
+def test_combined_flac_row_is_accepted(conn):
+    """v12 allows a recording's combined track to be combined.flac."""
+    conn.execute(f"UPDATE files SET rel_path = 'recordings/{R}/combined.flac' "
+                 f"WHERE kind = 'combined' AND recording_id = '{R}'")
+    assert _one(conn, "SELECT rel_path FROM files WHERE kind = 'combined'") == \
+        f"recordings/{R}/combined.flac"
 
 
 def test_v11_ddl_backslashes(conn):

@@ -2461,9 +2461,10 @@ def storage_trim(apply_: bool, device: str):
     Moves every misplaced session's files into its campaign's folder and moves
     legacy journals out of the data dir, extracts any speaker voices a
     transcript lacks, converts each transcript's audio to a 16 kHz mono FLAC,
-    deletes orphaned recording hand-off copies, and removes the segment and
-    per-user audio a recording's combined.wav makes redundant. Only files
-    wisper tracks are touched.
+    converts each recording's combined.wav to combined.flac, deletes orphaned
+    recording hand-off copies, and removes the segment and per-user audio a
+    recording's combined track makes redundant. Only files wisper tracks are
+    touched.
 
     Dry run by default. With --apply the web server must be stopped.
     """
@@ -2490,7 +2491,9 @@ def storage_trim(apply_: bool, device: str):
         click.echo("")
         click.echo(
             f"Moved {len(report.organized)} into campaign folders; "
-            f"converted {len(report.converted)}, deleted {len(report.dropped)} copy(ies) and "
+            f"converted {len(report.converted)} audio and "
+            f"{len(report.converted_recordings)} recording(s), deleted "
+            f"{len(report.dropped)} copy(ies) and "
             f"{len(report.orphans)} orphan(s), trimmed {len(report.trimmed)} recording(s); "
             + (f"freed {_fmt_bytes(report.freed_bytes)}." if report.freed_bytes >= 0
                else f"used {_fmt_bytes(-report.freed_bytes)} more."))
@@ -2540,4 +2543,7 @@ def _echo_plan(current) -> None:
             click.echo(f"{'Converted':<16} {_fmt_bytes(current.convert_bytes):>10}  "
                        "replaced by 16 kHz mono FLAC, about 90 MB per hour of audio; "
                        "a compressed audio file can grow")
+        if current.convert_recording_bytes:
+            click.echo(f"{'Recordings':<16} {_fmt_bytes(current.convert_recording_bytes):>10}  "
+                       "combined.wav → combined.flac (lossless, about half the size)")
     _echo_attention(current.attention)

@@ -1280,7 +1280,7 @@ class JobQueue:
             job.speaker_embeddings = _result_store.get("speaker_embeddings", {})
             job.output_path = str(output_path)
 
-            # Excerpts are cut from the extracted WAV (or a recording's combined.wav).
+            # Excerpts are cut from the extracted WAV (or a recording's combined track).
             _extract_speaker_excerpts(job, output_path,
                                       aligned_segments=_result_store.get("aligned_segments", []),
                                       diarization_segments=job.diarization_segments)

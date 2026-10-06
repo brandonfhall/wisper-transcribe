@@ -64,7 +64,7 @@ A transcript uploaded with a campaign is written into that campaign's folder in 
 - Failed jobs show a generic message ("Transcription failed — see server logs"). The full error is in the server log (the terminal running `wisper server`, or the `--debug` log file).
 - The dashboard shows the 20 newest jobs, including ones from before a restart, each with its campaign (the campaign its transcript is currently in, else the one it was submitted with). **all jobs →** opens **Job history** (`/jobs/history`): every job ever run, 50 per page, filterable by type and status, with each job's settings, result, and last log lines. Transcript and campaign pages have a **Jobs** button that filters it to that transcript or campaign; a campaign's list includes the transcriptions of its sessions. Jobs that were queued or running when the server stopped show as "Interrupted by restart"; they are not resumed.
 
-What a job keeps: the transcript, the summary, the speaker clips, and the audio as `<name>.flac` beside the transcript. The uploaded file itself isn't kept: wisper extracts its first audio track, deletes the upload, and saves that track as a 16 kHz mono FLAC. A recording keeps its `combined.wav` and the transcript plays from it.
+What a job keeps: the transcript, the summary, the speaker clips, and the audio as `<name>.flac` beside the transcript. The uploaded file itself isn't kept: wisper extracts its first audio track, deletes the upload, and saves that track as a 16 kHz mono FLAC. A recording keeps its combined track (`combined.flac`, or a legacy `combined.wav`) and the transcript plays from it.
 
 Transcripts are written to the transcripts folder (`output/` in the data directory unless `output_dir` / `WISPER_OUTPUT_DIR` says otherwise; see [configuration.md](configuration.md#transcripts-folder)) and appear on the Transcripts page as soon as the job finishes. Files you add to that folder yourself appear too.
 
@@ -72,13 +72,13 @@ Transcripts are written to the transcripts folder (`output/` in the data directo
 
 ## Playing a transcript
 
-A transcript with audio shows a player bar at the top of its page. An upload's audio is its kept `<stem>.flac`. A transcript made from a recording plays that recording's `combined.wav`. A transcript with no audio on disk shows no player.
+A transcript with audio shows a player bar at the top of its page. An upload's audio is its kept `<stem>.flac`. A transcript made from a recording plays that recording's combined track (`combined.flac`, or a legacy `combined.wav`). A transcript with no audio on disk shows no player.
 
 - **Highlight.** The block being spoken is highlighted as the audio plays.
 - **Follow along.** The page scrolls to keep the highlighted block centered. Scrolling yourself turns it off, and the button turns it back on. The button appears only when the transcript has timestamps.
 - **Click to seek.** Click any timestamped block to play from its start. Links inside a block still open normally.
 - **Deep links.** Opening a page at `#b-<n>` (a search result does) cues the audio to that block without playing it.
-- **Markers.** A transcript made from a recording lists the session's markers in the bar as `H:MM:SS` buttons that seek there. A marker's time is wall-clock time since the session started, while `combined.wav` joins audio frames, so over a long session a marker can land a few seconds off. Use it for "roughly here".
+- **Markers.** A transcript made from a recording lists the session's markers in the bar as `H:MM:SS` buttons that seek there. A marker's time is wall-clock time since the session started, while the combined track joins audio frames, so over a long session a marker can land a few seconds off. Use it for "roughly here".
 
 ---
 
@@ -92,7 +92,7 @@ A transcript with audio has a **Re-transcribe** button in its toolbar. It asks f
 - **Taken from the current config:** the model, device, VAD, and word alignment.
 - **Not reused:** custom vocabulary and prompts from the original upload.
 - **No audio:** the page says the transcript has no saved audio to re-transcribe from.
-- **Recording-linked:** a transcript made from a recording reruns from the recording's `combined.wav`, the same as **Transcribe** on the recording.
+- **Recording-linked:** a transcript made from a recording reruns from the recording's combined track (`combined.flac`, or a legacy `combined.wav`), the same as **Transcribe** on the recording.
 
 ---
 
@@ -177,7 +177,7 @@ If another job is already running when you start, the Record page warns that the
 - Stopping never starts transcription automatically. Click **Transcribe** on the recording (or from **Transcripts → Awaiting transcription**) to run the full diarized pass. The live draft stays on the recording's detail page until then.
 - **Campaign:** a recording shows the campaign its transcript is in. Moving the transcript to another campaign moves the recording with it. Before a transcript exists, it shows the campaign chosen when recording started.
 - **Re-transcribe** asks first, then replaces the recording's transcript (same name, same campaign place). If a transcription fails or you stop it, the recording is simply transcribable again.
-- **What a recording keeps:** its `combined.wav`, plus `live_transcript.md` (the live draft) for a session recorded on this computer. When a session ends, wisper checks that `combined.wav` holds all the captured audio, then deletes the one-minute pieces and the separate mic and system tracks. A Discord speaker's own track stays until that speaker is bound to a profile, because **Enroll** reads it. Enrolling a speaker whose track is already gone shows an error.
+- **What a recording keeps:** its combined track (`combined.flac`, or a legacy `combined.wav`), plus `live_transcript.md` (the live draft) for a session recorded on this computer. When a session ends, wisper checks that the combined track holds all the captured audio, then deletes the one-minute pieces and the separate mic and system tracks. A Discord speaker's own track stays until that speaker is bound to a profile, because **Enroll** reads it. Enrolling a speaker whose track is already gone shows an error.
 - **Recover recording:** if wisper stopped unexpectedly mid-session (crash, power loss, killed process), the recording shows **FAILED** but its audio is still on disk. Its page offers **Recover recording**, which stitches the saved one-minute pieces back together; the recording then shows **COMPLETED** and can be transcribed. The last partial minute may be missing.
 - Deleting a recording's transcript from `/transcripts` puts the recording back under **Awaiting transcription**.
 - **Deleting a recording is permanent.** Single delete and **Delete selected** both remove the audio and, if it was transcribed, the transcript and its sidecars. Active sessions can't be deleted.
@@ -223,7 +223,7 @@ The Campaign page's **Rolling journal** panel combines session summaries into on
 - **Folder taken:** a folder with the campaign's name already exists and isn't wisper's. Rename the campaign, or **Use this folder** — every `.md` file in it becomes a session of that campaign.
 - **Journals to move:** a journal from an older install that couldn't be moved into its campaign folder.
 - **Campaign folders missing:** a campaign's folder is gone from the transcripts folder. Rename the campaign to match the folder, or **Recreate folder**.
-- **Files with no transcript** show their size and modified time. Summaries, speaker data, clips, backups, and `.flac` audio in a scanned folder have a **Delete** button; a file in wisper's data folder, such as a recording's `combined.wav`, is listed only.
+- **Files with no transcript** show their size and modified time. Summaries, speaker data, clips, backups, and `.flac` audio in a scanned folder have a **Delete** button; a file in wisper's data folder, such as a recording's combined track, is listed only.
 - wisper logs the counts at startup.
 
 ---

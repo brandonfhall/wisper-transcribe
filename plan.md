@@ -33,54 +33,6 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 
 ---
 
-## Storage — open
-
-- **Store `combined.wav` as FLAC** (about half the size). Approved (Brandon, 2026-10-05); not started. Touches the fixed `recordings/<id>/combined.wav` layout and every reader of it.
-
-**Decided (Brandon, 2026-10-06)**
-- New captures write `combined.flac` at Stop (both `_finalise()` methods and `recover_recording()`). If the encode fails, keep the `.wav` and register it, so a capture is never lost to an ffmpeg failure.
-- Existing `combined.wav` stays readable forever. Every reader accepts either suffix and prefers `.flac` when both exist. `storage trim --apply` converts a `.wav` it finds; nothing else does.
-- Schema: a new `_V12` that only rebuilds `files` to accept `combined.wav` or `combined.flac`, mirroring the v11 `files` rebuild. Develop it with `SCHEMA_FROZEN = False` and freeze at merge, as v11 did (`37e0d64`).
-- `combined/NNNN.wav` segments stay WAV (deleted at trim); `live_transcript.md` is text.
-- Segments are already 16 kHz mono s16 (`audio_writer` `RATE = 16000`), the format `encode_flac` writes, so conversion is lossless. Verify the FLAC's frame count equals the WAV's before deleting the WAV.
-
-**Current behaviour**
-- The path is fixed and derived: `recording_manager.combined_path_for()` (`recording_manager.py:74-75`) returns `recordings/<id>/combined.wav`; `_check_derived()` rejects any other path (`:250-251`).
-- The DB pins the path twice: `files` CHECK `kind='combined' → rel_path='recordings/'||recording_id||'/combined.wav'` (`db.py:649`, and the v11 rebuild at `:858`).
-- Writers build it by frame-concatenating WAV segments, never re-encoding: `web/audio_writer.concat_wav_segments()` (`audio_writer.py:202-240`) is called by `discord_bot._finalise()` (`discord_bot.py:531-538`) and `local_capture._finalise()` (`local_capture.py:551-558`), and by `recording_manager.recover_recording()` (`recording_manager.py:579-580`).
-- `register_capture_files()` registers it as `kind="combined"` (`recording_manager.py:544`); `file_registry._scan_data()` finds it by the literal name (`file_registry.py:718`).
-- Verifiable-WAV readers: `recording_manager._wav_frames()` uses stdlib `wave.open` (`:600-606`), so `trim_recording_audio`/`_trim_targets` (`:627-668`) only ever verify a WAV; `load_recordings` sets `combined_path` from `combined.exists()` (`:168-187`).
-- Other readers: `transcript_store.audio_path()`/`_audio_for()` (`transcript_store.py:2499-2531`); `storage_trim.plan()` (`storage_trim.py:263`) and `_drop_copy()` (`:396`); playback route `_AUDIO_TYPES` already maps `.flac` (`web/routes/transcripts.py:163,694-710`, `audio_path` served as `audio/flac`); `record.py` `has_audio=bool(rec.combined_path)` (`:64`) and the hand-off (`:963,1015`); `transcripts.py:354` "Awaiting transcription"; the recording detail page. ffmpeg readers (`_extract_speaker_excerpts`, `convert_to_wav`) handle FLAC unchanged.
-- `scripts/alignment_eval.py` reads only its own `clip.wav` (`:148`), never `combined.wav`; `convert_to_wav` re-encodes FLAC inputs.
-
-**Change**
-- New `audio_utils` helper (e.g. `concat_wav_segments_flac()`, or `encode_flac()` after `concat_wav_segments()`) producing `<id>.flac`, since segments are already 16 kHz mono s16 and `encode_flac` (`audio_utils.py:201-242`) re-encodes to exactly that.
-- `recording_manager.combined_path_for()` gives the `.flac` path for new writes; a resolver (e.g. `combined_path_existing()`) returns `.flac`, else `.wav`, else None for readers; `_check_derived` accepts either suffix; `_wav_frames` is replaced by a FLAC frame/duration probe (`probe_format` exists at `audio_utils.py:244`; a FLAC frame count needs `ffprobe` or `soundfile`-free parsing) so trim verification still works.
-- New migration (`_V12`, a new version — shipped migrations are frozen, `db.py:54,965-977`) rebuilds `files` only to relax the `combined` CHECK to accept `combined.wav` or `combined.flac`. **It must not move or rewrite any file** (migrations never touch user files); it only widens the constraint so a converted `.flac` row validates.
-- Conversion of existing recordings is a **storage-trim action, not a migration**: extend `trim_recording_audio`/`plan` with a convert step that verifies the WAV (existing `_wav_frames` logic), encodes to `.flac`, `set`/`move`s the `combined` row, then deletes the `.wav` after commit. Do this before or as part of the existing trim so `combined/` deletion and per-user trim still run.
-- `file_registry._scan_data()` matches both suffixes; `sync()` already refuses to guess an unregistered `.flac`, so a recording-owned `combined.flac` with an existing `combined` row is the one that gets picked up.
-- `recover_recording()` and both `_finalise()` methods write the FLAC form going forward.
-
-**Every caller/reader affected**
-- Capture hand-off: `discord_bot._finalise` (`:531-538`), `local_capture._finalise` (`:551-558`), `recover_recording` (`:579-580`).
-- Storage trim: `plan` DROP_COPY/CONVERT decision (`storage_trim.py:263`), `_drop_copy` (`:396`), `trim_recording_audio` verification and targets (`recording_manager.py:627-748`).
-- Transcript audio resolution: `transcript_store.audio_path`/`_audio_for` (`:2499-2531`), `_companion_paths` already excludes anything under `<data>/recordings/` (`:1539-1546`) so delete is unaffected.
-- Playback: `transcripts.py` route and `_AUDIO_TYPES` (`.flac` already handled); MIME stays `audio/flac`.
-- Recording UI/API: `record.py:64,963,1015`, `transcripts.py:354`, `models.Recording.combined_path` comment (`models.py:132`).
-- File registry: `register_capture_files` (`:544`), `_scan_data` (`:718`), `db.py` CHECKs (`:649,858`), `test_schema.py` baselines (`:62,225,251`).
-- Tests referencing the literal path: `test_recording_manager.py` (many, e.g. `:137,546,622`), `test_discord_bot.py:444`, `test_local_capture.py`, `test_record_routes.py` (many), `test_web_routes.py:518`, `test_web_jobs.py:1047`, `test_file_registry.py`, `test_storage_trim.py:204,210`, `test_audio_writer.py`.
-- Docs: `architecture.md` (Recording layer, Data Storage tree, Known Constraints, Storage trim), `docs/configuration.md:74`, `docs/cli-reference.md:529-530`, `docs/scenarios.md:133`, `docs/web-ui.md:67,75,95,180,226`, `docs/docker.md` if it names the file.
-
-**Tests**
-- `encode_flac`/concat helper: mocked ffmpeg writes the FLAC through a temp name; failure leaves the WAV and its row.
-- Trim verifies a converted FLAC and still deletes `combined/` + per-user; a truncated/zero-frame FLAC blocks the trim (mirror `test_recording_manager.py:531-743`).
-- Conversion action converts an existing `.wav` recording in place, updates the `combined` row (path + size), deletes the `.wav`, and is idempotent (`test_storage_trim.py`, `test_schema.py` for the new CHECK).
-- `combined_path` is None when neither form exists; `.flac` preferred when both.
-- Recording transcribe hand-off submits the `.flac` (`test_record_routes.py`); playback serves `audio/flac`; recover writes FLAC (`test_recording_manager.py:460-466,672-716`).
-- No real audio: FFmpeg mocked as today.
-
----
-
 ## Forced word alignment — follow-ups
 
 Design in `architecture.md` ("Forced word alignment"). The `forced_alignment = auto` default rests on spot-check evidence, not a full labelled set: on a 2 h episode, aligned and unaligned runs disagreed on 155 of 20,675 words; one-word "islands" inside another speaker's run were 10 (unaligned) vs 3 (aligned); 4 of 4 hand-checked disputed words were right with alignment.

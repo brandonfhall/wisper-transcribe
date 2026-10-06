@@ -271,6 +271,50 @@ def probe_format(path: Path) -> tuple[int, int]:
         raise RuntimeError(f"ffprobe gave no audio format for {Path(path).name!r}") from exc
 
 
+def probe_frames(path: Path) -> int:
+    """Exact sample-frame count of a FLAC via ffprobe, without decoding it.
+
+    FLAC's STREAMINFO header stores the total sample count; FFmpeg's flac
+    demuxer exposes it as ``duration_ts`` with ``time_base`` ``1/sample_rate``,
+    so for a FLAC ``duration_ts`` *is* the frame count. Counting frames with
+    ``-count_frames`` decodes the whole file for the same answer, so it is not
+    used. Raises RuntimeError when ffprobe can't read the stream or the values
+    don't line up (then the count can't be trusted).
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=sample_rate,duration_ts,time_base",
+                "-of", "default=noprint_wrappers=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"ffprobe could not run: {exc}") from exc
+    if result.returncode != 0:
+        raise RuntimeError(f"ffprobe could not read {Path(path).name!r}")
+    fields: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        key, _, value = line.partition("=")
+        fields[key.strip()] = value.strip()
+    try:
+        rate = int(fields["sample_rate"])
+        frames = int(fields["duration_ts"])
+        num, _, den = fields["time_base"].partition("/")
+        num, den = int(num), int(den)
+    except (KeyError, ValueError) as exc:
+        raise RuntimeError(f"ffprobe gave no reliable frame count for {Path(path).name!r}") from exc
+    # duration_ts is the frame count only when the time base is 1/sample_rate.
+    if rate <= 0 or frames <= 0 or num <= 0 or rate * num != den:
+        raise RuntimeError(f"ffprobe gave no reliable frame count for {Path(path).name!r}")
+    return frames
+
+
 def get_duration(path: Path) -> float:
     """Return audio duration in seconds.
 

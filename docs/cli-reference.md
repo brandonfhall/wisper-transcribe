@@ -258,7 +258,7 @@ wisper campaigns relabel d-d-mondays --no-backfill  # only use voice data alread
 - Automatically assigned names are matched against the campaign roster again, so a player enrolled after a session was transcribed gets named in it.
 - An unknown voice heard in two or more sessions gets one shared name, `Recurring Speaker N`. Name them once in any session's wizard and the others follow.
 - Names you set by hand are never changed.
-- Sessions with no stored voice data have it re-extracted from the transcript's kept audio (the `<name>.flac` an upload leaves beside it, or a recording's `combined.wav`). Sessions without either are skipped and listed.
+- Sessions with no stored voice data have it re-extracted from the transcript's kept audio (the `<name>.flac` an upload leaves beside it, or a recording's combined track). Sessions without either are skipped and listed.
 
 ```
 Options:
@@ -518,7 +518,7 @@ wisper storage trim --apply          # do it
 wisper storage trim --apply --device cpu
 ```
 
-`trim` is a dry run unless you pass `--apply`. It prints one line per action (what it does, the file or session, its current size, and where a session is going), the space the deletions free, the size of the files to convert, and the Needs-attention list, and changes nothing. The actions, in order:
+`trim` is a dry run unless you pass `--apply`. It prints one line per action (what it does, the file or session, its current size, and where a session is going), the space the deletions free, the size of the files to convert, and the Needs-attention list, and changes nothing. A recording's `combined.wav` conversion is listed under `Recordings` (its size before), the transcript conversions under `Converted`. The actions, in order:
 
 - **Move sessions into campaign folders.** A session still in the transcripts root (or elsewhere) that a campaign holds moves into that campaign's folder, with its summary, speaker data, clips, and audio. A campaign journal still in the data dir moves into the campaign folder too. Run this once after upgrading; a campaign whose folder is taken, mid-rename, or missing is reported instead, to fix from the Transcripts page.
 - **Match renames.** Transcripts renamed outside wisper are matched first, as at server start.
@@ -526,8 +526,9 @@ wisper storage trim --apply --device cpu
   - A video or a large WAV shrinks to about 90 MB per hour of audio.
   - An already-compressed audio file (MP3, M4A, Opus) can grow: a 64 kbps MP3 becomes about 3 times larger. Every transcript then keeps the same lossless format.
   - The summary reports the net change, which can be more space used.
-- **Delete recording copies.** A transcript made from a recording uses the recording's `combined.wav`, so its own copy is deleted. A `<recording-id>.wav` in the transcripts folder that no transcript uses is deleted too.
-- **Trim recordings.** Segment and per-user audio is removed once `combined.wav` is verified complete.
+- **Delete recording copies.** A transcript made from a recording uses the recording's combined track (`combined.flac`, or a legacy `combined.wav`), so its own copy is deleted. A `<recording-id>.wav` in the transcripts folder that no transcript uses is deleted too.
+- **Convert recording combined audio to FLAC.** Each recording whose combined file is still a legacy `combined.wav` is encoded to `combined.flac` (about half the size, lossless) and the WAV is deleted. The WAV is verified first and the FLAC's frame count must equal it, so a truncated or unreadable WAV is left alone and reported. A second run finds nothing to convert.
+- **Trim recordings.** Segment and per-user audio is removed once the recording's combined track is verified complete.
 
 It moves only sessions a campaign holds and deletes only files wisper tracks, plus those unused `<recording-id>.wav` copies. Other files in the transcripts folder are never touched. Needs-attention items (missing transcripts, missing files, files with no transcript) are listed, never deleted.
 

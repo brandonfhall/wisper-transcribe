@@ -36,7 +36,10 @@ import numpy as np
 
 from wisper_transcribe.models import Recording
 from wisper_transcribe.recording_manager import (
+    combined_path_for,
+    combined_wav_path_for,
     create_recording,
+    encode_combined_flac,
     record_completed_wav_segment,
     register_capture_files,
     trim_recording_audio,
@@ -548,13 +551,19 @@ class LocalCaptureManager:
             self._combined_writer = None
             self._combined_segment_started_at = None
 
-            combined_out = self._data_dir / "recordings" / recording.id / "combined.wav"
+            combined_out = combined_wav_path_for(recording.id, self._data_dir)
+            combined_out.parent.mkdir(parents=True, exist_ok=True)
             try:
                 merged = concat_wav_segments(combined_dir, combined_out)
             except Exception:
                 log.warning("Failed to concatenate local capture combined segments", exc_info=True)
                 merged = None
             if merged is not None:
+                # Store FLAC and verify it before deleting the WAV; on failure
+                # keep and register the WAV, so the capture still finishes.
+                if encode_combined_flac(recording.id, merged, self._data_dir) is not None:
+                    merged.unlink(missing_ok=True)
+                    merged = combined_path_for(recording.id, self._data_dir)
                 recording.combined_path = merged
                 log.info("Local recording %s combined track written to %s", recording.id, merged)
 
@@ -569,7 +578,7 @@ class LocalCaptureManager:
             recording.status = "completed"
             recording.ended_at = datetime.now(timezone.utc)
 
-        # combined.wav's path is derived from the layout; only the status
+        # combined.flac's path is derived from the layout; only the status
         # change needs writing, and a terminal status set earlier is kept.
         if became_completed:
             update_recording_status(recording.id, "completed", self._data_dir,

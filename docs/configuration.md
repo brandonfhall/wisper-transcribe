@@ -71,7 +71,7 @@ wisper-transcribe/
 ├── campaigns/
 │   └── <slug>/
 │       └── journal.md.v11-adopted   a journal moved into its campaign folder, kept for rolling back
-├── recordings/          each recording's combined.wav, plus per-user tracks of Discord speakers not yet enrolled (recording details are in wisper.db)
+├── recordings/          each recording's combined.flac (or a legacy combined.wav), plus per-user tracks of Discord speakers not yet enrolled (recording details are in wisper.db)
 └── output/              transcripts (unless `output_dir` / `WISPER_OUTPUT_DIR` points elsewhere)
 ```
 

@@ -10,6 +10,15 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+from ._flac_mock import frames as combined_frames, install as install_flac_mock
+
+
+@pytest.fixture(autouse=True)
+def _mock_flac_encode(monkeypatch):
+    """No real ffmpeg: a real BotManager/LocalCaptureManager finalise encodes a
+    combined track, so mock the FLAC encode/probe for every test in this file."""
+    install_flac_mock(monkeypatch)
+
 
 @pytest.fixture()
 def client(tmp_path):
@@ -1804,7 +1813,7 @@ def test_transcribe_recording_no_audio_regression_after_real_bot_session(client)
         id=str(_uuid.uuid4()),
         status="pending",
         created_at=loaded.started_at,
-        input_path=str(tmp_path / "recordings" / rec.id / "combined.wav"),
+        input_path=str(loaded.combined_path),
         kwargs={},
         name=rec.id,
     )
@@ -1818,10 +1827,8 @@ def test_transcribe_recording_no_audio_regression_after_real_bot_session(client)
 
     assert mock_submit.call_args.args[0] == str(loaded.combined_path)
     assert not list((tmp_path / "output").glob("*.wav"))
-    with wave.open(str(loaded.combined_path), "rb") as wf:
-        assert wf.getframerate() == 16000
-        assert wf.getnchannels() == 1
-        assert wf.getnframes() > 0
+    assert loaded.combined_path.name == "combined.flac"
+    assert combined_frames(loaded.combined_path) > 0
 
 
 def test_transcribe_recording_invalid_id_blocked(client):
@@ -2036,6 +2043,28 @@ def test_api_recording_transcribe_handoff(client):
     assert loaded.status == "transcribing"
     assert loaded.job_id == fake_job.id
     mock_submit.assert_called_once()
+
+
+def test_transcribe_handoff_submits_combined_flac(client):
+    """A recording whose only audio is combined.flac hands that path to the job."""
+    from tests._seed import seed_recording
+    from wisper_transcribe.web.jobs import Job as JobCls
+    import uuid as _uuid
+
+    c, tmp_path = client
+    rec = seed_recording(tmp_path, as_flac=True)
+    assert rec.combined_path is not None and rec.combined_path.name == "combined.flac"
+
+    fake_job = JobCls(
+        id=str(_uuid.uuid4()), status="pending", created_at=rec.started_at,
+        input_path=str(rec.combined_path), kwargs={}, name=rec.id,
+    )
+    with patch.object(c.app.state.job_queue, "submit", return_value=fake_job) as mock_submit:
+        resp = c.post(f"/api/recordings/{rec.id}/transcribe")
+
+    assert resp.status_code == 202
+    mock_submit.assert_called_once()
+    assert mock_submit.call_args.args[0] == str(rec.combined_path)
 
 
 def test_api_recording_transcribe_not_ready_returns_409(client):

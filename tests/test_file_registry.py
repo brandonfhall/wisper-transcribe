@@ -16,6 +16,14 @@ from wisper_transcribe.campaign_manager import create_campaign
 from wisper_transcribe.config import get_data_dir
 from wisper_transcribe.path_utils import get_output_dir
 
+from ._flac_mock import install as install_flac_mock
+
+
+@pytest.fixture(autouse=True)
+def _mock_flac_encode(monkeypatch):
+    """No real ffmpeg: the combined-track FLAC encode/probe is mocked."""
+    install_flac_mock(monkeypatch)
+
 
 @pytest.fixture(autouse=True)
 def _case_sensitive(monkeypatch):
@@ -1020,7 +1028,7 @@ def test_local_finalise_registers_combined_per_user_and_the_live_draft(data, mon
     _run_session_to_completion(mgr)
 
     owner = fr.Owner.for_recording(rec.id)
-    assert _row(owner, "combined").rel_path == f"recordings/{rec.id}/combined.wav"
+    assert _row(owner, "combined").rel_path == f"recordings/{rec.id}/combined.flac"
     assert _row(owner, "per_user", "mic").rel_path == f"recordings/{rec.id}/per-user/mic"
     assert _row(owner, "per_user", "system") is not None
     assert _row(owner, "live_draft") is not None

@@ -87,15 +87,18 @@ def seed_job(job_id: str, *, job_type: str = "transcription", status: str = "pen
 
 
 def seed_recording(data_dir: Optional[Path] = None, *, status: str = "completed",
-                   with_audio: bool = True, **kwargs):
-    """A recording in ``status`` with the real on-disk layout: when
-    ``with_audio``, ``recordings/<id>/combined.wav`` exists (a tiny valid WAV),
-    so the derived ``combined_path`` resolves. Returns the loaded Recording."""
+                   with_audio: bool = True, as_flac: bool = False, **kwargs):
+    """A recording in ``status`` with the real on-disk layout.
+
+    With ``with_audio`` a tiny valid combined track exists, so the derived
+    ``combined_path`` resolves: ``combined.wav`` by default (a legacy session),
+    or ``combined.flac`` when ``as_flac``. Returns the loaded Recording."""
     import wave
     from datetime import datetime, timezone
 
     from wisper_transcribe.recording_manager import (
-        combined_path_for, create_recording, load_recording, update_recording_status,
+        combined_path_for, combined_wav_path_for, create_recording, load_recording,
+        update_recording_status,
     )
 
     rec = create_recording(
@@ -103,13 +106,17 @@ def seed_recording(data_dir: Optional[Path] = None, *, status: str = "completed"
         data_dir=data_dir, **kwargs,
     )
     if with_audio:
-        path = combined_path_for(rec.id, data_dir)
+        path = combined_path_for(rec.id, data_dir) if as_flac \
+            else combined_wav_path_for(rec.id, data_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with wave.open(str(path), "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(16000)
-            wf.writeframes(b"\x00\x00" * 160)
+        if as_flac:
+            path.write_bytes(b"fLaC")  # header only; tests mock probe_frames/encode
+        else:
+            with wave.open(str(path), "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(16000)
+                wf.writeframes(b"\x00\x00" * 160)
     if status != "recording":
         update_recording_status(rec.id, status, data_dir,
                                 ended_at=datetime.now(timezone.utc))

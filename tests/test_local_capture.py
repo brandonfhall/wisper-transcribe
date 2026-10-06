@@ -26,6 +26,14 @@ from wisper_transcribe.web.local_capture import (
     resolve_device_name,
 )
 
+from ._flac_mock import frames as combined_frames, install as install_flac_mock
+
+
+@pytest.fixture(autouse=True)
+def _mock_flac_encode(monkeypatch):
+    """No real ffmpeg: the combined-track FLAC encode/probe is mocked."""
+    install_flac_mock(monkeypatch)
+
 
 # ---------------------------------------------------------------------------
 # Fakes: scripted capture_factory + instant ticker
@@ -190,9 +198,8 @@ def test_combined_duration_equals_tick_count_times_20ms(tmp_path):
     _run_session_to_completion(mgr)
 
     assert rec.combined_path is not None and rec.combined_path.exists()
-    rate, channels, sampwidth, nframes, _ = _read_wav(rec.combined_path)
-    assert rate == 16000 and channels == 1 and sampwidth == 2
-    assert nframes == n_ticks * 320
+    assert rec.combined_path.name == "combined.flac"
+    assert combined_frames(rec.combined_path) == n_ticks * 320
 
 
 def test_silence_substitution_for_starved_track(tmp_path):

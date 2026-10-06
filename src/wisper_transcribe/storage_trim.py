@@ -1,7 +1,7 @@
 """Move sessions into their campaign folders, and convert and delete audio that
 older transcripts and recordings don't need.
 
-``plan()`` only reads. ``apply()`` runs five actions in order:
+``plan()`` only reads. ``apply()`` runs six actions in order:
 
 1. reconcile the registry with the output folders, so renames are matched first;
 2. move each misplaced session's files into the folder its campaign names, and
@@ -9,9 +9,11 @@ older transcripts and recordings don't need.
 3. for each transcript with an ``audio`` file: store the voice embeddings it
    lacks (while the original audio still exists), then shrink the audio to a
    16 kHz mono ``<stem>.flac`` (or drop it when the recording's
-   ``combined.wav`` already covers it);
+   ``combined.flac``/``combined.wav`` already covers it);
 4. delete orphaned ``<recording-id>.wav`` hand-off copies in the output root;
-5. trim each recording to ``combined.wav``.
+5. convert each recording's legacy ``combined.wav`` to a verified
+   ``combined.flac`` (a no-op once it is ``.flac``);
+6. trim each recording to its combined track.
 
 The plan is recomputed after the moves, so the conversion actions name the
 files' new paths.
@@ -39,15 +41,19 @@ ORGANIZE = "organize"
 CONVERT = "convert"
 DROP_COPY = "drop_copy"
 ORPHAN = "orphan"
+CONVERT_RECORDING = "convert_recording"
 TRIM_RECORDING = "trim_recording"
 
-# Order the actions run in (reconcile runs before all of them).
-_ORDER = (ORGANIZE, CONVERT, DROP_COPY, ORPHAN, TRIM_RECORDING)
+# Order the actions run in (reconcile runs before all of them). A recording's
+# combined WAV is converted to FLAC before its segments are trimmed, so the
+# trim verifies the FLAC.
+_ORDER = (ORGANIZE, CONVERT, DROP_COPY, ORPHAN, CONVERT_RECORDING, TRIM_RECORDING)
 KIND_LABELS = {
     ORGANIZE: "move into campaign folder",
     CONVERT: "convert to FLAC",
     DROP_COPY: "delete copy",
     ORPHAN: "delete orphan",
+    CONVERT_RECORDING: "convert recording to FLAC",
     TRIM_RECORDING: "trim recording",
 }
 
@@ -75,12 +81,18 @@ class TrimPlan:
     @property
     def total_bytes(self) -> int:
         """Bytes the deletions free. A conversion's result size isn't known ahead."""
-        return sum(a.size for a in self.actions if a.kind not in (CONVERT, ORGANIZE))
+        return sum(a.size for a in self.actions
+                   if a.kind not in (CONVERT, ORGANIZE, CONVERT_RECORDING))
 
     @property
     def convert_bytes(self) -> int:
-        """Current size of the files a conversion replaces."""
+        """Current size of the transcript files a conversion replaces."""
         return sum(a.size for a in self.actions if a.kind == CONVERT)
+
+    @property
+    def convert_recording_bytes(self) -> int:
+        """Current size of the legacy ``combined.wav`` files a conversion replaces."""
+        return sum(a.size for a in self.actions if a.kind == CONVERT_RECORDING)
 
     @property
     def move_bytes(self) -> int:
@@ -96,12 +108,13 @@ class TrimPlan:
 @dataclass
 class TrimReport:
     converted: list[str] = field(default_factory=list)
+    converted_recordings: dict[str, int] = field(default_factory=dict)
     dropped: list[str] = field(default_factory=list)
     orphans: list[str] = field(default_factory=list)
     trimmed: dict[str, int] = field(default_factory=dict)
     embeddings: list[str] = field(default_factory=list)
     organized: list[str] = field(default_factory=list)
-    freed_bytes: int = 0            # net: negative when conversions grew the audio
+    freed_bytes: int = 0            # net: negative when conversions grew the audio (includes converted_recordings values)
     errors: list[str] = field(default_factory=list)
     attention: Optional[object] = None
     reconciled: dict[str, int] = field(default_factory=dict)
@@ -260,10 +273,10 @@ def plan(data_dir: Optional[Path] = None, output_dir: Optional[Path] = None) -> 
                 rows.append((t["stem"], t["id"], row, linked.get(t["id"])))
 
     for stem, tid, row, rec_id in rows:
-        if rec_id is not None and recording_manager.combined_path_for(rec_id, data).is_file():
+        if rec_id is not None and recording_manager.existing_combined_path(rec_id, data) is not None:
             result.actions.append(Action(
                 DROP_COPY, row.path, _size(row.path), stem=stem, transcript_id=tid,
-                recording_id=rec_id, note="the recording's combined.wav is the audio"))
+                recording_id=rec_id, note="the recording's combined FLAC/WAV is the audio"))
         elif not _is_kept_flac(row, stem):
             result.actions.append(Action(CONVERT, row.path, _size(row.path), stem=stem,
                                          transcript_id=tid))
@@ -274,6 +287,14 @@ def plan(data_dir: Optional[Path] = None, output_dir: Optional[Path] = None) -> 
     for rid, status in recordings.items():
         if status in file_registry._ACTIVE_CAPTURE:
             continue
+        # Any combined.wav left is converted, even when the row already names the
+        # .flac: a crash between the repoint and the delete leaves the WAV behind,
+        # and re-running the verified encode then deletes it.
+        wav = recording_manager.combined_wav_path_for(rid, data)
+        if wav.is_file():
+            result.actions.append(Action(
+                CONVERT_RECORDING, wav, _size(wav), recording_id=rid,
+                note="the recording's combined track is converted to FLAC"))
         freed = recording_manager.trimmable_bytes(rid, data)
         if freed > 0:
             result.actions.append(Action(
@@ -393,8 +414,8 @@ def _convert(loc, action: Action, output: Path, data: Path, report: TrimReport) 
 def _drop_copy(loc, action: Action, output: Path, data: Path, report: TrimReport) -> None:
     from . import recording_manager, transcript_store
 
-    if action.recording_id is None or not recording_manager.combined_path_for(
-            action.recording_id, data).is_file():
+    if action.recording_id is None or recording_manager.existing_combined_path(
+            action.recording_id, data) is None:
         return
     before = _size(action.path)
     try:
@@ -407,6 +428,55 @@ def _drop_copy(loc, action: Action, output: Path, data: Path, report: TrimReport
         return
     report.dropped.append(loc.stem or "")
     report.freed_bytes += before
+
+
+def _convert_recording(action: Action, data: Path, report: TrimReport) -> None:
+    """Convert one recording's legacy ``combined.wav`` to a verified ``.flac``.
+
+    Verify the WAV has frames, encode to ``combined.flac`` (atomic replace, so a
+    re-run overwrites a crash's partial file), verify the FLAC as finalise does,
+    then re-point the ``combined`` row in one transaction and delete the ``.wav``
+    after the commit. Any failure removes the partial ``.flac`` and keeps the WAV
+    and its row. Idempotent: a second run finds a ``.flac`` and plans nothing.
+    """
+    from . import recording_manager
+
+    rid = action.recording_id
+    if rid is None:
+        return
+    wav = action.path
+    flac = recording_manager.combined_path_for(rid, data)
+    before = _size(wav)
+    if recording_manager.combined_frames(wav) <= 0:
+        report.errors.append(f"recording {rid}: the WAV has no readable frames; not converted")
+        return
+    try:
+        converted = recording_manager.encode_combined_flac(rid, wav, data)
+    except Exception as exc:
+        report.errors.append(f"recording {rid}: could not convert ({type(exc).__name__})")
+        log.warning("Could not convert recording %s", rid, exc_info=True)
+        return
+    if converted is None:
+        report.errors.append(f"recording {rid}: the FLAC did not verify; the WAV is kept")
+        return
+    owner = file_registry.Owner("recording", rid)
+    try:
+        with db.transaction(data) as conn:
+            row = file_registry.file_for(owner, "combined", conn=conn, data_dir=data)
+            if row is not None:
+                file_registry.repoint(row, converted, conn=conn, data_dir=data)
+            else:
+                file_registry.add_if_owned(converted, kind="combined", owner=owner, conn=conn,
+                                           data_dir=data)
+    except Exception as exc:
+        report.errors.append(f"recording {rid}: could not record the FLAC ({type(exc).__name__})")
+        log.warning("Could not record the FLAC of recording %s", rid, exc_info=True)
+        converted.unlink(missing_ok=True)
+        return
+    wav.unlink(missing_ok=True)
+    saved = before - _size(converted)
+    report.converted_recordings[rid] = saved
+    report.freed_bytes += saved
 
 
 def _organize(moves: list[Action], data: Path, output: Path, report: TrimReport,
@@ -511,17 +581,19 @@ def apply(plan_: Optional[TrimPlan] = None, device: str = "auto",
             report.errors.append(f"{path.name}: could not be deleted")
 
     for action in current.actions:
-        if action.kind != TRIM_RECORDING or action.recording_id is None:
-            continue
-        say(f"trim recording: {action.recording_id}")
-        try:
-            freed = recording_manager.trim_recording_audio(action.recording_id, data)
-        except Exception as exc:
-            report.errors.append(
-                f"recording {action.recording_id}: could not trim ({type(exc).__name__})")
-            continue
-        if freed:
-            report.trimmed[action.recording_id] = freed
-            report.freed_bytes += freed
+        if action.kind == CONVERT_RECORDING and action.recording_id is not None:
+            say(f"convert recording to FLAC: {action.recording_id}")
+            _convert_recording(action, data, report)
+        elif action.kind == TRIM_RECORDING and action.recording_id is not None:
+            say(f"trim recording: {action.recording_id}")
+            try:
+                freed = recording_manager.trim_recording_audio(action.recording_id, data)
+            except Exception as exc:
+                report.errors.append(
+                    f"recording {action.recording_id}: could not trim ({type(exc).__name__})")
+                continue
+            if freed:
+                report.trimmed[action.recording_id] = freed
+                report.freed_bytes += freed
 
     return report

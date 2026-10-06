@@ -26,7 +26,10 @@ from wisper_transcribe.models import Recording, RejoinAttempt
 from wisper_transcribe.recording_manager import (
     append_rejoin,
     bind_recording_speaker,
+    combined_path_for,
+    combined_wav_path_for,
     create_recording,
+    encode_combined_flac,
     load_recordings,
     record_completed_wav_segment,
     register_capture_files,
@@ -494,12 +497,33 @@ class BotManager:
             await asyncio.sleep(delay)
         return True
 
+    def _store_combined(self, recording_id: str, combined_dir) -> Optional[Path]:
+        """Join the combined-track segments and store them as ``combined.flac``.
+
+        The FLAC is verified before the joined WAV is deleted; on any failure
+        the WAV is kept and becomes the combined file, so the capture still
+        finishes. Returns None when no audio was captured.
+        """
+        combined_out = combined_wav_path_for(recording_id, self._data_dir)
+        combined_out.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            merged = concat_wav_segments(combined_dir, combined_out)
+        except Exception as exc:
+            log.warning("Failed to concatenate combined-track segments: %s", exc)
+            return None
+        if merged is not None and encode_combined_flac(recording_id, merged, self._data_dir) is not None:
+            merged.unlink(missing_ok=True)
+            return combined_path_for(recording_id, self._data_dir)
+        return merged
+
     async def _finalise(self, recording: Recording) -> None:
         """Close all writers, merge the combined track, mark recording completed.
 
-        Concatenates the combined-track segments into
-        ``recordings/<id>/combined.wav`` and sets ``combined_path`` when any
-        audio was captured; otherwise it stays None.
+        Concatenates the combined-track segments into a WAV, encodes it to
+        ``recordings/<id>/combined.flac`` and verifies the frame count, then
+        deletes the WAV; when any step fails the WAV is kept. Either way
+        ``combined_path`` points at the file that survived, or stays None when
+        no audio was captured.
         """
         for writer in self._writers.values():
             try:
@@ -528,12 +552,8 @@ class BotManager:
             self._combined_dir = None
             self._combined_segment_started_at = None
 
-            combined_out = self._data_dir / "recordings" / recording.id / "combined.wav"
-            try:
-                merged = concat_wav_segments(combined_dir, combined_out)
-            except Exception as exc:
-                log.warning("Failed to concatenate combined-track segments: %s", exc)
-                merged = None
+            # Joining and encoding a long session takes minutes: off the event loop.
+            merged = await asyncio.to_thread(self._store_combined, recording.id, combined_dir)
             if merged is not None:
                 recording.combined_path = merged
                 log.info("Recording %s combined track written to %s", recording.id, merged)
@@ -549,7 +569,7 @@ class BotManager:
             recording.status = "completed"
             recording.ended_at = datetime.now(timezone.utc)
 
-        # combined.wav's path is derived from the layout, so only a status
+        # combined.flac's path is derived from the layout, so only a status
         # change needs writing; a terminal status saved by a disconnect
         # handler (failed/degraded) is kept.
         if became_completed:

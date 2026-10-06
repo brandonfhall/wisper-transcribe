@@ -7,14 +7,16 @@ layout under ``$DATA_DIR/recordings/<id>/``:
 
     per-user/<track>/NNNN.wav   60 s segments per Discord user id, or mic/system
     combined/NNNN.wav           60 s segments of the mixed track
-    combined.wav                concatenated at session end
+    combined.flac               concatenated at session end (a legacy capture left combined.wav)
     live_transcript.md          live draft (local sessions)
 
-``combined.wav`` is the recording's only lasting audio. Once it is verified
-complete, :func:`trim_recording_audio` deletes ``combined/`` and the per-user
-tracks nothing still needs: all of a local session's, and a Discord user's once
-that user is bound to a profile (an unbound user's track is what enrollment
-reads). Segment rows stay as metadata.
+``combined.flac`` (or a legacy ``combined.wav``) is the recording's only lasting
+audio. Readers resolve either suffix through :func:`existing_combined_path`,
+preferring ``.flac`` when both exist. Once it is verified complete,
+:func:`trim_recording_audio` deletes ``combined/`` and the per-user tracks
+nothing still needs: all of a local session's, and a Discord user's once that
+user is bound to a profile (an unbound user's track is what enrollment reads).
+Segment rows stay as metadata.
 
 so paths are never stored: :class:`~wisper_transcribe.models.Recording`'s
 ``combined_path``, ``per_user_dir``, and segment ``path`` are derived from
@@ -72,7 +74,29 @@ def get_recording_dir(recording_id: str, data_dir: Optional[Path] = None) -> Pat
 
 
 def combined_path_for(recording_id: str, data_dir: Optional[Path] = None) -> Path:
+    """Where a new capture writes its combined track: ``combined.flac``."""
+    return get_recording_dir(recording_id, data_dir) / "combined.flac"
+
+
+def combined_wav_path_for(recording_id: str, data_dir: Optional[Path] = None) -> Path:
+    """The legacy ``combined.wav`` a pre-FLAC capture left, if any."""
     return get_recording_dir(recording_id, data_dir) / "combined.wav"
+
+
+def existing_combined_path(recording_id: str,
+                           data_dir: Optional[Path] = None) -> Optional[Path]:
+    """The recording's combined track on disk: ``.flac`` if present, else ``.wav``.
+
+    Every reader resolves through here so a legacy ``combined.wav`` stays
+    readable and a new ``combined.flac`` is preferred when both exist (e.g.
+    during a conversion). Returns None when neither is a file.
+    """
+    directory = get_recording_dir(recording_id, data_dir)
+    for name in ("combined.flac", "combined.wav"):
+        path = directory / name
+        if path.is_file():
+            return path
+    return None
 
 
 def segment_path_for(recording_id: str, idx: int, data_dir: Optional[Path] = None) -> Path:
@@ -165,8 +189,8 @@ def _load(conn: sqlite3.Connection, data_dir: Optional[Path],
             status = "transcribing"
         else:
             status = r["capture_status"]
-        combined = combined_path_for(rid, data_dir)
-        has_combined = combined.exists()
+        combined = existing_combined_path(rid, data_dir)
+        has_combined = combined is not None
         spk = speakers.get(rid, [])
         recordings[rid] = Recording(
             id=rid,
@@ -184,7 +208,7 @@ def _load(conn: sqlite3.Connection, data_dir: Optional[Path],
                               finalized=bool(s["finalized"]))
                 for s in segments.get(rid, [])
             ],
-            combined_path=combined if has_combined else None,
+            combined_path=combined,
             per_user_dir=get_recording_dir(rid, data_dir) / "per-user",
             transcript_path=transcript_path,
             transcript_id=tid,
@@ -247,8 +271,9 @@ def _check_derived(rec: Recording, data_dir: Optional[Path]) -> None:
     stored something that is silently recomputed."""
     if rec.status not in CAPTURE_STATUSES and rec.status not in ("transcribing", "transcribed"):
         raise ValueError(f"unknown recording status {rec.status!r}")
-    if rec.combined_path is not None and Path(rec.combined_path) != combined_path_for(rec.id, data_dir):
-        raise ValueError("combined_path is fixed: recordings/<id>/combined.wav")
+    if rec.combined_path is not None and Path(rec.combined_path) not in (
+            combined_path_for(rec.id, data_dir), combined_wav_path_for(rec.id, data_dir)):
+        raise ValueError("combined_path is fixed: recordings/<id>/combined.wav or .flac")
     for seg in rec.segment_manifest:
         if seg.stream != "mixed" or Path(seg.path) != segment_path_for(rec.id, seg.index, data_dir):
             raise ValueError("segment paths are fixed: recordings/<id>/combined/NNNN.wav (mixed)")
@@ -531,9 +556,9 @@ def append_rejoin(recording_id: str, attempt: RejoinAttempt, data_dir: Optional[
 
 
 def register_capture_files(recording_id: str, data_dir: Optional[Path] = None) -> None:
-    """Register the files a finished capture left: ``combined.wav``, each
-    ``per-user/<track>/`` directory, and the live draft. Best-effort, and a
-    file that doesn't exist is skipped.
+    """Register the files a finished capture left: its combined track
+    (``.flac``, or a legacy ``.wav``), each ``per-user/<track>/`` directory,
+    and the live draft. Best-effort, and a file that doesn't exist is skipped.
     """
     try:
         with db.transaction(data_dir) as conn:
@@ -541,9 +566,10 @@ def register_capture_files(recording_id: str, data_dir: Optional[Path] = None) -
             if owner is None:
                 return
             rec_dir = get_recording_dir(recording_id, data_dir)
-            for kind, path in (("combined", combined_path_for(recording_id, data_dir)),
+            combined = existing_combined_path(recording_id, data_dir)
+            for kind, path in (("combined", combined),
                                ("live_draft", rec_dir / "live_transcript.md")):
-                if path.is_file():
+                if path is not None and path.is_file():
                     file_registry.add_if_owned(path, kind=kind, owner=owner, conn=conn,
                                                data_dir=data_dir)
             tracks = rec_dir / "per-user"
@@ -556,16 +582,18 @@ def register_capture_files(recording_id: str, data_dir: Optional[Path] = None) -
 
 
 def recover_recording(recording_id: str, data_dir: Optional[Path] = None) -> Recording:
-    """Rebuild ``combined.wav`` for a session that crashed, from its segments.
+    """Rebuild the combined track for a session that crashed, from its segments.
 
     Segments are self-contained WAVs (the writer patches each header when it
     closes), so recovery is a plain join; only the last partial minute can be
-    missing. The recording becomes ``completed`` with ``recovered_at`` set and
-    can then be transcribed like any other. Slow for long sessions: call it
-    off the request thread.
+    missing. The join is written as ``combined.wav``, encoded to
+    ``combined.flac`` and verified, and only then is the WAV deleted; if the
+    encode fails the WAV is kept. The recording becomes ``completed`` with
+    ``recovered_at`` set and can then be transcribed like any other. Slow for
+    long sessions: call it off the request thread.
 
     Raises KeyError (unknown id) or ValueError (active, not failed, already
-    has ``combined.wav``, or no readable segments).
+    has a combined track, or no readable segments).
     """
     from .web.audio_writer import concat_wav_segments
 
@@ -576,19 +604,25 @@ def recover_recording(recording_id: str, data_dir: Optional[Path] = None) -> Rec
         raise ValueError("the session is still recording")
     if not rec.recoverable:
         raise ValueError("nothing to recover")
-    combined = combined_path_for(recording_id, data_dir)
+    combined = combined_wav_path_for(recording_id, data_dir)
     merged = concat_wav_segments(combined.parent / "combined", combined)
     if merged is None:
         raise ValueError("no readable audio segments")
+    # Verify the FLAC before deleting the WAV; on failure the WAV is kept and
+    # goes on to be registered as the recording's combined file.
+    if encode_combined_flac(recording_id, merged, data_dir) is not None:
+        merged.unlink(missing_ok=True)
     with db.transaction(data_dir) as conn:
         conn.execute(
             "UPDATE recordings SET capture_status = 'completed', recovered_at = ?, "
             "ended_at = coalesce(ended_at, ?) WHERE id = ? AND capture_status = 'failed'",
             (_ts(datetime.now(timezone.utc)), _ts(datetime.now(timezone.utc)), recording_id),
         )
-    file_registry.add_if_owned(
-        combined, kind="combined", owner=file_registry.Owner.for_recording(recording_id),
-        data_dir=data_dir)
+    registered = existing_combined_path(recording_id, data_dir)
+    if registered is not None:
+        file_registry.add_if_owned(
+            registered, kind="combined", owner=file_registry.Owner.for_recording(recording_id),
+            data_dir=data_dir)
     log.info("Recovered recording %s from its segments", recording_id)
     try:
         trim_recording_audio(recording_id, data_dir)
@@ -604,6 +638,53 @@ def _wav_frames(path: Path) -> int:
             return wf.getnframes()
     except (wave.Error, EOFError, OSError):
         return 0
+
+
+def combined_frames(path: Optional[Path]) -> int:
+    """Sample-frame count of a combined track, or 0 if unreadable.
+
+    A WAV is read from its header; a FLAC is probed with ffprobe. A FLAC's
+    decoded frame count equals the WAV's because both are 16 kHz mono s16
+    (segments are written at ``audio_writer.RATE``), so frame counts compare
+    directly.
+    """
+    if path is None:
+        return 0
+    if Path(path).suffix.lower() == ".flac":
+        from .audio_utils import probe_frames
+        try:
+            return probe_frames(Path(path))
+        except Exception:
+            return 0
+    return _wav_frames(Path(path))
+
+
+def encode_combined_flac(recording_id: str, wav: Path,
+                         data_dir: Optional[Path] = None) -> Optional[Path]:
+    """Encode a finished ``combined.wav`` to the recording's ``combined.flac``.
+
+    Returns the FLAC path once it verifies (16000 Hz, mono, and exactly the
+    WAV's frame count), else None. A partial or unverifiable ``.flac`` is
+    removed; the ``.wav`` is never deleted, so a capture is never lost to an
+    ffmpeg failure. Callers delete the ``.wav`` only after this returns a path.
+    """
+    from .audio_utils import encode_flac, probe_format
+
+    wav = Path(wav)
+    flac = combined_path_for(recording_id, data_dir)
+    expected = _wav_frames(wav)
+    if expected <= 0:
+        return None
+    try:
+        encode_flac(wav, flac)
+        if probe_format(flac) != (16000, 1) or combined_frames(flac) != expected:
+            raise ValueError("the encoded FLAC did not verify")
+    except Exception:
+        log.warning("Could not store recording %s's combined track as FLAC; keeping the WAV",
+                    recording_id, exc_info=True)
+        flac.unlink(missing_ok=True)
+        return None
+    return flac
 
 
 def _tree_bytes(path: Path) -> int:
@@ -628,12 +709,13 @@ def _trim_targets(rid: str, data_dir: Optional[Path]) -> list[tuple[Path, Option
     """The directories :func:`trim_recording_audio` would remove, or ``[]``.
 
     Each is ``(directory, per_user label)``; the label is None for ``combined/``
-    and ``""`` for a local session's whole ``per-user/``. Empty unless
-    ``combined.wav`` verifies as complete (see :func:`trim_recording_audio`).
+    and ``""`` for a local session's whole ``per-user/``. Empty unless the
+    combined track (``.flac`` or a legacy ``.wav``) verifies as complete (see
+    :func:`trim_recording_audio`).
     """
     rec_dir = get_recording_dir(rid, data_dir)
-    combined = combined_path_for(rid, data_dir)
-    total = _wav_frames(combined)
+    combined = existing_combined_path(rid, data_dir)
+    total = combined_frames(combined) if combined is not None else 0
     if total <= 0:
         return []
 
@@ -683,23 +765,24 @@ def trimmable_bytes(recording_id: str, data_dir: Optional[Path] = None) -> int:
 
 
 def trim_recording_audio(recording_id: str, data_dir: Optional[Path] = None) -> int:
-    """Delete the audio ``combined.wav`` makes redundant; return the bytes freed.
+    """Delete the audio the recording's combined track makes redundant; return
+    the bytes freed.
 
-    Changes nothing (returns 0) unless ``combined.wav`` is complete: it opens
-    as a WAV with at least one frame and, while ``combined/`` still exists,
-    its frames equal the summed frames of the readable, non-empty segments
-    (what ``concat_wav_segments`` joined) and no fewer segment files are
-    readable than there are segment rows. Segment ``duration_s`` is wall-clock
-    time, so it is not used. Once ``combined/`` is gone an earlier trim has
-    verified the file, so only the first check applies; that is what lets a
-    Discord user bound later have their track deleted.
+    Changes nothing (returns 0) unless the combined track (``combined.flac``,
+    or a legacy ``combined.wav``) is complete: it holds at least one frame and,
+    while ``combined/`` still exists, its frames equal the summed frames of the
+    readable, non-empty segments (what ``concat_wav_segments`` joined) and no
+    fewer segment files are readable than there are segment rows. Segment
+    ``duration_s`` is wall-clock time, so it is not used. Once ``combined/`` is
+    gone an earlier trim has verified the file, so only the first check applies;
+    that is what lets a Discord user bound later have their track deleted.
 
     Deletes ``combined/``, then ``per-user/`` for a local session or
     ``per-user/<uid>/`` for each bound Discord user. Each directory is renamed
     to ``.wisper-trash-<n>`` first and removed after the registry rows are
     forgotten, so a long delete never holds the database write lock and a
     crash leaves only trash for ``app._cleanup_recording_trash``. Never touches
-    ``combined.wav``.
+    the combined track itself.
     """
     rid = _validate_recording_id(recording_id)
     if rid is None:
