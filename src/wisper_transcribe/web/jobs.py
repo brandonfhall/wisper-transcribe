@@ -65,6 +65,8 @@ _GENERIC_JOB_ERRORS = {
     JOB_SUMMARIZE: "Post-processing failed — see server logs",
     JOB_ENROLL: "Enrollment failed",
     JOB_SPEAKER_RELABEL: "Speaker re-match failed — see server logs",
+    JOB_CAMPAIGN_SUMMARY: "Summary generation failed — see server logs",
+    JOB_CAMPAIGN_RECAP: "Recap generation failed — see server logs",
 }
 
 
@@ -595,12 +597,14 @@ class JobQueue:
     def _enqueue(self, job: Job) -> None:
         """Record the job in history, then track and queue it.
 
-        The job types the busy guard reads (transcription, journal, relabel)
-        write their row first and re-raise: a job whose row can't be written
-        must not be queued, or a move could miss it. The others keep the
+        The job types the busy guard reads (transcription, journal, digests,
+        relabel) write their row first and re-raise: a job whose row can't be
+        written must not be queued, or a move could miss it. The others keep the
         swallowing ``record``.
         """
-        required = job.job_type in (JOB_TRANSCRIPTION, JOB_CAMPAIGN_JOURNAL, JOB_SPEAKER_RELABEL)
+        required = job.job_type in (
+            JOB_TRANSCRIPTION, JOB_CAMPAIGN_JOURNAL, JOB_SPEAKER_RELABEL,
+            JOB_CAMPAIGN_SUMMARY, JOB_CAMPAIGN_RECAP)
         _record_history(job, required=required)
         self._jobs[job.id] = job
         self._queue.put_nowait(job.id)
@@ -948,6 +952,34 @@ class JobQueue:
         self._enqueue(job)
         return job
 
+    def submit_campaign_summary(self, slug: str, name: str = "") -> Job:
+        """Enqueue a combined-summary job for a campaign."""
+        job = Job(
+            id=str(uuid.uuid4()),
+            status=PENDING,
+            created_at=datetime.now(),
+            input_path="",
+            kwargs={"slug": slug},
+            name=name or f"Combined summary: {slug}",
+            job_type=JOB_CAMPAIGN_SUMMARY,
+        )
+        self._enqueue(job)
+        return job
+
+    def submit_campaign_recap(self, slug: str, sessions: int = 1, name: str = "") -> Job:
+        """Enqueue a "Previously on…" recap job for a campaign."""
+        job = Job(
+            id=str(uuid.uuid4()),
+            status=PENDING,
+            created_at=datetime.now(),
+            input_path="",
+            kwargs={"slug": slug, "sessions": int(sessions)},
+            name=name or f"Recap: {slug}",
+            job_type=JOB_CAMPAIGN_RECAP,
+        )
+        self._enqueue(job)
+        return job
+
     def submit_relabel(self, slug: str, name: str = "") -> Job:
         """Enqueue a campaign-wide speaker re-match (``speaker_registry.relabel_campaign``)."""
         job = Job(
@@ -1127,6 +1159,8 @@ class JobQueue:
         """Dispatch to the appropriate worker based on job_type."""
         if job.job_type == JOB_CAMPAIGN_JOURNAL:
             self._run_journal_job(job)
+        elif job.job_type in (JOB_CAMPAIGN_SUMMARY, JOB_CAMPAIGN_RECAP):
+            self._run_digest_job(job)
         elif job.job_type == JOB_SPEAKER_RELABEL:
             self._run_relabel_job(job)
         elif job.job_type in (JOB_REFINE, JOB_SUMMARIZE):
@@ -1250,6 +1284,58 @@ class JobQueue:
         except Exception as exc:
             job.status = FAILED
             job.error = str(exc)
+            raise
+        finally:
+            _sys.stderr = old_stderr
+            job.finished_at = datetime.now()
+
+    def _run_digest_job(self, job: Job) -> None:
+        """Generate a campaign combined summary or a "Previously on…" recap.
+
+        Runs in a thread; sys.stderr is redirected to capture the LLM client's
+        streaming status messages into job.log_lines (same pattern as the
+        journal job — safe because the queue is single-worker). LLM failures
+        soft-fail: the job reports a generic error and nothing is written.
+        """
+        from wisper_transcribe.campaign_digest import (
+            generate_combined_summary, generate_recap,
+        )
+        from wisper_transcribe.llm import get_client
+        from wisper_transcribe.llm.errors import LLMResponseError, LLMUnavailableError
+        from wisper_transcribe.speaker_manager import load_profiles
+
+        slug = job.kwargs["slug"]
+        kind = "combined summary" if job.job_type == JOB_CAMPAIGN_SUMMARY else "recap"
+
+        old_stderr = _sys.stderr
+        _sys.stderr = _StderrCapture(job)
+        try:
+            cfg = load_config()
+            client = get_client(cfg.get("llm_provider", "ollama"), config=cfg)
+            job.append_log(f"LLM: {client.provider} / {client.model}")
+            profiles = load_profiles()
+            try:
+                if job.job_type == JOB_CAMPAIGN_SUMMARY:
+                    result = generate_combined_summary(slug, client, profiles)
+                else:
+                    result = generate_recap(slug, client, profiles,
+                                            sessions=job.kwargs.get("sessions", 1))
+            except (LLMUnavailableError, LLMResponseError) as exc:
+                job.append_log(f"Generation failed: {exc}")
+                job.status = FAILED
+                raise
+            if result is None:
+                job.append_log(
+                    f"No summarized session in this campaign yet — nothing to write.")
+                job.status = COMPLETED
+                return
+            job.output_path = str(result.path)
+            verb = "Replaced" if result.replaced else "Wrote"
+            job.append_log(
+                f"{verb} {result.path.name} ({len(result.sessions)} session(s) covered)")
+            job.status = COMPLETED
+        except Exception:
+            job.status = FAILED
             raise
         finally:
             _sys.stderr = old_stderr

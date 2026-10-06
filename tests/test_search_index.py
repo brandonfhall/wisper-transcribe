@@ -526,6 +526,7 @@ def test_changed_file_shows_reindexing_state(out):
 # so the search index follows; a new call must be reviewed here.
 _ATOMIC_WRITE_ALLOWED = {
     ("journal.py", "pending_file"),        # campaign journal
+    ("campaign_digest.py", "target"),      # combined summary / recap
     ("cli.py", "backup"),                  # <stem>.md.bak before refine
     ("web/jobs.py", "backup"),
     ("web/jobs.py", "text_path"),          # speaker excerpt .txt

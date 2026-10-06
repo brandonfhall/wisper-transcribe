@@ -433,6 +433,7 @@ Two bounded, whole-campaign artifacts built from the same per-session `.summary.
 - `summarized_sessions()` mirrors the journal's discovery but returns every session with a summary, in campaign order; `recap_sessions(n)` takes the last 1–3 (`clamp_recap_sessions`, default 1). `combined_summary_path()`/`recap_path()` resolve the registered path, else the derived name in a claimed folder, else None.
 - Each generation records a `campaign_digests` row (campaign, kind, `file_id`, `generated_at`, provider, model) plus one `campaign_digest_sessions` link per covered session, in one transaction (LLM work is done first). Re-recording a file replaces its digest row and links.
 - **Combined-summary staleness** (`combined_summary_stale_since()`): the campaign's summarized sessions differ from the digest's session set, or a covered session's summary file's mtime is later than `generated_at`.
+- **Generation.** `generate_combined_summary()` runs one LLM call over every summarized session's summary; `generate_recap()` over the last 1–3. Both render YAML frontmatter (`type: campaign-combined-summary` / `campaign-recap`, campaign, generated_at, provider, model, sessions), write with `transcript_store.atomic_write_text`, register the file, and record the digest (LLM work outside any transaction). The recap system prompt fixes the shape: 200–400 words, prose, spoiler-free, player-facing. Both run as jobs (`JOB_CAMPAIGN_SUMMARY` / `JOB_CAMPAIGN_RECAP`) and CLI commands, behind a campaign folder that must exist; an LLM failure is soft-failed (generic job error, nothing written).
 - A campaign delete removes both digests' files and rows by cascade plus `paths_for_delete`. The recap label's stem cannot collide with the journal name because `validate_new_stem()` refuses stems ending in `.md`; a folder rename rewrites the paths like the journal's.
 
 ### Clients (`llm/`)
@@ -834,6 +835,7 @@ Job types:
 - **Transcription** — `process_file()`, optionally chaining refine/summarize (`post_refine`/`post_summarize`) in the same thread.
 - **`refine` / `summarize`** — `submit_llm()`. Provider output is captured by redirecting `sys.stderr` for the job thread (safe under one-job-at-a-time).
 - **`JOB_CAMPAIGN_JOURNAL`** — `submit_journal()`: fold next, fold all, or rebuild.
+- **`JOB_CAMPAIGN_SUMMARY` / `JOB_CAMPAIGN_RECAP`** — `submit_campaign_summary()` / `submit_campaign_recap()`: one LLM pass over every summarized session, or the last 1–3, via `campaign_digest.generate_combined_summary()` / `generate_recap()`. An LLM error soft-fails with the generic per-type message; no summarized session is a clean completion.
 - **`JOB_SPEAKER_RELABEL`** — `submit_relabel()`: `relabel_campaign()` with audio backfill; logs renames and skipped sessions.
 - **`JOB_ENROLL`** — `enroll_mode` selects:
   - `wizard` — embeddings for renames already applied by the wizard. Carries only the transcript path, rename groups, and device; re-reads the sidecar. `output_path` is set at submit so "View transcript" works immediately. For a campaign transcript it then propagates names with `relabel_campaign(backfill=False)`; a propagation failure is logged and doesn't fail the job.

@@ -289,6 +289,28 @@ A session is "pending" once it has a `.summary.md`. With no flags the command fo
 
 **Stale journal:** moving a folded session to another campaign, removing it from the campaign, deleting it, or re-transcribing it never edits the journal text; it marks the journal stale instead. `wisper campaigns show <slug>` prints `Journal: STALE since …` with the rebuild command. Deleting the journal file by hand starts a fresh journal (every session becomes pending again); editing it by hand is fine, and later folds build on your edits.
 
+#### `wisper campaigns summarize`
+
+Writes a **combined summary** of a campaign — one LLM pass over every session's `.summary.md`, in campaign order, to `<campaign folder>/<campaign folder> Combined Summary.md`. It is overwritten on each run (one per campaign), so it is a self-contained retrospective for onboarding or a campaign wiki. Context is the whole campaign at once: roughly 20 sessions ≈ 20k input tokens; the Campaign page warns above ~40 sessions.
+
+```bash
+wisper campaigns summarize d-d-mondays
+wisper campaigns summarize d-d-mondays --provider openai --model gpt-4o-mini
+```
+
+It refuses cleanly ("no summarized sessions") when no session has a `.summary.md`. The Campaign page shows a stale notice when a session was summarized, re-summarized, added, or removed since the summary was generated.
+
+#### `wisper campaigns recap`
+
+Writes a player-facing **"Previously on…" recap** — 200–400 words, spoiler-free, from the last 1–3 summarized sessions (default 1) — to `<campaign folder>/<campaign folder> Recap — <newest session>.md`. History is kept: each run writes one file, and re-running for the same newest session replaces that one file.
+
+```bash
+wisper campaigns recap d-d-mondays              # recap the latest session
+wisper campaigns recap d-d-mondays --sessions 3 # recap the last three
+```
+
+`--sessions` is clamped to 1–3. Like `summarize`, it refuses cleanly when no session is summarized.
+
 **Scoping transcription to a campaign:**
 
 ```bash

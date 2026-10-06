@@ -17,21 +17,26 @@ generation is recorded in ``campaign_digests`` with the sessions it covered.
 The LLM call runs outside any transaction; the file is written with
 ``transcript_store.atomic_write_text`` and registered right after.
 
-This module owns path resolution, session discovery, digest rows, and staleness.
-The prompt builders and generation lives in :mod:`campaign_summaries`.
+This module owns path resolution, session discovery, digest rows, staleness,
+the prompt builders, and generation.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import yaml
+
 from . import campaign_folders, db, file_registry
 from .campaign_manager import _validate_campaign_slug, get_transcripts_for_campaign
 from .config import get_output_root
-from .journal import _summary_path
-from .transcript_store import nfc
+from .journal import _check_campaign, _strip_code_fence, _summary_path
+from .llm import LLMClient
+from .models import SpeakerProfile
+from .transcript_store import atomic_write_text, nfc
 
 COMBINED_SUMMARY = "combined_summary"
 RECAP = "recap"
@@ -313,3 +318,222 @@ def combined_summary_stale_since(slug: str,
         if stamp is not None and stamp > digest.generated_at:
             return digest.generated_at
     return None
+
+
+# ---------------------------------------------------------------------------
+# Frontmatter
+# ---------------------------------------------------------------------------
+
+def render_digest(slug: str, kind: str, body: str, provider: str, model: str,
+                  sessions: list[str]) -> str:
+    """Render a digest markdown: YAML frontmatter + body, like the journal."""
+    meta = {
+        "type": "campaign-combined-summary" if kind == COMBINED_SUMMARY else "campaign-recap",
+        "campaign": slug,
+        "generated_at": _dt.datetime.now().isoformat(timespec="seconds"),
+        "provider": provider,
+        "model": model,
+        "sessions": list(sessions),
+    }
+    fm = yaml.safe_dump(meta, sort_keys=False, default_flow_style=False,
+                        allow_unicode=True).strip()
+    return f"---\n{fm}\n---\n\n{body.strip()}\n"
+
+
+# ---------------------------------------------------------------------------
+# Prompts
+# ---------------------------------------------------------------------------
+
+_COMBINED_SYSTEM_PROMPT = (
+    "You are the campaign archivist for an ongoing tabletop RPG actual-play. "
+    "You will be given the enrolled speaker roster and the summaries of every "
+    "session so far, in order. Produce ONE combined campaign summary in "
+    "Markdown — a self-contained retrospective for a new or returning reader.\n\n"
+    "Rules:\n"
+    " - Keep these sections: '## The Story So Far', '## The Party', "
+    "'## Major NPCs', '## Open Threads', '## Loot & Resources'.\n"
+    " - The Story So Far: the through-line across all sessions, in order.\n"
+    " - Open Threads: unresolved plot hooks; move resolved ones into the story.\n"
+    " - Do NOT invent events that are not supported by the session summaries.\n"
+    " - Output ONLY the summary Markdown body — no YAML frontmatter and no code "
+    "fences."
+)
+
+_RECAP_SYSTEM_PROMPT = (
+    "You write the spoiler-free 'Previously on…' recap shown to players at the "
+    "start of a tabletop RPG session. You will be given the enrolled speaker "
+    "roster and the summaries of the most recent sessions, in order.\n\n"
+    "Rules:\n"
+    " - Player-facing: 200 to 400 words of prose. Write it as a short "
+    "voice-over recap of what the party did, in order.\n"
+    " - SPOILER-FREE: exclude DM-only material — secret plans, hidden "
+    "identities, unrevealed villains, and future plot. Include only what the "
+    "players already witnessed at the table.\n"
+    " - No lists, headings, or code fences; plain paragraphs.\n"
+    " - Do NOT invent events that are not supported by the session summaries.\n"
+    " - Output ONLY the recap prose."
+)
+
+
+def _roster_lines(profiles: dict[str, SpeakerProfile]) -> str:
+    if not profiles:
+        return "(no speakers enrolled)"
+    out = []
+    for p in profiles.values():
+        role = f" [{p.role}]" if p.role else ""
+        note = f" — {p.notes}" if p.notes else ""
+        out.append(f"- {p.display_name}{role}{note}")
+    return "\n".join(out)
+
+
+def _session_block(stem: str, summary_md: str) -> str:
+    return f"=== SESSION — {stem} ===\n{summary_md.strip()}"
+
+
+def combined_summary_prompt(session_materials: list[tuple[str, str]],
+                            profiles: dict[str, SpeakerProfile]) -> str:
+    """The user prompt for the combined summary over every summarized session."""
+    blocks = "\n\n".join(_session_block(stem, md) for stem, md in session_materials)
+    return (
+        f"Enrolled speakers (the players):\n{_roster_lines(profiles)}\n\n"
+        f"Every session so far, in campaign order:\n\n{blocks}"
+    )
+
+
+def recap_prompt(session_materials: list[tuple[str, str]],
+                 profiles: dict[str, SpeakerProfile]) -> str:
+    """The user prompt for the player-facing recap of the latest session(s)."""
+    blocks = "\n\n".join(_session_block(stem, md) for stem, md in session_materials)
+    return (
+        f"Enrolled speakers (the players):\n{_roster_lines(profiles)}\n\n"
+        f"The most recent session(s), in order:\n\n{blocks}\n\n"
+        f"Write the 200–400 word spoiler-free 'Previously on…' recap."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Generation
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DigestResult:
+    """Outcome of a single combined-summary or recap generation."""
+    path: Path
+    kind: str
+    sessions: list[str]
+    provider: str
+    model: str
+    replaced: bool = False
+
+
+def _materials(safe: str, cid: int, stems: list[str],
+               data_dir: Optional[Path]) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for stem in stems:
+        summary = _summary_path(cid, stem, data_dir)
+        if summary is not None and summary.exists():
+            out.append((stem, summary.read_text(encoding="utf-8")))
+    return out
+
+
+def _generate(slug: str, kind: str, target: Path, stems: list[str], *, label: Optional[str],
+              system_prompt: str, user_prompt: str, client: LLMClient,
+              data_dir: Optional[Path], output_dir: Optional[Path]) -> DigestResult:
+    """The common write path: run the LLM, write the file, register, record."""
+    body = _strip_code_fence(client.complete(system_prompt, user_prompt))
+    rendered = render_digest(slug, kind, body, getattr(client, "provider", ""),
+                             getattr(client, "model", ""), stems)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    replaced = target.exists()
+    atomic_write_text(target, rendered)
+
+    owner = file_registry.Owner.for_campaign_slug(slug, data_dir=data_dir)
+    with db.transaction(data_dir) as conn:
+        file_registry.add_if_owned(target, kind=kind, owner=owner, label=label,
+                                   conn=conn, data_dir=data_dir, output_dir=output_dir)
+    # Re-read the file row so the digest links to the row's id, not a guess.
+    row = file_registry.file_for(owner, kind, label, data_dir=data_dir,
+                                 output_dir=output_dir)
+    if row is not None:
+        record_digest(slug, kind, row.id, stems,
+                      getattr(client, "provider", ""), getattr(client, "model", ""),
+                      data_dir=data_dir)
+    return DigestResult(path=target, kind=kind, sessions=list(stems),
+                        provider=getattr(client, "provider", ""),
+                        model=getattr(client, "model", ""), replaced=replaced)
+
+
+def _prepare(slug: str, data_dir: Optional[Path]) -> tuple[str, int, Path]:
+    """Validate the campaign and resolve its folder; returns (slug, id, folder)."""
+    safe = _check_campaign(slug, data_dir)
+    output = get_output_root()
+    with db.connection(data_dir) as conn:
+        cid = conn.execute("SELECT id FROM campaigns WHERE slug = ?", (safe,)).fetchone()["id"]
+    try:
+        folder = campaign_folders.ensure_folder(cid, data_dir=data_dir, output_dir=output)
+    except campaign_folders.FolderTakenError:
+        raise DigestLocationError("digest_folder_taken") from None
+    except FileNotFoundError:
+        raise DigestLocationError("digest_output_unavailable") from None
+    return safe, cid, folder
+
+
+def generate_combined_summary(slug: str, client: LLMClient,
+                              profiles: dict[str, SpeakerProfile], *,
+                              data_dir: Optional[Path] = None) -> Optional[DigestResult]:
+    """Summarize every summarized session into the campaign's combined summary.
+
+    Returns the result, or None when the campaign has no summarized session.
+
+    Raises:
+        ValueError: invalid slug.
+        KeyError: campaign not found.
+        DigestLocationError: the folder or output root is unusable.
+        LLMUnavailableError / LLMResponseError: provider failure (propagated).
+    """
+    safe, cid, folder = _prepare(slug, data_dir)
+    stems = summarized_sessions(safe, data_dir)
+    if not stems:
+        return None
+    materials = _materials(safe, cid, stems, data_dir)
+    if not materials:
+        return None
+    output = get_output_root()
+    target = (combined_summary_path(safe, data_dir, output_dir=output)
+              or folder / campaign_folders.combined_summary_name(folder.name))
+    return _generate(safe, COMBINED_SUMMARY, target, stems, label=None,
+                     system_prompt=_COMBINED_SYSTEM_PROMPT,
+                     user_prompt=combined_summary_prompt(materials, profiles),
+                     client=client, data_dir=data_dir, output_dir=output)
+
+
+def generate_recap(slug: str, client: LLMClient,
+                   profiles: dict[str, SpeakerProfile], *,
+                   sessions: int = RECAP_DEFAULT_SESSIONS,
+                   data_dir: Optional[Path] = None) -> Optional[DigestResult]:
+    """Write a player-facing recap from the last 1–3 summarized sessions.
+
+    Returns the result, or None when no session is summarized.
+
+    Raises:
+        ValueError: invalid slug.
+        KeyError: campaign not found.
+        DigestLocationError: the folder or output root is unusable.
+        LLMUnavailableError / LLMResponseError: provider failure (propagated).
+    """
+    safe, cid, folder = _prepare(slug, data_dir)
+    stems = recap_sessions(safe, sessions, data_dir)
+    if not stems:
+        return None
+    materials = _materials(safe, cid, stems, data_dir)
+    if not materials:
+        return None
+    output = get_output_root()
+    newest = stems[-1]
+    label = nfc(newest)
+    target = (recap_path(safe, newest, data_dir, output_dir=output)
+              or folder / campaign_folders.recap_name(folder.name, newest))
+    return _generate(safe, RECAP, target, stems, label=label,
+                     system_prompt=_RECAP_SYSTEM_PROMPT,
+                     user_prompt=recap_prompt(materials, profiles),
+                     client=client, data_dir=data_dir, output_dir=output)

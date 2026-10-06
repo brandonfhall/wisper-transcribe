@@ -32,7 +32,7 @@ _PARAM_ALLOWLIST = (
     "model_size", "language", "device", "compute_type", "num_speakers", "min_speakers",
     "max_speakers", "no_diarize", "vad_filter", "include_timestamps", "campaign",
     "overwrite", "forced_alignment", "slug", "session_stem", "fold_all", "rebuild",
-    "resummarize", "backfill", "tasks", "provider", "model",
+    "resummarize", "backfill", "tasks", "provider", "model", "sessions",
 )
 
 
@@ -84,7 +84,7 @@ def _subject_ids(conn, job: Any) -> tuple[Optional[int], Optional[int], Optional
     if transcript_id is None and path:
         loc = locate_path(Path(path), conn=conn)
         transcript_id = loc.id if loc is not None else None
-    if job_type in ("campaign_journal", "speaker_relabel"):
+    if job_type in ("campaign_journal", "speaker_relabel", "campaign_summary", "campaign_recap"):
         slug = (getattr(job, "kwargs", {}) or {}).get("slug")
         if slug:
             row = conn.execute("SELECT id FROM campaigns WHERE slug = ?", (slug,)).fetchone()
