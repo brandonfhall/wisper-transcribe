@@ -185,6 +185,27 @@ def test_channels_invalid_token_returns_error(client):
     assert resp.json()["guilds"] == []
 
 
+def test_record_page_renders_channel_picker_and_fallback_inputs(client):
+    """The Record page's Discord form renders the guild/voice-channel picker
+    (filled from /api/record/channels by inline JS) while keeping the raw-ID
+    inputs the picker writes into, so the start route is unchanged even with
+    no token configured (the picker's no-token path falls back to them)."""
+    c, _ = client
+    resp = c.get("/record")
+    assert resp.status_code == 200
+    # Picker container + selects.
+    assert 'id="discord-picker"' in resp.text
+    assert 'id="discord-guild-select"' in resp.text
+    assert 'id="discord-channel-select"' in resp.text
+    # Raw-ID fallback: the actual form fields, and the toggle.
+    assert 'id="discord-manual-ids"' in resp.text
+    assert 'id="discord-manual-toggle"' in resp.text
+    assert 'name="guild_id"' in resp.text
+    assert 'name="voice_channel_id"' in resp.text
+    # Populated from the existing channels API.
+    assert "/api/record/channels" in resp.text
+
+
 # ---------------------------------------------------------------------------
 # Live local recording — device enumeration, start/stop-local,
 # cross-manager (Discord vs local) mutual exclusion

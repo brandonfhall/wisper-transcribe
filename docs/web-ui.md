@@ -147,6 +147,7 @@ Only one recording — Discord or local — can run at a time.
 The bot joins a voice channel, records each participant on their own track plus a mixed track, and hands the result to the normal transcription pipeline. Setup (bot token, invite, Java 25) is in [docker.md](docker.md#discord-recording-bot).
 
 - Save a guild/channel pair as a preset from the Record page.
+- Pick the server and voice channel from dropdowns (fetched from Discord); the raw guild/channel IDs remain available behind **Enter IDs manually**, and are used automatically if the channel list can't be fetched (`no_token` sends you to the Config page).
 - The Record page shows who is talking in real time.
 
 **Auto-enrollment:** Discord users not yet bound to a campaign member are listed under "Unknown Speakers" on the recording's detail page. Enter a name and click **Enroll** to create a profile from their track; the Discord ID is then bound in the campaign roster, so future sessions tag them automatically.

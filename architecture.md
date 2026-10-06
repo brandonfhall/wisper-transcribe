@@ -730,7 +730,7 @@ Two managers write the same on-disk layout: `BotManager` (Discord, via a Java si
 - `GET /api/record/status` — `{"active": false}` or the active recording + `"active": true`; backs the global banner.
 - `GET /api/record/devices`, `POST /api/record/start-local` / `stop-local` — device ids resolve to names server-side.
 - `POST /api/record/start` / `stop` — Discord sessions.
-- `GET /api/record/channels` — guilds and voice channels the bot can see. No UI uses it.
+- `GET /api/record/channels` — guilds and voice channels the bot can see; fills the Record page's guild/voice-channel picker, with raw-ID entry as a fallback when it errors (`no_token`/`invalid_token`/`fetch_failed`).
 - `POST /api/record/live-noise-floor` — updates the running `JOB_LIVE` job's noise floor.
 - `/api/recordings/*` (list, detail, transcribe, delete) back `wisper record list/show/transcribe/delete`. `_recording_to_dict()` never includes filesystem paths.
 - `POST /api/recordings/{id}/delete` removes only the database rows unless `?purge=true`, because it has no confirmation step. The CLI passes `purge=true` after its own prompt.
