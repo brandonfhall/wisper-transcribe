@@ -14,7 +14,7 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 
 ### Ollama: empty responses from reasoning models
 
-**Decided (Brandon, 2026-10-05): retry on empty content.** Not started. Touches the shared client code every provider uses.
+**Decided (Brandon, 2026-10-05/06): retry on empty content.** Not started. Touches the shared client code every provider uses.
 
 **Current behaviour**
 - `llm/ollama.py:73-91` reads only `(chunk.get("message") or {}).get("content", "")`; a chunk's `thinking` field and a streamed `error` field are ignored.
@@ -26,26 +26,22 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 - Callers catch both and soft-fail: `refine.py:155,333`, `summarize.py:84,103`, `journal.py:703,723`, `web/jobs.py:1722,1760`, `cli.py:1443,1810,1928`.
 
 **Change**
-- New helper in `llm/ollama.py`, e.g. `_post_chat_with_retry(payload)`: call `_post_chat`, and on empty content sleep then call again, up to `_EMPTY_RETRIES` attempts with exponential backoff.
-- Treat empty content as retryable: `not "".join(parts).strip()`.
-- Read `chunk.get("error")` in the stream loop; surface it as `LLMUnavailableError` (provider/endpoint) instead of letting it become empty content.
-- Log one line per retry via `tqdm.write`/`sys.stderr` so CLI and web job logs show it (`_StderrCapture`, `web/jobs.py:141`).
-- Apply to `complete()` and `complete_json()`; `OllamaCloudClient` inherits.
-- Decide whether `LMStudioClient` gets the same retry.
+- Shared helper on `LLMClient` (`llm/base.py`), e.g. `_retry_on_empty(call)`: run `call()`; if the returned content is empty after `.strip()`, sleep and call again. 2 retries, sleeping 0.5 s then 1.5 s (3 calls max); still empty → `LLMResponseError`.
+- "Empty" means the content is empty, even when a `thinking` field came back.
+- `OllamaClient` and `LMStudioClient` wrap `_post_chat` with it in both `complete()` and `complete_json()`; `OllamaCloudClient` inherits. The SDK clients (Anthropic, OpenAI, Google) are unchanged.
+- Only empty content retries. A non-empty response that fails `json.loads` raises `LLMResponseError` at once, as today.
+- Read `chunk.get("error")` in both stream loops and raise `LLMUnavailableError` with the provider's message right away (no retry).
+- Log one line per retry to stderr (`tqdm.write`), e.g. `  LLM returned an empty response; retrying (1/2)…`, so CLI and web job logs show it (`_StderrCapture`, `web/jobs.py:141`). Never in `job.error`.
 
 **Tests** (`tests/test_llm_clients.py`, mocked `httpx.stream` via `_fake_stream_context`)
 - Empty-then-content: first context empty, second content → returns content, two `httpx.stream` calls.
 - All-empty exhausts retries → `LLMResponseError`; a non-empty first response makes one call only.
 - Streamed `error` field raises `LLMUnavailableError`; `complete_json` parses a fence delivered on the retry.
+- Non-empty unparseable JSON makes one call only; LM Studio gets the same empty-then-content test. Patch `time.sleep`.
 
 **Docs**
 - `architecture.md` LLM clients section: retry-on-empty and the `error` field. `docs/configuration.md` only if a config key is added.
 
-**Open questions for Brandon**
-- Retry count and backoff (recommend 2 retries, 0.5 s then 1.5 s).
-- "Empty" = content empty even when `thinking` is non-empty (recommend yes), or only when both are empty?
-- Surface the streamed `error` as its own `LLMUnavailableError` message, separate from the empty-content retry? (recommend yes)
-- Retry in `ollama.py` only, or a shared `LLMClient` helper so LM Studio and the cloud providers share it? Log-line wording (never in `job.error`).
 
 ---
 
@@ -66,13 +62,20 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 
 ## Dependency pins
 
-- **Drop `av<19`** (approved, Brandon 2026-10-05; not started) (pyproject) once a faster-whisper release stops passing `metadata_errors=` to `av.open()`; check with a CPU Docker build and one transcription.
+- **Drop `av<19`** (approved, Brandon 2026-10-05) (pyproject) once a faster-whisper release stops passing `metadata_errors=` to `av.open()`; check with a CPU Docker build and one transcription. Blocked as of 2026-10-06: 1.2.1 is the latest release and still passes it (`faster_whisper/audio.py:46`).
 
 ---
 
 ## Storage — open
 
 - **Store `combined.wav` as FLAC** (about half the size). Approved (Brandon, 2026-10-05); not started. Touches the fixed `recordings/<id>/combined.wav` layout and every reader of it.
+
+**Decided (Brandon, 2026-10-06)**
+- New captures write `combined.flac` at Stop (both `_finalise()` methods and `recover_recording()`). If the encode fails, keep the `.wav` and register it, so a capture is never lost to an ffmpeg failure.
+- Existing `combined.wav` stays readable forever. Every reader accepts either suffix and prefers `.flac` when both exist. `storage trim --apply` converts a `.wav` it finds; nothing else does.
+- Schema: a new `_V12` that only rebuilds `files` to accept `combined.wav` or `combined.flac`, mirroring the v11 `files` rebuild. Develop it with `SCHEMA_FROZEN = False` and freeze at merge, as v11 did (`37e0d64`).
+- `combined/NNNN.wav` segments stay WAV (deleted at trim); `live_transcript.md` is text.
+- Segments are already 16 kHz mono s16 (`audio_writer` `RATE = 16000`), the format `encode_flac` writes, so conversion is lossless. Verify the FLAC's frame count equals the WAV's before deleting the WAV.
 
 **Current behaviour**
 - The path is fixed and derived: `recording_manager.combined_path_for()` (`recording_manager.py:74-75`) returns `recordings/<id>/combined.wav`; `_check_derived()` rejects any other path (`:250-251`).
@@ -85,7 +88,7 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 
 **Change**
 - New `audio_utils` helper (e.g. `concat_wav_segments_flac()`, or `encode_flac()` after `concat_wav_segments()`) producing `<id>.flac`, since segments are already 16 kHz mono s16 and `encode_flac` (`audio_utils.py:201-242`) re-encodes to exactly that.
-- `recording_manager.combined_path_for()` returns `combined.flac`; `_check_derived` accepts only it; `_wav_frames` is replaced by a FLAC frame/duration probe (`probe_format` exists at `audio_utils.py:244`; a FLAC frame count needs `ffprobe` or `soundfile`-free parsing) so trim verification still works.
+- `recording_manager.combined_path_for()` gives the `.flac` path for new writes; a resolver (e.g. `combined_path_existing()`) returns `.flac`, else `.wav`, else None for readers; `_check_derived` accepts either suffix; `_wav_frames` is replaced by a FLAC frame/duration probe (`probe_format` exists at `audio_utils.py:244`; a FLAC frame count needs `ffprobe` or `soundfile`-free parsing) so trim verification still works.
 - New migration (`_V12`, a new version — shipped migrations are frozen, `db.py:54,965-977`) rebuilds `files` only to relax the `combined` CHECK to accept `combined.wav` or `combined.flac`. **It must not move or rewrite any file** (migrations never touch user files); it only widens the constraint so a converted `.flac` row validates.
 - Conversion of existing recordings is a **storage-trim action, not a migration**: extend `trim_recording_audio`/`plan` with a convert step that verifies the WAV (existing `_wav_frames` logic), encodes to `.flac`, `set`/`move`s the `combined` row, then deletes the `.wav` after commit. Do this before or as part of the existing trim so `combined/` deletion and per-user trim still run.
 - `file_registry._scan_data()` matches both suffixes; `sync()` already refuses to guess an unregistered `.flac`, so a recording-owned `combined.flac` with an existing `combined` row is the one that gets picked up.
@@ -109,13 +112,7 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 - Recording transcribe hand-off submits the `.flac` (`test_record_routes.py`); playback serves `audio/flac`; recover writes FLAC (`test_recording_manager.py:460-466,672-716`).
 - No real audio: FFmpeg mocked as today.
 
-**Open questions for Brandon**
-- Write FLAC at finalise vs keep WAV + convert on trim (recommend FLAC at finalise for new captures, trim converts old ones).
-- Keep the legacy `.wav` readable forever, or force-convert on first `storage trim`?
-- Also convert `combined/NNNN.wav` segments and `live_transcript.md`? (recommend no — segments are deleted at trim; live draft is text.)
-- Migration: a new `_V12` that only relaxes the CHECK (recommended), or `SCHEMA_FROZEN=False` while unreleased?
-- Confirm trim's "no file moved by a migration" rule means conversion happens only in `storage trim --apply`.
-- **Minor** (approved fix, Brandon 2026-10-05; not started): with an unfrozen schema and `WISPER_OUTPUT_DIR` unset, a CLI command creates the configured output folder (empty) before the dev guard refuses (`path_utils.get_output_dir` mkdir). The server path creates nothing.
+- **Minor** (approved fix, Brandon 2026-10-05; not started): with an unfrozen schema and `WISPER_OUTPUT_DIR` unset, a CLI command creates the configured output folder (empty) before the dev guard refuses (`path_utils.get_output_dir` mkdir; guard at `db.py:1183`). The server path creates nothing. Fix before the FLAC branch, which runs unfrozen.
 
 ---
 
@@ -468,6 +465,15 @@ All ML mocked, per CLAUDE.md. New seams are patchable like the existing ones:
 
 **Decided (Brandon, 2026-10-05): option 1** — run the job's ML work in a subprocess and terminate it on cancel. Not started. The `parallel_stages` pool can't be reused as is: it never terminates its workers (below), so this needs a worker process the job owns.
 
+**Decided (Brandon, 2026-10-06)** — these override the options and recommendations further down:
+- **The whole ML pipeline runs in the worker:** transcribe, diarize, align, and embeddings. The module-level caches (`transcriber._model`, `diarizer._pipeline`, `speaker_manager._embedding_model`, `word_alignment._fa_model`/`_fa_processor`) live in the worker, not the server.
+- **One persistent warm worker,** reused across jobs. Stop kills it, and the next job respawns it lazily and pays the model reload.
+- **Gated by a new config key, `transcribe_subprocess`, on by default.** Off runs today's in-process path. Wire it like `parallel_stages` (`CONFIG_CHOICES`, web Config page, `docs/configuration.md`).
+- **Web jobs only.** CLI `wisper transcribe` stays in-process.
+- **Transcription, enrollment, and relabel jobs** use the worker, so batch jobs share one copy of the models. `JOB_LIVE` stays in-process: its real-time loop can't take a cross-process hop.
+- **Boundary:** the worker computes and returns plain picklable results (segments, embeddings, alignment output). The parent does every DB, `file_registry`, and transcript-store write, and reads speaker profiles (`load_profiles`) to pass in. The worker never opens `wisper.db`.
+- `parallel_stages` inside the worker is out of scope for the first cut; decide while implementing whether it stays in-process-only.
+
 **Current behaviour**
 - Cancel sets `job._cancel_event` (`web/jobs.py:1009-1011`); the running job thread only sees it at `capturing_write()`/`ProgressCatcher.write()` (`jobs.py:1216-1245`), i.e. on a tqdm write.
 - `pipeline.process_file()` (`pipeline.py:382-697`) calls `transcribe()` in-process (`:545`) or through `_run_parallel_transcribe_diarize()` (`:541`); neither knows about the cancel event.
@@ -477,11 +483,11 @@ All ML mocked, per CLAUDE.md. New seams are patchable like the existing ones:
 - `jobs._run_transcription_job` wraps `process_file` in layer 2 of the tqdm patching (`jobs.py:1205-1340`); `debug_log.Logger` is layer 1; `_patch_tqdm_for_queue` is layer 3 (`architecture.md` "tqdm patching is load-bearing in three layers").
 
 **Change**
-- Give transcription its own long-lived worker process, not a `with`-scoped pool, so the parent holds a `Process` object and can call `.terminate()` (or `.kill()` on Windows) when `job._cancel_event` is set.
+- Give the ML pipeline its own long-lived worker process, not a `with`-scoped pool, so the parent holds a `Process` object and can call `.terminate()` (or `.kill()` on Windows) when `job._cancel_event` is set.
 - Add a module-level watcher in `jobs._run_transcription_job`: while the transcription subprocess runs, poll `_cancel_event` (e.g. a `threading.Timer`/thread or a loop with `proc.join(timeout)`) and terminate the process; then raise `InterruptedError` in the job thread so the existing `except InterruptedError` path runs (`jobs.py:1325-1329`).
 - Reuse `_transcribe_worker` + `_patch_tqdm_for_queue` for logs/progress; parent drain thread forwards `"log"` via `tqdm.write` (so layers 1 and 2 still capture) and `"bar"` to `job.progress_channels`.
 - Pass `_cancel_event` awareness **only** in the parent; the subprocess needs no cancel hook — termination is the mechanism.
-- Keep diarization where it is (main process sequentially, or its own worker under `parallel_stages`) and run alignment in the main process as today (`pipeline.py:580-586`); terminating the transcribe process must leave the diarization result and the WAV intact.
+- Terminating the worker must leave the job's WAV and any already-written files intact; the job ends Cancelled with nothing half-written.
 - Config: decide whether this is always-on or gated by a new key (e.g. `transcribe_subprocess`), rather than overloading `parallel_stages`. If a key is added, wire `CONFIG_CHOICES`/web Config like `parallel_stages` (`config.py:121-126`, `web/routes/config.py:35`).
 
 **Model-caching cost (the main trade-off)**
@@ -520,12 +526,6 @@ All ML mocked, per CLAUDE.md. New seams are patchable like the existing ones:
 - `architecture.md`: "Parallel stage processing" (or a new "Job cancellation" subsection), the three-layer tqdm note, and the Known Constraints "Cooperative cancellation" row.
 - `docs/web-ui.md:63` (Stop Job wording), `docs/scenarios.md:213` (best-effort cancellation), `docs/configuration.md` if a new key is added, `docs/cli-reference.md` if the CLI gains the subprocess path.
 
-**Open questions for Brandon**
-- Always-on subprocess, or a new config key (default on for GPU, off for CPU)?
-- Per-job worker vs persistent warm worker (recommend persistent, killed on cancel)?
-- Should CLI `wisper transcribe` share the same subprocess path, or stay in-process (no cancel button there)?
-- What runs in the worker: transcription only, or the whole ML pipeline (transcribe, diarize, align, embeddings)? Diarization and alignment also hold the GPU, so killing only transcription leaves the GPU busy after Stop. Recommend the whole pipeline: one kill stops all GPU work, and the module-level model caches (`transcriber._model`, `diarizer._pipeline`, `_embedding_model`, `word_alignment._fa_model`) move into the warm worker with it.
-- Accept the model-reload latency on the first job after a cancel, or keep a warm spare? (recommend accept.)
 
 ---
 
