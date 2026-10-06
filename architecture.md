@@ -413,6 +413,7 @@ Campaign fold order is `Campaign.transcripts` order — **insertion order**, not
 - One `LLMClient` ABC (`complete()`, `complete_json(schema)`); provider JSON mechanics are internal.
 - SDKs are imported inside each client, so an Ollama-only install never hits an SDK import error; a missing SDK raises `LLMUnavailableError` with an install hint.
 - **Ollama streaming:** `httpx.stream()` with no read timeout (long generations) but a connect/write timeout; prints a `·` per 50 tokens to stderr. Errors are split into connect failure ("daemon running?"), 404 ("model not found — `ollama pull`"), and other HTTP errors.
+- **Retry on empty content:** reasoning models (Ollama, LM Studio) can stream a `thinking` field and no `content`, which reads as an empty response. `LLMClient._retry_on_empty` retries the call twice more (0.5 s then 1.5 s), logging one line per retry via `tqdm.write` (never `job.error`), and raises `LLMResponseError` if it stays empty. Only empty content retries; a non-empty response whose JSON does not parse fails at once. Both stream loops also read a chunk's `error` field and raise `LLMUnavailableError` with the provider's message immediately, with no retry.
 - **Ollama Cloud:** either keep `llm_provider = "ollama"` and pick a `-cloud` model (the local daemon proxies with `ollama signin` credentials), or use `llm_provider = "ollama-cloud"` with `OLLAMA_API_KEY`, which calls `https://ollama.com/api/chat` directly.
 - **LM Studio:** OpenAI-compatible API on `:1234`, SSE streaming, `response_format: json_object`.
 

@@ -290,6 +290,92 @@ def test_ollama_bad_json_raises_response_error():
 
 
 # ---------------------------------------------------------------------------
+# OllamaClient retry on empty content
+# ---------------------------------------------------------------------------
+
+def test_ollama_complete_retries_an_empty_response():
+    """A reasoning model that returns no content is retried, then succeeds."""
+    from wisper_transcribe.llm.ollama import OllamaClient
+
+    client = OllamaClient(model="gpt-oss:20b")
+    empty = _fake_stream_context(_ollama_chunks(""))
+    content = _fake_stream_context(_ollama_chunks("finally"))
+    with patch("httpx.stream", side_effect=[empty, content]) as mock_stream, \
+         patch("time.sleep"):
+        result = client.complete("sys", "user")
+
+    assert result == "finally"
+    assert mock_stream.call_count == 2
+
+
+def test_ollama_complete_empty_exhausts_retries():
+    """Three empty responses raise LLMResponseError and make exactly 3 calls."""
+    from wisper_transcribe.llm.ollama import OllamaClient
+
+    client = OllamaClient(model="gpt-oss:20b")
+    empties = [_fake_stream_context(_ollama_chunks("")) for _ in range(3)]
+    with patch("httpx.stream", side_effect=empties) as mock_stream, \
+         patch("time.sleep"):
+        with pytest.raises(LLMResponseError, match="empty response"):
+            client.complete("sys", "user")
+
+    assert mock_stream.call_count == 3
+
+
+def test_ollama_complete_non_empty_does_not_retry():
+    from wisper_transcribe.llm.ollama import OllamaClient
+
+    client = OllamaClient(model="llama3.1:8b")
+    fake_cm = _fake_stream_context(_ollama_chunks("hi"))
+    with patch("httpx.stream", return_value=fake_cm) as mock_stream:
+        assert client.complete("sys", "user") == "hi"
+
+    assert mock_stream.call_count == 1
+
+
+def test_ollama_stream_error_field_raises_unavailable():
+    """A streamed `error` field fails immediately, with no retry."""
+    from wisper_transcribe.llm.ollama import OllamaClient
+
+    client = OllamaClient(model="llama3.1:8b")
+    fake_cm = _fake_stream_context(
+        [{"error": "model requires a subscription"}]
+    )
+    with patch("httpx.stream", return_value=fake_cm) as mock_stream:
+        with pytest.raises(LLMUnavailableError, match="requires a subscription"):
+            client.complete("sys", "user")
+
+    assert mock_stream.call_count == 1
+
+
+def test_ollama_complete_json_parses_a_fence_from_the_retry():
+    from wisper_transcribe.llm.ollama import OllamaClient
+
+    client = OllamaClient(model="gpt-oss:20b")
+    empty = _fake_stream_context(_ollama_chunks(""))
+    fenced = _fake_stream_context(_ollama_chunks('```json\n{"changes": []}\n```'))
+    with patch("httpx.stream", side_effect=[empty, fenced]) as mock_stream, \
+         patch("time.sleep"):
+        data = client.complete_json("sys", "user", {"type": "object"})
+
+    assert data == {"changes": []}
+    assert mock_stream.call_count == 2
+
+
+def test_ollama_complete_json_bad_json_does_not_retry():
+    """Non-empty unparseable JSON raises at once (empty-only retry)."""
+    from wisper_transcribe.llm.ollama import OllamaClient
+
+    client = OllamaClient(model="llama3.1:8b")
+    fake_cm = _fake_stream_context(_ollama_chunks("not valid json"))
+    with patch("httpx.stream", return_value=fake_cm) as mock_stream:
+        with pytest.raises(LLMResponseError, match="did not parse"):
+            client.complete_json("sys", "user", {"type": "object"})
+
+    assert mock_stream.call_count == 1
+
+
+# ---------------------------------------------------------------------------
 # AnthropicClient (mocked SDK)
 # ---------------------------------------------------------------------------
 

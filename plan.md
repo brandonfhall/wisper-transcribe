@@ -12,39 +12,6 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 
 **Status:** guarded, not fixed. The runtime lease (`db.py`, `runtime_leases`) makes the second runtime refuse to start when the container is inside Docker Desktop's VM; it is advisory (two processes starting in the same second could both pass). Documented in `docs/docker.md` ("One way of running at a time"). A real fix would need a lock that crosses the VM (e.g. routing host CLI writes through the container's server API).
 
-### Ollama: empty responses from reasoning models
-
-**Decided (Brandon, 2026-10-05/06): retry on empty content.** Not started. Touches the shared client code every provider uses.
-
-**Current behaviour**
-- `llm/ollama.py:73-91` reads only `(chunk.get("message") or {}).get("content", "")`; a chunk's `thinking` field and a streamed `error` field are ignored.
-- `_post_chat` returns `"".join(parts)` (`llm/ollama.py:125`); empty content is indistinguishable from a model that returned nothing.
-- `complete()` (`:127`) and `complete_json()` (`:138-157`) both call it; the empty string then fails at `json.loads` and raises `LLMResponseError("... Raw: ''")` (`:154-156`).
-- `OllamaCloudClient` inherits `OllamaClient` (`llm/ollama_cloud.py:18`), so `ollama-cloud` shares the path.
-- `llm/lmstudio.py:62-83` has the same content-only read and no `error` check; its `complete_json` raises the same way (`:141-146`).
-- No retry exists in any client. `llm/base.py:9-12` documents soft-fail via `LLMUnavailableError`/`LLMResponseError`.
-- Callers catch both and soft-fail: `refine.py:155,333`, `summarize.py:84,103`, `journal.py:703,723`, `web/jobs.py:1722,1760`, `cli.py:1443,1810,1928`.
-
-**Change**
-- Shared helper on `LLMClient` (`llm/base.py`), e.g. `_retry_on_empty(call)`: run `call()`; if the returned content is empty after `.strip()`, sleep and call again. 2 retries, sleeping 0.5 s then 1.5 s (3 calls max); still empty → `LLMResponseError`.
-- "Empty" means the content is empty, even when a `thinking` field came back.
-- `OllamaClient` and `LMStudioClient` wrap `_post_chat` with it in both `complete()` and `complete_json()`; `OllamaCloudClient` inherits. The SDK clients (Anthropic, OpenAI, Google) are unchanged.
-- Only empty content retries. A non-empty response that fails `json.loads` raises `LLMResponseError` at once, as today.
-- Read `chunk.get("error")` in both stream loops and raise `LLMUnavailableError` with the provider's message right away (no retry).
-- Log one line per retry to stderr (`tqdm.write`), e.g. `  LLM returned an empty response; retrying (1/2)…`, so CLI and web job logs show it (`_StderrCapture`, `web/jobs.py:141`). Never in `job.error`.
-
-**Tests** (`tests/test_llm_clients.py`, mocked `httpx.stream` via `_fake_stream_context`)
-- Empty-then-content: first context empty, second content → returns content, two `httpx.stream` calls.
-- All-empty exhausts retries → `LLMResponseError`; a non-empty first response makes one call only.
-- Streamed `error` field raises `LLMUnavailableError`; `complete_json` parses a fence delivered on the retry.
-- Non-empty unparseable JSON makes one call only; LM Studio gets the same empty-then-content test. Patch `time.sleep`.
-
-**Docs**
-- `architecture.md` LLM clients section: retry-on-empty and the `error` field. `docs/configuration.md` only if a config key is added.
-
-
----
-
 ## Manual verification owed
 
 - **Live recording + campaign journal:** `LIVE_AUDIO_TEST_PLAN.md` — real-device capture, live transcript, journal browser flows, bulk delete, busy-queue notice.

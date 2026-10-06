@@ -190,3 +190,62 @@ def test_lmstudio_ignores_non_data_lines():
     fake_cm = _fake_stream_ctx(lines)
     with patch("httpx.stream", return_value=fake_cm):
         assert client.complete("sys", "user") == "hi"
+
+
+# ---------------------------------------------------------------------------
+# LMStudioClient retry on empty content
+# ---------------------------------------------------------------------------
+
+def test_lmstudio_complete_retries_an_empty_response():
+    from wisper_transcribe.llm.lmstudio import LMStudioClient
+
+    client = LMStudioClient(model="phi-3")
+    empty = _fake_stream_ctx(_sse_lines(""))
+    content = _fake_stream_ctx(_sse_lines("finally"))
+    with patch("httpx.stream", side_effect=[empty, content]) as mock_stream, \
+         patch("time.sleep"):
+        result = client.complete("sys", "user")
+
+    assert result == "finally"
+    assert mock_stream.call_count == 2
+
+
+def test_lmstudio_complete_empty_exhausts_retries():
+    from wisper_transcribe.llm.lmstudio import LMStudioClient
+
+    client = LMStudioClient(model="phi-3")
+    empties = [_fake_stream_ctx(_sse_lines("")) for _ in range(3)]
+    with patch("httpx.stream", side_effect=empties) as mock_stream, \
+         patch("time.sleep"):
+        with pytest.raises(LLMResponseError, match="empty response"):
+            client.complete("sys", "user")
+
+    assert mock_stream.call_count == 3
+
+
+def test_lmstudio_stream_error_field_raises_unavailable():
+    """A streamed `error` field fails immediately, with no retry."""
+    from wisper_transcribe.llm.lmstudio import LMStudioClient
+
+    client = LMStudioClient(model="phi-3")
+    fake_cm = _fake_stream_ctx(
+        [f'data: {json.dumps({"error": "model failed to load"})}']
+    )
+    with patch("httpx.stream", return_value=fake_cm) as mock_stream:
+        with pytest.raises(LLMUnavailableError, match="model failed to load"):
+            client.complete("sys", "user")
+
+    assert mock_stream.call_count == 1
+
+
+def test_lmstudio_complete_json_bad_json_does_not_retry():
+    """Non-empty unparseable JSON raises at once (empty-only retry)."""
+    from wisper_transcribe.llm.lmstudio import LMStudioClient
+
+    client = LMStudioClient(model="phi-3")
+    fake_cm = _fake_stream_ctx(_sse_lines("not valid json"))
+    with patch("httpx.stream", return_value=fake_cm) as mock_stream:
+        with pytest.raises(LLMResponseError, match="did not parse"):
+            client.complete_json("sys", "user", {"type": "object"})
+
+    assert mock_stream.call_count == 1

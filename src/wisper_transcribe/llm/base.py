@@ -14,7 +14,17 @@ Every concrete client must:
 from __future__ import annotations
 
 import re
+import time
 from abc import ABC, abstractmethod
+from typing import Callable
+
+from tqdm import tqdm
+
+from .errors import LLMResponseError
+
+# Retry policy when a streaming call comes back with empty content: two more
+# attempts (three calls total), sleeping this long before each.
+_EMPTY_RETRY_DELAYS = (0.5, 1.5)
 
 
 def _strip_json_fence(text: str) -> str:
@@ -37,6 +47,30 @@ class LLMClient(ABC):
     provider: str = ""       # filled in by subclasses
     model: str = ""
     temperature: float = 0.2
+
+    def _retry_on_empty(self, call: Callable[[], str]) -> str:
+        """Run ``call()``, retrying when it returns empty (whitespace-only) text.
+
+        Reasoning models (Ollama, LM Studio) sometimes stream a ``thinking``
+        field and no ``content``, which is indistinguishable from a model that
+        returned nothing. Retry a couple of times — logging one line per retry
+        via ``tqdm.write`` so CLI and web job logs show it — then raise
+        ``LLMResponseError`` if it stays empty. Only empty content retries;
+        a non-empty response is returned as-is (its caller parses JSON).
+        """
+        attempts = len(_EMPTY_RETRY_DELAYS) + 1
+        for attempt in range(1, attempts + 1):
+            text = call()
+            if text.strip():
+                return text
+            if attempt == attempts:
+                break
+            tqdm.write(f"  LLM returned an empty response; retrying ({attempt}/{attempts - 1})…")
+            time.sleep(_EMPTY_RETRY_DELAYS[attempt - 1])
+        raise LLMResponseError(
+            f"The {self.provider} model {self.model!r} returned an empty response "
+            f"after {attempts} attempts."
+        )
 
     @abstractmethod
     def complete(self, system: str, user: str) -> str:
