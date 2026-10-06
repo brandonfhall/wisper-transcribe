@@ -229,16 +229,6 @@ def enumerate_devices() -> dict:
     }
 
 
-def resolve_device_name(devices: list, device_id: str) -> str:
-    """Look up `device_id` in an `enumerate_devices()` list; falls back to
-    echoing the id itself when not found (device ids are never used in a
-    file path, so this is safe -- see .claude/rules/web-security.md)."""
-    for d in devices:
-        if d.get("id") == device_id:
-            return d.get("name", device_id)
-    return device_id
-
-
 # ---------------------------------------------------------------------------
 # LocalCaptureManager
 # ---------------------------------------------------------------------------
@@ -342,15 +332,13 @@ class LocalCaptureManager:
         campaign_slug: Optional[str],
         mic_device_id: str,
         system_device_id: str,
-        mic_name: str = "",
-        system_name: str = "",
         name: Optional[str] = None,
     ) -> Recording:
         """Create a Recording and start both capture threads and the tick thread.
 
-        ``mic_name``/``system_name`` are server-resolved device names (falling
-        back to the raw id). ``name`` is a free-text, display-only session
-        title; it never becomes a path.
+        ``name`` is a free-text, display-only session title; it never becomes a
+        path. The device ids are held in memory (``_track_device_ids``), not
+        stored.
         """
         if self._active_recording is not None and self._active_recording.status in ACTIVE_STATUSES:
             raise RuntimeError(f"Session {self._active_recording.id} is already active")
@@ -361,10 +349,6 @@ class LocalCaptureManager:
             campaign_slug=campaign_slug,
             data_dir=self._data_dir,
             source="local",
-            devices={
-                "mic": mic_name or mic_device_id,
-                "system": system_name or system_device_id,
-            },
             name=name,
         )
 

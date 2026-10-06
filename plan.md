@@ -54,27 +54,6 @@ Design in `architecture.md`. Open items:
 
 ## Live recording — feature requests
 
-### Approved for build (Brandon, 2026-10-06) — branch `feat/live-recording`, schema v13
-
-**1. Channel picker on the Record page.**
-- `GET /api/record/channels` already returns `{guilds: [{id, name, voice_channels: [{id, name}]}]}` or `{error: no_token|invalid_token|fetch_failed}`. The Record page's Discord form fetches it when the Discord source is shown and replaces the two raw-ID text inputs with a guild `<select>` and a voice-channel `<select>` (filtered by guild). The selects fill the same `guild_id`/`voice_channel_id` form fields, so the start routes and "Save as preset" are unchanged.
-- Keep raw-ID entry as a fallback: shown automatically on any `error`, and behind a "Enter IDs manually" toggle otherwise. `no_token` says where to set the bot token (Config page).
-- Presets and the configured default guild/channel pre-select their entries when present in the list.
-- Build options with `textContent`/`new Option()`, never `innerHTML` (names come from Discord).
-- Tests: the page renders the picker container and the fallback inputs; the API's existing tests stay green.
-
-**2. Switch an input device mid-session (local capture).**
-- Each track (`mic`, `system`) has a capture thread feeding a `_ByteFifo`; the tick thread drains both and pads a starved track with silence, so a switch only restarts one track's capture thread on the new device id. Segments, the combined track, the live transcript, and the `Recording` continue; the switch leaves a short silent gap on that track.
-- `LocalCaptureManager.switch_device(track, device_id)`: per-track stop event (or generation counter) so the old thread stops pushing into the FIFO even if `record()` is mid-block; join with a short timeout; start the new thread on the same FIFO. A switch also recovers a session that went `degraded` because that track's device died (status back to `recording` via `update_recording_status`, never `save_recording`).
-- Route `POST /api/record/switch-device` (`track` ∈ {mic, system}, `device_id` must be in `enumerate_devices()` for that track's list, else 400 with a generic code). HTML: two selects + "Switch" on the active local-session panel, current device pre-selected.
-- Tests with the fake `capture_factory`: switching mid-session keeps writing segments, the old thread stops pushing, an unknown device id is rejected, a degraded session returns to recording, Discord sessions reject the route.
-
-**3. Stop storing device names.** They are display-only (`recording_devices`, the detail page's `mic:`/`sys:` lines, the recordings API `devices` field); the capture threads use device ids held in memory.
-- Migration v13: `DROP TABLE recording_devices`. Remove `Recording.devices`, the `save_recording`/`_load` reads and writes, `legacy_import`'s insert, `create_recording(devices=...)`, `resolve_device_name` and its callers, the API field, and the detail-page lines. `test_schema.py` updated.
-- Develop with `SCHEMA_FROZEN = False`; frozen at merge (not by the worker).
-
-**Docs:** `docs/web-ui.md` (Record page: picker, switching), `architecture.md` (recording layer, schema v13, Known Constraints if any), `docs/docker.md` only if it mentions IDs.
-
 ### Research (approved 2026-10-06, no product change yet)
 
 **4. Per-speaker labels on the live system track.** Today the system track is one RMS-attributed "Other": OS loopback is already mixed. Candidate design: for each committed system-track utterance, compute a WeSpeaker embedding (`speaker_manager.extract_embedding`), match it against a per-session pool of voices (cosine, the 0.55 threshold), and match pool voices to the campaign's enrolled profiles so lines read "Alice" instead of "Other". The final transcript stays the full pyannote pass after Stop; live labels are best-effort.

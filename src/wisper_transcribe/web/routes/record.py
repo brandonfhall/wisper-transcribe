@@ -32,7 +32,6 @@ from wisper_transcribe.web.jobs import resume_slice
 from wisper_transcribe.web.local_capture import (
     ACTIVE_STATUSES,
     enumerate_devices,
-    resolve_device_name,
 )
 from wisper_transcribe.web.routes import get_bot_manager, get_local_capture_manager, get_queue, templates
 
@@ -64,7 +63,6 @@ def _recording_to_dict(rec) -> dict:
         "has_audio": bool(rec.combined_path),
         "has_transcript": bool(rec.transcript_path),
         "source": rec.source,
-        "devices": dict(rec.devices),
         "name": rec.name,
         "markers": [{"elapsed_s": m.elapsed_s} for m in rec.markers],
     }
@@ -377,16 +375,11 @@ async def record_start_local(request: Request):
     if _other_session_active(request, lcm):
         return JSONResponse({"detail": "recording already in progress"}, status_code=409)
 
-    mic_name = resolve_device_name(devices["microphones"], mic_id)
-    system_name = resolve_device_name(devices["loopbacks"], system_id)
-
     try:
         recording = lcm.start_session(
             body.get("campaign_slug"),
             mic_id,
             system_id,
-            mic_name=mic_name,
-            system_name=system_name,
             name=_clean_session_name(str(body.get("name", ""))),
         )
     except RuntimeError:
@@ -739,16 +732,11 @@ async def record_start_local_html(
     if _other_session_active(request, lcm):
         return error_redirect("/record", "already_active")
 
-    mic_name = resolve_device_name(devices["microphones"], mic_id.strip())
-    system_name = resolve_device_name(devices["loopbacks"], system_id.strip())
-
     try:
         recording = lcm.start_session(
             campaign_slug.strip() or None,
             mic_id.strip(),
             system_id.strip(),
-            mic_name=mic_name,
-            system_name=system_name,
             name=_clean_session_name(name),
         )
     except RuntimeError:

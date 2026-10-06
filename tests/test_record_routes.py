@@ -289,7 +289,7 @@ def test_start_local_success_creates_local_recording(client):
         data = resp.json()
         assert data["status"] == "recording"
         assert data["source"] == "local"
-        assert data["devices"] == {"mic": "Built-in Microphone", "system": "Speakers (loopback)"}
+        assert "devices" not in data
     finally:
         mgr.stop_session()
 
@@ -957,27 +957,25 @@ def test_recordings_list_shows_local_badge(client):
 
     c, data_dir = client
     create_recording(
-        voice_channel_id="", guild_id="", data_dir=data_dir,
-        source="local", devices={"mic": "Mic", "system": "Speakers"},
+        voice_channel_id="", guild_id="", data_dir=data_dir, source="local",
     )
     resp = c.get("/recordings")
     assert resp.status_code == 200
     assert "LOCAL" in resp.text
 
 
-def test_recording_detail_shows_local_device_names(client):
+def test_recording_detail_shows_local_badge_not_device_names(client):
+    """The detail page marks a local session but no longer shows device names
+    (schema v13)."""
     from wisper_transcribe.recording_manager import create_recording
 
     c, data_dir = client
-    rec = create_recording(
-        voice_channel_id="", guild_id="", data_dir=data_dir,
-        source="local", devices={"mic": "Built-in Microphone", "system": "Speakers (loopback)"},
-    )
+    rec = create_recording(voice_channel_id="", guild_id="", data_dir=data_dir, source="local")
     resp = c.get(f"/recordings/{rec.id}")
     assert resp.status_code == 200
-    assert "Built-in Microphone" in resp.text
-    assert "Speakers (loopback)" in resp.text
     assert "LOCAL" in resp.text
+    assert "mic:" not in resp.text
+    assert "sys:" not in resp.text
 
 
 def test_recording_detail_shows_live_pane_for_active_local_session(client):

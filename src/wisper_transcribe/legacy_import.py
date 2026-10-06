@@ -531,11 +531,7 @@ def import_recordings(conn: sqlite3.Connection, ctx: MigrationContext) -> None:
         else:
             if d.get("discord_speakers") or d.get("unbound_speakers"):
                 ctx.note(f"recording {rid}: local session listed Discord speakers; dropped")
-            for role, name in (d.get("devices") or {}).items():
-                if role in ("mic", "system") and name:
-                    conn.execute(
-                        "INSERT INTO recording_devices (recording_id, role, device_name) VALUES (?, ?, ?)",
-                        (rid, role, str(name)))
+            # Device names aren't stored any more (display-only, no longer shown).
 
         combined_dir = os.path.realpath(rec_root / str(rid) / "combined")
         for seg in d.get("segment_manifest") or []:

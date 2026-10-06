@@ -51,7 +51,7 @@ MIN_SQLITE = (3, 43, 0)
 
 # False only on a branch that edits unreleased migrations in place; such a
 # build refuses the default data dir. test_db fails on main unless True.
-SCHEMA_FROZEN = True
+SCHEMA_FROZEN = False
 
 # While the schema is unfrozen, connect() also refuses to run unless
 # WISPER_OUTPUT_DIR is set or the output root lies inside the data dir, so a
@@ -1032,6 +1032,13 @@ END;
 """
 
 
+# --- v13: device names are display-only; stop persisting them ----------------
+
+# Local capture uses device ids held in memory. The stored mic/system names only
+# fed a detail-page line and the recordings API's `devices` field, both removed.
+_V13_DDL = "DROP TABLE recording_devices;"
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "foundation", _V1_DDL, _v1_pin_output_dir),
     Migration(2, "profiles-campaigns", _V2_DDL, _v2_import),
@@ -1045,6 +1052,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(10, "drop-audio-rel-path", _V10_DDL),
     Migration(11, "campaign-folders", _V11_DDL, _v11_import),
     Migration(12, "combined-flac", _V12_DDL),
+    Migration(13, "drop-recording-devices", _V13_DDL),
 )
 LATEST_VERSION = MIGRATIONS[-1].version
 

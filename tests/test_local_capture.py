@@ -24,7 +24,6 @@ from wisper_transcribe.web.local_capture import (
     LocalCaptureManager,
     _ByteFifo,
     enumerate_devices,
-    resolve_device_name,
 )
 
 from ._flac_mock import frames as combined_frames, install as install_flac_mock
@@ -109,11 +108,10 @@ def test_start_session_creates_local_recording(tmp_path):
         capture_factory=scripted_capture_factory({}),
         ticker=instant_ticker(0),
     )
-    rec = mgr.start_session("campaign-1", "mic-dev", "sys-dev", mic_name="Mic", system_name="Speakers")
+    rec = mgr.start_session("campaign-1", "mic-dev", "sys-dev")
     assert rec.source == "local"
     assert rec.voice_channel_id == ""
     assert rec.guild_id == ""
-    assert rec.devices == {"mic": "Mic", "system": "Speakers"}
     assert rec.status == "recording"
     mgr.stop_session()
 
@@ -155,7 +153,8 @@ def test_device_names_fall_back_to_id_when_not_given(tmp_path):
         ticker=instant_ticker(0),
     )
     rec = mgr.start_session(None, "mic-dev", "sys-dev")
-    assert rec.devices == {"mic": "mic-dev", "system": "sys-dev"}
+    assert rec.name is None
+    assert mgr.current_device_ids() == {"mic": "mic-dev", "system": "sys-dev"}
     mgr.stop_session()
 
 
@@ -453,12 +452,11 @@ def test_switch_device_returns_a_degraded_session_to_recording(tmp_path):
     def factory(device_id, samplerate):
         if device_id == "bad-mic":
             raise RuntimeError("mic unplugged")
-        return iter([(_block(), 48000)])
+        return iter([_block()])
 
     mgr = LocalCaptureManager(data_dir=tmp_path, capture_factory=factory, ticker=instant_ticker(0))
     rec = mgr.start_session(None, "bad-mic", "sys-dev")
-    for t in list(mgr._track_threads.values()):
-        t.join(timeout=5.0)
+    mgr._track_threads["mic"].join(timeout=5.0)
     assert rec.status == "degraded"  # the dead mic degraded the session
 
     mgr.switch_device("mic", "good-mic")
@@ -919,9 +917,3 @@ def test_enumerate_devices_degrades_to_unavailable_on_exception(monkeypatch):
         "default_microphone_id": "",
         "default_loopback_id": "",
     }
-
-
-def test_resolve_device_name_found_and_fallback():
-    devices = [{"id": "a", "name": "Device A"}]
-    assert resolve_device_name(devices, "a") == "Device A"
-    assert resolve_device_name(devices, "unknown-id") == "unknown-id"
