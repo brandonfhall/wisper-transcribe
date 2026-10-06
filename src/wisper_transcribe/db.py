@@ -51,8 +51,7 @@ MIN_SQLITE = (3, 43, 0)
 
 # False only on a branch that edits unreleased migrations in place; such a
 # build refuses the default data dir. test_db fails on main unless True.
-# feat/flac-combined: v12 is unreleased, so the branch runs unfrozen.
-SCHEMA_FROZEN = False
+SCHEMA_FROZEN = True
 
 # While the schema is unfrozen, connect() also refuses to run unless
 # WISPER_OUTPUT_DIR is set or the output root lies inside the data dir, so a
