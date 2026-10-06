@@ -111,6 +111,11 @@ def delegating(worker: "MLWorker", cancel_event=None, on_log=None,
 
     Always cleared in ``finally``, including on exception, and restored to
     whatever the thread had before (normally ``None``).
+
+    Cancel is sticky: a block that ends normally while ``cancel_event`` is set
+    raises ``InterruptedError``. Several callers catch ``Exception`` around a
+    GPU call and carry on (per-speaker loops), which would otherwise turn a
+    Stop into a "completed" job.
     """
     previous = getattr(_thread_state, "value", None)
     _thread_state.value = _Delegation(worker, cancel_event, on_log, on_bar)
@@ -118,6 +123,8 @@ def delegating(worker: "MLWorker", cancel_event=None, on_log=None,
         yield _thread_state.value
     finally:
         _thread_state.value = previous
+    if cancel_event is not None and cancel_event.is_set():
+        raise InterruptedError("Job cancelled by user")
 
 
 def delegated_call(name: str, args: tuple, kwargs: dict) -> tuple[bool, Any]:
@@ -244,12 +251,17 @@ class MLWorker:
         ``InterruptedError``; a crash raises ``RuntimeError`` and the next
         call respawns.
         """
+        # Checked before spawning: after a Stop, a caller that swallowed the
+        # first InterruptedError must not start (and load models in) a new child.
+        if cancel_event is not None and cancel_event.is_set():
+            raise InterruptedError("Job cancelled by user")
         with self._lock:
             if not self.alive:
                 self._spawn()
             proc = self._proc
             spec_q, log_q, result_q = self._spec_q, self._log_q, self._result_q
 
+        replied = False
         try:
             spec_q.put((name, args, kwargs))
             while True:
@@ -263,14 +275,18 @@ class MLWorker:
                         self._kill(proc)
                         raise RuntimeError(_CRASH_MESSAGE)
                     continue
+                replied = True
                 self._drain(log_q, on_log, on_bar)
                 kind = msg[0]
                 if kind == "ok":
                     return msg[1]
                 _, err_name, err_msg = msg
                 raise _KNOWN_ERRORS.get(err_name, RuntimeError)(err_msg)
-        except InterruptedError:
-            # Covers both the explicit check above and a callback
-            # (tqdm.write -> capturing_write) raising on cancel.
-            self._kill(proc)
+        except BaseException:
+            # Leaving before the reply (cancel, a callback such as
+            # capturing_write raising, Ctrl+C) leaves the child mid-call; its
+            # late reply would answer the next call. Kill it. An error the
+            # child reported is a reply: the child stays warm.
+            if not replied:
+                self._kill(proc)
             raise

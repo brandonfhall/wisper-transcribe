@@ -618,6 +618,8 @@ def match_speakers(
     for label in unique_labels:
         try:
             query_embeddings[label] = extract_embedding(audio_path, diarization_segments, label, device)
+        except InterruptedError:
+            raise  # Stop: not one failed speaker
         except Exception:
             pass
     if embeddings is not None:

@@ -219,3 +219,21 @@ def test_path_like_stem_is_refused(world):
     campaigns["game"].transcripts.append("../escape")
     with pytest.raises(sqlite3.IntegrityError):
         _seed_save_campaigns(campaigns, data)
+
+def test_backfill_lets_a_cancel_through(tmp_path):
+    """A Stop during relabel's embedding backfill stops the job instead of
+    being logged as one failed speaker and moving on."""
+    from unittest.mock import patch
+
+    from wisper_transcribe.models import DiarizationSegment
+    from wisper_transcribe.speaker_registry import _backfill_embeddings
+
+    audio = tmp_path / "a.wav"
+    audio.write_bytes(b"RIFF")
+    segs = [DiarizationSegment(0.0, 1.0, "SPEAKER_00"), DiarizationSegment(1.0, 2.0, "SPEAKER_01")]
+    with patch("wisper_transcribe.audio_utils.convert_to_wav", return_value=audio), \
+         patch("wisper_transcribe.speaker_manager.extract_embedding",
+               side_effect=InterruptedError("Job cancelled by user")) as extract:
+        with pytest.raises(InterruptedError):
+            _backfill_embeddings({"input_path": str(audio)}, segs, "cpu")
+    assert extract.call_count == 1

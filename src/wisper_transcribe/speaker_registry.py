@@ -147,6 +147,8 @@ def _backfill_embeddings(diar: dict, segments: list, device: str) -> Optional[di
         for label in sorted({s.speaker for s in segments}):
             try:
                 embeddings[label] = extract_embedding(wav_path, segments, label, device)
+            except InterruptedError:
+                raise  # Stop: not one failed speaker
             except Exception as exc:
                 log.warning("embedding extraction failed for %s: %s", label, exc)
         return embeddings or None

@@ -173,3 +173,37 @@ def test_delegated_call_inactive_returns_false():
     from wisper_transcribe import ml_worker
 
     assert ml_worker.delegated_call("transcribe", ("x",), {}) == (False, None)
+
+
+def test_a_set_cancel_raises_without_spawning(worker):
+    """After a Stop, a caller that swallowed the first InterruptedError must
+    not start a new child (and load its models) on its next GPU call."""
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(InterruptedError):
+        worker.call("echo", 1, cancel_event=cancel)
+    assert worker.pid is None
+
+
+def test_delegating_raises_when_a_cancel_was_swallowed(worker):
+    """A block that ends normally after a Stop still ends Cancelled."""
+    from wisper_transcribe import ml_worker
+
+    cancel = threading.Event()
+    with pytest.raises(InterruptedError):
+        with ml_worker.delegating(worker, cancel_event=cancel):
+            cancel.set()  # e.g. a per-speaker loop caught the InterruptedError
+    assert ml_worker.active() is None
+
+
+def test_leaving_before_the_reply_kills_the_child(worker):
+    """A callback raising mid-call leaves the child busy; its late reply must
+    not answer the next call, so the child is killed and respawned."""
+    def failing_log(_msg):
+        raise RuntimeError("log sink broke")
+
+    with pytest.raises(RuntimeError, match="log sink broke"):
+        worker.call("emit", on_log=failing_log)
+    first = worker.pid
+    assert worker.call("echo", "fresh") == "fresh"
+    assert worker.pid != first

@@ -147,6 +147,19 @@ def test_match_speakers_above_threshold(tmp_path):
     assert result["SPEAKER_00"] == "Alice"
 
 
+def test_match_speakers_lets_a_cancel_through(tmp_path):
+    """A Stop during extraction stops the job, not just one speaker."""
+    from wisper_transcribe.speaker_manager import match_speakers
+
+    _write_profile(tmp_path, "alice", np.array([1.0, 0.0, 0.0]))
+    segs = _fake_diarization(["SPEAKER_00", "SPEAKER_01"])
+    with patch("wisper_transcribe.speaker_manager.extract_embedding",
+               side_effect=InterruptedError("Job cancelled by user")) as extract:
+        with pytest.raises(InterruptedError):
+            match_speakers(Path("fake.wav"), segs, data_dir=tmp_path, threshold=0.65)
+    assert extract.call_count == 1
+
+
 def test_match_speakers_below_threshold_becomes_unknown(tmp_path):
     from wisper_transcribe.speaker_manager import match_speakers
 

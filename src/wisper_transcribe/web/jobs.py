@@ -1672,6 +1672,8 @@ class JobQueue:
                     _progress("Updating other sessions in the campaign…")
                     relabel_campaign(campaign_slug, device=job.enroll_device,
                                      backfill=False, progress=_progress)
+                except InterruptedError:
+                    raise
                 except Exception as exc:
                     log.warning("campaign relabel after enroll failed: %s", exc)
             job.status = COMPLETED
