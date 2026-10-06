@@ -51,7 +51,7 @@ MIN_SQLITE = (3, 43, 0)
 
 # False only on a branch that edits unreleased migrations in place; such a
 # build refuses the default data dir. test_db fails on main unless True.
-SCHEMA_FROZEN = True
+SCHEMA_FROZEN = False
 
 # While the schema is unfrozen, connect() also refuses to run unless
 # WISPER_OUTPUT_DIR is set or the output root lies inside the data dir, so a
@@ -1039,6 +1039,132 @@ END;
 _V13_DDL = "DROP TABLE recording_devices;"
 
 
+# --- v14: campaign-level LLM summaries ---------------------------------------
+
+# Two new campaign-owned kinds join the registry: `combined_summary` (one per
+# campaign, `<folder> Combined Summary.md`) and `recap` (one per newest session,
+# `<folder> Recap — <stem>.md`, so the label carries the stem). Because recap is
+# per-label, the `files_campaign` unique index widens to
+# `(campaign_id, kind, coalesce(label, ''))` — the same shape as the transcript
+# and recording indexes. This is a `files` rebuild mirroring v12: same columns,
+# every other CHECK, FKs, indexes, and trigger. It reads and writes no file.
+# `campaign_digests` records each generated document and `campaign_digest_sessions`
+# the sessions it covered; both cascade from their owner.
+_V14_DDL = """
+DROP TRIGGER files_profile_key_au;
+CREATE TABLE files_new (
+  id            INTEGER PRIMARY KEY,
+  kind          TEXT NOT NULL CHECK (kind IN ('transcript', 'summary', 'sidecar', 'excerpt', 'excerpt_text', 'audio',
+                                              'backup', 'combined', 'per_user', 'live_draft', 'reference_clip', 'journal',
+                                              'combined_summary', 'recap')),
+  root          TEXT NOT NULL CHECK (root IN ('output', 'data')),
+  rel_path      TEXT NOT NULL CHECK (rel_path <> '' AND rel_path NOT GLOB '/*' AND rel_path NOT GLOB '*\\*'
+                                     AND rel_path NOT GLOB '[A-Za-z]:*' AND rel_path NOT GLOB '*/'
+                                     AND rel_path NOT GLOB '*//*'
+                                     AND '/' || rel_path || '/' NOT GLOB '*/../*'
+                                     AND '/' || rel_path || '/' NOT GLOB '*/./*'
+                                     AND instr(CAST(rel_path AS BLOB), x'00') = 0),
+  label         TEXT CHECK (label IS NULL OR (label <> '' AND label NOT GLOB '*[/\\:]*')),
+  transcript_id INTEGER REFERENCES transcripts(id) ON DELETE CASCADE,
+  recording_id  TEXT    REFERENCES recordings(id)  ON DELETE CASCADE,
+  profile_id    INTEGER REFERENCES profiles(id)    ON DELETE CASCADE,
+  campaign_id   INTEGER REFERENCES campaigns(id)   ON DELETE CASCADE,
+  size          INTEGER CHECK (size IS NULL OR size >= 0),
+  mtime_ns      INTEGER,
+  UNIQUE (root, rel_path),
+  CHECK ((transcript_id IS NOT NULL) + (recording_id IS NOT NULL)
+         + (profile_id IS NOT NULL) + (campaign_id IS NOT NULL) = 1),
+  CHECK ((kind IN ('transcript', 'summary', 'sidecar', 'excerpt', 'excerpt_text', 'audio', 'backup'))
+         = (transcript_id IS NOT NULL)),
+  CHECK ((kind IN ('combined', 'per_user', 'live_draft')) = (recording_id IS NOT NULL)),
+  CHECK ((kind = 'reference_clip') = (profile_id IS NOT NULL)),
+  CHECK ((kind IN ('journal', 'combined_summary', 'recap')) = (campaign_id IS NOT NULL)),
+  CHECK ((root = 'output') = (kind IN ('transcript', 'summary', 'sidecar', 'excerpt', 'excerpt_text',
+                                       'audio', 'backup', 'journal', 'combined_summary', 'recap'))),
+  CHECK (root <> 'output' OR rel_path NOT GLOB '*/*/*'),
+  CHECK ((kind IN ('excerpt', 'excerpt_text', 'per_user', 'recap')) = (label IS NOT NULL)),
+  CHECK (kind <> 'per_user' OR label IN ('mic', 'system') OR label NOT GLOB '*[^0-9]*'),
+  CHECK ((size IS NULL) = (mtime_ns IS NULL)),
+  CHECK (kind <> 'per_user' OR size IS NULL),
+  CHECK (kind <> 'transcript'   OR (lower(rel_path) GLOB '*.md' AND lower(rel_path) NOT GLOB '*.summary.md')),
+  CHECK (kind <> 'summary'      OR lower(rel_path) GLOB '*.summary.md'),
+  CHECK (kind <> 'sidecar'      OR rel_path GLOB '*_diar.json'),
+  CHECK (kind <> 'excerpt'      OR rel_path GLOB '*_excerpt_*.mp3'),
+  CHECK (kind <> 'excerpt_text' OR rel_path GLOB '*_excerpt_*.txt'),
+  CHECK (kind <> 'audio'        OR lower(rel_path) NOT GLOB '*.md'),
+  CHECK (kind <> 'backup'       OR lower(rel_path) GLOB '*.md.bak'),
+  CHECK (kind <> 'combined'     OR rel_path = 'recordings/' || recording_id || '/combined.wav'
+                                OR rel_path = 'recordings/' || recording_id || '/combined.flac'),
+  CHECK (kind <> 'per_user'     OR rel_path = 'recordings/' || recording_id || '/per-user/' || label),
+  CHECK (kind <> 'live_draft'   OR rel_path = 'recordings/' || recording_id || '/live_transcript.md'),
+  CHECK (kind <> 'reference_clip' OR rel_path GLOB 'profiles/embeddings/*.mp3'),
+  CHECK (kind <> 'journal'      OR (rel_path GLOB '?*/?* Journal.md' AND rel_path NOT GLOB '*/*/*')),
+  CHECK (kind <> 'combined_summary' OR (rel_path GLOB '?*/?* Combined Summary.md' AND rel_path NOT GLOB '*/*/*')),
+  CHECK (kind <> 'recap'        OR (rel_path GLOB '?*/?* Recap — ?*.md' AND rel_path NOT GLOB '*/*/*'))
+) STRICT;
+INSERT INTO files_new SELECT * FROM files;
+DROP TABLE files;
+ALTER TABLE files_new RENAME TO files;
+CREATE UNIQUE INDEX files_transcript ON files(transcript_id, kind, coalesce(label, ''));
+CREATE UNIQUE INDEX files_recording  ON files(recording_id, kind, coalesce(label, ''));
+CREATE UNIQUE INDEX files_profile    ON files(profile_id, kind);
+CREATE UNIQUE INDEX files_campaign   ON files(campaign_id, kind, coalesce(label, ''));
+CREATE TRIGGER files_profile_key_au AFTER UPDATE OF key ON profiles BEGIN
+  UPDATE files SET rel_path = 'profiles/embeddings/' || new.key || '.mp3'
+   WHERE profile_id = new.id AND kind = 'reference_clip';
+END;
+
+-- One generated document (combined summary or recap) and the sessions it read.
+CREATE TABLE campaign_digests (
+  id           INTEGER PRIMARY KEY,
+  campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  kind         TEXT NOT NULL CHECK (kind IN ('combined_summary', 'recap')),
+  file_id      INTEGER NOT NULL UNIQUE REFERENCES files(id) ON DELETE CASCADE,
+  generated_at TEXT NOT NULL,
+  provider     TEXT NOT NULL DEFAULT '',
+  model        TEXT NOT NULL DEFAULT ''
+) STRICT;
+CREATE INDEX campaign_digests_campaign ON campaign_digests(campaign_id, kind, generated_at);
+
+CREATE TABLE campaign_digest_sessions (
+  digest_id     INTEGER NOT NULL REFERENCES campaign_digests(id) ON DELETE CASCADE,
+  transcript_id INTEGER NOT NULL REFERENCES transcripts(id) ON DELETE CASCADE,
+  PRIMARY KEY (digest_id, transcript_id)
+) STRICT;
+CREATE INDEX campaign_digest_sessions_transcript ON campaign_digest_sessions(transcript_id);
+
+-- The two new job types join the jobs enum. Mirrors a jobs rebuild.
+CREATE TABLE jobs_new (
+  id            TEXT PRIMARY KEY CHECK (length(id) = 36),
+  type          TEXT NOT NULL CHECK (type IN ('transcription', 'refine', 'summarize', 'enroll',
+                                              'live', 'campaign_journal', 'speaker_relabel',
+                                              'campaign_summary', 'campaign_recap')),
+  status        TEXT NOT NULL CHECK (status IN ('pending', 'running', 'completed', 'failed')),
+  created_at    TEXT NOT NULL,
+  started_at    TEXT,
+  finished_at   TEXT,
+  error_code    TEXT,
+  transcript_id INTEGER REFERENCES transcripts(id) ON DELETE SET NULL,
+  campaign_id   INTEGER REFERENCES campaigns(id)   ON DELETE SET NULL,
+  recording_id  TEXT    REFERENCES recordings(id)  ON DELETE SET NULL,
+  params_json   TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(params_json) AND json_type(params_json) = 'object'),
+  log_tail      TEXT NOT NULL DEFAULT '',
+  CHECK (status <> 'pending' OR started_at IS NULL),
+  CHECK (status <> 'running' OR started_at IS NOT NULL),
+  CHECK ((status IN ('completed', 'failed')) = (finished_at IS NOT NULL)),
+  CHECK ((status = 'failed') = (error_code IS NOT NULL))
+) STRICT;
+INSERT INTO jobs_new SELECT * FROM jobs;
+DROP TABLE jobs;
+ALTER TABLE jobs_new RENAME TO jobs;
+CREATE INDEX jobs_created    ON jobs(created_at);
+CREATE INDEX jobs_transcript ON jobs(transcript_id);
+CREATE INDEX jobs_campaign   ON jobs(campaign_id);
+CREATE INDEX jobs_recording  ON jobs(recording_id);
+CREATE INDEX jobs_active ON jobs(status) WHERE status IN ('pending', 'running');
+"""
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "foundation", _V1_DDL, _v1_pin_output_dir),
     Migration(2, "profiles-campaigns", _V2_DDL, _v2_import),
@@ -1053,6 +1179,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(11, "campaign-folders", _V11_DDL, _v11_import),
     Migration(12, "combined-flac", _V12_DDL),
     Migration(13, "drop-recording-devices", _V13_DDL),
+    Migration(14, "campaign-digests", _V14_DDL),
 )
 LATEST_VERSION = MIGRATIONS[-1].version
 

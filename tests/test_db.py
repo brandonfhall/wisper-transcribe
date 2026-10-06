@@ -521,7 +521,7 @@ def test_upgrade_v8_to_latest_moves_audio_paths_into_files(monkeypatch, data_dir
             for stem, audio in seeded:
                 conn.execute("INSERT INTO transcripts (stem, created_at, audio_rel_path) VALUES (?, 'now', ?)",
                              (stem, audio))
-    assert db.migrate() == [9, 10, 11, 12, 13]
+    assert db.migrate() == [9, 10, 11, 12, 13, 14]
 
     with db.connection() as conn:
         rows = conn.execute(
@@ -542,7 +542,7 @@ def test_upgrade_v8_to_latest_moves_audio_paths_into_files(monkeypatch, data_dir
         ]
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert "audio_rel_path" not in [r["name"] for r in conn.execute("PRAGMA table_info(transcripts)")]
-        assert db._normalized_schema(conn) == db.expected_schema(13)
+        assert db._normalized_schema(conn) == db.expected_schema(db.LATEST_VERSION)
     assert db.status().schema_drift is False
 
     (report,) = (data_dir / "backups").glob("import-report-*.txt")
@@ -912,7 +912,7 @@ def _upgrade_seeded_v10(monkeypatch):
                 conn.execute(stmt)
             before = {t: conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
                       for t in _V10_TABLES}
-    assert db.migrate() == [11, 12, 13]
+    assert db.migrate() == [11, 12, 13, 14]
     return before
 
 
@@ -932,7 +932,7 @@ def test_upgrade_v10_to_v11_keeps_every_row_and_assigns_folders(monkeypatch, dat
         assert conn.execute("SELECT count(*) FROM journal_entries").fetchone()[0] == 1
         assert [r[0] for r in conn.execute(
             "SELECT rowid FROM transcript_titles WHERE transcript_titles MATCH 's1'")] == [1]
-        assert db._normalized_schema(conn) == db.expected_schema(13)
+        assert db._normalized_schema(conn) == db.expected_schema(14)
     assert db.status().schema_drift is False
 
 

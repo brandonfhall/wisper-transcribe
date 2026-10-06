@@ -92,6 +92,16 @@ def journal_name(folder: str) -> str:
     return f"{folder} Journal.md"
 
 
+def combined_summary_name(folder: str) -> str:
+    """The campaign's combined summary file name (one per campaign)."""
+    return f"{folder} Combined Summary.md"
+
+
+def recap_name(folder: str, stem: str) -> str:
+    """A recap's file name: one per newest session stem, so several coexist."""
+    return f"{folder} Recap \u2014 {stem}.md"
+
+
 def _fold(name: str) -> str:
     return unicodedata.normalize("NFC", name).casefold()
 

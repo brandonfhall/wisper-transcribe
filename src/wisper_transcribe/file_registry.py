@@ -44,18 +44,19 @@ log = logging.getLogger(__name__)
 KINDS = (
     "transcript", "summary", "sidecar", "excerpt", "excerpt_text", "audio",
     "backup", "combined", "per_user", "live_draft", "reference_clip", "journal",
+    "combined_summary", "recap",
 )
 _OUTPUT_KINDS = frozenset(
     {"transcript", "summary", "sidecar", "excerpt", "excerpt_text", "audio", "backup"}
 )
-# A journal lives in its campaign's folder, so it is under the output root
-# though a campaign (not a transcript) owns it.
-_OUTPUT_ROOT_KINDS = _OUTPUT_KINDS | {"journal"}
+# A journal, a combined summary, and a recap live in their campaign's folder,
+# so they are under the output root though a campaign (not a transcript) owns them.
+_OUTPUT_ROOT_KINDS = _OUTPUT_KINDS | {"journal", "combined_summary", "recap"}
 ROOT_OF_KIND: dict[str, str] = {
     k: ("output" if k in _OUTPUT_ROOT_KINDS else "data") for k in KINDS
 }
 # Kinds with one file per owner; the rest are unique per (owner, label).
-SINGLE_KINDS = frozenset(set(KINDS) - {"excerpt", "excerpt_text", "per_user"})
+SINGLE_KINDS = frozenset(set(KINDS) - {"excerpt", "excerpt_text", "per_user", "recap"})
 
 OwnerKind = Literal["transcript", "recording", "profile", "campaign"]
 MoveResult = Literal["moved", "conflict", "missing", "error"]
@@ -68,6 +69,7 @@ _OWNER_OF_KIND: dict[str, str] = {
     **{k: "transcript" for k in _OUTPUT_KINDS},
     "combined": "recording", "per_user": "recording", "live_draft": "recording",
     "reference_clip": "profile", "journal": "campaign",
+    "combined_summary": "campaign", "recap": "campaign",
 }
 # Recordings in these states are still being written.
 _ACTIVE_CAPTURE = ("recording", "degraded")

@@ -56,6 +56,7 @@ src/wisper_transcribe/
 ├── refine.py            LLM vocabulary correction + unknown-speaker suggestions
 ├── summarize.py         LLM session notes → Obsidian-ready `.summary.md` sidecar
 ├── journal.py           Rolling campaign journal; whole-campaign rebuild
+├── campaign_digest.py   Campaign combined-summary and recap paths, session discovery, digest rows, staleness
 ├── debug_log.py         Logger for --debug (file tee) and --verbose (console)
 ├── _noise_suppress.py   Third-party warning/logging suppression; safe to call in subprocesses
 ├── tailwind.py          Pinned Tailwind build (TAILWIND_VERSION, build_css()); `python -m wisper_transcribe.tailwind`
@@ -387,6 +388,7 @@ Cancel only sets `job._cancel_event`, and the job thread can't notice until its 
     - `jobs_active` is a partial index on pending and running jobs.
   - **v12** rebuilds `files` only, widening the `combined` path CHECK to accept `recordings/<id>/combined.wav` or `combined.flac`. It changes no row and no file: the conversion is a storage-trim action, never a migration. The rebuild mirrors v11 (same columns, every other CHECK, FKs, indexes, and the profile-key trigger); the migration runner keeps foreign keys off across the DROP TABLE and a `foreign_key_check` runs before commit.
   - **v13** drops `recording_devices`. Device names were display-only (the detail page's `mic:`/`sys:` lines and the recordings API's `devices` field, both removed); the capture threads hold the device ids in memory, so nothing else reads the table.
+  - **v14** adds the campaign digests (see "Campaign digests"): it rebuilds `files` (mirroring v12) to add the `combined_summary` and `recap` kinds, their path CHECKs, the recap-label CHECK, and the widened `files_campaign` unique index `(campaign_id, kind, coalesce(label, ''))`; adds `campaign_digests` and `campaign_digest_sessions` (both `ON DELETE CASCADE`); and rebuilds `jobs` to add the `campaign_summary` and `campaign_recap` types. No row or file changes; the rebuilds mirror v11/v12 (same columns, every other CHECK, FKs, indexes, and triggers), and the runner keeps foreign keys off across the DROP TABLE.
 - **File registry** (`file_registry.py`) is the only code that writes `files` besides the v9 import.
   - Write sites register with `add_if_owned()`, which never raises: no owner, or a path outside the kind's root (a CLI `--output`), registers nothing, so CLI use outside the roots keeps working.
   - `add()` looks up the path first, then the owner's slot, then inserts, because an upsert on `(root, rel_path)` can't express the owner's existing row conflicting on its own index. It returns the path it replaced.
@@ -424,6 +426,14 @@ Cancel only sets `job._cancel_event`, and the job thread can't notice until its 
 - **Rebuilds.** Both reset the journal (`reset_journal()`: delete file and entries, then clear the stale flag the trigger just set) and fold in campaign order; a missing transcript or LLM error skips that session (`RebuildResult.skipped`). `refold_campaign()` (default; web **Rebuild journal**, CLI `--rebuild`) folds each session's existing `.summary.md`, summarizing only sessions without one — one call per session, and summary edits survive. `rebuild_campaign()` (web **Rebuild from transcripts**, CLI `--rebuild --resummarize`) re-summarizes everything first — two calls per session. Both run as `JOB_CAMPAIGN_JOURNAL` (`rebuild`/`resummarize` kwargs) behind a confirmation showing the call count.
 
 Campaign fold order is `Campaign.transcripts` order — **insertion order**, not a date. `reorder_campaign_transcript()` (swap up/down) and `set_campaign_transcript_order()` (full permutation, else `ValueError`) fix it.
+
+### Campaign digests (`campaign_digest.py`)
+Two bounded, whole-campaign artifacts built from the same per-session `.summary.md` sidecars, in the campaign's folder (campaign-owned `files` rows, so a folder rename carries them): the **combined summary** (`<folder> Combined Summary.md`, one per campaign, overwritten on each run) and the **"Previously on…" recap** (`<folder> Recap — <stem>.md`, one per newest session, so history is kept and a rerun for the same stem replaces that one file). Both live under `output`; `recap` carries its newest session's stem in the file row's `label`, which is why the `files_campaign` unique index keys `(campaign_id, kind, coalesce(label, ''))` (v14).
+
+- `summarized_sessions()` mirrors the journal's discovery but returns every session with a summary, in campaign order; `recap_sessions(n)` takes the last 1–3 (`clamp_recap_sessions`, default 1). `combined_summary_path()`/`recap_path()` resolve the registered path, else the derived name in a claimed folder, else None.
+- Each generation records a `campaign_digests` row (campaign, kind, `file_id`, `generated_at`, provider, model) plus one `campaign_digest_sessions` link per covered session, in one transaction (LLM work is done first). Re-recording a file replaces its digest row and links.
+- **Combined-summary staleness** (`combined_summary_stale_since()`): the campaign's summarized sessions differ from the digest's session set, or a covered session's summary file's mtime is later than `generated_at`.
+- A campaign delete removes both digests' files and rows by cascade plus `paths_for_delete`. The recap label's stem cannot collide with the journal name because `validate_new_stem()` refuses stems ending in `.md`; a folder rename rewrites the paths like the journal's.
 
 ### Clients (`llm/`)
 - One `LLMClient` ABC (`complete()`, `complete_json(schema)`); provider JSON mechanics are internal.

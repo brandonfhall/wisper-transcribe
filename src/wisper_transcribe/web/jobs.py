@@ -48,6 +48,8 @@ JOB_ENROLL = "enroll"
 # session, transcribing chunks from LocalCaptureManager's live sink.
 JOB_LIVE = "live"
 JOB_CAMPAIGN_JOURNAL = "campaign_journal"
+JOB_CAMPAIGN_SUMMARY = "campaign_summary"
+JOB_CAMPAIGN_RECAP = "campaign_recap"
 JOB_SPEAKER_RELABEL = "speaker_relabel"
 
 _MAX_LIVE_LINES = 2000  # mirrors _MAX_LOG_LINES below -- bound a very long session's memory

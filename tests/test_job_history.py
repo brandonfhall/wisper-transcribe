@@ -91,6 +91,8 @@ def test_enum_checks_mirror_python_constants():
     from wisper_transcribe.web import jobs
 
     ddl = "\n".join(m.ddl for m in db.MIGRATIONS)
+    # v14 rebuilds `jobs` and `files`; read the latest definition of each.
+    v14 = next(m.ddl for m in db.MIGRATIONS if m.version == 14)
 
     def check_values(column: str, source: str = ddl) -> set[str]:
         m = re.search(rf"{column}\s+TEXT NOT NULL CHECK \({column} IN \(([^)]*)\)\)", source)
@@ -98,13 +100,12 @@ def test_enum_checks_mirror_python_constants():
         return set(re.findall(r"'([^']+)'", m.group(1)))
 
     job_types = {getattr(jobs, n) for n in dir(jobs) if n.startswith("JOB_") and isinstance(getattr(jobs, n), str)}
-    assert check_values("type") == job_types
+    assert check_values("type", v14) == job_types
     assert check_values("status") == {jobs.PENDING, jobs.RUNNING, jobs.COMPLETED, jobs.FAILED}
     assert check_values("capture_status") == set(recording_manager.CAPTURE_STATUSES)
     assert check_values("source") >= {SOURCE_AUTO, SOURCE_MANUAL}
-    # Other tables also have a `kind` column, so read only the files table's DDL.
-    files_ddl = next(m.ddl for m in db.MIGRATIONS if m.version == 9)
-    assert check_values("kind", files_ddl) == set(file_registry.KINDS)
+    # Other tables also have a `kind` column; the v14 files rebuild has the latest.
+    assert check_values("kind", v14) == set(file_registry.KINDS)
 
 
 def test_history_page_and_detail_fallback(tmp_path):
