@@ -150,8 +150,9 @@ async def test_cancel_mid_call_ends_job_cancelled_then_queue_usable(tmp_path, _e
         while not fake.started:
             await asyncio.sleep(0.01)
         assert q.cancel(job.id) is True
-        # Let the worker loop observe the cancelled job.
-        while job.status not in (FAILED, COMPLETED):
+        # Wait for the runner's finally (finished_at), not the status: the
+        # cancel handler sets FAILED before the error and the upload delete.
+        while job.finished_at is None:
             await asyncio.sleep(0.01)
 
         assert job.status == FAILED and job.error == "Cancelled"
@@ -166,7 +167,7 @@ async def test_cancel_mid_call_ends_job_cancelled_then_queue_usable(tmp_path, _e
 
         with patch("wisper_transcribe.web.jobs.process_file", side_effect=_ok):
             job2 = q.submit("/tmp/b.mp3", no_diarize=True, output_dir=str(tmp_path))
-            while job2.status not in (FAILED, COMPLETED):
+            while job2.finished_at is None:
                 await asyncio.sleep(0.01)
         assert job2.status == COMPLETED
         await q.stop()

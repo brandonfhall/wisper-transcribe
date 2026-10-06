@@ -76,3 +76,6 @@ discord-bot/.gradle/
 
 # Forced-alignment measurement output (scripts/alignment_eval.py); holds real audio
 alignment-eval/
+
+# Live per-speaker labeling measurement output (scripts/live_diarization_eval.py)
+live-diarization-eval/

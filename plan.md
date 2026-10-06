@@ -20,10 +20,16 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 - **SQLite storage in a browser and on real capture** (automated coverage: `test_e2e.py`, `test_schema.py`). With `WISPER_DATA_DIR` pointing at a copy of real data:
   - Journal: the stale-journal notice (move a folded session to another campaign) on the Campaign and Journal pages; **Rebuild journal** vs **Rebuild from transcripts** confirmations and their call counts; journal **Download** includes `journaled_sessions`.
   - Job history page, filters, paging, and a historical job's page after a restart.
-  - Recording end to end: record a few minutes, local and Discord. Add markers, including two in quick succession, and edit the notes mid-session, then stop. After stop, only `combined.wav` and (local) `live_transcript.md` remain; Discord also keeps unbound users' `per-user/<uid>/`. Transcribe it, play it back, and jump to a marker.
+  - Recording end to end: record a few minutes, local and Discord. Add markers, including two in quick succession, and edit the notes mid-session, then stop. After stop, only `combined.flac` and (local) `live_transcript.md` remain; Discord also keeps unbound users' `per-user/<uid>/`. Transcribe it, play it back, and jump to a marker.
   - Search: edit a transcript in Obsidian while the server runs and search for the new words (the result shows "changed — reindexing", then matches after a reload).
 - **Campaign folders, real journal fold:** fold a session into a campaign journal with a real LLM and confirm `<folder> Journal.md` updates in the campaign folder (rehearsals covered it only with a mocked LLM).
 - **macOS loopback.** Record page on a Mac with BlackHole installed: BlackHole appears under System Audio and captures audio.
+- **Shipped 2026-10-06, verified only by automated tests** — steps in `LIVE_AUDIO_TEST_PLAN.md`:
+  - Switching an input device mid-session, and recovering a degraded session (§1a, real devices).
+  - The Discord channel picker with a real bot token (§1e).
+  - Combined summary and recaps in the browser, and keep-files delete + re-create (§2c–2d). Generation itself was checked once with a real LLM.
+  - Live ticker shows a markup-like speaker name as text (§1b).
+  - Stop frees the GPU on NVIDIA/CUDA and on Windows (§5); rehearsed only on Apple Silicon.
 
 ---
 
@@ -57,7 +63,10 @@ Design in `architecture.md`. Open items:
 ### Research (approved 2026-10-06, no product change yet)
 
 **4. Per-speaker labels on the live system track.** Today the system track is one RMS-attributed "Other": OS loopback is already mixed. Candidate design: for each committed system-track utterance, compute a WeSpeaker embedding (`speaker_manager.extract_embedding`), match it against a per-session pool of voices (cosine, the 0.55 threshold), and match pool voices to the campaign's enrolled profiles so lines read "Alice" instead of "Other". The final transcript stays the full pyannote pass after Stop; live labels are best-effort.
-- First step is an offline harness, `scripts/live_diarization_eval.py`: replay a recorded `combined.flac` (or a transcript's audio) in live-sized utterances using the transcript's diarization as ground truth, and report per-utterance latency, label accuracy against the final diarization, and how often an utterance spans two speakers. Decide on building it from those numbers.
+- Harness: `scripts/live_diarization_eval.py` replays a transcript's audio in live-sized utterances (cut at 0.6 s pauses, force-cut at 15 s, scraps under 0.3 s dropped, as `web/live_transcribe.py` does), embeds each, and scores against the final pyannote labels.
+- **First measurement (2026-10-06, one ~2 h actual-play episode, 8 speakers, Apple Silicon/MPS):** embedding takes 27 ms p50 / ~97 ms p95 per utterance, well inside the live loop's budget. 21% of live utterances hold two speakers, which caps any per-utterance label. Lower pool thresholds win: at 0.35, 38 pool voices for 8 speakers, 84.7% label accuracy and 86.3% of speech showing the right enrolled name; at the 0.55 used offline, 80.1%; at 0.65, 75.4%. Cutting at speaker turns instead of pauses (a best case) didn't help: shorter excerpts embed worse.
+- Caveats: one session; remote podcast audio (cleaner than a table mic); the harness embeds the mixed file, not a loopback-only system track; ground truth is pyannote, not hand labels.
+- **Next:** run it on 2–3 more sessions (an in-room recording especially) before deciding. If they agree, build it with threshold ~0.35, show "Other" for voices not yet matched to a profile, and keep the post-Stop pass authoritative.
 
 ### Parked
 

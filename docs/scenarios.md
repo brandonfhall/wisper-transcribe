@@ -112,6 +112,20 @@ The sheet lists rows marked `discriminating` first: those are the words where th
 
 ---
 
+## Measuring live per-speaker labeling offline
+
+The live system track is labeled "Other", but a candidate design would embed each committed system-track utterance and assign it to a per-session voice pool (cosine against running-mean centroids, the 0.55 threshold), then match pool voices to enrolled profiles. `scripts/live_diarization_eval.py` replays a recorded transcript in live-sized utterances and scores that design against the transcript's final pyannote pass (output goes to `live-diarization-eval/`, which is gitignored):
+
+```bash
+python scripts/live_diarization_eval.py run <transcript-id-or-stem> --threshold 0.55
+python scripts/live_diarization_eval.py run <stem> --threshold 0.60 --out live-diarization-eval/<stem>-60
+python scripts/live_diarization_eval.py score live-diarization-eval/*/
+```
+
+`run` cuts each ground-truth turn into utterances no longer than the live loop's 15 s force-cut, times `extract_embedding` on each, and reports per-utterance latency (mean/p50/p95/max), label accuracy as the fraction of utterance-seconds a pool voice explains under the best one-to-one voice-to-speaker mapping, the pool's voice count vs the true speaker count, and how often an utterance spans two speakers. With enrolled profiles it also reports name accuracy against the transcript's final `speaker_map`. `score` compares thresholds in one table. This is research only; nothing under `src/` changes and the post-session pass stays the authoritative transcript.
+
+---
+
 ## Finding a moment across sessions
 
 "When did we first meet the Baron?" Type it into the search box at the top of the sidebar (or run `wisper search "Baron"`). Results come grouped by session, best match first, each with the speaker, timestamp, and the matching line; clicking one opens the transcript at that line with the words highlighted.
