@@ -13,6 +13,12 @@ def test_load_config_returns_defaults(tmp_path):
             assert cfg[key] == val
 
 
+def test_ml_worker_defaults_on():
+    from wisper_transcribe.config import DEFAULTS
+
+    assert DEFAULTS["ml_worker"] is True
+
+
 def test_save_and_load_config(tmp_path):
     with patch("wisper_transcribe.config.get_data_dir", return_value=tmp_path):
         from wisper_transcribe.config import load_config, save_config

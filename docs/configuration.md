@@ -37,7 +37,8 @@ Stored in `config.toml`. View with `wisper config show`, change with `wisper con
 | `hotwords` | `[]` | Custom vocabulary (names, places) fed to Whisper as a prompt |
 | `use_mlx` | `auto` | Apple Silicon: `auto` uses MLX Whisper when installed, `true` requires it, `false` always uses faster-whisper |
 | `forced_alignment` | `auto` | Re-time Whisper's words against the audio before speaker assignment, so words at speaker changes land with the right person. `auto` = on when diarizing on a GPU (CUDA or Apple Silicon), off on CPU; `true` / `false` force it. Never runs with `--no-diarize`. `--forced-align/--no-forced-align` overrides. |
-| `parallel_stages` | `false` | Run transcription and diarization concurrently in two subprocesses. Uses more memory; benchmark before enabling. |
+| `parallel_stages` | `false` | Run transcription and diarization concurrently in two subprocesses. Uses more memory; benchmark before enabling. Ignored while the web job queue delegates to the ML worker (`ml_worker`). |
+| `ml_worker` | `true` | Web jobs: run the GPU model calls in a separate process so **Stop Job** terminates it and frees the GPU immediately. Off runs everything in-process (Stop then waits for the current batch). Ignored by the CLI. |
 | `llm_provider` | `ollama` | `ollama`, `ollama-cloud`, `lmstudio`, `anthropic`, `openai`, or `google` |
 | `llm_model` | — | Blank uses the provider's default model |
 | `llm_endpoint` | `http://localhost:11434` | Local LLM server URL (LM Studio default is `:1234`) |

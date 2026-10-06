@@ -327,6 +327,15 @@ def extract_embedding(
     Each segment is normalized before averaging so long segments don't dominate.
     Raises ``ValueError`` when no segment gives a finite embedding.
     """
+    # Delegate to the warm worker when this thread is a web job (see ml_worker).
+    from .ml_worker import delegated_call
+    _delegated, _result = delegated_call(
+        "extract_embedding", (audio_path, segments, speaker_label),
+        dict(device=device),
+    )
+    if _delegated:
+        return _result
+
     from pyannote.core import Segment as PyannoteSegment
 
     inference = _load_embedding_model(device)
@@ -609,6 +618,8 @@ def match_speakers(
     for label in unique_labels:
         try:
             query_embeddings[label] = extract_embedding(audio_path, diarization_segments, label, device)
+        except InterruptedError:
+            raise  # Stop: not one failed speaker
         except Exception:
             pass
     if embeddings is not None:

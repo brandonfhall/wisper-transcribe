@@ -27,6 +27,7 @@ from typing import Any, Callable, Optional
 import tqdm as _tqdm_module
 
 from wisper_transcribe import file_registry
+from wisper_transcribe.config import load_config
 from wisper_transcribe.pipeline import process_file
 from wisper_transcribe.transcript_store import atomic_write_text, save_summary, save_transcript
 
@@ -103,6 +104,21 @@ def _set_job_error(job: "Job", exc: BaseException) -> None:
         job.error = "Input file not found"
         return
     job.error = _GENERIC_JOB_ERRORS.get(job.job_type, "Job failed — see server logs")
+
+
+def _set_job_progress(job: "Job", msg: str) -> None:
+    """Set ``job.progress`` from a worker bar render (delegated jobs)."""
+    stripped = msg.strip()
+    if stripped:
+        job.progress = stripped
+
+
+def _ml_worker_enabled() -> bool:
+    """True when config opts into the warm ML worker (default: yes).
+
+    Read through jobs.load_config so tests can patch one place.
+    """
+    return bool(load_config().get("ml_worker", True))
 
 # In-memory growth caps. Internal resource limits, not user config.
 _MAX_RETAINED_JOBS = 50   # cap on retained COMPLETED/FAILED jobs (never PENDING/RUNNING)
@@ -569,6 +585,10 @@ class JobQueue:
         self._worker_task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
         self._on_complete_callbacks: dict[str, Callable[["Job"], None]] = {}
         self._on_error_callbacks: dict[str, Callable[["Job"], None]] = {}
+        # One warm spawned child for the four GPU functions. Lazily spawned on
+        # the first delegated call; never spawned when ml_worker is off.
+        from wisper_transcribe.ml_worker import MLWorker
+        self._ml_worker = MLWorker()
 
     def _enqueue(self, job: Job) -> None:
         """Record the job in history, then track and queue it.
@@ -599,6 +619,8 @@ class JobQueue:
                 await self._worker_task
             except asyncio.CancelledError:
                 pass
+        # Never let the ML child outlive the server holding the GPU.
+        await asyncio.to_thread(self._ml_worker.stop)
 
     # ------------------------------------------------------------------
     # Public API
@@ -1079,6 +1101,9 @@ class JobQueue:
                 job.error = INTERRUPTED
                 job.finished_at = datetime.now()
                 _delete_temp_upload(job)
+                # The job thread can't be stopped; kill the ML child so it
+                # doesn't keep the GPU busy until the process exits.
+                await asyncio.to_thread(self._ml_worker.stop)
                 raise
             except Exception as exc:
                 job.status = FAILED
@@ -1111,22 +1136,48 @@ class JobQueue:
         else:
             self._run_transcription_job(job)
 
+    def _delegation(self, job: Job):
+        """Return a ``delegating()`` context for *job*, or a no-op when off.
+
+        On: the four GPU functions run in the queue's warm child, ``on_log``
+        goes through ``tqdm.write`` so ``capturing_write`` still records lines,
+        bars update ``job.progress``, and ``job._cancel_event`` kills the child.
+        Off: ``nullcontext`` keeps today's in-process behaviour unchanged.
+        """
+        from contextlib import nullcontext
+
+        if not _ml_worker_enabled():
+            return nullcontext()
+        from wisper_transcribe.ml_worker import delegating
+        return delegating(
+            self._ml_worker,
+            cancel_event=job._cancel_event,
+            on_log=_tqdm_module.tqdm.write,
+            on_bar=lambda msg: _set_job_progress(job, msg),
+        )
+
     def _run_relabel_job(self, job: Job) -> None:
         """Re-match auto-named speakers across a campaign's transcripts."""
         from wisper_transcribe.config import get_device
         from wisper_transcribe.speaker_registry import relabel_campaign
 
-        report = relabel_campaign(job.kwargs["slug"], device=get_device(),
-                                  backfill=True, progress=job.append_log)
-        changed = sum(len(t.renamed) for t in report.transcripts)
-        job.append_log(f"Renamed {changed} speaker label(s) across {len(report.transcripts)} session(s)")
-        if report.recurring:
-            job.append_log(f"Unknown voices heard in more than one session: {report.recurring}")
-        for t in report.transcripts:
-            if t.skipped:
-                job.append_log(f"  Skipped {t.stem}: {t.skipped}")
-        job.status = COMPLETED
-        job.finished_at = datetime.now()
+        try:
+            with self._delegation(job):
+                report = relabel_campaign(job.kwargs["slug"], device=get_device(),
+                                          backfill=True, progress=job.append_log)
+            changed = sum(len(t.renamed) for t in report.transcripts)
+            job.append_log(f"Renamed {changed} speaker label(s) across {len(report.transcripts)} session(s)")
+            if report.recurring:
+                job.append_log(f"Unknown voices heard in more than one session: {report.recurring}")
+            for t in report.transcripts:
+                if t.skipped:
+                    job.append_log(f"  Skipped {t.stem}: {t.skipped}")
+            job.status = COMPLETED
+        except InterruptedError:
+            job.status = FAILED
+            job.error = "Cancelled"
+        finally:
+            job.finished_at = datetime.now()
 
     def _run_journal_job(self, job: Job) -> None:
         """Fold session summaries into a campaign's rolling journal.
@@ -1269,8 +1320,9 @@ class JobQueue:
                 job.input_path = str(wav)
 
             _result_store: dict = {}
-            output_path = process_file(Path(job.input_path), _result_store=_result_store,
-                                       job_id=job.id, skip_existing=False, **job.kwargs)
+            with self._delegation(job):
+                output_path = process_file(Path(job.input_path), _result_store=_result_store,
+                                           job_id=job.id, skip_existing=False, **job.kwargs)
             if not Path(output_path).is_file():
                 from wisper_transcribe.config import get_output_root
                 job.append_log(f"Transcripts folder: {job.kwargs.get('output_dir') or get_output_root()}")
@@ -1392,14 +1444,19 @@ class JobQueue:
 
         Runners set a generic ``job.error`` and never re-raise: exception text
         can contain paths, and the job page renders it into HTML.
+
+        The whole dispatch runs in a delegation when ``ml_worker`` is on, so
+        the diarize/embedding calls run in the warm child and Stop terminates
+        it. Each runner turns the resulting ``InterruptedError`` into Cancelled.
         """
-        if job.enroll_mode == "standalone":
-            self._run_standalone_enroll(job)
-            return
-        if job.enroll_mode == "recording":
-            self._run_recording_enroll(job)
-            return
-        self._run_wizard_enroll(job)
+        with self._delegation(job):
+            if job.enroll_mode == "standalone":
+                self._run_standalone_enroll(job)
+                return
+            if job.enroll_mode == "recording":
+                self._run_recording_enroll(job)
+                return
+            self._run_wizard_enroll(job)
 
     def _run_standalone_enroll(self, job: Job) -> None:
         """Run a standalone /speakers/enroll job.
@@ -1465,6 +1522,9 @@ class JobQueue:
                 )
             job.append_log("Speaker enrolled.")
             job.status = COMPLETED
+        except InterruptedError:
+            job.status = FAILED
+            job.error = "Cancelled"
         except Exception as exc:
             log.error("Standalone enroll job %s failed", job.id, exc_info=exc)
             job.status = FAILED
@@ -1499,6 +1559,11 @@ class JobQueue:
                 per_user_dir=Path(p["per_user_dir"]),
                 data_dir=data_dir,
             )
+        except InterruptedError:
+            job.status = FAILED
+            job.error = "Cancelled"
+            job.finished_at = datetime.now()
+            return
         except Exception as exc:
             log.error("Recording enroll job %s failed", job.id, exc_info=exc)
             job.status = FAILED
@@ -1607,9 +1672,14 @@ class JobQueue:
                     _progress("Updating other sessions in the campaign…")
                     relabel_campaign(campaign_slug, device=job.enroll_device,
                                      backfill=False, progress=_progress)
+                except InterruptedError:
+                    raise
                 except Exception as exc:
                     log.warning("campaign relabel after enroll failed: %s", exc)
             job.status = COMPLETED
+        except InterruptedError:
+            job.status = FAILED
+            job.error = "Cancelled"
         except Exception:
             job.status = FAILED
             job.error = "Enrollment failed"

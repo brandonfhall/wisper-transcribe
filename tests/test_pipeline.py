@@ -848,6 +848,38 @@ def test_parallel_stages_calls_parallel_helper(
 @patch("wisper_transcribe.pipeline.get_duration", return_value=600.0)
 @patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
 @patch("wisper_transcribe.pipeline._run_parallel_transcribe_diarize")
+def test_parallel_stages_ignored_while_delegating(
+    mock_parallel, mock_transcribe, mock_duration, mock_convert, mock_validate,
+    mock_ffmpeg, tmp_path
+):
+    """parallel_stages=True is ignored while this thread delegates to ml_worker:
+    the worker runs the stages sequentially so Stop can kill it."""
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    mock_convert.return_value = audio
+
+    with patch("wisper_transcribe.pipeline.load_config", return_value={
+        "model": "medium",
+        "language": "en",
+        "compute_type": "auto",
+        "vad_filter": True,
+        "hotwords": [],
+        "use_mlx": "auto",
+        "parallel_stages": True,
+    }), patch("wisper_transcribe.ml_worker.active", return_value=object()):
+        from wisper_transcribe.pipeline import process_file
+        process_file(audio, output_dir=tmp_path, device="cpu", no_diarize=True)
+
+    mock_parallel.assert_not_called()
+    mock_transcribe.assert_called_once()
+
+
+@patch("wisper_transcribe.pipeline.check_ffmpeg")
+@patch("wisper_transcribe.pipeline.validate_audio")
+@patch("wisper_transcribe.pipeline.convert_to_wav")
+@patch("wisper_transcribe.pipeline.get_duration", return_value=600.0)
+@patch("wisper_transcribe.pipeline.transcribe", return_value=FAKE_SEGMENTS)
+@patch("wisper_transcribe.pipeline._run_parallel_transcribe_diarize")
 def test_parallel_stages_disabled_uses_sequential(
     mock_parallel, mock_transcribe, mock_duration, mock_convert, mock_validate, mock_ffmpeg, tmp_path
 ):

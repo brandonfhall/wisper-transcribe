@@ -32,6 +32,7 @@ src/wisper_transcribe/
 ├── cli.py               Click entry points; delegates to pipeline/managers. Setup wizard, server command, --debug/--verbose
 ├── pipeline.py          Orchestrator: process_file(), process_folder(), CLI enrollment prompts
 ├── transcriber.py       faster-whisper wrapper, lazy model cache, CUDA DLL path fix, MLX dispatch
+├── ml_worker.py         Warm spawned child for the four GPU functions; thread-local delegation and Stop → terminate (see "Job cancellation / ML worker")
 ├── diarizer.py          pyannote pipeline wrapper, lazy pipeline cache
 ├── word_alignment.py    Forced word alignment: re-time Whisper words with Qwen3-ForcedAligner (see "Forced word alignment")
 ├── aligner.py           Merge transcription words with diarization turns (see "Alignment")
@@ -295,7 +296,7 @@ Silenced: the `lightning`/`pytorch_lightning` logger family and `torch`. Also se
 
 1. **`debug_log.Logger._patch_tqdm`** — permanent tee into the `--debug` log. Idempotent: re-patching wraps the true original, so wrappers never stack.
 2. **`jobs._run_transcription_job`** — per-job capture into `job.log_lines` for SSE, restored afterwards. This is also where cancellation is checked, so **cancellation only fires when tqdm writes**; a job inside a long silent call can't be interrupted until the next write.
-3. **`pipeline._patch_tqdm_for_queue`** (`parallel_stages=True`) — per-subprocess redirect into the IPC queue; never touches the parent's tqdm.
+3. **`pipeline._patch_tqdm_for_queue`** — per-subprocess redirect into the IPC queue, used both by `parallel_stages=True` and by the `ml_worker` child; never touches the parent's tqdm.
 
 They coexist only because of the one-job-at-a-time invariant: layer 2 wraps one job at a time and chains at most one level over layer 1. Check all three before changing any of them.
 
@@ -318,7 +319,7 @@ They coexist only because of the one-job-at-a-time invariant: layer 2 wraps one 
 
 - **Cache keys:** each cache records its load parameters and reloads on mismatch (`_model_key = (model_size, device, compute_type)`, `_pipeline_device`, `_embedding_device`, `_fa_device`). Without this, the web server would keep the first job's model forever.
 - **No poisoned cache:** loaders build into a local and publish to the global only after device checks and `.to(device)` succeed. The old reference is dropped before loading the replacement so two models are never resident at once.
-- These globals are not thread-safe, which is why the web queue runs one job at a time.
+- These globals are not thread-safe, which is why the web queue runs one job at a time. With `ml_worker=true` the four GPU caches (`_model`, `_pipeline`, `_embedding_model`, `_fa_model`/`_fa_processor`) live in the warm child instead; the server process holds them only for live recording and non-delegated jobs.
 
 ### Parallel stage processing (`parallel_stages`)
 With `parallel_stages=True` (default off), transcription and diarization run in `ProcessPoolExecutor(max_workers=2)`; each subprocess has its own model globals.
@@ -329,6 +330,19 @@ Progress reaches the web UI through IPC:
 3. A drain thread in the parent sends `"log"` through `tqdm.write()` (so the debug tee and job capture see it) and writes `"bar"` frames to stderr, de-duplicated per channel.
 
 Worker functions are module-level so they pickle. With `--workers N`, total processes are N×2.
+
+### Job cancellation / ML worker (`ml_worker`)
+Cancel only sets `job._cancel_event`, and the job thread can't notice until its next `tqdm.write` — a long model call keeps the GPU busy until the stage ends. With `ml_worker=true` (default) the web queue proxies the four GPU functions — `transcriber.transcribe`, `diarizer.diarize`, `word_alignment.align_words`, `speaker_manager.extract_embedding` — into one warm spawned child (`multiprocessing.get_context("spawn")`, same on every OS). Stop `terminate()`s the child, freeing the GPU at once; the next job respawns it and reloads the models.
+
+- **What moves:** only those four functions. `pipeline.process_file`, `match_speakers`, enrollment, relabel, ffmpeg, and every DB/registry/transcript write stay in the server. The worker never opens `wisper.db` and never writes files. All four take and return picklable values.
+- **What doesn't:** the CLI never delegates (no `delegating()` block), live recording keeps its own in-process model, request threads and the worker child itself see `active() is None`. `ml_worker=off` runs everything in-process exactly as before.
+- **Which jobs:** transcription (`_run_transcription_job`), every enroll job (`_run_enroll_job` and its standalone/recording/wizard paths), and relabel (`_run_relabel_job`). LLM, journal, and live jobs never delegate (no GPU work), and the CLI never does.
+- **Delegation is thread-local.** The job runner wraps the call in `ml_worker.delegating(worker, cancel_event, on_log, on_bar)`, cleared in `finally`. Each guarded function starts with `delegated_call(...)`: active → send to the worker and return; else → run locally.
+- **Waiting stays in the job thread.** `MLWorker.call()` polls the result with a short timeout, drains the log/bar queue each pass, and checks `cancel_event` and the child's liveness. Logs go to `tqdm.write` so `jobs`' capture still records them; bars set `job.progress`. On cancel: `terminate()` → `join(timeout)` → `kill()` if alive → mark dead → `InterruptedError`, which the existing runner path turns into Cancelled. A helper/drain thread would reintroduce the `parallel_stages` bug where `capturing_write` raises in the wrong thread.
+- **Errors:** the child sends the exception's type name and message. The parent re-raises `RuntimeError`, `ValueError`, `FileNotFoundError`, `MemoryError`, and `ImportError` by name, and a plain `RuntimeError` for anything else (torch/pyannote exceptions often don't unpickle). A child that exits without replying raises `RuntimeError("ML worker exited unexpectedly")`; the next call respawns.
+- **Shutdown:** `JobQueue.stop()` and the `asyncio.CancelledError` path in `_worker` call `MLWorker.stop()`. `app.py`'s lifespan already calls `job_queue.stop()`, so the child never outlives the server.
+- **`parallel_stages` is ignored while delegating:** the worker runs the stages one after another, and its pool would start from the server (outside the warm worker) so Stop couldn't kill it. `process_file` checks `ml_worker.active()` before choosing the parallel path.
+- **Cost:** the first delegated call after start or a cancel loads its models in the child (seconds to tens of seconds). The server process no longer holds models for these jobs.
 
 ### Parallel folder processing (`--workers N`)
 `process_folder()` uses `ProcessPoolExecutor` (model globals aren't thread-safe). `workers` is clamped to 1 unless the resolved device is `cpu`, since GPU memory can't be shared across processes. Outputs that already exist are detected up front and returned in `skipped`; the function returns `(successes, skipped, errors)`.
@@ -636,7 +650,7 @@ Full-text search over every transcript and its `.summary.md`. The index is deriv
 - **Snippets** are rebuilt from the current file by `block_idx`, after checking its stat against the state row (and again after the read). Each piece of text is HTML-escaped and only the `<mark>` tags are markup. Highlighting is approximate: porter can't be reproduced in Python, so each query word is matched by prefix after dropping `-ing`, `-es`, `-ed`, or `-s`. A hit with nothing highlighted is acceptable.
 
 ### Config keys
-`model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`, `hotwords`, `use_mlx`, `forced_alignment`, `parallel_stages`, `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`, `ollama_cloud_api_key`, `discord_bot_token`, `discord_default_guild`, `discord_default_channel`, `discord_presets`, `output_dir`.
+`model`, `language`, `device`, `compute_type`, `vad_filter`, `timestamps`, `similarity_threshold`, `min_speakers`, `max_speakers`, `hf_token`, `hotwords`, `use_mlx`, `forced_alignment`, `parallel_stages`, `ml_worker`, `llm_provider`, `llm_model`, `llm_endpoint`, `llm_temperature`, `anthropic_api_key`, `openai_api_key`, `google_api_key`, `ollama_cloud_api_key`, `discord_bot_token`, `discord_default_guild`, `discord_default_channel`, `discord_presets`, `output_dir`.
 
 `default_mic_profile_key` is also stored, written by the Record page (not in `DEFAULTS`, so not settable via `config set`).
 
@@ -962,7 +976,7 @@ The job page shows step pills and one bar split into equal per-step slices:
 | Local recording is native-only | `soundcard` needs host audio devices, so it never works in Docker; the Local capture card hides when unavailable |
 | Live session holds the queue | `JOB_LIVE` occupies the only worker slot for the session. A job already running when a session starts delays live transcription for the whole session (the Record page warns) |
 | Uploads keep one audio track | The original upload (video, extra audio tracks) isn't kept, only the 16 kHz mono FLAC of its first audio track. To transcribe a file again with a different track, export that track and upload it |
-| Cooperative cancellation | Cancel is checked on tqdm writes; the GPU finishes its current batch |
+| Cooperative cancellation | With `ml_worker` on (default), Stop terminates the worker child: the GPU is freed at once and the next job respawns and reloads models. With it off, or for the CLI/live recording, cancel is checked on tqdm writes only, so the GPU finishes its current batch |
 | Host + Docker Desktop container on one DB | File locks don't cross Docker Desktop's VM, so both writing `wisper.db` at once corrupts it. The runtime lease refuses the second one; use Docker for everything or the native CLI with a local `wisper server`. Container + container is safe; native Linux Docker is unaffected |
 | SQLite requirement | SQLite ≥ 3.43 with FTS5 (contentless delete). Shipped Pythons and Docker have it; an old Linux system Python (e.g. Ubuntu 22.04's 3.37) is refused at startup |
 | Search highlighting | Matching uses porter stemming; highlighting approximates it by prefix, so a hit can show no highlighted word |

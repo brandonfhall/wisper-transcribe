@@ -227,6 +227,14 @@ def align_words(
     lets a segment's words claim its neighbour's audio. ``wav_path`` must be
     the pipeline's 16 kHz mono WAV.
     """
+    # Delegate to the warm worker when this thread is a web job (see ml_worker).
+    from .ml_worker import delegated_call
+    _delegated, _result = delegated_call(
+        "align_words", (wav_path, segments, device, language), {},
+    )
+    if _delegated:
+        return _result
+
     from tqdm import tqdm
 
     t0 = time.monotonic()

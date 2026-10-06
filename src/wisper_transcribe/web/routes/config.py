@@ -33,6 +33,7 @@ _CONFIG_FIELDS = [
     ("min_speakers",        "int",   "Minimum number of speakers for diarization", None),
     ("max_speakers",        "int",   "Maximum number of speakers for diarization", None),
     ("forced_alignment",    "str",   "Forced word alignment (auto = on when diarizing on a GPU)", ["auto", "true", "false"]),
+    ("ml_worker",           "bool",  "Run GPU work in a separate process (Stop frees the GPU)", None),
     ("hf_token",            "secret","HuggingFace access token", None),
 ]
 

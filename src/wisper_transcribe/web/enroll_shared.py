@@ -512,6 +512,8 @@ def enroll_profiles(
                             embedding=avg,
                             **extra,
                         )
+            except InterruptedError:
+                raise  # Stop: not one failed profile
             except Exception as exc:
                 log.warning("enroll failed for %s: %s", display_name, exc)
                 continue

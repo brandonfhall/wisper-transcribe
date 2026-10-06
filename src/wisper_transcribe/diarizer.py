@@ -154,6 +154,16 @@ def diarize(
     """Run speaker diarization and return labeled time segments."""
     global _pipeline
 
+    # Delegate to the warm worker when this thread is a web job (see ml_worker).
+    from .ml_worker import delegated_call
+    _delegated, _result = delegated_call(
+        "diarize", (audio_path,),
+        dict(hf_token=hf_token, device=device, num_speakers=num_speakers,
+             min_speakers=min_speakers, max_speakers=max_speakers),
+    )
+    if _delegated:
+        return _result
+
     # Reload when a job asks for a different device than the cached one.
     if _pipeline is None or _pipeline_device != device:
         load_pipeline(hf_token, device)
