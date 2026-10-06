@@ -332,8 +332,17 @@
       } else if (evt.status === 'failed') {
         if (progressBar) { progressBar.style.background = 'var(--color-signal-rose)'; progressBar.style.boxShadow = 'none'; }
         if (stepLabel) stepLabel.textContent = 'Failed';
-        const msg = evt.error === 'Cancelled' ? 'Job was cancelled.' : `<strong>Error:</strong> ${evt.error || 'Unknown error'}`;
-        actions.innerHTML = `<div style="padding:12px 14px;background:#e88b8b15;border:1px solid #e88b8b40;border-radius:4px;font-size:12.5px;color:var(--color-signal-rose);width:100%">${msg}</div><a href="/" class="btn btn-secondary">← Dashboard</a>`;
+        // The error text is set as text, never markup: some job errors carry provider messages.
+        actions.innerHTML = `<div id="job-error-box" style="padding:12px 14px;background:#e88b8b15;border:1px solid #e88b8b40;border-radius:4px;font-size:12.5px;color:var(--color-signal-rose);width:100%"></div><a href="/" class="btn btn-secondary">← Dashboard</a>`;
+        const box = document.getElementById('job-error-box');
+        if (evt.error === 'Cancelled') {
+          box.textContent = 'Job was cancelled.';
+        } else {
+          const label = document.createElement('strong');
+          label.textContent = 'Error: ';
+          box.appendChild(label);
+          box.appendChild(document.createTextNode(evt.error || 'Unknown error'));
+        }
       }
     }
   };

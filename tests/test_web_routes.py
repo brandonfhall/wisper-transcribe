@@ -5103,3 +5103,19 @@ def test_delete_file_route_refuses_a_bad_path(client, name):
                        follow_redirects=False)
     assert resp.status_code == 400
     assert name not in resp.text
+
+
+def test_live_ticker_and_job_errors_render_as_text():
+    """Speaker names (user-entered profiles), transcript text, and job errors
+    (some carry provider messages) must never be inserted as markup."""
+    import re
+
+    from wisper_transcribe.web.app import _STATIC_DIR
+
+    app_js = (_STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    start = app_js.index("// ── Record: live transcript ticker ──")
+    end = app_js.index("// ── Inline audio excerpt player ──")
+    assert ".innerHTML" not in app_js[start:end]
+
+    job_detail = (_STATIC_DIR.parent / "web" / "templates" / "job_detail.html").read_text(encoding="utf-8")
+    assert not re.search(r"\$\{[^}]*evt\.error", job_detail)
