@@ -467,6 +467,27 @@ def test_switch_device_returns_a_degraded_session_to_recording(tmp_path):
     mgr.stop_session()
 
 
+def test_switching_the_healthy_track_leaves_a_degraded_session_degraded(tmp_path):
+    """The mic died; switching the system track doesn't make the session healthy."""
+    def factory(device_id, samplerate):
+        if device_id == "bad-mic":
+            raise RuntimeError("mic unplugged")
+        return iter([_block()])
+
+    mgr = LocalCaptureManager(data_dir=tmp_path, capture_factory=factory, ticker=instant_ticker(0))
+    rec = mgr.start_session(None, "bad-mic", "sys-dev")
+    mgr._track_threads["mic"].join(timeout=5.0)
+    assert rec.status == "degraded"
+
+    mgr.switch_device("system", "sys-dev2")
+    assert rec.status == "degraded"
+
+    mgr.switch_device("mic", "good-mic")
+    assert rec.status == "recording"
+    mgr._track_threads["mic"].join(timeout=5.0)
+    mgr.stop_session()
+
+
 def test_switch_device_unknown_track_raises_and_changes_nothing(tmp_path):
     mgr = LocalCaptureManager(
         data_dir=tmp_path, capture_factory=scripted_capture_factory({}), ticker=instant_ticker(0),

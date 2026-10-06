@@ -483,10 +483,12 @@
   var presets = [];
   try { presets = JSON.parse(form.dataset.presets || '[]') || []; } catch (e) { presets = []; }
 
-  function showManual() {
+  // After an error there is no list to go back to, so the toggle hides;
+  // when the user chose manual entry it stays, to switch back.
+  function showManual(fromError) {
     picker.hidden = true;
     manual.hidden = false;
-    if (toggle) toggle.hidden = true;
+    if (toggle) toggle.hidden = !!fromError;
   }
   function showPicker() {
     picker.hidden = false;
@@ -541,7 +543,7 @@
   });
   if (toggle) {
     toggle.addEventListener('click', function() {
-      if (manual.hidden) { showManual(); toggle.textContent = 'Show channel list'; }
+      if (manual.hidden) { showManual(false); toggle.textContent = 'Show channel list'; }
       else { showPicker(); toggle.textContent = 'Enter IDs manually'; }
     });
   }
@@ -551,17 +553,17 @@
     .then(function(data) {
       if (data.error === 'no_token') {
         statusEl.textContent = 'No bot token — set one on the Config page, or enter IDs manually.';
-        showManual();
+        showManual(true);
         return;
       }
       if (data.error === 'invalid_token') {
         statusEl.textContent = 'Discord rejected the bot token — check it on the Config page.';
-        showManual();
+        showManual(true);
         return;
       }
       if (data.error || !data.guilds || !data.guilds.length) {
         statusEl.textContent = 'Couldn\'t load channels — enter IDs manually.';
-        showManual();
+        showManual(true);
         return;
       }
       guildSel._guilds = data.guilds;
@@ -571,7 +573,7 @@
     })
     .catch(function() {
       statusEl.textContent = 'Couldn\'t load channels — enter IDs manually.';
-      showManual();
+      showManual(true);
     });
 })();
 </script>
@@ -728,19 +730,35 @@
   if (!btn) return;
   var statusEl = document.getElementById('switch-device-status');
 
+  // Only a track whose selection changed is switched: a switch restarts that
+  // track's capture and leaves a short gap in it.
+  var current = {};
+  ['mic', 'system'].forEach(function(track) {
+    var sel = document.getElementById('switch-select-' + track);
+    if (sel) current[track] = sel.value;
+  });
+
   btn.addEventListener('click', function() {
-    btn.disabled = true;
     var requests = [];
     ['mic', 'system'].forEach(function(track) {
       var sel = document.getElementById('switch-select-' + track);
-      if (sel && sel.value) {
+      if (sel && sel.value && sel.value !== current[track]) {
+        var chosen = sel.value;
         requests.push(fetch('/api/record/switch-device', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({track: track, device_id: sel.value}),
-        }).then(function(r) { return r.ok; }));
+          body: JSON.stringify({track: track, device_id: chosen}),
+        }).then(function(r) {
+          if (r.ok) current[track] = chosen;
+          return r.ok;
+        }));
       }
     });
+    if (!requests.length) {
+      if (statusEl) statusEl.textContent = 'Pick a different device first.';
+      return;
+    }
+    btn.disabled = true;
     Promise.all(requests)
       .then(function(oks) {
         if (statusEl) {

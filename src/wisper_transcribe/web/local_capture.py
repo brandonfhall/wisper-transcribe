@@ -278,6 +278,9 @@ class LocalCaptureManager:
         self._track_threads: dict[str, threading.Thread] = {}
         self._capture_events: dict[str, threading.Event] = {}
         self._track_device_ids: dict[str, str] = {}
+        # Tracks whose capture thread died on a device error; a new thread on
+        # that track clears it. A degraded session recovers only when empty.
+        self._failed_tracks: set[str] = set()
         # Optional live-transcription tap, called from the tick thread with
         # (mic, system, mixed) bytes each tick. Must not block.
         self._live_sink: Optional[Callable[[bytes, bytes, bytes], None]] = None
@@ -370,6 +373,7 @@ class LocalCaptureManager:
         # calls _mark_degraded(), which needs the active recording.
         self._active_recording = recording
         self._track_threads = {}
+        self._failed_tracks = set()
         self._capture_events = {}
         self._capture_threads = []
         self._track_device_ids = {"mic": mic_device_id, "system": system_device_id}
@@ -419,6 +423,7 @@ class LocalCaptureManager:
         if event is None:
             event = threading.Event()
         self._capture_events[track] = event
+        self._failed_tracks.discard(track)
         thread = threading.Thread(
             target=self._capture_loop,
             args=(track, device_id, self._fifos[track], event),
@@ -458,9 +463,10 @@ class LocalCaptureManager:
 
         self._start_capture_thread(track, device_id)
 
-        # Recover a track-killed session: only this manager's own status, via
-        # the targeted writer (a full-object save is off-limits during capture).
-        if recording.status == "degraded":
+        # Recover a track-killed session, but only once no track is still
+        # failed: switching the healthy track leaves the dead one dead. Via the targeted writer (a full-object save is off-limits
+        # during capture).
+        if recording.status == "degraded" and not self._failed_tracks:
             recording.status = "recording"
             try:
                 update_recording_status(recording.id, "recording", self._data_dir)
@@ -489,6 +495,7 @@ class LocalCaptureManager:
             log.exception("Local capture thread %r failed", track)
             # Don't degrade a track that a switch already retired.
             if not event.is_set() and not self._stop_event.is_set():
+                self._failed_tracks.add(track)
                 self._mark_degraded()
 
     def _mark_degraded(self) -> None:
