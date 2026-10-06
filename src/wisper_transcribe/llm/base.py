@@ -24,7 +24,7 @@ from .errors import LLMResponseError
 
 # Retry policy when a streaming call comes back with empty content: two more
 # attempts (three calls total), sleeping this long before each.
-_EMPTY_RETRY_DELAYS = (0.5, 1.5)
+_EMPTY_RETRY_DELAYS = (5.0, 10.0)
 
 
 def _strip_json_fence(text: str) -> str:

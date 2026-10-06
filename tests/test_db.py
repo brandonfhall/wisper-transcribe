@@ -484,12 +484,8 @@ def test_output_guard_skips_inspection_commands(monkeypatch, tmp_path):
 
 
 def test_output_guard_refuses_before_a_cli_command_creates_the_folder(monkeypatch, tmp_path):
-    """A refused CLI run leaves the disk untouched.
-
-    ``wisper transcripts list`` used to mkdir the configured output root
-    before ``db.connect()`` ran the guard, so an unmerged build created an
-    empty ``~/elsewhere`` even though it then refused.
-    """
+    """A refused CLI run leaves the disk untouched: nothing may create the
+    configured output root before ``db.connect()`` runs the guard."""
     from wisper_transcribe.cli import main
 
     _guard_world(monkeypatch, tmp_path, "~/elsewhere")

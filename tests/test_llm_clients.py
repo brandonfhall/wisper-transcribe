@@ -315,11 +315,17 @@ def test_ollama_complete_empty_exhausts_retries():
     client = OllamaClient(model="gpt-oss:20b")
     empties = [_fake_stream_context(_ollama_chunks("")) for _ in range(3)]
     with patch("httpx.stream", side_effect=empties) as mock_stream, \
-         patch("time.sleep"):
+         patch("time.sleep") as mock_sleep, \
+         patch("tqdm.tqdm.write") as mock_write:
         with pytest.raises(LLMResponseError, match="empty response"):
             client.complete("sys", "user")
 
     assert mock_stream.call_count == 3
+    assert [c.args[0] for c in mock_sleep.call_args_list] == [5.0, 10.0]
+    assert [c.args[0] for c in mock_write.call_args_list] == [
+        "  LLM returned an empty response; retrying (1/2)…",
+        "  LLM returned an empty response; retrying (2/2)…",
+    ]
 
 
 def test_ollama_complete_non_empty_does_not_retry():
