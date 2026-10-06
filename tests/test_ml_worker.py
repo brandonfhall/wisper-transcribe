@@ -146,3 +146,32 @@ def test_delegating_cleared_on_exception(worker):
         with ml_worker.delegating(worker):
             raise RuntimeError("boom")
     assert ml_worker.active() is None
+
+
+def test_four_gpu_functions_delegate_when_active():
+    """Each guarded function routes through the worker without touching its
+    real implementation (a sentinel return proves the guard fired first)."""
+    from wisper_transcribe import (
+        diarizer, ml_worker, speaker_manager, transcriber, word_alignment,
+    )
+
+    calls: list[str] = []
+
+    class FakeWorker:
+        def call(self, name, *args, **kwargs):
+            calls.append(name)
+            return "SENTINEL"
+
+    with ml_worker.delegating(FakeWorker()):
+        assert transcriber.transcribe("audio.wav") == "SENTINEL"
+        assert diarizer.diarize("audio.wav", "token", "cpu") == "SENTINEL"
+        assert word_alignment.align_words("audio.wav", [], "cpu") == "SENTINEL"
+        assert speaker_manager.extract_embedding("audio.wav", [], "SPEAKER_00") == "SENTINEL"
+
+    assert calls == ["transcribe", "diarize", "align_words", "extract_embedding"]
+
+
+def test_delegated_call_inactive_returns_false():
+    from wisper_transcribe import ml_worker
+
+    assert ml_worker.delegated_call("transcribe", ("x",), {}) == (False, None)

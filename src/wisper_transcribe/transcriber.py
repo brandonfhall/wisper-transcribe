@@ -197,6 +197,18 @@ def transcribe(
 
     from .config import get_device
 
+    # If this thread delegates GPU work (web job), run in the warm worker so
+    # Stop can terminate it. Cheap: ml_worker imports no ML library.
+    from .ml_worker import delegated_call
+    _delegated, _result = delegated_call(
+        "transcribe", (audio_path,),
+        dict(model_size=model_size, device=device, language=language,
+             compute_type=compute_type, vad_filter=vad_filter,
+             initial_prompt=initial_prompt, hotwords=hotwords, use_mlx=use_mlx),
+    )
+    if _delegated:
+        return _result
+
     if device == "auto":
         device = get_device()
 

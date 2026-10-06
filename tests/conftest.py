@@ -28,6 +28,9 @@ _BASE_CONFIG = {
     # Off so no test loads the real aligner on a GPU machine; forced-alignment
     # tests set it explicitly.
     "forced_alignment": "false",
+    # Off so no test reaches a real spawned ML child; ml_worker/delegation
+    # tests turn it on explicitly.
+    "ml_worker": False,
 }
 
 
@@ -77,6 +80,18 @@ def _isolated_pipeline_config():
         "wisper_transcribe.pipeline.load_config",
         return_value=dict(_BASE_CONFIG),
     ):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _no_ml_worker():
+    """Keep the whole suite in-process: no test spawns a real ML child.
+
+    ``jobs.load_config`` reads the developer's real config, whose default for
+    ``ml_worker`` is now True, so patching the module switch (not just the
+    config) is what actually guarantees no delegation. Tests that exercise
+    delegation patch ``_ml_worker_enabled``/``_delegation`` themselves."""
+    with patch("wisper_transcribe.web.jobs._ml_worker_enabled", return_value=False):
         yield
 
 

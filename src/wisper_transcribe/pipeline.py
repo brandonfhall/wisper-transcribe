@@ -517,7 +517,14 @@ def process_file(
             hf_token = get_hf_token(config)
 
         # Decide whether to run transcription + diarization concurrently.
-        _run_parallel = parallel_stages and not no_diarize and bool(hf_token)
+        # Ignored while the four GPU calls are delegated to ml_worker: the
+        # worker runs the stages one after another, and its pool would start
+        # from the server (outside the warm worker) so Stop couldn't kill it.
+        from .ml_worker import active as _ml_active
+        _run_parallel = (
+            parallel_stages and not no_diarize and bool(hf_token)
+            and _ml_active() is None
+        )
 
         diarization = None
         if _run_parallel:

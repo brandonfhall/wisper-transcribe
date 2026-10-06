@@ -41,6 +41,10 @@ DEFAULTS = {
     # Each subprocess gets its own copy of the module-level model globals.
     # Disabled by default — enable after benchmarking on your hardware.
     "parallel_stages": False,
+    # Proxy the four GPU functions through one warm spawned child so Stop
+    # terminates the process and frees the GPU immediately. Off runs
+    # everything in-process. Ignored by the CLI.
+    "ml_worker": True,
     # Re-time Whisper's words against the audio before speaker assignment
     # (word_alignment.py). "auto" aligns when diarization runs on a GPU
     # (CUDA or MPS); CPU adds ~9-20 min per 2.5 h session.
