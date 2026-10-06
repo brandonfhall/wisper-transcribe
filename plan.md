@@ -6,10 +6,6 @@ Active plans, open bugs, and parked designs. Shipped work is removed; its design
 
 ## Open bugs
 
-### Missing transcript file after a successful Transcribe job
-
-A local-recording transcription once reported COMPLETED ("Wrote `<id>.md`") but the file never existed; root cause unknown. **Detection is in place:** the job fails with "Transcript file missing after write" and logs the job's output dir (the transcripts folder, or the campaign's folder in it), and job history keeps that log across restarts. **Next step:** if it recurs, check `/jobs/history` for the job's log and output root; run with `WISPER_DEBUG=1` to capture more (`LIVE_AUDIO_TEST_PLAN.md` §4a). The recording hand-off no longer copies `combined.wav` into the output dir (it reads it in place), so the job's input is `recordings/<id>/combined.wav` and the output is named by `output_stem`.
-
 ### Docker Desktop + native CLI on one data dir can corrupt the DB
 
 With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted, a native `wisper` command pointed at the same `./data` (via `WISPER_DATA_DIR`) and writing at the same time can corrupt `wisper.db`: file locks don't cross the Docker Desktop VM boundary. Reproduced 2026-09-30 (one host writer plus one container writer gave `database disk image is malformed` and lost updates). Container + container is fine (15,000/15,000 writes), and native Linux Docker is unaffected.
@@ -20,7 +16,7 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 
 `ollama.py`'s `_post_chat` reads only `message.content` from the stream. A reasoning model can spend its whole budget on the `thinking` field and return no content, and a streamed `"error"` field is never checked. Both cases surface as `Ollama JSON response did not parse: ... Raw: ''`, which blames the parse layer. Seen intermittently when summarizing a ~150k-char transcript with `ollama-cloud`; a plain retry succeeded. A non-thinking local model instead ignored the `format` schema and returned prose.
 
-**Decision needed:** add retry-on-empty-content and/or surface a streamed error distinctly. Either change touches the shared client code used by every provider.
+**Decided (Brandon, 2026-10-05): retry on empty content.** Not started. It touches the shared client code used by every provider.
 
 ---
 
@@ -41,14 +37,14 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 
 ## Dependency pins
 
-- **Drop `av<19`** (pyproject) once a faster-whisper release stops passing `metadata_errors=` to `av.open()`; check with a CPU Docker build and one transcription.
+- **Drop `av<19`** (approved, Brandon 2026-10-05; not started) (pyproject) once a faster-whisper release stops passing `metadata_errors=` to `av.open()`; check with a CPU Docker build and one transcription.
 
 ---
 
 ## Storage — open
 
-- **Store `combined.wav` as FLAC** (about half the size)? It touches the fixed `recordings/<id>/combined.wav` layout and every reader of it.
-- **Minor:** with an unfrozen schema and `WISPER_OUTPUT_DIR` unset, a CLI command creates the configured output folder (empty) before the dev guard refuses (`path_utils.get_output_dir` mkdir). The server path creates nothing.
+- **Store `combined.wav` as FLAC** (about half the size). Approved (Brandon, 2026-10-05); not started. It touches the fixed `recordings/<id>/combined.wav` layout and every reader of it.
+- **Minor** (approved fix, Brandon 2026-10-05; not started): with an unfrozen schema and `WISPER_OUTPUT_DIR` unset, a CLI command creates the configured output folder (empty) before the dev guard refuses (`path_utils.get_output_dir` mkdir). The server path creates nothing.
 
 ---
 
@@ -397,7 +393,7 @@ All ML mocked, per CLAUDE.md. New seams are patchable like the existing ones:
 
 ---
 
-## Job cancellation — best-effort GPU stop
+## Job cancellation — stop the GPU on cancel (approved)
 
 Stopping an in-flight transcribe job marks it Failed, but the GPU keeps running until the current CTranslate2 batch finishes.
 
@@ -411,7 +407,7 @@ Stopping an in-flight transcribe job marks it Failed, but the GPU keeps running 
 2. **Check the cancel event between segments in `pipeline.process_file()`.** Cheaper, but doesn't help mid-batch.
 3. **Document cancel as best-effort** and add a force-quit button that terminates at the OS level.
 
-**Recommendation:** option 1, reusing the parallel-stages subprocess plumbing. Deferred until cancellation is used often enough to justify it.
+**Decided (Brandon, 2026-10-05): option 1**, reusing the parallel-stages subprocess plumbing. Not started.
 
 ---
 
@@ -419,8 +415,8 @@ Stopping an in-flight transcribe job marks it Failed, but the GPU keeps running 
 
 The Java sidecar (JDA 6.3.0 + JDAVE 0.1.8) receives and decrypts DAVE-encrypted audio end-to-end. DAVE is mandatory for non-stage voice, so the only question is where it's implemented. DAVE is MLS over OpenMLS and every path depends on a native (Rust/JNI) binding; the choice is which language wraps it.
 
-**Python readiness (as of 2026-06):**
-- **pycord PR #3159** — DAVE receive for pycord, which has native voice receive. Approved but still a draft, milestoned for 2.9.0rc1. The right target once released.
+**Python readiness (as of 2026-10-05):**
+- **pycord PR #3159** — DAVE receive for pycord, which has native voice receive. Out of draft but still open, milestoned for 2.9.0rc1; latest release is 2.8.1 (2026-07-25), which has DAVE for sending only. The right target once 2.9 ships.
 - **discord.py PR #10300** — shipped in 2.7.x but flagged tentative. discord.py has no first-class voice receive, so it doesn't fit a recording bot.
 - **`davey`** — the OpenMLS binding both use; beta (v0.1.5) with no usage docs.
 
