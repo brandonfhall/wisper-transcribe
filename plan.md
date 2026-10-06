@@ -54,9 +54,34 @@ Design in `architecture.md`. Open items:
 
 ## Live recording — feature requests
 
-- **Change input devices mid-session.** `LocalCaptureManager.start_session()` binds both capture threads to fixed device IDs; switching today means Stop + Start (a new `Recording` and a gap in the transcript). Needs capture threads that can restart against a new device while the tick thread, segment writers, and `Recording` keep running. Needs a design pass first.
-- **Per-speaker diarization on the live system track.** The system track is a single RMS-attributed "Other", because OS loopback is already a mixed-down stream. pyannote only gives consistent labels across a whole-file pass; live use would need an incremental layer (embed each turn, match against a running per-session speaker pool) plus added latency in the live loop. Revisit if the You/Other split becomes limiting.
-- **Channel picker on the Record page.** `GET /api/record/channels` already lists the guilds and voice channels the bot can see; the Record page still takes raw IDs or a preset.
+### Approved for build (Brandon, 2026-10-06) — branch `feat/live-recording`, schema v13
+
+**1. Channel picker on the Record page.**
+- `GET /api/record/channels` already returns `{guilds: [{id, name, voice_channels: [{id, name}]}]}` or `{error: no_token|invalid_token|fetch_failed}`. The Record page's Discord form fetches it when the Discord source is shown and replaces the two raw-ID text inputs with a guild `<select>` and a voice-channel `<select>` (filtered by guild). The selects fill the same `guild_id`/`voice_channel_id` form fields, so the start routes and "Save as preset" are unchanged.
+- Keep raw-ID entry as a fallback: shown automatically on any `error`, and behind a "Enter IDs manually" toggle otherwise. `no_token` says where to set the bot token (Config page).
+- Presets and the configured default guild/channel pre-select their entries when present in the list.
+- Build options with `textContent`/`new Option()`, never `innerHTML` (names come from Discord).
+- Tests: the page renders the picker container and the fallback inputs; the API's existing tests stay green.
+
+**2. Switch an input device mid-session (local capture).**
+- Each track (`mic`, `system`) has a capture thread feeding a `_ByteFifo`; the tick thread drains both and pads a starved track with silence, so a switch only restarts one track's capture thread on the new device id. Segments, the combined track, the live transcript, and the `Recording` continue; the switch leaves a short silent gap on that track.
+- `LocalCaptureManager.switch_device(track, device_id)`: per-track stop event (or generation counter) so the old thread stops pushing into the FIFO even if `record()` is mid-block; join with a short timeout; start the new thread on the same FIFO. A switch also recovers a session that went `degraded` because that track's device died (status back to `recording` via `update_recording_status`, never `save_recording`).
+- Route `POST /api/record/switch-device` (`track` ∈ {mic, system}, `device_id` must be in `enumerate_devices()` for that track's list, else 400 with a generic code). HTML: two selects + "Switch" on the active local-session panel, current device pre-selected.
+- Tests with the fake `capture_factory`: switching mid-session keeps writing segments, the old thread stops pushing, an unknown device id is rejected, a degraded session returns to recording, Discord sessions reject the route.
+
+**3. Stop storing device names.** They are display-only (`recording_devices`, the detail page's `mic:`/`sys:` lines, the recordings API `devices` field); the capture threads use device ids held in memory.
+- Migration v13: `DROP TABLE recording_devices`. Remove `Recording.devices`, the `save_recording`/`_load` reads and writes, `legacy_import`'s insert, `create_recording(devices=...)`, `resolve_device_name` and its callers, the API field, and the detail-page lines. `test_schema.py` updated.
+- Develop with `SCHEMA_FROZEN = False`; frozen at merge (not by the worker).
+
+**Docs:** `docs/web-ui.md` (Record page: picker, switching), `architecture.md` (recording layer, schema v13, Known Constraints if any), `docs/docker.md` only if it mentions IDs.
+
+### Research (approved 2026-10-06, no product change yet)
+
+**4. Per-speaker labels on the live system track.** Today the system track is one RMS-attributed "Other": OS loopback is already mixed. Candidate design: for each committed system-track utterance, compute a WeSpeaker embedding (`speaker_manager.extract_embedding`), match it against a per-session pool of voices (cosine, the 0.55 threshold), and match pool voices to the campaign's enrolled profiles so lines read "Alice" instead of "Other". The final transcript stays the full pyannote pass after Stop; live labels are best-effort.
+- First step is an offline harness, `scripts/live_diarization_eval.py`: replay a recorded `combined.flac` (or a transcript's audio) in live-sized utterances using the transcript's diarization as ground truth, and report per-utterance latency, label accuracy against the final diarization, and how often an utterance spans two speakers. Decide on building it from those numbers.
+
+### Parked
+
 - **Replay markers into the ticker on reload.** Markers persist (`recording_markers`) and show on the detail page, but a page reload doesn't re-insert them into the live ticker (only transcript lines come back through SSE).
 
 ---
@@ -403,18 +428,23 @@ Nothing else changes; the wire protocol is the stable interface.
 
 ## Campaign-level LLM summaries (DM tools)
 
-The rolling campaign journal sets the pattern: storage in the campaign's folder beside the journal (`<folder> Combined Summary.md`, `<folder> Recap.md`), registered as `files` rows owned by the campaign (new `files.kind` values in this plan's migration; a campaign folder rename then carries them, since it rewrites every row under the folder), `.summary.md` discovery via `unjournalled_sessions()`, and `JobQueue.submit_journal` / `_run_journal_job` as the template for new `JOB_CAMPAIGN_*` types on the standard SSE progress page. All three features below read the same `.summary.md` sidecars (`SummaryNote` already carries loot, NPCs, and follow-ups). Campaigns with no summarized sessions hide or disable the buttons.
+**Approved for build (Brandon, 2026-10-06): combined summary and "Previously on…" recap.** Schema v14 (after the live-recording branch's v13). Hierarchical summaries stay deferred.
 
-**Build on the database:** the transcript registry and `journal_entries`, not stem lists or frontmatter. Combined-summary and recap outputs get their own table with FKs to the campaign (and the sessions they cover), so deletes cascade; add it as a new migration and extend `test_schema.py`. The search index could cover them too (a new `search_index_state.kind`).
+The rolling journal is the template: output in the campaign's folder registered as campaign-owned `files` rows (a folder rename carries them), `.summary.md` sessions discovered through the DB (`unjournalled_sessions()` pattern), and a `JobQueue.submit_journal` / `_run_journal_job`-style job type per feature on the standard SSE job page. Both read the same per-session `.summary.md` notes (`SummaryNote` carries loot, NPCs, follow-ups). Campaigns with no summarized sessions hide or disable the buttons. LLM errors soft-fail like the journal (`LLMUnavailableError`/`LLMResponseError`), and job errors stay generic.
 
-### 1. Combined summary
+**1. Combined summary** — one LLM call over every summarized session in campaign order → `<folder> Combined Summary.md`, overwritten on each run (one per campaign). For retrospectives, onboarding a player, or a campaign wiki. ~20 sessions ≈ 20k input tokens; warn on the Campaign page above ~40 sessions. Stale notice on the Campaign page (like the journal's) when a session was summarized, re-summarized, added, or removed since it was generated.
 
-One LLM call over every session summary in a campaign → `<folder> Combined Summary.md` in the campaign folder. For retrospectives, onboarding a player, or a campaign wiki. ~20 sessions ≈ 20k input tokens; at 50+ the rolling journal is the better tool. Entry point: "Generate combined summary" on the Campaign page, with a warning at high session counts.
+**2. "Previously on…" recap** — 200–400 words, spoiler-free and player-facing (no DM-only notes, no future plans), from the last 1–3 summarized sessions; the count is chosen on the Campaign page each run (default 1). **History is kept:** each run writes `<folder> Recap — <newest session stem>.md`; re-running for the same newest session replaces that one file. The Campaign page lists recaps newest first with view/download.
 
-### 2. "Previously on…" recap
+**Schema v14**
+- `files`: new kinds `combined_summary` and `recap`, campaign-owned, `root = 'output'`, path CHECKs `'?*/?* Combined Summary.md'` and `'?*/?* Recap — ?*.md'` (single folder level, like `journal`). A recap needs a `label` (its newest session's stem) so several can coexist: widen the label CHECK and the `files_campaign` unique index to `(campaign_id, kind, coalesce(label, ''))`. This is a `files` rebuild — mirror v12's exactly.
+- `campaign_digests(id, campaign_id → campaigns ON DELETE CASCADE, kind CHECK IN ('combined_summary','recap'), file_id → files ON DELETE CASCADE UNIQUE, generated_at, provider, model)` and `campaign_digest_sessions(digest_id → campaign_digests ON DELETE CASCADE, transcript_id → transcripts ON DELETE CASCADE, PRIMARY KEY (digest_id, transcript_id))`. Staleness = the campaign's summarized sessions differ from the combined digest's session set, or a covered session's summary file changed after `generated_at`.
+- Prototype the DDL against a real DB copy before writing it (`feedback_db_design`). Extend `test_schema.py`. Develop unfrozen; frozen at merge.
+- Search: index both kinds (new `search_index_state.kind` values) so they show in search like journals — only if the index already keys journals that way; otherwise note it as a follow-up.
 
-A 200–400 word, spoiler-free, player-facing recap built from the last 1–3 session summaries. Shown on the Campaign page or exported as `.recap.md`; shareable with players (e.g. to a campaign Discord). The journal is the DM's cumulative view; the recap is a short retelling for players.
+**Entry points:** Campaign page buttons ("Generate combined summary", "Write recap" with the 1–3 selector), each submitting a job; CLI `wisper campaigns summarize <slug>` and `wisper campaigns recap <slug> [--sessions N]` mirroring `wisper campaigns journal`. Delete with the campaign (cascade + `paths_for_delete`).
 
-### 3. Hierarchical summaries
+**Docs:** `docs/web-ui.md` (Campaign page), `docs/cli-reference.md`, `architecture.md` (campaign layer, schema v14, storage layout).
 
-Group sessions into arcs, summarize each arc, then combine arcs into a campaign overview. Only needed if the rolling journal hits context limits in practice — deferred indefinitely.
+### Deferred
+- **Hierarchical summaries** (arcs → campaign overview): only if the rolling journal hits context limits in practice.
