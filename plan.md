@@ -77,6 +77,43 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 | 9 — Holistic docs, comments, and tests review | done (opencode; Claude review fixes) | 67f08c0 |
 | 10 — Final review and rehearsals (orchestrator) | orchestrator steps done; Brandon's steps 6 and 8 open | d8b331c |
 
+### Pick up here: Windows rehearsal (2026-10-05)
+
+**Where things stand:** `feat/campaign-folders` is pushed (`ad3da2a`); there is no PR and nothing is merged. `db.SCHEMA_FROZEN` is still `False` on purpose: this build refuses the default data dir, so it can only touch copies. **Don't run `start.bat` on the real data until the branch is merged.** What's left is Phase 10 step 6 (below), then step 8 (the PR commit).
+
+**1. Get the branch** (PowerShell, in the repo):
+```powershell
+git fetch; git checkout feat/campaign-folders; git pull
+.venv\Scripts\pip install -e .
+```
+
+**2. Make copies** (never point anything at the real `%APPDATA%\wisper-transcribe` or the real transcripts folder):
+- Find the transcripts folder: `Get-Content "$env:APPDATA\wisper-transcribe\config.toml" | Select-String output_dir` (no line means `<data dir>\output`).
+- Copy both, keeping the transcripts copy outside the data copy:
+  ```powershell
+  $R = "C:\wisper-rehearsal"
+  robocopy "$env:APPDATA\wisper-transcribe" "$R\data" /E /XD output
+  robocopy "<transcripts folder>" "$R\output" /E
+  Remove-Item "$R\data\server.lock" -ErrorAction SilentlyContinue
+  $env:WISPER_DATA_DIR = "$R\data"; $env:WISPER_OUTPUT_DIR = "$R\output"
+  ```
+  Set both variables in every new PowerShell window before running `wisper`.
+
+**3. Counts, before migrating** (on the copy; record them in Phase 10's Results next to the Mac counts):
+```powershell
+.venv\Scripts\python -c "import sqlite3,os; c=sqlite3.connect(os.environ['WISPER_DATA_DIR']+r'\wisper.db'); print(c.execute('PRAGMA user_version').fetchone(), c.execute(\"SELECT kind, count(*) FROM files WHERE root='output' AND rel_path GLOB '*/*' GROUP BY kind\").fetchall(), c.execute(\"SELECT count(*) FROM transcripts t WHERE NOT EXISTS (SELECT 1 FROM files f WHERE f.kind='transcript' AND f.transcript_id=t.id)\").fetchone())"
+```
+Expected: version 10, no subfolder rows, 0 transcripts without a `transcript` row. Anything else: stop and bring it back to Claude.
+
+**4. Run step 6** (`### Phase 10`, step 6), in order:
+- `wisper db status` (shows 10, pending), `wisper storage trim` (dry run lists the sessions to move), `wisper storage trim --apply`, `wisper db status` (11, clean);
+- `wisper server`, then check the Transcripts page, a campaign page, and playback;
+- rename a campaign while one of its sessions is open in Obsidian → a pending rename under Needs attention; close Obsidian → **Retry** completes it;
+- move a session while its `.md` is open → "locked", nothing moved; with only its `.flac` open → "partial", then **Move files** finishes it;
+- change a claimed campaign folder's capitals in Explorer, then rename the campaign: it completes.
+
+**5. Afterwards:** record the counts and results under Phase 10's Results, and delete `C:\wisper-rehearsal`. Then step 8 with Claude: the PR commit sets `SCHEMA_FROZEN = True` and removes this plan section, and the PR is opened only on Brandon's OK. After merging, the real upgrade on each machine is: start wisper once (it migrates to v11), stop it, `wisper storage trim --apply`.
+
 ### Hand-offs to opencode (2026-10-05)
 
 Brandon is trying a non-Claude agent (opencode with DeepSeek) on the mechanical phases. Claude launches each hand-off headless (`opencode run`), reviews the diff, sends fixes back to the same opencode session, and commits. Phase 2a went this way (`a051bf1`, review fixes `553b9d8`).
