@@ -2502,9 +2502,9 @@ def audio_path(md_path: Path, conn: Optional[sqlite3.Connection] = None,
     """Where a transcript's audio is, or None.
 
     The transcript's ``audio`` file if it exists; else, for a transcript made
-    from a recording, that recording's ``combined.wav`` if it exists. The
-    recording's file is never a transcript's own, so deleting the transcript
-    leaves it.
+    from a recording, that recording's combined track (``combined.flac``, or a
+    legacy ``combined.wav``) if it exists. The recording's file is never a
+    transcript's own, so deleting the transcript leaves it.
     """
     md_path = Path(md_path)
     if conn is None:
@@ -2524,9 +2524,9 @@ def _audio_for(md_path: Path, conn: sqlite3.Connection, data_dir: Optional[Path]
     rec = conn.execute("SELECT id FROM recordings WHERE transcript_id = ?",
                        (loc.id,)).fetchone()
     if rec is not None:
-        from .recording_manager import combined_path_for
-        combined = combined_path_for(rec["id"], data_dir)
-        if combined.is_file():
+        from .recording_manager import existing_combined_path
+        combined = existing_combined_path(rec["id"], data_dir)
+        if combined is not None:
             return combined
     return None
 

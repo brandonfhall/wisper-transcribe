@@ -129,7 +129,7 @@ class Recording:
     guild_id: str
     discord_speakers: dict         # discord_user_id → wisper profile name (or "")
     segment_manifest: list         # list[SegmentRecord]
-    combined_path: Optional[Path]  # set after recording stops and mix is written
+    combined_path: Optional[Path]  # set after recording stops and mix is written (combined.flac, or a legacy combined.wav)
     per_user_dir: Optional[Path]
     transcript_path: Optional[Path]
     rejoin_log: list               # list[RejoinAttempt]
@@ -141,8 +141,8 @@ class Recording:
     devices: dict = field(default_factory=dict)  # local: {"mic": "<device name>", "system": "<device name>"} — display-only, never used in a file path
     name: Optional[str] = None     # user-supplied session name, set at start; display-only, never used in a file path
     markers: list = field(default_factory=list)  # list[Marker] -- user-flagged moments, "Add marker" button on /record
-    recovered_at: Optional[datetime] = None  # set when a crashed session's segments were joined into combined.wav
-    recoverable: bool = False      # derived: failed, no combined.wav, but combined segments on disk
+    recovered_at: Optional[datetime] = None  # set when a crashed session's segments were joined into its combined track
+    recoverable: bool = False      # derived: failed, no combined track, but combined segments on disk
 
 
 # ---------------------------------------------------------------------------

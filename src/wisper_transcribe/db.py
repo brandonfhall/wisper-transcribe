@@ -51,7 +51,8 @@ MIN_SQLITE = (3, 43, 0)
 
 # False only on a branch that edits unreleased migrations in place; such a
 # build refuses the default data dir. test_db fails on main unless True.
-SCHEMA_FROZEN = True
+# feat/flac-combined: v12 is unreleased, so the branch runs unfrozen.
+SCHEMA_FROZEN = False
 
 # While the schema is unfrozen, connect() also refuses to run unless
 # WISPER_OUTPUT_DIR is set or the output root lies inside the data dir, so a
@@ -962,6 +963,76 @@ def _v11_import(conn: sqlite3.Connection, ctx: MigrationContext) -> None:
                      "transcript; not registered")
 
 
+# --- v12: combined audio may be FLAC -----------------------------------------
+
+# New captures write ``recordings/<id>/combined.flac``; a legacy
+# ``combined.wav`` stays readable forever. Only the ``combined`` path CHECK
+# changes, so this mirrors the v11 ``files`` rebuild (same columns, every other
+# CHECK, FKs, indexes, trigger, and foreign_keys handling). It reads and writes
+# no file: the conversion is a storage-trim action, never a migration.
+_V12_DDL = """
+DROP TRIGGER files_profile_key_au;
+CREATE TABLE files_new (
+  id            INTEGER PRIMARY KEY,
+  kind          TEXT NOT NULL CHECK (kind IN ('transcript', 'summary', 'sidecar', 'excerpt', 'excerpt_text', 'audio',
+                                              'backup', 'combined', 'per_user', 'live_draft', 'reference_clip', 'journal')),
+  root          TEXT NOT NULL CHECK (root IN ('output', 'data')),
+  rel_path      TEXT NOT NULL CHECK (rel_path <> '' AND rel_path NOT GLOB '/*' AND rel_path NOT GLOB '*\\*'
+                                     AND rel_path NOT GLOB '[A-Za-z]:*' AND rel_path NOT GLOB '*/'
+                                     AND rel_path NOT GLOB '*//*'
+                                     AND '/' || rel_path || '/' NOT GLOB '*/../*'
+                                     AND '/' || rel_path || '/' NOT GLOB '*/./*'
+                                     AND instr(CAST(rel_path AS BLOB), x'00') = 0),
+  label         TEXT CHECK (label IS NULL OR (label <> '' AND label NOT GLOB '*[/\\:]*')),
+  transcript_id INTEGER REFERENCES transcripts(id) ON DELETE CASCADE,
+  recording_id  TEXT    REFERENCES recordings(id)  ON DELETE CASCADE,
+  profile_id    INTEGER REFERENCES profiles(id)    ON DELETE CASCADE,
+  campaign_id   INTEGER REFERENCES campaigns(id)   ON DELETE CASCADE,
+  size          INTEGER CHECK (size IS NULL OR size >= 0),
+  mtime_ns      INTEGER,
+  UNIQUE (root, rel_path),
+  CHECK ((transcript_id IS NOT NULL) + (recording_id IS NOT NULL)
+         + (profile_id IS NOT NULL) + (campaign_id IS NOT NULL) = 1),
+  CHECK ((kind IN ('transcript', 'summary', 'sidecar', 'excerpt', 'excerpt_text', 'audio', 'backup'))
+         = (transcript_id IS NOT NULL)),
+  CHECK ((kind IN ('combined', 'per_user', 'live_draft')) = (recording_id IS NOT NULL)),
+  CHECK ((kind = 'reference_clip') = (profile_id IS NOT NULL)),
+  CHECK ((kind = 'journal') = (campaign_id IS NOT NULL)),
+  CHECK ((root = 'output') = (kind IN ('transcript', 'summary', 'sidecar', 'excerpt', 'excerpt_text',
+                                       'audio', 'backup', 'journal'))),
+  CHECK (root <> 'output' OR rel_path NOT GLOB '*/*/*'),
+  CHECK ((kind IN ('excerpt', 'excerpt_text', 'per_user')) = (label IS NOT NULL)),
+  CHECK (kind <> 'per_user' OR label IN ('mic', 'system') OR label NOT GLOB '*[^0-9]*'),
+  CHECK ((size IS NULL) = (mtime_ns IS NULL)),
+  CHECK (kind <> 'per_user' OR size IS NULL),
+  CHECK (kind <> 'transcript'   OR (lower(rel_path) GLOB '*.md' AND lower(rel_path) NOT GLOB '*.summary.md')),
+  CHECK (kind <> 'summary'      OR lower(rel_path) GLOB '*.summary.md'),
+  CHECK (kind <> 'sidecar'      OR rel_path GLOB '*_diar.json'),
+  CHECK (kind <> 'excerpt'      OR rel_path GLOB '*_excerpt_*.mp3'),
+  CHECK (kind <> 'excerpt_text' OR rel_path GLOB '*_excerpt_*.txt'),
+  CHECK (kind <> 'audio'        OR lower(rel_path) NOT GLOB '*.md'),
+  CHECK (kind <> 'backup'       OR lower(rel_path) GLOB '*.md.bak'),
+  CHECK (kind <> 'combined'     OR rel_path = 'recordings/' || recording_id || '/combined.wav'
+                                OR rel_path = 'recordings/' || recording_id || '/combined.flac'),
+  CHECK (kind <> 'per_user'     OR rel_path = 'recordings/' || recording_id || '/per-user/' || label),
+  CHECK (kind <> 'live_draft'   OR rel_path = 'recordings/' || recording_id || '/live_transcript.md'),
+  CHECK (kind <> 'reference_clip' OR rel_path GLOB 'profiles/embeddings/*.mp3'),
+  CHECK (kind <> 'journal'      OR (rel_path GLOB '?*/?* Journal.md' AND rel_path NOT GLOB '*/*/*'))
+) STRICT;
+INSERT INTO files_new SELECT * FROM files;
+DROP TABLE files;
+ALTER TABLE files_new RENAME TO files;
+CREATE UNIQUE INDEX files_transcript ON files(transcript_id, kind, coalesce(label, ''));
+CREATE UNIQUE INDEX files_recording  ON files(recording_id, kind, coalesce(label, ''));
+CREATE UNIQUE INDEX files_profile    ON files(profile_id, kind);
+CREATE UNIQUE INDEX files_campaign   ON files(campaign_id, kind);
+CREATE TRIGGER files_profile_key_au AFTER UPDATE OF key ON profiles BEGIN
+  UPDATE files SET rel_path = 'profiles/embeddings/' || new.key || '.mp3'
+   WHERE profile_id = new.id AND kind = 'reference_clip';
+END;
+"""
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "foundation", _V1_DDL, _v1_pin_output_dir),
     Migration(2, "profiles-campaigns", _V2_DDL, _v2_import),
@@ -974,6 +1045,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(9, "file-registry", _V9_DDL, _v9_import),
     Migration(10, "drop-audio-rel-path", _V10_DDL),
     Migration(11, "campaign-folders", _V11_DDL, _v11_import),
+    Migration(12, "combined-flac", _V12_DDL),
 )
 LATEST_VERSION = MIGRATIONS[-1].version
 

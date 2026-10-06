@@ -139,6 +139,31 @@ def test_combined_path_is_derived_from_the_layout(tmp_path):
     assert load_recordings(tmp_path)[rec.id].combined_path == combined
 
 
+def test_new_captures_write_combined_flac(tmp_path):
+    rec = _make_recording(tmp_path)
+    assert rm.combined_path_for(rec.id, tmp_path).name == "combined.flac"
+    assert rm.combined_wav_path_for(rec.id, tmp_path).name == "combined.wav"
+
+
+def test_existing_combined_path_prefers_flac_then_wav_then_none(tmp_path):
+    rec = _make_recording(tmp_path)
+    assert rm.existing_combined_path(rec.id, tmp_path) is None
+    wav = rm.combined_wav_path_for(rec.id, tmp_path)
+    _write_wav(wav)
+    assert rm.existing_combined_path(rec.id, tmp_path) == wav
+    flac = rm.combined_path_for(rec.id, tmp_path)
+    flac.write_bytes(b"fLaC")
+    assert rm.existing_combined_path(rec.id, tmp_path) == flac  # .flac wins
+
+
+def test_a_flac_only_recording_loads_with_combined_path(tmp_path):
+    rec = _make_recording(tmp_path)
+    flac = rm.combined_path_for(rec.id, tmp_path)
+    flac.parent.mkdir(parents=True, exist_ok=True)
+    flac.write_bytes(b"fLaC")
+    assert load_recordings(tmp_path)[rec.id].combined_path == flac
+
+
 def test_save_refuses_off_layout_paths(tmp_path):
     rec = _make_recording(tmp_path)
     rec.combined_path = tmp_path / "elsewhere.wav"

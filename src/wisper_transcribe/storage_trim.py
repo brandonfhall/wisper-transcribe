@@ -260,10 +260,10 @@ def plan(data_dir: Optional[Path] = None, output_dir: Optional[Path] = None) -> 
                 rows.append((t["stem"], t["id"], row, linked.get(t["id"])))
 
     for stem, tid, row, rec_id in rows:
-        if rec_id is not None and recording_manager.combined_path_for(rec_id, data).is_file():
+        if rec_id is not None and recording_manager.existing_combined_path(rec_id, data) is not None:
             result.actions.append(Action(
                 DROP_COPY, row.path, _size(row.path), stem=stem, transcript_id=tid,
-                recording_id=rec_id, note="the recording's combined.wav is the audio"))
+                recording_id=rec_id, note="the recording's combined FLAC/WAV is the audio"))
         elif not _is_kept_flac(row, stem):
             result.actions.append(Action(CONVERT, row.path, _size(row.path), stem=stem,
                                          transcript_id=tid))
@@ -393,8 +393,8 @@ def _convert(loc, action: Action, output: Path, data: Path, report: TrimReport) 
 def _drop_copy(loc, action: Action, output: Path, data: Path, report: TrimReport) -> None:
     from . import recording_manager, transcript_store
 
-    if action.recording_id is None or not recording_manager.combined_path_for(
-            action.recording_id, data).is_file():
+    if action.recording_id is None or recording_manager.existing_combined_path(
+            action.recording_id, data) is None:
         return
     before = _size(action.path)
     try:

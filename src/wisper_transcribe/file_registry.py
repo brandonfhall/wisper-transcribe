@@ -715,9 +715,11 @@ def _scan_data(data: Path, in_output, recordings: dict[str, str],
             if status in _ACTIVE_CAPTURE:
                 continue
             owner = Owner("recording", rec_dir.name) if status is not None else None
-            for kind, name in (("combined", "combined.wav"), ("live_draft", "live_transcript.md")):
-                if (rec_dir / name).is_file():
-                    found.append(_Found(kind, rec_dir / name, "data", owner))
+            for kind, names in (("combined", ("combined.flac", "combined.wav")),
+                                ("live_draft", ("live_transcript.md",))):
+                for name in names:
+                    if (rec_dir / name).is_file():
+                        found.append(_Found(kind, rec_dir / name, "data", owner))
             for track in listing(rec_dir / "per-user"):
                 if track.is_dir() and (track.name in ("mic", "system") or track.name.isdigit()):
                     found.append(_Found("per_user", track, "data", owner, track.name))

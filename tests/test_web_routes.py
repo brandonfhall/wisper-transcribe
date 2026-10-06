@@ -4683,6 +4683,20 @@ def test_audio_route_serves_upload_flac_with_range(client, tmp_path, monkeypatch
     assert resp.headers["content-type"] == "audio/flac"
 
 
+def test_audio_route_serves_recording_combined_flac(client, tmp_path, monkeypatch):
+    """A FLAC-only recording plays back as audio/flac."""
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    rec = _recording_for(tmp_path, md)  # seed_recording writes a legacy .wav
+    rec_dir = tmp_path / "recordings" / rec.id
+    combined = rec_dir / "combined.flac"
+    combined.write_bytes(b"fLaC" + b"\x00" * 200)
+    (rec_dir / "combined.wav").unlink()  # FLAC only
+    tid = _tid(md)
+    resp = client.get(f"/transcripts/{tid}/audio")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "audio/flac"
+
+
 def test_audio_route_404_without_audio_or_file(client, tmp_path, monkeypatch):
     out, md = _playback_setup(tmp_path, monkeypatch)
     tid = _tid(md)

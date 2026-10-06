@@ -158,7 +158,7 @@ def test_recording_linked_copy_is_dropped(out, encode, probe):
     report = storage_trim.apply()
     assert not (out / f"{rec.id}.wav").exists()
     assert _audio_row(md) is None
-    assert transcript_store.audio_path(md) == recording_manager.combined_path_for(rec.id)
+    assert transcript_store.audio_path(md) == recording_manager.combined_wav_path_for(rec.id)
     assert report.dropped == ["Rec"]
     encode.assert_not_called()
 
@@ -201,13 +201,13 @@ def test_recordings_are_trimmed(out, encode, probe):
     seg = recording_manager.get_recording_dir(rec.id) / "combined"
     seg.mkdir()
     import shutil
-    shutil.copy(recording_manager.combined_path_for(rec.id), seg / "0000.wav")
+    shutil.copy(recording_manager.combined_wav_path_for(rec.id), seg / "0000.wav")
     plan = storage_trim.plan()
     assert [a.kind for a in plan.actions] == [storage_trim.TRIM_RECORDING]
     assert seg.exists()  # a plan changes nothing
     report = storage_trim.apply()
     assert not seg.exists()
-    assert recording_manager.combined_path_for(rec.id).is_file()
+    assert recording_manager.combined_wav_path_for(rec.id).is_file()
     assert report.trimmed and storage_trim.plan().actions == []
 
 
