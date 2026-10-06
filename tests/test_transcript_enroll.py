@@ -9,9 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from ._seed import seed_sidecar
-
-from ._seed import seed_profile, sidecar_data
+from ._seed import assign_campaign, seed_profile, seed_sidecar, sidecar_data
 
 
 # ---------------------------------------------------------------------------
@@ -28,6 +26,13 @@ def app():
 def client(app):
     with TestClient(app, raise_server_exceptions=True) as c:
         yield c
+
+
+@pytest.fixture(autouse=True)
+def _output_root(tmp_path, monkeypatch):
+    """tmp_path is the transcript output root, so a ``session01.md`` written
+    there is a registered session (``write_sidecar`` resolves the root)."""
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(tmp_path))
 
 
 _SAMPLE_MD = """\
@@ -56,18 +61,23 @@ _SAMPLE_DIAR = {
 
 
 def _write_transcript(tmp_path: Path, diar: dict | None = _SAMPLE_DIAR) -> Path:
+    from wisper_transcribe import transcript_store
+
     md = tmp_path / "session01.md"
     md.write_text(_SAMPLE_MD, encoding="utf-8")
+    transcript_store.register(md, origin="reconcile")
     if diar is not None:
         seed_sidecar(tmp_path / "session01.md", diar)
     return md
 
 
-def _patch_output(tmp_path: Path):
-    return patch(
-        "wisper_transcribe.web.routes.transcripts.get_output_dir",
-        return_value=tmp_path,
-    )
+def _tid(md: Path) -> int:
+    """The database id of a registered ``.md`` in the output root."""
+    from wisper_transcribe import transcript_store
+
+    loc = transcript_store.locate_path(md)
+    assert loc is not None, md
+    return loc.id
 
 
 # ---------------------------------------------------------------------------
@@ -81,15 +91,17 @@ def test_sidecar_written_after_job_completes(tmp_path: Path):
     from datetime import datetime
     import uuid
 
-    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    from wisper_transcribe import transcript_store
+    from wisper_transcribe.campaign_manager import create_campaign
 
     out_md = tmp_path / "session01.md"
     out_md.write_text("# Session 01", encoding="utf-8")
+    tid = transcript_store.register(out_md, origin="job")
     audio = tmp_path / "session01.mp3"   # the durable copy next to the transcript
     audio.write_bytes(b"x")
     input_path_str = str(audio)
     create_campaign("My Campaign")
-    move_transcript_to_campaign("session01", "my-campaign")
+    assign_campaign(tid, "my-campaign")
 
     seg = DiarizationSegment(start=1.0, end=5.0, speaker="SPEAKER_00")
     job = Job(
@@ -115,11 +127,13 @@ def test_sidecar_written_after_job_completes(tmp_path: Path):
     assert set(json.loads(sidecar.read_text(encoding="utf-8"))) == {"diarization_segments"}
 
 
-def test_sidecar_audio_outside_transcript_folder_is_not_tracked(tmp_path: Path):
+def test_sidecar_audio_outside_transcript_folder_is_not_tracked(tmp_path: Path, monkeypatch):
     from wisper_transcribe.transcript_store import read_sidecar, write_sidecar
 
-    md = tmp_path / "out" / "s1.md"
-    md.parent.mkdir()
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    md = out / "s1.md"
     md.write_text("x", encoding="utf-8")
     write_sidecar(md, {"input_path": str(tmp_path / "elsewhere.mp3"),
                        "diarization_segments": []})
@@ -199,6 +213,8 @@ def test_wizard_enroll_propagates_to_campaign(tmp_path: Path):
 
     md = tmp_path / "s1.md"
     md.write_text("# s1", encoding="utf-8")
+    from wisper_transcribe import transcript_store
+    tid = transcript_store.register(md, origin="job")
     audio = tmp_path / "s1.wav"
     audio.write_bytes(b"x")
     seed_sidecar(tmp_path / "s1.md", {
@@ -206,9 +222,9 @@ def test_wizard_enroll_propagates_to_campaign(tmp_path: Path):
         "diarization_segments": [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"}],
     })
     # The campaign comes from the transcript's current campaign row.
-    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    from wisper_transcribe.campaign_manager import create_campaign
     create_campaign("Game")
-    move_transcript_to_campaign("s1", "game")
+    assign_campaign(tid, "game")
     job = Job(id=str(uuid.uuid4()), status=COMPLETED, created_at=datetime.now(),
               input_path=str(md), kwargs={}, job_type=JOB_ENROLL,
               enroll_md_path=str(md), enroll_groups={"Alice": ["SPEAKER_00"]})
@@ -246,14 +262,15 @@ def test_sidecar_not_written_when_no_segments(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# GET /transcripts/{name}/enroll
+# GET /transcripts/{id}/enroll
 # ---------------------------------------------------------------------------
 
 def test_enroll_form_renders_with_sidecar(client: TestClient, tmp_path: Path):
     _write_transcript(tmp_path)
-    with _patch_output(tmp_path), \
-         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
-        resp = client.get("/transcripts/session01/enroll")
+    tid = _tid(tmp_path / "session01.md")
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        resp = client.get(f"/transcripts/{tid}/enroll")
+
     assert resp.status_code == 200
     body = resp.content.decode()
     assert "SPEAKER_00" in body
@@ -263,14 +280,15 @@ def test_enroll_form_renders_with_sidecar(client: TestClient, tmp_path: Path):
 
 def test_enroll_form_404_when_no_sidecar(client: TestClient, tmp_path: Path):
     _write_transcript(tmp_path, diar=None)
-    with _patch_output(tmp_path):
-        resp = client.get("/transcripts/session01/enroll")
+    tid = _tid(tmp_path / "session01.md")
+    resp = client.get(f"/transcripts/{tid}/enroll")
+
     assert resp.status_code == 404
 
 
 def test_enroll_form_404_when_no_transcript(client: TestClient, tmp_path: Path):
-    with _patch_output(tmp_path):
-        resp = client.get("/transcripts/nonexistent/enroll")
+    resp = client.get("/transcripts/nonexistent/enroll")
+
     assert resp.status_code == 404
 
 
@@ -286,9 +304,10 @@ def test_enroll_form_prefills_previously_applied_names(client: TestClient, tmp_p
         encoding="utf-8",
     )
     seed_sidecar(tmp_path / "session01.md", _SAMPLE_DIAR)
-    with _patch_output(tmp_path), \
-         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
-        resp = client.get("/transcripts/session01/enroll")
+    tid = _tid(tmp_path / "session01.md")
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        resp = client.get(f"/transcripts/{tid}/enroll")
+
     body = resp.content.decode()
     assert 'name="speaker_SPEAKER_00"' in body
     assert 'value="Brandon"' in body
@@ -307,27 +326,29 @@ def test_enroll_form_orders_speakers_by_first_appearance(client: TestClient, tmp
         ],
     }
     _write_transcript(tmp_path, diar=diar)
-    with _patch_output(tmp_path), \
-         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
-        resp = client.get("/transcripts/session01/enroll")
+    tid = _tid(tmp_path / "session01.md")
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        resp = client.get(f"/transcripts/{tid}/enroll")
+
     body = resp.content.decode()
     assert body.index("SPEAKER_00") < body.index("SPEAKER_01")
 
 
 # ---------------------------------------------------------------------------
-# POST /transcripts/{name}/enroll
+# POST /transcripts/{id}/enroll
 # ---------------------------------------------------------------------------
 
 def test_enroll_submit_renames_transcript(client: TestClient, tmp_path: Path):
     # The sidecar points to /tmp/session01.mp3 which won't exist in CI —
     # enrollment is silently skipped, but the rename always happens first.
     md = _write_transcript(tmp_path)
-    with _patch_output(tmp_path):
-        resp = client.post(
-            "/transcripts/session01/enroll",
-            data={"speaker_SPEAKER_00": "Alice", "speaker_SPEAKER_01": "Bob"},
-            follow_redirects=False,
-        )
+    tid = _tid(md)
+    resp = client.post(
+        f"/transcripts/{tid}/enroll",
+        data={"speaker_SPEAKER_00": "Alice", "speaker_SPEAKER_01": "Bob"},
+        follow_redirects=False,
+    )
+
     assert resp.status_code == 303
     content = md.read_text(encoding="utf-8")
     assert "**Alice**" in content
@@ -348,12 +369,13 @@ def test_enroll_submit_second_pass_corrects_typo(client: TestClient, tmp_path: P
         encoding="utf-8",
     )
     seed_sidecar(tmp_path / "session01.md", _SAMPLE_DIAR)
-    with _patch_output(tmp_path):
-        resp = client.post(
-            "/transcripts/session01/enroll",
-            data={"speaker_SPEAKER_00": "Brandon", "speaker_SPEAKER_01": "Sam"},
-            follow_redirects=False,
-        )
+    tid = _tid(tmp_path / "session01.md")
+    resp = client.post(
+        f"/transcripts/{tid}/enroll",
+        data={"speaker_SPEAKER_00": "Brandon", "speaker_SPEAKER_01": "Sam"},
+        follow_redirects=False,
+    )
+
     assert resp.status_code == 303
     content = md.read_text(encoding="utf-8")
     assert "**Brandon**" in content
@@ -735,13 +757,13 @@ def test_enroll_submit_enqueues_job_and_renames_synchronously(
     audio.write_bytes(b"fake-mp3")
     diar = {**_SAMPLE_DIAR, "input_path": str(audio)}
     md = _write_transcript(tmp_path, diar=diar)
+    tid = _tid(md)
 
-    with _patch_output(tmp_path):
-        resp = client.post(
-            "/transcripts/session01/enroll",
-            data={"speaker_SPEAKER_00": "Alice"},
-            follow_redirects=False,
-        )
+    resp = client.post(
+        f"/transcripts/{tid}/enroll",
+        data={"speaker_SPEAKER_00": "Alice"},
+        follow_redirects=False,
+    )
 
     assert resp.status_code == 303
     location = resp.headers["location"]
@@ -768,11 +790,11 @@ def test_enroll_submit_skips_enroll_when_audio_missing(
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     diar = {**_SAMPLE_DIAR, "input_path": "/nonexistent/audio.mp3"}
     _write_transcript(tmp_path, diar=diar)
+    tid = _tid(tmp_path / "session01.md")
 
-    with _patch_output(tmp_path), \
-         patch("wisper_transcribe.speaker_manager.enroll_speaker") as mock_enroll:
+    with patch("wisper_transcribe.speaker_manager.enroll_speaker") as mock_enroll:
         client.post(
-            "/transcripts/session01/enroll",
+            f"/transcripts/{tid}/enroll",
             data={"speaker_SPEAKER_00": "Alice"},
             follow_redirects=False,
         )
@@ -790,18 +812,18 @@ def test_enroll_submit_redirects_with_notice_when_audio_missing(
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     diar = {**_SAMPLE_DIAR, "input_path": "/nonexistent/audio.mp3"}
     _write_transcript(tmp_path, diar=diar)
+    tid = _tid(tmp_path / "session01.md")
 
-    with _patch_output(tmp_path), \
-         patch("wisper_transcribe.speaker_manager.enroll_speaker"):
+    with patch("wisper_transcribe.speaker_manager.enroll_speaker"):
         resp = client.post(
-            "/transcripts/session01/enroll",
+            f"/transcripts/{tid}/enroll",
             data={"speaker_SPEAKER_00": "Alice"},
             follow_redirects=False,
         )
 
     assert resp.status_code == 303
     location = resp.headers["location"]
-    assert location == "/transcripts/session01?notice=enroll_audio_missing"
+    assert location == f"/transcripts/{tid}?notice=enroll_audio_missing"
 
 
 def test_enroll_submit_missing_input_path_key_redirects_with_notice(
@@ -813,18 +835,18 @@ def test_enroll_submit_missing_input_path_key_redirects_with_notice(
     diar = {k: v for k, v in _SAMPLE_DIAR.items() if k != "input_path"}
     assert "input_path" not in diar
     _write_transcript(tmp_path, diar=diar)
+    tid = _tid(tmp_path / "session01.md")
 
-    with _patch_output(tmp_path), \
-         patch("wisper_transcribe.speaker_manager.enroll_speaker"):
+    with patch("wisper_transcribe.speaker_manager.enroll_speaker"):
         resp = client.post(
-            "/transcripts/session01/enroll",
+            f"/transcripts/{tid}/enroll",
             data={"speaker_SPEAKER_00": "Alice"},
             follow_redirects=False,
         )
 
     assert resp.status_code == 303
     location = resp.headers["location"]
-    assert location == "/transcripts/session01?notice=enroll_audio_missing"
+    assert location == f"/transcripts/{tid}?notice=enroll_audio_missing"
     assert client.app.state.job_queue.list_all() == []
 
 
@@ -837,13 +859,13 @@ def test_enroll_submit_no_notice_when_audio_present(
     audio.write_bytes(b"fake-mp3")
     diar = {**_SAMPLE_DIAR, "input_path": str(audio)}
     _write_transcript(tmp_path, diar=diar)
+    tid = _tid(tmp_path / "session01.md")
 
-    with _patch_output(tmp_path):
-        resp = client.post(
-            "/transcripts/session01/enroll",
-            data={"speaker_SPEAKER_00": "Alice"},
-            follow_redirects=False,
-        )
+    resp = client.post(
+        f"/transcripts/{tid}/enroll",
+        data={"speaker_SPEAKER_00": "Alice"},
+        follow_redirects=False,
+    )
 
     assert resp.status_code == 303
     location = resp.headers["location"]
@@ -855,8 +877,9 @@ def test_transcript_detail_shows_notice_banner(client: TestClient, tmp_path: Pat
     """(e) The transcript detail page renders the skipped-enrollment notice
     when the redirect included the generic ?notice=enroll_audio_missing flag."""
     _write_transcript(tmp_path)
-    with _patch_output(tmp_path):
-        resp = client.get("/transcripts/session01?notice=enroll_audio_missing")
+    tid = _tid(tmp_path / "session01.md")
+    resp = client.get(f"/transcripts/{tid}?notice=enroll_audio_missing")
+
     assert resp.status_code == 200
     body = resp.content.decode()
     assert "no saved voice data" in body.lower()
@@ -864,8 +887,9 @@ def test_transcript_detail_shows_notice_banner(client: TestClient, tmp_path: Pat
 
 def test_transcript_detail_no_banner_without_notice(client: TestClient, tmp_path: Path):
     _write_transcript(tmp_path)
-    with _patch_output(tmp_path):
-        resp = client.get("/transcripts/session01")
+    tid = _tid(tmp_path / "session01.md")
+    resp = client.get(f"/transcripts/{tid}")
+
     assert resp.status_code == 200
     body = resp.content.decode()
     assert "no saved voice data" not in body.lower()
@@ -876,9 +900,10 @@ def test_enroll_form_shows_audio_missing_banner(client: TestClient, tmp_path: Pa
     doesn't exist, so users know before they submit."""
     diar = {**_SAMPLE_DIAR, "input_path": "/nonexistent/audio.mp3"}
     _write_transcript(tmp_path, diar=diar)
-    with _patch_output(tmp_path), \
-         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
-        resp = client.get("/transcripts/session01/enroll")
+    tid = _tid(tmp_path / "session01.md")
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        resp = client.get(f"/transcripts/{tid}/enroll")
+
     assert resp.status_code == 200
     body = resp.content.decode()
     assert "no saved voice data" in body.lower()
@@ -889,9 +914,10 @@ def test_enroll_form_no_banner_when_audio_present(client: TestClient, tmp_path: 
     audio.write_bytes(b"fake-mp3")
     diar = {**_SAMPLE_DIAR, "input_path": str(audio)}
     _write_transcript(tmp_path, diar=diar)
-    with _patch_output(tmp_path), \
-         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
-        resp = client.get("/transcripts/session01/enroll")
+    tid = _tid(tmp_path / "session01.md")
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        resp = client.get(f"/transcripts/{tid}/enroll")
+
     assert resp.status_code == 200
     body = resp.content.decode()
     assert "no saved voice data" not in body.lower()
@@ -899,12 +925,13 @@ def test_enroll_form_no_banner_when_audio_present(client: TestClient, tmp_path: 
 
 def test_enroll_submit_404_when_no_sidecar(client: TestClient, tmp_path: Path):
     _write_transcript(tmp_path, diar=None)
-    with _patch_output(tmp_path):
-        resp = client.post(
-            "/transcripts/session01/enroll",
-            data={"speaker_SPEAKER_00": "Alice"},
-            follow_redirects=False,
-        )
+    tid = _tid(tmp_path / "session01.md")
+    resp = client.post(
+        f"/transcripts/{tid}/enroll",
+        data={"speaker_SPEAKER_00": "Alice"},
+        follow_redirects=False,
+    )
+
     assert resp.status_code == 404
 
 
@@ -912,27 +939,29 @@ def test_enroll_submit_no_renames_redirects_without_write(
     client: TestClient, tmp_path: Path
 ):
     md = _write_transcript(tmp_path)
+    tid = _tid(md)
     original = md.read_text(encoding="utf-8")
-    with _patch_output(tmp_path):
-        resp = client.post(
-            "/transcripts/session01/enroll",
-            data={},
-            follow_redirects=False,
-        )
+    resp = client.post(
+        f"/transcripts/{tid}/enroll",
+        data={},
+        follow_redirects=False,
+    )
+
     assert resp.status_code == 303
     assert md.read_text(encoding="utf-8") == original
 
 
 # ---------------------------------------------------------------------------
-# GET /transcripts/{name}/excerpt/{speaker_name}
+# GET /transcripts/{id}/excerpt/{speaker_name}
 # ---------------------------------------------------------------------------
 
 def test_excerpt_serves_clip(client: TestClient, tmp_path: Path):
     _write_transcript(tmp_path)
+    tid = _tid(tmp_path / "session01.md")
     clip = tmp_path / "session01_excerpt_SPEAKER_00.mp3"
     clip.write_bytes(b"fake-mp3-data")
-    with _patch_output(tmp_path):
-        resp = client.get("/transcripts/session01/excerpt/SPEAKER_00")
+    resp = client.get(f"/transcripts/{tid}/excerpt/SPEAKER_00")
+
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "audio/mpeg"
 
@@ -950,12 +979,13 @@ def test_excerpt_falls_back_to_legacy_display_name(client: TestClient, tmp_path:
         encoding="utf-8",
     )
     seed_sidecar(tmp_path / "session01.md", _SAMPLE_DIAR)
+    tid = _tid(tmp_path / "session01.md")
     # Legacy file name: keyed by display name, not raw label
     legacy_clip = tmp_path / "session01_excerpt_Unknown_Speaker_1.mp3"
     legacy_clip.write_bytes(b"fake-mp3-data")
 
-    with _patch_output(tmp_path):
-        resp = client.get("/transcripts/session01/excerpt/SPEAKER_00")
+    resp = client.get(f"/transcripts/{tid}/excerpt/SPEAKER_00")
+
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "audio/mpeg"
 
@@ -971,13 +1001,14 @@ def test_enroll_form_finds_legacy_display_name_excerpts(client: TestClient, tmp_
         encoding="utf-8",
     )
     seed_sidecar(tmp_path / "session01.md", _SAMPLE_DIAR)
+    tid = _tid(tmp_path / "session01.md")
     (tmp_path / "session01_excerpt_Unknown_Speaker_1.mp3").write_bytes(b"audio")
     (tmp_path / "session01_excerpt_Unknown_Speaker_1.txt").write_text(
         "Hello everyone", encoding="utf-8",
     )
 
-    with _patch_output(tmp_path):
-        resp = client.get("/transcripts/session01/enroll")
+    resp = client.get(f"/transcripts/{tid}/enroll")
+
     assert resp.status_code == 200
     # Sample button is rendered when speaker_excerpts contains the raw label
     assert b"Sample" in resp.content
@@ -1009,10 +1040,11 @@ def test_legacy_backfill_uses_interval_match_not_exact_timestamp(client: TestCli
         ],
     }
     seed_sidecar(tmp_path / "session01.md", diar)
+    tid = _tid(tmp_path / "session01.md")
     (tmp_path / "session01_excerpt_Unknown_Speaker_1.mp3").write_bytes(b"audio")
 
-    with _patch_output(tmp_path):
-        resp = client.get("/transcripts/session01/excerpt/SPEAKER_00")
+    resp = client.get(f"/transcripts/{tid}/excerpt/SPEAKER_00")
+
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "audio/mpeg"
 
@@ -1280,15 +1312,17 @@ def test_extract_speaker_excerpts_falls_back_per_label_without_diarization(tmp_p
 
 def test_excerpt_404_when_no_clip(client: TestClient, tmp_path: Path):
     _write_transcript(tmp_path)
-    with _patch_output(tmp_path):
-        resp = client.get("/transcripts/session01/excerpt/SPEAKER_99")
+    tid = _tid(tmp_path / "session01.md")
+    resp = client.get(f"/transcripts/{tid}/excerpt/SPEAKER_99")
+
     assert resp.status_code == 404
 
 
 def test_excerpt_rejects_null_byte(client: TestClient, tmp_path: Path):
     _write_transcript(tmp_path)
-    with _patch_output(tmp_path):
-        resp = client.get("/transcripts/session01/excerpt/SPEAKER%00_00")
+    tid = _tid(tmp_path / "session01.md")
+    resp = client.get(f"/transcripts/{tid}/excerpt/SPEAKER%00_00")
+
     assert resp.status_code == 400
 
 
@@ -1302,9 +1336,10 @@ def test_enroll_form_first_pass_leaves_input_empty(client: TestClient, tmp_path:
     prefilled with the raw label -- prefilling it means submitting untouched
     fields creates junk 'SPEAKER_00' voice profiles."""
     _write_transcript(tmp_path)
-    with _patch_output(tmp_path), \
-         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
-        resp = client.get("/transcripts/session01/enroll")
+    tid = _tid(tmp_path / "session01.md")
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        resp = client.get(f"/transcripts/{tid}/enroll")
+
     body = resp.content.decode()
     assert 'name="speaker_SPEAKER_00"' in body
     assert 'value="SPEAKER_00"' not in body
@@ -1334,15 +1369,16 @@ def test_enroll_submit_refuses_raw_label_shaped_name(client: TestClient, tmp_pat
         ],
     }
     seed_sidecar(tmp_path / "session01.md", diar)
+    tid = _tid(tmp_path / "session01.md")
 
-    with _patch_output(tmp_path), \
-         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
          patch("wisper_transcribe.speaker_manager.enroll_speaker") as mock_enroll:
         resp = client.post(
-            "/transcripts/session01/enroll",
+            f"/transcripts/{tid}/enroll",
             data={"speaker_SPEAKER_00": "SPEAKER_00"},
             follow_redirects=False,
         )
+
     assert resp.status_code == 303
     mock_enroll.assert_not_called()
     assert md.read_text(encoding="utf-8") == original
@@ -1610,14 +1646,16 @@ def test_job_detail_completed_enroll_shows_transcript_link_not_name_speakers(
     client: TestClient, tmp_path: Path
 ):
     """On completion, a JOB_ENROLL job's detail page shows "View transcript"
-    (job.output_path is set at submit time -- see submit_enroll) and hides
-    "Name speakers" (already gated on job_type == "transcription")."""
+    when its output file is a registered transcript and hides "Name speakers"
+    (already gated on job_type == "transcription")."""
     from wisper_transcribe.web.jobs import Job, JOB_ENROLL, COMPLETED
+    from wisper_transcribe import transcript_store
     from datetime import datetime
     import uuid
 
     transcript = tmp_path / "session01.md"
     transcript.write_text("# Session 01", encoding="utf-8")
+    transcript_store.register(transcript, origin="job")
 
     job = Job(
         id=str(uuid.uuid4()),
@@ -1838,9 +1876,10 @@ def test_enroll_profiles_no_excerpt_no_audio_creates_profile_without_clip(tmp_pa
 def test_enroll_form_old_embedding_space_without_audio_shows_banner(client: TestClient, tmp_path: Path):
     diar = _stored_diar(tmp_path, {"SPEAKER_00": _unit(1, 0, 0)}, space="old-model")
     _write_transcript(tmp_path, diar=diar)
-    with _patch_output(tmp_path), \
-         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
-        resp = client.get("/transcripts/session01/enroll")
+    tid = _tid(tmp_path / "session01.md")
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        resp = client.get(f"/transcripts/{tid}/enroll")
+
     assert "no saved voice data" in resp.content.decode().lower()
 
 
@@ -1848,18 +1887,20 @@ def test_enroll_form_no_banner_when_all_speakers_have_embeddings(client: TestCli
     diar = _stored_diar(tmp_path, {"SPEAKER_00": _unit(1, 0, 0), "SPEAKER_01": _unit(0, 1, 0),
                                    "SPEAKER_02": _unit(0, 0, 1)})
     _write_transcript(tmp_path, diar=diar)
-    with _patch_output(tmp_path), \
-         patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
-        resp = client.get("/transcripts/session01/enroll")
+    tid = _tid(tmp_path / "session01.md")
+    with patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}):
+        resp = client.get(f"/transcripts/{tid}/enroll")
+
     assert "no saved voice data" not in resp.content.decode().lower()
 
 
 def test_enroll_submit_stored_embeddings_without_audio_enqueues_job(client: TestClient, tmp_path: Path):
     diar = _stored_diar(tmp_path, {"SPEAKER_00": _unit(1, 0, 0)})
     _write_transcript(tmp_path, diar=diar)
-    with _patch_output(tmp_path):
-        resp = client.post("/transcripts/session01/enroll",
-                           data={"speaker_SPEAKER_00": "Alice"}, follow_redirects=False)
+    tid = _tid(tmp_path / "session01.md")
+    resp = client.post(f"/transcripts/{tid}/enroll",
+                       data={"speaker_SPEAKER_00": "Alice"}, follow_redirects=False)
+
     location = resp.headers["location"]
     assert location.startswith("/transcribe/jobs/")
     assert "notice" not in location
@@ -1868,10 +1909,11 @@ def test_enroll_submit_stored_embeddings_without_audio_enqueues_job(client: Test
 def test_enroll_submit_partial_enqueues_job_and_carries_notice(client: TestClient, tmp_path: Path):
     diar = _stored_diar(tmp_path, {"SPEAKER_00": _unit(1, 0, 0)})
     _write_transcript(tmp_path, diar=diar)
-    with _patch_output(tmp_path):
-        resp = client.post("/transcripts/session01/enroll",
-                           data={"speaker_SPEAKER_00": "Alice", "speaker_SPEAKER_01": "Brad"},
-                           follow_redirects=False)
+    tid = _tid(tmp_path / "session01.md")
+    resp = client.post(f"/transcripts/{tid}/enroll",
+                       data={"speaker_SPEAKER_00": "Alice", "speaker_SPEAKER_01": "Brad"},
+                       follow_redirects=False)
+
     location = resp.headers["location"]
     assert location.startswith("/transcribe/jobs/")
     assert location.endswith("?notice=enroll_audio_missing")
@@ -1885,7 +1927,8 @@ def test_enroll_submit_old_embedding_space_without_audio_redirects_with_notice(
 ):
     diar = _stored_diar(tmp_path, {"SPEAKER_00": _unit(1, 0, 0)}, space="old-model")
     _write_transcript(tmp_path, diar=diar)
-    with _patch_output(tmp_path):
-        resp = client.post("/transcripts/session01/enroll",
-                           data={"speaker_SPEAKER_00": "Alice"}, follow_redirects=False)
-    assert resp.headers["location"] == "/transcripts/session01?notice=enroll_audio_missing"
+    tid = _tid(tmp_path / "session01.md")
+    resp = client.post(f"/transcripts/{tid}/enroll",
+                       data={"speaker_SPEAKER_00": "Alice"}, follow_redirects=False)
+
+    assert resp.headers["location"] == f"/transcripts/{tid}?notice=enroll_audio_missing"

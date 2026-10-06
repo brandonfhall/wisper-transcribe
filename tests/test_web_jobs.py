@@ -667,6 +667,47 @@ def test_submit_non_upload_path_not_flagged(tmp_path):
     assert job.upload_dir == ""
 
 
+def test_submit_fails_and_removes_the_upload_when_history_cannot_be_written(tmp_path):
+    """A job type the busy guard reads must not be queued when its history row
+    can't be written: submit raises, queues nothing, and drops the upload."""
+    from wisper_transcribe import job_history
+
+    q = _make_queue()
+    upload = tmp_path / "wisper_upload_abc123.mp3"
+    upload.write_bytes(b"fake-audio")
+    calls = []
+
+    def boom(job, data_dir=None):
+        calls.append(job)
+        raise RuntimeError("database busy")
+
+    with patch.object(job_history, "record_required", boom):
+        with pytest.raises(RuntimeError):
+            q.submit(str(upload), original_stem="My Session")
+
+    assert q.list_all() == []
+    assert q.active_count() == 0
+    assert not any(p.name.startswith("wisper_upload_") for p in tmp_path.iterdir())
+
+
+def test_submit_llm_keeps_swallowing_a_history_failure(tmp_path):
+    """A job type the busy guard ignores (an LLM rerun) still queues when its
+    history write fails; only the guard's job types are required."""
+    from wisper_transcribe import job_history
+    from wisper_transcribe.web.jobs import JOB_REFINE
+
+    q = _make_queue()
+
+    def boom(job, data_dir=None):
+        raise RuntimeError("database busy")
+
+    with patch.object(job_history, "record_required", boom), \
+            patch.object(job_history, "record", lambda job, data_dir=None: None):
+        job = q.submit_llm(str(tmp_path / "s1.md"), JOB_REFINE)
+
+    assert q.get(job.id) is job and q.active_count() == 1
+
+
 def test_non_temp_input_not_moved(tmp_path):
     """(b) A non-temp (e.g. recording-sourced) input must never be moved,
     even though it lives next to (or anywhere relative to) the output dir."""
@@ -720,10 +761,13 @@ def _upload_env(tmp_path, monkeypatch):
 
 
 def _audio_row(out_dir, stem):
-    from wisper_transcribe import file_registry
+    from wisper_transcribe import file_registry, transcript_store
 
-    owner = file_registry.Owner.for_stem(stem, output_dir=out_dir)
-    return file_registry.file_for(owner, "audio", output_dir=out_dir) if owner else None
+    loc = transcript_store.locate_path(out_dir / f"{stem}.md")
+    if loc is None:
+        return None
+    return file_registry.file_for(file_registry.Owner("transcript", loc.id), "audio",
+                                  output_dir=out_dir)
 
 
 def _run_upload_job(tmp_dir, out_dir, *, suffix=".mp4", stem="Session 12", diarize=True,
@@ -1099,7 +1143,14 @@ def _write_sidecar(tmp_path, md_path, input_path, campaign=None):
     seed_sidecar(md_path, diar)
 
 
-def test_run_enroll_job_success_calls_enroll_profiles_and_completes(tmp_path):
+@pytest.fixture
+def out_env(tmp_path, monkeypatch):
+    """Output root == tmp_path, so ``session01.md`` written there is a transcript."""
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(tmp_path))
+    return tmp_path
+
+
+def test_run_enroll_job_success_calls_enroll_profiles_and_completes(tmp_path, out_env):
     """(d) The success path calls enroll_profiles() and sets COMPLETED +
     output_path."""
     from wisper_transcribe.web.jobs import JobQueue, COMPLETED
@@ -1131,7 +1182,7 @@ def test_run_enroll_job_success_calls_enroll_profiles_and_completes(tmp_path):
     assert job.finished_at is not None
 
 
-def test_run_enroll_job_progress_lines_land_in_log(tmp_path):
+def test_run_enroll_job_progress_lines_land_in_log(tmp_path, out_env):
     """(f) Progress lines the runner passes to enroll_profiles() land in
     job.log_lines (so the SSE stream picks them up)."""
     from wisper_transcribe.web.jobs import JobQueue, COMPLETED
@@ -1164,7 +1215,7 @@ def test_run_enroll_job_progress_lines_land_in_log(tmp_path):
     assert any("Alice" in line for line in job.log_lines)
 
 
-def test_run_enroll_job_missing_audio_sets_generic_error(tmp_path):
+def test_run_enroll_job_missing_audio_sets_generic_error(tmp_path, out_env):
     """(e) Missing source audio fails the job with a generic message --
     never the path."""
     from wisper_transcribe.web.jobs import JobQueue, FAILED
@@ -1190,7 +1241,7 @@ def test_run_enroll_job_missing_audio_sets_generic_error(tmp_path):
     assert job.finished_at is not None
 
 
-def test_run_enroll_job_missing_sidecar_sets_generic_error(tmp_path):
+def test_run_enroll_job_missing_sidecar_sets_generic_error(tmp_path, out_env):
     """No _diar.json at all (e.g. deleted between wizard submit and job run)
     also fails generically rather than raising."""
     from wisper_transcribe.web.jobs import JobQueue, FAILED
@@ -1213,7 +1264,7 @@ def test_run_enroll_job_missing_sidecar_sets_generic_error(tmp_path):
     assert job.error == "Source audio not available"
 
 
-def test_run_enroll_job_exception_sets_generic_error_not_path(tmp_path):
+def test_run_enroll_job_exception_sets_generic_error_not_path(tmp_path, out_env):
     """(e) An unexpected exception from enroll_profiles() (e.g. a WAV
     conversion failure whose message contains a path) must never leak that
     path into job.error -- the job detail page renders it directly into
@@ -2024,6 +2075,57 @@ def test_job_fails_when_reported_transcript_is_missing(tmp_path):
     assert any("Transcripts folder:" in line for line in job.log_lines)
 
 
+def test_job_target_is_recorded_at_submit(tmp_path):
+    """A re-transcribe submitted through JobQueue.submit carries its
+    transcript_id while still pending, so the busy guard can see it."""
+    from wisper_transcribe import db, transcript_store
+    from wisper_transcribe.web.jobs import JobQueue
+
+    out = tmp_path / "out"
+    out.mkdir()
+    md = out / "Session 01.md"
+    md.write_text("# t", encoding="utf-8")
+    tid = transcript_store.register(md, origin="reconcile")
+
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    q = JobQueue()
+    job = q.submit(str(audio), original_stem="Session 01", output_dir=str(out), overwrite=True)
+    assert job.status == "pending"
+    assert job.transcript_id == tid
+    # History recorded it too, so the busy guard sees a queued re-transcribe.
+    with db.connection() as conn:
+        row = conn.execute("SELECT transcript_id FROM jobs WHERE id = ?", (job.id,)).fetchone()
+    assert row["transcript_id"] == tid
+
+
+def test_job_target_is_none_for_a_new_name(tmp_path):
+    from wisper_transcribe.web.jobs import JobQueue
+
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    q = JobQueue()
+    job = q.submit(str(audio), original_stem="brand-new", output_dir=str(tmp_path))
+    assert job.transcript_id is None
+
+
+def test_missing_transcript_after_write_names_a_campaign_folder(tmp_path):
+    from wisper_transcribe.web.jobs import FAILED, JobQueue, TranscriptMissingError
+
+    folder = tmp_path / "Game"
+    folder.mkdir()
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    q = JobQueue()
+    job = q.submit(str(audio), original_stem="session", output_dir=str(folder))
+    with patch("wisper_transcribe.web.jobs.process_file", return_value=folder / "nowhere.md"):
+        with pytest.raises(TranscriptMissingError):
+            q._run_transcription_job(job)
+    assert job.status == FAILED
+    assert job.error == "Transcript file missing after write"
+    assert any(str(folder) in line for line in job.log_lines)
+
+
 def test_recording_is_transcribing_only_while_its_job_is_pending_or_running(tmp_path):
     """A cancelled pending job never runs its callbacks; the recording must
     still come back as transcribable (status is derived from the queue)."""
@@ -2068,7 +2170,7 @@ def _seed_stored(tmp_path, vectors, *, audio=False, space=None):
     return md_path
 
 
-def test_run_enroll_job_stored_embeddings_without_audio_completes(tmp_path):
+def test_run_enroll_job_stored_embeddings_without_audio_completes(tmp_path, out_env):
     from wisper_transcribe.web.jobs import JobQueue, COMPLETED
 
     md_path = _seed_stored(tmp_path, {"SPEAKER_00": [1.0, 0.0, 0.0]})
@@ -2083,7 +2185,7 @@ def test_run_enroll_job_stored_embeddings_without_audio_completes(tmp_path):
     assert "alice" in load_profiles()
 
 
-def test_run_enroll_job_partial_logs_skipped_name_and_completes(tmp_path):
+def test_run_enroll_job_partial_logs_skipped_name_and_completes(tmp_path, out_env):
     from wisper_transcribe.web.jobs import JobQueue, COMPLETED
 
     md_path = _seed_stored(tmp_path, {"SPEAKER_00": [1.0, 0.0, 0.0]})
@@ -2099,7 +2201,7 @@ def test_run_enroll_job_partial_logs_skipped_name_and_completes(tmp_path):
     assert "alice" in profiles and "brad" not in profiles
 
 
-def test_run_enroll_job_old_embedding_space_without_audio_fails(tmp_path):
+def test_run_enroll_job_old_embedding_space_without_audio_fails(tmp_path, out_env):
     from wisper_transcribe.web.jobs import JobQueue, FAILED
 
     md_path = _seed_stored(tmp_path, {"SPEAKER_00": [1.0, 0.0, 0.0]}, space="old-model")
@@ -2112,7 +2214,7 @@ def test_run_enroll_job_old_embedding_space_without_audio_fails(tmp_path):
     assert job.error == "Source audio not available"
 
 
-def test_run_enroll_job_old_embedding_space_with_audio_extracts(tmp_path):
+def test_run_enroll_job_old_embedding_space_with_audio_extracts(tmp_path, out_env):
     import numpy as np
     from wisper_transcribe.web.jobs import JobQueue, COMPLETED
 

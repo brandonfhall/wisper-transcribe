@@ -4,9 +4,9 @@ Campaigns are an optional layer over the global speaker profiles: a roster of
 profiles with per-campaign role/character overrides and Discord bindings, plus
 the ordered list of the campaign's transcripts.
 
-Data lives in ``wisper.db`` (tables ``campaigns``, ``campaign_members``,
-``campaign_transcripts``); each campaign's journal stays a file under
-``$DATA_DIR/campaigns/<slug>/``. Every change is one ``db.transaction()``, so
+Data lives in ``wisper.db`` (tables ``campaigns``, ``campaign_members``, and
+each transcript's ``campaign_id``/``position``); each campaign's journal is a
+file in its folder under the output root. Every change is one ``db.transaction()``, so
 concurrent requests and processes can't lose each other's updates.
 """
 from __future__ import annotations
@@ -14,13 +14,36 @@ from __future__ import annotations
 import re
 import sqlite3
 import unicodedata
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
-from . import db
-from .config import get_data_dir
+from . import campaign_folders, db
+from .config import get_data_dir, get_output_root
 from .models import Campaign, CampaignMember
 from .path_utils import validate_path_component
+
+
+class CampaignError(ValueError):
+    """A campaign name couldn't be used, with a code from the campaign table."""
+
+    def __init__(self, code: str, message: str = "") -> None:
+        super().__init__(message or code)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class DeleteOutcome:
+    """What a campaign delete did.
+
+    ``status`` is ``deleted``, ``busy`` (a job holds the campaign),
+    ``kept`` (a session's file couldn't be deleted or moved), or
+    ``delete_incomplete`` (a reconcile registered a new session mid-delete).
+    ``kept`` names the sessions left behind.
+    """
+
+    status: Literal["deleted", "busy", "kept", "delete_incomplete"]
+    kept: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -72,60 +95,75 @@ def _profile_id(conn: sqlite3.Connection, key: str) -> int:
     return row[0]
 
 
-def _transcript_id(conn: sqlite3.Connection, stem: str) -> int:
-    """The registry row for ``stem``, created if absent."""
-    from .transcript_store import ensure_row
+def _transcript_id(conn: sqlite3.Connection, campaign_id: int, stem: str) -> int:
+    """The id of the campaign's session named ``stem``. Raises KeyError if absent."""
+    row = conn.execute(
+        "SELECT id FROM transcripts WHERE campaign_id = ? AND stem = ?", (campaign_id, stem)
+    ).fetchone()
+    if row is None:
+        raise KeyError(f"Transcript {stem!r} is not in the campaign")
+    return row[0]
 
-    return ensure_row(conn, stem)
+
+def _assign(conn: sqlite3.Connection, tid: int, campaign_id: Optional[int],
+            position: Optional[int], stem: Optional[str] = None) -> None:
+    """Set a session's campaign slot, and its stem when ``stem`` is given.
+
+    The one primitive that writes a session's assignment; only
+    ``transcript_store.move_transcript`` moves a session between campaigns. A
+    name already taken in the target (a campaign, or the root) violates a
+    partial unique index; that is reported as a ValueError. The ``stem`` column
+    is written only when it changes, so a plain assignment doesn't re-fire the
+    title trigger.
+    """
+    row = conn.execute("SELECT stem FROM transcripts WHERE id = ?", (tid,)).fetchone()
+    if row is None:
+        raise KeyError(f"No transcript with id {tid}")
+    new_stem = row[0] if stem is None else stem
+    try:
+        if new_stem != row[0]:
+            conn.execute(
+                "UPDATE transcripts SET campaign_id = ?, position = ?, stem = ? WHERE id = ?",
+                (campaign_id, position, new_stem, tid),
+            )
+        else:
+            conn.execute(
+                "UPDATE transcripts SET campaign_id = ?, position = ? WHERE id = ?",
+                (campaign_id, position, tid),
+            )
+    except sqlite3.IntegrityError:
+        raise ValueError(f"a session named {new_stem!r} is already there") from None
 
 
 def _write_order(conn: sqlite3.Connection, campaign_id: int, transcript_ids: list[int]) -> None:
-    """Set the campaign's rows to exactly ``transcript_ids``, in that order.
+    """Set the campaign's rows to ``transcript_ids``, in that order.
 
+    Every id must already belong to the campaign (``ValueError`` otherwise):
+    moving a session in or out goes through ``move_transcript``, so this never
+    changes membership and never unassigns a row it wasn't given.
     ``UNIQUE(campaign_id, position)`` is checked row by row, so positions are
-    written in two steps: shift every row above the current maximum, then
-    write the final positions.
+    written in two steps: shift every row above the current maximum, then write
+    the final positions.
     """
-    keep = set(transcript_ids)
-    for (tid,) in conn.execute(
-        "SELECT transcript_id FROM campaign_transcripts WHERE campaign_id = ?", (campaign_id,)
-    ).fetchall():
-        if tid not in keep:
-            conn.execute("DELETE FROM campaign_transcripts WHERE transcript_id = ?", (tid,))
-    top = conn.execute(
-        "SELECT coalesce(max(position), -1) + 1 FROM campaign_transcripts WHERE campaign_id = ?",
+    for tid in transcript_ids:
+        row = conn.execute("SELECT campaign_id FROM transcripts WHERE id = ?", (tid,)).fetchone()
+        if row is None or row[0] != campaign_id:
+            raise ValueError(f"transcript {tid} is not in this campaign")
+    shift = conn.execute(
+        "SELECT coalesce(max(position), -1) + 1 FROM transcripts WHERE campaign_id = ?",
         (campaign_id,),
-    ).fetchone()[0]
-    offset = top + len(transcript_ids)
+    ).fetchone()[0] + len(transcript_ids)
     conn.execute(
-        "UPDATE campaign_transcripts SET position = position + ? WHERE campaign_id = ?",
-        (offset, campaign_id),
+        "UPDATE transcripts SET position = position + ? WHERE campaign_id = ?",
+        (shift, campaign_id),
     )
     for pos, tid in enumerate(transcript_ids):
-        current = conn.execute(
-            "SELECT campaign_id FROM campaign_transcripts WHERE transcript_id = ?", (tid,)
-        ).fetchone()
-        if current is not None and current[0] == campaign_id:
-            # Already here: position only. Never rewrite campaign_id in place —
-            # journal_entries' composite FK refuses that.
-            conn.execute(
-                "UPDATE campaign_transcripts SET position = ? WHERE transcript_id = ?", (pos, tid)
-            )
-            continue
-        # Moving in from another campaign (one campaign per transcript): delete
-        # and insert, so the old campaign's journal entry cascades and its
-        # journal is marked stale.
-        conn.execute("DELETE FROM campaign_transcripts WHERE transcript_id = ?", (tid,))
-        conn.execute(
-            "INSERT INTO campaign_transcripts (transcript_id, campaign_id, position) VALUES (?, ?, ?)",
-            (tid, campaign_id, pos),
-        )
+        conn.execute("UPDATE transcripts SET position = ? WHERE id = ?", (pos, tid))
 
 
 def _stems(conn: sqlite3.Connection, campaign_id: int) -> list[str]:
     return [r[0] for r in conn.execute(
-        "SELECT t.stem FROM campaign_transcripts ct JOIN transcripts t ON t.id = ct.transcript_id "
-        "WHERE ct.campaign_id = ? ORDER BY ct.position",
+        "SELECT stem FROM transcripts WHERE campaign_id = ? ORDER BY position",
         (campaign_id,),
     )]
 
@@ -143,8 +181,8 @@ def load_campaigns(data_dir: Optional[Path] = None) -> dict[str, Campaign]:
             "FROM campaign_members m JOIN profiles p ON p.id = m.profile_id ORDER BY m.rowid"
         ).fetchall()
         transcripts = conn.execute(
-            "SELECT ct.campaign_id, t.stem FROM campaign_transcripts ct "
-            "JOIN transcripts t ON t.id = ct.transcript_id ORDER BY ct.campaign_id, ct.position"
+            "SELECT campaign_id, id, stem FROM transcripts "
+            "WHERE campaign_id IS NOT NULL ORDER BY campaign_id, position"
         ).fetchall()
 
     by_id: dict[int, Campaign] = {}
@@ -156,6 +194,8 @@ def load_campaigns(data_dir: Optional[Path] = None) -> dict[str, Campaign]:
             created=r["created_at"][:10],
             members={},
             transcripts=[],
+            id=r["id"],
+            folder=r["folder"],
         )
         by_id[r["id"]] = c
         campaigns[c.slug] = c
@@ -166,6 +206,7 @@ def load_campaigns(data_dir: Optional[Path] = None) -> dict[str, Campaign]:
         )
     for t in transcripts:
         by_id[t["campaign_id"]].transcripts.append(t["stem"])
+        by_id[t["campaign_id"]].transcript_ids.append(t["id"])
     return campaigns
 
 
@@ -173,69 +214,148 @@ def load_campaigns(data_dir: Optional[Path] = None) -> dict[str, Campaign]:
 # CRUD
 # ---------------------------------------------------------------------------
 
-def create_campaign(display_name: str, data_dir: Optional[Path] = None) -> Campaign:
-    """Create a new campaign. Raises ValueError for empty name or duplicate slug."""
+def create_campaign(display_name: str, data_dir: Optional[Path] = None, *,
+                    output_dir: Optional[Path] = None) -> Campaign:
+    """Create a new campaign and claim its folder.
+
+    Raises ``CampaignError`` with a code from the campaign table (``invalid``,
+    ``slug_taken``, ``taken``, ``folder_exists``). The folder is claimed after
+    the row commits: if that can't happen (an absent output root, or a folder
+    that appeared meanwhile) the campaign still exists and its folder is made
+    and claimed on first write.
+    """
     display_name = display_name.strip()
     if not display_name:
-        raise ValueError("Campaign display name cannot be empty")
+        raise CampaignError("invalid", "Campaign display name cannot be empty")
 
     slug = _make_slug(display_name)
     if not slug:
-        raise ValueError(f"Cannot derive a valid slug from name: {display_name!r}")
+        raise CampaignError("invalid", f"Cannot derive a valid slug from name: {display_name!r}")
+
+    output = Path(output_dir) if output_dir is not None else get_output_root()
+    folder = campaign_folders.folder_name(display_name)
+    # The folder_exists disk check can't be atomic; a folder appearing in between
+    # is caught by ensure_folder. The database check runs inside the transaction.
+    code = campaign_folders.check_available(folder, output_dir=output)
+    if code is not None:
+        raise CampaignError(code, f"A campaign folder named {folder!r} already exists")
 
     created = db.now_utc()
-    with db.transaction(data_dir) as conn:
-        if conn.execute("SELECT 1 FROM campaigns WHERE slug = ?", (slug,)).fetchone():
-            raise ValueError(f"Campaign with slug {slug!r} already exists")
-        conn.execute(
-            "INSERT INTO campaigns (slug, display_name, created_at) VALUES (?, ?, ?)",
-            (slug, display_name, created),
-        )
-    return Campaign(slug=slug, display_name=display_name, created=created[:10], members={})
+    try:
+        with db.transaction(data_dir) as conn:
+            if conn.execute("SELECT 1 FROM campaigns WHERE slug = ?", (slug,)).fetchone():
+                raise CampaignError("slug_taken", f"Campaign with slug {slug!r} already exists")
+            if campaign_folders.taken_by_campaign(conn, folder):
+                raise CampaignError("taken", f"A campaign folder named {folder!r} already exists")
+            cid = conn.execute(
+                "INSERT INTO campaigns (slug, display_name, folder, created_at) "
+                "VALUES (?, ?, ?, ?) RETURNING id",
+                (slug, display_name, folder, created),
+            ).fetchone()[0]
+    except sqlite3.IntegrityError as exc:
+        raise CampaignError(_integrity_code(exc), str(exc)) from None
+    try:
+        campaign_folders.ensure_folder(cid, data_dir=data_dir, output_dir=output)
+    except (campaign_folders.FolderTakenError, OSError):
+        pass  # claimed on first write
+    return Campaign(slug=slug, display_name=display_name, created=created[:10], members={},
+                    id=cid, folder=folder)
+
+
+def _integrity_code(exc: sqlite3.IntegrityError) -> str:
+    """Map a campaign write's ``IntegrityError`` to a campaign table code."""
+    text = str(exc)
+    if "slug" in text:
+        return "slug_taken"
+    return "taken"
 
 
 def delete_campaign(slug: str, *, delete_transcripts: bool = False,
-                    data_dir: Optional[Path] = None) -> None:
-    """Delete a campaign and its roster and order. Raises KeyError if not found.
+                    data_dir: Optional[Path] = None,
+                    output_dir: Optional[Path] = None) -> DeleteOutcome:
+    """Delete a campaign and handle its folder. Raises KeyError if not found.
 
-    Profiles are untouched. By default the campaign's transcripts stay,
-    unassigned, and so does its journal file: the journal's ``files`` row goes
-    with the campaign, so ``file_registry.sync`` lists the file as unclaimed.
+    Both ways first refuse while a job is pending or running for the campaign
+    (``busy``). With ``delete_transcripts`` each session goes through
+    ``transcript_store.delete_transcript``; a session whose ``.md`` can't be
+    deleted (held open) stops the delete and the campaign stays with what's
+    left (``kept``). Otherwise each session moves to the output root (a clash
+    becomes ``<name> (2)``); any session that can't move stops the delete
+    (``kept``). Only an empty campaign is deleted, so a session left behind
+    keeps the campaign and its folder.
 
-    With ``delete_transcripts``, each transcript goes through
-    ``transcript_store.delete_transcript`` (row, files, speakers, search
-    entries), then the campaign and its journal file. A transcript whose
-    ``.md`` can't be deleted (held open on Windows) is kept, unassigned.
+    Delete everything deletes the journal file, then the campaign; a claimed
+    folder is removed only when nothing is left in it. Keep the files leaves
+    the journal file and its folder on disk, untracked; either way a claimed
+    folder left empty is removed. Profiles are untouched.
     """
     from . import file_registry
+    from .job_history import active_jobs
+
+    output = Path(output_dir) if output_dir is not None else get_output_root()
+    with db.transaction(data_dir) as conn:
+        cid = _campaign_id(conn, slug)  # KeyError before anything is deleted
+        ids = [r[0] for r in conn.execute(
+            "SELECT id FROM transcripts WHERE campaign_id = ? ORDER BY position", (cid,))]
+        stems = {r[0]: r[1] for r in conn.execute(
+            "SELECT id, stem FROM transcripts WHERE campaign_id = ?", (cid,))}
+        claimed = bool(conn.execute(
+            "SELECT folder_claimed FROM campaigns WHERE id = ?", (cid,)).fetchone()[0])
+        folder = conn.execute("SELECT folder FROM campaigns WHERE id = ?", (cid,)).fetchone()[0]
+        if active_jobs(conn, campaign_ids={cid}, campaign_slugs={slug}):
+            return DeleteOutcome("busy")
 
     if delete_transcripts:
         from .transcript_store import delete_transcript
 
-        with db.connection(data_dir) as conn:
-            _campaign_id(conn, slug)  # KeyError before anything is deleted
-        for stem in get_transcripts_for_campaign(slug, data_dir):
-            delete_transcript(stem, data_dir=data_dir)
+        kept = []
+        for tid in ids:
+            if delete_transcript(tid, data_dir=data_dir, output_dir=output) == "kept":
+                kept.append(stems[tid])
+                break
+        if kept:
+            return DeleteOutcome("kept", kept)
+    else:
+        from .transcript_store import move_transcript
+
+        kept = []
+        for tid in ids:
+            outcome = move_transcript(tid, None, clash="keep_both",
+                                      data_dir=data_dir, output_dir=output)
+            if outcome.status not in ("moved", "unchanged"):
+                kept.append(stems[tid])
+        if kept:
+            return DeleteOutcome("kept", kept)
 
     journal_files: list[Path] = []
-    with db.transaction(data_dir) as conn:
-        cid = _campaign_id(conn, slug)
-        if delete_transcripts:
-            owner = file_registry.Owner("campaign", cid)
-            journal_files = file_registry.paths_for_delete(owner, conn, data_dir=data_dir)
-            if not journal_files:  # a journal file that was never registered
-                from .journal import journal_path
-                path = journal_path(slug, data_dir)
-                if path is not None and path.is_file():
-                    journal_files = [path]
-        conn.execute("DELETE FROM campaigns WHERE id = ?", (cid,))
+    try:
+        with db.transaction(data_dir) as conn:
+            cid = _campaign_id(conn, slug)
+            if delete_transcripts:
+                owner = file_registry.Owner("campaign", cid)
+                journal_files = file_registry.paths_for_delete(owner, conn, data_dir=data_dir,
+                                                               output_dir=output)
+            conn.execute("DELETE FROM campaigns WHERE id = ?", (cid,))
+    except sqlite3.IntegrityError:
+        # A reconcile in another process registered a new .md in the folder.
+        return DeleteOutcome("delete_incomplete")
+
     if journal_files:
         file_registry.unlink_paths(journal_files)
-        for path in journal_files:
-            try:
-                path.parent.rmdir()  # the campaign's folder, if nothing else is in it
-            except OSError:
-                pass
+    if claimed:
+        # Either way an empty folder goes, so re-creating the campaign isn't
+        # refused by a folder wisper left; one holding the journal stays.
+        campaign_folders.rmdir_if_empty(folder, output_dir=output)
+    # A later campaign with this slug must not adopt this one's journal.
+    from .journal import ADOPTED_SUFFIX, _pending_path, legacy_journal_path
+
+    legacy = legacy_journal_path(slug, data_dir)
+    for path in (legacy, _pending_path(legacy), legacy.with_name(legacy.name + ADOPTED_SUFFIX)):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    return DeleteOutcome("deleted")
 
 
 def add_member(
@@ -345,42 +465,6 @@ def lookup_profile_by_discord_id(
 # ---------------------------------------------------------------------------
 
 
-def move_transcript_to_campaign(
-    stem: str, slug: str, data_dir: Optional[Path] = None
-) -> None:
-    """Associate a transcript stem with a campaign, appended at the end.
-
-    Removes it from any other campaign first (one transcript → one campaign;
-    the schema enforces it). A no-op if it's already in this campaign.
-    Raises KeyError if the target campaign slug is not found.
-    """
-    with db.transaction(data_dir) as conn:
-        cid = _campaign_id(conn, slug)
-        tid = _transcript_id(conn, stem)
-        current = conn.execute(
-            "SELECT campaign_id FROM campaign_transcripts WHERE transcript_id = ?", (tid,)
-        ).fetchone()
-        if current is not None and current[0] == cid:
-            return
-        conn.execute("DELETE FROM campaign_transcripts WHERE transcript_id = ?", (tid,))
-        conn.execute(
-            "INSERT INTO campaign_transcripts (transcript_id, campaign_id, position) "
-            "VALUES (?, ?, (SELECT coalesce(max(position), -1) + 1 FROM campaign_transcripts "
-            "WHERE campaign_id = ?))",
-            (tid, cid, cid),
-        )
-
-
-def remove_transcript_from_campaign(stem: str, data_dir: Optional[Path] = None) -> None:
-    """Disassociate a transcript stem from whichever campaign it belongs to (no-op if none)."""
-    with db.transaction(data_dir) as conn:
-        conn.execute(
-            "DELETE FROM campaign_transcripts WHERE transcript_id = "
-            "(SELECT id FROM transcripts WHERE stem = ?)",
-            (_nfc(stem),),
-        )
-
-
 def reorder_campaign_transcript(
     slug: str, stem: str, direction: str, data_dir: Optional[Path] = None
 ) -> None:
@@ -410,7 +494,7 @@ def reorder_campaign_transcript(
         swap_idx = idx - 1 if direction == "up" else idx + 1
         if 0 <= swap_idx < len(stems):
             stems[idx], stems[swap_idx] = stems[swap_idx], stems[idx]
-            _write_order(conn, cid, [_transcript_id(conn, s) for s in stems])
+            _write_order(conn, cid, [_transcript_id(conn, cid, s) for s in stems])
 
 
 def set_campaign_transcript_order(
@@ -419,11 +503,11 @@ def set_campaign_transcript_order(
     """Replace a campaign's whole transcript order in one call.
 
     ``order`` must be exactly a permutation of the campaign's current
-    transcripts (same set, no additions/removals) — use
-    ``move_transcript_to_campaign``/``remove_transcript_from_campaign`` to
-    change membership. Bulk counterpart to ``reorder_campaign_transcript``'s
-    single-step move, for fixing a badly-out-of-order campaign (e.g. from
-    the CLI) without many individual up/down calls.
+    transcripts (same set, no additions/removals) — a session joins or leaves a
+    campaign only through ``transcript_store.move_transcript``. Bulk
+    counterpart to ``reorder_campaign_transcript``'s single-step move, for
+    fixing a badly-out-of-order campaign (e.g. from the CLI) without many
+    individual up/down calls.
 
     Raises:
         KeyError: campaign not found.
@@ -438,16 +522,16 @@ def set_campaign_transcript_order(
                 "order must be a permutation of the campaign's current transcripts "
                 f"(got {sorted(order)!r}, expected {sorted(current)!r})"
             )
-        _write_order(conn, cid, [_transcript_id(conn, s) for s in order])
+        _write_order(conn, cid, [_transcript_id(conn, cid, s) for s in order])
 
 
-def get_campaign_for_transcript(stem: str, data_dir: Optional[Path] = None) -> Optional[str]:
-    """Return the slug of the campaign that owns this transcript stem, or None."""
+def get_campaign_for_transcript(transcript_id: int, data_dir: Optional[Path] = None) -> Optional[str]:
+    """Return the slug of the campaign that owns this transcript id, or None."""
     with db.connection(data_dir) as conn:
         row = conn.execute(
-            "SELECT c.slug FROM transcripts t JOIN campaign_transcripts ct ON ct.transcript_id = t.id "
-            "JOIN campaigns c ON c.id = ct.campaign_id WHERE t.stem = ?",
-            (_nfc(stem),),
+            "SELECT c.slug FROM transcripts t JOIN campaigns c ON c.id = t.campaign_id "
+            "WHERE t.id = ?",
+            (transcript_id,),
         ).fetchone()
     return row[0] if row else None
 

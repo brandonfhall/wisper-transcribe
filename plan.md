@@ -8,7 +8,7 @@ Active plans, open bugs, and parked designs. Shipped work is removed; its design
 
 ### Missing transcript file after a successful Transcribe job
 
-A local-recording transcription once reported COMPLETED ("Wrote `<id>.md`") but the file never existed; root cause unknown. **Detection is in place:** the job fails with "Transcript file missing after write" and logs the transcripts folder, and job history keeps that log across restarts. **Next step:** if it recurs, check `/jobs/history` for the job's log and output root; run with `WISPER_DEBUG=1` to capture more (`LIVE_AUDIO_TEST_PLAN.md` §4a). The recording hand-off no longer copies `combined.wav` into the output dir (it reads it in place), so the job's input is `recordings/<id>/combined.wav` and the output is named by `output_stem`.
+A local-recording transcription once reported COMPLETED ("Wrote `<id>.md`") but the file never existed; root cause unknown. **Detection is in place:** the job fails with "Transcript file missing after write" and logs the job's output dir (the transcripts folder, or the campaign's folder in it), and job history keeps that log across restarts. **Next step:** if it recurs, check `/jobs/history` for the job's log and output root; run with `WISPER_DEBUG=1` to capture more (`LIVE_AUDIO_TEST_PLAN.md` §4a). The recording hand-off no longer copies `combined.wav` into the output dir (it reads it in place), so the job's input is `recordings/<id>/combined.wav` and the output is named by `output_stem`.
 
 ### Docker Desktop + native CLI on one data dir can corrupt the DB
 
@@ -34,6 +34,7 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
   - Job history page, filters, paging, and a historical job's page after a restart.
   - Recording end to end: record a few minutes, local and Discord. Add markers, including two in quick succession, and edit the notes mid-session, then stop. After stop, only `combined.wav` and (local) `live_transcript.md` remain; Discord also keeps unbound users' `per-user/<uid>/`. Transcribe it, play it back, and jump to a marker.
   - Search: edit a transcript in Obsidian while the server runs and search for the new words (the result shows "changed — reindexing", then matches after a reload).
+- **Campaign folders, real journal fold:** fold a session into a campaign journal with a real LLM and confirm `<folder> Journal.md` updates in the campaign folder (rehearsals covered it only with a mocked LLM).
 - **macOS loopback.** Record page on a Mac with BlackHole installed: BlackHole appears under System Audio and captures audio.
 
 ---
@@ -47,87 +48,7 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 ## Storage — open
 
 - **Store `combined.wav` as FLAC** (about half the size)? It touches the fixed `recordings/<id>/combined.wav` layout and every reader of it.
-- **Prune old `backups/` snapshots** (keep the newest N)? Small today; it grows with each migration.
 - **Minor:** with an unfrozen schema and `WISPER_OUTPUT_DIR` unset, a CLI command creates the configured output folder (empty) before the dev guard refuses (`path_utils.get_output_dir` mkdir). The server path creates nothing.
-
----
-
-## Campaign folders — transcripts in a folder per campaign (`feat/campaign-folders`, after storage trim)
-
-**Status:** design decisions taken (Brandon, 2026-10-03). It builds on storage trim's `rename_companions`, `audio_path`, and Needs-attention panel.
-
-**Before any work starts (gate, in order):**
-1. **Re-review every decision below against the code as merged** after storage trim: helpers, schema, routes, and anything storage trim changed or learned. Update or drop decisions that no longer fit, and confirm changes with Brandon.
-2. **Write the detailed, worker-ready design**, like storage trim's (`plan.md` at `dc62163`): phases with Read first, Steps, the existing tests to rewrite, new tests, Docs, and Done when.
-3. **Run the three reviews again** on that design and fold in the results:
-   - an Opus reviewer checking correctness and safety against the code;
-   - a Sonnet reviewer walking each phase as the worker who will build it;
-   - a database reviewer checking the migration and schema.
-4. **Brandon approves** the design. Only then does Phase 1 go to a worker.
-
-**Decisions:**
-- A transcript in a campaign lives in `<output root>/<campaign folder>/`. A transcript in no campaign stays in the output root.
-- The campaign folder is named after the campaign's display name. Renaming a campaign renames its folder and updates the database.
-- Moving a transcript to another campaign (or out of all of them) moves its `.md` and every companion file: summary, sidecar, excerpts, and audio.
-- The same transcript name may exist in two campaigns (`A/Session 1.md` and `B/Session 1.md`).
-- A file's location is campaign folder + transcript name. The `files` registry (storage trim Phase 1) stores each file's path, and campaign moves update it through `file_registry.move`.
-- **Dupes:** any move, rename, or upload that would land on an existing file prompts Keep or Overwrite, showing that file's last-modified time.
-- **Renames:** a Rename action in wisper renames the `.md` and its companions together (`rename_companions`), with the same clash prompt.
-
-**Known consequences, for the design pass:**
-- `transcripts.stem` is `UNIQUE` across all transcripts (`db.py:323`), and its CHECK forbids path separators. Uniqueness becomes per campaign, while the campaign lives in `campaign_transcripts`, a separate table. One option is moving `campaign_id` onto `transcripts` with a unique index on `(coalesce(campaign_id, 0), stem)`. Either way it needs a new migration that rebuilds `transcripts`; every table that references it needs care.
-- URLs identify a transcript by name (`/transcripts/{name}`, campaign and journal routes, search deep links). With duplicate names they need the campaign or the row id.
-- 28 path builders in 11 files assume `<output root>/<stem><suffix>`. They go through one location helper.
-- `reconcile()` and `_transcript_files` scan only the output root. They scan campaign folders too, and a file found in a campaign folder that doesn't match its row's campaign is a move to resolve, or a Needs-attention item.
-- Display names may contain characters Windows forbids in folder names, and two display names may map to the same folder name. Sanitizing and uniqueness rules are needed.
-- Obsidian links Brandon typed by name keep working after a move. Links written with a path, or ambiguous names shared by two campaigns, may not.
-- The existing flat output root needs a one-time migration of files into campaign folders: a CLI command with a dry run, like `wisper storage trim`.
-**Database review input (2026-10-03).** Re-check each item at the gate.
-- **Migration number:** v11 (storage trim adds v9, the `files` registry, and v10, which drops `audio_rel_path`).
-- **Rebuilding `transcripts`** relies on `migrate()` running with `foreign_keys=OFF`; otherwise it cascade-deletes speakers, search data, campaign places, journal entries, and `files` rows, and `foreign_key_check` still passes. The v11 upgrade test must seed every child table and assert their row counts are unchanged.
-- **Per-campaign uniqueness:** move `campaign_id` and `position` onto `transcripts` and drop `campaign_transcripts`.
-  - `UNIQUE (campaign_id, stem)`, plus a partial unique index on `stem` for the root (`WHERE campaign_id IS NULL`).
-  - `CHECK ((campaign_id IS NULL) = (position IS NULL))`, `UNIQUE (campaign_id, position)`, and `UNIQUE (campaign_id, id)` as the journal's FK target.
-  - `campaign_id REFERENCES campaigns(id)` with no action (RESTRICT): a campaign's transcripts move out (with the clash prompt) before it's deleted.
-  - Rebuild `journal_entries` to reference `transcripts(campaign_id, id)`. A `BEFORE UPDATE OF campaign_id` trigger deletes the journal entry on a move, which marks the journal stale via `journal_entries_ad`. Pin its ordering with a test.
-- **`campaigns.folder` is stored:** `TEXT NOT NULL COLLATE NOCASE UNIQUE`, with a CHECK forbidding `/ \ : * ? " < > |`, a leading dot, and trailing spaces or dots.
-  - Rename order: `display_name` changes at once; `folder` changes only after the directory rename succeeds (Obsidian or Explorer may hold it open).
-  - v11 seeds `folder` from `slug`. Its import step sets sanitized display names with a frozen sanitizer, de-duplicated with `casefold()`.
-- **Rebuild procedure:** create `X_new`, copy (keeping `id`), `DROP X`, `ALTER TABLE X_new RENAME TO X`. Never rename the old table first: SQLite then rewrites child FKs to point at it.
-  - Recreate the `transcript_titles_*` triggers and run `INSERT INTO transcript_titles(transcript_titles) VALUES('rebuild')`.
-  - All structural changes go in the DDL string, because `expected_schema()` replays only DDL.
-- **`transcripts.id` becomes `INTEGER PRIMARY KEY AUTOINCREMENT`,** so ids are never reused, and URLs key transcripts by id.
-- **`legacy_root` (a flag for files not yet moved into their campaign folder)** is unnecessary only if every path lookup resolves through `files.rel_path` (the `transcript` row is the authoritative `.md` location; storage trim Phase 1). If any helper builds paths from campaign folder + stem instead, it comes back. Decide at the gate: one source of truth for locations.
-- **Code that ships with v11:**
-  - every `campaign_transcripts` query (`campaign_manager`, `journal`, `search_index`, `transcript_store`, `job_history`);
-  - `_purge_recording_files` (`record.py:526`) and every other output-root-only path check: `recording_manager._transcript_id` (`:256`), `search_index.reindex_path` (`:215`), `job_history._subject_ids` (`:82`), and `JobRecord.output_path`. These move to the registry.
-  - `recording_manager._load`'s join on `campaign_transcripts` (storage trim Phase 8) becomes `transcripts.campaign_id`.
-  - A campaign-folder rename rewrites `files.rel_path` by prefix with `substr(rel_path, 1, length(:old) + 1) = :old || '/'`, not GLOB (folder names can contain `[`, `*`, `?`).
-
-**Questions for the gate (second review round, 2026-10-03):**
-1. **One source of truth for locations:** `files.rel_path`, or campaign folder + stem (see `legacy_root` above)?
-2. **Campaign delete:**
-   - `files.campaign_id` (v9) cascades, but v11 makes `transcripts.campaign_id` RESTRICT; reconcile the two;
-   - storage trim Phase 2's Delete everything / Keep the files choice must also move or delete the campaign folder;
-   - does the journal live in the data dir or in the campaign folder?
-3. **URLs:** `/transcripts/{id}`; what happens to old stem URLs, search deep links, and Obsidian links.
-4. **`process_file` must know the campaign before writing,** so the `.md` lands in the right folder. Define the CLI behaviour too.
-5. **Folder names:**
-   - Windows rules: reserved names (CON, PRN, AUX, NUL, COM1–9, LPT1–9), trailing dots and spaces, MAX_PATH (260) with long names;
-   - Unicode case folding (`COLLATE NOCASE` folds ASCII only);
-   - what to do when the output root already holds a user folder with that name. Never adopt or rename a folder wisper didn't create.
-6. **Folder renames on Windows** fail while any file inside is open, including by the search indexer. They need retry, plus a crash rule between the directory rename and the `rel_path` update. A per-file campaign move isn't atomic across N files either.
-7. **Refuse moves** while a job targets that transcript.
-8. **"Overwrite" on a clash** never replaces a file wisper doesn't own (no `files` row).
-9. **Vault clutter:** companions (excerpts, `_diar.json`, `.flac`, `.bak`) sit in each campaign folder. Consider a hidden `.wisper/` subfolder.
-10. **Scanning:** reconcile's scanning depth; whether the size/mtime rename match also detects cross-folder moves.
-11. **Moving existing files:** the flat-to-folders command (dry run, rollback, and its order relative to `wisper storage trim`).
-12. **Every flat-root check** must move to the location helper: `pipeline._under_output_root` (707–712), `campaigns.py` `_transcript_missing`/`summarized` (~89–104), `transcribe._existing_transcript`/`name_check`, `search_index.check_freshness`/`_paths`, `find_excerpt_clip`, `link_transcript`/`_transcript_id`, and every stem-keyed API.
-13. **Case sensitivity across moves:** a data dir moved between case-insensitive (Windows, macOS) and case-sensitive (Linux) filesystems. Should per-campaign stem uniqueness ignore case?
-14. **Storage trim's flat-root assumptions** must all change: `_v9_import`'s "contains `/`" skip; `sync`'s top-level-only scan; the basename-only Needs-attention routes and `_companion_stem`; Phase 6's orphan rule; Phase 7's audio-route guard.
-15. **`files` CHECKs:** `(root = 'output') = (transcript_id IS NOT NULL)` and the `journal` path pin forbid a journal inside a campaign folder. Changing them means rebuilding `files` in v11 (Q2 decides).
-16. **`campaigns.folder` renames:** rewrite `files.rel_path` by trigger (like `files_profile_key_au`) or by code?
-17. **CLI:** do `wisper transcribe --campaign` and folder runs (`_folder_output_path`, `pipeline.py:717`) write into campaign folders?
 
 ---
 
@@ -519,13 +440,13 @@ Nothing else changes; the wire protocol is the stable interface.
 
 ## Campaign-level LLM summaries (DM tools)
 
-The rolling campaign journal sets the pattern: slug-scoped storage under `campaigns/<slug>/`, `.summary.md` discovery via `unjournalled_sessions()`, and `JobQueue.submit_journal` / `_run_journal_job` as the template for new `JOB_CAMPAIGN_*` types on the standard SSE progress page. All three features below read the same `.summary.md` sidecars (`SummaryNote` already carries loot, NPCs, and follow-ups). Campaigns with no summarized sessions hide or disable the buttons.
+The rolling campaign journal sets the pattern: storage in the campaign's folder beside the journal (`<folder> Combined Summary.md`, `<folder> Recap.md`), registered as `files` rows owned by the campaign (new `files.kind` values in this plan's migration; a campaign folder rename then carries them, since it rewrites every row under the folder), `.summary.md` discovery via `unjournalled_sessions()`, and `JobQueue.submit_journal` / `_run_journal_job` as the template for new `JOB_CAMPAIGN_*` types on the standard SSE progress page. All three features below read the same `.summary.md` sidecars (`SummaryNote` already carries loot, NPCs, and follow-ups). Campaigns with no summarized sessions hide or disable the buttons.
 
 **Build on the database:** the transcript registry and `journal_entries`, not stem lists or frontmatter. Combined-summary and recap outputs get their own table with FKs to the campaign (and the sessions they cover), so deletes cascade; add it as a new migration and extend `test_schema.py`. The search index could cover them too (a new `search_index_state.kind`).
 
 ### 1. Combined summary
 
-One LLM call over every session summary in a campaign → `campaigns/<slug>/combined_summary.md`. For retrospectives, onboarding a player, or a campaign wiki. ~20 sessions ≈ 20k input tokens; at 50+ the rolling journal is the better tool. Entry point: "Generate combined summary" on the Campaign page, with a warning at high session counts.
+One LLM call over every session summary in a campaign → `<folder> Combined Summary.md` in the campaign folder. For retrospectives, onboarding a player, or a campaign wiki. ~20 sessions ≈ 20k input tokens; at 50+ the rolling journal is the better tool. Entry point: "Generate combined summary" on the Campaign page, with a warning at high session counts.
 
 ### 2. "Previously on…" recap
 

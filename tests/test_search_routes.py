@@ -8,8 +8,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from wisper_transcribe import search_index as si, transcript_store as ts
-from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+from wisper_transcribe.campaign_manager import create_campaign
 from wisper_transcribe.path_utils import get_output_dir
+
+from . import _seed
 
 from .test_search_index import SUMMARY, TRANSCRIPT, _bump
 
@@ -33,8 +35,14 @@ def _add(out: Path, stem: str, text: str = TRANSCRIPT, summary: str | None = Non
     md.write_text(text, encoding="utf-8")
     if summary is not None:
         (out / f"{stem}.summary.md").write_text(summary, encoding="utf-8")
-    ts.register(stem, origin="job")
+    ts.register(md, origin="job")
     return md
+
+
+def _tid(md: Path) -> int:
+    loc = ts.locate_path(md)
+    assert loc is not None, md
+    return loc.id
 
 
 def test_empty_search_page_shows_help_and_sidebar_box(client):
@@ -49,21 +57,23 @@ def test_sidebar_box_on_every_page(client):
 
 
 def test_results_link_to_block_with_query(out, client):
-    _add(out, "Session — 1 (x)", summary=SUMMARY)
+    md = _add(out, "Session — 1 (x)", summary=SUMMARY)
+    tid = _tid(md)
     r = client.get("/search", params={"q": "strahd"})
     assert r.status_code == 200
     assert r.text.count('data-testid="search-group"') == 1
     assert "<mark>Strahd</mark>" in r.text
-    assert '/transcripts/Session%20%E2%80%94%201%20%28x%29?q=strahd#b-0' in r.text
-    assert '/transcripts/Session%20%E2%80%94%201%20%28x%29/summary?q=strahd#s-1' in r.text
+    assert f'/transcripts/{tid}?q=strahd#b-0' in r.text
+    assert f'/transcripts/{tid}/summary?q=strahd#s-1' in r.text
     assert "00:05" in r.text and "Alice" in r.text
 
 
 def test_title_hit_links_to_the_transcript_top(out, client):
-    _add(out, "Cumstone - Year One")
+    md = _add(out, "Cumstone - Year One")
+    tid = _tid(md)
     page = client.get("/search", params={"q": "cumstone"}).text
     assert "TITLE" in page
-    assert 'href="/transcripts/Cumstone%20-%20Year%20One?q=cumstone"' in page
+    assert f'href="/transcripts/{tid}?q=cumstone"' in page
     assert "<mark>Cumstone</mark>" in page
 
 
@@ -71,6 +81,16 @@ def test_query_with_ampersand_is_encoded_in_links(out, client):
     _add(out, "s1")
     r = client.get("/search", params={"q": "strahd & castle"})
     assert "?q=strahd%20%26%20castle#b-0" in r.text
+
+
+def test_search_hit_links_use_the_transcript_id(out, client):
+    """A hit links `/transcripts/<id>` (and `…/summary`), not the stem."""
+    md = _add(out, "Session — 1 (x)", summary=SUMMARY)
+    tid = ts.locate_path(md).id
+    r = client.get("/search", params={"q": "strahd"})
+    assert f'/transcripts/{tid}?q=strahd#b-0' in r.text
+    assert f'/transcripts/{tid}/summary?q=strahd#s-1' in r.text
+    assert "/transcripts/Session" not in r.text
 
 
 def test_xss_in_query_and_text_is_escaped(out, client):
@@ -85,7 +105,7 @@ def test_filters_and_unknown_values_ignored(out, client):
     _add(out, "s1")
     _add(out, "s2")
     create_campaign("Curse")
-    move_transcript_to_campaign("s1", "curse")
+    _seed.move_to_campaign("s1", "curse")
     r = client.get("/search", params={"q": "strahd", "campaign": "curse"})
     assert r.text.count('data-testid="search-group"') == 1
     assert "Curse" in r.text
@@ -139,35 +159,40 @@ def test_changed_file_shows_reindexing(out, client):
 # ---------------------------------------------------------------------------
 
 def test_transcript_page_has_block_anchors(out, client):
-    _add(out, "s1")
-    html = client.get("/transcripts/s1").text
+    md = _add(out, "s1")
+    tid = _tid(md)
+    html = client.get(f"/transcripts/{tid}").text
     assert re.findall(r'id="(b-\d+)"', html) == ["b-0", "b-1", "b-2"]
     assert "new RegExp" not in html  # no query, no highlight script
 
 
 def test_anchor_numbering_matches_index_without_blank_lines(out, client):
     text = TRANSCRIPT.replace("\n\n**", "\n**")  # blocks on consecutive lines
-    _add(out, "s1", text)
-    html = client.get("/transcripts/s1").text
+    md = _add(out, "s1", text)
+    tid = _tid(md)
+    html = client.get(f"/transcripts/{tid}").text
     assert re.findall(r'id="(b-\d+)"', html) == ["b-0", "b-1", "b-2"]
     assert re.search(r'<span id="b-1" class="block-anchor"[^>]*><strong>Bob</strong>', html)
 
 
 def test_transcript_page_highlight_script_with_query(out, client):
-    _add(out, "s1")
-    html = client.get("/transcripts/s1", params={"q": "fights"}).text
+    md = _add(out, "s1")
+    tid = _tid(md)
+    html = client.get(f"/transcripts/{tid}", params={"q": "fights"}).text
     assert 'new RegExp("\\\\b(?:fight)\\\\w*", "gi")' in html
 
 
 def test_highlight_pattern_cannot_break_out_of_script(out, client):
-    _add(out, "s1")
-    html = client.get("/transcripts/s1", params={"q": '</script><img src=x onerror=alert(1)>'}).text
+    md = _add(out, "s1")
+    tid = _tid(md)
+    html = client.get(f"/transcripts/{tid}", params={"q": '</script><img src=x onerror=alert(1)>'}).text
     assert "<img src=x" not in html
     assert html.count("</script>") == html.count("<script")
 
 
 def test_summary_page_has_section_anchors(out, client):
-    _add(out, "s1", summary=SUMMARY)
-    html = client.get("/transcripts/s1/summary", params={"q": "dagger"}).text
+    md = _add(out, "s1", summary=SUMMARY)
+    tid = _tid(md)
+    html = client.get(f"/transcripts/{tid}/summary", params={"q": "dagger"}).text
     assert re.findall(r'id="(s-\d+)"', html) == ["s-0", "s-1", "s-2"]
     assert "new RegExp" in html

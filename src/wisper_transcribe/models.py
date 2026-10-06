@@ -76,6 +76,9 @@ class Campaign:
     created: str
     members: dict = field(default_factory=dict)       # dict[str, CampaignMember]
     transcripts: list = field(default_factory=list)   # list[str] — transcript stems
+    id: int = 0
+    folder: str = ""                                  # folder name under the output root
+    transcript_ids: list = field(default_factory=list)  # list[int], same order as transcripts
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +133,7 @@ class Recording:
     per_user_dir: Optional[Path]
     transcript_path: Optional[Path]
     rejoin_log: list               # list[RejoinAttempt]
+    transcript_id: Optional[int] = None  # the linked transcript's id, if any
     notes: Optional[str] = None
     unbound_speakers: list = field(default_factory=list)  # discord_user_ids heard but not bound
     job_id: Optional[str] = None  # JobQueue job.id when transcription is in progress or done

@@ -36,7 +36,11 @@ def _isolated_data_dir(tmp_path_factory, monkeypatch):
     """Point WISPER_DATA_DIR at a fresh temp dir so no test reads or writes
     the developer's real data (wisper.db, config, transcripts). Tests that
     need a specific dir still set their own (inner setenv/patch wins)."""
-    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path_factory.mktemp("wisper_data")))
+    data_dir = tmp_path_factory.mktemp("wisper_data")
+    monkeypatch.setenv("WISPER_DATA_DIR", str(data_dir))
+    # The root get_output_root() resolves to while WISPER_OUTPUT_DIR is unset;
+    # wisper never creates it itself.
+    (data_dir / "output").mkdir()
     # A dev shell or CI with WISPER_OUTPUT_DIR set must not leak into tests.
     monkeypatch.delenv("WISPER_OUTPUT_DIR", raising=False)
 

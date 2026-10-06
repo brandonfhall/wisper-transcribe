@@ -15,7 +15,9 @@ Use the two-layer pattern for any URL parameter or form field used in a file pat
 
 `Path.resolve()` on tainted input is **not** sufficient — CodeQL does not recognise it as a sanitiser. Use `os.path.abspath` + `startswith`.
 
-For a transcript or its companions in the output root, use `transcript_store.safe_path(stem, suffix)`. It applies the same two layers and also finds a file whose name is stored NFD on disk (`existing_form()`).
+For a transcript or its companions in the output root, use `transcript_store.safe_path(stem, suffix)`. It applies the same two layers and also finds a file whose name is stored NFD on disk (`existing_form()`). `safe_path` is for building a path inside a directory that is already known (a transcript's own folder).
+
+Transcript routes take a database **id** (`{transcript_id:int}`), not a name, and resolve every path from the database (`transcript_store.locate`). No transcript route builds a path from user input.
 
 ## User input in redirect URLs (CWE-601 Open Redirect)
 Use `_validate_job_id()` (defined in `transcribe.py`) for every job ID that appears in a `RedirectResponse` or `Location` header. For other ID types, apply the same two-layer pattern:

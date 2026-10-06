@@ -18,6 +18,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from . import db
 from .config import EMBEDDING_SPACE, load_config
 
 log = logging.getLogger(__name__)
@@ -174,8 +175,8 @@ def relabel_campaign(
     """
     from .campaign_manager import get_campaign_profile_keys, get_transcripts_for_campaign, load_campaigns
     from .models import DiarizationSegment
-    from .path_utils import get_output_dir
     from .speaker_manager import assign_labels, load_profiles
+    from .transcript_store import find_by_stem
     from .web.enroll_shared import apply_renames, resolve_current_names
 
     def _say(msg: str) -> None:
@@ -186,10 +187,12 @@ def relabel_campaign(
         raise KeyError(slug)
     if threshold is None:
         threshold = float(load_config()["similarity_threshold"])
-    out_dir = Path(output_dir) if output_dir is not None else get_output_dir()
 
     roster = get_campaign_profile_keys(slug, data_dir)
     profiles = {k: p for k, p in load_profiles(data_dir).items() if k in roster}
+
+    with db.connection(data_dir) as conn:
+        cid = conn.execute("SELECT id FROM campaigns WHERE slug = ?", (slug,)).fetchone()[0]
 
     report = RelabelReport()
     entries: list[_Entry] = []
@@ -200,7 +203,11 @@ def relabel_campaign(
         if os.path.basename(stem) != stem or stem in ("", ".", ".."):
             item.skipped = "invalid transcript name"
             continue
-        md_path = out_dir / f"{stem}.md"
+        found = find_by_stem(stem, campaign_id=cid, data_dir=data_dir, output_dir=output_dir)
+        if not found:
+            item.skipped = "no speaker data"
+            continue
+        md_path = found[0].md
         diar = _load_sidecar(md_path) if md_path.exists() else None
         if diar is None or not diar.get("diarization_segments"):
             item.skipped = "no speaker data"

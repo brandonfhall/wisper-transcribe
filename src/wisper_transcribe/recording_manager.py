@@ -112,22 +112,19 @@ def _dt(s: Optional[str]) -> Optional[datetime]:
 
 def _load(conn: sqlite3.Connection, data_dir: Optional[Path],
           where: str = "", params: tuple = ()) -> dict[str, Recording]:
-    from .path_utils import get_output_dir
-
     # recordings.campaign_id is the campaign chosen when recording started, used
     # until a transcript exists; a transcribed recording's campaign is its transcript's.
     rows = conn.execute(
-        "SELECT r.*, c.slug AS campaign_slug, t.stem AS transcript_stem, "
+        "SELECT r.*, c.slug AS campaign_slug, "
         "d.guild_id, d.voice_channel_id, "
         "(SELECT j.id FROM jobs j WHERE j.recording_id = r.id AND j.type = 'transcription' "
         " ORDER BY j.created_at DESC, j.rowid DESC LIMIT 1) AS latest_job_id, "
         "EXISTS (SELECT 1 FROM jobs j WHERE j.recording_id = r.id AND j.type = 'transcription' "
         " AND j.status IN ('pending', 'running')) AS job_active "
         "FROM recordings r "
-        "LEFT JOIN campaign_transcripts ct ON ct.transcript_id = r.transcript_id "
-        "LEFT JOIN campaigns c ON c.id = "
-        "CASE WHEN r.transcript_id IS NOT NULL THEN ct.campaign_id ELSE r.campaign_id END "
         "LEFT JOIN transcripts t ON t.id = r.transcript_id "
+        "LEFT JOIN campaigns c ON c.id = "
+        "CASE WHEN r.transcript_id IS NOT NULL THEN t.campaign_id ELSE r.campaign_id END "
         "LEFT JOIN recording_discord d ON d.recording_id = r.id "
         f"{where} ORDER BY r.rowid",
         params,
@@ -152,12 +149,17 @@ def _load(conn: sqlite3.Connection, data_dir: Optional[Path],
     markers = _children("SELECT * FROM recording_markers WHERE recording_id IN ({marks}) ORDER BY marked_at")
     rejoins = _children("SELECT * FROM recording_rejoins WHERE recording_id IN ({marks}) ORDER BY attempted_at")
 
-    output_dir = get_output_dir() if any(r["transcript_stem"] for r in rows) else None
     recordings: dict[str, Recording] = {}
     for r in rows:
         rid = r["id"]
         started = _dt(r["started_at"])
-        if r["transcript_stem"] is not None:
+        tid = r["transcript_id"]
+        transcript_path = None
+        if tid is not None:
+            from .transcript_store import locate
+            loc = locate(tid, conn=conn)
+            transcript_path = loc.md if loc is not None else None
+        if tid is not None:
             status = "transcribed"
         elif r["capture_status"] == "completed" and r["job_active"]:
             status = "transcribing"
@@ -184,7 +186,8 @@ def _load(conn: sqlite3.Connection, data_dir: Optional[Path],
             ],
             combined_path=combined if has_combined else None,
             per_user_dir=get_recording_dir(rid, data_dir) / "per-user",
-            transcript_path=(output_dir / f"{r['transcript_stem']}.md") if r["transcript_stem"] else None,
+            transcript_path=transcript_path,
+            transcript_id=tid,
             rejoin_log=[
                 RejoinAttempt(timestamp=_dt(j["attempted_at"]), close_code=j["close_code"],
                               attempt_number=j["attempt_number"])
@@ -269,21 +272,6 @@ def _profile_id(conn: sqlite3.Connection, key: str) -> Optional[int]:
     return row[0] if row else None
 
 
-def _transcript_id(conn: sqlite3.Connection, path: Optional[Path]) -> Optional[int]:
-    if path is None:
-        return None
-    import os
-
-    from .path_utils import get_output_dir
-    from .transcript_store import ensure_row
-
-    out = get_output_dir()
-    if os.path.realpath(Path(path).parent) != os.path.realpath(out):
-        log.warning("Recording transcript %s is outside the transcripts folder; not linked", Path(path).name)
-        return None
-    return ensure_row(conn, Path(path).stem, out)
-
-
 def save_recording(recording: Recording, data_dir: Optional[Path] = None) -> None:
     """Persist a recording's own fields; add (never remove) its segment,
     marker, and rejoin rows.
@@ -317,7 +305,7 @@ def save_recording(recording: Recording, data_dir: Optional[Path] = None) -> Non
             "ended_at = excluded.ended_at, "
             "recovered_at = coalesce(excluded.recovered_at, recordings.recovered_at)",
             (rec.id, rec.source, rec.name, rec.notes, campaign_id,
-             _transcript_id(conn, rec.transcript_path), capture,
+             rec.transcript_id, capture,
              _ts(rec.started_at), ended, recovered),
         )
         if rec.source == "discord":
@@ -760,15 +748,17 @@ def trim_recording_audio(recording_id: str, data_dir: Optional[Path] = None) -> 
     return freed
 
 
-def link_transcript(recording_id: str, transcript_path: Path,
+def link_transcript(recording_id: str, transcript_id: int,
                     data_dir: Optional[Path] = None) -> None:
-    """Record that ``transcript_path`` is this recording's transcript (it then
-    reads as ``transcribed``). A transcript can belong to one recording."""
+    """Record that transcript ``transcript_id`` is this recording's transcript
+    (it then reads as ``transcribed``). A transcript can belong to one recording."""
     with db.transaction(data_dir) as conn:
-        tid = _transcript_id(conn, Path(transcript_path))
+        row = conn.execute("SELECT id FROM transcripts WHERE id = ?", (transcript_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"No transcript with id {transcript_id}")
         conn.execute("UPDATE recordings SET transcript_id = NULL WHERE transcript_id = ? AND id <> ?",
-                     (tid, recording_id))
-        conn.execute("UPDATE recordings SET transcript_id = ? WHERE id = ?", (tid, recording_id))
+                     (transcript_id, recording_id))
+        conn.execute("UPDATE recordings SET transcript_id = ? WHERE id = ?", (transcript_id, recording_id))
 
 
 def delete_recording(recording_id: str, data_dir: Optional[Path] = None) -> None:

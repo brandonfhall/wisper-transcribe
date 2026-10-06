@@ -15,25 +15,36 @@ from urllib.parse import quote
 log = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Request
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 from wisper_transcribe.campaign_manager import (
     _validate_campaign_slug,
     get_campaign_for_transcript,
     load_campaigns,
-    move_transcript_to_campaign,
-    remove_transcript_from_campaign,
 )
-from wisper_transcribe.config import get_data_dir
-from wisper_transcribe import file_registry
+from wisper_transcribe.config import get_data_dir, get_output_root
+from wisper_transcribe import db as _db, file_registry
 from wisper_transcribe.recording_manager import load_recordings, recording_for_transcript
 
 from . import templates
-from wisper_transcribe.path_utils import get_output_dir
 from wisper_transcribe import transcript_store
 from wisper_transcribe.web._responses import invalid_input_response
 
 router = APIRouter(prefix="/transcripts")
+
+
+db_connection = _db.connection
+
+
+def _as_basename(value: object) -> Optional[str]:
+    """A single path component, or None when it names a path or is empty."""
+    name = str(value)
+    if not name or "\x00" in name or "\\" in name or ":" in name:
+        return None
+    if os.path.basename(name) != name or name in {".", ".."}:
+        return None
+    return name
 
 
 class _HtmlSanitizer(HTMLParser):
@@ -152,15 +163,13 @@ def _anchor_blocks(body: str) -> str:
 _AUDIO_TYPES = {".wav": "audio/wav", ".flac": "audio/flac"}
 
 
-def _playback(md_path: Path, name: str) -> tuple[str | None, list[dict]]:
+def _playback(loc: transcript_store.Located) -> tuple[str | None, list[dict]]:
     """The audio URL for the player (None without audio) and, for a transcript
     made from a recording, that recording's markers as ``{label, seconds}``."""
-    out_dir = get_output_dir()
-    if transcript_store.audio_path(md_path, output_dir=out_dir) is None:
+    if transcript_store.audio_path(loc.md, output_dir=get_output_root()) is None:
         return None, []
-    audio_url = f"/transcripts/{quote(name)}/audio"
-    owner = file_registry.Owner.for_stem(md_path.stem, output_dir=out_dir)
-    rec = recording_for_transcript(owner.id) if owner else None
+    audio_url = f"/transcripts/{loc.id}/audio"
+    rec = recording_for_transcript(loc.id)
     markers = []
     for marker in (rec.markers if rec else []):
         secs = int(marker.elapsed_s)
@@ -190,50 +199,138 @@ def _highlight(q: str) -> str | None:
     return pattern.pattern if pattern else None
 
 
-def _get_safe_content_path(name: str, suffix: str) -> Path | None:
-    """Resolve and sanitize a transcript output path, mitigating path traversal.
+def _located_or_redirect(transcript_id: int) -> "transcript_store.Located | RedirectResponse":
+    """The :class:`Located` for ``transcript_id``, or a 303 to the list page.
 
-    `suffix` is the file extension to append, e.g. ".md" or ".summary.md".
+    A row that doesn't exist redirects; a row flagged missing is returned so
+    the caller renders its missing state (the ``.md`` is gone).
     """
-    if not name or "\x00" in name:
+    loc = transcript_store.locate(transcript_id)
+    if loc is None:
+        return RedirectResponse(url="/transcripts?error=not_found", status_code=303)
+    return loc
+
+
+def _form_transcript_id(value: object) -> Optional[int]:
+    """A transcript id posted in a form, or None when it isn't a whole number."""
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
         return None
 
-    safe_name = os.path.basename(name)
-    if safe_name != name or safe_name in {".", ".."}:
+
+def _parse_transcript_ids(values: list) -> list[int]:
+    """The valid transcript ids among ``values``; malformed entries are dropped."""
+    ids = []
+    for value in values:
+        tid = _form_transcript_id(value)
+        if tid is not None:
+            ids.append(tid)
+    return ids
+
+
+#: The fixed ``?error=`` code for each refused move or rename status.
+_MOVE_ERROR_CODES = {
+    "invalid": "invalid_name",
+    "busy": "busy",
+    "folder_taken": "folder_taken",
+    "unavailable": "output_unavailable",
+    "reserved": "reserved",
+    "locked": "locked",
+}
+
+
+def _move_error_code(outcome: "transcript_store.MoveOutcome") -> str:
+    """The ``?error=`` code for a refused move or rename."""
+    if outcome.status == "folder_taken" and outcome.detail in ("folder_pending", "folder_missing"):
+        return "rename_pending" if outcome.detail == "folder_pending" else "folder_missing"
+    return _MOVE_ERROR_CODES.get(outcome.status, "move_failed")
+
+
+def _move_outcome_redirect(tid: int, outcome: "transcript_store.MoveOutcome", *,
+                           page: Optional[str] = None) -> RedirectResponse:
+    """Map a move/rename outcome to a redirect (the status table's route column)."""
+    page = page or f"/transcripts/{tid}"
+    if outcome.status in ("moved", "unchanged"):
+        return RedirectResponse(url=page, status_code=303)
+    if outcome.status == "partial":
+        return RedirectResponse(url=f"{page}?notice=partial_move", status_code=303)
+    return RedirectResponse(url=f"{page}?error={_move_error_code(outcome)}", status_code=303)
+
+
+def _move_clash_redirect(tid: int, target_slug: Optional[str]) -> RedirectResponse:
+    """The clash page for a move, with the target slug taken from the database row."""
+    if target_slug:
+        return RedirectResponse(
+            url=f"/transcripts/{tid}?clash=move&to={quote(target_slug, safe='')}", status_code=303)
+    return RedirectResponse(url=f"/transcripts/{tid}?clash=move", status_code=303)
+
+
+def _clash_context(loc: "transcript_store.Located", request: Request) -> Optional[dict]:
+    """The clash panel for ``?clash=move`` / ``?clash=rename``, recomputed server-side.
+
+    The query string only names a campaign slug or a new name; both are validated
+    here and the clash is recomputed with the pure :func:`check_move`, so nothing
+    from the URL builds a path or a link. Returns None unless it is a real clash.
+    """
+    kind = request.query_params.get("clash")
+    if kind not in ("move", "rename"):
         return None
-
-    out_dir = get_output_dir().resolve()
-
-    base_dir = os.path.abspath(str(out_dir))
-    if not base_dir.endswith(os.sep):
-        base_dir += os.sep
-
-    target_path = os.path.abspath(os.path.join(str(out_dir), f"{safe_name}{suffix}"))
-    if not target_path.startswith(base_dir):
+    if kind == "move":
+        raw = request.query_params.get("to", "").strip()
+        target_slug = _validate_campaign_slug(raw) if raw else None
+        if raw and target_slug is None:
+            return None
+        check = transcript_store.check_move(loc.id, target_slug)
+        if check.status != "clash":
+            return None
+        campaign = load_campaigns().get(target_slug) if target_slug else None
+        return {
+            "kind": "move",
+            "to": campaign.slug if campaign else "",
+            "target_name": campaign.display_name if campaign else "Uncategorized",
+            "name": "",
+            "modified": check.clash_modified,
+            "overwrite_allowed": check.overwrite_allowed,
+        }
+    cleaned = transcript_store.validate_new_stem(request.query_params.get("name", ""))
+    if cleaned is None:
         return None
-    # Only a path already inside the base is probed on disk; re-checked after.
-    target_path = transcript_store.existing_form(target_path)
-    if not target_path.startswith(base_dir):
+    current_slug = get_campaign_for_transcript(loc.id)
+    check = transcript_store.check_move(loc.id, current_slug, new_stem=cleaned)
+    if check.status != "clash":
         return None
+    return {
+        "kind": "rename",
+        "to": "",
+        "target_name": "",
+        "name": check.stem,
+        "modified": check.clash_modified,
+        "overwrite_allowed": check.overwrite_allowed,
+    }
 
-    return Path(target_path)
+
+def _misplaced_note(loc: "transcript_store.Located") -> Optional[dict]:
+    """Where a misplaced session's files are, and the folder they belong in."""
+    if not loc.misplaced:
+        return None
+    root = get_output_root()
+    where = ("the transcripts folder's root"
+             if transcript_store._dirs_equal(loc.dir, root, loc.fold) else loc.dir.name)
+    return {"where": where, "target": loc.expected_dir.name}
 
 
 @router.get("/partials/recent", response_class=HTMLResponse)
 async def recent_transcripts_partial(request: Request) -> HTMLResponse:
     """HTMX partial: 6 most recent transcripts for the dashboard archive section."""
-    out_dir = get_output_dir()
-    files = sorted(
-        [f for f in out_dir.glob("*.md") if not f.name.endswith(".summary.md")],
-        key=lambda f: f.stat().st_mtime,
-        reverse=True,
-    )[:6]
+    found = transcript_store.list_transcripts()[:6]
     items = []
-    for f in files:
-        meta, _ = _parse_frontmatter(f.read_text(encoding="utf-8"))
+    for loc in found:
+        meta, _ = _parse_frontmatter(loc.md.read_text(encoding="utf-8"))
         items.append({
-            "stem": f.stem,
-            "title": meta.get("title", f.stem),
+            "id": loc.id,
+            "stem": loc.stem,
+            "title": meta.get("title", loc.stem),
             "duration": meta.get("duration", ""),
             "date_processed": meta.get("date_processed", ""),
         })
@@ -267,36 +364,25 @@ def _pending_recordings(data_dir: Path) -> tuple[list, set[str]]:
 
 @router.get("", response_class=HTMLResponse)
 async def transcripts_list(request: Request) -> HTMLResponse:
-    out_dir = get_output_dir()
-    transcript_store.reconcile(out_dir, sync="throttled")  # register new files, flag deleted ones
-    # Exclude .summary.md sidecars — they are shown via the transcript detail page
-    files = sorted(
-        [f for f in out_dir.glob("*.md") if not f.name.endswith(".summary.md")],
-        key=lambda f: f.stat().st_mtime,
-        reverse=True,
-    )
+    out_dir = get_output_root()
+    transcript_store.reconcile(out_dir, sync="throttled", blocking=False)
 
     campaigns = load_campaigns()
-
-    # Build stem → campaign slug mapping
-    stem_to_campaign: dict[str, str] = {}
-    for slug, c in campaigns.items():
-        for stem in c.transcripts:
-            stem_to_campaign[stem] = slug
+    campaign_slug_by_id = {c.id: slug for slug, c in campaigns.items()}
 
     items = []
-    for f in files:
-        meta, _ = _parse_frontmatter(f.read_text(encoding="utf-8"))
-        summary_file = f.with_name(f"{f.stem}.summary.md")
+    for loc in transcript_store.list_transcripts(output_dir=out_dir):
+        meta, _ = _parse_frontmatter(loc.md.read_text(encoding="utf-8"))
         items.append({
-            "stem": f.stem,
-            "name": f.name,
-            "title": meta.get("title", f.stem),
+            "id": loc.id,
+            "stem": loc.stem,
+            "name": loc.md.name,
+            "title": meta.get("title", loc.stem),
             "date_processed": meta.get("date_processed", ""),
             "duration": meta.get("duration", ""),
             "speakers": meta.get("speakers", []),
-            "has_summary": summary_file.exists(),
-            "campaign_slug": stem_to_campaign.get(f.stem),
+            "has_summary": loc.companion(".summary.md").exists(),
+            "campaign_slug": campaign_slug_by_id.get(loc.campaign_id),
         })
 
     pending_recordings, live_draft_ids = _pending_recordings(get_data_dir())
@@ -309,7 +395,6 @@ async def transcripts_list(request: Request) -> HTMLResponse:
             "request": request,
             "transcripts": items,
             "campaigns": campaigns,
-            "stem_to_campaign": stem_to_campaign,
             "pending_recordings": pending_recordings,
             "live_draft_ids": live_draft_ids,
             "attention": attention,
@@ -318,8 +403,10 @@ async def transcripts_list(request: Request) -> HTMLResponse:
     )
 
 
-def _attention_context(out_dir: Path) -> Optional[dict]:
+def _attention_context(out_dir: "Path | None") -> Optional[dict]:
     """The Needs attention panel's data, or None when there is nothing to show."""
+    if out_dir is None:
+        out_dir = get_output_root()
     try:
         found = transcript_store.needs_attention(out_dir)
     except Exception:
@@ -328,20 +415,37 @@ def _attention_context(out_dir: Path) -> Optional[dict]:
     if not found.total:
         return None
     base = os.path.abspath(str(out_dir))
-    data_base = os.path.abspath(str(get_data_dir()))
     unclaimed = []
     for path in found.unclaimed:
         try:
             st = path.stat()
         except OSError:
             continue
-        in_output = os.path.dirname(os.path.abspath(path)) == base
+        rel = os.path.relpath(os.path.abspath(path), base)
+        in_output = os.sep not in rel
+        # Only a scanned directory's file with a recognised companion name may
+        # be deleted here; anything else is listed only.
+        deletable = (transcript_store._companion_stem(path.name) is not None
+                     and (in_output or rel.split(os.sep)[0] in _campaign_folder_names()))
         unclaimed.append({
-            "name": path.name if in_output else os.path.relpath(path, data_base),
+            "name": path.name if in_output else rel.replace(os.sep, "/"),
             "size": st.st_size,
             "modified": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
-            # Only an output-root file with a recognised companion name may be deleted here.
-            "deletable": in_output and transcript_store._companion_stem(path.name) is not None,
+            "deletable": deletable,
+        })
+    campaigns = load_campaigns()
+    campaign_name = {c.id: c.display_name for c in campaigns.values()}
+    misplaced = []
+    for loc in found.misplaced:
+        try:
+            where = os.path.relpath(os.path.abspath(loc.dir), base).replace(os.sep, "/")
+        except ValueError:
+            where = str(loc.dir)
+        misplaced.append({
+            "id": loc.id,
+            "stem": loc.stem,
+            "campaign": campaign_name.get(loc.campaign_id),
+            "dir": where,
         })
     return {
         "missing_transcripts": found.missing_transcripts,
@@ -349,27 +453,36 @@ def _attention_context(out_dir: Path) -> Optional[dict]:
             {"id": r.id, "name": r.rel_path, "kind": r.kind} for r in found.missing_files
         ],
         "unclaimed": unclaimed,
+        "misplaced": misplaced,
+        "pending_folders": found.pending_folders,
+        "folder_taken": found.folder_taken,
+        "legacy_journals": found.legacy_journals,
+        "missing_folders": found.missing_folders,
     }
+
+
+def _campaign_folder_names() -> set[str]:
+    """Current campaign folder names, for validating a two-part delete path."""
+    return {c.folder for c in load_campaigns().values()}
 
 
 @router.post("/bulk-delete", response_class=HTMLResponse)
 async def bulk_delete_transcripts(request: Request) -> HTMLResponse:
     """Delete multiple transcripts (and their summary sidecars) in one request."""
     form = await request.form()
-    stems = form.getlist("stems")
-    for stem in stems:
-        md_path = _get_safe_content_path(stem, ".md")
-        if not md_path:
-            continue
-        transcript_store.delete_transcript(md_path.stem, output_dir=md_path.parent)
+    for tid in _parse_transcript_ids(form.getlist("transcript_id")):
+        transcript_store.delete_transcript(tid)
     return HTMLResponse(content="", status_code=303, headers={"Location": "/transcripts"})
 
 
 @router.post("/bulk-campaign", response_class=HTMLResponse)
 async def bulk_assign_campaign(request: Request) -> HTMLResponse:
-    """Assign or remove a campaign for multiple transcripts in one request."""
+    """Move multiple transcripts to a campaign in one request.
+
+    A clashing session stays where it is and is counted as skipped; a busy
+    session is counted as busy. The counts (ints) go in the redirect.
+    """
     form = await request.form()
-    stems = form.getlist("stems")
     campaign = str(form.get("campaign", "")).strip()
 
     safe_slug: "Optional[str]" = None
@@ -381,31 +494,40 @@ async def bulk_assign_campaign(request: Request) -> HTMLResponse:
                 headers={"Location": "/transcripts?error=invalid_campaign"},
             )
 
-    for stem in stems:
-        path = _get_safe_content_path(stem, ".md")
-        if path is None:
-            continue
+    moved = skipped = busy = 0
+    for tid in _parse_transcript_ids(form.getlist("transcript_id")):
         try:
-            if safe_slug:
-                move_transcript_to_campaign(path.stem, safe_slug)
-            else:
-                remove_transcript_from_campaign(path.stem)
+            outcome = await run_in_threadpool(
+                transcript_store.move_transcript, tid, safe_slug, clash="skip")
         except Exception:
-            pass
+            skipped += 1
+            continue
+        if outcome.status in ("moved", "unchanged", "partial"):
+            moved += 1
+        elif outcome.status == "busy":
+            busy += 1
+        else:
+            skipped += 1
 
-    return HTMLResponse(content="", status_code=303, headers={"Location": "/transcripts"})
+    return HTMLResponse(
+        content="", status_code=303,
+        headers={"Location": f"/transcripts?moved={moved}&skipped={skipped}&busy={busy}"},
+    )
 
 
 @router.post("/relink", response_class=HTMLResponse)
 async def relink_transcript(request: Request) -> RedirectResponse:
     """Give a missing transcript's identity (and companion files) to a renamed file."""
     form = await request.form()
-    old_md = _get_safe_content_path(str(form.get("old_stem", "")), ".md")
-    new_md = _get_safe_content_path(str(form.get("new_stem", "")), ".md")
-    if old_md is None or new_md is None:
+    old_id = _form_transcript_id(form.get("old_id"))
+    new_id = _form_transcript_id(form.get("new_id"))
+    if old_id is None or new_id is None:
+        return RedirectResponse(url="/transcripts?error=relink_failed", status_code=303)
+    new_loc = transcript_store.locate(new_id)
+    if new_loc is None:
         return RedirectResponse(url="/transcripts?error=relink_failed", status_code=303)
     try:
-        kept = transcript_store.relink(old_md.stem, new_md.stem, output_dir=old_md.parent)
+        kept = transcript_store.relink(old_id, new_loc.md)
     except (KeyError, ValueError):
         return RedirectResponse(url="/transcripts?error=relink_failed", status_code=303)
     notice = "?notice=relink_kept_names" if kept else ""
@@ -415,14 +537,12 @@ async def relink_transcript(request: Request) -> RedirectResponse:
 @router.post("/needs-attention/forget", response_class=HTMLResponse)
 async def forget_missing_file(request: Request) -> HTMLResponse:
     """Drop the record of a registered file that is gone from disk."""
-    from wisper_transcribe import file_registry
-
     form = await request.form()
     try:
         file_id = int(str(form.get("file_id", "")))
     except ValueError:
         return invalid_input_response("Invalid file id")
-    out_dir = get_output_dir()
+    out_dir = get_output_root()
     report = file_registry.last_report(None, out_dir)
     row = next((r for r in report.missing if r.id == file_id), None) if report else None
     # Only a row the latest sync reported missing whose file is still gone.
@@ -435,32 +555,91 @@ async def forget_missing_file(request: Request) -> HTMLResponse:
 
 @router.post("/needs-attention/delete-file", response_class=HTMLResponse)
 async def delete_unclaimed_file(request: Request) -> HTMLResponse:
-    """Delete an output-root file with a companion-file name that nothing owns."""
+    """Delete an unowned file with a companion-file name in a scanned directory.
+
+    ``name`` is ``<file>`` or ``<folder>/<file>``; each component is a plain
+    name (no separator, colon, or NUL), and ``<folder>`` must be a current
+    campaign's folder. ``delete_unowned_file`` re-checks the directory.
+    """
     form = await request.form()
-    name = str(form.get("name", ""))
-    safe_name = os.path.basename(name)
-    if (not name or "\x00" in name or safe_name != name or safe_name in {".", ".."}
-            or transcript_store._companion_stem(safe_name) is None):
+    parts = str(form.get("name", "")).split("/")
+    if len(parts) == 1:
+        safe_name = _as_basename(parts[0])
+        folder = None
+    elif len(parts) == 2:
+        folder, safe_name = _as_basename(parts[0]), _as_basename(parts[1])
+        if folder is None or folder not in _campaign_folder_names():
+            return invalid_input_response("Invalid file name")
+    else:
         return invalid_input_response("Invalid file name")
-    out_dir = get_output_dir()
-    base = os.path.abspath(str(out_dir))
-    if not base.endswith(os.sep):
-        base += os.sep
-    target = os.path.abspath(os.path.join(base, safe_name))
-    if not target.startswith(base):
+    if safe_name is None or transcript_store._companion_stem(safe_name) is None:
         return invalid_input_response("Invalid file name")
+    out_dir = get_output_root()
+    target = out_dir / (safe_name if folder is None else f"{folder}/{safe_name}")
     if not transcript_store.delete_unowned_file(Path(target), output_dir=out_dir):
         return RedirectResponse(url="/transcripts?error=delete_failed", status_code=303)
     return RedirectResponse(url="/transcripts", status_code=303)
 
 
-@router.get("/{name}", response_class=HTMLResponse)
-async def transcript_detail(request: Request, name: str, q: str = "") -> HTMLResponse:
-    md_path = _get_safe_content_path(name, ".md")
-    if not md_path:
-        return invalid_input_response("Invalid name")
-    if not md_path.exists():
+@router.post("/needs-attention/claim-folder", response_class=HTMLResponse)
+async def claim_taken_folder(request: Request) -> HTMLResponse:
+    """Claim an existing non-empty folder as the campaign's, for "Use this folder".
+
+    Only a folder-taken campaign qualifies: it exists, wisper doesn't own it,
+    and no rename is pending. The next reconcile registers its `.md` files.
+    """
+    from wisper_transcribe import campaign_folders
+    from wisper_transcribe.config import get_output_root
+
+    form = await request.form()
+    try:
+        campaign_id = int(str(form.get("campaign_id", "")))
+    except ValueError:
+        return invalid_input_response("Invalid campaign id")
+    with db_connection() as conn:
+        row = conn.execute(
+            "SELECT folder, folder_pending, folder_claimed FROM campaigns WHERE id = ?",
+            (campaign_id,),
+        ).fetchone()
+    if row is None or row["folder_pending"] is not None or row["folder_claimed"]:
+        return RedirectResponse(url="/transcripts?error=not_found", status_code=303)
+    folder = get_output_root() / row["folder"]
+    if not folder.is_dir() or campaign_folders.holds_only_wisper(folder, row["folder"]):
+        return RedirectResponse(url="/transcripts?error=not_found", status_code=303)
+    try:
+        campaign_folders.claim_folder(campaign_id)
+    except (KeyError, campaign_folders.FolderPendingError):
+        return RedirectResponse(url="/transcripts?error=not_found", status_code=303)
+    return RedirectResponse(url="/transcripts", status_code=303)
+
+
+@router.post("/needs-attention/recreate-folder", response_class=HTMLResponse)
+async def recreate_missing_folder(request: Request) -> HTMLResponse:
+    """Make a claimed campaign's vanished folder again, for "Recreate folder"."""
+    from wisper_transcribe import campaign_folders
+
+    form = await request.form()
+    try:
+        campaign_id = int(str(form.get("campaign_id", "")))
+    except ValueError:
+        return invalid_input_response("Invalid campaign id")
+    try:
+        campaign_folders.recreate_folder(campaign_id)
+    except KeyError:
+        return RedirectResponse(url="/transcripts?error=not_found", status_code=303)
+    except campaign_folders.FolderTakenError:
+        return RedirectResponse(url="/transcripts?error=not_found", status_code=303)
+    return RedirectResponse(url="/transcripts", status_code=303)
+
+
+@router.get("/{transcript_id:int}", response_class=HTMLResponse)
+async def transcript_detail(request: Request, transcript_id: int, q: str = "") -> Response:
+    loc = _located_or_redirect(transcript_id)
+    if isinstance(loc, RedirectResponse):
+        return loc
+    if not loc.md.exists():
         return HTMLResponse(content="Transcript not found", status_code=404)
+    md_path = loc.md
 
     content = md_path.read_text(encoding="utf-8")
     meta, body = _parse_frontmatter(content)
@@ -469,12 +648,12 @@ async def transcript_detail(request: Request, name: str, q: str = "") -> HTMLRes
     html_body = _sanitize_html(_md.markdown(_anchor_blocks(body), extensions=["nl2br"]))
 
     # Check for summary sidecar
-    summary_path = _get_safe_content_path(name, ".summary.md")
-    has_summary = bool(summary_path and summary_path.exists())
+    summary_path = loc.companion(".summary.md")
+    has_summary = summary_path.exists()
 
     # Check for enrollment sidecar (transcript-centric wizard)
-    diar_path = _get_safe_content_path(name, "_diar.json")
-    has_diar_sidecar = bool(diar_path and diar_path.exists())
+    diar_path = loc.companion(transcript_store.SIDECAR_SUFFIX)
+    has_diar_sidecar = diar_path.exists()
 
     # Load current LLM config for display
     from wisper_transcribe.config import load_config
@@ -483,15 +662,16 @@ async def transcript_detail(request: Request, name: str, q: str = "") -> HTMLRes
     llm_model = cfg.get("llm_model", "") or ""
 
     campaigns = load_campaigns()
-    current_campaign_slug = get_campaign_for_transcript(md_path.stem)
-    audio_url, markers = _playback(md_path, name)
+    current_campaign_slug = get_campaign_for_transcript(loc.id)
+    audio_url, markers = _playback(loc)
 
     return templates.TemplateResponse(
         request,
         "transcript_detail.html",
         {
             "request": request,
-            "name": name,
+            "id": loc.id,
+            "name": loc.stem,
             "meta": meta,
             "html_body": html_body,
             "raw_path": str(md_path),
@@ -501,6 +681,8 @@ async def transcript_detail(request: Request, name: str, q: str = "") -> HTMLRes
             "llm_model": llm_model,
             "campaigns": campaigns,
             "current_campaign_slug": current_campaign_slug,
+            "clash": _clash_context(loc, request),
+            "misplaced": _misplaced_note(loc),
             "highlight": _highlight(q),
             "audio_url": audio_url,
             "markers": markers,
@@ -509,18 +691,18 @@ async def transcript_detail(request: Request, name: str, q: str = "") -> HTMLRes
     )
 
 
-@router.get("/{name}/audio")
-async def transcript_audio(name: str):
-    md_path = _get_safe_content_path(name, ".md")
-    if not md_path:
-        return invalid_input_response("Invalid name")
-    if not md_path.exists():
+@router.get("/{transcript_id:int}/audio")
+async def transcript_audio(transcript_id: int):
+    loc = _located_or_redirect(transcript_id)
+    if isinstance(loc, RedirectResponse):
+        return loc
+    if not loc.md.exists():
         return HTMLResponse(content="Not found", status_code=404)
-    audio = transcript_store.audio_path(md_path, output_dir=get_output_dir())
+    audio = transcript_store.audio_path(loc.md, output_dir=get_output_root())
     if audio is None:
         return HTMLResponse(content="No audio", status_code=404)
     target = os.path.abspath(str(audio))
-    roots = [os.path.abspath(str(get_output_dir())),
+    roots = [os.path.abspath(str(get_output_root())),
              os.path.abspath(str(get_data_dir() / "recordings"))]
     if not any(target.startswith(r.rstrip(os.sep) + os.sep) for r in roots):
         return HTMLResponse(content="Not found", status_code=404)
@@ -531,27 +713,27 @@ async def transcript_audio(name: str):
     return FileResponse(target, media_type=media_type)
 
 
-@router.get("/{name}/download")
-async def transcript_download(request: Request, name: str):
-    md_path = _get_safe_content_path(name, ".md")
-    if not md_path:
-        return invalid_input_response("Invalid name")
-    if not md_path.exists():
+@router.get("/{transcript_id:int}/download")
+async def transcript_download(request: Request, transcript_id: int):
+    loc = _located_or_redirect(transcript_id)
+    if isinstance(loc, RedirectResponse):
+        return loc
+    if not loc.md.exists():
         return HTMLResponse(content="Transcript not found", status_code=404)
     return FileResponse(
-        path=str(md_path),
+        path=str(loc.md),
         media_type="text/markdown",
-        filename=md_path.name,
+        filename=loc.md.name,
     )
 
 
-@router.post("/{name}/delete", response_class=HTMLResponse)
-async def delete_transcript(request: Request, name: str) -> HTMLResponse:
+@router.post("/{transcript_id:int}/delete", response_class=HTMLResponse)
+async def delete_transcript(request: Request, transcript_id: int) -> HTMLResponse:
     """Delete a transcript, its campaign/journal links, and its companion files."""
-    md_path = _get_safe_content_path(name, ".md")
-    if not md_path:
-        return invalid_input_response("Invalid name")
-    transcript_store.delete_transcript(md_path.stem, output_dir=md_path.parent)
+    loc = _located_or_redirect(transcript_id)
+    if isinstance(loc, RedirectResponse):
+        return loc
+    transcript_store.delete_transcript(loc.id)
     return HTMLResponse(
         content="",
         status_code=303,
@@ -559,14 +741,15 @@ async def delete_transcript(request: Request, name: str) -> HTMLResponse:
     )
 
 
-@router.get("/{name}/edit", response_class=HTMLResponse)
-async def transcript_edit(request: Request, name: str) -> HTMLResponse:
+@router.get("/{transcript_id:int}/edit", response_class=HTMLResponse)
+async def transcript_edit(request: Request, transcript_id: int) -> Response:
     """Edit page — shows each speaker block with an editable speaker field."""
-    md_path = _get_safe_content_path(name, ".md")
-    if not md_path:
-        return invalid_input_response("Invalid name")
-    if not md_path.exists():
+    loc = _located_or_redirect(transcript_id)
+    if isinstance(loc, RedirectResponse):
+        return loc
+    if not loc.md.exists():
         return HTMLResponse(content="Transcript not found", status_code=404)
+    md_path = loc.md
 
     content = md_path.read_text(encoding="utf-8")
     meta, body = _parse_frontmatter(content)
@@ -581,7 +764,8 @@ async def transcript_edit(request: Request, name: str) -> HTMLResponse:
         "transcript_edit.html",
         {
             "request": request,
-            "name": name,
+            "id": loc.id,
+            "name": loc.stem,
             "meta": meta,
             "blocks": blocks,
             "unique_speakers": unique_speakers,
@@ -589,14 +773,15 @@ async def transcript_edit(request: Request, name: str) -> HTMLResponse:
     )
 
 
-@router.post("/{name}/edit", response_class=HTMLResponse)
-async def transcript_edit_save(request: Request, name: str) -> HTMLResponse:
+@router.post("/{transcript_id:int}/edit", response_class=HTMLResponse)
+async def transcript_edit_save(request: Request, transcript_id: int) -> Response:
     """Save per-block speaker name changes."""
-    md_path = _get_safe_content_path(name, ".md")
-    if not md_path:
-        return invalid_input_response("Invalid name")
-    if not md_path.exists():
+    loc = _located_or_redirect(transcript_id)
+    if isinstance(loc, RedirectResponse):
+        return loc
+    if not loc.md.exists():
         return HTMLResponse(content="Transcript not found", status_code=404)
+    md_path = loc.md
 
     form = await request.form()
 
@@ -620,18 +805,19 @@ async def transcript_edit_save(request: Request, name: str) -> HTMLResponse:
     return HTMLResponse(
         content="",
         status_code=303,
-        headers={"Location": f"/transcripts/{quote(name)}"},
+        headers={"Location": f"/transcripts/{loc.id}"},
     )
 
 
-@router.post("/{name}/fix-speaker", response_class=HTMLResponse)
-async def fix_speaker(request: Request, name: str) -> HTMLResponse:
+@router.post("/{transcript_id:int}/fix-speaker", response_class=HTMLResponse)
+async def fix_speaker(request: Request, transcript_id: int) -> Response:
     """Rename a speaker in an existing transcript."""
-    md_path = _get_safe_content_path(name, ".md")
-    if not md_path:
-        return invalid_input_response("Invalid name")
-    if not md_path.exists():
+    loc = _located_or_redirect(transcript_id)
+    if isinstance(loc, RedirectResponse):
+        return loc
+    if not loc.md.exists():
         return HTMLResponse(content="Transcript not found", status_code=404)
+    md_path = loc.md
 
     form = await request.form()
     old_name = str(form.get("old_name", "")).strip()
@@ -646,18 +832,19 @@ async def fix_speaker(request: Request, name: str) -> HTMLResponse:
     return HTMLResponse(
         content="",
         status_code=303,
-        headers={"Location": f"/transcripts/{quote(name)}"},
+        headers={"Location": f"/transcripts/{loc.id}"},
     )
 
 
-@router.post("/{name}/refine", response_class=HTMLResponse)
-async def post_refine(request: Request, name: str) -> HTMLResponse:
+@router.post("/{transcript_id:int}/refine", response_class=HTMLResponse)
+async def post_refine(request: Request, transcript_id: int) -> Response:
     """Submit a vocabulary-refine LLM job for an existing transcript."""
-    md_path = _get_safe_content_path(name, ".md")
-    if not md_path:
-        return invalid_input_response("Invalid name")
-    if not md_path.exists():
+    loc = _located_or_redirect(transcript_id)
+    if isinstance(loc, RedirectResponse):
+        return loc
+    if not loc.md.exists():
         return HTMLResponse(content="Transcript not found", status_code=404)
+    md_path = loc.md
 
     from . import get_queue
     from ..jobs import JOB_REFINE
@@ -666,7 +853,7 @@ async def post_refine(request: Request, name: str) -> HTMLResponse:
     job = queue.submit_llm(
         transcript_path=str(md_path),
         job_type=JOB_REFINE,
-        name=name,
+        name=loc.stem,
     )
     return HTMLResponse(
         content="",
@@ -675,14 +862,15 @@ async def post_refine(request: Request, name: str) -> HTMLResponse:
     )
 
 
-@router.post("/{name}/summarize", response_class=HTMLResponse)
-async def post_summarize(request: Request, name: str) -> HTMLResponse:
+@router.post("/{transcript_id:int}/summarize", response_class=HTMLResponse)
+async def post_summarize(request: Request, transcript_id: int) -> Response:
     """Submit a campaign-summary LLM job for an existing transcript."""
-    md_path = _get_safe_content_path(name, ".md")
-    if not md_path:
-        return invalid_input_response("Invalid name")
-    if not md_path.exists():
+    loc = _located_or_redirect(transcript_id)
+    if isinstance(loc, RedirectResponse):
+        return loc
+    if not loc.md.exists():
         return HTMLResponse(content="Transcript not found", status_code=404)
+    md_path = loc.md
 
     from . import get_queue
     from ..jobs import JOB_SUMMARIZE
@@ -691,7 +879,7 @@ async def post_summarize(request: Request, name: str) -> HTMLResponse:
     job = queue.submit_llm(
         transcript_path=str(md_path),
         job_type=JOB_SUMMARIZE,
-        name=name,
+        name=loc.stem,
     )
     return HTMLResponse(
         content="",
@@ -700,15 +888,15 @@ async def post_summarize(request: Request, name: str) -> HTMLResponse:
     )
 
 
-@router.get("/{name}/summary", response_class=HTMLResponse)
-async def summary_detail(request: Request, name: str, q: str = "") -> HTMLResponse:
+@router.get("/{transcript_id:int}/summary", response_class=HTMLResponse)
+async def summary_detail(request: Request, transcript_id: int, q: str = "") -> Response:
     """Render the campaign-notes summary for a transcript."""
-    md_path = _get_safe_content_path(name, ".md")
-    if not md_path:
-        return invalid_input_response("Invalid name")
+    loc = _located_or_redirect(transcript_id)
+    if isinstance(loc, RedirectResponse):
+        return loc
 
-    summary_path = _get_safe_content_path(name, ".summary.md")
-    if not summary_path or not summary_path.exists():
+    summary_path = loc.companion(".summary.md")
+    if not summary_path.exists():
         return HTMLResponse(content="Summary not found", status_code=404)
 
     content = summary_path.read_text(encoding="utf-8")
@@ -722,21 +910,23 @@ async def summary_detail(request: Request, name: str, q: str = "") -> HTMLRespon
         "summary_detail.html",
         {
             "request": request,
-            "name": name,
+            "id": loc.id,
+            "name": loc.stem,
             "meta": meta,
             "html_body": html_body,
-            "title": meta.get("title", f"{name} — Campaign Notes"),
+            "title": meta.get("title", f"{loc.stem} — Campaign Notes"),
             "highlight": _highlight(q),
         },
     )
 
 
-@router.get("/{name}/summary/download")
-async def summary_download(request: Request, name: str):
+@router.get("/{transcript_id:int}/summary/download")
+async def summary_download(request: Request, transcript_id: int):
     """Download the .summary.md sidecar file."""
-    summary_path = _get_safe_content_path(name, ".summary.md")
-    if not summary_path:
-        return invalid_input_response("Invalid name")
+    loc = _located_or_redirect(transcript_id)
+    if isinstance(loc, RedirectResponse):
+        return loc
+    summary_path = loc.companion(".summary.md")
     if not summary_path.exists():
         return HTMLResponse(content="Summary not found", status_code=404)
     return FileResponse(
@@ -746,90 +936,123 @@ async def summary_download(request: Request, name: str):
     )
 
 
-@router.post("/{name}/campaign", response_class=HTMLResponse)
-async def assign_campaign(request: Request, name: str) -> HTMLResponse:
-    """Assign or remove a campaign association for a transcript."""
-    safe_name = _get_safe_content_path(name, ".md")
-    if not safe_name:
-        return invalid_input_response("Invalid name")
+@router.post("/{transcript_id:int}/campaign", response_class=HTMLResponse)
+async def assign_campaign(request: Request, transcript_id: int) -> Response:
+    """Move a transcript to a campaign (or the root) and move its files.
+
+    ``clash=overwrite|keep_both`` resolves a name clash; the default returns to
+    the transcript page with the clash panel. The status table's route column
+    maps every other outcome to a fixed ``?error=`` code or ``?notice=``.
+    """
+    loc = _located_or_redirect(transcript_id)
+    if isinstance(loc, RedirectResponse):
+        return loc
 
     form = await request.form()
     campaign_slug = str(form.get("campaign", "")).strip()
+    clash = str(form.get("clash", "")).strip()
 
+    target_slug: Optional[str] = None
     if campaign_slug:
-        safe_slug = _validate_campaign_slug(campaign_slug)
-        if safe_slug is None:
+        target_slug = _validate_campaign_slug(campaign_slug)
+        if target_slug is None:
             return HTMLResponse(
-                content="",
-                status_code=303,
-                headers={"Location": f"/transcripts/{quote(name)}?error=invalid_campaign"},
+                content="", status_code=303,
+                headers={"Location": f"/transcripts/{loc.id}?error=invalid_campaign"},
             )
-        try:
-            move_transcript_to_campaign(safe_name.stem, safe_slug)
-        except KeyError:
-            return HTMLResponse(
-                content="",
-                status_code=303,
-                headers={"Location": f"/transcripts/{quote(name)}?error=not_found"},
-            )
-    else:
-        remove_transcript_from_campaign(safe_name.stem)
 
-    return HTMLResponse(
-        content="",
-        status_code=303,
-        headers={"Location": f"/transcripts/{quote(name)}"},
-    )
+    mode = clash if clash in ("overwrite", "keep_both") else "ask"
+    outcome = await run_in_threadpool(
+        transcript_store.move_transcript, loc.id, target_slug, clash=mode)
+    if outcome.status == "clash":
+        campaign = load_campaigns().get(target_slug) if target_slug else None
+        return _move_clash_redirect(loc.id, campaign.slug if campaign else None)
+    return _move_outcome_redirect(loc.id, outcome)
+
+
+@router.post("/{transcript_id:int}/rename", response_class=HTMLResponse)
+async def rename_transcript(request: Request, transcript_id: int) -> Response:
+    """Rename a transcript's ``.md`` and every companion together.
+
+    ``clash=overwrite|keep_both`` resolves a name clash; the default returns to
+    the transcript page with the clash panel.
+    """
+    loc = _located_or_redirect(transcript_id)
+    if isinstance(loc, RedirectResponse):
+        return loc
+
+    form = await request.form()
+    new_name = str(form.get("new_name", ""))
+    clash = str(form.get("clash", "")).strip()
+    mode = clash if clash in ("overwrite", "keep_both") else "ask"
+
+    outcome = await run_in_threadpool(
+        transcript_store.rename_transcript, loc.id, new_name, clash=mode)
+    if outcome.status == "clash" and outcome.new_stem:
+        return RedirectResponse(
+            url=f"/transcripts/{loc.id}?clash=rename&name={quote(outcome.new_stem, safe='')}",
+            status_code=303)
+    return _move_outcome_redirect(loc.id, outcome)
+
+
+@router.post("/{transcript_id:int}/move-files", response_class=HTMLResponse)
+async def move_files_home(request: Request, transcript_id: int) -> Response:
+    """Put a misplaced session's files into its campaign's folder."""
+    loc = _located_or_redirect(transcript_id)
+    if isinstance(loc, RedirectResponse):
+        return loc
+    outcome = await run_in_threadpool(transcript_store.move_files_home, loc.id)
+    return _move_outcome_redirect(loc.id, outcome)
 
 
 _RETRANSCRIBE_ERRORS = {"no_audio", "not_ready"}
 
 
-def _back_to_transcript(name: str, error: str) -> HTMLResponse:
+def _back_to_transcript(loc: transcript_store.Located, error: str) -> HTMLResponse:
     """303 to the transcript page with a fixed error code (a Location header, as the other routes do)."""
     code = error if error in _RETRANSCRIBE_ERRORS else "not_ready"
     return HTMLResponse(
         content="",
         status_code=303,
-        headers={"Location": f"/transcripts/{quote(name)}?error={code}"},
+        headers={"Location": f"/transcripts/{loc.id}?error={code}"},
     )
 
 
-@router.post("/{name}/retranscribe")
-async def retranscribe(request: Request, name: str):
+@router.post("/{transcript_id:int}/retranscribe")
+async def retranscribe(request: Request, transcript_id: int):
     """Re-run a transcript from its saved audio, replacing it in place."""
-    md_path = _get_safe_content_path(name, ".md")
-    if not md_path:
-        return invalid_input_response("Invalid name")
-    if not md_path.exists():
+    loc = _located_or_redirect(transcript_id)
+    if isinstance(loc, RedirectResponse):
+        return loc
+    if not loc.md.exists():
         return HTMLResponse(content="Transcript not found", status_code=404)
-    out_dir = get_output_dir()
-    owner = file_registry.Owner.for_stem(md_path.stem, output_dir=out_dir)
-    rec = recording_for_transcript(owner.id) if owner else None
+    md_path = loc.md
+    out_dir = get_output_root()
+    rec = recording_for_transcript(loc.id)
     if rec is not None:
         from wisper_transcribe.web.routes.record import _submit_recording_transcription
 
         job, error = _submit_recording_transcription(rec, request, get_data_dir())
         if job is None:
-            return _back_to_transcript(name, error or "not_ready")
+            return _back_to_transcript(loc, error or "not_ready")
         return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
 
     audio = transcript_store.audio_path(md_path, output_dir=out_dir)
     if audio is None:
-        return _back_to_transcript(name, "no_audio")
+        return _back_to_transcript(loc, "no_audio")
     from wisper_transcribe.job_history import last_transcription_params
 
     meta, _ = _parse_frontmatter(md_path.read_text(encoding="utf-8"))
-    kwargs = last_transcription_params(owner.id) if owner else {}
+    kwargs = last_transcription_params(loc.id)
     if meta.get("title"):
         kwargs["title"] = str(meta["title"])
-    campaign = get_campaign_for_transcript(md_path.stem)
+    campaign = get_campaign_for_transcript(loc.id)
     if campaign:
         kwargs["campaign"] = campaign
     job = request.app.state.job_queue.submit(
         str(audio),
-        original_stem=md_path.stem,
-        output_dir=str(md_path.parent),
+        original_stem=loc.stem,
+        output_dir=str(loc.dir),
         source_name=str(meta.get("source_file") or audio.name),
         overwrite=True,
         **kwargs,
@@ -853,14 +1076,15 @@ from wisper_transcribe.web.enroll_shared import (
 )
 
 
-@router.get("/{name}/enroll", response_class=HTMLResponse)
-async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
+@router.get("/{transcript_id:int}/enroll", response_class=HTMLResponse)
+async def transcript_enroll_form(request: Request, transcript_id: int) -> Response:
     """Speaker enrollment wizard — transcript-centric, restart-safe."""
-    md_path = _get_safe_content_path(name, ".md")
-    if not md_path:
-        return invalid_input_response("Invalid name")
-    if not md_path.exists():
+    loc = _located_or_redirect(transcript_id)
+    if isinstance(loc, RedirectResponse):
+        return loc
+    if not loc.md.exists():
         return HTMLResponse(content="Transcript not found", status_code=404)
+    md_path = loc.md
 
     diar = _load_diar_sidecar(md_path)
     if not diar:
@@ -875,8 +1099,8 @@ async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
 
     # Clips are keyed by raw label; older transcripts keyed them by display
     # name, so map those back via first-appearance timestamps.
-    out_dir = md_path.parent
-    stem = md_path.stem
+    out_dir = loc.dir
+    stem = loc.stem
 
     legacy_label_map = _build_legacy_label_map(md_path, diar.get("diarization_segments", []))
 
@@ -908,10 +1132,10 @@ async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
         "speaker_enroll.html",
         {
             "request": request,
-            "form_action": f"/transcripts/{quote(name)}/enroll",
-            "back_url": f"/transcripts/{quote(name)}",
-            "excerpt_base_url": f"/transcripts/{quote(name)}/excerpt",
-            "display_name": name,
+            "form_action": f"/transcripts/{loc.id}/enroll",
+            "back_url": f"/transcripts/{loc.id}",
+            "excerpt_base_url": f"/transcripts/{loc.id}/excerpt",
+            "display_name": loc.stem,
             "detected_speakers": speakers,
             "existing_profiles": load_profiles(),
             "speaker_excerpts": speaker_excerpts,
@@ -926,14 +1150,15 @@ async def transcript_enroll_form(request: Request, name: str) -> HTMLResponse:
     )
 
 
-@router.post("/{name}/enroll", response_class=HTMLResponse)
-async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
+@router.post("/{transcript_id:int}/enroll", response_class=HTMLResponse)
+async def transcript_enroll_submit(request: Request, transcript_id: int) -> Response:
     """Apply speaker name assignments from the transcript enrollment wizard."""
-    md_path = _get_safe_content_path(name, ".md")
-    if not md_path:
-        return invalid_input_response("Invalid name")
-    if not md_path.exists():
+    loc = _located_or_redirect(transcript_id)
+    if isinstance(loc, RedirectResponse):
+        return loc
+    if not loc.md.exists():
         return HTMLResponse(content="Transcript not found", status_code=404)
+    md_path = loc.md
 
     diar = _load_diar_sidecar(md_path)
     if not diar:
@@ -948,7 +1173,7 @@ async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
     if not renames:
         return HTMLResponse(
             content="", status_code=303,
-            headers={"Location": f"/transcripts/{quote(name)}"},
+            headers={"Location": f"/transcripts/{loc.id}"},
         )
 
     # Rename now; embedding extraction runs as a JOB_ENROLL job.
@@ -960,7 +1185,7 @@ async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
     ]
     rename_result = apply_renames(md_path, raw_segments, renames)
 
-    location = f"/transcripts/{quote(name)}"
+    location = f"/transcripts/{loc.id}"
     if not rename_result.groups:
         # Nothing eligible for enrollment (all skipped/unchanged/refused) --
         # the rename (if any) already happened; no job needed.
@@ -991,7 +1216,7 @@ async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
     queue = get_queue(request)
     job = queue.submit_enroll(
         md_path=str(md_path),
-        transcript_name=name,
+        transcript_name=loc.stem,
         groups=rename_result.groups,
         device=device,
     )
@@ -1004,8 +1229,8 @@ async def transcript_enroll_submit(request: Request, name: str) -> HTMLResponse:
     )
 
 
-@router.get("/{name}/excerpt/{speaker_name}")
-async def transcript_excerpt(request: Request, name: str, speaker_name: str):
+@router.get("/{transcript_id:int}/excerpt/{speaker_name}")
+async def transcript_excerpt(request: Request, transcript_id: int, speaker_name: str):
     """Serve a speaker excerpt clip for the transcript-centric enrollment wizard."""
     if not speaker_name or "\x00" in speaker_name:
         return invalid_input_response("Invalid speaker name")
@@ -1013,9 +1238,10 @@ async def transcript_excerpt(request: Request, name: str, speaker_name: str):
     if safe_sp != speaker_name or safe_sp in {".", ".."}:
         return invalid_input_response("Invalid speaker name")
 
-    md_path = _get_safe_content_path(name, ".md")
-    if not md_path:
-        return invalid_input_response("Invalid name")
+    loc = _located_or_redirect(transcript_id)
+    if isinstance(loc, RedirectResponse):
+        return loc
+    md_path = loc.md
 
     from fastapi.responses import FileResponse
 
@@ -1032,7 +1258,46 @@ async def transcript_excerpt(request: Request, name: str, speaker_name: str):
     # Shared lookup + CodeQL guard (also used by the job-based wizard).
     from wisper_transcribe.web.enroll_shared import find_excerpt_clip
 
-    clip = find_excerpt_clip(md_path.parent, md_path.stem, candidates)
+    clip = find_excerpt_clip(loc.dir, loc.stem, candidates)
     if clip is not None:
         return FileResponse(path=str(clip), media_type="audio/mpeg")
     return HTMLResponse(content="Excerpt not available", status_code=404)
+
+
+# ---------------------------------------------------------------------------
+# Legacy name URLs
+# ---------------------------------------------------------------------------
+
+@router.get("/{name}", response_class=HTMLResponse)
+async def transcript_legacy(request: Request, name: str) -> Response:
+    """Redirect an old ``/transcripts/{name}`` link to the id-based URL.
+
+    Declared after every static and integer route, so a numeric segment never
+    reaches here. The name is only ever a bound SQL parameter: it is never
+    turned into a path. Exactly one match redirects; several offer a chooser
+    (the same name may exist in two campaigns); none redirects with an error.
+    """
+    matches = transcript_store.find_by_stem(name, present_only=True)
+    if len(matches) == 1:
+        return RedirectResponse(url=f"/transcripts/{matches[0].id}", status_code=303)
+    if not matches:
+        return RedirectResponse(url="/transcripts?error=not_found", status_code=303)
+
+    items = []
+    campaigns = load_campaigns()
+    for loc in matches:
+        slug = get_campaign_for_transcript(loc.id)
+        campaign = campaigns.get(slug).display_name if slug in campaigns else None
+        items.append(
+            f'<li><a href="/transcripts/{loc.id}">{_html_module.escape(loc.stem)}</a>'
+            f'{" — " + _html_module.escape(campaign) if campaign else ""}</li>'
+        )
+    body = (
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\">"
+        f"<title>Choose a transcript — wisper</title></head><body>"
+        f"<p>More than one transcript is named <strong>{_html_module.escape(matches[0].stem)}</strong>.</p>"
+        f"<ul>{''.join(items)}</ul>"
+        "<p><a href=\"/transcripts\">Back to transcripts</a></p>"
+        "</body></html>"
+    )
+    return HTMLResponse(content=body)

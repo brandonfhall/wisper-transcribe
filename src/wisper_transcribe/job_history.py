@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -56,9 +57,10 @@ def _params(job: Any) -> str:
         if getattr(job, flag, False):
             out[flag] = True
     if getattr(job, "job_type", "") == "transcription":
-        from .path_utils import get_output_dir
         # Where it wrote: evidence for "the job said done but the file is missing".
-        out["output_root"] = str(get_output_dir())
+        output_dir = kwargs.get("output_dir")
+        if output_dir:
+            out["output_root"] = str(output_dir)
     return json.dumps(out, sort_keys=True)
 
 
@@ -67,21 +69,21 @@ def _subject_ids(conn, job: Any) -> tuple[Optional[int], Optional[int], Optional
 
     Links only to rows that exist; a job never creates them.
     """
-    from .transcript_store import nfc
+    from .transcript_store import locate_path
 
     transcript_id = campaign_id = recording_id = None
     job_type = getattr(job, "job_type", "")
     path = None
     if job_type == "transcription":
+        transcript_id = getattr(job, "transcript_id", None)
         path = getattr(job, "output_path", None)
     elif job_type in ("refine", "summarize"):
         path = getattr(job, "llm_transcript_path", None)
     elif job_type == "enroll":
         path = getattr(job, "enroll_md_path", None)
-    if path:
-        row = conn.execute("SELECT id FROM transcripts WHERE stem = ?",
-                           (nfc(Path(path).stem),)).fetchone()
-        transcript_id = row[0] if row else None
+    if transcript_id is None and path:
+        loc = locate_path(Path(path), conn=conn)
+        transcript_id = loc.id if loc is not None else None
     if job_type in ("campaign_journal", "speaker_relabel"):
         slug = (getattr(job, "kwargs", {}) or {}).get("slug")
         if slug:
@@ -96,37 +98,96 @@ def _subject_ids(conn, job: Any) -> tuple[Optional[int], Optional[int], Optional
     return transcript_id, campaign_id, recording_id
 
 
+def _write(job: Any, data_dir: Optional[Path] = None) -> None:
+    """Upsert one job's row from the in-memory ``Job``. May raise."""
+    status = job.status if job.status in JOB_STATUSES else "failed"
+    terminal = status in ("completed", "failed")
+    started = getattr(job, "started_at", None)
+    if status == "pending":
+        started = None
+    elif status == "running" and started is None:
+        started = datetime.now()
+    finished = (job.finished_at or datetime.now()) if terminal else None
+    error = (job.error or "Job failed") if status == "failed" else None
+    log_tail = "\n".join(list(getattr(job, "log_lines", []) or [])[-LOG_TAIL_LINES:]) if terminal else ""
+    with db.transaction(data_dir) as conn:
+        transcript_id, campaign_id, recording_id = _subject_ids(conn, job)
+        conn.execute(
+            "INSERT INTO jobs (id, type, status, created_at, started_at, finished_at, error_code, "
+            "transcript_id, campaign_id, recording_id, params_json, log_tail) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET "
+            "status = excluded.status, started_at = excluded.started_at, "
+            "finished_at = excluded.finished_at, error_code = excluded.error_code, "
+            "transcript_id = coalesce(excluded.transcript_id, jobs.transcript_id), "
+            "campaign_id = coalesce(excluded.campaign_id, jobs.campaign_id), "
+            "recording_id = coalesce(excluded.recording_id, jobs.recording_id), "
+            "params_json = excluded.params_json, log_tail = excluded.log_tail",
+            (job.id, job.job_type, status, _utc(job.created_at), _utc(started), _utc(finished),
+             error, transcript_id, campaign_id, recording_id, _params(job), log_tail),
+        )
+
+
 def record(job: Any, data_dir: Optional[Path] = None) -> None:
     """Upsert one job's row from the in-memory ``Job``. Never raises: a
     history write must not break the job itself."""
     try:
-        status = job.status if job.status in JOB_STATUSES else "failed"
-        terminal = status in ("completed", "failed")
-        started = getattr(job, "started_at", None)
-        if status == "pending":
-            started = None
-        elif status == "running" and started is None:
-            started = datetime.now()
-        finished = (job.finished_at or datetime.now()) if terminal else None
-        error = (job.error or "Job failed") if status == "failed" else None
-        log_tail = "\n".join(list(getattr(job, "log_lines", []) or [])[-LOG_TAIL_LINES:]) if terminal else ""
-        with db.transaction(data_dir) as conn:
-            transcript_id, campaign_id, recording_id = _subject_ids(conn, job)
-            conn.execute(
-                "INSERT INTO jobs (id, type, status, created_at, started_at, finished_at, error_code, "
-                "transcript_id, campaign_id, recording_id, params_json, log_tail) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET "
-                "status = excluded.status, started_at = excluded.started_at, "
-                "finished_at = excluded.finished_at, error_code = excluded.error_code, "
-                "transcript_id = coalesce(excluded.transcript_id, jobs.transcript_id), "
-                "campaign_id = coalesce(excluded.campaign_id, jobs.campaign_id), "
-                "recording_id = coalesce(excluded.recording_id, jobs.recording_id), "
-                "params_json = excluded.params_json, log_tail = excluded.log_tail",
-                (job.id, job.job_type, status, _utc(job.created_at), _utc(started), _utc(finished),
-                 error, transcript_id, campaign_id, recording_id, _params(job), log_tail),
-            )
+        _write(job, data_dir)
     except Exception:
         log.warning("Could not record job %s in history", getattr(job, "id", "?"), exc_info=True)
+
+
+def record_required(job: Any, data_dir: Optional[Path] = None) -> None:
+    """Like :func:`record`, but re-raises.
+
+    The busy guard reads a job's row, so a job whose row can't be written must
+    not be queued: submit fails instead.
+    """
+    _write(job, data_dir)
+
+
+# One job is busy when it is pending or running and targets the transcript, a
+# campaign (its own, its transcript's, or the slug in params_json). The status
+# is spelled exactly as the ``jobs_active`` partial index does so the index is used.
+_ACTIVE_JOBS_SQL = (
+    "SELECT j.id FROM jobs j "
+    "LEFT JOIN transcripts t ON t.id = j.transcript_id "
+    "WHERE j.status IN ('pending', 'running') AND ("
+    "j.transcript_id = :transcript_id "
+    "OR j.campaign_id IN (SELECT value FROM json_each(:campaign_ids)) "
+    "OR t.campaign_id IN (SELECT value FROM json_each(:campaign_ids)) "
+    "OR json_extract(j.params_json, '$.campaign') IN (SELECT value FROM json_each(:campaign_slugs)))"
+)
+
+
+def active_jobs(conn: sqlite3.Connection, *, transcript_id: Optional[int] = None,
+                campaign_ids: tuple = (), campaign_slugs: tuple = ()) -> list[str]:
+    """The ids of jobs and captures that make a move, rename, or delete unsafe.
+
+    A job counts when its ``status`` is pending or running and it targets the
+    transcript, one of the campaigns (its own, its transcript's, or the slug
+    it was submitted with). A capture counts when its ``campaign_id`` or
+    ``transcript_id`` matches: a Discord or local capture holds its campaign
+    without a ``jobs`` row. Empty means free.
+
+    Call inside the write transaction so a job submitted between check and
+    write can't be missed: submit writes its row first.
+    """
+    from . import file_registry
+
+    params = {
+        "transcript_id": transcript_id,
+        "campaign_ids": json.dumps(sorted({int(c) for c in campaign_ids if c is not None})),
+        "campaign_slugs": json.dumps(sorted({str(s) for s in campaign_slugs if s is not None})),
+    }
+    found = [r[0] for r in conn.execute(_ACTIVE_JOBS_SQL, params)]
+    active = tuple(file_registry._ACTIVE_CAPTURE)
+    placeholders = ", ".join("?" * len(active))
+    found += [r[0] for r in conn.execute(
+        f"SELECT id FROM recordings WHERE capture_status IN ({placeholders}) AND ("
+        "campaign_id IN (SELECT value FROM json_each(?)) OR transcript_id = ?)",
+        (*active, params["campaign_ids"], transcript_id),
+    )]
+    return list(dict.fromkeys(found))
 
 
 def mark_interrupted(data_dir: Optional[Path] = None) -> int:
@@ -157,6 +218,7 @@ class JobRecord:
     campaign_name: Optional[str]
     params: dict
     log_tail: str
+    transcript_id: Optional[int] = None
 
     @property
     def name(self) -> str:
@@ -175,13 +237,12 @@ class JobRecord:
 # A job's campaign: its own subject (journal, relabel), else its transcript's
 # current campaign, else its recording's, else the campaign it was submitted
 # with (params_json; a job that never wrote a transcript). Derived, so a moved
-# transcript's jobs follow it. campaign_transcripts allows one row per
-# transcript, so the joins never multiply job rows.
+# transcript's jobs follow it. A transcript has one campaign_id, so the
+# joins never multiply job rows.
 _FROM = (
     "FROM jobs j LEFT JOIN transcripts t ON t.id = j.transcript_id "
-    "LEFT JOIN campaign_transcripts ct ON ct.transcript_id = j.transcript_id "
     "LEFT JOIN recordings rec ON rec.id = j.recording_id "
-    "LEFT JOIN campaigns c ON c.id = coalesce(j.campaign_id, ct.campaign_id, rec.campaign_id, "
+    "LEFT JOIN campaigns c ON c.id = coalesce(j.campaign_id, t.campaign_id, rec.campaign_id, "
     "(SELECT id FROM campaigns WHERE slug = json_extract(j.params_json, '$.campaign'))) "
 )
 _COLUMNS = "j.*, t.stem AS transcript_stem, c.slug AS campaign_slug, c.display_name AS campaign_name"
@@ -193,7 +254,7 @@ def _record(r) -> "JobRecord":
         started_at=_dt(r["started_at"]), finished_at=_dt(r["finished_at"]),
         error=r["error_code"], transcript_stem=r["transcript_stem"],
         campaign_slug=r["campaign_slug"], recording_id=r["recording_id"],
-        campaign_name=r["campaign_name"],
+        campaign_name=r["campaign_name"], transcript_id=r["transcript_id"],
         params=json.loads(r["params_json"]), log_tail=r["log_tail"],
     )
 
@@ -204,7 +265,7 @@ def _dt(s: Optional[str]) -> Optional[datetime]:
 
 
 def list_jobs(*, page: int = 1, per_page: int = 50, job_type: Optional[str] = None,
-              status: Optional[str] = None, transcript: Optional[str] = None,
+              status: Optional[str] = None, transcript_id: Optional[int] = None,
               campaign: Optional[str] = None, data_dir: Optional[Path] = None,
               ) -> tuple[list[JobRecord], int]:
     """A page of history, newest first, and the total matching count."""
@@ -215,9 +276,9 @@ def list_jobs(*, page: int = 1, per_page: int = 50, job_type: Optional[str] = No
     if status:
         where.append("j.status = ?")
         params.append(status)
-    if transcript:
-        where.append("t.stem = ?")
-        params.append(transcript)
+    if transcript_id is not None:
+        where.append("t.id = ?")
+        params.append(transcript_id)
     if campaign:
         where.append("c.slug = ?")
         params.append(campaign)

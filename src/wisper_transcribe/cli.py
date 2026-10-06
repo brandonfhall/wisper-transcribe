@@ -90,7 +90,9 @@ def main():
 @click.option("--debug", is_flag=True, default=False,
               help="Write full debug log to ./logs/wisper_<timestamp>.log")
 @click.option("--campaign", default=None,
-              help="Scope speaker matching to this campaign's roster (slug, e.g. dnd-mondays)")
+              help="Campaign slug: write into its folder and use its roster")
+@click.option("--keep-both", "keep_both", is_flag=True, default=False,
+              help="A name already in the campaign: save this run as a new copy")
 def transcribe(
     path: Path,
     output_dir: Optional[Path],
@@ -114,6 +116,7 @@ def transcribe(
     verbose: bool,
     debug: bool,
     campaign: Optional[str],
+    keep_both: bool,
 ):
     """Transcribe an audio file (or folder of files) to markdown.
 
@@ -134,13 +137,19 @@ def transcribe(
         lines = Path(vocab_file).read_text(encoding="utf-8").splitlines()
         hotwords = [ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")]
 
+    extra: dict = {}
+    if campaign:
+        extra.update(_campaign_output_args(campaign, output_dir, path, keep_both, overwrite))
+    out_dir = extra.pop("output_dir", output_dir)
+    out_overwrite = extra.pop("overwrite", overwrite)
+
     kwargs = dict(
-        output_dir=output_dir,
+        output_dir=out_dir,
         model_size=model_size,
         device=device,
         language=language,
         include_timestamps=timestamps,
-        overwrite=overwrite,
+        overwrite=out_overwrite,
         no_diarize=no_diarize,
         num_speakers=num_speakers,
         min_speakers=min_speakers,
@@ -153,6 +162,7 @@ def transcribe(
         hotwords=hotwords,
         campaign=campaign,
         forced_alignment=None if forced_align is None else str(forced_align).lower(),
+        **extra,
     )
 
     if path.is_dir():
@@ -167,6 +177,93 @@ def transcribe(
             click.echo(f"Done: {out}")
         except Exception as e:
             raise click.ClickException(str(e))
+
+
+def _keep_both_suffix() -> str:
+    """The timestamp a CLI ``--keep-both`` copy is named after.
+
+    The run's local start time, e.g. ``2026-10-05 0142``. No colon, which
+    Windows forbids; colons separate a time on Windows drives.
+    """
+    from datetime import datetime
+
+    return datetime.now().strftime("%Y-%m-%d %H%M")
+
+
+def _campaign_output_args(campaign: str, output_dir: Optional[Path], path: Path,
+                          keep_both: bool, overwrite: bool) -> dict:
+    """Resolve a CLI run's output into a campaign folder, and name clashes.
+
+    ``--campaign`` writes into the campaign's folder when no ``-o`` names
+    somewhere else; a name already in the campaign is refused unless
+    ``--keep-both`` or ``--overwrite`` is given. Returns the extra kwargs
+    (``output_dir``, ``output_stem``, ``overwrite``); an unknown slug or a
+    taken folder is a ``ClickException``.
+    """
+    from . import campaign_folders, db
+    from .config import get_output_root
+    from .transcript_store import _stem_row, nfc, next_free_stem
+
+    root = get_output_root()
+    with db.connection() as conn:
+        row = conn.execute("SELECT id FROM campaigns WHERE slug = ?", (campaign,)).fetchone()
+    if row is None:
+        raise click.ClickException(f"No campaign with slug {campaign!r}. Run `wisper campaigns list`.")
+    campaign_id = row[0]
+
+    if output_dir is not None:
+        try:
+            same = Path(os.path.realpath(output_dir)) == Path(os.path.realpath(root))
+        except OSError:
+            same = False
+        if not same:
+            return {}  # -o elsewhere: roster-only, unchanged
+
+    try:
+        out = campaign_folders.ensure_folder(campaign_id)
+    except campaign_folders.FolderTakenError as exc:
+        raise click.ClickException(
+            f"The campaign's folder name is taken by another folder: {exc}."
+        ) from None
+    except FileNotFoundError:
+        raise click.ClickException("The transcripts folder isn't available.")
+
+    source = path if path.is_file() else None
+    stem = nfc(source.stem) if source is not None else None
+    result: dict = {"output_dir": out}
+    if stem is None:
+        # A folder run names each member after its input file; process_file
+        # skips (or overwrites) an existing output there.
+        return result
+
+    with db.connection() as conn:
+        same = _stem_row(conn, campaign_id, stem)
+    taken = same is not None
+    md = out / f"{stem}.md"
+    flac = out / f"{stem}.flac"
+    if not (taken or md.is_file() or flac.is_file()):
+        return result
+    if keep_both:
+        suffix = _keep_both_suffix()
+        room = max(1, 100 - len(suffix) - 3)
+        named = f"{stem[:room].rstrip()} ({suffix})"
+        result["output_stem"] = next_free_stem(out, named, campaign_id)
+        return result
+    if overwrite:
+        from .transcript_store import locate
+        loc = locate(same[0]) if taken else None
+        if loc is not None:
+            # Reuse the row: write where its .md is (a misplaced session's is
+            # still in the root), under its current name.
+            result["output_dir"] = loc.dir
+            result["output_stem"] = loc.stem
+        else:
+            result["output_stem"] = stem  # an unregistered file of that name
+        return result
+    raise click.ClickException(
+        f"{stem!r} is already in the campaign. Pass --keep-both to save a new "
+        "copy, or --overwrite to replace it."
+    )
 
 
 def _audio_extensions():
@@ -219,7 +316,12 @@ def server(host: str, port: int, reload: bool, debug: bool) -> None:
     try:
         # Fail before serving if the database can't be used (the lifespan checks
         # again for `uvicorn` launched directly and --reload subprocesses).
+        # This connect migrates, so the lifespan sees no upgrade: report it here.
+        before = db.schema_version()
         db.connect().close()
+        if 0 < before < db.LATEST_VERSION:
+            from .web.app import _report_upgrade
+            _report_upgrade(before)
 
         # Publish bind address so app.py can write server.json for CLI discovery.
         os.environ["WISPER_BIND"] = f"{host}:{port}"
@@ -872,6 +974,25 @@ def _llm_provider_choice() -> click.Choice:
 
 _LLM_PROVIDER_CHOICE = _llm_provider_choice()
 
+# One table for campaign name/delete refusals, shared with the web's ?error= codes.
+_CAMPAIGN_CODE_MESSAGES = {
+    "invalid": "Enter a campaign name.",
+    "slug_taken": "A campaign with that name already exists.",
+    "taken": "A campaign with that name already exists.",
+    "folder_exists": "A folder with that name already exists in your transcripts folder.",
+    "folder_taken": "A folder with that name already exists in your transcripts folder.",
+    "busy": "A job is running for this campaign; try again when it finishes.",
+    "pending": "The last rename of this campaign's folder hasn't finished; "
+               "Retry it under Needs attention first.",
+    "folder_missing": "The campaign's folder is missing from your transcripts folder; "
+                      "see Needs attention.",
+    "reserved": "A session in this campaign is named like the renamed journal; "
+                "rename that session first.",
+    "legacy_journal": "This campaign's old journal is waiting to be moved; see Needs attention.",
+    "delete_incomplete": "A new session appeared in the campaign while it was being deleted; "
+                         "nothing else was removed.",
+}
+
 
 @main.group()
 def campaigns():
@@ -898,14 +1019,17 @@ def campaigns_list():
 @click.argument("display_name")
 def campaigns_create(display_name: str):
     """Create a new campaign. The slug is auto-derived from the name."""
-    from .campaign_manager import create_campaign
+    from .campaign_manager import CampaignError, create_campaign
 
     try:
         campaign = create_campaign(display_name)
+    except CampaignError as exc:
+        raise click.ClickException(_CAMPAIGN_CODE_MESSAGES.get(exc.code, str(exc)))
     except ValueError as exc:
         raise click.ClickException(str(exc))
 
-    click.echo(f"Created campaign {campaign.display_name!r} (slug: {campaign.slug})")
+    click.echo(f"Created campaign {campaign.display_name!r} (slug: {campaign.slug}) "
+               f"(folder: {campaign.folder})")
 
 
 @campaigns.command("delete")
@@ -926,15 +1050,56 @@ def campaigns_delete(slug: str, yes: bool, delete_transcripts: bool):
 
     if not yes:
         what = ("and delete its transcripts, their files, and its journal"
-                if delete_transcripts else "and keep its transcripts and journal file")
+                if delete_transcripts else "and move its transcripts to the output root")
         click.confirm(f"Delete campaign {safe!r} {what}?", abort=True)
 
     try:
-        delete_campaign(safe, delete_transcripts=delete_transcripts)
+        outcome = delete_campaign(safe, delete_transcripts=delete_transcripts)
     except KeyError:
         raise click.ClickException(f"Campaign {safe!r} not found.")
 
-    click.echo(f"Deleted campaign {safe!r}.")
+    if outcome.status == "deleted":
+        click.echo(f"Deleted campaign {safe!r}.")
+        return
+    if outcome.status == "kept":
+        names = ", ".join(outcome.kept)
+        raise click.ClickException(
+            f"Campaign {safe!r} was kept: {len(outcome.kept)} session(s) didn't "
+            f"{'delete' if delete_transcripts else 'move'} ({names}). "
+            "Close the file in another program and retry."
+        )
+    if outcome.status == "busy":
+        raise click.ClickException(_CAMPAIGN_CODE_MESSAGES["busy"])
+    raise click.ClickException(_CAMPAIGN_CODE_MESSAGES["delete_incomplete"])
+
+
+@campaigns.command("rename")
+@click.argument("slug")
+@click.argument("new_name")
+def campaigns_rename(slug: str, new_name: str):
+    """Rename a campaign: its display name, slug, folder, and journal file."""
+    from .campaign_manager import _validate_campaign_slug, load_campaigns
+    from .campaign_folders import rename_campaign
+
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        raise click.ClickException(f"Invalid campaign slug: {slug!r}")
+
+    try:
+        outcome = rename_campaign(safe, new_name)
+    except KeyError:
+        raise click.ClickException(f"Campaign {safe!r} not found.")
+
+    if outcome.status == "renamed":
+        campaign = load_campaigns().get(outcome.new_slug)
+        if campaign is not None:
+            click.echo(f"Renamed campaign {safe!r} to {campaign.display_name!r} "
+                       f"(slug: {campaign.slug}, folder: {campaign.folder}).")
+            return
+    if outcome.status == "pending":
+        click.echo(_CAMPAIGN_CODE_MESSAGES["pending"])
+        return
+    raise click.ClickException(_CAMPAIGN_CODE_MESSAGES.get(outcome.status, outcome.status))
 
 
 @campaigns.command("show")
@@ -957,6 +1122,14 @@ def campaigns_show(slug: str):
 
     click.echo(f"Campaign: {campaign.display_name} (slug: {campaign.slug})")
     click.echo(f"Created:  {campaign.created}")
+    from . import db
+    with db.connection() as conn:
+        pending = conn.execute(
+            "SELECT folder_pending FROM campaigns WHERE id = ?", (campaign.id,)
+        ).fetchone()
+    click.echo(f"Folder:   {campaign.folder}")
+    if pending is not None and pending[0] is not None:
+        click.echo(f"Rename pending → {pending[0]}")
     from .journal import journal_path, journal_stale_since, sync_journal
     sync_journal(safe)
     jpath = journal_path(safe)
@@ -1160,19 +1333,19 @@ def campaigns_journal(slug: str, session: Optional[str], fold_all: bool,
     """Fold session summaries into a rolling campaign journal.
 
     The journal is a single living document at
-    ``campaigns/<slug>/journal.md`` that the LLM rewrites as each new session
-    is folded in. With no flags it folds the next unjournalled session (one
-    that has a ``.summary.md`` from `wisper summarize`). Pass ``--all`` to fold
-    every pending session, ``--session <stem>`` to fold a specific one,
-    ``--rebuild`` to start the journal over from the existing summaries
-    (add ``--resummarize`` to re-summarize the transcripts first), or
-    ``--export`` to print it with its folded-session list.
+    ``<output root>/<folder>/<folder> Journal.md`` in the campaign's folder,
+    which the LLM rewrites as each new session is folded in. With no flags it
+    folds the next unjournalled session (one that has a ``.summary.md`` from
+    `wisper summarize`). Pass ``--all`` to fold every pending session,
+    ``--session <stem>`` to fold a specific one, ``--rebuild`` to start the
+    journal over from the existing summaries (add ``--resummarize`` to
+    re-summarize the transcripts first), or ``--export`` to print it with its
+    folded-session list.
     """
     from .campaign_manager import _validate_campaign_slug, get_transcripts_for_campaign, load_campaigns
     from .journal import (
         export_journal, rebuild_campaign, refold_campaign, unjournalled_sessions, update_journal,
     )
-    from .path_utils import get_output_dir
     from .llm.errors import LLMResponseError, LLMUnavailableError
     from .speaker_manager import load_profiles
 
@@ -1213,8 +1386,13 @@ def campaigns_journal(slug: str, session: Optional[str], fold_all: bool,
                         f"session(s), overwriting their summaries, and regenerate the journal "
                         f"from scratch? This is {calls} LLM calls.")
         else:
-            out_dir = get_output_dir()
-            unsummarized = sum(1 for st in stems if not (out_dir / f"{st}.summary.md").exists())
+            from .transcript_store import find_by_stem
+            campaign_id = load_campaigns()[safe].id
+            unsummarized = sum(
+                1 for st in stems
+                if not any(loc.companion(".summary.md").exists()
+                           for loc in find_by_stem(st, campaign_id=campaign_id))
+            )
             calls = transcript_count + unsummarized
             extra = f" ({unsummarized} need a summary first)" if unsummarized else ""
             question = (f"Rebuild {safe!r}: start the journal over from the {transcript_count} "
@@ -1277,7 +1455,7 @@ def campaigns_journal(slug: str, session: Optional[str], fold_all: bool,
 
 @main.group()
 def transcripts():
-    """Manage transcripts — list, move to campaign, or unlink from a campaign."""
+    """Manage transcripts — list, move between campaigns, or rename."""
 
 
 @transcripts.command("list")
@@ -1293,11 +1471,14 @@ def transcripts_list(campaign: Optional[str]):
             raise click.ClickException("Invalid campaign slug")
 
     out_dir = get_output_dir()
-    from .transcript_store import reconcile
+    from . import campaign_folders
+    from .transcript_store import list_transcripts, reconcile
+    campaign_folders.finish_pending_renames()  # before scanning the folders
     reconcile(out_dir)  # register new files, flag ones deleted outside wisper
 
-    all_stems = sorted(p.stem for p in out_dir.glob("*.md")
-                       if not p.stem.endswith(".summary") and not p.name.startswith("."))
+    # Present sessions from the database, newest first (same order as the page).
+    present_locs = list_transcripts(output_dir=out_dir)
+    all_stems = list(dict.fromkeys(loc.stem for loc in present_locs))
     present = set(all_stems)
 
     campaigns = load_campaigns()
@@ -1349,36 +1530,158 @@ def transcripts_list(campaign: Optional[str]):
     _attention_note()
 
 
+def _find_transcript(name: str, from_slug: Optional[str], *, exclude_slug: Optional[str] = None,
+                     data_dir=None):
+    """One :class:`Located` named ``name``, narrowed by ``from_slug``.
+
+    A name in several campaigns is refused unless ``--from`` (the source
+    campaign) picks one; for a move, the target campaign is dropped from the
+    candidates first, so a name already in the target identifies the session
+    coming in. The error names the campaigns.
+    """
+    from . import db
+    from wisper_transcribe.campaign_manager import _validate_campaign_slug
+    from .transcript_store import find_by_stem
+
+    def campaign_id(slug: str) -> int:
+        safe = _validate_campaign_slug(slug)
+        if safe is None:
+            raise click.ClickException("Invalid campaign slug")
+        with db.connection(data_dir) as conn:
+            row = conn.execute("SELECT id FROM campaigns WHERE slug = ?", (safe,)).fetchone()
+        if row is None:
+            raise click.ClickException(f"Campaign {safe!r} not found.")
+        return row[0]
+
+    if from_slug:
+        found = find_by_stem(name, campaign_id=campaign_id(from_slug), data_dir=data_dir)
+    else:
+        found = find_by_stem(name, data_dir=data_dir)
+
+    if not found:
+        raise click.ClickException(
+            f"No transcript named {name!r}. Run `wisper transcripts list`; a file just added "
+            "is picked up by the next scan."
+        )
+    if len(found) > 1 and exclude_slug:
+        excluded = campaign_id(exclude_slug)
+        remaining = [loc for loc in found if loc.campaign_id != excluded]
+        if remaining:
+            found = remaining
+    if len(found) > 1:
+        with db.connection(data_dir) as conn:
+            slugs = [conn.execute("SELECT slug FROM campaigns WHERE id = ?",
+                                  (loc.campaign_id,)).fetchone() for loc in found]
+        places = sorted(r[0] if r else "no campaign" for r in slugs)
+        raise click.ClickException(
+            f"{name!r} is in several campaigns ({', '.join(places)}); pass --from <slug>."
+        )
+    return found[0]
+
+
+def _clash_flag(keep_both: bool, overwrite: bool) -> str:
+    if keep_both and overwrite:
+        raise click.ClickException("Pass only one of --keep-both or --overwrite.")
+    return "keep_both" if keep_both else "overwrite" if overwrite else "ask"
+
+
+def _report_move(outcome, stem: str, target_slug: Optional[str]) -> None:
+    """Print a :class:`MoveOutcome` and exit 1 for the statuses that failed."""
+    where = f"campaign {target_slug!r}" if target_slug else "the transcripts folder"
+    if outcome.status == "moved":
+        click.echo(f"Moved {stem!r} to {where}.")
+    elif outcome.status == "unchanged":
+        click.echo(f"{stem!r} is already there.")
+    elif outcome.status == "partial":
+        names = ", ".join(p.name for p in outcome.kept)
+        click.echo(f"Moved {stem!r} to {where}; kept in place: {names}.")
+    elif outcome.status == "invalid":
+        raise click.ClickException(f"{stem!r} is not a valid session name.")
+    elif outcome.status == "busy":
+        ids = ", ".join(outcome.busy)
+        raise click.ClickException(
+            f"A job is running for this session ({ids}). If no wisper server is running, these "
+            "are left over from a crash: start the server once to clear them."
+        )
+    elif outcome.status == "folder_taken":
+        raise click.ClickException(
+            f"The campaign's folder isn't available ({outcome.detail or 'folder taken'})."
+        )
+    elif outcome.status == "unavailable":
+        raise click.ClickException("The transcripts folder isn't available.")
+    elif outcome.status == "clash":
+        when = f" (last modified {outcome.clash_modified})" if outcome.clash_modified else ""
+        raise click.ClickException(
+            f"A file with that name is already there{when}. Use --keep-both or --overwrite."
+        )
+    elif outcome.status == "reserved":
+        raise click.ClickException("That name is the campaign journal's.")
+    elif outcome.status == "locked":
+        raise click.ClickException("A file is open in another program; nothing was moved.")
+    else:
+        raise click.ClickException(f"Could not complete the move ({outcome.status}).")
+
+
 @transcripts.command("move")
 @click.argument("stem")
-@click.option("--campaign", default=None, help="Campaign slug to assign (omit to unlink)")
-@click.option("--no-campaign", "unlink", is_flag=True, default=False, help="Remove campaign association")
-def transcripts_move(stem: str, campaign: Optional[str], unlink: bool):
-    """Assign a transcript to a campaign, or remove its campaign association."""
-    from wisper_transcribe.campaign_manager import (
-        move_transcript_to_campaign,
-        remove_transcript_from_campaign,
-        _validate_campaign_slug,
-    )
+@click.option("--campaign", default=None, help="Campaign slug to move the session into")
+@click.option("--no-campaign", "unlink", is_flag=True, default=False,
+              help="Move the session to the transcripts folder root")
+@click.option("--from", "from_slug", default=None,
+              help="Disambiguate a name that is in several campaigns")
+@click.option("--keep-both", is_flag=True, default=False,
+              help="On a name clash, save the moved session as '<name> (2)'")
+@click.option("--overwrite", is_flag=True, default=False,
+              help="On a name clash, replace the existing session")
+def transcripts_move(stem: str, campaign: Optional[str], unlink: bool, from_slug: Optional[str],
+                      keep_both: bool, overwrite: bool):
+    """Move a transcript to a campaign, or out of all of them, moving its files."""
+    from wisper_transcribe.campaign_manager import _validate_campaign_slug
+    from .transcript_store import move_transcript
 
-    if unlink:
-        remove_transcript_from_campaign(stem)
-        click.echo(f"Unlinked {stem!r} from its campaign.")
-        return
-
-    if not campaign:
+    if unlink and campaign:
+        raise click.ClickException("Pass only one of --campaign or --no-campaign.")
+    if not unlink and not campaign:
         raise click.ClickException("Provide --campaign <slug> or --no-campaign")
+    clash = _clash_flag(keep_both, overwrite)
 
-    safe = _validate_campaign_slug(campaign)
-    if safe is None:
-        raise click.ClickException("Invalid campaign slug")
+    target = None
+    if campaign:
+        target = _validate_campaign_slug(campaign)
+        if target is None:
+            raise click.ClickException("Invalid campaign slug")
+    loc = _find_transcript(stem, from_slug, exclude_slug=target)
+    outcome = move_transcript(loc.id, target, clash=clash)
+    _report_move(outcome, loc.stem, target)
 
-    try:
-        move_transcript_to_campaign(stem, safe)
-    except KeyError as exc:
-        raise click.ClickException(str(exc))
 
-    click.echo(f"Moved {stem!r} → campaign {safe!r}.")
+@transcripts.command("rename")
+@click.argument("name")
+@click.argument("new_name")
+@click.option("--campaign", default=None, help="Disambiguate a name that is in several campaigns")
+@click.option("--keep-both", is_flag=True, default=False,
+              help="On a name clash, use the next free '<new_name> (2)'")
+@click.option("--overwrite", is_flag=True, default=False,
+              help="On a name clash, replace the existing session")
+def transcripts_rename(name: str, new_name: str, campaign: Optional[str],
+                       keep_both: bool, overwrite: bool):
+    """Rename a transcript and its companion files."""
+    from .transcript_store import rename_transcript
+
+    clash = _clash_flag(keep_both, overwrite)
+    loc = _find_transcript(name, campaign)
+    outcome = rename_transcript(loc.id, new_name, clash=clash)
+    if outcome.status == "moved":
+        click.echo(f"Renamed {loc.stem!r} to {outcome.new_stem!r}.")
+        return
+    if outcome.status == "unchanged":
+        click.echo(f"{loc.stem!r} is already named that.")
+        return
+    if outcome.status == "partial":
+        names = ", ".join(p.name for p in outcome.kept)
+        click.echo(f"Renamed {loc.stem!r} to {outcome.new_stem!r}; kept in place: {names}.")
+        return
+    _report_move(outcome, new_name, campaign)
 
 
 # ---------------------------------------------------------------------------
@@ -1537,7 +1840,7 @@ def refine(transcript: Path, tasks_raw: str, provider: Optional[str],
     backup = transcript.with_suffix(transcript.suffix + ".bak")
     atomic_write_text(backup, original)
     file_registry.add_if_owned(
-        backup, kind="backup", owner=file_registry.Owner.for_stem(transcript.stem))
+        backup, kind="backup", owner=file_registry.Owner.for_path(transcript))
     save_transcript(transcript, refined_md)
     click.echo(f"\nWrote {transcript}. Backup at {backup}.")
 
@@ -1632,7 +1935,7 @@ def summarize(transcript: Path, provider: Optional[str], model: Optional[str],
             backup = transcript.with_suffix(transcript.suffix + ".bak")
             atomic_write_text(backup, current_md)
             file_registry.add_if_owned(
-                backup, kind="backup", owner=file_registry.Owner.for_stem(transcript.stem))
+                backup, kind="backup", owner=file_registry.Owner.for_path(transcript))
             save_transcript(transcript, refined_md)
             click.echo(f"Refine applied {len(applied_edits)} edit(s). "
                        f"Backup: {backup}")
@@ -2038,7 +2341,11 @@ def db_status():
     if not st.frozen:
         click.echo("Build          : unmerged development build (schema not frozen)")
     for m in st.migrations:
-        backup = f", backup {m['backup_dir']}" if m["backup_dir"] else ""
+        backup = ""
+        if m["backup_dir"]:
+            backup = f", backup {m['backup_dir']}"
+            if not (st.path.parent / m["backup_dir"]).exists():
+                backup += " (pruned)"
         click.echo(f"  v{m['version']} applied {m['applied_at']}{backup}")
     if st.leases:
         click.echo("Runtime leases :")
@@ -2121,10 +2428,16 @@ def storage_group():
 
 
 def _echo_attention(attention) -> None:
-    if attention is None or not attention.total:
+    # Misplaced sessions, legacy journals, and blocked campaign folders are
+    # listed above as organize actions or blocked lines; count only these.
+    if attention is None:
+        return
+    count = (len(attention.missing_transcripts) + len(attention.missing_files)
+             + len(attention.unclaimed))
+    if not count:
         return
     click.echo("")
-    click.echo(f"Needs attention ({attention.total}):")
+    click.echo(f"Needs attention ({count}):")
     for m in attention.missing_transcripts:
         where = f" [{m.campaign}]" if m.campaign else ""
         click.echo(f"  missing transcript: {m.stem}{where}")
@@ -2140,16 +2453,20 @@ def _echo_attention(attention) -> None:
 @click.option("--device", default="auto", show_default=True, type=click.Choice(_config.DEVICES),
               help="Compute device for extracting missing speaker voices")
 def storage_trim(apply_: bool, device: str):
-    """Shrink stored audio to one compact copy per transcript.
+    """Move sessions into their campaign folders, then shrink stored audio.
 
-    Converts each transcript's audio to a 16 kHz mono FLAC (extracting any
-    speaker voices it lacks first), deletes orphaned recording hand-off
-    copies, and removes the segment and per-user audio a recording's
-    combined.wav makes redundant. Only files wisper tracks are touched.
+    Moves every misplaced session's files into its campaign's folder and moves
+    legacy journals out of the data dir, extracts any speaker voices a
+    transcript lacks, converts each transcript's audio to a 16 kHz mono FLAC,
+    deletes orphaned recording hand-off copies, and removes the segment and
+    per-user audio a recording's combined.wav makes redundant. Only files
+    wisper tracks are touched.
 
     Dry run by default. With --apply the web server must be stopped.
     """
-    from . import db, storage_trim as trim
+    from . import campaign_folders, db, storage_trim as trim
+
+    campaign_folders.finish_pending_renames()  # before scanning the folders
 
     if apply_:
         lock = db.ServerLock()
@@ -2169,7 +2486,8 @@ def storage_trim(apply_: bool, device: str):
             lock.release()
         click.echo("")
         click.echo(
-            f"Converted {len(report.converted)}, deleted {len(report.dropped)} copy(ies) and "
+            f"Moved {len(report.organized)} into campaign folders; "
+            f"converted {len(report.converted)}, deleted {len(report.dropped)} copy(ies) and "
             f"{len(report.orphans)} orphan(s), trimmed {len(report.trimmed)} recording(s); "
             + (f"freed {_fmt_bytes(report.freed_bytes)}." if report.freed_bytes >= 0
                else f"used {_fmt_bytes(-report.freed_bytes)} more."))
@@ -2188,14 +2506,31 @@ def storage_trim(apply_: bool, device: str):
         click.echo("Dry run: nothing was changed. Run again with --apply to do this.")
 
 
-def _echo_plan(current) -> None:
-    from .storage_trim import KIND_LABELS
+def _move_count(moves) -> str:
+    """``"3 sessions and 1 journal"``; journals are organize actions too."""
+    journals = sum(1 for a in moves if a.note == "journal")
+    sessions = len(moves) - journals
+    parts = [f"{n} {word}{'s' if n != 1 else ''}"
+             for n, word in ((sessions, "session"), (journals, "journal")) if n]
+    return " and ".join(parts)
 
-    if not current.actions:
+
+def _echo_plan(current) -> None:
+    from .storage_trim import KIND_LABELS, ORGANIZE
+
+    if not current.actions and not current.blocked:
         click.echo("Nothing to trim.")
     for a in current.actions:
-        click.echo(f"{KIND_LABELS[a.kind]:<16} {_fmt_bytes(a.size):>10}  {a.path}")
+        note = f"  {a.note}" if a.note and a.kind == ORGANIZE else ""
+        click.echo(f"{KIND_LABELS[a.kind]:<16} {_fmt_bytes(a.size):>10}  {a.path}{note}")
+    for name, sessions, why in current.blocked:
+        noun = "session" if sessions == 1 else "sessions"
+        click.echo(f"{name}: {sessions} {noun} can't be organized ({why}; "
+                   "see Needs attention)")
     if current.actions:
+        if current.move_bytes:
+            click.echo(f"Move {_move_count(current.moves)} into their campaign "
+                       f"folders ({_fmt_bytes(current.move_bytes)}, nothing deleted)")
         if current.total_bytes:
             click.echo(f"{'Deletions free':<16} {_fmt_bytes(current.total_bytes):>10}")
         if current.convert_bytes:

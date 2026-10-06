@@ -14,7 +14,6 @@ from wisper_transcribe.config import (
     load_config,
     resolve_llm_model,
 )
-from wisper_transcribe.path_utils import get_output_dir
 
 router = APIRouter()
 
@@ -35,6 +34,16 @@ def recent_jobs(queue, limit: int = RECENT_JOBS) -> list:
         stored = []
     merged = live + [r for r in stored if r.id not in seen]
     merged.sort(key=lambda j: j.created_at, reverse=True)
+    # In-memory jobs link by transcript id like history rows; resolve it from
+    # output_path when the job didn't set one. History rows already carry it.
+    from wisper_transcribe import transcript_store
+    for j in merged:
+        if (not hasattr(j, "kwargs") or j.transcript_id is not None
+                or not j.output_path):
+            continue
+        loc = transcript_store.locate_path(Path(j.output_path))
+        if loc is not None:
+            j.transcript_id = loc.id
     return merged[:limit]
 
 
@@ -57,7 +66,10 @@ def job_campaigns(jobs: list) -> dict[str, str]:
             path = (getattr(job, "output_path", None) or getattr(job, "llm_transcript_path", None)
                     or getattr(job, "enroll_md_path", None))
             if path:
-                slug = get_campaign_for_transcript(Path(path).stem)
+                from wisper_transcribe.transcript_store import locate_path
+                loc = locate_path(Path(path))
+                if loc is not None:
+                    slug = get_campaign_for_transcript(loc.id)
             rid = getattr(job, "recording_id", None) or getattr(job, "live_recording_id", None)
             if slug is None and rid:
                 rec = load_recording(rid)
@@ -81,11 +93,9 @@ async def dashboard(request: Request) -> HTMLResponse:
         or os.environ.get("HF_TOKEN")
     )
 
-    # Exclude .summary.md sidecars so this matches the Transcripts page.
-    output_dir = get_output_dir()
-    transcript_count = len(
-        [p for p in output_dir.glob("*.md") if not p.stem.endswith(".summary")]
-    ) if output_dir.exists() else 0
+    # Present sessions only, from the database (matches the Transcripts page).
+    from wisper_transcribe import transcript_store
+    transcript_count = len(transcript_store.list_transcripts())
 
     # Count enrolled speakers
     from wisper_transcribe.speaker_manager import load_profiles
@@ -163,7 +173,7 @@ async def job_history_page(
     page: int = 1,
     type: str = "",
     status: str = "",
-    transcript: str = "",
+    transcript_id: str = "",
     campaign: str = "",
 ) -> HTMLResponse:
     """Every job ever run, newest first, 50 per page, filterable."""
@@ -177,19 +187,23 @@ async def job_history_page(
                  JOB_CAMPAIGN_JOURNAL, JOB_SPEAKER_RELABEL)
     type_filter = type if type in job_types else ""
     status_filter = status if status in job_history.JOB_STATUSES else ""
+    # A transcript filter is a database id; a bad value is ignored.
+    try:
+        transcript_filter = int(transcript_id) if transcript_id else None
+    except ValueError:
+        transcript_filter = None
     page = max(1, page)
     records, total = job_history.list_jobs(
         page=page, per_page=HISTORY_PAGE_SIZE, job_type=type_filter or None,
-        status=status_filter or None, transcript=transcript or None, campaign=campaign or None,
+        status=status_filter or None, transcript_id=transcript_filter, campaign=campaign or None,
     )
     pages = max(1, -(-total // HISTORY_PAGE_SIZE))
     return templates.TemplateResponse(
-        request,
-        "job_history.html",
+        request, "job_history.html",
         {
             "request": request, "records": records, "total": total, "page": page, "pages": pages,
             "job_types": job_types, "statuses": job_history.JOB_STATUSES,
             "type_filter": type_filter, "status_filter": status_filter,
-            "transcript_filter": transcript, "campaign_filter": campaign,
+            "transcript_filter": transcript_filter, "campaign_filter": campaign,
         },
     )

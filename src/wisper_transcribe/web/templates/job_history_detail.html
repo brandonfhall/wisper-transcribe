@@ -23,7 +23,7 @@
   </div>
 
   <div style="display:flex;gap:10px;margin-bottom:22px;flex-wrap:wrap">
-    {% if record.transcript_stem %}<a class="btn btn-secondary btn-sm" href="/transcripts/{{ record.transcript_stem | urlencode }}">Transcript</a>{% endif %}
+    {% if record.transcript_id %}<a class="btn btn-secondary btn-sm" href="/transcripts/{{ record.transcript_id }}">Transcript</a>{% endif %}
     {% if record.campaign_slug %}<a class="btn btn-secondary btn-sm" href="/campaigns/{{ record.campaign_slug | urlencode }}">Campaign</a>{% endif %}
     {% if record.recording_id %}<a class="btn btn-secondary btn-sm" href="/recordings/{{ record.recording_id }}">Recording</a>{% endif %}
   </div>

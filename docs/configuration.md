@@ -52,7 +52,7 @@ Stored in `config.toml`. View with `wisper config show`, change with `wisper con
 
 ## Where Data Is Stored
 
-The database, settings, voice samples, journals, and recordings are stored in your OS user data directory — separate from the project folder so they persist across updates.
+The database, settings, voice samples, and recordings are stored in your OS user data directory — separate from the project folder so they persist across updates.
 
 | Platform | Path |
 |----------|------|
@@ -70,7 +70,7 @@ wisper-transcribe/
 │       └── alice.mp3    short voice sample for the Speakers page (profiles are in wisper.db)
 ├── campaigns/
 │   └── <slug>/
-│       └── journal.md   rolling campaign journal (`wisper campaigns journal`)
+│       └── journal.md.v11-adopted   a journal moved into its campaign folder, kept for rolling back
 ├── recordings/          each recording's combined.wav, plus per-user tracks of Discord speakers not yet enrolled (recording details are in wisper.db)
 └── output/              transcripts (unless `output_dir` / `WISPER_OUTPUT_DIR` points elsewhere)
 ```
@@ -81,13 +81,15 @@ Override the storage path with `WISPER_DATA_DIR` (set automatically in Docker). 
 
 Transcripts go to the output root: `WISPER_OUTPUT_DIR` if set, else the `output_dir` setting, else `output/` in the data directory. It never depends on the directory you launch wisper from. Each uploaded transcript keeps its audio as `<name>.flac` beside it. An install whose transcripts are in a `./output` folder next to where wisper was started gets that path saved into `output_dir` the first time it runs with the database.
 
-Large stored audio (whole uploaded videos, extra recording copies) is shrunk by `wisper storage trim`.
+Each campaign's journal is `<campaign folder>/<campaign folder> Journal.md` inside the transcripts folder, in a folder wisper has claimed (it created the folder, or found it absent or empty). wisper never reads or writes a journal in a folder it hasn't claimed. A journal from an older install, at `campaigns/<slug>/journal.md` in the data directory, moves into the campaign folder the first time it is read, and at startup; the old file is kept as `journal.md.v11-adopted`.
+
+Large stored audio (whole uploaded videos, extra recording copies) is shrunk by `wisper storage trim`, which also moves existing sessions into their campaign folders; run it once after upgrading.
 
 To move your transcripts: stop the server, move the files, then `wisper config set output_dir <new path>`.
 
 ### Database and backups
 
-`wisper.db` in the data directory holds speaker profiles (including voice fingerprints), campaigns and their session order, the list of known transcripts with each one's speaker names, which sessions each journal has folded in, recordings, job history, and the search index. Transcripts, summaries, journals, and audio stay ordinary files you can open and edit. The database also records every file wisper owns: its owner, kind, location, size, and modified time. It is brought in line with the disk at startup and when you open the Transcripts or Campaigns page; it never deletes a file it finds unexpected. The database is created on first use and upgraded automatically; before an upgrade changes an existing database, a copy is saved in `backups/`. The server prints `Database upgraded from version N to M` with the copy's name when it upgrades, and, after an upgrade from a release before the file registry, a reminder to run `wisper storage trim` if there is stored audio to shrink.
+`wisper.db` in the data directory holds speaker profiles (including voice fingerprints), campaigns and their session order, the list of known transcripts with each one's speaker names, which sessions each journal has folded in, recordings, job history, and the search index. Transcripts, summaries, journals, and audio stay ordinary files you can open and edit. The database also records every file wisper owns: its owner, kind, location, size, and modified time. It is brought in line with the disk at startup and when you open the Transcripts or Campaigns page; it never deletes a file it finds unexpected. The database is created on first use and upgraded automatically; before an upgrade changes an existing database, a copy is saved in `backups/`, and only the newest five snapshots are kept. The server prints `Database upgraded from version N to M` with the copy's name when it upgrades, and points at `wisper storage trim` for what the upgrade left to do: move existing sessions into their campaign folders, and shrink stored audio after an upgrade from a release before the file registry.
 
 Upgrading from a version that stored these as JSON files (`speakers.json`, `campaigns.json`, `.npy` voice files, `recordings.json` and each recording's `metadata.json`, and the speaker data in each transcript's `_diar.json`) imports them once on first start. Copies of the originals go to `backups/pre-sqlite-v<N>-<time>/`, and anything that had to be repaired or dropped (for example a campaign member whose profile no longer exists) is listed in `import-report.txt` there. The JSON files are then deleted; each `_diar.json` keeps only its speaker timings.
 
@@ -165,3 +167,12 @@ wisper transcribe session.mp3
 # Mac/Linux
 WISPER_DEBUG=1 wisper transcribe session.mp3
 ```
+
+### Going back to an older version
+
+A build older than the campaign-folder schema can't open the upgraded database. To go back:
+
+1. Stop wisper.
+2. Restore the newest `backups/wisper-v10-*.db` as `wisper.db`.
+3. Rename each `campaigns/<slug>/journal.md.v11-adopted` back to `journal.md`.
+4. Move session files out of campaign folders back into the transcripts folder, so the older build finds them.

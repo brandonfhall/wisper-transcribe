@@ -90,8 +90,9 @@ def _cleanup_recording_trash() -> None:
 
 def _report_upgrade(before: int) -> None:
     """Say on the console that startup upgraded the database, and point at
-    ``wisper storage trim`` when an upgrade from before the file registry (v9)
-    left stored audio it would shrink.
+    ``wisper storage trim`` for what the upgrade left to do: move sessions into
+    their campaign folders (an upgrade crossing v11) and shrink stored audio
+    (an upgrade from before the file registry, v9).
 
     Logged as warnings so they print without debug logging, like the
     Needs-attention line.
@@ -111,11 +112,19 @@ def _report_upgrade(before: int) -> None:
         log.debug("Could not read the upgrade backup path", exc_info=True)
     log.warning("Database upgraded from version %d to %d%s", before, db.LATEST_VERSION,
                 f"; previous copy in {backup}" if backup else "")
+    if before < 11 <= db.LATEST_VERSION:
+        try:
+            from wisper_transcribe import transcript_store
+            if transcript_store.needs_attention().misplaced:
+                log.warning("Run `wisper storage trim --apply` (with the server stopped) "
+                            "to move existing sessions into their campaign folders.")
+        except Exception:
+            log.debug("Could not check for misplaced sessions", exc_info=True)
     if before >= 9:
         return
     try:
         from wisper_transcribe import storage_trim
-        if storage_trim.plan().actions:
+        if any(a.kind != storage_trim.ORGANIZE for a in storage_trim.plan().actions):
             log.warning("Stored audio can be shrunk: stop the server and run "
                         "`wisper storage trim` to review, then `wisper storage trim --apply`")
     except Exception:
@@ -216,6 +225,25 @@ def create_app() -> FastAPI:
         except Exception:
             import logging
             logging.getLogger(__name__).warning("Could not mark interrupted jobs", exc_info=True)
+
+        # Move journals from the data dir into their campaign folders. After
+        # mark_interrupted, so leftover job rows don't read as busy.
+        try:
+            from wisper_transcribe import journal
+            journal.adopt_legacy_journals()
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning("Could not adopt legacy journals", exc_info=True)
+
+        # Finish a campaign folder rename that a crash or a locked folder left
+        # pending, before reconcile scans the folders.
+        try:
+            from wisper_transcribe import campaign_folders
+            campaign_folders.finish_pending_renames()
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Could not finish pending folder renames", exc_info=True)
 
         # Register transcripts added while the server was down, flag deleted
         # ones, match renames, and sweep crash leftover temp files.

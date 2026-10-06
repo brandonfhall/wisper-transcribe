@@ -35,6 +35,8 @@ The web UI is a **single-user tool with no authentication and no CSRF protection
 | Recordings | `/recordings` | Browse recordings by campaign; detail, transcribe, and delete |
 | Config | `/config` | All settings, including LLM provider and Discord bot |
 
+Transcript pages are addressed by their database id (`/transcripts/{id}`). Old links that named a session still work: when exactly one transcript has that name the link redirects to the id; when several do (the same name in two campaigns) it lists them to choose from.
+
 While a recording is active, every page shows a banner with the elapsed time and a **Stop recording** button.
 
 ---
@@ -45,12 +47,14 @@ Drag a file onto `/transcribe` and choose options:
 
 - **Whisper model** — preselected from your config (`large-v3-turbo` if the configured model isn't one of the options shown).
 - **Detect speakers** — on by default. Turn it off for audiobooks or lectures to skip diarization. When on, pick **?** (auto-detect) or pin a count of 1–10.
-- **Campaign** — restricts speaker matching to that campaign's roster.
+- **Campaign** — restricts speaker matching to that campaign's roster, and chooses the folder the transcript is written into.
 - **Refine** / **Summarize** — LLM post-processing that runs after transcription in the same job.
 
 Large uploads show a byte-level progress bar ("Uploading… N%", then "Processing…") before the job page opens.
 
-**Name already taken:** the transcript is named after the file. If a transcript or an audio file (`<name>.flac`) with that name exists, the page says so as soon as you pick the file (which campaign it's in, and when the existing file was last modified), before anything uploads. A transcript of that name that is missing (renamed or deleted outside wisper) is flagged too: overwriting replaces its audio and speakers, so relink it first to keep them. Tick **Overwrite it** to replace it — it keeps its campaign place, and if it was folded into the campaign journal the journal is marked as needing a rebuild — or **Cancel** and rename the file. A job never reports success without writing its transcript: if a same-named transcript appears while the job runs, the job fails with "Transcript already exists", and a job whose transcript file isn't there afterwards fails with "Transcript file missing after write" (the job log shows the transcripts folder it used).
+A transcript uploaded with a campaign is written into that campaign's folder in the transcripts folder; without one it goes to the transcripts folder's root. A campaign whose folder name is taken by a folder wisper doesn't own refuses the upload ("folder taken"); the Transcripts page lists it under Needs attention. An upload, a recording hand-off, or a journal or relabel run that can't be written to job history is refused ("submit failed") and queues nothing, so moving or renaming a session can't miss it.
+
+**Name already taken:** the transcript is named after the file. If a transcript or an audio file (`<name>.flac`) with that name exists in the target folder, the page says so as soon as you pick the file (which campaign it's in, and when the existing file was last modified), before anything uploads. A transcript of that name that is missing (renamed or deleted outside wisper) is flagged too: overwriting replaces its audio and speakers, so relink it first to keep them. Choose **Overwrite it** to replace it — it keeps its campaign place, and if it was folded into the campaign journal the journal is marked as needing a rebuild — **Keep both** to save the new run as `<name> (2)`, or **Cancel** and rename the file. Overwrite is offered only when the existing file is a wisper transcript; a stray `.flac` with no transcript, or a name that would collide with the campaign journal, can only be kept as a new copy. A job never reports success without writing its transcript: if a same-named transcript appears while the job runs, the job fails with "Transcript already exists", and a job whose transcript file isn't there afterwards fails with "Transcript file missing after write" (the job log shows the transcripts folder it used).
 
 ### Job page
 
@@ -58,7 +62,7 @@ Large uploads show a byte-level progress bar ("Uploading… N%", then "Processin
 - A live log, ETA, and speed. On Apple Silicon (MLX) the Transcribe ETA updates about every 30 s of audio.
 - **Stop Job** cancels a pending or running job. A running transcription stops at its next progress update; the GPU may finish its current batch first.
 - Failed jobs show a generic message ("Transcription failed — see server logs"). The full error is in the server log (the terminal running `wisper server`, or the `--debug` log file).
-- The dashboard shows the 20 newest jobs, including ones from before a restart, each with its campaign (the campaign its transcript is in now, else the one it was submitted with). **all jobs →** opens **Job history** (`/jobs/history`): every job ever run, 50 per page, filterable by type and status, with each job's settings, result, and last log lines. Transcript and campaign pages have a **Jobs** button that filters it to that transcript or campaign; a campaign's list includes the transcriptions of its sessions. Jobs that were queued or running when the server stopped show as "Interrupted by restart"; they are not resumed.
+- The dashboard shows the 20 newest jobs, including ones from before a restart, each with its campaign (the campaign its transcript is currently in, else the one it was submitted with). **all jobs →** opens **Job history** (`/jobs/history`): every job ever run, 50 per page, filterable by type and status, with each job's settings, result, and last log lines. Transcript and campaign pages have a **Jobs** button that filters it to that transcript or campaign; a campaign's list includes the transcriptions of its sessions. Jobs that were queued or running when the server stopped show as "Interrupted by restart"; they are not resumed.
 
 What a job keeps: the transcript, the summary, the speaker clips, and the audio as `<name>.flac` beside the transcript. The uploaded file itself isn't kept: wisper extracts its first audio track, deletes the upload, and saves that track as a 16 kHz mono FLAC. A recording keeps its `combined.wav` and the transcript plays from it.
 
@@ -92,6 +96,17 @@ A transcript with audio has a **Re-transcribe** button in its toolbar. It asks f
 
 ---
 
+## Moving and renaming a transcript
+
+A transcript's page has a **Campaign** box and a **Rename** field. The campaign box moves the session into that campaign's folder (or into the transcripts folder's root for **— Uncategorized —**). **Rename** renames the `.md` and its files together. A **Move files** button appears when the session's files aren't in its campaign's folder yet.
+
+- Both actions move the `.md`, its summary, its speaker data and clips, its audio copy, and its backup together. The database changes first, then the files follow; a file another program holds open stays behind, and the session reads under **Needs attention** until **Move files** finishes it.
+- A name already in the target folder is never replaced silently. The page shows the existing file's last-modified time and offers **Overwrite** (only when it's a wisper transcript; it deletes that session first), **Keep both** (saves as `<name> (2)`), or **Cancel**. In a bulk move from the Transcripts page, a clashing session stays put and the result counts it as skipped.
+- A move, a rename, or a bulk move is refused while a job is pending or running for the session or its campaign, or while a recording of the campaign is capturing; the page says so and nothing changes.
+- A link typed in your notes points at the old file name, so it stops working after a rename; wisper doesn't rewrite the text of your notes.
+
+---
+
 ## Searching
 
 Type in the sidebar box or open `/search`. Every transcript's title and text, and its session summary, are searched.
@@ -119,7 +134,7 @@ The wizard enrolls from voice data saved when the transcript was made, so it doe
 
 **Standalone enrollment** (`/speakers` → Enroll) takes a clean reference clip for one speaker and runs as a background job.
 
-**Per-line edits:** `/transcripts/{name}/edit` reassigns individual lines to a different speaker.
+**Per-line edits:** `/transcripts/{id}/edit` reassigns individual lines to a different speaker.
 
 ---
 
@@ -186,22 +201,29 @@ The Campaign page's **Rolling journal** panel combines session summaries into on
 - A session is ready to fold in once it has a `.summary.md`.
 - **Update journal** folds the next session; **Fold all** folds every pending one. Each fold is a job.
 - **View journal** shows the rendered result.
-- **View journal** also has **Download**, which saves `journal.md` with the list of folded sessions added to its frontmatter.
+- **View journal** also has **Download**, which saves the journal with the list of folded sessions added to its frontmatter.
 - **Rebuild journal** starts the journal over from each session's existing summary — one LLM call per session (plus one for any session not yet summarized). Your edits to summaries are kept. It asks for confirmation, showing the call count.
 - **Rebuild from transcripts** re-summarizes every session first, overwriting the summaries, then rebuilds — two LLM calls per session. Use it after changing model or provider, or when the summaries themselves are bad.
 - **Stale journal:** moving a folded session to another campaign, removing it, deleting it, or re-transcribing it leaves the journal text alone and shows an amber notice ("This journal mentions sessions that were moved, removed, or re-transcribed…") on the Campaign and Journal pages. **Rebuild journal** is highlighted until you rebuild. Nothing is regenerated automatically.
-- Editing `journal.md` yourself (e.g. in Obsidian) is fine; later folds build on your edits. Deleting it starts a fresh journal.
+- The journal is a file named `<campaign folder> Journal.md` in the campaign's folder inside the transcripts folder. Editing it yourself (e.g. in Obsidian) is fine; later folds build on your edits. Deleting it starts a fresh journal.
 
 **Episode order:** the ▲/▼ arrows on the Episodes list set the order sessions are folded in. Order is when a transcript was added to the campaign, not its date, so check it before rebuilding.
 
-**Deleted transcripts:** deleting a transcript in wisper (single, **Delete selected**, or a recording with its files) removes it from its campaign and its companion files (summary, speaker clips, audio copy). A transcript file that disappears some other way — deleted in Finder, renamed in Obsidian, a sync still in progress, an unplugged drive — keeps its place and shows as **MISSING** on the Campaign page. If the file comes back, the flag clears on its own. If it was renamed, wisper matches it on the next start when the file is unchanged; otherwise pick the new file in the **Relink** dropdown next to it: the session keeps its place, journal entry, speaker names, and its summary, speaker clips, and audio. Otherwise remove it with ✕.
+**Renaming a campaign** changes its display name, page URL, folder on disk, and journal file together. The Rename form is in the Campaign page header; a name whose folder is taken is refused. If the folder can't move (a file in it is open in another program) the name and folder change stay pending and the Transcripts page's Needs attention offers **Retry**; when both the old and new folders are gone, **Finish without folder** commits the new name and folder in the database and makes the folder on the next write.
 
-**Deleting a campaign** asks which of two you want. **Delete campaign, keep the files** removes the campaign and leaves its transcripts unassigned; its `journal.md` stays on disk and is listed under Needs attention. **Delete campaign and everything in it** deletes the campaign, every transcript in it with its summary, speaker clips, and audio, and its journal. A transcript that can't be deleted (another program has it open) is kept, unassigned, and listed under Needs attention.
+**Deleted transcripts:** deleting a transcript in wisper (single, **Delete selected**, or a recording with its files) removes it from its campaign and its companion files (summary, speaker clips, audio copy). A transcript file that disappears some other way — deleted in Finder, renamed in Obsidian, a sync still in progress, an unplugged drive — keeps its place and shows as **MISSING** on the Campaign page. If the file comes back, the flag clears on its own. If it was renamed, wisper matches it on the next start when the file is unchanged; otherwise pick the new file in the **Relink** dropdown next to it: the session keeps its place, journal entry, speaker names, and its summary, speaker clips, and audio. Otherwise remove it with ✕. Removing a session from a campaign moves its files to the transcripts folder's root, keeping its name (and ` (2)` on a clash); it is refused while a job is running for it or while a file is open in another program.
+
+**Deleting a campaign** asks which of two you want. **Delete campaign, keep the files** moves its sessions to the transcripts folder's root (a name already there becomes `<name> (2)`); its journal file stays on disk in its folder (a folder left empty is removed), and creating a campaign of that name again re-claims the folder and its journal. **Delete campaign and everything in it** lists the sessions and deletes the campaign, every one of them with its summary, speaker clips, and audio, and its journal; the folder is removed when nothing is left in it. If a session can't be deleted or moved (another program has it open), the campaign is kept with what's left and the message names the sessions. wisper never deletes a folder holding files it doesn't own.
 
 **Needs attention:** the Transcripts page shows this panel only when something needs you. Nothing in it is deleted automatically.
 - **Missing transcripts** have a **Relink** dropdown (the renamed file brings its summary, speaker clips, and audio along) and a **Remove** button that deletes the transcript and its files.
 - **Files gone from disk** (a summary or clip you deleted by hand) have a **Forget** button that stops tracking them.
-- **Files with no transcript** show their size and modified time. Summaries, speaker data, clips, backups, and `.flac` audio in the transcripts folder have a **Delete** button; a file in wisper's data folder, such as a recording's `combined.wav`, is listed only.
+- **Not in their campaign's folder:** sessions still in the transcripts root (or elsewhere) that a campaign holds. Run `wisper storage trim --apply`, or move them with **Move files** on the session's page.
+- **Folder renames to finish:** a campaign folder rename that didn't complete because a file in it is open. Close it and **Retry**; when both the old and new folders are gone, **Finish without folder** commits the database change and makes the folder on the next write.
+- **Folder taken:** a folder with the campaign's name already exists and isn't wisper's. Rename the campaign, or **Use this folder** — every `.md` file in it becomes a session of that campaign.
+- **Journals to move:** a journal from an older install that couldn't be moved into its campaign folder.
+- **Campaign folders missing:** a campaign's folder is gone from the transcripts folder. Rename the campaign to match the folder, or **Recreate folder**.
+- **Files with no transcript** show their size and modified time. Summaries, speaker data, clips, backups, and `.flac` audio in a scanned folder have a **Delete** button; a file in wisper's data folder, such as a recording's `combined.wav`, is listed only.
 - wisper logs the counts at startup.
 
 ---

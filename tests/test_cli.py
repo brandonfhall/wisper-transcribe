@@ -15,6 +15,8 @@ import pytest
 from click.testing import CliRunner
 
 from wisper_transcribe.cli import main
+
+from . import _seed
 # Import these before any autouse patch replaces them in the module namespace.
 from wisper_transcribe.cli import _get_ollama_models as _real_get_ollama_models
 from wisper_transcribe.cli import _get_lmstudio_models as _real_get_lmstudio_models
@@ -393,7 +395,7 @@ def test_transcribe_cli_raises_click_exception_on_error(tmp_path):
 def test_transcribe_cli_language_auto_passes_through(tmp_path):
     """--language auto is forwarded as the literal string "auto" — process_file
     (not the CLI) is responsible for turning it into None for auto-detection,
-    since None is now the CLI's own "unset, use config" sentinel."""
+    since None is the CLI's own "unset, use config" sentinel."""
     audio = tmp_path / "test.mp3"
     audio.write_bytes(b"fake")
 
@@ -1169,11 +1171,10 @@ def test_campaigns_list_empty(tmp_path, monkeypatch):
 
 def test_campaigns_reorder_up(tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-    from wisper_transcribe.campaign_manager import move_transcript_to_campaign
     runner = CliRunner()
     runner.invoke(main, ["campaigns", "create", "Test Campaign"])
     for stem in ("s1", "s2", "s3"):
-        move_transcript_to_campaign(stem, "test-campaign", data_dir=tmp_path)
+        _seed.move_to_campaign(stem, "test-campaign", data_dir=tmp_path)
 
     result = runner.invoke(main, ["campaigns", "reorder", "test-campaign", "s3", "--up"])
     assert result.exit_code == 0, result.output
@@ -1184,11 +1185,11 @@ def test_campaigns_reorder_up(tmp_path, monkeypatch):
 
 def test_campaigns_reorder_set(tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-    from wisper_transcribe.campaign_manager import move_transcript_to_campaign, get_transcripts_for_campaign
+    from wisper_transcribe.campaign_manager import get_transcripts_for_campaign
     runner = CliRunner()
     runner.invoke(main, ["campaigns", "create", "Test Campaign"])
     for stem in ("s1", "s2", "s3"):
-        move_transcript_to_campaign(stem, "test-campaign", data_dir=tmp_path)
+        _seed.move_to_campaign(stem, "test-campaign", data_dir=tmp_path)
 
     result = runner.invoke(main, ["campaigns", "reorder", "test-campaign", "--set", "s3,s1,s2"])
     assert result.exit_code == 0, result.output
@@ -1197,10 +1198,9 @@ def test_campaigns_reorder_set(tmp_path, monkeypatch):
 
 def test_campaigns_reorder_set_rejects_non_permutation(tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-    from wisper_transcribe.campaign_manager import move_transcript_to_campaign
     runner = CliRunner()
     runner.invoke(main, ["campaigns", "create", "Test Campaign"])
-    move_transcript_to_campaign("s1", "test-campaign", data_dir=tmp_path)
+    _seed.move_to_campaign("s1", "test-campaign", data_dir=tmp_path)
 
     result = runner.invoke(main, ["campaigns", "reorder", "test-campaign", "--set", "s1,ghost"])
     assert result.exit_code != 0
@@ -1208,10 +1208,9 @@ def test_campaigns_reorder_set_rejects_non_permutation(tmp_path, monkeypatch):
 
 def test_campaigns_reorder_requires_up_or_down(tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-    from wisper_transcribe.campaign_manager import move_transcript_to_campaign
     runner = CliRunner()
     runner.invoke(main, ["campaigns", "create", "Test Campaign"])
-    move_transcript_to_campaign("s1", "test-campaign", data_dir=tmp_path)
+    _seed.move_to_campaign("s1", "test-campaign", data_dir=tmp_path)
 
     result = runner.invoke(main, ["campaigns", "reorder", "test-campaign", "s1"])
     assert result.exit_code != 0
@@ -1249,14 +1248,14 @@ def test_campaigns_delete_with_yes(tmp_path, monkeypatch):
 
 def _campaign_with_transcript(out):
     from wisper_transcribe import transcript_store
-    from wisper_transcribe.campaign_manager import move_transcript_to_campaign
 
     runner = CliRunner()
     runner.invoke(main, ["campaigns", "create", "Test Campaign"])
-    (out / "s01.md").write_text("x", encoding="utf-8")
-    transcript_store.register("s01", origin="job")
+    md = out / "s01.md"
+    md.write_text("x", encoding="utf-8")
+    transcript_store.register(md, origin="job")
     (out / "s01.summary.md").write_text("sum", encoding="utf-8")
-    move_transcript_to_campaign("s01", "test-campaign")
+    _seed.move_to_campaign("s01", "test-campaign")
     return runner
 
 
@@ -1269,7 +1268,8 @@ def test_campaigns_delete_keeps_transcripts_by_default(tmp_path, monkeypatch):
 
     result = runner.invoke(main, ["campaigns", "delete", "test-campaign"], input="y\n")
     assert result.exit_code == 0, result.output
-    assert "keep its transcripts and journal file" in result.output
+    assert "move its transcripts to the output root" in result.output
+    assert "Deleted campaign" in result.output
     assert (out / "s01.md").exists() and (out / "s01.summary.md").exists()
 
 
@@ -1285,6 +1285,87 @@ def test_campaigns_delete_transcripts_flag_deletes_them(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "delete its transcripts, their files, and its journal" in result.output
     assert not list(out.iterdir())
+
+
+def test_campaigns_delete_reports_a_kept_campaign_and_exits_nonzero(tmp_path, monkeypatch):
+    from wisper_transcribe import transcript_store as ts
+    from wisper_transcribe.path_utils import get_output_dir
+    from unittest.mock import patch
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    out = get_output_dir()
+    runner = _campaign_with_transcript(out)
+
+    with patch("wisper_transcribe.transcript_store.delete_transcript", return_value="kept"):
+        result = runner.invoke(main, ["campaigns", "delete", "test-campaign",
+                                      "--delete-transcripts"], input="y\n")
+
+    assert result.exit_code != 0
+    assert "was kept" in result.output and "s01" in result.output
+    from wisper_transcribe.campaign_manager import load_campaigns
+    assert "test-campaign" in load_campaigns(tmp_path)
+
+
+def test_campaigns_delete_busy_exits_nonzero(tmp_path, monkeypatch):
+    from wisper_transcribe import db
+    from wisper_transcribe.campaign_manager import load_campaigns
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    runner = CliRunner()
+    runner.invoke(main, ["campaigns", "create", "Test Campaign"])
+    with db.connection(tmp_path) as conn:
+        cid = conn.execute("SELECT id FROM campaigns WHERE slug = 'test-campaign'").fetchone()[0]
+    with db.transaction(tmp_path) as conn:
+        conn.execute(
+            "INSERT INTO jobs (id, type, status, created_at, started_at, campaign_id, params_json) "
+            "VALUES ('00000000-0000-0000-0000-000000000002', 'campaign_journal', 'running', "
+            "'now', 'now', ?, '{}')", (cid,))
+
+    result = runner.invoke(main, ["campaigns", "delete", "test-campaign", "--yes"])
+    assert result.exit_code != 0
+    assert "try again when it finishes" in result.output
+    assert "test-campaign" in load_campaigns(tmp_path)
+
+
+def test_campaigns_rename_prints_the_new_slug_and_folder(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    runner = CliRunner()
+    runner.invoke(main, ["campaigns", "create", "Hanataz"])
+
+    result = runner.invoke(main, ["campaigns", "rename", "hanataz", "Hanataz: Act I?"])
+    assert result.exit_code == 0, result.output
+    assert "Hanataz Act I" in result.output
+    assert "hanataz-act-i" in result.output
+
+
+def test_campaigns_rename_missing_slug_exits_nonzero(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    result = CliRunner().invoke(main, ["campaigns", "rename", "ghost", "X"])
+    assert result.exit_code != 0
+    assert "not found" in result.output
+
+
+def test_campaigns_show_prints_the_folder(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    runner = CliRunner()
+    runner.invoke(main, ["campaigns", "create", "Hanataz"])
+
+    result = runner.invoke(main, ["campaigns", "show", "hanataz"])
+    assert result.exit_code == 0, result.output
+    assert "Folder:" in result.output and "Hanataz" in result.output
+
+
+def test_campaigns_show_reports_a_pending_rename(tmp_path, monkeypatch):
+    from wisper_transcribe import db
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    runner = CliRunner()
+    runner.invoke(main, ["campaigns", "create", "Hanataz"])
+    with db.transaction(tmp_path) as conn:
+        conn.execute("UPDATE campaigns SET folder_pending = 'Next' WHERE slug = 'hanataz'")
+
+    result = runner.invoke(main, ["campaigns", "show", "hanataz"])
+    assert "Rename pending → Next" in result.output
 
 
 def test_transcripts_list_points_at_the_attention_page(tmp_path, monkeypatch):
@@ -1350,8 +1431,11 @@ def test_campaigns_invalid_slug_rejected(tmp_path, monkeypatch):
 def test_transcribe_passes_campaign_to_process_file(tmp_path, monkeypatch):
     """--campaign is forwarded to process_file as the campaign kwarg."""
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    (tmp_path / "output").mkdir()
     audio = tmp_path / "session.mp3"
     audio.write_bytes(b"fake")
+    from wisper_transcribe.campaign_manager import create_campaign
+    create_campaign("D&D Mondays", data_dir=tmp_path)
 
     captured = {}
 
@@ -1361,10 +1445,173 @@ def test_transcribe_passes_campaign_to_process_file(tmp_path, monkeypatch):
 
     with patch("wisper_transcribe.pipeline.process_file", side_effect=fake_process_file):
         result = CliRunner().invoke(
-            main, ["transcribe", str(audio), "--campaign", "dnd-mondays"]
+            main, ["transcribe", str(audio), "--campaign", "d-d-mondays"]
         )
 
-    assert captured.get("campaign") == "dnd-mondays", result.output
+    assert captured.get("campaign") == "d-d-mondays", result.output
+
+
+def test_cli_campaign_writes_into_the_folder(tmp_path, monkeypatch):
+    """--campaign without -o writes into the campaign's folder."""
+    from unittest.mock import patch
+    from wisper_transcribe import campaign_folders
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    (tmp_path / "output").mkdir()
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    campaign = create_campaign("D&D Mondays", data_dir=tmp_path)
+    folder = campaign_folders.ensure_folder(campaign.id, data_dir=tmp_path)
+
+    captured = {}
+    with patch("wisper_transcribe.pipeline.process_file",
+               side_effect=lambda path, **kw: (captured.update(kw), tmp_path / "session.md")[1]):
+        result = CliRunner().invoke(main, ["transcribe", str(audio), "--campaign", "d-d-mondays"])
+    assert result.exit_code == 0, result.output
+    assert Path(captured["output_dir"]) == folder
+
+
+def test_cli_campaign_with_output_root_writes_into_the_folder(tmp_path, monkeypatch):
+    """-o naming the output root writes into the campaign's folder."""
+    from unittest.mock import patch
+    from wisper_transcribe import campaign_folders
+    from wisper_transcribe.campaign_manager import create_campaign
+    from wisper_transcribe.config import get_output_root
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    (tmp_path / "output").mkdir()
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    campaign = create_campaign("D&D Mondays", data_dir=tmp_path)
+    folder = campaign_folders.ensure_folder(campaign.id, data_dir=tmp_path)
+
+    captured = {}
+    with patch("wisper_transcribe.pipeline.process_file",
+               side_effect=lambda path, **kw: (captured.update(kw), tmp_path / "s.md")[1]):
+        result = CliRunner().invoke(
+            main, ["transcribe", str(audio), "--campaign", "d-d-mondays",
+                   "-o", str(get_output_root())])
+    assert result.exit_code == 0, result.output
+    assert Path(captured["output_dir"]) == folder
+
+
+def test_cli_campaign_with_output_elsewhere_is_roster_only(tmp_path, monkeypatch):
+    """-o elsewhere leaves the output beside the input (roster-only)."""
+    from unittest.mock import patch
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    (tmp_path / "output").mkdir()
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    create_campaign("D&D Mondays", data_dir=tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+
+    captured = {}
+    with patch("wisper_transcribe.pipeline.process_file",
+               side_effect=lambda path, **kw: (captured.update(kw), tmp_path / "s.md")[1]):
+        result = CliRunner().invoke(
+            main, ["transcribe", str(audio), "--campaign", "d-d-mondays", "-o", str(elsewhere)])
+    assert result.exit_code == 0, result.output
+    assert Path(captured["output_dir"]) == elsewhere
+
+
+def test_cli_campaign_name_clash_is_refused(tmp_path, monkeypatch):
+    from unittest.mock import patch
+    from wisper_transcribe import campaign_folders
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    (tmp_path / "output").mkdir()
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    campaign = create_campaign("Game", data_dir=tmp_path)
+    folder = campaign_folders.ensure_folder(campaign.id, data_dir=tmp_path)
+    (folder / "session.md").write_text("old")
+
+    with patch("wisper_transcribe.pipeline.process_file") as mock_pf:
+        result = CliRunner().invoke(main, ["transcribe", str(audio), "--campaign", "game"])
+    assert result.exit_code != 0
+    assert "already in the campaign" in result.output
+    mock_pf.assert_not_called()
+    assert (folder / "session.md").read_text() == "old"
+
+
+def test_cli_campaign_keep_both_uses_the_timestamp(tmp_path, monkeypatch):
+    from unittest.mock import patch
+    from datetime import datetime
+    from wisper_transcribe import campaign_folders
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    (tmp_path / "output").mkdir()
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    campaign = create_campaign("Game", data_dir=tmp_path)
+    folder = campaign_folders.ensure_folder(campaign.id, data_dir=tmp_path)
+    (folder / "session.md").write_text("old")
+
+    captured = {}
+    with patch("wisper_transcribe.pipeline.process_file",
+               side_effect=lambda path, **kw: (captured.update(kw), tmp_path / "s.md")[1]), \
+         patch("wisper_transcribe.cli._keep_both_suffix", return_value="2026-10-05 0142"):
+        result = CliRunner().invoke(
+            main, ["transcribe", str(audio), "--campaign", "game", "--keep-both"])
+    assert result.exit_code == 0, result.output
+    assert captured["output_stem"] == "session (2026-10-05 0142)"
+
+    # A second clash in the same minute gets "(2)" appended.
+    (folder / "session (2026-10-05 0142).md").write_text("prior")
+    with patch("wisper_transcribe.pipeline.process_file",
+               side_effect=lambda path, **kw: (captured.update(kw), tmp_path / "s.md")[1]), \
+         patch("wisper_transcribe.cli._keep_both_suffix", return_value="2026-10-05 0142"):
+        result = CliRunner().invoke(
+            main, ["transcribe", str(audio), "--campaign", "game", "--keep-both"])
+    assert result.exit_code == 0, result.output
+    assert captured["output_stem"] == "session (2026-10-05 0142) (2)"
+
+
+def test_cli_campaign_overwrite_writes_over_a_misplaced_session_where_it_is(tmp_path, monkeypatch):
+    """--overwrite keeps the row: a session still in the root is overwritten there."""
+    from unittest.mock import patch
+    from wisper_transcribe import campaign_folders, transcript_store
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    root = tmp_path / "output"
+    root.mkdir()
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+    campaign = create_campaign("Game", data_dir=tmp_path)
+    campaign_folders.ensure_folder(campaign.id, data_dir=tmp_path)
+    (root / "session.md").write_text("old")
+    tid = transcript_store.register(root / "session.md", origin="reconcile")
+    _seed.move_to_campaign("session", "game", data_dir=tmp_path)  # misplaced: stays in the root
+
+    captured = {}
+    with patch("wisper_transcribe.pipeline.process_file",
+               side_effect=lambda path, **kw: (captured.update(kw), tmp_path / "s.md")[1]):
+        result = CliRunner().invoke(
+            main, ["transcribe", str(audio), "--campaign", "game", "--overwrite"])
+    assert result.exit_code == 0, result.output
+    assert Path(captured["output_dir"]) == root
+    assert captured["output_stem"] == "session"
+
+
+def test_cli_campaign_unknown_slug_is_refused(tmp_path, monkeypatch):
+    from unittest.mock import patch
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    (tmp_path / "output").mkdir()
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"fake")
+
+    with patch("wisper_transcribe.pipeline.process_file") as mock_pf:
+        result = CliRunner().invoke(main, ["transcribe", str(audio), "--campaign", "nope"])
+    assert result.exit_code != 0
+    assert "No campaign" in result.output
+    mock_pf.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1394,9 +1641,9 @@ def test_transcripts_list_grouped_by_campaign(tmp_path, monkeypatch):
     out = tmp_path / "output"
     out.mkdir()
     (out / "session01.md").write_text("hello")
-    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    from wisper_transcribe.campaign_manager import create_campaign
     create_campaign("D&D Mondays", data_dir=tmp_path)
-    move_transcript_to_campaign("session01", "d-d-mondays", data_dir=tmp_path)
+    _seed.move_to_campaign("session01", "d-d-mondays", data_dir=tmp_path)
     result = CliRunner().invoke(main, ["transcripts", "list"])
     assert result.exit_code == 0
     assert "D&D Mondays" in result.output
@@ -1409,9 +1656,9 @@ def test_transcripts_list_campaign_filter(tmp_path, monkeypatch):
     out.mkdir()
     (out / "session01.md").write_text("hello")
     (out / "session02.md").write_text("hello")
-    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    from wisper_transcribe.campaign_manager import create_campaign
     create_campaign("Alpha", data_dir=tmp_path)
-    move_transcript_to_campaign("session01", "alpha", data_dir=tmp_path)
+    _seed.move_to_campaign("session01", "alpha", data_dir=tmp_path)
     result = CliRunner().invoke(main, ["transcripts", "list", "--campaign", "alpha"])
     assert result.exit_code == 0
     assert "session01" in result.output
@@ -1422,27 +1669,114 @@ def test_transcripts_move_assigns_campaign(tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     from wisper_transcribe.campaign_manager import create_campaign, get_campaign_for_transcript
     create_campaign("Alpha", data_dir=tmp_path)
+    _seed.seed_transcript("session01", data_dir=tmp_path)
     result = CliRunner().invoke(main, ["transcripts", "move", "session01", "--campaign", "alpha"])
     assert result.exit_code == 0
-    assert get_campaign_for_transcript("session01", data_dir=tmp_path) == "alpha"
+    assert get_campaign_for_transcript(_seed.transcript_id("session01", data_dir=tmp_path),
+                                       data_dir=tmp_path) == "alpha"
 
 
 def test_transcripts_move_unlinks(tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     from wisper_transcribe.campaign_manager import (
-        create_campaign, move_transcript_to_campaign, get_campaign_for_transcript
+        create_campaign, get_campaign_for_transcript
     )
     create_campaign("Alpha", data_dir=tmp_path)
-    move_transcript_to_campaign("session01", "alpha", data_dir=tmp_path)
+    _seed.move_to_campaign("session01", "alpha", data_dir=tmp_path)
     result = CliRunner().invoke(main, ["transcripts", "move", "session01", "--no-campaign"])
     assert result.exit_code == 0
-    assert get_campaign_for_transcript("session01", data_dir=tmp_path) is None
+    assert get_campaign_for_transcript(_seed.transcript_id("session01", data_dir=tmp_path),
+                                       data_dir=tmp_path) is None
 
 
 def test_transcripts_move_invalid_slug_rejected(tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     result = CliRunner().invoke(main, ["transcripts", "move", "session01", "--campaign", "../evil"])
     assert result.exit_code != 0
+
+
+def test_transcripts_move_ambiguous_name_needs_from(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe import db
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    create_campaign("Alpha", data_dir=tmp_path)
+    create_campaign("Beta", data_dir=tmp_path)
+    with db.transaction(tmp_path) as conn:
+        for slug in ("alpha", "beta"):
+            conn.execute(
+                "INSERT INTO transcripts (stem, campaign_id, position, created_at) "
+                "SELECT 's1', id, 0, 'now' FROM campaigns WHERE slug = ?", (slug,))
+
+    result = CliRunner().invoke(main, ["transcripts", "move", "s1", "--no-campaign"])
+    assert result.exit_code != 0
+    assert "several campaigns" in result.output and "--from" in result.output
+
+
+def test_transcripts_move_clash_without_a_flag_lists_the_time(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe import transcript_store
+    from wisper_transcribe.path_utils import get_output_dir
+
+    from ._moves import claimed_campaign, placed_session
+
+    out = get_output_dir()
+    cid, slug, folder = claimed_campaign("Alpha")
+    placed_session("s1", campaign=slug, directory=out / folder)  # the claimed target
+    source, _md = placed_session("s1")                            # a fresh root session
+
+    result = CliRunner().invoke(main, ["transcripts", "move", "s1", "--campaign", slug])
+    assert result.exit_code == 1
+    assert "already there" in result.output and "--keep-both" in result.output
+
+
+def test_transcripts_move_keep_both(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.path_utils import get_output_dir
+
+    from ._moves import claimed_campaign, placed_session
+
+    out = get_output_dir()
+    cid, slug, folder = claimed_campaign("Alpha")
+    placed_session("s1", campaign=slug, directory=out / folder)
+    placed_session("s1")
+
+    result = CliRunner().invoke(
+        main, ["transcripts", "move", "s1", "--campaign", slug, "--keep-both"])
+    assert result.exit_code == 0, result.output
+    assert (out / folder / "s1 (2).md").exists()
+
+
+def test_transcripts_rename_carries_the_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe import transcript_store
+    from wisper_transcribe.path_utils import get_output_dir
+
+    out = get_output_dir()
+    (out / "old.md").write_text("x", encoding="utf-8")
+    transcript_store.register(out / "old.md", origin="job")
+
+    result = CliRunner().invoke(main, ["transcripts", "rename", "old", "new"])
+    assert result.exit_code == 0, result.output
+    assert (out / "new.md").exists() and not (out / "old.md").exists()
+
+
+def test_transcripts_rename_busy_names_the_job(tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    import tempfile
+    from wisper_transcribe import transcript_store
+    from wisper_transcribe.path_utils import get_output_dir
+    from wisper_transcribe.web.jobs import JobQueue
+
+    out = get_output_dir()
+    (out / "old.md").write_text("x", encoding="utf-8")
+    tid = transcript_store.register(out / "old.md", origin="job")
+    JobQueue().submit(str(tmp_path / "wisper_upload_x.mp3"), original_stem="old",
+                      output_dir=str(out))
+    # The uploaded temp lives under WISPER_OUTPUT_DIR in this CLI test; just assert the guard.
+    result = CliRunner().invoke(main, ["transcripts", "rename", "old", "new"])
+    assert result.exit_code == 1
+    assert "job is running" in result.output.lower()
 
 
 def test_campaigns_relabel_reports_changes(tmp_path, monkeypatch):
@@ -1600,21 +1934,22 @@ def test_speakers_doctor_clean(tmp_path, monkeypatch):
 
 def test_transcripts_list_marks_missing_entries_in_campaign_order(tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
-    from wisper_transcribe.campaign_manager import create_campaign, move_transcript_to_campaign
+    from wisper_transcribe.campaign_manager import create_campaign
     from wisper_transcribe.path_utils import get_output_dir
 
     out = get_output_dir()
     create_campaign("Game")
     for stem in ("s02", "s01"):
         (out / f"{stem}.md").write_text("x", encoding="utf-8")
-        move_transcript_to_campaign(stem, "game")
+        _seed.move_to_campaign(stem, "game")
     (out / "s02.md").unlink()
 
     result = CliRunner().invoke(main, ["transcripts", "list", "--campaign", "game"])
     assert result.exit_code == 0, result.output
     lines = result.output.splitlines()
     assert lines[:2] == ["s02  (missing — file not found)", "s01"]
-    assert "1 item needs attention; see the Transcripts page or `wisper storage trim`" in lines[2:]
+    # s02 is missing, s01 is in the root though it belongs to Game.
+    assert "2 items need attention; see the Transcripts page or `wisper storage trim`" in lines[2:]
 
 
 # ---------------------------------------------------------------------------
@@ -1702,6 +2037,61 @@ def test_server_releases_its_lock_on_exit():
     with patch.dict("sys.modules", {"uvicorn": MagicMock()}):
         assert CliRunner().invoke(main, ["server"]).exit_code == 0
     db.ServerLock().acquire().release()
+
+
+def test_storage_trim_organizes_sessions_into_campaign_folders(tmp_path, monkeypatch):
+    out = tmp_path / "trim_out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    from tests._moves import claimed_campaign, placed_session
+
+    _cid, slug, folder = claimed_campaign("Game")
+    tid, md = placed_session("Stray", campaign=slug)
+
+    dry = CliRunner().invoke(main, ["storage", "trim"])
+    assert dry.exit_code == 0, dry.output
+    lines = dry.output.splitlines()
+    assert lines[0].startswith("move into campaign folder") and "Stray.md" in lines[0]
+    assert any(line.startswith("Move 1 session") and "nothing deleted" in line
+               for line in lines)
+    assert md.is_file()
+
+    with patch("wisper_transcribe.audio_utils.encode_flac", side_effect=_fake_flac), \
+         patch("wisper_transcribe.audio_utils.probe_format", return_value=(16000, 1)):
+        applied = CliRunner().invoke(main, ["storage", "trim", "--apply"])
+    assert applied.exit_code == 0, applied.output
+    assert "Moved 1 into campaign folders" in applied.output
+    assert (out / folder / "Stray.md").is_file() and not md.exists()
+
+
+def test_storage_trim_move_count_names_journals_apart():
+    from wisper_transcribe.cli import _move_count
+    from wisper_transcribe.storage_trim import ORGANIZE, Action
+
+    def act(note=""):
+        return Action(ORGANIZE, Path("x.md"), 1, note=note)
+
+    assert _move_count([act()]) == "1 session"
+    assert _move_count([act(), act(), act("journal")]) == "2 sessions and 1 journal"
+    assert _move_count([act("journal"), act("journal")]) == "2 journals"
+
+    again = CliRunner().invoke(main, ["storage", "trim"])
+    assert again.exit_code == 0 and "Nothing to trim." in again.output
+
+
+def test_storage_trim_reports_a_blocked_campaign(tmp_path, monkeypatch):
+    out = tmp_path / "trim_out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    _seed.seed_campaign("Game", slug="game")   # unclaimed
+    (out / "Game").mkdir()
+    (out / "Game" / "notes.md").write_text("# mine\n", encoding="utf-8")
+    _seed.seed_transcript("Stray", campaign="game", write_md=True)
+
+    result = CliRunner().invoke(main, ["storage", "trim"])
+    assert result.exit_code == 0, result.output
+    assert "Game: 1 session can't be organized (folder taken; see Needs attention)" \
+        in result.output
 
 
 def test_storage_trim_container_refused_on_fresh_host_lease(tmp_path, monkeypatch):

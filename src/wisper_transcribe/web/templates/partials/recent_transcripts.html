@@ -1,7 +1,7 @@
 {# Recent transcripts partial — polled by the dashboard archive section #}
 {% if transcripts %}
 {% for t in transcripts %}
-<a href="/transcripts/{{ t.stem | urlencode }}"
+<a href="/transcripts/{{ t.id }}"
    style="display:grid;grid-template-columns:1fr 160px 70px;gap:18px;align-items:baseline;
           padding:14px 0;border-bottom:1px solid var(--color-rule);
           text-decoration:none;color:inherit;transition:background 120ms"

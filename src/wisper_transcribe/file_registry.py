@@ -48,8 +48,11 @@ KINDS = (
 _OUTPUT_KINDS = frozenset(
     {"transcript", "summary", "sidecar", "excerpt", "excerpt_text", "audio", "backup"}
 )
+# A journal lives in its campaign's folder, so it is under the output root
+# though a campaign (not a transcript) owns it.
+_OUTPUT_ROOT_KINDS = _OUTPUT_KINDS | {"journal"}
 ROOT_OF_KIND: dict[str, str] = {
-    k: ("output" if k in _OUTPUT_KINDS else "data") for k in KINDS
+    k: ("output" if k in _OUTPUT_ROOT_KINDS else "data") for k in KINDS
 }
 # Kinds with one file per owner; the rest are unique per (owner, label).
 SINGLE_KINDS = frozenset(set(KINDS) - {"excerpt", "excerpt_text", "per_user"})
@@ -113,8 +116,8 @@ def _use(conn: Optional[sqlite3.Connection], data_dir: Optional[Path], *,
 def _dirs(data_dir: Optional[Path], output_dir: Optional[Path]) -> tuple[Path, Path]:
     data = db._data_dir(data_dir)
     if output_dir is None:
-        from .path_utils import get_output_dir
-        output = get_output_dir()
+        from .config import get_output_root
+        output = get_output_root()
     else:
         output = Path(output_dir)
     return data, output
@@ -154,21 +157,14 @@ class Owner:
     id: int | str
 
     @classmethod
-    def for_stem(cls, stem: str, conn: Optional[sqlite3.Connection] = None, *,
+    def for_path(cls, md_path: Path, conn: Optional[sqlite3.Connection] = None, *,
                  data_dir: Optional[Path] = None,
                  output_dir: Optional[Path] = None) -> Optional["Owner"]:
-        stem = _nfc(stem)
-        with _use(conn, data_dir, write=False) as c:
-            row = c.execute("SELECT id FROM transcripts WHERE stem = ?", (stem,)).fetchone()
-            if row is None:
-                _, output = _dirs(data_dir, output_dir)
-                if _fold(output):
-                    want = stem.casefold()
-                    for r in c.execute("SELECT id, stem FROM transcripts"):
-                        if r["stem"].casefold() == want:
-                            row = r
-                            break
-        return cls("transcript", row["id"]) if row else None
+        """The transcript owner of the ``.md`` at ``md_path``, or None."""
+        from .transcript_store import locate_path
+
+        loc = locate_path(Path(md_path), conn=conn, data_dir=data_dir, output_dir=output_dir)
+        return cls("transcript", loc.id) if loc else None
 
     @classmethod
     def for_profile_key(cls, key: str, conn: Optional[sqlite3.Connection] = None, *,
@@ -468,6 +464,17 @@ def _same_file(src: Path, dst: Path) -> bool:
                 and _fold(dst.parent))
 
 
+def _same_dir(src: Path, dst: Path, fold: bool) -> bool:
+    """Whether two directories name the same place, comparing NFC and case."""
+    a, b = Path(os.path.realpath(src)), Path(os.path.realpath(dst))
+    try:
+        if os.path.samefile(a, b):
+            return True
+    except OSError:
+        pass
+    return _key(str(a), fold) == _key(str(b), fold)
+
+
 def move(row: FileRow, new_path: Path, *, data_dir: Optional[Path] = None,
          output_dir: Optional[Path] = None) -> MoveResult:
     """Move ``row``'s file to ``new_path`` and re-point its row.
@@ -529,6 +536,11 @@ def repoint(row: FileRow, new_path: Path, conn: Optional[sqlite3.Connection] = N
         c.execute("UPDATE files SET rel_path = ?, size = coalesce(?, size), "
                   "mtime_ns = coalesce(?, mtime_ns) WHERE id = ?",
                   (rel, size, mtime, row.id))
+
+
+def repoint_rel(conn: sqlite3.Connection, file_id: int, rel_path: str) -> None:
+    """Point a row at a new stored path, unchanged on disk (a folder rename)."""
+    conn.execute("UPDATE files SET rel_path = ? WHERE id = ?", (rel_path, file_id))
 
 
 def refresh(row: FileRow, conn: Optional[sqlite3.Connection] = None, *,
@@ -645,16 +657,23 @@ def _output_candidates(name: str) -> list[tuple[str, str, Optional[str]]]:
     return []
 
 
-def _scan_output(output: Path, owners: dict[str, Owner], fold: bool) -> list[_Found]:
+def _scan_output(directory: Path, owner_by_stem: dict[str, Owner],
+                 fold: bool, journal: Optional[str] = None) -> list[_Found]:
+    """Files in one transcript directory (the root or a campaign folder).
+
+    ``journal`` is the campaign folder's journal file name, never a session.
+    """
     from .transcript_store import TEMP_PREFIX
     found = []
     try:
-        entries = sorted(os.scandir(output), key=lambda e: e.name)
+        entries = sorted(os.scandir(directory), key=lambda e: e.name)
     except OSError:
         return found
     for entry in entries:
         name = entry.name
         if name.startswith(TEMP_PREFIX):
+            continue
+        if journal is not None and _key(name, fold) == _key(journal, fold):
             continue
         try:
             if not entry.is_file():
@@ -666,7 +685,7 @@ def _scan_output(output: Path, owners: dict[str, Owner], fold: bool) -> list[_Fo
             continue
         owner, picked = None, candidates[0]
         for cand in candidates:
-            owner = owners.get(_key(cand[1], fold))
+            owner = owner_by_stem.get(_key(cand[1], fold))
             if owner is not None:
                 picked = cand
                 break
@@ -677,8 +696,8 @@ def _scan_output(output: Path, owners: dict[str, Owner], fold: bool) -> list[_Fo
     return found
 
 
-def _scan_data(data: Path, in_output, recordings: dict[str, str], profiles: dict[str, Owner],
-               campaigns: dict[str, Owner]) -> list[_Found]:
+def _scan_data(data: Path, in_output, recordings: dict[str, str],
+               profiles: dict[str, Owner]) -> list[_Found]:
     found = []
 
     def listing(directory: Path) -> list[Path]:
@@ -707,12 +726,19 @@ def _scan_data(data: Path, in_output, recordings: dict[str, str], profiles: dict
         for clip in listing(clips):
             if clip.suffix == ".mp3" and clip.is_file():
                 found.append(_Found("reference_clip", clip, "data", profiles.get(_nfc(clip.stem))))
-    camp_root = data / "campaigns"
-    if not in_output(camp_root):
-        for camp_dir in listing(camp_root):
-            journal = camp_dir / "journal.md"
-            if camp_dir.is_dir() and not in_output(camp_dir) and journal.is_file():
-                found.append(_Found("journal", journal, "data", campaigns.get(_nfc(camp_dir.name))))
+    return found
+
+
+def _scan_journals(output: Path, folders: list[tuple[int, str]]) -> list[_Found]:
+    """A claimed campaign's journal, if the file is there. Unclaimed folders and
+    folders mid-rename are not wisper's to read."""
+    from .campaign_folders import journal_name
+
+    found = []
+    for cid, folder in folders:
+        path = output / folder / journal_name(folder)
+        if path.is_file():
+            found.append(_Found("journal", path, "output", Owner("campaign", cid)))
     return found
 
 
@@ -770,11 +796,24 @@ def _sync(report: SyncReport, data: Path, output: Path, data_dir_arg: Optional[P
                       for r in c.execute("SELECT id, capture_status FROM recordings")}
         profiles = {_nfc(r["key"]): Owner("profile", r["id"])
                     for r in c.execute("SELECT id, key FROM profiles")}
-        campaigns = {_nfc(r["slug"]): Owner("campaign", r["id"])
-                     for r in c.execute("SELECT id, slug FROM campaigns")}
+        journal_folders = [(r["id"], r["folder"]) for r in c.execute(
+            "SELECT id, folder FROM campaigns WHERE folder_claimed = 1 AND folder_pending IS NULL")]
         db_rows = c.execute("SELECT * FROM files ORDER BY id").fetchall()
+        # The directory a transcript's `.md` is in, from its `transcript` row,
+        # else the directory its campaign assignment expects.
+        folder_of = {r["id"]: r["folder"] for r in c.execute(
+            "SELECT id, folder FROM campaigns")}
+        md_dirs: dict[int, Path] = {}
+        for r in c.execute("SELECT id, campaign_id FROM transcripts"):
+            folder = folder_of.get(r["campaign_id"])
+            md_dirs[r["id"]] = output / folder if folder is not None else output
+        for r in c.execute(
+                "SELECT transcript_id, rel_path FROM files WHERE kind = 'transcript'"):
+            md_dirs[r["transcript_id"]] = db.from_rel(r["rel_path"], output).parent
+        from .transcript_store import transcript_dirs
+        dirs = transcript_dirs(conn=c, output_dir=output)
 
-    owners = {_key(stem, fold): Owner("transcript", tid) for tid, stem in stems.items()}
+    from .campaign_folders import journal_name
     rows = [_file_row(r, data, output) for r in db_rows]
     by_path = {(r.root, _key(r.rel_path, fold if r.root == "output" else False)): r for r in rows}
     taken = {(r.owner, r.kind, r.label or "") for r in rows}
@@ -784,7 +823,7 @@ def _sync(report: SyncReport, data: Path, output: Path, data_dir_arg: Optional[P
     for r in rows:
         if r.kind == "transcript":
             want = _key(stems.get(r.owner.id, "") + ".md", fold)
-            if _key(r.rel_path, fold) != want:
+            if _key(r.path.name, fold) != want:
                 report.errors.append(
                     f"transcript row {r.rel_path!r} does not match its stem {stems.get(r.owner.id)!r}")
         if not os.path.lexists(r.path):
@@ -796,8 +835,17 @@ def _sync(report: SyncReport, data: Path, output: Path, data_dir_arg: Optional[P
             refresh_rows.append((r, size, mtime))
 
     # Files: register what has an owner and an empty slot, list the rest.
-    scanned = _scan_output(output, owners, fold) + _scan_data(
-        data, in_output, recordings, profiles, campaigns)
+    scanned = (_scan_data(data, in_output, recordings, profiles)
+               + _scan_journals(output, journal_folders))
+    for directory, cid in dirs:
+        # The owner of `<S><suffix>` is the transcript whose `.md` is beside it.
+        owner_by_stem = {
+            _key(stem, fold): Owner("transcript", tid)
+            for tid, stem in stems.items()
+            if _same_dir(md_dirs.get(tid, output), directory, fold)
+        }
+        journal = journal_name(directory.name) if cid is not None else None
+        scanned += _scan_output(directory, owner_by_stem, fold, journal)
     new_files: list[_Found] = []
     for f in scanned:
         rel_root = _root_dir(f.root, data, output)

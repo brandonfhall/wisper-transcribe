@@ -10,6 +10,7 @@ from wisper_transcribe import db
 from wisper_transcribe.config import EMBEDDING_SPACE
 from wisper_transcribe import campaign_manager as cm, speaker_manager as sm
 from wisper_transcribe.models import Campaign, SpeakerProfile
+from wisper_transcribe.transcript_store import ANY
 
 
 def unit(vec) -> np.ndarray:
@@ -55,7 +56,7 @@ def seed_profiles(*keys: str, data_dir: Optional[Path] = None) -> None:
 
 
 def sidecar_data(sidecar_path: Path) -> dict:
-    """What a ``<stem>_diar.json`` means now: its segments plus the speaker
+    """What a ``<stem>_diar.json`` holds: its segments plus the speaker
     fields stored in the database (``transcript_store.read_sidecar``)."""
     from wisper_transcribe.transcript_store import SIDECAR_SUFFIX, read_sidecar
 
@@ -132,28 +133,68 @@ def save_profiles(profiles: dict[str, SpeakerProfile], data_dir: Optional[Path] 
             sm._upsert_profile(conn, key, p)
 
 
+def _find_or_create_transcript(conn, stem: str) -> int:
+    """The session named ``stem`` in any campaign or the root; created in the root if none."""
+    from wisper_transcribe.transcript_store import ensure_row
+
+    rows = conn.execute("SELECT id FROM transcripts WHERE stem = ? LIMIT 2", (stem,)).fetchall()
+    if len(rows) > 1:
+        raise ValueError(f"more than one session is named {stem!r}")
+    return rows[0][0] if rows else ensure_row(conn, stem)
+
+
+def _assign_stems(conn, cid: int, stems: list[str]) -> None:
+    """Make campaign ``cid`` hold exactly ``stems``, in that order.
+
+    Two steps so UNIQUE(campaign_id, position) never collides mid-way: shift
+    the campaign's rows above every final position, then write the final ones.
+    """
+    shift = conn.execute(
+        "SELECT coalesce(max(position), -1) + 1 FROM transcripts WHERE campaign_id = ?", (cid,)
+    ).fetchone()[0] + len(stems)
+    conn.execute("UPDATE transcripts SET position = position + ? WHERE campaign_id = ?",
+                 (shift, cid))
+    for pos, stem in enumerate(stems):
+        conn.execute("UPDATE transcripts SET campaign_id = ?, position = ? WHERE id = ?",
+                     (cid, pos, _find_or_create_transcript(conn, stem)))
+    conn.execute("UPDATE transcripts SET campaign_id = NULL, position = NULL "
+                 "WHERE campaign_id = ? AND position >= ?", (cid, shift))
+
+
 def save_campaigns(campaigns: dict[str, Campaign], data_dir: Optional[Path] = None) -> None:
     """Make the campaign store exactly ``campaigns``, in one transaction.
 
     Campaigns are matched by slug and updated in place; slugs not in
-    ``campaigns`` are deleted. Members must be existing profiles (``KeyError``
-    otherwise); a transcript listed here moves out of any other campaign.
-    Test seeding only; the app uses the targeted functions.
+    ``campaigns`` are deleted, their transcripts unassigned. Members must be
+    existing profiles (``KeyError`` otherwise); a transcript listed here moves
+    out of any other campaign. Test seeding only; the app uses the targeted
+    functions.
     """
+    from wisper_transcribe import campaign_folders
+
     with db.transaction(data_dir) as conn:
         existing = {r[0] for r in conn.execute("SELECT slug FROM campaigns")}
         for slug in existing - set(campaigns):
+            conn.execute("UPDATE transcripts SET campaign_id = NULL, position = NULL "
+                         "WHERE campaign_id = (SELECT id FROM campaigns WHERE slug = ?)", (slug,))
             conn.execute("DELETE FROM campaigns WHERE slug = ?", (slug,))
         for slug, c in campaigns.items():
             created = c.created if len(c.created or "") > 10 else (
                 f"{c.created}T00:00:00Z" if c.created else db.now_utc()
             )
-            cid = conn.execute(
-                "INSERT INTO campaigns (slug, display_name, created_at) VALUES (?, ?, ?) "
-                "ON CONFLICT (slug) DO UPDATE SET display_name = excluded.display_name, "
-                "created_at = excluded.created_at RETURNING id",
-                (slug, c.display_name or slug, created),
-            ).fetchone()[0]
+            display_name = c.display_name or slug
+            row = conn.execute("SELECT id FROM campaigns WHERE slug = ?", (slug,)).fetchone()
+            if row is None:
+                cid = conn.execute(
+                    "INSERT INTO campaigns (slug, display_name, folder, created_at) "
+                    "VALUES (?, ?, ?, ?) RETURNING id",
+                    (slug, display_name, campaign_folders.unique_folder(display_name, conn),
+                     created),
+                ).fetchone()[0]
+            else:
+                cid = row[0]
+                conn.execute("UPDATE campaigns SET display_name = ?, created_at = ? WHERE id = ?",
+                             (display_name, created, cid))
             conn.execute("DELETE FROM campaign_members WHERE campaign_id = ?", (cid,))
             for key, m in c.members.items():
                 conn.execute(
@@ -162,7 +203,135 @@ def save_campaigns(campaigns: dict[str, Campaign], data_dir: Optional[Path] = No
                     (cid, cm._profile_id(conn, key), m.role or "", m.character or "",
                      m.discord_user_id or None),
                 )
-            cm._write_order(conn, cid, [cm._transcript_id(conn, st) for st in c.transcripts])
+            _assign_stems(conn, cid, c.transcripts)
+
+
+def seed_campaign(display_name: str, slug: Optional[str] = None, *, claimed: bool = False,
+                  data_dir: Optional[Path] = None) -> int:
+    """A campaign row; returns its id. Without ``slug`` the slug derives from the
+    name. ``claimed`` also creates and claims its folder.
+
+    A direct insert (test seeding): it makes no folder, so a test that needs one
+    on disk makes it, or claims it with ``claimed=True``.
+    """
+    from wisper_transcribe import campaign_folders
+
+    with db.transaction(data_dir) as conn:
+        cid = conn.execute(
+            "INSERT INTO campaigns (slug, display_name, folder, created_at) "
+            "VALUES (?, ?, ?, ?) RETURNING id",
+            (slug or cm._make_slug(display_name), display_name,
+             campaign_folders.unique_folder(display_name, conn), db.now_utc()),
+        ).fetchone()[0]
+    if claimed:
+        campaign_folders.ensure_folder(cid, data_dir=data_dir)
+    return cid
+
+
+def seed_transcript(stem: str, *, campaign: Optional[str] = None, write_md: bool = False,
+                    data_dir: Optional[Path] = None,
+                    output_dir: Optional[Path] = None) -> int:
+    """A session row; returns its id. ``campaign`` is a slug; the session is
+    appended to it. ``write_md`` writes ``<stem>.md`` in the output root and
+    registers it."""
+    with db.transaction(data_dir) as conn:
+        tid = _find_or_create_transcript(conn, stem)
+        if campaign is not None:
+            cid = cm._campaign_id(conn, campaign)
+            pos = conn.execute(
+                "SELECT coalesce(max(position), -1) + 1 FROM transcripts WHERE campaign_id = ?",
+                (cid,),
+            ).fetchone()[0]
+            conn.execute("UPDATE transcripts SET campaign_id = ?, position = ? WHERE id = ?",
+                         (cid, pos, tid))
+    if write_md:
+        from wisper_transcribe import file_registry
+        from wisper_transcribe.config import get_output_root
+
+        root = Path(output_dir) if output_dir is not None else get_output_root()
+        md = root / f"{stem}.md"
+        md.write_text(f"# {stem}\n", encoding="utf-8")
+        file_registry.add(md, kind="transcript", owner=file_registry.Owner("transcript", tid),
+                          output_dir=root, data_dir=data_dir)
+        with db.transaction(data_dir) as conn:
+            conn.execute("UPDATE transcripts SET missing_since = NULL WHERE id = ?", (tid,))
+    return tid
+
+
+def transcript_id(stem: str, *, campaign_slug=ANY, data_dir: Optional[Path] = None) -> int:
+    """The id of the session named ``stem`` (``KeyError`` if absent).
+
+    ``campaign_slug`` defaults to any campaign (including the root); ``None``
+    means the root only. Raises ``ValueError`` when two rows match.
+    """
+    from wisper_transcribe.transcript_store import find_by_stem
+
+    if campaign_slug is ANY or campaign_slug is None:
+        campaign_id = campaign_slug
+    else:
+        with db.connection(data_dir) as conn:
+            row = conn.execute(
+                "SELECT id FROM campaigns WHERE slug = ?", (campaign_slug,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(campaign_slug)
+        campaign_id = row[0]
+    found = find_by_stem(stem, campaign_id=campaign_id, data_dir=data_dir)
+    if not found:
+        raise KeyError(stem)
+    if len(found) > 1:
+        raise ValueError(f"more than one session is named {stem!r}")
+    return found[0].id
+
+
+def move_to_campaign(stem: str, slug: str, data_dir: Optional[Path] = None) -> int:
+    """Attach the session named ``stem`` (created in the root if absent) to
+    ``slug``; returns its id.
+
+    A direct ``UPDATE`` (test seeding): it moves no files, so the session reads
+    misplaced until ``transcript_store.move_files_home``.
+    """
+    with db.transaction(data_dir) as conn:
+        tid = _find_or_create_transcript(conn, stem)
+        cid = cm._campaign_id(conn, slug)
+        pos = conn.execute(
+            "SELECT coalesce(max(position), -1) + 1 FROM transcripts WHERE campaign_id = ?",
+            (cid,),
+        ).fetchone()[0]
+        conn.execute("UPDATE transcripts SET campaign_id = ?, position = ? WHERE id = ?",
+                     (cid, pos, tid))
+    return tid
+
+
+def remove_from_campaign(stem: str, data_dir: Optional[Path] = None) -> int:
+    """Unassign the session named ``stem`` (any campaign); returns its id.
+
+    A direct ``UPDATE`` (test seeding): it moves no files.
+    """
+    with db.transaction(data_dir) as conn:
+        tid = _find_or_create_transcript(conn, stem)
+        conn.execute("UPDATE transcripts SET campaign_id = NULL, position = NULL WHERE id = ?",
+                     (tid,))
+    return tid
+
+
+def assign_campaign(tid: int, slug: str, data_dir: Optional[Path] = None) -> None:
+    """Attach an existing session id to ``slug`` (test seeding, moves no files)."""
+    with db.transaction(data_dir) as conn:
+        cid = cm._campaign_id(conn, slug)
+        pos = conn.execute(
+            "SELECT coalesce(max(position), -1) + 1 FROM transcripts WHERE campaign_id = ?",
+            (cid,),
+        ).fetchone()[0]
+        conn.execute("UPDATE transcripts SET campaign_id = ?, position = ? WHERE id = ?",
+                     (cid, pos, tid))
+
+
+def unassign_campaign(tid: int, data_dir: Optional[Path] = None) -> None:
+    """Detach an existing session id from any campaign (test seeding, moves no files)."""
+    with db.transaction(data_dir) as conn:
+        conn.execute("UPDATE transcripts SET campaign_id = NULL, position = NULL WHERE id = ?",
+                     (tid,))
 
 
 def seed_sidecar(md_path: Path, diar: dict, data_dir: Optional[Path] = None) -> None:

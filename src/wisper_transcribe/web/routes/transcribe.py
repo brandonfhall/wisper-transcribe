@@ -9,7 +9,6 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Optional
-from urllib.parse import quote
 
 from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
@@ -17,7 +16,8 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Resp
 from ..jobs import COMPLETED, FAILED, JOB_LIVE, resume_slice
 from . import get_local_capture_manager, get_queue as _get_queue, templates
 from wisper_transcribe.campaign_manager import _validate_campaign_slug as _validate_campaign_slug_cm, load_campaigns
-from wisper_transcribe.path_utils import get_output_dir, validate_path_component
+from wisper_transcribe.config import get_output_root
+from wisper_transcribe.path_utils import validate_path_component
 from wisper_transcribe.web._responses import error_redirect, invalid_input_response
 
 router = APIRouter(prefix="/transcribe")
@@ -71,15 +71,15 @@ async def start_transcribe(
     post_summarize: Annotated[Optional[str], Form()] = None,
     campaign: Annotated[Optional[str], Form()] = None,
     vocab_file: Annotated[Optional[UploadFile], File()] = None,
-    overwrite: Annotated[Optional[str], Form()] = None,
+    clash: Annotated[Optional[str], Form()] = None,
 ) -> RedirectResponse:
     """Accept an uploaded audio file, save it to a temp location, enqueue job.
 
-    A transcript, or an audio file, with the same name is never replaced
-    silently: without ``overwrite`` the upload is refused
-    (``?error=name_exists``). The page
-    checks the name when a file is picked (``/transcribe/name-check``) and
-    offers Overwrite or Cancel before anything is uploaded.
+    A transcript, or an audio file, with the same name in the target folder is
+    never replaced silently: without ``clash=overwrite`` the upload is refused
+    (``?error=name_exists``). ``clash=keep_both`` writes ``<name> (2)``. The
+    page checks the name when a file is picked (``/transcribe/name-check``) and
+    offers Overwrite, Keep both, or Cancel before anything is uploaded.
     """
     # Validate enums before any file I/O so a bad value never orphans a temp
     # upload. Never echo the value back.
@@ -87,8 +87,55 @@ async def start_transcribe(
     if model_size not in MODEL_SIZES or device not in DEVICES or compute_type not in COMPUTE_TYPES:
         return error_redirect("/transcribe", "invalid_option")
 
-    replace_existing = overwrite == "on"
-    if not replace_existing and _name_clashes(file.filename)["clashes"]:
+    # Validate campaign slug if provided — use server-side object for redirect URL.
+    safe_campaign: Optional[str] = None
+    if campaign and campaign.strip():
+        safe_campaign = _validate_campaign_slug_cm(campaign.strip())
+        if safe_campaign is None:
+            return error_redirect("/transcribe", "invalid_campaign")
+
+    resolved = _resolve_campaign(safe_campaign)
+    campaign_id = resolved[0] if resolved is not None else None
+
+    # Resolve the target folder before saving the upload, so an unknown
+    # campaign, a taken folder, or an absent output root refuses without
+    # leaving a temp file. The path is resolved internally, never from the form.
+    if campaign_id is not None:
+        from wisper_transcribe import campaign_folders
+        try:
+            out_path = campaign_folders.ensure_folder(campaign_id)
+        except campaign_folders.FolderPendingError:
+            return error_redirect("/transcribe", "rename_pending")
+        except campaign_folders.FolderMissingError:
+            return error_redirect("/transcribe", "folder_missing")
+        except campaign_folders.FolderTakenError:
+            return error_redirect("/transcribe", "folder_taken")
+        except FileNotFoundError:
+            return error_redirect("/transcribe", "output_unavailable")
+    else:
+        out_path = get_output_root()
+        if not out_path.is_dir():
+            return error_redirect("/transcribe", "output_unavailable")
+
+    # Use the original filename stem as a hint so the output .md has a
+    # meaningful name instead of a temp-file UUID.
+    original_stem = _upload_stem(file.filename)
+    found_clash = _name_clashes(file.filename, safe_campaign)
+
+    replace_existing = False
+    if clash == "keep_both":
+        from wisper_transcribe.transcript_store import next_free_stem
+
+        original_stem = next_free_stem(out_path, original_stem, campaign_id)
+    elif clash == "overwrite" and found_clash["overwrite_allowed"]:
+        loc = found_clash["loc"]
+        if loc is not None:
+            # Reuse the existing session's row: write where its .md is, under
+            # its current name, so no second .md appears.
+            out_path = loc.dir
+            original_stem = loc.stem
+        replace_existing = True
+    elif found_clash["clashes"]:
         return error_redirect("/transcribe", "name_exists")
 
     # Save uploaded file to a persistent temp location (job must outlive request)
@@ -125,45 +172,36 @@ async def start_transcribe(
     elif vad == "off":
         vad_filter = False
 
-    # Always use the default output dir; never accept a path from form data.
-    out_path: Path = get_output_dir()
-
-    # Use the original filename stem as a hint so the output .md has a
-    # meaningful name instead of a temp-file UUID.
-    original_stem = _upload_stem(file.filename)
-
-    # Validate campaign slug if provided — use server-side object for redirect URL.
-    safe_campaign: Optional[str] = None
-    if campaign and campaign.strip():
-        safe_campaign = _validate_campaign_slug_cm(campaign.strip())
-        if safe_campaign is None:
-            return error_redirect("/transcribe", "invalid_campaign")
-
     queue = _get_queue(request)
-    job = queue.submit(
-        input_path=tmp.name,
-        original_stem=original_stem,
-        source_name=os.path.basename(file.filename or "") or (original_stem + suffix),
-        model_size=model_size,
-        # Pass "auto" through: process_file treats None as "use config".
-        language=language,
-        device=device,
-        num_speakers=_int_or_none(num_speakers),
-        min_speakers=_int_or_none(min_speakers),
-        max_speakers=_int_or_none(max_speakers),
-        no_diarize=no_diarize,
-        compute_type=compute_type,
-        vad_filter=vad_filter,
-        include_timestamps=include_timestamps,
-        initial_prompt=initial_prompt or None,
-        output_dir=out_path,
-        enroll_speakers=False,  # Web enrollment is post-job wizard
-        post_refine=bool(post_refine),
-        post_summarize=bool(post_summarize),
-        campaign=safe_campaign,
-        hotwords=hotwords,
-        overwrite=replace_existing,
-    )
+    try:
+        job = queue.submit(
+            input_path=tmp.name,
+            original_stem=original_stem,
+            source_name=os.path.basename(file.filename or "") or (original_stem + suffix),
+            model_size=model_size,
+            # Pass "auto" through: process_file treats None as "use config".
+            language=language,
+            device=device,
+            num_speakers=_int_or_none(num_speakers),
+            min_speakers=_int_or_none(min_speakers),
+            max_speakers=_int_or_none(max_speakers),
+            no_diarize=no_diarize,
+            compute_type=compute_type,
+            vad_filter=vad_filter,
+            include_timestamps=include_timestamps,
+            initial_prompt=initial_prompt or None,
+            output_dir=out_path,
+            enroll_speakers=False,  # Web enrollment is post-job wizard
+            post_refine=bool(post_refine),
+            post_summarize=bool(post_summarize),
+            campaign=safe_campaign,
+            hotwords=hotwords,
+            overwrite=replace_existing,
+        )
+    except Exception:
+        # The job's history row couldn't be written, so it wasn't queued; the
+        # temp upload is already deleted. A move must not miss this job.
+        return error_redirect("/transcribe", "submit_failed")
 
     return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
 
@@ -172,66 +210,126 @@ def _upload_stem(filename: Optional[str]) -> str:
     """The transcript name an upload called ``filename`` gets.
 
     Splits on both separators: on POSIX a browser-supplied name can carry
-    ``\\``, which would otherwise end up inside the stem.
+    ``\\``, which would otherwise end up inside the stem. The name is NFC,
+    trimmed, loses a leading dot, gets ``_`` appended when Windows treats it
+    as a device name, and is cut to the new-name limit.
     """
+    from wisper_transcribe.transcript_store import nfc
+    from wisper_transcribe.campaign_folders import is_reserved
+
     last = re.split(r"[\\/]", filename or "upload")[-1]
-    return Path(last).stem or "upload"
+    name = nfc(Path(last).stem or "upload").strip().lstrip(".")
+    if is_reserved(name):
+        name += "_"
+    return name[:100].rstrip(". ") or "upload"
 
 
-def _name_clashes(filename: Optional[str]) -> dict:
-    """What an upload named ``filename`` would collide with.
+def _resolve_campaign(campaign_slug: Optional[str]) -> Optional[tuple[int, dict]]:
+    """The ``(id, Campaign)`` for a slug, or None for the root.
 
-    ``clashes`` holds ``"md"`` (a transcript of that name exists), ``"flac"``
-    (``<stem>.flac`` exists and isn't that transcript's own audio) and
-    ``"missing"`` (a transcript of that name is registered but its file is
-    gone: a new job would reuse its row, audio and speakers). ``md`` and
-    ``flac`` are the clashing paths, for their modified times.
+    An unknown slug maps to the root, matching a recording whose campaign slug
+    has no row.
     """
-    from wisper_transcribe import db, file_registry
-    from wisper_transcribe.transcript_store import _same_file, nfc, safe_path
+    slug = (campaign_slug or "").strip()
+    if not slug:
+        return None
+    campaign = load_campaigns().get(slug)
+    return None if campaign is None else (campaign.id, campaign)
+
+
+def _name_clashes(filename: Optional[str], campaign_slug: Optional[str] = None) -> dict:
+    """What an upload named ``filename`` would collide with in its target folder.
+
+    ``clashes`` holds ``"md"`` (a session of that name is in the campaign, or
+    its ``.md`` is in the target folder), ``"flac"`` (``<stem>.flac`` exists and
+    isn't that session's own audio), ``"missing"`` (a session of that name is
+    registered but its file is gone), ``"reserved"`` (the name equals the
+    campaign's journal name) and ``"folder_taken"`` (the campaign's folder
+    exists but isn't wisper's). ``overwrite_allowed`` is false when only Keep
+    both or Cancel make sense. ``md`` and ``flac`` are the clashing paths, for
+    their modified times.
+    """
+    from wisper_transcribe import db
+    from wisper_transcribe.campaign_folders import _fold, holds_only_wisper, journal_name
+    from wisper_transcribe.config import get_output_root
+    from wisper_transcribe.transcript_store import (
+        _same_file, expected_dir, find_by_stem, locate_path, safe_path,
+    )
 
     stem = _upload_stem(filename)
-    out = get_output_dir()
-    md = safe_path(stem, ".md", out)
-    flac = safe_path(stem, ".flac", out)
-    result: dict = {"clashes": [], "stem": stem, "md": None, "flac": None}
-    if md is not None and md.is_file():
+    root = get_output_root()
+    resolved = _resolve_campaign(campaign_slug)
+    campaign_id = resolved[0] if resolved is not None else None
+    expected = expected_dir(campaign_id)
+    result: dict = {"clashes": [], "stem": stem, "md": None, "flac": None, "loc": None,
+                    "overwrite_allowed": True}
+
+    if campaign_id is not None:
+        with db.connection() as conn:
+            row = conn.execute(
+                "SELECT folder, folder_claimed FROM campaigns WHERE id = ?", (campaign_id,)
+            ).fetchone()
+        claimed = bool(row["folder_claimed"]) if row is not None else False
+        if (not claimed and expected.is_dir()
+                and not holds_only_wisper(expected, expected.name)):
+            result["clashes"].append("folder_taken")
+            result["overwrite_allowed"] = False
+            return result
+        if _fold(Path(journal_name(expected.name)).stem) == _fold(stem):
+            result["clashes"].append("reserved")
+            result["overwrite_allowed"] = False
+            return result
+
+    md = safe_path(stem, ".md", expected)
+    flac = safe_path(stem, ".flac", expected)
+    found = find_by_stem(stem, campaign_id=campaign_id, output_dir=root)
+    loc = next((l for l in found if not l.missing), found[0] if found else None)
+    if loc is not None and not loc.missing:
+        result["clashes"].append("md")
+        result["md"] = loc.md
+        result["loc"] = loc
+    elif md is not None and md.is_file():
         result["clashes"].append("md")
         result["md"] = md
+        result["loc"] = locate_path(md, output_dir=root)
+    elif loc is not None and loc.missing:
+        result["clashes"].append("missing")
+        result["loc"] = loc
+
     if flac is not None and flac.is_file():
-        owner = file_registry.Owner.for_stem(stem, output_dir=out)
-        own = file_registry.file_for(owner, "audio", output_dir=out) if owner else None
-        if own is None or not _same_file(own.path, flac):
+        own = result["loc"].companions.get(("audio", "")) if result["loc"] is not None else None
+        if own is None or not _same_file(own, flac):
             result["clashes"].append("flac")
             result["flac"] = flac
-    if md is not None and result["md"] is None:
-        with db.connection() as conn:
-            row = conn.execute("SELECT missing_since FROM transcripts WHERE stem = ?",
-                               (nfc(stem),)).fetchone()
-        if row is not None and row["missing_since"] is not None:
-            result["clashes"].append("missing")
+    if "md" in result["clashes"] and result["loc"] is None:
+        result["overwrite_allowed"] = False
+    if "flac" in result["clashes"] and "md" not in result["clashes"]:
+        result["overwrite_allowed"] = False
     return result
 
 
 @router.get("/name-check")
-async def name_check(filename: str = "") -> Response:
+async def name_check(filename: str = "", campaign: str = "") -> Response:
     """Whether uploading ``filename`` would replace something.
 
-    Returns ``{"exists", "campaign", "modified", "missing", "clashes"}``:
-    ``clashes`` lists ``"md"``, ``"flac"`` and ``"missing"`` (see
-    :func:`_name_clashes`), ``exists`` is true when it isn't empty, and
-    ``modified`` is the clashing file's last-modified time (the ``.md``'s when
-    both clash). The filename is never echoed back.
+    Returns ``{"exists", "campaign", "modified", "missing", "clashes",
+    "overwrite_allowed"}``: ``clashes`` lists the codes (see
+    :func:`_name_clashes`), ``exists`` is true when it isn't empty,
+    ``overwrite_allowed`` says whether Overwrite is offered, and ``modified``
+    is the clashing file's last-modified time (the ``.md``'s when both clash).
+    The filename is never echoed back.
     """
-    from wisper_transcribe.campaign_manager import get_campaign_for_transcript
-
-    found = _name_clashes(filename)
+    found = _name_clashes(filename, campaign)
     clashes = found["clashes"]
     campaign_name = None
     if "md" in clashes or "missing" in clashes:
-        slug = get_campaign_for_transcript(found["stem"])
-        campaign = load_campaigns().get(slug) if slug else None
-        campaign_name = campaign.display_name if campaign else None
+        from wisper_transcribe.campaign_manager import get_campaign_for_transcript
+        loc = found["loc"]
+        slug = get_campaign_for_transcript(loc.id) if loc is not None else None
+        named = load_campaigns().get(slug) if slug else None
+        if named is None and campaign.strip():
+            named = load_campaigns().get(campaign.strip())
+        campaign_name = named.display_name if named else None
     clashing = found["md"] or found["flac"]
     modified = None
     if clashing is not None:
@@ -246,6 +344,7 @@ async def name_check(filename: str = "") -> Response:
             "modified": modified,
             "missing": "missing" in clashes,
             "clashes": clashes,
+            "overwrite_allowed": found["overwrite_allowed"],
         }),
         media_type="application/json",
     )
@@ -299,8 +398,21 @@ async def job_detail(request: Request, job_id: str) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
         "job_detail.html",
-        {"request": request, "job": job},
+        {"request": request, "job": _with_transcript_id(job)},
     )
+
+
+def _with_transcript_id(job):
+    """A job whose transcript row id isn't set yet (in memory): resolve it from
+    ``output_path`` so the page's completion links use it. Never mutates the job
+    for jobs without an output."""
+    if job.transcript_id is None and job.output_path:
+        from wisper_transcribe import transcript_store
+
+        loc = transcript_store.locate_path(Path(job.output_path))
+        if loc is not None:
+            job.transcript_id = loc.id
+    return job
 
 
 @router.get("/jobs/{job_id}/stream")
@@ -349,11 +461,18 @@ async def job_stream(request: Request, job_id: str, after: int = 0) -> Streaming
             yield f"data: {data}\n\n"
 
             if job.status in (COMPLETED, FAILED):
+                transcript_id = job.transcript_id
+                if transcript_id is None and job.output_path:
+                    from wisper_transcribe import transcript_store
+
+                    loc = transcript_store.locate_path(Path(job.output_path))
+                    transcript_id = loc.id if loc is not None else None
                 final = json.dumps({
                     "type": "done",
                     "status": job.status,
                     "output_path": job.output_path,
                     "summary_path": job.summary_path,
+                    "transcript_id": transcript_id,
                     "job_type": job.job_type,
                     # For campaign-journal jobs there is no transcript — the
                     # completion action links to the campaign journal instead.
@@ -530,7 +649,14 @@ async def enroll_submit(request: Request, job_id: str) -> Response:
             renames[old_name] = str(value).strip()
 
     transcript_name = Path(job.output_path).stem
-    url = f"/transcripts/{quote(transcript_name, safe='')}"
+    # A completed job's transcript is registered, so its row id resolves the
+    # redirect. Without one, the job page still shows the result.
+    from wisper_transcribe import transcript_store
+
+    loc = transcript_store.locate_path(Path(job.output_path))
+    if loc is None:
+        return RedirectResponse(url=f"/transcribe/jobs/{job.id}", status_code=303)
+    url = f"/transcripts/{loc.id}"
 
     if renames:
         # Rename now; embedding extraction runs as a JOB_ENROLL job.

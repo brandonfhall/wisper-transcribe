@@ -134,33 +134,65 @@ def _stat(path: Path) -> Optional[tuple[int, int]]:
     return st.st_mtime_ns, st.st_size
 
 
-def _paths(stem: str, output_dir: Optional[Path]) -> Optional[dict[str, Path]]:
+def _paths(loc) -> Optional[dict[str, Path]]:
+    """The transcript and summary paths for a ``Located`` (summary may not exist)."""
     from .transcript_store import safe_path
 
-    md = safe_path(stem, ".md", output_dir)
-    summary = safe_path(stem, SUMMARY_SUFFIX, output_dir)
-    if md is None or summary is None:
+    md = loc.md
+    if md is None:
+        return None
+    try:
+        summary = loc.companion(SUMMARY_SUFFIX)
+    except ValueError:
         return None
     return {KIND_TRANSCRIPT: md, KIND_SUMMARY: summary}
 
 
-def reindex(stem: str, *, data_dir: Optional[Path] = None,
+def _paths_for(conn: sqlite3.Connection, transcript_id: int, output: Path) -> Optional[dict[str, Path]]:
+    """The transcript and summary paths for an id, from its ``files`` rows.
+
+    The summary falls back to ``<stem>.summary.md`` beside the ``.md``. None
+    when the transcript has no registered ``.md`` row.
+    """
+    from .transcript_store import safe_path
+
+    rows = conn.execute(
+        "SELECT kind, rel_path FROM files WHERE transcript_id = ? AND kind IN ('transcript', 'summary')",
+        (transcript_id,),
+    ).fetchall()
+    md = summary = None
+    for kind, rel in rows:
+        path = db.from_rel(rel, output)
+        if kind == "transcript" and md is None:
+            md = path
+        elif kind == "summary" and summary is None:
+            summary = path
+    if md is None:
+        return None
+    if summary is None:
+        summary = safe_path(md.stem, SUMMARY_SUFFIX, md.parent)
+    return {KIND_TRANSCRIPT: md, KIND_SUMMARY: summary}
+
+
+def reindex(transcript_id: int, *, data_dir: Optional[Path] = None,
             output_dir: Optional[Path] = None) -> bool:
-    """Index ``<stem>.md`` and its summary, replacing what was indexed before.
+    """Index the transcript's ``.md`` and its summary, replacing what was indexed.
 
     One short transaction. Each file is stat'ed *before* it is read, and that
     stat is what's stored: a write landing in between leaves a mismatch that
     the next freshness check catches, never fresh-looking state over old
     blocks. Undecodable bytes are replaced, and an unreadable file is indexed
     as empty, so a bad file is indexed once instead of being retried forever.
-    Returns False when the transcript isn't registered or its ``.md`` is gone.
+    Returns False when the transcript doesn't exist or its ``.md`` is gone.
     """
-    from .transcript_store import nfc
+    from .transcript_store import locate
 
-    paths = _paths(stem, output_dir)
+    loc = locate(transcript_id, data_dir=data_dir, output_dir=output_dir)
+    if loc is None:
+        return False
+    paths = _paths(loc)
     if paths is None:
         return False
-    stem = nfc(paths[KIND_TRANSCRIPT].stem)
     files: dict[str, tuple[tuple[int, int], list[Block]]] = {}
     for kind, path in paths.items():
         st = _stat(path)
@@ -178,10 +210,7 @@ def reindex(stem: str, *, data_dir: Optional[Path] = None,
         return False
 
     with db.transaction(data_dir) as conn:
-        row = conn.execute("SELECT id FROM transcripts WHERE stem = ?", (stem,)).fetchone()
-        if row is None:
-            return False
-        tid = row[0]
+        tid = transcript_id
         # Cascades to the old blocks, whose trigger clears their FTS rows.
         conn.execute("DELETE FROM search_index_state WHERE transcript_id = ?", (tid,))
         for kind, ((mtime_ns, size), blocks) in files.items():
@@ -202,28 +231,43 @@ def reindex(stem: str, *, data_dir: Optional[Path] = None,
 def reindex_path(path: Path, data_dir: Optional[Path] = None) -> None:
     """Reindex the transcript a just-written ``.md`` or ``.summary.md`` belongs to.
 
-    Does nothing for files outside the output root (``wisper fix`` on a file
-    elsewhere, ``summarize --output``) or not registered. Never raises: a
-    failed reindex leaves the old state row, whose stat no longer matches the
-    file, so the next freshness check reindexes it.
+    Does nothing for a file not registered as a transcript's or its summary's,
+    or outside the output root (``wisper fix`` on a file elsewhere,
+    ``summarize --output``). Never raises: a failed reindex leaves the old
+    state row, whose stat doesn't match the file, so the next freshness check
+    reindexes it.
     """
-    from .path_utils import get_output_dir
+    from .transcript_store import locate_path
 
     path = Path(path)
     try:
-        output_dir = get_output_dir()
-        if os.path.realpath(path.parent) != os.path.realpath(output_dir):
+        tid = _transcript_id_for_path(path, data_dir)
+        if tid is None:
+            loc = locate_path(path, data_dir=data_dir)
+            tid = loc.id if loc is not None else None
+        if tid is None:
             return
-        name = path.name
-        if name.endswith(SUMMARY_SUFFIX):
-            stem = name[: -len(SUMMARY_SUFFIX)]
-        elif name.endswith(".md"):
-            stem = name[: -len(".md")]
-        else:
-            return
-        reindex(stem, data_dir=data_dir, output_dir=output_dir)
+        reindex(tid, data_dir=data_dir)
     except Exception:
         log.warning("Search reindex failed for %s", path.name, exc_info=True)
+
+
+def _transcript_id_for_path(path: Path, data_dir: Optional[Path]) -> Optional[int]:
+    """The transcript a registered ``.md`` or ``.summary.md`` belongs to."""
+    from . import file_registry
+    from .config import get_output_root
+    from .transcript_store import nfc
+
+    output = get_output_root()
+    try:
+        rel = nfc(db.to_rel(path, output))
+    except ValueError:
+        return None
+    with db.connection(data_dir) as conn:
+        hit = file_registry._find_by_path(conn, "output", rel, file_registry._fold(output))
+    if hit is not None and hit["kind"] in (KIND_TRANSCRIPT, KIND_SUMMARY):
+        return hit["transcript_id"]
+    return None
 
 
 def mark_stale(conn: sqlite3.Connection, transcript_ids: Iterable[int]) -> None:
@@ -245,21 +289,21 @@ def check_freshness(output_dir: Optional[Path] = None, data_dir: Optional[Path] 
         output_dir = get_output_dir()
     with db.connection(data_dir) as conn:
         rows = conn.execute(
-            "SELECT t.id, t.stem, s.kind, s.indexed_mtime_ns, s.indexed_size "
+            "SELECT t.id, s.kind, s.indexed_mtime_ns, s.indexed_size "
             "FROM search_index_state s JOIN transcripts t ON t.id = s.transcript_id "
             "WHERE t.missing_since IS NULL"
         ).fetchall()
-    indexed: dict[int, dict] = {}
-    for r in rows:
-        entry = indexed.setdefault(r["id"], {"stem": r["stem"], "kinds": {}})
-        entry["kinds"][r["kind"]] = (r["indexed_mtime_ns"], r["indexed_size"])
+        indexed: dict[int, dict] = {}
+        for r in rows:
+            indexed.setdefault(r["id"], {})[r["kind"]] = (r["indexed_mtime_ns"], r["indexed_size"])
+        paths_by_id = {tid: _paths_for(conn, tid, output_dir) for tid in indexed}
     stale = []
-    for tid, entry in indexed.items():
-        paths = _paths(entry["stem"], output_dir)
+    for tid, kinds in indexed.items():
+        paths = paths_by_id[tid]
         if paths is None:
             continue
         for kind, path in paths.items():
-            if _stat(path) != entry["kinds"].get(kind):
+            if _stat(path) != kinds.get(kind):
                 stale.append(tid)
                 break
     if stale:
@@ -293,21 +337,21 @@ def run_backfill(data_dir: Optional[Path] = None, output_dir: Optional[Path] = N
         output_dir = get_output_dir()
     with db.connection(data_dir) as conn:
         todo = [r[0] for r in conn.execute(
-            "SELECT t.stem FROM transcripts t WHERE t.missing_since IS NULL AND NOT EXISTS "
+            "SELECT t.id FROM transcripts t WHERE t.missing_since IS NULL AND NOT EXISTS "
             "(SELECT 1 FROM search_index_state s WHERE s.transcript_id = t.id AND s.kind = ?) "
             "ORDER BY t.id", (KIND_TRANSCRIPT,),
         )]
     done = 0
-    for n, stem in enumerate(todo, 1):
+    for n, tid in enumerate(todo, 1):
         if stop is not None and stop.is_set():
             break
         if yield_s and n > 1:
             (stop or threading.Event()).wait(yield_s)
         try:
-            if reindex(stem, data_dir=data_dir, output_dir=output_dir):
+            if reindex(tid, data_dir=data_dir, output_dir=output_dir):
                 done += 1
         except Exception:
-            log.warning("Search index: could not index %s", stem, exc_info=True)
+            log.warning("Search index: could not index transcript %s", tid, exc_info=True)
         if report is not None:
             report(n, len(todo))
     return done
@@ -536,6 +580,7 @@ class Hit:
 
 @dataclass
 class ResultGroup:
+    transcript_id: int
     stem: str
     campaign_slug: Optional[str]
     campaign_name: Optional[str]
@@ -578,8 +623,7 @@ def search(query: str, *, campaign: Optional[str] = None, speaker: Optional[str]
         output_dir = get_output_dir()
 
     filters, params = ["search_fts MATCH ?", "t.missing_since IS NULL"], [match]
-    campaign_filter = ("t.id IN (SELECT ct.transcript_id FROM campaign_transcripts ct "
-                       "JOIN campaigns c ON c.id = ct.campaign_id WHERE c.slug = ?)")
+    campaign_filter = "t.campaign_id = (SELECT id FROM campaigns WHERE slug = ?)"
     if kind:
         filters.append("b.kind = ?")
         params.append(kind)
@@ -625,8 +669,7 @@ def search(query: str, *, campaign: Optional[str] = None, speaker: Optional[str]
         FROM ranked r
         JOIN groups g USING (transcript_id)
         JOIN transcripts t ON t.id = r.transcript_id
-        LEFT JOIN campaign_transcripts ct ON ct.transcript_id = t.id
-        LEFT JOIN campaigns c ON c.id = ct.campaign_id
+        LEFT JOIN campaigns c ON c.id = t.campaign_id
         WHERE r.rn <= ?
         ORDER BY g.best, r.transcript_id, r.rn
     """
@@ -639,6 +682,7 @@ def search(query: str, *, campaign: Optional[str] = None, speaker: Optional[str]
                 "SELECT transcript_id, kind, indexed_mtime_ns, indexed_size FROM search_index_state "
                 f"WHERE transcript_id IN ({','.join('?' * len(ids))})", ids,
             ).fetchall() if ids else []
+            paths_by_id = {tid: _paths_for(conn, tid, Path(output_dir)) for tid in ids}
     except sqlite3.OperationalError:
         log.info("Search query rejected: %r", match)
         return SearchPage(query, [], page, False, error=SEARCH_ERROR)
@@ -650,7 +694,7 @@ def search(query: str, *, campaign: Optional[str] = None, speaker: Optional[str]
             if len(groups) == per_page:
                 continue  # the extra group only says there's a next page
             group = groups[r["transcript_id"]] = ResultGroup(
-                r["stem"], r["slug"], r["display_name"], r["n"], [])
+                r["transcript_id"], r["stem"], r["slug"], r["display_name"], r["n"], [])
         group.hits.append(Hit(r["kind"], r["block_idx"], r["speaker"], r["start_s"]))
     has_next = len({r["transcript_id"] for r in rows}) > per_page
 
@@ -659,7 +703,7 @@ def search(query: str, *, campaign: Optional[str] = None, speaker: Optional[str]
     pattern = highlight_pattern(query)
     stale_ids = []
     for tid, group in groups.items():
-        paths = _paths(group.stem, output_dir)
+        paths = paths_by_id.get(tid)
         texts: dict[str, list[Block]] = {}
         for k in {h.kind for h in group.hits} - {KIND_TITLE}:
             path = paths[k] if paths else None

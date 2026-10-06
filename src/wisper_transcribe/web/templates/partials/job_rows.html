@@ -3,8 +3,8 @@
 {% if jobs %}
 {% for job in jobs %}
 {%- set active = job.status == 'running' -%}
-{%- if job.output_path and job.status == 'completed' -%}
-  {%- set row_href = '/transcripts/' ~ ((job.output_path | stem) | urlencode) -%}
+{%- if job.transcript_id and job.status == 'completed' -%}
+  {%- set row_href = '/transcripts/' ~ job.transcript_id -%}
 {%- else -%}
   {%- set row_href = '/transcribe/jobs/' ~ job.id -%}
 {%- endif -%}

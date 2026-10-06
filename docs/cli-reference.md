@@ -158,15 +158,19 @@ wisper transcribe <path>
   --overwrite              Re-process files that already have output. Without it an existing
                            transcript is skipped ("already processed (in campaign 'x')"); with it
                            the transcript keeps its campaign place, and a folded journal is
-                           marked as needing a rebuild.
+                           marked as needing a rebuild. With --campaign, replaces a same-named
+                           session in the campaign's folder, keeping its identity.
+  --keep-both              With --campaign: a name already in the campaign writes this run as a
+                           new copy named after the run's start time, e.g.
+                           `Session 3 (2026-10-05 0142)` (a second clash adds ` (2)`).
   --workers INT            Parallel workers for folder processing — CPU only;
                            clamped to 1 on GPU (default: 1)
-  --campaign SLUG          Restrict speaker matching to this campaign's roster, and add the
-                           transcript to the campaign. Run `wisper campaigns list` for slugs.
-                           Only when the output lands in the transcripts folder (the default
-                           output is next to the input, so pass -o <transcripts folder> unless
-                           the audio is already there); elsewhere it prints a note and skips the
-                           association. Transcripts written there are also indexed for search.
+  --campaign SLUG          Write into the campaign's folder and use its roster. Run
+                           `wisper campaigns list` for slugs. With no -o, or with -o naming the
+                           transcripts folder, the transcript is written into the campaign's
+                           folder; with -o elsewhere it is a roster filter only and the file
+                           beside the input isn't tracked. A name already in the campaign is
+                           refused unless --keep-both or --overwrite is given.
   --verbose                Show detailed progress; surfaces ML library log output
                            (pyannote, faster-whisper) on the console at DEBUG level
   --debug                  Write a full timestamped log to ./logs/wisper_<timestamp>.log
@@ -222,17 +226,22 @@ Campaigns let you track multiple games with separate player rosters. Speaker voi
 
 ```bash
 wisper campaigns list                                    # show all campaigns
-wisper campaigns create "D&D Mondays"                   # create a campaign (prints the slug)
-wisper campaigns show d-d-mondays                       # roster table with roles/characters
+wisper campaigns create "D&D Mondays"                   # create a campaign and its folder (prints the slug and folder)
+wisper campaigns show d-d-mondays                       # roster table with the folder name
+wisper campaigns rename d-d-mondays "D&D Tuesdays"     # rename the display name, slug, folder, and journal file
 wisper campaigns add-member d-d-mondays alice --role DM # add a player (must be enrolled)
 wisper campaigns add-member d-d-mondays bob --role Player --character "Theron"
 wisper campaigns remove-member d-d-mondays charlie      # remove from roster only (keeps voice profile)
-wisper campaigns delete d-d-mondays                     # delete campaign, keep its transcripts and journal file (with confirmation)
+wisper campaigns delete d-d-mondays                     # delete campaign, move its sessions to the output root (with confirmation)
 wisper campaigns delete d-d-mondays --delete-transcripts  # also delete its transcripts, their files, and its journal
 wisper campaigns reorder d-d-mondays s02 --up           # move a session one position earlier
 wisper campaigns reorder d-d-mondays s02 --down         # move a session one position later
 wisper campaigns reorder d-d-mondays --set "s01,s02,s03" # replace the whole order in one shot
 ```
+
+`delete` exits 1 and prints the sessions when any of them can't be deleted or moved (a file open in another program): the campaign is kept with what's left. Without `--delete-transcripts` its journal file and folder stay on disk; creating a campaign of that name again re-claims them.
+
+`rename` changes the display name, the slug, the campaign's folder on disk, and its journal file together. A rename that can't finish (a file open in another program) prints a notice and stays pending; `wisper campaigns show` reports `Rename pending → <folder>`, and the Transcripts page's Needs attention panel offers Retry.
 
 `reorder` sets the order sessions are folded into the journal and numbered on the campaign page. The order is when each transcript was added to the campaign, not its date, so a late-added session can land out of place. `--set` takes every transcript stem in the campaign, comma-separated, and errors unless it is an exact permutation of the current list.
 
@@ -260,7 +269,7 @@ Options:
 
 #### `wisper campaigns journal`
 
-Maintains a **rolling campaign journal** — a single living document the LLM rewrites as each new session is folded in. It reads the per-session `.summary.md` sidecars (from `wisper summarize`) and accumulates them into `campaigns/<slug>/journal.md`, tracking story arcs, open plot threads, NPCs, party decisions, and a running loot ledger. Context stays bounded: each fold sends only the current journal plus one new session summary.
+Maintains a **rolling campaign journal** — a single living document the LLM rewrites as each new session is folded in. It reads the per-session `.summary.md` sidecars (from `wisper summarize`) and accumulates them into `<campaign folder>/<campaign folder> Journal.md` in the transcripts folder, tracking story arcs, open plot threads, NPCs, party decisions, and a running loot ledger. Context stays bounded: each fold sends only the current journal plus one new session summary.
 
 ```bash
 wisper campaigns journal d-d-mondays                  # fold the next unjournalled session
@@ -278,7 +287,7 @@ A session is "pending" once it has a `.summary.md`. With no flags the command fo
 
 `--rebuild` starts the journal over from each session's existing `.summary.md`, in campaign order — one LLM call per session, plus one for any session that has no summary yet. Your edits to summaries are kept. Add `--resummarize` to re-summarize every transcript first, overwriting the summaries (two calls per session) — for when the summaries themselves are bad. Both ask for confirmation, showing the call count, unless `--yes` is passed. Sessions whose transcript is missing or whose summary fails are skipped and reported. `--session`, `--all`, `--rebuild`, and `--export` are mutually exclusive.
 
-**Stale journal:** moving a folded session to another campaign, removing it from the campaign, deleting it, or re-transcribing it never edits the journal text; it marks the journal stale instead. `wisper campaigns show <slug>` prints `Journal: STALE since …` with the rebuild command. Deleting `journal.md` by hand starts a fresh journal (every session becomes pending again); editing it by hand is fine, and later folds build on your edits.
+**Stale journal:** moving a folded session to another campaign, removing it from the campaign, deleting it, or re-transcribing it never edits the journal text; it marks the journal stale instead. `wisper campaigns show <slug>` prints `Journal: STALE since …` with the rebuild command. Deleting the journal file by hand starts a fresh journal (every session becomes pending again); editing it by hand is fine, and later folds build on your edits.
 
 **Scoping transcription to a campaign:**
 
@@ -286,7 +295,7 @@ A session is "pending" once it has a `.summary.md`. With no flags the command fo
 wisper transcribe session12.mp3 --campaign d-d-mondays --num-speakers 5
 ```
 
-With `--campaign`, speaker matching is restricted to that campaign's enrolled members — players from other campaigns won't appear in the output.
+With `--campaign`, speaker matching is restricted to that campaign's enrolled members — players from other campaigns won't appear in the output — and, when the output lands in the transcripts folder (no `-o`, or `-o` naming it), the transcript is written into the campaign's folder. A name already in the campaign is refused unless `--keep-both` or `--overwrite` is passed. With `-o` elsewhere the campaign is a roster filter only and the file beside the input isn't tracked.
 
 **Voice transfer between campaigns:** Because embeddings are stored globally, adding an existing speaker profile to a new campaign automatically gives that campaign the benefit of all previously recorded voice data. No re-enrollment needed.
 
@@ -311,11 +320,16 @@ Organize and view transcript-to-campaign associations from the command line:
 ```bash
 wisper transcripts list                          # list all transcripts, grouped by campaign
 wisper transcripts list --campaign d-d-mondays  # show only transcripts for a specific campaign
-wisper transcripts move session12 --campaign d-d-mondays   # assign a transcript to a campaign
-wisper transcripts move session12 --no-campaign            # remove campaign association
+wisper transcripts move session12 --campaign d-d-mondays   # move a transcript into a campaign
+wisper transcripts move session12 --no-campaign            # move a transcript to the root
+wisper transcripts move session12 --campaign d-d-mondays --from old-campaign  # disambiguate
+wisper transcripts move session12 --campaign d-d-mondays --keep-both          # on a name clash
+wisper transcripts rename session12 session-13              # rename a transcript and its files
 ```
 
 - `session12` is the transcript stem (filename without `.md`).
+- `move` and `rename` move the `.md` and its companion files (summary, sidecar, excerpts, audio, backup) together. A clash with an existing file prints its last-modified time and exits 1 unless `--keep-both` (`<name> (2)`) or `--overwrite` is given; `--overwrite` is offered only for a registered session.
+- A name in several campaigns is refused unless `--from <slug>` (for `move`) or `--campaign <slug>` (for `rename`) picks the source.
 - A transcript can belong to at most one campaign at a time.
 - When a transcript or file needs a decision (a missing transcript, a file gone from disk, a file with no transcript), the listing ends with "N items need attention; see the Transcripts page".
 
@@ -496,7 +510,7 @@ Every command that uses the database stops with a clear message, not a traceback
 
 ### `wisper storage`
 
-Reclaim disk space used by older transcripts and recordings.
+Move sessions into their campaign folders, and reclaim disk space used by older transcripts and recordings.
 
 ```bash
 wisper storage trim                  # dry run: list what would change
@@ -504,8 +518,9 @@ wisper storage trim --apply          # do it
 wisper storage trim --apply --device cpu
 ```
 
-`trim` is a dry run unless you pass `--apply`. It prints one line per action (what it does, the file's current size, the file), the space the deletions free, the size of the files to convert, and the Needs-attention list, and changes nothing. The actions, in order:
+`trim` is a dry run unless you pass `--apply`. It prints one line per action (what it does, the file or session, its current size, and where a session is going), the space the deletions free, the size of the files to convert, and the Needs-attention list, and changes nothing. The actions, in order:
 
+- **Move sessions into campaign folders.** A session still in the transcripts root (or elsewhere) that a campaign holds moves into that campaign's folder, with its summary, speaker data, clips, and audio. A campaign journal still in the data dir moves into the campaign folder too. Run this once after upgrading; a campaign whose folder is taken, mid-rename, or missing is reported instead, to fix from the Transcripts page.
 - **Match renames.** Transcripts renamed outside wisper are matched first, as at server start.
 - **Convert transcript audio.** Each transcript's audio becomes a 16 kHz mono `<name>.flac`, the form new uploads keep. Speaker voices the transcript lacks are extracted from the original audio first. A `.flac` already at 16 kHz mono is left alone. If a conversion fails, the original stays and the failure is listed.
   - A video or a large WAV shrinks to about 90 MB per hour of audio.
@@ -514,7 +529,7 @@ wisper storage trim --apply --device cpu
 - **Delete recording copies.** A transcript made from a recording uses the recording's `combined.wav`, so its own copy is deleted. A `<recording-id>.wav` in the transcripts folder that no transcript uses is deleted too.
 - **Trim recordings.** Segment and per-user audio is removed once `combined.wav` is verified complete.
 
-It deletes only files wisper tracks, plus those unused `<recording-id>.wav` copies. Other files in the transcripts folder are never touched. Needs-attention items (missing transcripts, missing files, files with no transcript) are listed, never deleted.
+It moves only sessions a campaign holds and deletes only files wisper tracks, plus those unused `<recording-id>.wav` copies. Other files in the transcripts folder are never touched. Needs-attention items (missing transcripts, missing files, files with no transcript) are listed, never deleted.
 
 | Flag | Meaning |
 |------|---------|
@@ -559,7 +574,7 @@ All formats are converted to 16kHz mono WAV internally before transcription.
 
 ## Output Format
 
-`wisper transcribe` writes one `.md` per audio file next to the input (or in `--output`); web uploads and recordings go to the transcripts folder ([configuration.md](configuration.md#transcripts-folder)). Timestamps are `mm:ss`, or `hh:mm:ss` past the first hour:
+`wisper transcribe` writes one `.md` per audio file next to the input (or in `--output`, or in `--campaign`'s folder when the output lands in the transcripts folder); web uploads and recordings go to the transcripts folder — an upload or recording with a campaign into that campaign's folder ([configuration.md](configuration.md#transcripts-folder)). Timestamps are `mm:ss`, or `hh:mm:ss` past the first hour:
 
 ```markdown
 ---

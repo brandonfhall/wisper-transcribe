@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 def client(tmp_path):
     """TestClient with server.json writing patched to tmp_path."""
     import wisper_transcribe.web.app as app_module
+    (tmp_path / "output").mkdir()  # the root get_output_root() resolves to
     with patch("wisper_transcribe.config.get_data_dir", return_value=tmp_path), \
          patch("wisper_transcribe.web.routes.record.get_data_dir", return_value=tmp_path):
         from wisper_transcribe.web.app import create_app
@@ -978,7 +979,9 @@ def test_recording_detail_shows_retranscribe_button_when_transcribed(client):
     rec = seed_recording(tmp_path)
     md = get_output_dir() / f"{rec.id}.md"
     md.write_text("x", encoding="utf-8")
-    link_transcript(rec.id, md, tmp_path)   # "transcribed" = has a transcript
+    from wisper_transcribe import transcript_store
+    tid = transcript_store.register(md, origin="job")
+    link_transcript(rec.id, tid, tmp_path)   # "transcribed" = has a transcript
     resp = c.get(f"/recordings/{rec.id}")
     assert resp.status_code == 200
     assert "Re-transcribe" in resp.text
@@ -1174,6 +1177,8 @@ def _make_transcribed_recording_with_files(tmp_path):
     out_dir.mkdir(parents=True, exist_ok=True)
     md_path = out_dir / f"{rec.id}.md"
     md_path.write_text("# transcript", encoding="utf-8")
+    from wisper_transcribe import transcript_store
+    rec.transcript_id = transcript_store.register(md_path, origin="reconcile")
     summary_path = out_dir / f"{rec.id}.summary.md"
     summary_path.write_text("# summary", encoding="utf-8")
     audio_path = out_dir / f"{rec.id}.wav"
@@ -1537,7 +1542,7 @@ def _run_handed_off_job(call, out_dir, *, fail=False):
             raise RuntimeError("boom")
         md = out_dir / (kwargs["output_stem"] + ".md")
         md.write_text("# t", encoding="utf-8")
-        transcript_store.register(md.stem, origin="job")
+        transcript_store.register(md, origin="job")
         return md
 
     queue = JobQueue()
@@ -1573,12 +1578,12 @@ def test_retranscribe_after_rename_replaces_the_renamed_transcript(client):
     still exactly one transcript for the recording and nothing under <id>."""
     from wisper_transcribe import transcript_store
     from wisper_transcribe.campaign_manager import (
-        create_campaign, get_transcripts_for_campaign, move_transcript_to_campaign,
+        create_campaign, get_transcripts_for_campaign,
     )
     from wisper_transcribe.path_utils import get_output_dir
     from wisper_transcribe.recording_manager import link_transcript, load_recording
 
-    from ._seed import seed_recording
+    from ._seed import assign_campaign, seed_recording
 
     c, tmp_path = client
     create_campaign("My Game", data_dir=tmp_path)
@@ -1587,9 +1592,9 @@ def test_retranscribe_after_rename_replaces_the_renamed_transcript(client):
     out.mkdir(parents=True, exist_ok=True)
     renamed = out / "Session 14.md"
     renamed.write_text("old", encoding="utf-8")
-    transcript_store.register("Session 14", origin="job")
-    move_transcript_to_campaign("Session 14", "my-game", data_dir=tmp_path)
-    link_transcript(rec.id, renamed, tmp_path)
+    tid = transcript_store.register(renamed, origin="job")
+    assign_campaign(tid, "my-game", data_dir=tmp_path)
+    link_transcript(rec.id, tid, tmp_path)
 
     call = _hand_off(c, tmp_path, rec)
     assert call.kwargs["original_stem"] == "Session 14"
@@ -1702,7 +1707,8 @@ def test_failed_retranscribe_keeps_the_existing_transcript(client):
     rec = seed_recording(tmp_path)
     md = get_output_dir() / f"{rec.id}.md"
     md.write_text("x", encoding="utf-8")
-    link_transcript(rec.id, md, tmp_path)
+    from wisper_transcribe import transcript_store
+    link_transcript(rec.id, transcript_store.register(md, origin="job"), tmp_path)
     fake_job = JobCls(
         id=str(_uuid.uuid4()), status="pending", created_at=rec.started_at,
         input_path=str(tmp_path / "recordings" / rec.id / "combined.wav"), kwargs={}, name=rec.id,
@@ -1743,6 +1749,26 @@ def test_transcribe_recording_no_audio_rejects(client):
     resp = c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
     assert resp.status_code == 303
     assert "error=no_audio" in resp.headers["location"]
+
+
+def test_transcribe_recording_submit_failure_reports_submit_failed(client):
+    """When the job's history row can't be written, the hand-off reports
+    submit_failed and queues nothing."""
+    from wisper_transcribe import job_history
+    from ._seed import seed_recording
+
+    c, tmp_path = client
+    rec = seed_recording(tmp_path, status="completed")
+
+    def boom(job, data_dir=None):
+        raise RuntimeError("database busy")
+
+    with patch.object(job_history, "record_required", boom):
+        resp = c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert "error=submit_failed" in resp.headers["location"]
+    assert c.app.state.job_queue.active_count() == 0
 
 
 def test_transcribe_recording_no_audio_regression_after_real_bot_session(client):
@@ -1897,6 +1923,78 @@ def test_api_recording_delete_unknown_id_returns_404(client):
     assert resp.json() == {"error": "not_found"}
 
 
+def test_recording_first_run_lands_in_the_campaign_folder(client):
+    """A first transcription writes into the campaign's folder, at the recording id."""
+    from wisper_transcribe import campaign_folders
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    from ._seed import seed_recording
+
+    c, tmp_path = client
+    campaign = create_campaign("My Game", data_dir=tmp_path)
+    folder = campaign_folders.ensure_folder(campaign.id, data_dir=tmp_path)
+    rec = seed_recording(tmp_path, campaign_slug="my-game")
+
+    call = _hand_off(c, tmp_path, rec)
+    assert Path(call.kwargs["output_dir"]) == folder
+    assert call.kwargs["original_stem"] == rec.id
+
+    job = _run_handed_off_job(call, folder)
+    assert job.status == "completed"
+    assert (folder / f"{rec.id}.md").is_file()
+
+
+def test_recording_retranscribe_writes_where_a_misplaced_md_is(client):
+    """Re-transcribing a misplaced transcript writes where its .md actually is."""
+    from wisper_transcribe import transcript_store
+    from wisper_transcribe.campaign_manager import create_campaign
+    from wisper_transcribe.path_utils import get_output_dir
+    from wisper_transcribe.recording_manager import link_transcript
+
+    from ._seed import assign_campaign, seed_recording
+
+    c, tmp_path = client
+    create_campaign("My Game", data_dir=tmp_path)
+    rec = seed_recording(tmp_path)
+    out = get_output_dir()
+    out.mkdir(parents=True, exist_ok=True)
+    misplaced = out / "Session 01.md"
+    misplaced.write_text("old", encoding="utf-8")
+    tid = transcript_store.register(misplaced, origin="job")
+    assign_campaign(tid, "my-game", data_dir=tmp_path)
+    link_transcript(rec.id, tid, tmp_path)
+
+    call = _hand_off(c, tmp_path, rec)
+    assert Path(call.kwargs["output_dir"]) == out
+    assert call.kwargs["original_stem"] == "Session 01"
+
+    job = _run_handed_off_job(call, out)
+    assert job.status == "completed"
+    assert misplaced.is_file()
+    assert not (tmp_path / "output" / "My Game" / "Session 01.md").exists()
+
+
+def test_recording_hand_off_folder_taken_redirects(client):
+    """A campaign folder wisper doesn't own refuses the hand-off."""
+    from wisper_transcribe.campaign_manager import create_campaign
+    from wisper_transcribe.path_utils import get_output_dir
+
+    from ._seed import seed_recording
+
+    c, tmp_path = client
+    from ._seed import seed_campaign
+
+    seed_campaign("My Game", "my-game", data_dir=tmp_path)  # unclaimed
+    out = get_output_dir()
+    (out / "My Game").mkdir()
+    (out / "My Game" / "notes.md").write_text("user's")
+    rec = seed_recording(tmp_path, campaign_slug="my-game")
+
+    resp = c.post(f"/recordings/{rec.id}/transcribe", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "error=folder_taken" in resp.headers["location"]
+
+
 def test_api_recording_transcribe_handoff(client):
     """POST /api/recordings/{id}/transcribe submits the same job the HTML
     hand-off route submits and returns the job id as JSON."""
@@ -1975,13 +2073,16 @@ def test_api_recording_transcribe_unknown_id_returns_404(client):
 def test_recording_purge_removes_campaign_entry(client):
     """Purging a transcribed recording also unlinks its transcript from the campaign."""
     from wisper_transcribe.campaign_manager import (
-        create_campaign, get_transcripts_for_campaign, move_transcript_to_campaign,
+        create_campaign, get_transcripts_for_campaign,
     )
+    from ._seed import assign_campaign, seed_recording
     c, tmp_path = client
     rec, paths = _make_transcribed_recording_with_files(tmp_path)
     # campaign_manager resolves the data dir itself (WISPER_DATA_DIR, from conftest).
     camp = create_campaign("Purge Test")
-    move_transcript_to_campaign(paths["md_path"].stem, camp.slug)
+    from wisper_transcribe.recording_manager import load_recording
+    loaded = load_recording(rec.id, tmp_path)
+    assign_campaign(loaded.transcript_id, camp.slug)
 
     c.post(f"/recordings/{rec.id}/delete", follow_redirects=False)
 
@@ -2086,8 +2187,8 @@ def test_trimmed_recording_retranscribe_submits_combined_wav(client):
     out.mkdir(parents=True, exist_ok=True)
     md = out / "Session 3.md"
     md.write_text("old", encoding="utf-8")
-    transcript_store.register("Session 3", origin="job")
-    link_transcript(rec.id, md, tmp_path)
+    tid = transcript_store.register(md, origin="job")
+    link_transcript(rec.id, tid, tmp_path)
 
     call = _hand_off(c, tmp_path, rec)
 

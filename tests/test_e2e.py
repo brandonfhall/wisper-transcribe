@@ -135,23 +135,24 @@ def test_full_session_lifecycle(client, ml):
     out = get_output_dir()
     assert client.post("/campaigns", data={"display_name": "Curse of Strahd"},
                        follow_redirects=False).status_code == 303
+    folder = out / "Curse of Strahd"
 
     # Transcribe into the campaign.
     _wait(client, _upload(client, "Session 1", "curse-of-strahd"))
-    md = out / "Session 1.md"
+    md = folder / "Session 1.md"
     assert md.is_file() and "Castle Ravenloft" in md.read_text(encoding="utf-8")
     tid = _row("SELECT id FROM transcripts WHERE stem = 'Session 1'")[0]
     audio = file_registry.file_for(file_registry.Owner("transcript", tid), "audio")
-    assert audio is not None and audio.path == out / "Session 1.flac" and audio.path.is_file()
-    assert _count("SELECT count(*) FROM campaign_transcripts ct JOIN campaigns c ON c.id = ct.campaign_id "
-                  "WHERE ct.transcript_id = ? AND c.slug = 'curse-of-strahd'", tid) == 1
+    assert audio is not None and audio.path == folder / "Session 1.flac" and audio.path.is_file()
+    assert _count("SELECT count(*) FROM transcripts t JOIN campaigns c ON c.id = t.campaign_id "
+                  "WHERE t.id = ? AND c.slug = 'curse-of-strahd'", tid) == 1
     assert _count("SELECT count(*) FROM transcript_speakers WHERE transcript_id = ?", tid) == 2
-    assert (out / "Session 1_diar.json").is_file()
+    assert (folder / "Session 1_diar.json").is_file()
     assert [g.stem for g in search_index.search("ravenloft").groups] == ["Session 1"]
 
     # Summarize.
-    _wait(client, _job_from(client.post("/transcripts/Session%201/summarize", follow_redirects=False)))
-    assert (out / "Session 1.summary.md").is_file()
+    _wait(client, _job_from(client.post(f"/transcripts/{tid}/summarize", follow_redirects=False)))
+    assert (folder / "Session 1.summary.md").is_file()
     hits = search_index.search("summoned", kind="summary").groups
     assert [g.stem for g in hits] == ["Session 1"]
 
@@ -162,7 +163,7 @@ def test_full_session_lifecycle(client, ml):
     assert _row("SELECT journal_sha256 FROM campaigns WHERE slug = 'curse-of-strahd'")[0]
 
     # Rename a speaker in the wizard.
-    resp = client.post("/transcripts/Session%201/enroll", data={"speaker_SPEAKER_01": "Ezmerelda"},
+    resp = client.post(f"/transcripts/{tid}/enroll", data={"speaker_SPEAKER_01": "Ezmerelda"},
                        follow_redirects=False)
     assert resp.status_code == 303
     location = resp.headers["location"]
@@ -176,10 +177,10 @@ def test_full_session_lifecycle(client, ml):
     assert 'data-testid="search-hit"' in page and "#b-1" in page
 
     # Delete: file, row, links, index, companions; the journal goes stale.
-    assert client.post("/transcripts/Session%201/delete", follow_redirects=False).status_code == 303
-    assert not md.exists() and not (out / "Session 1.summary.md").exists()
-    assert not (out / "Session 1_diar.json").exists() and not audio.path.exists()
-    for table in ("transcripts", "campaign_transcripts", "journal_entries", "transcript_speakers",
+    assert client.post(f"/transcripts/{tid}/delete", follow_redirects=False).status_code == 303
+    assert not md.exists() and not (folder / "Session 1.summary.md").exists()
+    assert not (folder / "Session 1_diar.json").exists() and not audio.path.exists()
+    for table in ("transcripts", "journal_entries", "transcript_speakers",
                   "search_index_state", "search_blocks"):
         col = "id" if table == "transcripts" else "transcript_id"
         assert _count(f"SELECT count(*) FROM {table} WHERE {col} = ?", tid) == 0, table
@@ -194,6 +195,7 @@ def test_full_session_lifecycle(client, ml):
 def test_legacy_install_imports_then_works(ml, tmp_path, monkeypatch):
     data = tmp_path / "legacy-data"
     monkeypatch.setenv("WISPER_DATA_DIR", str(data))
+    (data / "output").mkdir(parents=True)
     write_speakers(data, {"alice": {"display_name": "Alice"}}, embeddings={"alice": unit(np.eye(256)[0])})
     write_campaigns(data, {"cos": {"display_name": "Curse", "members": {"alice": {"role": "DM"}}}})
     (data / "config.toml").write_text("", encoding="utf-8")
@@ -206,12 +208,13 @@ def test_legacy_install_imports_then_works(ml, tmp_path, monkeypatch):
                       "WHERE p.key = 'alice'") == 1
 
         _wait(client, _upload(client, "Session 2", "cos"))
-        md = get_output_dir() / "Session 2.md"
+        md = get_output_dir() / "Curse" / "Session 2.md"
         # The imported profile matched SPEAKER_00 by its embedding.
         assert "**Alice**" in md.read_text(encoding="utf-8")
         assert [g.stem for g in search_index.search("gate", speaker="Alice").groups] == []
         assert [g.stem for g in search_index.search("ravenloft", speaker="Alice").groups] == ["Session 2"]
-        assert client.post("/transcripts/Session%202/delete", follow_redirects=False).status_code == 303
+        tid = _row("SELECT id FROM transcripts WHERE stem = 'Session 2'")[0]
+        assert client.post(f"/transcripts/{tid}/delete", follow_redirects=False).status_code == 303
         assert _count("SELECT count(*) FROM transcripts") == 0
 
 
@@ -234,8 +237,9 @@ def test_recording_transcript_delete_reopens_recording(client, ml):
     assert done.status == "transcribed" and done.transcript_path is not None
     stem = Path(done.transcript_path).stem
     assert search_index.search("ravenloft").groups[0].stem == stem
+    tid = _row("SELECT id FROM transcripts WHERE stem = ?", stem)[0]
 
-    assert client.post(f"/transcripts/{stem}/delete", follow_redirects=False).status_code == 303
+    assert client.post(f"/transcripts/{tid}/delete", follow_redirects=False).status_code == 303
     again = load_recording(rec.id)
     assert again.status == "completed" and again.transcript_path is None
     assert "Transcribe" in client.get(f"/recordings/{rec.id}").text
@@ -251,23 +255,103 @@ def test_retranscribe_keeps_campaign_position_and_marks_journal_stale(client, ml
     out = get_output_dir()
     assert client.post("/campaigns", data={"display_name": "Curse of Strahd"},
                        follow_redirects=False).status_code == 303
+    folder = out / "Curse of Strahd"
     for stem in ("Session 1", "Session 2", "Session 3"):
         _wait(client, _upload(client, stem, "curse-of-strahd"))
-    _wait(client, _job_from(client.post("/transcripts/Session%201/summarize", follow_redirects=False)))
+    s1_id = _row("SELECT id FROM transcripts WHERE stem = 'Session 1'")[0]
+    _wait(client, _job_from(client.post(f"/transcripts/{s1_id}/summarize", follow_redirects=False)))
     _wait(client, _job_from(client.post("/campaigns/curse-of-strahd/journal", data={"mode": "next"},
                                         follow_redirects=False)))
     tid, stem = _row("SELECT t.id, t.stem FROM journal_entries je "
                      "JOIN transcripts t ON t.id = je.transcript_id")
     assert _row("SELECT journal_stale_since FROM campaigns WHERE slug = 'curse-of-strahd'")[0] is None
-    flac = out / f"{stem}.flac"
+    flac = folder / f"{stem}.flac"
     order = get_transcripts_for_campaign("curse-of-strahd")
 
-    _wait(client, _job_from(client.post(f"/transcripts/{stem.replace(' ', '%20')}/retranscribe",
+    _wait(client, _job_from(client.post(f"/transcripts/{tid}/retranscribe",
                                         follow_redirects=False)))
 
     assert get_transcripts_for_campaign("curse-of-strahd") == order
     assert _row("SELECT id FROM transcripts WHERE stem = ?", stem)[0] == tid
-    assert flac.is_file() and sorted(p.name for p in out.glob("*.flac")) == [
+    assert flac.is_file() and sorted(p.name for p in folder.glob("*.flac")) == [
         "Session 1.flac", "Session 2.flac", "Session 3.flac"]
     assert file_registry.file_for(file_registry.Owner("transcript", tid), "audio").path == flac
     assert _row("SELECT journal_stale_since FROM campaigns WHERE slug = 'curse-of-strahd'")[0]
+
+
+# ---------------------------------------------------------------------------
+# Campaign folders: upload, move, rename, rename campaign, organize, delete
+# ---------------------------------------------------------------------------
+
+def test_campaign_folder_lifecycle(client, ml):
+    import os
+
+    from wisper_transcribe import storage_trim, transcript_store
+
+    out = get_output_dir()
+    for name in ("Curse of Strahd", "Tomb of Annihilation"):
+        assert client.post("/campaigns", data={"display_name": name},
+                           follow_redirects=False).status_code == 303
+    strahd, tomb = out / "Curse of Strahd", out / "Tomb of Annihilation"
+
+    def names(folder):
+        return sorted(p.name for p in folder.iterdir())
+
+    # Upload into a campaign: the session and its files land in its folder.
+    _wait(client, _upload(client, "Session 1", "curse-of-strahd"))
+    tid = _row("SELECT id FROM transcripts WHERE stem = 'Session 1'")[0]
+    assert "Session 1.md" in names(strahd) and "Session 1.flac" in names(strahd)
+
+    # Move to another campaign: every file follows.
+    resp = client.post(f"/transcripts/{tid}/campaign", data={"campaign": "tomb-of-annihilation"},
+                       follow_redirects=False)
+    assert resp.status_code == 303
+    assert not [n for n in names(strahd) if n.startswith("Session 1")]
+    assert {"Session 1.md", "Session 1.flac", "Session 1_diar.json"} <= set(names(tomb))
+
+    # Rename the session: the .md and its companions are renamed together.
+    resp = client.post(f"/transcripts/{tid}/rename", data={"new_name": "Session One"},
+                       follow_redirects=False)
+    assert resp.status_code == 303
+    assert not [n for n in names(tomb) if n.startswith("Session 1")]
+    assert {"Session One.md", "Session One.flac", "Session One_diar.json"} <= set(names(tomb))
+
+    # Rename the campaign: its folder moves and the session is found inside it.
+    resp = client.post("/campaigns/tomb-of-annihilation/rename",
+                       data={"display_name": "Tomb Renamed"}, follow_redirects=False)
+    assert resp.headers["location"] == "/campaigns/tomb-renamed"
+    renamed = out / "Tomb Renamed"
+    assert not tomb.exists() and "Session One.md" in names(renamed)
+    assert transcript_store.locate(tid).dir == renamed
+    assert client.get(f"/transcripts/{tid}").status_code == 200
+
+    # A shell mv of the whole session to the root is followed as a move out of
+    # the campaign, with every companion.
+    for path in list(renamed.iterdir()):
+        if path.name.startswith("Session One"):
+            os.replace(path, out / path.name)
+    transcript_store.reconcile(out)
+    loc = transcript_store.locate(tid)
+    assert loc.campaign_id is None and loc.dir == out and not loc.misplaced
+
+    # Assigned to the campaign with its files still in the root (as an upgrade
+    # leaves sessions): misplaced, and storage trim moves the files home.
+    from wisper_transcribe.campaign_manager import _assign
+
+    cid = _row("SELECT id FROM campaigns WHERE slug = 'tomb-renamed'")[0]
+    with db.transaction() as conn:
+        _assign(conn, tid, cid, 0)
+    assert transcript_store.locate(tid).misplaced
+    report = storage_trim.apply()
+    assert report.organized == ["Session One"]
+    assert not transcript_store.locate(tid).misplaced
+    assert "Session One.md" in names(renamed)
+
+    # Delete the campaign, keeping the files: the session moves to the root.
+    resp = client.post("/campaigns/tomb-renamed/delete", data={"mode": "keep"},
+                       follow_redirects=False)
+    assert resp.status_code == 303
+    assert (out / "Session One.md").is_file() and (out / "Session One.flac").is_file()
+    assert not renamed.exists()
+    loc = transcript_store.locate(tid)
+    assert loc.campaign_id is None and loc.dir == out and not loc.misplaced

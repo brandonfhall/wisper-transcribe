@@ -124,13 +124,13 @@ The sheet lists rows marked `discriminating` first: those are the words where th
 
 ## Free up disk space used by older transcripts
 
-Older uploads keep the whole original file (often a video), and older recordings keep several copies of their audio. The server reminds you once, on the start that upgrades the database, when there is something to trim.
+Older uploads keep the whole original file (often a video), and older recordings keep several copies of their audio. The server reminds you once, on the start that upgrades the database, when there is something to trim or existing sessions to move into their campaign folders.
 
 1. Stop the web server.
 2. Run `wisper storage trim` and review the list. Nothing is changed.
 3. Run `wisper storage trim --apply`.
 
-Each transcript keeps one compact `<name>.flac`, and each recording keeps `combined.wav`. See [cli-reference.md](cli-reference.md#wisper-storage).
+Each session moves into its campaign's folder with its summary, speaker data, clips, and audio, each transcript keeps one compact `<name>.flac`, and each recording keeps `combined.wav`. See [cli-reference.md](cli-reference.md#wisper-storage).
 
 ---
 
@@ -154,6 +154,38 @@ If wisper can't be sure (you also edited the file, or two files look alike), the
 
 ---
 
+## I moved a session to another campaign's folder in Obsidian
+
+Drag the session's `.md` (and its summary, speaker data, clips, and audio) from one campaign's folder to another's in Obsidian, or out to the transcripts root. On the next start or page load, wisper recognises the files by size and modified time, moves the session into that campaign (or out of all of them), keeps its place in the folder it stayed in, and brings its companion files along. Its journal entry is dropped and the old campaign's journal is marked for a rebuild.
+
+A `.md` you copy or drop into a campaign folder becomes a session of that campaign, exactly as one in the root belongs to no campaign.
+
+---
+
+## A session's files didn't all move
+
+Moving a session between campaigns, or renaming it, moves its `.md` and every registered companion (summary, speaker data, excerpt clips, audio, backup) together. If one of those files is open in another program — Obsidian, a player, Explorer, a sync client — Windows won't let it move. The `.md` is the exception: if it can't move, the whole move is undone, and nothing changes.
+
+When only a companion is left behind, the session still works everywhere: it reads as **misplaced** under **Needs attention** on the Transcripts page, because a file isn't in the session's folder. Close the program holding it and click **Move files** for that session (or run `wisper storage trim --apply`) to finish the move. The file keeps its registered name and is found wherever it is in the meantime.
+
+A move or rename is refused while a job is pending or running for the session, its campaign, or a recording of it; finish or cancel the job and try again. The clash prompt (when a name is already taken) offers **Overwrite** only for a session wisper owns; a file it doesn't own can only be kept as a new copy.
+
+---
+
+## Renaming a campaign says the folder is busy
+
+Renaming a campaign changes its display name, its page URL, its folder on disk, and its journal file. If a file in the folder is open in another program, Windows won't let the folder move, so the rename stays pending: the name and folder are unchanged, and the Campaign's **Needs attention** entry on the Transcripts page offers **Retry**. Close the program holding the file and Retry; `wisper campaigns show` reports the pending rename in the meantime.
+
+If both the old and the new folder are gone from the transcripts folder (you moved or deleted it outside wisper), the entry offers **Finish without folder**: the new name and folder are committed in the database and the folder is made on the next write.
+
+---
+
+## I renamed or deleted a campaign folder outside wisper
+
+wisper owns a campaign's folder only when it claimed it. Renaming the folder in Finder or Obsidian doesn't rename the campaign: the campaign's folder reads as missing under **Needs attention**, offering **Recreate folder**, or rename the campaign to match the folder you made. Deleting the folder is never recreated silently.
+
+---
+
 ## A recording stopped unexpectedly
 
 If wisper crashes or the machine loses power mid-session, the recording shows **FAILED** after the restart, but everything captured up to the last minute is still on disk. Open the recording and click **Recover recording** (or run `wisper record recover <recording_id>` while `wisper server` runs). The saved pieces are joined into one file, the recording becomes **COMPLETED**, and **Transcribe** works as usual. Expect up to the final minute to be missing.
@@ -164,7 +196,7 @@ If wisper crashes or the machine loses power mid-session, the recording shows **
 
 - **Rebuild journal** (web) or `wisper campaigns journal <slug> --rebuild` re-folds every session's existing summary: one LLM call per session, and your edits to summaries are kept.
 - **Rebuild from transcripts** / `--rebuild --resummarize` re-summarizes every session first (two calls per session). Use it after switching LLM model or when the summaries are poor.
-- Deleting `journal.md` from `campaigns/<slug>/` also starts over: every summarized session becomes pending again. Editing `journal.md` by hand is fine; later folds build on your version.
+- Deleting the journal file (`<campaign folder> Journal.md`, in the campaign's folder in the transcripts folder) also starts over: every summarized session becomes pending again. Editing it by hand is fine; later folds build on your version.
 
 ---
 

@@ -34,6 +34,9 @@
   {% elif err == 'delete_failed' %}
   <div style="margin-bottom:16px;color:var(--color-signal-amber);font-size:12.5px">Couldn't delete that file: it may be open in another program, or it now belongs to a transcript.</div>
   {% endif %}
+  {% if request.query_params.get('moved') %}
+  <div data-testid="bulk-move-result" style="margin-bottom:16px;color:var(--color-signal-amber);font-size:12.5px">Moved {{ request.query_params.get('moved') }}, skipped {{ request.query_params.get('skipped', '0') }} (name already in the target folder), {{ request.query_params.get('busy', '0') }} busy.</div>
+  {% endif %}
   {% if request.query_params.get('notice') == 'relink_kept_names' %}
   <div style="margin-bottom:16px;color:var(--color-signal-amber);font-size:12.5px">Relinked. Some files kept their old name because a file with the new name already exists; see Needs attention below.</div>
   {% endif %}
@@ -60,14 +63,14 @@
       <div style="flex:1"></div>
       {% if relink_candidates %}
       <form method="post" action="/transcripts/relink" data-testid="relink-form" style="display:flex;gap:6px;align-items:center">
-        <input type="hidden" name="old_stem" value="{{ m.stem }}"/>
-        <select name="new_stem" aria-label="Relink to" style="background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:3px 6px;border-radius:4px;font-size:12px;max-width:260px">
-          {% for cand in relink_candidates %}<option value="{{ cand }}">{{ cand }}</option>{% endfor %}
+        <input type="hidden" name="old_id" value="{{ m.id }}"/>
+        <select name="new_id" aria-label="Relink to" style="background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:3px 6px;border-radius:4px;font-size:12px;max-width:260px">
+          {% for cand in relink_candidates %}<option value="{{ cand.id }}">{{ cand.stem }}</option>{% endfor %}
         </select>
         <button type="submit" class="btn btn-secondary btn-sm" title="Use this file for the missing session, keeping its place, journal entry, speakers, and files">Relink</button>
       </form>
       {% endif %}
-      <form method="post" action="/transcripts/{{ m.stem | urlencode }}/delete"
+      <form method="post" action="/transcripts/{{ m.id }}/delete"
             onsubmit='return confirm({{ "Remove this transcript? Its summary, speaker clips, and audio are deleted too." | tojson }})'>
         <button type="submit" class="btn btn-secondary btn-sm" style="color:var(--color-signal-rose)">Remove</button>
       </form>
@@ -106,6 +109,84 @@
       {% else %}
       <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint)">listed only</span>
       {% endif %}
+    </div>
+    {% endfor %}
+    {% endif %}
+
+    {% if attention.misplaced %}
+    <div class="mono-kicker" style="margin:16px 0 8px">Not in their campaign's folder</div>
+    {% for m in attention.misplaced %}
+    <div data-testid="misplaced-transcript" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--color-rule)">
+      <span style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper-faint)">{{ m.stem }}</span>
+      {% if m.campaign %}<span class="pill pill-dim">{{ m.campaign }}</span>{% endif %}
+      <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint)">{{ m.dir }}</span>
+      <div style="flex:1"></div>
+      <form method="post" action="/transcripts/{{ m.id }}/move-files">
+        <button type="submit" class="btn btn-secondary btn-sm" title="Move this session's files into its campaign's folder">Move files</button>
+      </form>
+    </div>
+    {% endfor %}
+    {% endif %}
+
+    {% if attention.pending_folders %}
+    <div class="mono-kicker" style="margin:16px 0 8px">Folder renames to finish</div>
+    {% for p in attention.pending_folders %}
+    <div data-testid="pending-folder" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--color-rule)">
+      <span style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper-faint)">{{ p.campaign }}</span>
+      <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint)">{{ p.folder }} → {{ p.pending }}</span>
+      <span style="font-size:11px;color:var(--color-paper-dim)">Rename of folder {{ p.folder }} to {{ p.pending }} didn't finish: a file in it is open in another program. Close it, then Retry.</span>
+      <div style="flex:1"></div>
+      <form method="post" action="/campaigns/{{ p.slug }}/finish-rename">
+        <button type="submit" class="btn btn-secondary btn-sm">Retry</button>
+      </form>
+      {% if p.neither %}
+      <form method="post" action="/campaigns/{{ p.slug }}/finish-rename">
+        <input type="hidden" name="without_folder" value="1"/>
+        <button type="submit" class="btn btn-secondary btn-sm">Finish without folder</button>
+      </form>
+      {% endif %}
+    </div>
+    {% endfor %}
+    {% endif %}
+
+    {% if attention.folder_taken %}
+    <div class="mono-kicker" style="margin:16px 0 8px">Folder taken</div>
+    {% for cid, name, folder in attention.folder_taken %}
+    <div data-testid="folder-taken" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--color-rule)">
+      <span style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper-faint)">{{ name }}</span>
+      <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint)">{{ folder }}</span>
+      <div style="flex:1"></div>
+      <span style="font-size:11px;color:var(--color-paper-dim)">A folder named {{ folder }} already exists in your transcripts folder and isn't wisper's. Rename the campaign to use a different folder, or use this folder: every `.md` file in it becomes a session of this campaign.</span>
+      <form method="post" action="/transcripts/needs-attention/claim-folder">
+        <input type="hidden" name="campaign_id" value="{{ cid }}"/>
+        <button type="submit" class="btn btn-secondary btn-sm">Use this folder</button>
+      </form>
+    </div>
+    {% endfor %}
+    {% endif %}
+
+    {% if attention.legacy_journals %}
+    <div class="mono-kicker" style="margin:16px 0 8px">Journals to move</div>
+    {% for name in attention.legacy_journals %}
+    <div data-testid="legacy-journal" style="display:flex;gap:12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--color-rule)">
+      <span style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper-faint)">{{ name }}</span>
+      <span style="font-size:11px;color:var(--color-paper-dim)">The journal couldn't be moved into its folder yet.</span>
+    </div>
+    {% endfor %}
+    {% endif %}
+
+    {% if attention.missing_folders %}
+    <div class="mono-kicker" style="margin:16px 0 8px">Campaign folders missing</div>
+    {% for cid, name, folder in attention.missing_folders %}
+    <div data-testid="missing-folder" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--color-rule)">
+      <span style="font-family:var(--font-serif);font-size:15px;color:var(--color-paper-faint)">{{ name }}</span>
+      <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint)">{{ folder }}</span>
+      <div style="flex:1"></div>
+      <span style="font-size:11px;color:var(--color-paper-dim)">The folder {{ folder }} for campaign {{ name }} isn't in your transcripts folder. If you renamed it, rename the campaign to match; otherwise Recreate folder.</span>
+      <form method="post" action="/transcripts/needs-attention/recreate-folder">
+        <input type="hidden" name="campaign_id" value="{{ cid }}"/>
+        <button type="submit" class="btn btn-secondary btn-sm">Recreate folder</button>
+      </form>
     </div>
     {% endfor %}
     {% endif %}
@@ -220,11 +301,11 @@
     </div>
 
     {% for t in items %}
-    <a href="/transcripts/{{ t.stem | urlencode }}"
+    <a href="/transcripts/{{ t.id }}"
        data-title="{{ t.title | lower }}" data-campaign="{{ slug }}"
        style="display:grid;grid-template-columns:14px 2fr 80px 80px 80px 110px 60px;gap:16px;padding:14px 16px;border-bottom:1px solid var(--color-rule);align-items:center;text-decoration:none;
               {% if loop.last %}border-bottom:none;{% endif %}">
-      <input type="checkbox" class="transcript-select" value="{{ t.stem }}" aria-label="Select {{ t.title }}"
+      <input type="checkbox" class="transcript-select" value="{{ t.id }}" aria-label="Select {{ t.title }}"
              onclick="event.stopPropagation()" onchange="wisperUpdateTranscriptSelection()" style="cursor:pointer;margin:0"/>
       <div>
         <div style="font-family:var(--font-serif);font-size:16px;color:var(--color-paper)">{{ t.title }}</div>
@@ -255,10 +336,10 @@
       <div style="flex:1;height:1px;background:var(--color-rule)"></div>
     </div>
     {% for t in unassigned %}
-    <a href="/transcripts/{{ t.stem | urlencode }}"
+    <a href="/transcripts/{{ t.id }}"
        data-title="{{ t.title | lower }}" data-campaign=""
        style="display:grid;grid-template-columns:14px 2fr 80px 110px 60px;gap:16px;padding:14px 16px;border-bottom:{% if not loop.last %}1px solid var(--color-rule){% else %}none{% endif %};align-items:center;text-decoration:none">
-      <input type="checkbox" class="transcript-select" value="{{ t.stem }}" aria-label="Select {{ t.title }}"
+      <input type="checkbox" class="transcript-select" value="{{ t.id }}" aria-label="Select {{ t.title }}"
              onclick="event.stopPropagation()" onchange="wisperUpdateTranscriptSelection()" style="cursor:pointer;margin:0"/>
       <div style="font-family:var(--font-serif);font-size:16px;color:var(--color-paper)">{{ t.title }}</div>
       <div style="font-family:var(--font-mono);font-size:11.5px;color:var(--color-paper-dim);text-align:right">{{ t.duration or '—' }}</div>
@@ -296,12 +377,12 @@ function wisperToggleAllTranscripts(cb) {
   document.querySelectorAll('.transcript-select').forEach(function(el) { el.checked = cb.checked; });
   wisperUpdateTranscriptSelection();
 }
-function wisperSubmitStems(formId, stems, extra) {
+function wisperSubmitIds(formId, ids, extra) {
   var form = document.getElementById(formId);
   form.innerHTML = '';
-  stems.forEach(function(stem) {
+  ids.forEach(function(id) {
     var input = document.createElement('input');
-    input.type = 'hidden'; input.name = 'stems'; input.value = stem;
+    input.type = 'hidden'; input.name = 'transcript_id'; input.value = id;
     form.appendChild(input);
   });
   Object.keys(extra || {}).forEach(function(k) {
@@ -312,16 +393,16 @@ function wisperSubmitStems(formId, stems, extra) {
   form.submit();
 }
 function wisperBulkDeleteTranscripts() {
-  var stems = wisperSelectedTranscripts();
-  if (!stems.length) return;
-  if (!confirm('Delete ' + stems.length + ' transcript(s)? This removes each transcript, its summary, speaker clips, and audio copy, and takes it out of its campaign. This can\'t be undone.')) return;
-  wisperSubmitStems('bulk-delete-transcripts-form', stems);
+  var ids = wisperSelectedTranscripts();
+  if (!ids.length) return;
+  if (!confirm('Delete ' + ids.length + ' transcript(s)? This removes each transcript, its summary, speaker clips, and audio copy, and takes it out of its campaign. This can\'t be undone.')) return;
+  wisperSubmitIds('bulk-delete-transcripts-form', ids);
 }
 function wisperBulkAssignCampaign() {
-  var stems = wisperSelectedTranscripts();
-  if (!stems.length) return;
-  wisperSubmitStems('bulk-campaign-form', stems,
-                    {campaign: document.getElementById('bulk-campaign-select').value});
+  var ids = wisperSelectedTranscripts();
+  if (!ids.length) return;
+  wisperSubmitIds('bulk-campaign-form', ids,
+                  {campaign: document.getElementById('bulk-campaign-select').value});
 }
 function wisperCampaignFilter(btn, slug) {
   document.querySelectorAll('.filter-pill').forEach(function(b) { b.classList.remove('active'); });

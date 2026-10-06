@@ -18,20 +18,20 @@
     <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-signal-green);letter-spacing:0.12em;margin-right:6px">
       {% if meta.date_processed %}● PROCESSED {{ meta.date_processed }}{% endif %}
     </span>
-    <a href="/jobs/history?transcript={{ name | urlencode }}" class="btn btn-secondary btn-sm" title="Every job that worked on this transcript">Jobs</a>
-    <a href="/transcripts/{{ name | urlencode }}/download" class="btn btn-secondary btn-sm">Export .md</a>
+    <a href="/jobs/history?transcript_id={{ id }}" class="btn btn-secondary btn-sm" title="Every job that worked on this transcript">Jobs</a>
+    <a href="/transcripts/{{ id }}/download" class="btn btn-secondary btn-sm">Export .md</a>
     {% if audio_url %}
-    <form method="post" action="/transcripts/{{ name | urlencode }}/retranscribe" style="display:inline"
+    <form method="post" action="/transcripts/{{ id }}/retranscribe" style="display:inline"
           onsubmit='return confirm({{ "Re-transcribe this session from its saved audio? The transcript is replaced (it keeps its name and campaign place), speaker names you set by hand are reset, and custom vocabulary or prompts from the original upload aren't reused. If it was folded into the campaign journal, the journal is marked as needing a rebuild." | tojson }})'>
       <button type="submit" class="btn btn-secondary btn-sm">Re-transcribe</button>
     </form>
     {% endif %}
     {% if has_summary %}
-    <form method="post" action="/transcripts/{{ name | urlencode }}/refine" style="display:inline">
+    <form method="post" action="/transcripts/{{ id }}/refine" style="display:inline">
       <button type="submit" class="btn btn-secondary btn-sm">Re-refine</button>
     </form>
     {% else %}
-    <form method="post" action="/transcripts/{{ name | urlencode }}/summarize" style="display:inline">
+    <form method="post" action="/transcripts/{{ id }}/summarize" style="display:inline">
       <button type="submit" class="btn btn-primary btn-sm">{{ icon("spark", 10, "var(--color-ink-800)") }} Summarize</button>
     </form>
     {% endif %}
@@ -51,11 +51,26 @@
   {% set retranscribe_errors = {
     'no_audio': 'This transcript has no saved audio to re-transcribe from.',
     'not_ready': "The recording isn't ready to transcribe.",
+    'folder_taken': "A folder with the campaign's name already exists in your transcripts folder; rename the campaign or use that folder from the Transcripts page.",
+    'rename_pending': "The last rename of this campaign's folder hasn't finished; retry it from the Transcripts page first.",
+    'folder_missing': "The campaign's folder is missing from your transcripts folder; recreate it or rename the campaign from the Transcripts page.",
+    'output_unavailable': "The transcripts folder isn't available.",
+    'invalid_campaign': "That campaign doesn't exist.",
+    'invalid_name': "Enter a name without / \\ : * ? \" < > |, control characters, or a leading dot.",
+    'busy': "A job is running for this session or its campaign; try again when it finishes.",
+    'reserved': "That name is this campaign's journal; choose another.",
+    'locked': "A file is open in another program, so nothing moved. Close it and try again.",
+    'move_failed': "The move didn't finish; see Needs attention on the Transcripts page.",
   } %}
   {% set err = retranscribe_errors.get(request.query_params.get('error')) %}
   {% if err %}
   <div style="margin:20px 36px 0;padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber)">
     {{ err }}
+  </div>
+  {% endif %}
+  {% if request.query_params.get('notice') == 'partial_move' %}
+  <div style="margin:20px 36px 0;padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber)">
+    The session moved, but a file was open in another program and stayed behind. Use Move files to finish it.
   </div>
   {% endif %}
 
@@ -98,17 +113,17 @@
   <!-- Tabs -->
   <div style="display:flex;border-bottom:1px solid var(--color-rule);padding:0 36px">
     {% if has_summary %}
-    <a href="/transcripts/{{ name | urlencode }}/summary" class="tab-item {% if request.url.path.endswith('/summary') %}active{% endif %}" aria-label="Campaign Notes">
+    <a href="/transcripts/{{ id }}/summary" class="tab-item {% if request.url.path.endswith('/summary') %}active{% endif %}" aria-label="Campaign Notes">
       {{ icon("book", 11, "var(--color-accent)" if request.url.path.endswith('/summary') else "var(--color-paper-dim)") }}
       Summary
       <span style="font-size:9px;color:var(--color-accent);padding:2px 6px;border:1px solid #5fd4e740;margin-left:4px;letter-spacing:0.08em">Campaign Notes</span>
     </a>
     {% endif %}
-    <a href="/transcripts/{{ name | urlencode }}" class="tab-item {% if not request.url.path.endswith('/summary') %}active{% endif %}">
+    <a href="/transcripts/{{ id }}" class="tab-item {% if not request.url.path.endswith('/summary') %}active{% endif %}">
       {{ icon("scroll", 11, "var(--color-accent)" if not request.url.path.endswith('/summary') else "var(--color-paper-dim)") }}
       Transcript
     </a>
-    <a href="/transcripts/{{ name | urlencode }}/download" class="tab-item">
+    <a href="/transcripts/{{ id }}/download" class="tab-item">
       {{ icon("sliders", 11, "var(--color-paper-dim)") }} Raw .md
     </a>
   </div>
@@ -121,7 +136,7 @@
       <!-- Assign to campaign -->
       <div style="margin-bottom:28px;padding:14px 16px;background:var(--color-ink-700);border:1px solid var(--color-rule);border-radius:4px">
         <div class="mono-kicker" style="margin-bottom:8px">Campaign</div>
-        <form method="post" action="/transcripts/{{ name | urlencode }}/campaign" style="display:flex;gap:8px;align-items:center">
+        <form method="post" action="/transcripts/{{ id }}/campaign" style="display:flex;gap:8px;align-items:center">
           <select name="campaign" style="flex:1;background:var(--color-ink-900);border:1px solid var(--color-rule);color:var(--color-paper);padding:6px 10px;border-radius:4px;font-size:12px;font-family:var(--font-sans)">
             <option value="">— Uncategorized —</option>
             {% for slug, c in campaigns.items() %}
@@ -130,6 +145,60 @@
           </select>
           <button type="submit" class="btn btn-secondary btn-sm">Save</button>
         </form>
+
+        {% if clash and clash.kind == 'move' %}
+        <div data-testid="clash-panel" style="margin-top:12px;padding:12px;background:var(--color-ink-900);border:1px solid var(--color-rule);border-radius:4px">
+          <div style="font-size:12.5px;color:var(--color-paper)">A session named <strong>{{ clash.name or name }}</strong> is already in {{ clash.target_name }}.{% if clash.modified %} It was last modified {{ clash.modified }}.{% endif %}</div>
+          <div style="font-size:11.5px;color:var(--color-paper-faint);margin-top:6px">Overwrite deletes the existing session first.</div>
+          <form method="post" action="/transcripts/{{ id }}/campaign" style="display:inline">
+            <input type="hidden" name="campaign" value="{{ clash.to }}"/>
+            <input type="hidden" name="clash" value="keep_both"/>
+            <button type="submit" class="btn btn-secondary btn-sm" style="margin-top:8px">Keep both</button>
+          </form>
+          {% if clash.overwrite_allowed %}
+          <form method="post" action="/transcripts/{{ id }}/campaign" style="display:inline">
+            <input type="hidden" name="campaign" value="{{ clash.to }}"/>
+            <input type="hidden" name="clash" value="overwrite"/>
+            <button type="submit" class="btn btn-secondary btn-sm" style="margin-top:8px;color:var(--color-signal-rose)">Overwrite</button>
+          </form>
+          {% endif %}
+          <a href="/transcripts/{{ id }}" class="btn btn-secondary btn-sm" style="margin-top:8px">Cancel</a>
+        </div>
+        {% elif clash and clash.kind == 'rename' %}
+        <div data-testid="clash-panel" style="margin-top:12px;padding:12px;background:var(--color-ink-900);border:1px solid var(--color-rule);border-radius:4px">
+          <div style="font-size:12.5px;color:var(--color-paper)">A session named <strong>{{ clash.name }}</strong> already exists.{% if clash.modified %} It was last modified {{ clash.modified }}.{% endif %}</div>
+          <div style="font-size:11.5px;color:var(--color-paper-faint);margin-top:6px">Overwrite deletes the existing session first.</div>
+          <form method="post" action="/transcripts/{{ id }}/rename" style="display:inline">
+            <input type="hidden" name="new_name" value="{{ clash.name }}"/>
+            <input type="hidden" name="clash" value="keep_both"/>
+            <button type="submit" class="btn btn-secondary btn-sm" style="margin-top:8px">Keep both</button>
+          </form>
+          {% if clash.overwrite_allowed %}
+          <form method="post" action="/transcripts/{{ id }}/rename" style="display:inline">
+            <input type="hidden" name="new_name" value="{{ clash.name }}"/>
+            <input type="hidden" name="clash" value="overwrite"/>
+            <button type="submit" class="btn btn-secondary btn-sm" style="margin-top:8px;color:var(--color-signal-rose)">Overwrite</button>
+          </form>
+          {% endif %}
+          <a href="/transcripts/{{ id }}" class="btn btn-secondary btn-sm" style="margin-top:8px">Cancel</a>
+        </div>
+        {% endif %}
+
+        {% if misplaced %}
+        <div data-testid="misplaced-note" style="margin-top:12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+          <span style="font-size:12.5px;color:var(--color-signal-amber)">Files are in {{ misplaced.where }}, not in {{ misplaced.target }}.</span>
+          <form method="post" action="/transcripts/{{ id }}/move-files" style="display:inline">
+            <button type="submit" class="btn btn-secondary btn-sm">Move files</button>
+          </form>
+        </div>
+        {% endif %}
+
+        <form method="post" action="/transcripts/{{ id }}/rename" style="display:flex;gap:8px;align-items:center;margin-top:12px">
+          <input type="text" name="new_name" value="{{ name }}" aria-label="New session name"
+                 style="flex:1;background:var(--color-ink-900);border:1px solid var(--color-rule);color:var(--color-paper);padding:6px 10px;border-radius:4px;font-size:12px;font-family:var(--font-sans)"/>
+          <button type="submit" class="btn btn-secondary btn-sm">Rename</button>
+        </form>
+        <div style="font-size:11px;color:var(--color-paper-faint);margin-top:6px">Links typed in your notes don't follow a rename made here.</div>
       </div>
 
       {% if html_body %}
@@ -149,11 +218,11 @@
       <!-- Speaker enrollment -->
       <div style="margin-bottom:16px;padding:14px 16px;background:var(--color-ink-700);border:1px solid var(--color-rule);border-radius:4px">
         <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);letter-spacing:0.15em;text-transform:uppercase;margin-bottom:8px">Speakers</div>
-        <a href="/transcripts/{{ name | urlencode }}/edit" class="btn btn-secondary" style="display:flex;width:100%;justify-content:center;margin-bottom:6px">
+        <a href="/transcripts/{{ id }}/edit" class="btn btn-secondary" style="display:flex;width:100%;justify-content:center;margin-bottom:6px">
           {{ icon("sliders", 11) }} Edit per-line speakers
         </a>
         {% if has_diar_sidecar %}
-        <a href="/transcripts/{{ name | urlencode }}/enroll" class="btn btn-secondary" style="display:flex;width:100%;justify-content:center;margin-bottom:6px">
+        <a href="/transcripts/{{ id }}/enroll" class="btn btn-secondary" style="display:flex;width:100%;justify-content:center;margin-bottom:6px">
           {{ icon("users", 11) }} Name speakers
         </a>
         <div style="font-size:11px;color:var(--color-paper-faint);line-height:1.4">Assign names and enroll voice profiles detected in this session.</div>
@@ -177,14 +246,14 @@
           <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-accent);letter-spacing:0.18em;text-transform:uppercase">Post-processing</div>
         </div>
         {% if not has_summary %}
-        <form method="post" action="/transcripts/{{ name | urlencode }}/summarize" style="margin-bottom:8px">
+        <form method="post" action="/transcripts/{{ id }}/summarize" style="margin-bottom:8px">
           <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center">
             {{ icon("spark", 10, "var(--color-ink-800)") }} Generate Summary
           </button>
         </form>
         {% else %}
         <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-signal-green);letter-spacing:0.12em;margin-bottom:12px">✓ SUMMARY AVAILABLE</div>
-        <a href="/transcripts/{{ name | urlencode }}/summary" class="btn btn-secondary" style="display:flex;width:100%;justify-content:center;margin-bottom:8px">View Summary</a>
+        <a href="/transcripts/{{ id }}/summary" class="btn btn-secondary" style="display:flex;width:100%;justify-content:center;margin-bottom:8px">View Summary</a>
         {% endif %}
         <div style="font-size:11.5px;color:var(--color-paper-faint);margin-top:8px;line-height:1.5">
           LLM: {{ llm_provider }}{% if llm_model %} · {{ llm_model }}{% endif %}
@@ -225,7 +294,7 @@
 
       <!-- Delete -->
       <div style="margin-top:16px">
-        <form method="post" action="/transcripts/{{ name | urlencode }}/delete"
+        <form method="post" action="/transcripts/{{ id }}/delete"
               onsubmit="return confirm('Delete this transcript permanently?')">
           <button type="submit" style="background:none;border:none;color:var(--color-signal-rose);font-size:12px;font-family:var(--font-sans);cursor:pointer;padding:6px 0">Delete transcript</button>
         </form>

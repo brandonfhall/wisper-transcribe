@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from tests import _seed
 from tests._seed import seed_file, seed_profile, seed_recording
 from wisper_transcribe import db, file_registry as fr, transcript_store as ts
 from wisper_transcribe.campaign_manager import create_campaign
@@ -61,18 +62,19 @@ def _count() -> int:
 
 def test_root_follows_kind():
     assert {k for k, r in fr.ROOT_OF_KIND.items() if r == "output"} == {
-        "transcript", "summary", "sidecar", "excerpt", "excerpt_text", "audio", "backup"}
+        "transcript", "summary", "sidecar", "excerpt", "excerpt_text", "audio", "backup", "journal"}
     assert {k for k, r in fr.ROOT_OF_KIND.items() if r == "data"} == {
-        "combined", "per_user", "live_draft", "reference_clip", "journal"}
+        "combined", "per_user", "live_draft", "reference_clip"}
     assert fr.SINGLE_KINDS == set(fr.KINDS) - {"excerpt", "excerpt_text", "per_user"}
 
 
 def test_owner_lookups(out, monkeypatch):
     t = _owner("Session One")
-    assert fr.Owner.for_stem("Session One") == t
-    assert fr.Owner.for_stem("session one") is None
+    md = _touch(out / "Session One.md")
+    fr.add(md, kind="transcript", owner=t)
+    assert fr.Owner.for_path(md) == t
     _case(monkeypatch, True)
-    assert fr.Owner.for_stem("session one") == t
+    assert fr.Owner.for_path(out / "session one.md") == t
     seed_profile("alice")
     camp = create_campaign("Camp")
     rec = seed_recording()
@@ -83,9 +85,12 @@ def test_owner_lookups(out, monkeypatch):
     assert fr.Owner.for_recording("0" * 36) is None
 
 
-def test_owner_lookup_is_nfc():
+def test_owner_for_path_is_nfc(out):
     t = _owner("Café")
-    assert fr.Owner.for_stem(unicodedata.normalize("NFD", "Café")) == t
+    nfd_name = unicodedata.normalize("NFD", "Café") + ".md"
+    md = _touch(out / nfd_name)
+    fr.add(md, kind="transcript", owner=t)
+    assert fr.Owner.for_path(out / nfd_name) == t
 
 
 # ---------------------------------------------------------------------------
@@ -110,12 +115,21 @@ def test_add_missing_file_has_no_stats(out):
 
 
 def test_data_kinds_use_the_data_root(data):
+    seed_profile("alice")
+    owner = fr.Owner.for_profile_key("alice")
+    clip = _touch(data / "profiles" / "embeddings" / "alice.mp3")
+    fr.add(clip, kind="reference_clip", owner=owner)
+    row = fr.file_for(owner, "reference_clip")
+    assert row.root == "data" and row.rel_path == "profiles/embeddings/alice.mp3"
+
+
+def test_a_journal_is_registered_under_the_output_root_in_its_campaign_folder(out):
     camp = create_campaign("Camp")
     owner = fr.Owner.for_campaign_slug(camp.slug)
-    journal = _touch(data / "campaigns" / camp.slug / "journal.md")
+    journal = _touch(out / "Camp" / "Camp Journal.md")
     fr.add(journal, kind="journal", owner=owner)
     row = fr.file_for(owner, "journal")
-    assert row.root == "data" and row.rel_path == f"campaigns/{camp.slug}/journal.md"
+    assert row.root == "output" and row.rel_path == "Camp/Camp Journal.md" and row.path == journal
 
 
 @pytest.mark.parametrize("where", ["equal", "inside"])
@@ -125,11 +139,11 @@ def test_output_root_equal_to_or_inside_the_data_dir(data, where):
     camp = create_campaign("Camp")
     cowner = fr.Owner.for_campaign_slug(camp.slug)
     md = _touch(out / "s.md")
-    journal = _touch(data / "campaigns" / camp.slug / "journal.md")
+    journal = _touch(out / "Camp" / "Camp Journal.md")
     fr.add(md, kind="transcript", owner=owner, data_dir=None, output_dir=out)
     fr.add(journal, kind="journal", owner=cowner, output_dir=out)
     assert fr.file_for(owner, "transcript", output_dir=out).path == md
-    assert fr.file_for(cowner, "journal", output_dir=out).root == "data"
+    assert fr.file_for(cowner, "journal", output_dir=out).path == journal
 
 
 def test_outside_the_root_raises_or_returns_none(out, tmp_path):
@@ -426,7 +440,9 @@ def test_sync_registers_data_files_and_skips_active_recordings(data):
     seed_profile("alice")
     _touch(data / "profiles" / "embeddings" / "alice.mp3")
     camp = create_campaign("Camp")
-    _touch(data / "campaigns" / camp.slug / "journal.md")
+    from wisper_transcribe import campaign_folders
+    campaign_folders.ensure_folder(camp.id)
+    _touch(get_output_dir() / "Camp" / "Camp Journal.md")
     with db.transaction() as conn:
         conn.execute("UPDATE recordings SET capture_status = 'degraded' WHERE id = ?",
                      (degraded.id,))
@@ -646,7 +662,7 @@ def test_reconcile_sync_modes(out, monkeypatch, mode, calls):
 def test_reconcile_registers_files_by_default(out):
     _touch(out / "Session.md", b"---\ntitle: x\n---\n\nbody\n")
     ts.reconcile(out)
-    owner = fr.Owner.for_stem("Session")
+    owner = fr.Owner.for_path(out / "Session.md")
     assert fr.file_for(owner, "transcript").path == out / "Session.md"
     assert fr.last_report().registered == [out / "Session.md"]
 
@@ -661,18 +677,18 @@ def _row(owner: fr.Owner, kind: str, label: str | None = None):
 
 def test_register_adds_the_transcript_row(out):
     _touch(out / "s01.md", b"text")
-    tid = ts.register("s01", origin="job")
+    tid = ts.register(out / "s01.md", origin="job")
     row = _row(fr.Owner("transcript", tid), "transcript")
     assert row.path == out / "s01.md" and row.size == 4
 
 
 def test_overwriting_a_job_drops_the_stale_sidecar_row(out):
     _touch(out / "s01.md")
-    tid = ts.register("s01", origin="job")
+    tid = ts.register(out / "s01.md", origin="job")
     ts.write_sidecar(out / "s01.md", {"diarization_segments": [], "speaker_map": {"SPEAKER_00": "A"}})
     owner = fr.Owner("transcript", tid)
     assert _row(owner, "sidecar") is not None
-    ts.register("s01", origin="job")
+    ts.register(out / "s01.md", origin="job")
     assert _row(owner, "sidecar") is None
     assert not (out / "s01_diar.json").exists()
 
@@ -681,7 +697,7 @@ def test_write_sidecar_registers_the_sidecar_and_the_audio(out):
     md = _touch(out / "s01.md")
     audio = _touch(out / "s01.mp4")
     ts.write_sidecar(md, {"diarization_segments": [], "input_path": str(audio)})
-    owner = fr.Owner.for_stem("s01")
+    owner = fr.Owner.for_path(out / "s01.md")
     assert _row(owner, "sidecar").path == out / "s01_diar.json"
     assert _row(owner, "audio").path == audio
 
@@ -691,7 +707,7 @@ def test_write_sidecar_outside_the_output_folder_clears_the_audio(out, tmp_path)
     audio = _touch(out / "s01.mp4")
     ts.write_sidecar(md, {"diarization_segments": [], "input_path": str(audio)})
     ts.write_sidecar(md, {"diarization_segments": [], "input_path": str(tmp_path / "elsewhere.mp4")})
-    assert _row(fr.Owner.for_stem("s01"), "audio") is None
+    assert _row(fr.Owner.for_path(out / "s01.md"), "audio") is None
     assert not audio.exists()  # the replaced copy goes with it
 
 
@@ -699,7 +715,7 @@ def test_write_sidecar_never_tracks_a_recordings_audio(out, data):
     md = _touch(out / "s01.md")
     combined = _touch(data / "recordings" / "r1" / "combined.wav")
     ts.write_sidecar(md, {"diarization_segments": [], "input_path": str(combined)})
-    assert _row(fr.Owner.for_stem("s01"), "audio") is None
+    assert _row(fr.Owner.for_path(out / "s01.md"), "audio") is None
     assert combined.exists()
 
 
@@ -715,22 +731,22 @@ def test_set_audio_replaces_and_deletes_the_previous_file(out):
     first, second = _touch(out / "s01.mp4"), _touch(out / "s01.flac")
     ts.set_audio(md, first)
     ts.set_audio(md, second)
-    assert _row(fr.Owner.for_stem("s01"), "audio").path == second
+    assert _row(fr.Owner.for_path(out / "s01.md"), "audio").path == second
     assert not first.exists() and second.exists()
     ts.set_audio(md, None)
-    assert _row(fr.Owner.for_stem("s01"), "audio") is None and not second.exists()
+    assert _row(fr.Owner.for_path(out / "s01.md"), "audio") is None and not second.exists()
 
 
 def test_save_summary_registers_beside_a_registered_transcript(out, tmp_path):
     _touch(out / "s01.md")
-    ts.register("s01", origin="job")
+    ts.register(out / "s01.md", origin="job")
     ts.save_summary(out / "s01.summary.md", "summary")
-    assert _row(fr.Owner.for_stem("s01"), "summary").path == out / "s01.summary.md"
+    assert _row(fr.Owner.for_path(out / "s01.md"), "summary").path == out / "s01.summary.md"
 
 
 def test_save_summary_outside_the_roots_registers_nothing(out, tmp_path):
     _touch(out / "s01.md")
-    ts.register("s01", origin="job")
+    ts.register(out / "s01.md", origin="job")
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     before = _count()
@@ -741,18 +757,18 @@ def test_save_summary_outside_the_roots_registers_nothing(out, tmp_path):
 
 def test_save_transcript_restats_the_row(out):
     md = _touch(out / "s01.md", b"one")
-    tid = ts.register("s01", origin="job")
+    tid = ts.register(out / "s01.md", origin="job")
     ts.save_transcript(md, "longer text")
     assert _row(fr.Owner("transcript", tid), "transcript").size == len("longer text")
 
 
 def test_relink_repoints_the_transcript_row(out):
     _touch(out / "old.md")
-    tid = ts.register("old", origin="job")
+    tid = ts.register(out / "old.md", origin="job")
     (out / "old.md").rename(out / "new.md")
     os.utime(out / "new.md", ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
     ts.reconcile(out)  # a new mtime: the rename isn't provable, so relink does it
-    ts.relink("old", "new", output_dir=out)
+    ts.relink(tid, out / "new.md")
     row = _row(fr.Owner("transcript", tid), "transcript")
     assert row.rel_path == "new.md"
 
@@ -763,14 +779,14 @@ def test_relink_registers_when_the_transcript_had_no_row(out):
         tid = ts.ensure_row(conn, "old", out)
         conn.execute("UPDATE transcripts SET missing_since = '2026-01-01T00:00:00Z' WHERE id = ?", (tid,))
     _touch(out / "new.md")
-    ts.relink("old", "new", output_dir=out)
+    ts.relink(tid, out / "new.md")
     assert _row(fr.Owner("transcript", tid), "transcript").rel_path == "new.md"
 
 
 def test_reconcile_case_only_rename_repoints_the_row(out, monkeypatch):
     _case(monkeypatch, True)
     _touch(out / "Session.md")
-    tid = ts.register("Session", origin="job")
+    tid = ts.register(out / "Session.md", origin="job")
     (out / "Session.md").rename(out / "session-tmp.md")
     (out / "session-tmp.md").rename(out / "SESSION.md")
     ts.reconcile(out)
@@ -785,7 +801,7 @@ def test_extract_speaker_excerpts_registers_clips_with_sanitised_labels(out):
     from wisper_transcribe.web.jobs import COMPLETED, Job, _extract_speaker_excerpts
 
     md = _touch(out / "s01.md")
-    tid = ts.register("s01", origin="job")
+    tid = ts.register(out / "s01.md", origin="job")
     audio = _touch(out / "in.mp3")
     job = Job(id="j1", status=COMPLETED, created_at=datetime.now(), input_path=str(audio),
               kwargs={}, output_path=str(md))
@@ -811,7 +827,7 @@ def test_extract_speaker_excerpts_skips_a_clip_ffmpeg_did_not_write(out):
     from wisper_transcribe.web.jobs import COMPLETED, Job, _extract_speaker_excerpts
 
     md = _touch(out / "s01.md")
-    tid = ts.register("s01", origin="job")
+    tid = ts.register(out / "s01.md", origin="job")
     job = Job(id="j1", status=COMPLETED, created_at=datetime.now(),
               input_path=str(_touch(out / "in.mp3")), kwargs={}, output_path=str(md))
     aligned = [AlignedSegment(start=0.0, end=5.0, text="Hello", speaker="SPEAKER_00")]
@@ -830,14 +846,14 @@ def test_refine_registers_its_backup(out):
     from wisper_transcribe.cli import main
 
     md = _touch(out / "ep.md", b"---\ntitle: x\n---\n\n**A** *(00:00)*: Kira said hi.\n")
-    ts.register("ep", origin="job")
+    ts.register(out / "ep.md", origin="job")
     client = MagicMock(provider="mock", model="m1")
     client.complete_json.return_value = {"changes": [{"original": "Kira", "corrected": "Kyra"}]}
     with patch("wisper_transcribe.cli._get_llm_client", return_value=client):
         CliRunner().invoke(main, ["config", "set", "hotwords", "Kyra"])
         result = CliRunner().invoke(main, ["refine", str(md), "--apply", "--no-color"])
     assert result.exit_code == 0, result.output
-    assert _row(fr.Owner.for_stem("ep"), "backup").path == out / "ep.md.bak"
+    assert _row(fr.Owner.for_path(out / "ep.md"), "backup").path == out / "ep.md.bak"
 
 
 def test_refine_backup_outside_the_roots_registers_nothing(out, tmp_path):
@@ -920,12 +936,10 @@ def test_resetting_profiles_deletes_every_clip_and_row(data):
 
 
 def _fold_setup(out):
-    from wisper_transcribe.campaign_manager import move_transcript_to_campaign
-
     create_campaign("My Game")
     _touch(out / "s1.md")
-    ts.register("s1", origin="job")
-    move_transcript_to_campaign("s1", "my-game")
+    ts.register(out / "s1.md", origin="job")
+    _seed.move_to_campaign("s1", "my-game")
     _touch(out / "s1.summary.md", b"A session happened.")
 
 
@@ -978,7 +992,7 @@ def test_sync_journal_forgets_the_row_of_a_deleted_journal(out):
     assert fr.file_for(fr.Owner.for_campaign_slug("my-game"), "journal") is None
 
 
-def test_deleting_a_campaign_keeps_the_journal_file_unclaimed(out, data):
+def test_deleting_a_campaign_keeps_the_journal_file_untracked(out, data):
     from wisper_transcribe import journal
     from wisper_transcribe.campaign_manager import delete_campaign
 
@@ -986,7 +1000,7 @@ def test_deleting_a_campaign_keeps_the_journal_file_unclaimed(out, data):
     result = journal.update_journal("my-game", _Client(), {})
     delete_campaign("my-game")
     assert result.path.is_file() and _count() == 1  # only the transcript row is left
-    assert result.path in fr.sync(out, data).unclaimed
+    assert result.path not in fr.sync(out, data).unclaimed  # no campaign claims its folder
 
 
 def test_local_finalise_registers_combined_per_user_and_the_live_draft(data, monkeypatch):
@@ -1039,10 +1053,10 @@ def test_register_capture_files_registers_combined_and_numeric_tracks(data):
 
 def test_delete_transcript_removes_registered_and_unregistered_companions(out):
     md = _touch(out / "s01.md")
-    ts.register("s01", origin="job")
+    tid = ts.register(out / "s01.md", origin="job")
     registered = [_touch(out / "s01.summary.md"), _touch(out / "s01.md.bak"),
                   _touch(out / "s01_excerpt_A.mp3")]
-    owner = fr.Owner.for_stem("s01")
+    owner = fr.Owner.for_path(out / "s01.md")
     fr.add(registered[0], kind="summary", owner=owner)
     fr.add(registered[1], kind="backup", owner=owner)
     fr.add(registered[2], kind="excerpt", owner=owner, label="A")
@@ -1051,7 +1065,7 @@ def test_delete_transcript_removes_registered_and_unregistered_companions(out):
     unregistered = [_touch(out / "s01_diar.json"), _touch(out / "s01_excerpt_B.txt")]
     keep = _touch(out / "s02.summary.md")
 
-    assert ts.delete_transcript("s01")
+    assert ts.delete_transcript(tid) == "deleted"
     for path in [md, audio, *registered, *unregistered]:
         assert not path.exists(), path
     assert keep.exists() and _count() == 0
@@ -1059,11 +1073,11 @@ def test_delete_transcript_removes_registered_and_unregistered_companions(out):
 
 def test_delete_transcript_never_deletes_a_recordings_audio(out, data):
     md = _touch(out / "s01.md")
-    ts.register("s01", origin="job")
+    tid = ts.register(out / "s01.md", origin="job")
     combined = _touch(data / "recordings" / "r1" / "combined.wav")
     sidecar = _touch(out / "s01_diar.json", b'{"diarization_segments": [], "input_path": "%s"}'
                      % str(combined).encode())
-    ts.delete_transcript("s01")
+    ts.delete_transcript(tid)
     assert not md.exists() and not sidecar.exists() and combined.exists()
 
 
@@ -1076,10 +1090,10 @@ def test_audio_path_prefers_the_audio_row_then_the_recordings_combined_wav(out, 
     from wisper_transcribe.recording_manager import link_transcript
 
     md = _touch(out / "s01.md")
-    ts.register("s01", origin="job")
+    tid = ts.register(out / "s01.md", origin="job")
     assert ts.audio_path(md) is None
     rec = seed_recording()
-    link_transcript(rec.id, md)
+    link_transcript(rec.id, tid)
     combined = data / "recordings" / rec.id / "combined.wav"
     assert ts.audio_path(md) == combined
     audio = _touch(out / "s01.flac")
@@ -1163,3 +1177,94 @@ def test_audio_rel_path_lives_only_in_the_migrations_and_the_importer():
     offenders = sorted({rel for rel, _no, line in _src_lines()
                         if "audio_rel_path" in line and rel not in ("db.py", "legacy_import.py")})
     assert offenders == []
+
+
+def test_sync_registers_only_a_claimed_campaigns_journal(out):
+    from wisper_transcribe import campaign_folders
+
+    # A direct seed leaves the folder unclaimed; ensure_folder claims it.
+    claimed = _seed.seed_campaign("Claimed", "claimed")
+    unclaimed = _seed.seed_campaign("Unclaimed", "unclaimed")
+    renaming = _seed.seed_campaign("Renaming", "renaming")
+    campaign_folders.ensure_folder(claimed)
+    campaign_folders.ensure_folder(renaming)
+    with db.transaction() as conn:
+        conn.execute("UPDATE campaigns SET folder_pending = 'Next' WHERE id = ?", (renaming,))
+    for folder in ("Claimed", "Unclaimed", "Renaming"):
+        _touch(out / folder / f"{folder} Journal.md")
+
+    fr.sync()
+    for cid, slug, expected in ((claimed, "claimed", True), (unclaimed, "unclaimed", False),
+                                (renaming, "renaming", False)):
+        row = fr.file_for(fr.Owner("campaign", cid), "journal")
+        assert (row is not None) is expected, slug
+
+
+# ---------------------------------------------------------------------------
+# Campaign folders: sync scans each claimed folder
+# ---------------------------------------------------------------------------
+
+def test_sync_registers_a_campaign_folders_companions_for_its_transcript(out):
+    from wisper_transcribe import campaign_folders
+    camp = create_campaign("Game")
+    campaign_folders.ensure_folder(camp.id)
+    with db.transaction() as conn:
+        tid = conn.execute(
+            "INSERT INTO transcripts (stem, campaign_id, position, created_at) "
+            "VALUES ('S', ?, 0, ?) RETURNING id", (camp.id, db.now_utc())).fetchone()[0]
+    md = out / "Game" / "S.md"
+    _touch(md)
+    (out / "Game" / "S.summary.md").write_bytes(b"x")
+
+    report = fr.sync()
+
+    assert report.errors == [] and report.unclaimed == []
+    owner = fr.Owner("transcript", tid)
+    assert fr.file_for(owner, "transcript").path == md
+    assert fr.file_for(owner, "summary").path == out / "Game" / "S.summary.md"
+
+
+def test_sync_ignores_files_in_an_unclaimed_folder(out):
+    camp = create_campaign("Unclaimed")          # folder exists but is not claimed
+    _touch(out / "Unclaimed" / "S.md")
+    (out / "Unclaimed" / "S.summary.md").write_bytes(b"x")
+
+    report = fr.sync()
+
+    assert report.registered == [] and _count() == 0
+
+
+def test_sync_never_reads_a_campaign_folders_journal_as_a_transcript(out):
+    from wisper_transcribe import campaign_folders
+    camp = create_campaign("Game")
+    campaign_folders.ensure_folder(camp.id)
+    _touch(out / "Game" / "Game Journal.md")
+
+    report = fr.sync()
+
+    assert report.unclaimed == []
+    assert fr.file_for(fr.Owner.for_campaign_slug("game"), "journal").path == \
+        out / "Game" / "Game Journal.md"
+    assert fr.file_for(_owner("Game Journal"), "transcript") is None
+
+
+def test_sync_assigns_each_folders_companions_to_its_own_same_named_transcript(out):
+    from wisper_transcribe import campaign_folders
+    ca, cb = create_campaign("A"), create_campaign("B")
+    campaign_folders.ensure_folder(ca.id)
+    campaign_folders.ensure_folder(cb.id)
+    ids = {}
+    for c, folder in ((ca, "A"), (cb, "B")):
+        with db.transaction() as conn:
+            ids[c.id] = conn.execute(
+                "INSERT INTO transcripts (stem, campaign_id, position, created_at) "
+                "VALUES ('S', ?, 0, ?) RETURNING id", (c.id, db.now_utc())).fetchone()[0]
+        _touch(out / folder / "S.md")
+        (out / folder / "S.summary.md").write_bytes(b"x")
+
+    fr.sync()
+
+    for c, folder in ((ca, "A"), (cb, "B")):
+        owner = fr.Owner("transcript", ids[c.id])
+        assert fr.file_for(owner, "transcript").path == out / folder / "S.md"
+        assert fr.file_for(owner, "summary").path == out / folder / "S.summary.md"

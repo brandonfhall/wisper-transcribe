@@ -61,6 +61,7 @@ def world(tmp_path, monkeypatch):
     out = tmp_path / "out"
     out.mkdir()
     monkeypatch.setenv("WISPER_DATA_DIR", str(data))
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
     cm.create_campaign("Game", data_dir=data)
     for key, emb in (("alice", ALICE), ("bob", BOB)):
         _profile(data, key, emb)
@@ -68,9 +69,16 @@ def world(tmp_path, monkeypatch):
     return data, out
 
 
-def _add(data: Path, stem: str) -> None:
-    import wisper_transcribe.campaign_manager as cm
-    cm.move_transcript_to_campaign(stem, "game", data_dir=data)
+def _add(data: Path, stem: str, out: Path) -> None:
+    """Assign ``stem`` to the campaign and register its root ``.md`` (misplaced)."""
+    from wisper_transcribe import file_registry
+    from tests._seed import move_to_campaign, transcript_id
+
+    move_to_campaign(stem, "game", data_dir=data)
+    tid = transcript_id(stem, campaign_slug="game", data_dir=data)
+    file_registry.add(out / f"{stem}.md", kind="transcript",
+                      owner=file_registry.Owner("transcript", tid),
+                      output_dir=out, data_dir=data)
 
 
 def _run(data, out, **kw):
@@ -83,7 +91,7 @@ def test_auto_unknown_gets_newly_enrolled_profile(world):
     md = _transcript(out, "s1", {"SPEAKER_00": "Unknown Speaker 1", "SPEAKER_01": "Bob"},
                      embeddings={"SPEAKER_00": ALICE, "SPEAKER_01": BOB},
                      sources={"SPEAKER_00": "auto", "SPEAKER_01": "auto"})
-    _add(data, "s1")
+    _add(data, "s1", out)
 
     report = _run(data, out)
 
@@ -99,7 +107,7 @@ def test_manual_names_are_never_overwritten(world):
     data, out = world
     md = _transcript(out, "s1", {"SPEAKER_00": "Carol"},
                      embeddings={"SPEAKER_00": ALICE}, sources={"SPEAKER_00": "manual"})
-    _add(data, "s1")
+    _add(data, "s1", out)
 
     report = _run(data, out)
 
@@ -112,7 +120,7 @@ def test_legacy_sidecar_real_name_treated_as_manual(world):
     data, out = world
     _transcript(out, "s1", {"SPEAKER_00": "Carol", "SPEAKER_01": "Unknown Speaker 1"},
                 embeddings={"SPEAKER_00": ALICE, "SPEAKER_01": BOB})
-    _add(data, "s1")
+    _add(data, "s1", out)
 
     report = _run(data, out)
 
@@ -125,10 +133,10 @@ def test_unknown_voice_in_two_sessions_becomes_recurring(world):
         _transcript(out, stem, {"SPEAKER_00": "Alice", "SPEAKER_01": "Unknown Speaker 1"},
                     embeddings={"SPEAKER_00": ALICE, "SPEAKER_01": GUEST},
                     sources={"SPEAKER_00": "auto", "SPEAKER_01": "auto"})
-        _add(data, stem)
+        _add(data, stem, out)
     _transcript(out, "s3", {"SPEAKER_00": "Unknown Speaker 1"},
                 embeddings={"SPEAKER_00": OTHER}, sources={"SPEAKER_00": "auto"})
-    _add(data, "s3")
+    _add(data, "s3", out)
 
     report = _run(data, out)
 
@@ -143,7 +151,7 @@ def test_dry_run_writes_nothing(world):
     data, out = world
     md = _transcript(out, "s1", {"SPEAKER_00": "Unknown Speaker 1"},
                      embeddings={"SPEAKER_00": ALICE}, sources={"SPEAKER_00": "auto"})
-    _add(data, "s1")
+    _add(data, "s1", out)
     before_md = md.read_text(encoding="utf-8")
     before_sidecar = (out / "s1_diar.json").read_text()
 
@@ -159,7 +167,7 @@ def test_backfills_embeddings_from_durable_audio(world):
     audio = out / "s1.wav"  # durable copies live next to the transcript
     audio.write_bytes(b"fake")
     _transcript(out, "s1", {"SPEAKER_00": "Unknown Speaker 1"}, input_path=str(audio))
-    _add(data, "s1")
+    _add(data, "s1", out)
 
     with patch("wisper_transcribe.audio_utils.convert_to_wav", return_value=audio), \
          patch("wisper_transcribe.speaker_manager.extract_embedding", return_value=ALICE) as mock_extract:
@@ -175,7 +183,7 @@ def test_backfills_embeddings_from_durable_audio(world):
 def test_skips_transcript_without_embeddings_or_audio(world):
     data, out = world
     _transcript(out, "s1", {"SPEAKER_00": "Unknown Speaker 1"}, input_path="/gone.mp3")
-    _add(data, "s1")
+    _add(data, "s1", out)
 
     report = _run(data, out)
 

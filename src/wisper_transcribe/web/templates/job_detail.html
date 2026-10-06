@@ -131,13 +131,13 @@
         {% if job.kwargs.slug %}
           <a href="/campaigns/{{ job.kwargs.slug }}/journal" class="btn btn-primary">View journal</a>
         {% endif %}
-      {% elif job.output_path %}
-        <a href="/transcripts/{{ job.output_path | stem | urlencode }}" class="btn btn-primary">View transcript</a>
+      {% elif job.transcript_id %}
+        <a href="/transcripts/{{ job.transcript_id }}" class="btn btn-primary">View transcript</a>
         {% if job.job_type == "transcription" %}
           <a href="/transcribe/jobs/{{ job.id }}/enroll" class="btn btn-secondary">Name speakers</a>
         {% endif %}
         {% if job.summary_path %}
-          <a href="/transcripts/{{ job.output_path | stem | urlencode }}/summary" class="btn btn-secondary">View Summary</a>
+          <a href="/transcripts/{{ job.transcript_id }}/summary" class="btn btn-secondary">View Summary</a>
         {% endif %}
       {% endif %}
     {% elif job.status in ("pending", "running") %}
@@ -324,12 +324,10 @@
         allDone();
         if (JOURNAL_SLUG) {
           actions.innerHTML = `<a href="/campaigns/${encodeURIComponent(JOURNAL_SLUG)}/journal" class="btn btn-primary">View journal</a><a href="/" class="btn btn-secondary">← Dashboard</a>`;
-        } else if (evt.output_path) {
-          const stem = evt.output_path.replace(/\\/g, '/').split('/').pop().replace('.md', '');
-          const enc  = encodeURIComponent(stem);
+        } else if (evt.transcript_id) {
           const enrollBtn  = evt.job_type === 'transcription' ? `<a href="/transcribe/jobs/{{ job.id }}/enroll" class="btn btn-secondary">Name speakers</a>` : '';
-          const summaryBtn = evt.summary_path ? `<a href="/transcripts/${enc}/summary" class="btn btn-secondary">View Summary</a>` : '';
-          actions.innerHTML = `<a href="/transcripts/${enc}" class="btn btn-primary">View transcript</a>${enrollBtn}${summaryBtn}<a href="/" class="btn btn-secondary">← Dashboard</a>`;
+          const summaryBtn = evt.summary_path ? `<a href="/transcripts/${evt.transcript_id}/summary" class="btn btn-secondary">View Summary</a>` : '';
+          actions.innerHTML = `<a href="/transcripts/${evt.transcript_id}" class="btn btn-primary">View transcript</a>${enrollBtn}${summaryBtn}<a href="/" class="btn btn-secondary">← Dashboard</a>`;
         }
       } else if (evt.status === 'failed') {
         if (progressBar) { progressBar.style.background = 'var(--color-signal-rose)'; progressBar.style.boxShadow = 'none'; }

@@ -44,11 +44,52 @@
 {% if request.query_params.get('error') == 'create_failed' %}
 <div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">A campaign with that name may already exist.</div>
 {% elif request.query_params.get('error') == 'invalid_name' %}
-<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Invalid campaign name.</div>
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Enter a campaign name.</div>
+{% elif request.query_params.get('error') == 'campaign_exists' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">A campaign with that name already exists.</div>
+{% elif request.query_params.get('error') == 'folder_taken' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">A folder with that name already exists in your transcripts folder.</div>
+{% elif request.query_params.get('error') == 'busy' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">A job is running for this campaign; try again when it finishes.</div>
+{% elif request.query_params.get('error') == 'delete_kept' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">The campaign was kept: {{ request.query_params.get('count') }} session(s) were open in another program. Close the file and retry.</div>
+{% elif request.query_params.get('error') == 'delete_incomplete' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">A new session appeared in the campaign while it was being deleted. Nothing else was removed; try again.</div>
 {% elif request.query_params.get('error') == 'not_found' %}
 <div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Campaign not found.</div>
+{% elif request.query_params.get('error') == 'rename_pending' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">The last rename of this campaign's folder hasn't finished; Retry it under Needs attention first.</div>
+{% elif request.query_params.get('error') == 'journal_legacy_pending' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">This campaign's old journal is waiting to be moved; see Needs attention.</div>
+{% elif request.query_params.get('error') == 'rename_failed' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Couldn't rename the campaign.</div>
+{% elif request.query_params.get('error') == 'delete_failed' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Couldn't delete: an unassigned session already has the same name as one of its sessions.</div>
 {% elif request.query_params.get('error') == 'relink_failed' %}
 <div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Couldn't relink: that file may already belong to a campaign, or the session is no longer missing.</div>
+{% elif request.query_params.get('error') == 'submit_failed' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">The job could not be queued, so nothing was started. Try again.</div>
+{% endif %}
+{% set _move_error = request.query_params.get('error') %}
+{% if _move_error in ('busy', 'locked', 'reserved', 'folder_taken', 'rename_pending', 'folder_missing', 'output_unavailable', 'invalid_name', 'move_failed') %}
+<div data-testid="move-error" style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">
+  {%- if _move_error == 'busy' -%}
+  A job is running for that session or this campaign; try again when it finishes.
+  {%- elif _move_error == 'locked' -%}
+  A file is open in another program, so that session didn't move. Close it and try again.
+  {%- elif _move_error == 'reserved' -%}
+  That name is the journal's; choose another.
+  {%- elif _move_error in ('folder_taken', 'rename_pending', 'folder_missing') -%}
+  This campaign's folder isn't available; fix it from the Transcripts page.
+  {%- elif _move_error == 'output_unavailable' -%}
+  The transcripts folder isn't available.
+  {%- else -%}
+  That session didn't move; see Needs attention on the Transcripts page.
+  {%- endif -%}
+</div>
+{% endif %}
+{% if request.query_params.get('notice') == 'partial_move' %}
+<div data-testid="move-notice" style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">The session moved, but a file was open in another program and stayed behind. Use Move files to finish it.</div>
 {% endif %}
 {% if request.query_params.get('notice') == 'relink_kept_names' %}
 <div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Relinked. Some files kept their old name because a file with the new name already exists; see Needs attention on the Transcripts page.</div>
@@ -170,17 +211,17 @@
           </div>
         </div>
         <div style="border-top:1px solid var(--color-rule)">
-          {% for stem in active_campaign.transcripts %}
+          {% for s in sessions %}
           <div style="display:grid;grid-template-columns:60px 1fr 90px 22px 22px 32px;gap:10px;padding:14px 0;border-bottom:1px solid var(--color-rule);align-items:center">
             <div style="font-family:var(--font-mono);font-size:11px;color:var(--color-paper-faint);letter-spacing:0.06em">{{ "%02d"|format(loop.index) }}</div>
-            {% if stem in missing_transcripts %}
+            {% if s.missing %}
             <div>
-              <span title="The transcript file isn't in the transcripts folder. If it was renamed, relink it; otherwise remove it from the campaign with ✕." style="font-family:var(--font-serif);font-size:16px;color:var(--color-paper-faint)">{{ stem | replace('-', ' ') | title }}</span>
+              <span title="The transcript file isn't in the transcripts folder. If it was renamed, relink it; otherwise remove it from the campaign with ✕." style="font-family:var(--font-serif);font-size:16px;color:var(--color-paper-faint)">{{ s.stem | replace('-', ' ') | title }}</span>
               {% if relink_candidates %}
               <form method="post" action="/campaigns/{{ slug }}/transcripts/relink" data-testid="relink-form" style="display:flex;gap:6px;align-items:center;margin-top:6px">
-                <input type="hidden" name="old_stem" value="{{ stem }}"/>
-                <select name="new_stem" aria-label="Relink to" style="background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:3px 6px;border-radius:4px;font-size:12px;max-width:260px">
-                  {% for cand in relink_candidates %}<option value="{{ cand }}">{{ cand }}</option>{% endfor %}
+                <input type="hidden" name="old_id" value="{{ s.id }}"/>
+                <select name="new_id" aria-label="Relink to" style="background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:3px 6px;border-radius:4px;font-size:12px;max-width:260px">
+                  {% for cand in relink_candidates %}<option value="{{ cand.id }}">{{ cand.stem }}</option>{% endfor %}
                 </select>
                 <button type="submit" class="btn btn-secondary btn-sm" title="Use this file for the missing session, keeping its place, journal entry, and speakers">Relink</button>
               </form>
@@ -190,27 +231,27 @@
               <span class="pill pill-rose">MISSING</span>
             </div>
             {% else %}
-            <a href="/transcripts/{{ stem | urlencode }}" style="font-family:var(--font-serif);font-size:16px;color:var(--color-paper);text-decoration:none">{{ stem | replace('-', ' ') | title }}</a>
+            <a href="/transcripts/{{ s.id }}" style="font-family:var(--font-serif);font-size:16px;color:var(--color-paper);text-decoration:none">{{ s.stem | replace('-', ' ') | title }}</a>
             <div style="text-align:right">
               <span class="pill pill-green">TRANSCRIBED</span>
             </div>
             {% endif %}
             {% if not loop.first %}
             <form method="post" action="/campaigns/{{ slug }}/transcripts/reorder" style="display:flex">
-              <input type="hidden" name="stem" value="{{ stem }}"/>
+              <input type="hidden" name="transcript_id" value="{{ s.id }}"/>
               <input type="hidden" name="direction" value="up"/>
               <button type="submit" title="Move earlier" style="background:none;border:none;color:var(--color-paper-faint);font-size:12px;cursor:pointer;padding:0;line-height:1" onmouseover="this.style.color='var(--color-accent)'" onmouseout="this.style.color='var(--color-paper-faint)'">&#9650;</button>
             </form>
             {% endif %}
             {% if not loop.last %}
             <form method="post" action="/campaigns/{{ slug }}/transcripts/reorder" style="display:flex">
-              <input type="hidden" name="stem" value="{{ stem }}"/>
+              <input type="hidden" name="transcript_id" value="{{ s.id }}"/>
               <input type="hidden" name="direction" value="down"/>
               <button type="submit" title="Move later" style="background:none;border:none;color:var(--color-paper-faint);font-size:12px;cursor:pointer;padding:0;line-height:1" onmouseover="this.style.color='var(--color-accent)'" onmouseout="this.style.color='var(--color-paper-faint)'">&#9660;</button>
             </form>
             {% endif %}
             <form method="post" action="/campaigns/{{ slug }}/transcripts/remove" style="display:flex;align-items:center;justify-content:flex-end">
-              <input type="hidden" name="stem" value="{{ stem }}"/>
+              <input type="hidden" name="transcript_id" value="{{ s.id }}"/>
               <button type="submit" title="Remove from campaign" style="background:none;border:none;color:var(--color-paper-faint);font-size:14px;cursor:pointer;padding:0;line-height:1" onmouseover="this.style.color='var(--color-signal-rose)'" onmouseout="this.style.color='var(--color-paper-faint)'">✕</button>
             </form>
           </div>
@@ -269,16 +310,27 @@
           </form>
         </div>
 
+        <!-- Rename campaign -->
+        <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--color-rule)">
+          <div class="mono-kicker" style="margin-bottom:10px">Rename campaign</div>
+          <form method="post" action="/campaigns/{{ slug }}/rename" style="display:flex;gap:8px">
+            <input type="text" name="display_name" value="{{ active_campaign.display_name }}" required
+                   style="flex:1;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:7px 10px;border-radius:5px;font-size:12px;font-family:var(--font-sans)"/>
+            <button type="submit" data-testid="rename-campaign" class="btn btn-secondary btn-sm">Rename</button>
+          </form>
+        </div>
+
         <!-- Delete campaign -->
         <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--color-rule)">
           <form method="post" action="/campaigns/{{ slug }}/delete" style="display:flex;flex-direction:column;gap:8px;align-items:flex-start">
             <div class="mono-kicker">Delete campaign</div>
             <button type="submit" name="mode" value="keep" data-testid="delete-campaign-keep"
-                    onclick='return confirm({{ ("Delete campaign " ~ active_campaign.display_name ~ "? Its transcripts and journal file stay; the journal is listed under Needs attention.") | tojson }})'
+                    onclick='return confirm({{ ("Delete campaign " ~ active_campaign.display_name ~ "? Its transcripts move to the output root and the journal file stays; the journal is listed under Needs attention.") | tojson }})'
                     style="background:none;border:none;color:var(--color-signal-rose);font-size:12px;font-family:var(--font-sans);cursor:pointer;padding:0">Delete campaign, keep the files</button>
             <button type="submit" name="mode" value="everything" data-testid="delete-campaign-everything"
-                    onclick='return confirm({{ ("Delete campaign " ~ active_campaign.display_name ~ " and everything in it? Its transcripts, their summaries, speaker clips, and audio, and its journal are deleted. This cannot be undone.") | tojson }})'
+                    onclick='return confirm({{ ("Delete campaign " ~ active_campaign.display_name ~ " and everything in it? " ~ (active_campaign.transcripts | length) ~ " session(s): " ~ (active_campaign.transcripts | join(", ")) ~ ". Every .md file in the campaign's folder is one of these sessions; all of them, with their audio and summaries, are deleted. This cannot be undone.") | tojson }})'
                     style="background:none;border:none;color:var(--color-signal-rose);font-size:12px;font-family:var(--font-sans);cursor:pointer;padding:0">Delete campaign and everything in it</button>
+            <div style="color:var(--color-paper-faint);font-size:11.5px;font-style:italic">If a session's file is open in another program, the campaign is kept until you retry.</div>
           </form>
         </div>
       </div>

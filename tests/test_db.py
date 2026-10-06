@@ -238,6 +238,70 @@ def test_upgrade_snapshots_existing_db(monkeypatch, data_dir):
         assert conn.execute("PRAGMA user_version").fetchone()[0] == NEXT - 1
 
 
+def _write_snapshots(data_dir, pairs) -> None:
+    backups = data_dir / "backups"
+    backups.mkdir(parents=True, exist_ok=True)
+    for version, stamp in pairs:
+        (backups / f"wisper-v{version}-{stamp}.db").write_bytes(b"db")
+
+
+def test_prune_snapshots_keeps_newest_five_by_stamp(data_dir):
+    # Interleaved versions, so a whole-name sort (which ranks every v10 before
+    # every v9) would keep the wrong five.
+    pairs = [("10", "20260101T000000Z"), ("9", "20260102T000000Z"),
+             ("10", "20260103T000000Z"), ("9", "20260104T000000Z"),
+             ("10", "20260105T000000Z"), ("9", "20260106T000000Z"),
+             ("10", "20260107T000000Z")]
+    _write_snapshots(data_dir, pairs)
+    backups = data_dir / "backups"
+    legacy = backups / "pre-sqlite-v4-20260101T000000Z"
+    legacy.mkdir()
+    (legacy / "legacy.json").write_text("{}", encoding="utf-8")
+    report = backups / "import-report-20260101T000000Z.txt"
+    report.write_text("x", encoding="utf-8")
+
+    db._prune_snapshots(data_dir)
+
+    remaining = sorted(p.name for p in backups.glob("wisper-v*.db"))
+    assert remaining == [
+        "wisper-v10-20260103T000000Z.db", "wisper-v10-20260105T000000Z.db",
+        "wisper-v10-20260107T000000Z.db", "wisper-v9-20260104T000000Z.db",
+        "wisper-v9-20260106T000000Z.db",
+    ]
+    assert legacy.is_dir() and (legacy / "legacy.json").is_file()
+    assert report.is_file()
+
+
+def test_prune_snapshots_tolerates_a_missing_backups_dir(data_dir):
+    db._prune_snapshots(data_dir)  # never raises
+
+
+def test_migrate_prunes_snapshots(monkeypatch, data_dir):
+    db.migrate()
+    _write_snapshots(data_dir, [(f"1{i}", f"2026010{i}T000000Z") for i in range(1, 7)])
+    _fake_migration(monkeypatch, db.Migration(NEXT, "more", "CREATE TABLE t2 (x INTEGER) STRICT;"))
+    assert db.migrate() == [NEXT]
+    snaps = list((data_dir / "backups").glob("wisper-v*.db"))
+    assert len(snaps) == 5
+    # The migration's own snapshot is the newest and survives.
+    with db.connection() as conn:
+        backup_dir = conn.execute(
+            "SELECT backup_dir FROM migrations WHERE version = ?", (NEXT,)).fetchone()[0]
+    assert (data_dir / backup_dir).exists()
+
+
+def test_cli_db_status_marks_a_pruned_backup(tmp_path, data_dir):
+    from wisper_transcribe.cli import main
+
+    db.migrate()
+    missing = "backups/wisper-v9-20200101T000000Z.db"
+    with sqlite3.connect(data_dir / db.DB_FILENAME) as conn:
+        conn.execute("UPDATE migrations SET backup_dir = ? WHERE version = 1", (missing,))
+    result = CliRunner().invoke(main, ["db", "status"])
+    assert result.exit_code == 0, result.output
+    assert f"backup {missing} (pruned)" in result.output
+
+
 def test_import_report_and_after_commit(monkeypatch, data_dir):
     data_dir.mkdir(parents=True, exist_ok=True)
     legacy = data_dir / "legacy.json"
@@ -443,19 +507,28 @@ def test_upgrade_v8_to_latest_moves_audio_paths_into_files(monkeypatch, data_dir
             for stem, audio in seeded:
                 conn.execute("INSERT INTO transcripts (stem, created_at, audio_rel_path) VALUES (?, 'now', ?)",
                              (stem, audio))
-    assert db.migrate() == [9, 10]
+    assert db.migrate() == [9, 10, 11]
 
     with db.connection() as conn:
         rows = conn.execute(
             "SELECT t.stem, f.kind, f.root, f.rel_path, f.size, f.mtime_ns FROM files f "
-            "JOIN transcripts t ON t.id = f.transcript_id ORDER BY t.id").fetchall()
+            "JOIN transcripts t ON t.id = f.transcript_id ORDER BY t.id, f.kind").fetchall()
+        # v11 gives every transcript a stat-less ``transcript`` row at <stem>.md.
         assert [tuple(r) for r in rows] == [
             ("s1", "audio", "output", "a.mp4", None, None),
+            ("s1", "transcript", "output", "s1.md", None, None),
+            ("s2", "transcript", "output", "s2.md", None, None),
+            ("s3", "transcript", "output", "s3.md", None, None),
+            ("s4", "transcript", "output", "s4.md", None, None),
             ("s5", "audio", "output", "dup.mp4", None, None),
+            ("s5", "transcript", "output", "s5.md", None, None),
+            ("s6", "transcript", "output", "s6.md", None, None),
+            ("s7", "transcript", "output", "s7.md", None, None),
+            ("s8", "transcript", "output", "s8.md", None, None),
         ]
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert "audio_rel_path" not in [r["name"] for r in conn.execute("PRAGMA table_info(transcripts)")]
-        assert db._normalized_schema(conn) == db.expected_schema(10)
+        assert db._normalized_schema(conn) == db.expected_schema(11)
     assert db.status().schema_drift is False
 
     (report,) = (data_dir / "backups").glob("import-report-*.txt")
@@ -471,7 +544,7 @@ def test_legacy_install_imports_sidecar_audio_as_a_files_row(data_dir):
     from wisper_transcribe.config import get_output_root
 
     out = get_output_root()
-    out.mkdir(parents=True)
+    out.mkdir(parents=True, exist_ok=True)
     (out / "s1.md").write_text("---\ntitle: x\n---\n", encoding="utf-8")
     (out / "s1.wav").write_bytes(b"a")
     (out / "s1_diar.json").write_text(json.dumps({
@@ -485,8 +558,9 @@ def test_legacy_install_imports_sidecar_audio_as_a_files_row(data_dir):
     with db.connection() as conn:
         rows = conn.execute(
             "SELECT t.stem, f.kind, f.root, f.rel_path FROM files f "
-            "JOIN transcripts t ON t.id = f.transcript_id").fetchall()
-    assert [tuple(r) for r in rows] == [("s1", "audio", "output", "s1.wav")]
+            "JOIN transcripts t ON t.id = f.transcript_id ORDER BY f.kind").fetchall()
+    assert [tuple(r) for r in rows] == [("s1", "audio", "output", "s1.wav"),
+                                        ("s1", "transcript", "output", "s1.md")]
 
 
 # ---------------------------------------------------------------------------
@@ -770,3 +844,99 @@ def test_pin_skipped_under_env_override(tmp_path, monkeypatch, data_dir):
     monkeypatch.setenv("WISPER_OUTPUT_DIR", str(tmp_path / "output"))
     db.migrate()
     assert load_config()["output_dir"] == ""
+
+
+# ---------------------------------------------------------------------------
+# v11: campaign folders
+# ---------------------------------------------------------------------------
+
+_V10_SEED = """
+INSERT INTO profiles (id, key, display_name, enrolled_date, enrollment_source)
+  VALUES (1, 'alice', 'Alice', '2026-01-01', 's.mp3');
+INSERT INTO campaigns (id, slug, display_name, created_at)
+  VALUES (1, 'hana', 'Hanataz: Act I?', 'now'), (2, 'hana-2', 'HANATAZ: act i?', 'now');
+INSERT INTO campaign_members (campaign_id, profile_id) VALUES (1, 1);
+INSERT INTO transcripts (id, stem, created_at) VALUES
+  (1, 's1', 'now'), (2, 's2', 'now'), (3, 'odd.summary', 'now'), (4, 's4', 'now');
+INSERT INTO campaign_transcripts (transcript_id, campaign_id, position)
+  VALUES (1, 1, 0), (2, 1, 1), (4, 2, 0);
+INSERT INTO journal_entries (transcript_id, campaign_id, folded_at) VALUES (1, 1, 'now');
+INSERT INTO transcript_speakers (transcript_id, label, display_name, source)
+  VALUES (1, 'SPEAKER_00', 'Alice', 'auto');
+INSERT INTO recordings (id, source, capture_status, started_at, campaign_id, transcript_id)
+  VALUES ('11111111-1111-4111-8111-111111111111', 'local', 'completed', 'now', 1, 1);
+INSERT INTO jobs (id, type, status, created_at, transcript_id, campaign_id)
+  VALUES ('44444444-4444-4444-8444-444444444444', 'summarize', 'pending', 'now', 1, 1);
+INSERT INTO search_index_state VALUES (1, 'transcript', 1, 10);
+INSERT INTO search_blocks (id, transcript_id, kind, block_idx, speaker, start_s)
+  VALUES (1, 1, 'transcript', 0, 'Alice', 0.0);
+INSERT INTO search_fts (rowid, text) VALUES (1, 'the party meets strahd');
+INSERT INTO files (kind, root, rel_path, label, transcript_id, size, mtime_ns) VALUES
+  ('transcript',   'output', 's1.md',                     NULL,         1, 10, 5),
+  ('summary',      'output', 's1.summary.md',             NULL,         1, 10, 5),
+  ('sidecar',      'output', 's1_diar.json',              NULL,         1, 10, 5),
+  ('excerpt',      'output', 's1_excerpt_SPEAKER_00.mp3', 'SPEAKER_00', 1, 10, 5),
+  ('excerpt_text', 'output', 's1_excerpt_SPEAKER_00.txt', 'SPEAKER_00', 1, 10, 5),
+  ('audio',        'output', 's1.flac',                   NULL,         1, 10, 5),
+  ('backup',       'output', 's1.md.bak',                 NULL,         1, 10, 5),
+  ('audio',        'output', 'a/b/deep.flac',             NULL,         2, 10, 5);
+INSERT INTO files (kind, root, rel_path, campaign_id, size, mtime_ns)
+  VALUES ('journal', 'data', 'campaigns/hana/journal.md', 1, 10, 5);
+"""
+_V10_TABLES = ("profiles", "campaigns", "campaign_members", "transcripts", "journal_entries",
+               "transcript_speakers", "recordings", "jobs", "search_index_state",
+               "search_blocks", "files")
+
+
+def _upgrade_seeded_v10(monkeypatch):
+    with monkeypatch.context() as patched:
+        patched.setattr(db, "MIGRATIONS", db.MIGRATIONS[:10])
+        patched.setattr(db, "LATEST_VERSION", 10)
+        assert db.migrate() == list(range(1, 11))
+        with db.transaction() as conn:
+            for stmt in filter(str.strip, _V10_SEED.split(";\n")):
+                conn.execute(stmt)
+            before = {t: conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
+                      for t in _V10_TABLES}
+    assert db.migrate() == [11]
+    return before
+
+
+def test_upgrade_v10_to_v11_keeps_every_row_and_assigns_folders(monkeypatch, data_dir):
+    before = _upgrade_seeded_v10(monkeypatch)
+    with db.connection() as conn:
+        after = {t: conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in _V10_TABLES}
+        # Two file rows are dropped (the data-root journal, the one two folders deep)
+        # and two are added (s2 and s4 gain a transcript row; odd.summary can't).
+        assert after == before
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert conn.execute("SELECT count(*) FROM campaigns WHERE folder_claimed <> 0").fetchone()[0] == 0
+        rows = conn.execute("SELECT stem, campaign_id, position FROM transcripts ORDER BY id").fetchall()
+        assert [tuple(r) for r in rows] == [("s1", 1, 0), ("s2", 1, 1), ("odd.summary", None, None),
+                                            ("s4", 2, 0)]
+        assert conn.execute("SELECT count(*) FROM journal_entries").fetchone()[0] == 1
+        assert [r[0] for r in conn.execute(
+            "SELECT rowid FROM transcript_titles WHERE transcript_titles MATCH 's1'")] == [1]
+        assert db._normalized_schema(conn) == db.expected_schema(11)
+    assert db.status().schema_drift is False
+
+
+def test_upgrade_v10_to_v11_names_folders_and_registers_transcripts(monkeypatch, data_dir):
+    _upgrade_seeded_v10(monkeypatch)
+    with db.connection() as conn:
+        folders = [r[0] for r in conn.execute("SELECT folder FROM campaigns ORDER BY id")]
+        assert folders == ["Hanataz Act I", "HANATAZ act i (2)"]
+        rows = conn.execute(
+            "SELECT t.stem, f.rel_path, f.size FROM files f JOIN transcripts t ON t.id = f.transcript_id "
+            "WHERE f.kind = 'transcript' ORDER BY t.id").fetchall()
+        assert [tuple(r) for r in rows] == [("s1", "s1.md", 10), ("s2", "s2.md", None),
+                                            ("s4", "s4.md", None)]
+        assert conn.execute("SELECT count(*) FROM files WHERE kind = 'journal'").fetchone()[0] == 0
+    (report,) = (data_dir / "backups").glob("import-report-*.txt")
+    text = report.read_text(encoding="utf-8")
+    assert "a/b/deep.flac" in text and "more than one folder deep" in text
+    assert "'odd.summary'.md not registered" in text
+    assert "campaign hana: journal record dropped" in text
+    assert "campaign hana: folder 'Hanataz Act I'" in text
+    assert len(list((data_dir / "backups").glob("wisper-v10-*.db"))) == 1
