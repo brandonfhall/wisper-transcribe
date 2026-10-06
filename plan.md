@@ -66,8 +66,8 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 |---|---|---|
 | Planning: gate review, design, reviewer cycles | complete (5 review cycles) | |
 | 1 — Schema v11; campaign queries; journal into the campaign folder | done | ffd78f4 |
-| 2a — Location API (`transcript_store.locate` and friends), no callers changed | done (opencode; Claude review fixes) | a051bf1 + next |
-| 2b — Every caller resolves through the location API | done (opencode; Claude review fixes) | |
+| 2a — Location API (`transcript_store.locate` and friends), no callers changed | done (opencode; Claude review fixes) | a051bf1, 553b9d8 |
+| 2b — Every caller resolves through the location API | done (opencode; Claude review fixes) | eec04f2 |
 | 3 — Transcript URLs by id; lists from the database | done (opencode; Claude review fixes) | 121ea73 |
 | 4 — Scan campaign folders: reconcile, sync, Needs attention | done (opencode; Claude review fixes) | 950048e |
 | 5 — Write into campaign folders: uploads, recordings, re-transcribe, CLI | done (opencode; Claude review fixes) | 63d3357 |
