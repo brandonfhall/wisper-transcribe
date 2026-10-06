@@ -42,12 +42,14 @@ COS50 = _unit(0.5, float(np.sqrt(0.75)), 0.0)
 def test_utterances_merge_same_speaker_and_split_long_turns():
     segs = [DiarizationSegment(0.0, 3.0, "A"), DiarizationSegment(3.0, 6.0, "A"),
             DiarizationSegment(6.0, 14.0, "B")]
-    assert lde._utterances(segs, 5.0) == [(0.0, 3.0), (3.0, 6.0), (6.0, 10.0), (10.0, 14.0)]
+    # Same-speaker turns merge; a long stretch is cut every max_s like the live
+    # loop's force-cut.
+    assert lde._utterances(segs, 5.0, "turns") == [(0.0, 5.0), (5.0, 6.0), (6.0, 11.0), (11.0, 14.0)]
 
 
 def test_utterances_sort_out_of_order_turns():
     segs = [DiarizationSegment(6.0, 8.0, "B"), DiarizationSegment(0.0, 2.0, "A")]
-    assert lde._utterances(segs, 5.0) == [(0.0, 2.0), (6.0, 8.0)]
+    assert lde._utterances(segs, 5.0, "turns") == [(0.0, 2.0), (6.0, 8.0)]
 
 
 def test_pool_same_speaker_joins_different_speaker_opens_new_voice():
@@ -80,7 +82,7 @@ def test_best_mapping_is_one_to_one_and_maximises_seconds():
 
 def test_evaluate_scores_labels_and_overlap():
     segs = [DiarizationSegment(0.0, 4.0, "A"), DiarizationSegment(4.0, 6.0, "B")]
-    windows = lde._utterances(segs, 15.0)
+    windows = lde._utterances(segs, 15.0, "turns")
 
     def embed(start, end):
         return A if start < 4.0 else B
@@ -97,7 +99,7 @@ def test_evaluate_scores_labels_and_overlap():
 def test_evaluate_counts_overlap_over_20_percent():
     # B is the dominant speaker (3 s) but A still covers 2 s of the 5 s window.
     segs = [DiarizationSegment(0.0, 5.0, "B"), DiarizationSegment(3.0, 5.0, "A")]
-    windows = lde._utterances(segs, 15.0)
+    windows = lde._utterances(segs, 15.0, "turns")
     report, *_ = lde._evaluate(windows, segs, lambda s, e: B, 0.55)
     assert report["overlap_fraction"] == pytest.approx(1.0)
 
@@ -171,15 +173,17 @@ def test_cmd_run_writes_report_json(tmp_path, capsys):
     ts.write_sidecar(md, {"diarization_segments": segs, "input_path": str(audio),
                           "speaker_map": {"SPEAKER_00": "Alice", "SPEAKER_01": "Bob"}})
 
-    def fake_extract(path, segments, label, device="cpu"):
-        base = A if segments[0].start < 4.0 else B
-        return _noisy(base, int(segments[0].start))
+    class FakeInference:
+        def crop(self, audio_dict, excerpt):
+            base = A if excerpt.start < 4.0 else B
+            return _noisy(base, int(excerpt.start))
 
-    args = SimpleNamespace(transcript=stem, threshold=0.55, max_utterance_s=None,
+    args = SimpleNamespace(transcript=stem, threshold=0.55, max_utterance_s=None, boundaries="turns",
                            out=str(tmp_path / "run"), device="cpu")
     wav = out_dir / "converted.wav"
     wav.write_bytes(b"RIFF")
-    with patch.object(lde.speaker_manager, "extract_embedding", side_effect=fake_extract), \
+    with patch.object(lde.speaker_manager, "_load_embedding_model", return_value=FakeInference()), \
+            patch("wisper_transcribe.audio_utils.load_wav_as_tensor", return_value={}), \
             patch("wisper_transcribe.audio_utils.convert_to_wav", return_value=wav), \
             patch.object(lde.speaker_manager, "load_profiles", return_value={}), \
             patch("wisper_transcribe.config.get_device", return_value="cpu"):
@@ -224,3 +228,42 @@ def test_an_occasional_failure_is_skipped_and_counted():
     assert report["meta"]["failed_utterances"] == 1
     assert len(kept) == len(labels) == 39
     assert report["pool_voices"] == 1
+
+
+def test_too_short_utterances_are_counted_not_failed():
+    segs = [DiarizationSegment(float(i), float(i) + 1.0, "A") for i in range(40)]
+    windows = [(s.start, s.end) for s in segs]
+    vec = np.ones(4, dtype=np.float32) / 2.0
+
+    def embed(start, end):
+        if start < 20:
+            raise lde.TooShort
+        return vec
+
+    report, pool, mapping, labels, kept = lde._evaluate(windows, segs, embed, 0.55)
+    assert report["meta"]["too_short_utterances"] == 20
+    assert report["meta"]["failed_utterances"] == 0
+    assert abs(report["meta"]["too_short_seconds_fraction"] - 0.5) < 1e-6
+    assert len(kept) == 20
+
+
+def test_pause_boundaries_merge_back_to_back_speakers_like_the_live_loop():
+    segs = [DiarizationSegment(0.0, 2.0, "A"), DiarizationSegment(2.2, 4.0, "B"),
+            DiarizationSegment(5.0, 6.0, "A")]
+    assert lde._utterances(segs, 15.0, "pauses") == [(0.0, 4.0), (5.0, 6.0)]
+    assert lde._utterances(segs, 15.0, "turns") == [(0.0, 2.0), (2.2, 4.0), (5.0, 6.0)]
+
+
+def test_utterances_force_cut_and_drop_sub_commit_scraps():
+    segs = [DiarizationSegment(0.0, 31.0, "A"), DiarizationSegment(40.0, 40.1, "B")]
+    windows = lde._utterances(segs, 15.0, "pauses")
+    assert windows == [(0.0, 15.0), (15.0, 30.0), (30.0, 31.0)]
+
+
+def test_name_accuracy_scores_a_two_speaker_utterance_by_who_speaks():
+    """An utterance half A, half B showing A's name is half right, not all right."""
+    segs = [DiarizationSegment(0.0, 2.0, "A"), DiarizationSegment(2.0, 4.0, "B")]
+    coverage = lde._coverage_by_speaker(segs)
+    acc = lde._name_accuracy([(0.0, 4.0)], coverage, {0: "A"}, [0], {0: "Alice"},
+                             {"A": "Alice", "B": "Bob"})
+    assert abs(acc - 0.5) < 1e-9

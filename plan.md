@@ -57,7 +57,10 @@ Design in `architecture.md`. Open items:
 ### Research (approved 2026-10-06, no product change yet)
 
 **4. Per-speaker labels on the live system track.** Today the system track is one RMS-attributed "Other": OS loopback is already mixed. Candidate design: for each committed system-track utterance, compute a WeSpeaker embedding (`speaker_manager.extract_embedding`), match it against a per-session pool of voices (cosine, the 0.55 threshold), and match pool voices to the campaign's enrolled profiles so lines read "Alice" instead of "Other". The final transcript stays the full pyannote pass after Stop; live labels are best-effort.
-- First step is an offline harness, `scripts/live_diarization_eval.py`: replay a recorded `combined.flac` (or a transcript's audio) in live-sized utterances using the transcript's diarization as ground truth, and report per-utterance latency, label accuracy against the final diarization, and how often an utterance spans two speakers. Decide on building it from those numbers. Harness built: `scripts/live_diarization_eval.py`; next: run it on real sessions and decide.
+- Harness: `scripts/live_diarization_eval.py` replays a transcript's audio in live-sized utterances (cut at 0.6 s pauses, force-cut at 15 s, scraps under 0.3 s dropped, as `web/live_transcribe.py` does), embeds each, and scores against the final pyannote labels.
+- **First measurement (2026-10-06, one ~2 h actual-play episode, 8 speakers, Apple Silicon/MPS):** embedding takes 27 ms p50 / ~97 ms p95 per utterance, well inside the live loop's budget. 21% of live utterances hold two speakers, which caps any per-utterance label. Lower pool thresholds win: at 0.35, 38 pool voices for 8 speakers, 84.7% label accuracy and 86.3% of speech showing the right enrolled name; at the 0.55 used offline, 80.1%; at 0.65, 75.4%. Cutting at speaker turns instead of pauses (a best case) didn't help: shorter excerpts embed worse.
+- Caveats: one session; remote podcast audio (cleaner than a table mic); the harness embeds the mixed file, not a loopback-only system track; ground truth is pyannote, not hand labels.
+- **Next:** run it on 2–3 more sessions (an in-room recording especially) before deciding. If they agree, build it with threshold ~0.35, show "Other" for voices not yet matched to a profile, and keep the post-Stop pass authoritative.
 
 ### Parked
 

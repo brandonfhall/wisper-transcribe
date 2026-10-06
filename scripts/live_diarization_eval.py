@@ -34,7 +34,7 @@ from wisper_transcribe import speaker_manager
 from wisper_transcribe.config import DEFAULT_SIMILARITY_THRESHOLD
 from wisper_transcribe.models import DiarizationSegment
 from wisper_transcribe.speaker_manager import _cosine_similarity
-from wisper_transcribe.web.live_transcribe import FORCE_CUT_S
+from wisper_transcribe.web.live_transcribe import FORCE_CUT_S, MIN_COMMIT_S, SILENCE_GAP_S
 
 # The live loop force-cuts a chunk once it reaches FORCE_CUT_S seconds of
 # continuous speech (web/live_transcribe.py:FORCE_CUT_S); shorter chunks end at
@@ -63,28 +63,38 @@ def _resolve_transcript(ref: str):
     return loc
 
 
-def _utterances(segments: list[DiarizationSegment],
-                max_s: float) -> list[tuple[float, float]]:
-    """Ground-truth turns in time order, each split to at most ``max_s``.
+def _utterances(segments: list[DiarizationSegment], max_s: float,
+                boundaries: str = "pauses") -> list[tuple[float, float]]:
+    """The utterances a live session would have committed, in time order.
 
-    A turn is a stretch one ground-truth speaker holds; pyannote emits
-    consecutive same-speaker turns, so merge them first. The split mirrors the
-    live loop's force-cut of long continuous speech.
+    ``pauses`` (default) mirrors web/live_transcribe.py: speech from any
+    speaker runs on until a SILENCE_GAP_S pause, so back-to-back speakers land
+    in one utterance — the case live labelling has to survive. ``turns`` cuts
+    at every ground-truth speaker change instead: a best case for comparison.
+    Either way a stretch is force-cut every ``max_s`` (FORCE_CUT_S live) and
+    anything shorter than MIN_COMMIT_S is dropped, as the live loop never
+    commits it.
     """
-    turns: list[tuple[float, float, str]] = []
-    for seg in sorted(segments, key=lambda s: (s.start, s.end)):
-        if turns and turns[-1][2] == seg.speaker and seg.start <= turns[-1][1] + 1e-3:
-            turns[-1] = (turns[-1][0], max(turns[-1][1], seg.end), seg.speaker)
-        else:
-            turns.append((seg.start, seg.end, seg.speaker))
+    ordered = sorted(segments, key=lambda s: (s.start, s.end))
+    spans: list[list] = []
+    for seg in ordered:
+        if spans:
+            last = spans[-1]
+            joins = (seg.start <= last[1] + SILENCE_GAP_S if boundaries == "pauses"
+                     else last[2] == seg.speaker and seg.start <= last[1] + 1e-3)
+            if joins:
+                last[1] = max(last[1], seg.end)
+                continue
+        spans.append([seg.start, seg.end, seg.speaker])
 
     windows: list[tuple[float, float]] = []
-    for start, end, _speaker in turns:
-        n = max(1, int(np.ceil((end - start) / max_s)))
-        step = (end - start) / n
-        for i in range(n):
-            windows.append((start + i * step, end if i == n - 1 else start + (i + 1) * step))
-    return windows
+    for start, end, _speaker in spans:
+        cut = start
+        while end - cut > max_s:
+            windows.append((cut, cut + max_s))
+            cut += max_s
+        windows.append((cut, end))
+    return [(a, b) for a, b in windows if b - a >= MIN_COMMIT_S]
 
 
 def _coverage_by_speaker(segments: list[DiarizationSegment]) -> dict[str, list[tuple[float, float]]]:
@@ -209,6 +219,10 @@ def _report_accuracy(windows: list[tuple[float, float]],
     return (correct / total if total else 0.0), mapping
 
 
+class TooShort(Exception):
+    """The window gave no usable embedding (too short: the model returns NaN)."""
+
+
 def _evaluate(windows: list[tuple[float, float]],
               segments: list[DiarizationSegment],
               embed, threshold: float) -> tuple[dict, VoicePool, dict[int, str], list[int], list[tuple[float, float]]]:
@@ -226,12 +240,17 @@ def _evaluate(windows: list[tuple[float, float]],
     labels: list[int] = []
     kept: list[tuple[float, float]] = []
     failures = 0
+    too_short: list[tuple[float, float]] = []
     for start, end in windows:
         t0 = time.monotonic()
         try:
             embedding = embed(start, end)
         except InterruptedError:
             raise
+        except TooShort:
+            # Expected live: a one-word interjection can't be labelled.
+            too_short.append((start, end))
+            continue
         except Exception:
             # Skip the utterance (a very short excerpt can fail extraction),
             # but count it: if many fail, the numbers would describe the
@@ -251,6 +270,11 @@ def _evaluate(windows: list[tuple[float, float]],
         "meta": {
             "utterances": len(windows),
             "failed_utterances": failures,
+            "too_short_utterances": len(too_short),
+            "too_short_seconds_fraction": (
+                sum(e - s for s, e in too_short)
+                / max(1e-9, sum(e - s for s, e in kept) + sum(e - s for s, e in too_short))),
+            "longest_too_short_s": max((e - s for s, e in too_short), default=0.0),
             "ground_truth_speakers": len(coverage),
             "threshold": threshold,
             "embedding_dim": int(pool.centroids[0].size) if pool.centroids else 0,
@@ -293,14 +317,21 @@ def _name_accuracy(windows: list[tuple[float, float]],
                    coverage: dict[str, list[tuple[float, float]]],
                    mapping: dict[int, str], labels: list[int],
                    names: dict[int, str], speaker_map: dict[str, str]) -> float:
-    """Fraction of utterance-seconds whose pool voice shows the right final name."""
+    """Fraction of utterance-seconds that show the right final name.
+
+    Scored against who actually speaks in each stretch of the utterance (the
+    ground-truth coverage), not against the speaker the voice maps to: an
+    utterance holding two speakers is only partly right whatever it shows.
+    ``mapping`` is unused here; kept for the caller's signature.
+    """
     correct = 0.0
     total = 0.0
     for (start, end), voice in zip(windows, labels):
         total += end - start
-        truth = mapping.get(voice)
-        if truth is not None and names.get(voice, "") == speaker_map.get(truth, truth):
-            correct += end - start
+        shown = names.get(voice, "")
+        for speaker, seconds in _window_coverage(start, end, coverage).items():
+            if shown and shown == speaker_map.get(speaker, speaker):
+                correct += seconds
     return correct / total if total else 0.0
 
 
@@ -331,16 +362,28 @@ def cmd_run(args) -> None:
     source = audio
     audio = convert_to_wav(source)
     max_s = args.max_utterance_s or DEFAULT_MAX_UTTERANCE_S
-    windows = _utterances(segments, max_s)
+    windows = _utterances(segments, max_s, args.boundaries)
     out = Path(args.out) if args.out else Path("live-diarization-eval") / loc.stem
     out.mkdir(parents=True, exist_ok=True)
 
     print(f"Replaying {len(windows)} utterances from {audio.name} on {device} ...",
           file=sys.stderr)
 
+    # The same model and crop extract_embedding uses, but the audio is loaded
+    # once: extract_embedding reloads the whole session per call, which a live
+    # loop (embedding an in-memory chunk) would not, so timing it would
+    # measure file loading.
+    from pyannote.core import Segment as PyannoteSegment
+    from wisper_transcribe.audio_utils import load_wav_as_tensor
+    inference = speaker_manager._load_embedding_model(device)
+    audio_dict = load_wav_as_tensor(audio)
+
     def embed(start: float, end: float) -> np.ndarray:
-        one = [DiarizationSegment(start, end, "UTT")]
-        return speaker_manager.extract_embedding(audio, one, "UTT", device)
+        emb = np.asarray(inference.crop(audio_dict, PyannoteSegment(start, end)),
+                         dtype=np.float32).reshape(-1)
+        if not np.isfinite(emb).all():
+            raise TooShort
+        return speaker_manager._unit(emb)
 
     try:
         report, pool, mapping, labels, windows = _evaluate(windows, segments, embed, args.threshold)
@@ -349,7 +392,7 @@ def cmd_run(args) -> None:
             audio.unlink(missing_ok=True)
     report["meta"].update({
         "transcript": loc.stem, "transcript_id": loc.id, "audio": str(source),
-        "device": device, "max_utterance_s": max_s,
+        "device": device, "max_utterance_s": max_s, "boundaries": args.boundaries,
         "default_max_utterance_s": DEFAULT_MAX_UTTERANCE_S,
     })
 
@@ -404,6 +447,9 @@ def main() -> None:
                      help=f"cosine to join a pool voice (default {DEFAULT_SIMILARITY_THRESHOLD})")
     run.add_argument("--max-utterance-s", type=float, default=None,
                      help=f"split longer turns (default {DEFAULT_MAX_UTTERANCE_S:g})")
+    run.add_argument("--boundaries", choices=("pauses", "turns"), default="pauses",
+                     help="cut utterances at pauses like the live loop (default), "
+                          "or at speaker turns (best case)")
     run.add_argument("--out", default=None,
                      help="output folder (default live-diarization-eval/<stem>)")
     run.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
