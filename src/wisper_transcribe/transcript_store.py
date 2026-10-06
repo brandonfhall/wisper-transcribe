@@ -1680,7 +1680,7 @@ def _transcript_files(dirs: list[tuple[Path, Optional[int]]], output: Path, fold
     campaign-level output). Keyed by resolved directory and NFC stem, not
     ``os.path.normcase`` (a no-op on macOS).
     """
-    from .campaign_folders import journal_name
+    from .campaign_folders import combined_summary_name, journal_name
 
     found: dict[tuple[str, str], Path] = {}
     for directory, cid in dirs:
@@ -1690,6 +1690,9 @@ def _transcript_files(dirs: list[tuple[Path, Optional[int]]], output: Path, fold
             continue
         journal_key = (file_registry._key(journal_name(directory.name), fold)
                        if cid is not None else None)
+        digest_key = (file_registry._key(combined_summary_name(directory.name), fold)
+                      if cid is not None else None)
+        recap_prefix = f"{directory.name} Recap \u2014 " if cid is not None else None
         dir_key = file_registry._key(str(_resolved_dir(directory)), fold)
         for entry in entries:
             name = entry.name
@@ -1703,6 +1706,12 @@ def _transcript_files(dirs: list[tuple[Path, Optional[int]]], output: Path, fold
             except OSError:
                 continue
             if journal_key is not None and file_registry._key(name, fold) == journal_key:
+                continue
+            # A campaign's combined summary and recaps are not sessions, even
+            # before they are registered (a crash between write and register).
+            if digest_key is not None and file_registry._key(name, fold) == digest_key:
+                continue
+            if recap_prefix is not None and name.startswith(recap_prefix):
                 continue
             path = Path(entry.path)
             if _registered_campaign_file(path, output, fold, campaign_paths):

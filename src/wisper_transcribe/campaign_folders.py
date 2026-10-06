@@ -92,6 +92,16 @@ def journal_name(folder: str) -> str:
     return f"{folder} Journal.md"
 
 
+def combined_summary_name(folder: str) -> str:
+    """The campaign's combined summary file name (one per campaign)."""
+    return f"{folder} Combined Summary.md"
+
+
+def recap_name(folder: str, stem: str) -> str:
+    """A recap's file name: one per newest session stem, so several coexist."""
+    return f"{folder} Recap \u2014 {stem}.md"
+
+
 def _fold(name: str) -> str:
     return unicodedata.normalize("NFC", name).casefold()
 
@@ -150,10 +160,10 @@ def taken_by_campaign(conn: sqlite3.Connection, name: str, *,
     return any(other is not None and _fold(other) == want for row in rows for other in row)
 
 
-def holds_only_journal(path: Path, folder: str) -> bool:
-    """True when the existing folder holds only wisper's journal (a keep-files delete left it).
+def holds_only_documents(path: Path, folder: str) -> bool:
+    """True when the folder holds only wisper's documents (a keep-files delete left it).
 
-    An empty folder is not journal-only: it was made by the user, so a campaign
+    An empty folder is not document-only: it was made by the user, so a campaign
     whose name matches it is refused.
     """
     try:
@@ -169,7 +179,8 @@ def folder_exists(name: str, *, output_dir: Optional[Path] = None,
 
     An absent output root finds nothing: the folder is claimed later, on first
     write. ``exclude_folder`` is this campaign's current folder (a no-op rename).
-    A directory holding only its own journal (a keep-files delete) is re-claimable.
+    A directory holding only this campaign's own documents (a keep-files delete:
+    the journal, combined summary, and recaps) is re-claimable.
     """
     want = _fold(name)
     if exclude_folder is not None and _fold(exclude_folder) == want:
@@ -191,7 +202,7 @@ def folder_exists(name: str, *, output_dir: Optional[Path] = None,
         path = inside(output, entry.name)
         if path is None:
             continue
-        if path.is_dir() and holds_only_journal(path, path.name):
+        if path.is_dir() and holds_only_documents(path, path.name):
             continue
         return True
     return False
@@ -205,8 +216,8 @@ def check_available(name: str, conn: Optional[sqlite3.Connection] = None, *,
     ``taken`` when another campaign's ``folder`` or ``folder_pending`` folds to
     ``name``. ``folder_exists`` when an entry in the output root folds to
     ``name`` and isn't this campaign's current folder. An absent output root
-    finds nothing on disk. A directory holding only its own journal (a
-    keep-files delete) is available and is re-claimed.
+    finds nothing on disk. A directory holding only this campaign's own
+    documents (a keep-files delete) is available and is re-claimed.
     """
     def run(c: sqlite3.Connection) -> Optional[str]:
         if taken_by_campaign(c, name, exclude_id=exclude_id):
@@ -258,7 +269,8 @@ def _is_wisper_journal(path: Path) -> bool:
 
 
 def _claimable(path: Path, folder: str) -> bool:
-    """Make the folder if absent; true when it's new, empty, or holds only wisper's journal."""
+    """Make the folder if absent; true when it's new, empty, or holds only
+    this campaign's own documents."""
     try:
         path.mkdir()
     except FileExistsError:
@@ -269,16 +281,43 @@ def _claimable(path: Path, folder: str) -> bool:
     return path.is_dir() and holds_only_wisper(path, folder)
 
 
+def _recap_stem(name: str, folder: str) -> Optional[str]:
+    """The stem from ``<folder> Recap — <stem>.md``, or None (NFC, casefolded)."""
+    prefix = recap_name(folder, "")[:-len(".md")]  # "<folder> Recap — "
+    if len(name) <= len(prefix) or _fold(name[:len(prefix)]) != _fold(prefix):
+        return None
+    if name[-3:].lower() != ".md":
+        return None
+    stem = name[len(prefix):-3]
+    return stem or None
+
+
+def _document_kind(name: str, folder: str) -> Optional[tuple[str, Optional[str]]]:
+    """``(kind, label)`` when ``name`` is one of this campaign's document files."""
+    if _fold(name) == _fold(journal_name(folder)):
+        return ("journal", None)
+    if _fold(name) == _fold(combined_summary_name(folder)):
+        return ("combined_summary", None)
+    stem = _recap_stem(name, folder)
+    return ("recap", stem) if stem is not None else None
+
+
 def holds_only_wisper(path: Path, folder: str) -> bool:
-    """True when the existing folder is empty or holds only wisper's journal (no mkdir)."""
+    """True when the existing folder is empty or holds only this campaign's own
+    documents: the journal, the combined summary, and recaps (no mkdir)."""
     try:
         names = [n for n in os.listdir(path) if not is_clutter(n)]
     except OSError:
         return False
     if not names:
         return True
-    return (names == [journal_name(folder)]
-            and _is_wisper_journal(path / names[0]))
+    for name in names:
+        doc = _document_kind(name, folder)
+        if doc is None:
+            return False
+        if doc[0] == "journal" and not _is_wisper_journal(path / name):
+            return False
+    return True
 
 
 def _claim_cas(conn: sqlite3.Connection, campaign_id: int, folder: str) -> bool:
@@ -321,22 +360,33 @@ def ensure_folder(campaign_id: int, *, data_dir: Optional[Path] = None,
             raise FolderTakenError(folder)
         with db.transaction(data_dir) as conn:
             if _claim_cas(conn, campaign_id, folder):
-                _register_journal(conn, campaign_id, path / journal_name(folder),
-                                  data_dir, output)
+                _register_documents(conn, campaign_id, path, folder, data_dir, output)
                 return path
     _, pending, _ = _row(campaign_id, data_dir)
     raise (FolderPendingError if pending is not None else FolderTakenError)(folder)
 
 
-def _register_journal(conn: sqlite3.Connection, campaign_id: int, path: Path,
-                      data_dir: Optional[Path], output: Path) -> None:
-    """Register a re-claimed folder's journal (a keep-files delete left it untracked),
-    so the campaign's delete finds it."""
-    if path.is_file() and _is_wisper_journal(path):
-        from . import file_registry
+def _register_documents(conn: sqlite3.Connection, campaign_id: int, path: Path, folder: str,
+                        data_dir: Optional[Path], output: Path) -> None:
+    """Register a re-claimed folder's own documents (a keep-files delete left
+    them untracked), so a later delete finds them: the journal, the combined
+    summary, and each recap with its stem as label."""
+    from . import file_registry
 
-        file_registry.add_if_owned(path, kind="journal",
-                                   owner=file_registry.Owner("campaign", campaign_id),
+    owner = file_registry.Owner("campaign", campaign_id)
+    try:
+        names = [n for n in os.listdir(path) if not is_clutter(n)]
+    except OSError:
+        return
+    for name in names:
+        doc = _document_kind(name, folder)
+        if doc is None:
+            continue
+        kind, label = doc
+        file = path / name
+        if kind == "journal" and not _is_wisper_journal(file):
+            continue
+        file_registry.add_if_owned(file, kind=kind, owner=owner, label=label,
                                    conn=conn, data_dir=data_dir, output_dir=output)
 
 
@@ -510,8 +560,9 @@ def _rename_attempt(cid: int, slug: str, display: str, new_slug: str, new_folder
             return "slug_taken"
         if taken_by_campaign(conn, new_folder, exclude_id=cid):
             return "taken"
-        reserved = _fold(journal_name(new_folder)[:-len(".md")])
-        if any(_fold(s[0]) == reserved for s in conn.execute(
+        reserved = {_fold(journal_name(new_folder)[:-len(".md")]),
+                    _fold(combined_summary_name(new_folder)[:-len(".md")])}
+        if any(_fold(s[0]) in reserved for s in conn.execute(
                 "SELECT stem FROM transcripts WHERE campaign_id = ?", (cid,))):
             return "reserved"
         pending_folder = (new_folder if claimed and new_folder != r["folder"]
@@ -623,6 +674,7 @@ def finish_folder_rename(campaign_id: int, *, without_folder: bool = False,
             raise
 
         _rename_journal(campaign_id, output, old, new, data_dir)
+        _rename_digests(campaign_id, output, old, new, data_dir)
     return True
 
 
@@ -776,6 +828,31 @@ def _rename_journal(campaign_id: int, output: Path, old_folder: str, new_folder:
         return  # a misplaced journal: reconcile lists it, don't move it here
     file_registry.move(row, row.path.parent / target_name,
                        data_dir=data_dir, output_dir=output)
+
+
+def _rename_digests(campaign_id: int, output: Path, old_folder: str, new_folder: str,
+                    data_dir: Optional[Path]) -> None:
+    """Rename the combined summary and each recap to the new folder's name.
+
+    A digest is named after the folder, so a folder rename renames the file too
+    (the same way the journal does). Best effort: a file that can't move keeps
+    its name and row for the next reconcile.
+    """
+    from . import file_registry
+
+    owner = file_registry.Owner("campaign", campaign_id)
+    rows = file_registry.files_for(owner, data_dir=data_dir, output_dir=output)
+    for row in rows:
+        if row.kind == "combined_summary":
+            target_name = combined_summary_name(new_folder)
+        elif row.kind == "recap" and row.label:
+            target_name = recap_name(new_folder, row.label)
+        else:
+            continue
+        if row.path.name == target_name or row.path.parent.name != new_folder:
+            continue
+        file_registry.move(row, row.path.parent / target_name,
+                           data_dir=data_dir, output_dir=output)
 
 
 def finish_pending_renames(data_dir: Optional[Path] = None) -> None:

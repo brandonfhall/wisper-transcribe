@@ -2535,6 +2535,207 @@ def test_campaign_relabel_post_unknown_campaign(client, tmp_path, monkeypatch):
     assert "error=not_found" in resp.headers.get("location", "")
 
 
+def _digest_game(tmp_path, monkeypatch):
+    """A campaign with s1,s2 summarized and a combined summary generated."""
+    from wisper_transcribe import campaign_digest as cd
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    out = tmp_path / "out"
+    out.mkdir(exist_ok=True)
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    create_campaign("My Game")
+    for stem in ("s1", "s2"):
+        _reg(out / f"{stem}.md", "x")
+        (out / f"{stem}.summary.md").write_text("A session happened.", encoding="utf-8")
+        _seed.move_to_campaign(stem, "my-game")
+
+    class _Client:
+        provider, model = "fake", "m"
+
+        def complete(self, system, user):
+            return "## The Story So Far\n\nThe heroes gathered."
+
+    cd.generate_combined_summary("my-game", _Client(), {})
+    return out, cd
+
+
+def test_campaign_summarize_post_submits_job_and_redirects(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.web.jobs import Job
+    from wisper_transcribe.campaign_manager import create_campaign
+    import uuid
+
+    create_campaign("My Game", data_dir=tmp_path)
+    fake_job = MagicMock(spec=Job)
+    fake_job.id = str(uuid.uuid4())
+
+    with patch.object(client.app.state.job_queue, "submit_campaign_summary",
+                      return_value=fake_job) as mock_submit:
+        resp = client.post("/campaigns/my-game/summarize", follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/transcribe/jobs/{fake_job.id}"
+    assert mock_submit.call_args.args[0] == "my-game"
+
+
+def test_campaign_summarize_post_submit_failure(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    create_campaign("My Game", data_dir=tmp_path)
+    with patch.object(client.app.state.job_queue, "submit_campaign_summary",
+                      side_effect=RuntimeError("busy")):
+        resp = client.post("/campaigns/my-game/summarize", follow_redirects=False)
+    assert resp.headers["location"] == "/campaigns/my-game?error=submit_failed"
+
+
+def test_campaign_recap_post_submits_with_clamped_sessions(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.web.jobs import Job
+    from wisper_transcribe.campaign_manager import create_campaign
+    import uuid
+
+    create_campaign("My Game", data_dir=tmp_path)
+    fake_job = MagicMock(spec=Job)
+    fake_job.id = str(uuid.uuid4())
+
+    with patch.object(client.app.state.job_queue, "submit_campaign_recap",
+                      return_value=fake_job) as mock_submit:
+        resp = client.post("/campaigns/my-game/recap", data={"sessions": "9"},
+                           follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert mock_submit.call_args.kwargs.get("sessions") == 3
+
+
+def test_campaign_recap_post_rejects_a_non_numeric_selector(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.web.jobs import Job
+    from wisper_transcribe.campaign_manager import create_campaign
+    import uuid
+
+    create_campaign("My Game", data_dir=tmp_path)
+    fake_job = MagicMock(spec=Job)
+    fake_job.id = str(uuid.uuid4())
+    with patch.object(client.app.state.job_queue, "submit_campaign_recap",
+                      return_value=fake_job) as mock_submit:
+        resp = client.post("/campaigns/my-game/recap", data={"sessions": "abc"},
+                           follow_redirects=False)
+    assert resp.status_code == 303
+    assert mock_submit.call_args.kwargs.get("sessions") == 1
+
+
+def test_campaign_digest_view_and_download(client, tmp_path, monkeypatch):
+    out, cd = _digest_game(tmp_path, monkeypatch)
+    digest = cd.combined_summary_digest("my-game")
+    resp = client.get(f"/campaigns/my-game/summaries/{digest.file_id}")
+    assert resp.status_code == 200
+    assert "The heroes gathered." in resp.text
+
+    dl = client.get(f"/campaigns/my-game/summaries/{digest.file_id}/download")
+    assert dl.status_code == 200
+    assert "filename*=UTF-8''My%20Game%20Combined%20Summary.md" in dl.headers["content-disposition"]
+
+
+def test_campaign_recap_download_survives_a_non_latin1_name(client, tmp_path, monkeypatch):
+    """Recap names carry an em dash, which a latin-1 header can't hold."""
+    out, cd = _digest_game(tmp_path, monkeypatch)
+
+    class _Client:
+        provider, model = "fake", "m"
+
+        def complete(self, system, user):
+            return "Last time, the heroes gathered."
+
+    cd.generate_recap("my-game", _Client(), {}, sessions=1)
+    recap = cd.list_recaps("my-game")[0]
+    dl = client.get(f"/campaigns/my-game/summaries/{recap.file_id}/download")
+    assert dl.status_code == 200
+    disposition = dl.headers["content-disposition"]
+    assert 'filename="my-game-recap-' in disposition
+    assert "filename*=UTF-8''My%20Game%20Recap%20%E2%80%94%20s2.md" in disposition
+
+
+def test_campaign_digest_of_another_campaign_is_denied(client, tmp_path, monkeypatch):
+    out, cd = _digest_game(tmp_path, monkeypatch)
+    digest = cd.combined_summary_digest("my-game")
+    from wisper_transcribe.campaign_manager import create_campaign
+    create_campaign("Other Game", data_dir=tmp_path)
+    assert client.get(
+        f"/campaigns/other-game/summaries/{digest.file_id}",
+        follow_redirects=False).status_code == 303
+    assert client.get(
+        f"/campaigns/other-game/summaries/{digest.file_id}/download").status_code == 404
+
+
+def test_campaign_digest_view_bad_id_is_denied(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+    create_campaign("My Game", data_dir=tmp_path)
+    resp = client.get("/campaigns/my-game/summaries/999999", follow_redirects=False)
+    assert resp.status_code == 303
+    # A non-integer id doesn't match the route.
+    assert client.get("/campaigns/my-game/summaries/notanid").status_code == 404
+
+
+def test_campaign_page_shows_digest_controls(client, tmp_path, monkeypatch):
+    out, cd = _digest_game(tmp_path, monkeypatch)
+    resp = client.get("/campaigns/my-game")
+    assert "Generate combined summary" in resp.text
+    assert "Write recap" in resp.text
+    assert "View summary" in resp.text
+
+
+def test_campaign_page_disables_digest_buttons_without_summaries(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+    create_campaign("My Game", data_dir=tmp_path)
+    resp = client.get("/campaigns/my-game")
+    assert "Generate combined summary" in resp.text
+    assert "disabled" in resp.text
+
+
+def test_campaign_page_renders_after_reclaiming_the_kept_documents(client, tmp_path, monkeypatch):
+    """A re-claimed folder's files are registered but have no digest rows: the
+    page shows no generated summary and doesn't error."""
+    out, cd = _digest_game(tmp_path, monkeypatch)
+    from wisper_transcribe.campaign_manager import create_campaign, delete_campaign
+
+    class _Client:
+        provider, model = "fake", "m"
+
+        def complete(self, system, user):
+            return "Last time, the heroes gathered."
+
+    cd.generate_recap("my-game", _Client(), {}, sessions=1)
+    assert delete_campaign("my-game", data_dir=tmp_path).status == "deleted"
+    assert (out / "My Game" / "My Game Combined Summary.md").exists()
+
+    create_campaign("My Game", data_dir=tmp_path)
+    # One summarized session, so the summary panel renders (not the empty note).
+    _reg(out / "s3.md", "x")
+    (out / "s3.summary.md").write_text("A session happened.", encoding="utf-8")
+    _seed.move_to_campaign("s3", "my-game")
+
+    resp = client.get("/campaigns/my-game")
+    assert resp.status_code == 200
+    assert "No combined summary yet" in resp.text
+    assert "0 recaps" in resp.text
+    assert "View summary" not in resp.text
+
+
+def test_campaign_page_shows_combined_stale_notice(client, tmp_path, monkeypatch):
+    out, cd = _digest_game(tmp_path, monkeypatch)
+    assert 'data-testid="combined-stale"' not in client.get("/campaigns/my-game").text
+    (out / "s3.md").write_text("x", encoding="utf-8")
+    (out / "s3.summary.md").write_text("new", encoding="utf-8")
+    import wisper_transcribe.transcript_store as ts
+    ts.register(out / "s3.md", origin="reconcile")
+    _seed.move_to_campaign("s3", "my-game")
+    assert 'data-testid="combined-stale"' in client.get("/campaigns/my-game").text
+
+
 def test_relabel_job_runs_registry_and_logs_summary(tmp_path):
     from wisper_transcribe.speaker_registry import RelabelReport, TranscriptRelabel
     from wisper_transcribe.web.jobs import COMPLETED, JOB_SPEAKER_RELABEL, JobQueue

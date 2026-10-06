@@ -68,6 +68,10 @@
       {% set steps = [("enroll","E","Enroll")] %}
     {% elif job.job_type == "campaign_journal" %}
       {% set steps = [("journal","J","Journal")] %}
+    {% elif job.job_type == "campaign_summary" %}
+      {% set steps = [("summary","S","Summary")] %}
+    {% elif job.job_type == "campaign_recap" %}
+      {% set steps = [("recap","R","Recap")] %}
     {% else %}
       {% set steps = [("summarize","S","Summarize")] %}
     {% endif %}
@@ -131,6 +135,10 @@
         {% if job.kwargs.slug %}
           <a href="/campaigns/{{ job.kwargs.slug }}/journal" class="btn btn-primary">View journal</a>
         {% endif %}
+      {% elif job.job_type in ("campaign_summary", "campaign_recap") %}
+        {% if job.kwargs.slug %}
+          <a href="/campaigns/{{ job.kwargs.slug }}" class="btn btn-primary">Back to campaign</a>
+        {% endif %}
       {% elif job.transcript_id %}
         <a href="/transcripts/{{ job.transcript_id }}" class="btn btn-primary">View transcript</a>
         {% if job.job_type == "transcription" %}
@@ -184,6 +192,10 @@
       'enroll',
     {% elif job.job_type == "campaign_journal" %}
       'journal',
+    {% elif job.job_type == "campaign_summary" %}
+      'summary',
+    {% elif job.job_type == "campaign_recap" %}
+      'recap',
     {% else %}
       'summarize',
     {% endif %}

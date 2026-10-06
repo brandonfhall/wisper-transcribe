@@ -65,7 +65,14 @@ def conn():
         INSERT INTO files (kind, root, rel_path, profile_id, size, mtime_ns)
           VALUES ('reference_clip', 'data', 'profiles/embeddings/alice.mp3', 1, 10, 5);
         INSERT INTO files (kind, root, rel_path, campaign_id, size, mtime_ns)
-          VALUES ('journal', 'output', 'Game/Game Journal.md', 1, 10, 5);
+          VALUES ('journal', 'output', 'Game/Game Journal.md', 1, 10, 5),
+                 ('combined_summary', 'output', 'Game/Game Combined Summary.md', 1, 10, 5);
+        INSERT INTO files (kind, root, rel_path, label, campaign_id, size, mtime_ns)
+          VALUES ('recap', 'output', 'Game/Game Recap \u2014 s2.md', 's2', 1, 10, 5);
+        INSERT INTO campaign_digests (id, campaign_id, kind, file_id, generated_at, provider, model)
+          VALUES (1, 1, 'combined_summary', 14, '2026-01-01T00:00:00Z', 'ollama', 'm'),
+                 (2, 1, 'recap', 15, '2026-01-01T00:00:00Z', 'ollama', 'm');
+        INSERT INTO campaign_digest_sessions (digest_id, transcript_id) VALUES (1, 1), (1, 2), (2, 2);
     """)
     yield c
     c.close()
@@ -229,6 +236,24 @@ VIOLATIONS = {
                                              "VALUES ('journal', 'output', 'a/b/c Journal.md', 2)",
     "journal not named Journal.md": "INSERT INTO files (kind, root, rel_path, campaign_id) "
                                     "VALUES ('journal', 'output', 'Other/journal.md', 2)",
+    "combined summary not named Combined Summary.md":
+        "INSERT INTO files (kind, root, rel_path, campaign_id) "
+        "VALUES ('combined_summary', 'output', 'Other/Other Summary.md', 1)",
+    "combined summary deeper than a campaign folder":
+        "INSERT INTO files (kind, root, rel_path, campaign_id) "
+        "VALUES ('combined_summary', 'output', 'a/b/c Combined Summary.md', 1)",
+    "second combined summary for a campaign":
+        "INSERT INTO files (kind, root, rel_path, campaign_id) "
+        "VALUES ('combined_summary', 'output', 'Game/Game 2 Combined Summary.md', 1)",
+    "recap without a label": "INSERT INTO files (kind, root, rel_path, campaign_id) "
+                              "VALUES ('recap', 'output', 'Game/Game Recap \u2014 s3.md', 1)",
+    "recap not named Recap.md": "INSERT INTO files (kind, root, rel_path, label, campaign_id) "
+                                 "VALUES ('recap', 'output', 'Game/Game Sessions.md', 's3', 1)",
+    "combined summary with a transcript owner":
+        "INSERT INTO files (kind, root, rel_path, transcript_id) "
+        "VALUES ('combined_summary', 'output', 's1 Combined Summary.md', 1)",
+    "recap with a profile owner": "INSERT INTO files (kind, root, rel_path, label, profile_id) "
+                                  "VALUES ('recap', 'output', 'Alice Recap \u2014 s1.md', 's1', 1)",
     "output file deeper than one folder": "INSERT INTO files (kind, root, rel_path, transcript_id) "
                                           "VALUES ('audio', 'output', 'a/b/x.flac', 2)",
     "file path with an embedded NUL": "INSERT INTO files (kind, root, rel_path, transcript_id) "
@@ -509,3 +534,73 @@ def test_db_py_has_no_invalid_escapes():
 def test_active_jobs_have_a_partial_index(conn):
     sql = _one(conn, "SELECT sql FROM sqlite_master WHERE name = 'jobs_active'")
     assert "status IN ('pending', 'running')" in sql
+
+
+# ---------------------------------------------------------------------------
+# v14: campaign-level digests
+# ---------------------------------------------------------------------------
+
+def test_combined_summary_and_recap_paths_are_accepted(conn):
+    """v14 accepts `<folder>/<folder> Combined Summary.md` and a labelled recap."""
+    assert _one(conn, "SELECT count(*) FROM files WHERE kind = 'combined_summary'") == 1
+    assert _one(conn, "SELECT count(*) FROM files WHERE kind = 'recap'") == 1
+    assert _one(conn, "SELECT rel_path FROM files WHERE kind = 'combined_summary'") == \
+        "Game/Game Combined Summary.md"
+
+
+def test_two_recaps_with_different_labels_coexist(conn):
+    """The widened files_campaign index keys a recap by its label."""
+    conn.execute("INSERT INTO files (kind, root, rel_path, label, campaign_id) "
+                 "VALUES ('recap', 'output', 'Game/Game Recap \u2014 s1.md', 's1', 1)")
+    assert _one(conn, "SELECT count(*) FROM files WHERE kind = 'recap'") == 2
+
+
+def test_campaign_delete_cascades_to_digests(conn):
+    conn.execute("UPDATE transcripts SET campaign_id = NULL, position = NULL WHERE campaign_id = 1")
+    conn.execute("DELETE FROM campaigns WHERE id = 1")
+    assert _one(conn, "SELECT count(*) FROM files WHERE campaign_id = 1") == 0
+    assert _one(conn, "SELECT count(*) FROM campaign_digests") == 0
+    assert _one(conn, "SELECT count(*) FROM campaign_digest_sessions") == 0
+
+
+def test_deleting_a_covered_transcript_removes_only_its_link(conn):
+    """A digest outlives a session it covered; only the link row goes."""
+    conn.execute("DELETE FROM transcripts WHERE id = 2")
+    assert _one(conn, "SELECT count(*) FROM campaign_digest_sessions WHERE transcript_id = 2") == 0
+    assert _one(conn, "SELECT count(*) FROM campaign_digests") == 2
+    assert _one(conn, "SELECT count(*) FROM campaign_digest_sessions WHERE transcript_id = 1") == 1
+
+
+def test_digest_kind_enum(conn):
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO campaign_digests (campaign_id, kind, file_id, generated_at) "
+                     "VALUES (1, 'overview', 13, 'now')")
+
+
+def test_digest_file_is_unique(conn):
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO campaign_digests (campaign_id, kind, file_id, generated_at) "
+                     "VALUES (1, 'recap', 14, 'now')")
+
+
+def test_digest_requires_an_existing_file(conn):
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO campaign_digests (campaign_id, kind, file_id, generated_at) "
+                     "VALUES (1, 'recap', 999, 'now')")
+
+
+def test_deleting_a_digest_file_cascades_to_the_digest(conn):
+    conn.execute("DELETE FROM files WHERE id = 15")
+    assert _one(conn, "SELECT count(*) FROM campaign_digests WHERE file_id = 15") == 0
+
+
+def test_jobs_accept_the_new_campaign_job_types(conn):
+    for job_type in ("campaign_summary", "campaign_recap"):
+        conn.execute("INSERT INTO jobs (id, type, status, created_at) VALUES (?, ?, 'pending', 'now')",
+                     (job_type[:36].ljust(36, "0"), job_type))
+
+
+def test_files_campaign_index_is_not_globally_unique(conn):
+    """The index keys a campaign's rows by (kind, label), not kind alone."""
+    sql = _one(conn, "SELECT sql FROM sqlite_master WHERE name = 'files_campaign'")
+    assert "coalesce(label, '')" in sql

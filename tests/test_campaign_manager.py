@@ -872,6 +872,53 @@ def test_create_campaign_reclaims_a_folder_left_by_a_keep_files_delete(tmp_path)
     assert journal.journal_path("hanataz", data_dir=tmp_path) == folder / "Hanataz Journal.md"
 
 
+def test_create_campaign_reclaims_the_documents_left_by_a_keep_files_delete(tmp_path):
+    """A folder holding only this campaign's journal, combined summary, and
+    recaps is re-claimed, and each document is registered with its kind/label."""
+    from wisper_transcribe import campaign_folders, file_registry
+    from wisper_transcribe.config import get_output_root
+
+    create_campaign("Hanataz", data_dir=tmp_path)
+    folder = get_output_root() / "Hanataz"
+    (folder / "Hanataz Journal.md").write_text(
+        "---\ntype: campaign-journal\n---\n\nbody\n", encoding="utf-8")
+    (folder / "Hanataz Combined Summary.md").write_text("## The Story\n", encoding="utf-8")
+    (folder / "Hanataz Recap \u2014 s1.md").write_text("One.\n", encoding="utf-8")
+    (folder / "Hanataz Recap \u2014 s2.md").write_text("Two.\n", encoding="utf-8")
+    assert delete_campaign("hanataz", data_dir=tmp_path).status == "deleted"
+    assert folder.is_dir()  # keep-files leaves every document on disk
+
+    again = create_campaign("Hanataz", data_dir=tmp_path)
+    assert again.folder == "Hanataz"
+    assert campaign_folders.is_claimed(again.id, data_dir=tmp_path)
+
+    owner = file_registry.Owner("campaign", again.id)
+    rows = {(r.kind, r.label)
+            for r in file_registry.files_for(owner, data_dir=tmp_path,
+                                             output_dir=get_output_root())}
+    assert rows == {("journal", None), ("combined_summary", None),
+                    ("recap", "s1"), ("recap", "s2")}
+
+
+def test_create_campaign_refuses_kept_documents_with_a_stray_file(tmp_path):
+    """One file wisper doesn't own keeps the folder from being re-claimed."""
+    from wisper_transcribe.config import get_output_root
+
+    create_campaign("Hanataz", data_dir=tmp_path)
+    folder = get_output_root() / "Hanataz"
+    (folder / "Hanataz Journal.md").write_text(
+        "---\ntype: campaign-journal\n---\n\nbody\n", encoding="utf-8")
+    (folder / "Hanataz Combined Summary.md").write_text("## The Story\n", encoding="utf-8")
+    (folder / "Hanataz Recap \u2014 s1.md").write_text("One.\n", encoding="utf-8")
+    (folder / "notes.md").write_text("mine\n", encoding="utf-8")
+    assert delete_campaign("hanataz", data_dir=tmp_path).status == "deleted"
+
+    with pytest.raises(CampaignError) as excinfo:
+        create_campaign("Hanataz", data_dir=tmp_path)
+    assert excinfo.value.code == "folder_exists"
+    assert load_campaigns(tmp_path) == {}
+
+
 def test_load_campaigns_lists_transcript_ids_in_order(tmp_path):
     create_campaign("Alpha", data_dir=tmp_path)
     for st in ("b", "a", "c"):

@@ -70,10 +70,11 @@ def _count() -> int:
 
 def test_root_follows_kind():
     assert {k for k, r in fr.ROOT_OF_KIND.items() if r == "output"} == {
-        "transcript", "summary", "sidecar", "excerpt", "excerpt_text", "audio", "backup", "journal"}
+        "transcript", "summary", "sidecar", "excerpt", "excerpt_text", "audio", "backup",
+        "journal", "combined_summary", "recap"}
     assert {k for k, r in fr.ROOT_OF_KIND.items() if r == "data"} == {
         "combined", "per_user", "live_draft", "reference_clip"}
-    assert fr.SINGLE_KINDS == set(fr.KINDS) - {"excerpt", "excerpt_text", "per_user"}
+    assert fr.SINGLE_KINDS == set(fr.KINDS) - {"excerpt", "excerpt_text", "per_user", "recap"}
 
 
 def test_owner_lookups(out, monkeypatch):

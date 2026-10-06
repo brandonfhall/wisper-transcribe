@@ -1448,6 +1448,97 @@ def campaigns_journal(slug: str, session: Optional[str], fold_all: bool,
         click.echo(f"  journaled sessions: {len(result.journaled_sessions)}")
 
 
+def _digest_cli_common(slug: str) -> str:
+    """Validate a campaign slug and return it, without creating an LLM client."""
+    from .campaign_manager import _validate_campaign_slug, load_campaigns
+
+    safe = _validate_campaign_slug(slug)
+    if safe is None:
+        raise click.ClickException(f"Invalid campaign slug: {slug!r}")
+    if safe not in load_campaigns():
+        raise click.ClickException(f"Campaign {safe!r} not found.")
+    return safe
+
+
+@campaigns.command("summarize")
+@click.argument("slug")
+@click.option("--provider", default=None, type=_LLM_PROVIDER_CHOICE,
+              help="LLM provider (default: llm_provider from config)")
+@click.option("--model", default=None, help="Model override (default: llm_model from config)")
+@click.option("--endpoint", default=None, help="Ollama endpoint override")
+def campaigns_summarize(slug: str, provider: Optional[str], model: Optional[str],
+                        endpoint: Optional[str]):
+    """Write a combined summary of every summarized session in a campaign.
+
+    One LLM call over the sessions' ``.summary.md`` sidecars, in campaign order,
+    written to ``<campaign folder>/<campaign folder> Combined Summary.md`` and
+    overwritten each run.
+    """
+    from .campaign_digest import generate_combined_summary, summarized_sessions
+    from .llm.errors import LLMResponseError, LLMUnavailableError
+    from .speaker_manager import load_profiles
+
+    safe = _digest_cli_common(slug)
+    if not summarized_sessions(safe):
+        raise click.ClickException(
+            f"Campaign {safe!r} has no summarized sessions to combine. "
+            "Run `wisper summarize` on a session first."
+        )
+    client = _get_llm_client(provider, model, endpoint)
+    click.echo(f"Summarizing {safe!r} with {client.provider} / {client.model} ...", err=True)
+    try:
+        result = generate_combined_summary(safe, client, load_profiles())
+    except (LLMUnavailableError, LLMResponseError) as exc:
+        raise click.ClickException(str(exc))
+    except (ValueError, KeyError) as exc:
+        raise click.ClickException(str(exc))
+    assert result is not None  # guarded by summarized_sessions above
+    click.echo(f"Wrote {result.path}")
+    click.echo(f"  sessions covered: {len(result.sessions)}")
+
+
+@campaigns.command("recap")
+@click.argument("slug")
+@click.option("--sessions", type=int, default=1,
+              help="How many of the latest summarized sessions to recap (1-3; default 1)")
+@click.option("--provider", default=None, type=_LLM_PROVIDER_CHOICE,
+              help="LLM provider (default: llm_provider from config)")
+@click.option("--model", default=None, help="Model override (default: llm_model from config)")
+@click.option("--endpoint", default=None, help="Ollama endpoint override")
+def campaigns_recap(slug: str, sessions: int, provider: Optional[str], model: Optional[str],
+                    endpoint: Optional[str]):
+    """Write a player-facing "Previously on…" recap from the latest sessions.
+
+    A 200-400 word, spoiler-free recap from the last 1-3 summarized sessions
+    (default 1), written to ``<campaign folder>/<campaign folder> Recap —
+    <newest session>.md``. Re-running for the same newest session replaces that
+    one file.
+    """
+    from .campaign_digest import clamp_recap_sessions, generate_recap, summarized_sessions
+    from .llm.errors import LLMResponseError, LLMUnavailableError
+    from .speaker_manager import load_profiles
+
+    safe = _digest_cli_common(slug)
+    if not summarized_sessions(safe):
+        raise click.ClickException(
+            f"Campaign {safe!r} has no summarized sessions to recap. "
+            "Run `wisper summarize` on a session first."
+        )
+    count = clamp_recap_sessions(sessions)
+    client = _get_llm_client(provider, model, endpoint)
+    click.echo(f"Writing a recap of {count} session(s) with "
+               f"{client.provider} / {client.model} ...", err=True)
+    try:
+        result = generate_recap(safe, client, load_profiles(), sessions=count)
+    except (LLMUnavailableError, LLMResponseError) as exc:
+        raise click.ClickException(str(exc))
+    except (ValueError, KeyError) as exc:
+        raise click.ClickException(str(exc))
+    assert result is not None  # guarded by summarized_sessions above
+    click.echo(f"Wrote {result.path}")
+    click.echo(f"  sessions covered: {len(result.sessions)}")
+
+
 # ---------------------------------------------------------------------------
 # wisper transcripts
 # ---------------------------------------------------------------------------

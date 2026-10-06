@@ -179,12 +179,13 @@ async def job_history_page(
     """Every job ever run, newest first, 50 per page, filterable."""
     from wisper_transcribe import job_history
     from wisper_transcribe.web.jobs import (
-        JOB_CAMPAIGN_JOURNAL, JOB_ENROLL, JOB_LIVE, JOB_REFINE, JOB_SPEAKER_RELABEL,
-        JOB_SUMMARIZE, JOB_TRANSCRIPTION,
+        JOB_CAMPAIGN_JOURNAL, JOB_CAMPAIGN_RECAP, JOB_CAMPAIGN_SUMMARY, JOB_ENROLL,
+        JOB_LIVE, JOB_REFINE, JOB_SPEAKER_RELABEL, JOB_SUMMARIZE, JOB_TRANSCRIPTION,
     )
 
     job_types = (JOB_TRANSCRIPTION, JOB_REFINE, JOB_SUMMARIZE, JOB_ENROLL, JOB_LIVE,
-                 JOB_CAMPAIGN_JOURNAL, JOB_SPEAKER_RELABEL)
+                 JOB_CAMPAIGN_JOURNAL, JOB_CAMPAIGN_SUMMARY, JOB_CAMPAIGN_RECAP,
+                 JOB_SPEAKER_RELABEL)
     type_filter = type if type in job_types else ""
     status_filter = status if status in job_history.JOB_STATUSES else ""
     # A transcript filter is a database id; a bad value is ignored.

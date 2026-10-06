@@ -284,9 +284,10 @@ def delete_campaign(slug: str, *, delete_transcripts: bool = False,
     (``kept``). Only an empty campaign is deleted, so a session left behind
     keeps the campaign and its folder.
 
-    Delete everything deletes the journal file, then the campaign; a claimed
-    folder is removed only when nothing is left in it. Keep the files leaves
-    the journal file and its folder on disk, untracked; either way a claimed
+    Delete everything deletes the campaign's own files (journal, combined
+    summary, recaps), then the campaign; a claimed folder is removed only when
+    nothing is left in it. Keep the files leaves them and the folder on disk,
+    untracked; either way a claimed
     folder left empty is removed. Profiles are untouched.
     """
     from . import file_registry
@@ -331,8 +332,8 @@ def delete_campaign(slug: str, *, delete_transcripts: bool = False,
     try:
         with db.transaction(data_dir) as conn:
             cid = _campaign_id(conn, slug)
+            owner = file_registry.Owner("campaign", cid)
             if delete_transcripts:
-                owner = file_registry.Owner("campaign", cid)
                 journal_files = file_registry.paths_for_delete(owner, conn, data_dir=data_dir,
                                                                output_dir=output)
             conn.execute("DELETE FROM campaigns WHERE id = ?", (cid,))

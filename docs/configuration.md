@@ -84,6 +84,8 @@ Transcripts go to the output root: `WISPER_OUTPUT_DIR` if set, else the `output_
 
 Each campaign's journal is `<campaign folder>/<campaign folder> Journal.md` inside the transcripts folder, in a folder wisper has claimed (it created the folder, or found it absent or empty). wisper never reads or writes a journal in a folder it hasn't claimed. A journal from an older install, at `campaigns/<slug>/journal.md` in the data directory, moves into the campaign folder the first time it is read, and at startup; the old file is kept as `journal.md.v11-adopted`.
 
+A campaign's combined summary and its recaps are `<campaign folder> Combined Summary.md` and `<campaign folder> Recap — <session>.md`, in the same claimed folder. Like the journal they are written as files wisper owns; a keep-the-files delete leaves them on disk, and re-creating the campaign re-claims the folder and registers them.
+
 Large stored audio (whole uploaded videos, extra recording copies) is shrunk by `wisper storage trim`, which also moves existing sessions into their campaign folders; run it once after upgrading.
 
 To move your transcripts: stop the server, move the files, then `wisper config set output_dir <new path>`.
