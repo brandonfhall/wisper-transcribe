@@ -179,3 +179,221 @@ async def test_job_queue_stop_stops_the_ml_worker():
     q = _make_queue_with(fake)
     await q.stop()
     assert fake.stopped is True
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: enroll and relabel jobs
+# ---------------------------------------------------------------------------
+
+def _seed_wizard(tmp_path):
+    """A transcript + sidecar so a wizard enroll job has something to run."""
+    from wisper_transcribe import transcript_store
+    from ._seed import seed_sidecar
+
+    md = tmp_path / "session01.md"
+    md.write_text("# Session 01", encoding="utf-8")
+    transcript_store.register(md, origin="reconcile")
+    audio = tmp_path / "session01.mp3"
+    audio.write_bytes(b"fake")
+    seed_sidecar(md, {
+        "input_path": str(audio),
+        "diarization_segments": [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"}],
+    })
+    return md
+
+
+@pytest.fixture()
+def out_root(tmp_path, monkeypatch):
+    """Make tmp_path the transcript output root so the sidecar resolves."""
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(tmp_path))
+    return tmp_path
+
+
+def test_enroll_job_delegates_when_on(tmp_path, out_root, _enabled):
+    from wisper_transcribe import ml_worker
+    from wisper_transcribe.web.jobs import JobQueue
+
+    md = _seed_wizard(tmp_path)
+    fake = FakeMLWorker()
+    q = _make_queue_with(fake)
+    job = q.submit_enroll(str(md), "session01", {"Alice": ["SPEAKER_00"]}, device="cpu")
+
+    seen = {}
+    with patch("wisper_transcribe.web.enroll_shared.enroll_profiles",
+               side_effect=lambda **kw: seen.setdefault("active", ml_worker.active())):
+        q._run_enroll_job(job)
+
+    assert seen["active"] is not None and seen["active"].worker is fake
+    assert job.status == "completed"
+
+
+def test_enroll_job_does_not_delegate_when_off(tmp_path, out_root):
+    from wisper_transcribe import ml_worker
+    from wisper_transcribe.web.jobs import JobQueue
+
+    md = _seed_wizard(tmp_path)
+    with patch("wisper_transcribe.web.jobs._ml_worker_enabled", return_value=False):
+        q = _make_queue_with(FakeMLWorker())
+        job = q.submit_enroll(str(md), "session01", {"Alice": ["SPEAKER_00"]}, device="cpu")
+        seen = {}
+        with patch("wisper_transcribe.web.enroll_shared.enroll_profiles",
+                   side_effect=lambda **kw: seen.setdefault("active", ml_worker.active())):
+            q._run_enroll_job(job)
+
+    assert seen["active"] is None
+    assert job.status == "completed"
+
+
+def test_enroll_job_cancel_ends_cancelled(tmp_path, out_root, _enabled):
+    from wisper_transcribe import ml_worker
+    from wisper_transcribe.web.jobs import FAILED
+
+    md = _seed_wizard(tmp_path)
+
+    def _blocked(**kw):
+        # Stop killed the worker mid-call, so the delegated call raises.
+        assert ml_worker.active() is not None
+        raise InterruptedError("Job cancelled by user")
+
+    q = _make_queue_with(FakeMLWorker())
+    job = q.submit_enroll(str(md), "session01", {"Alice": ["SPEAKER_00"]}, device="cpu")
+    with patch("wisper_transcribe.web.enroll_shared.enroll_profiles", side_effect=_blocked):
+        q._run_enroll_job(job)
+
+    assert job.status == FAILED and job.error == "Cancelled"
+
+
+def test_standalone_enroll_delegates_and_cancels(tmp_path, out_root, _enabled):
+    from wisper_transcribe import ml_worker
+    from wisper_transcribe.web.jobs import FAILED
+
+    src = tmp_path / "clip.wav"
+    src.write_bytes(b"fake")
+    fake = FakeMLWorker()
+    q = _make_queue_with(fake)
+    job = q.submit_standalone_enroll(str(src), profile_key="alice",
+                                     display_name="Alice")
+    seen = {}
+
+    def _diarize(*a, **k):
+        seen["active"] = ml_worker.active()
+        raise InterruptedError("Job cancelled by user")
+
+    with patch("wisper_transcribe.audio_utils.convert_to_wav", side_effect=lambda p: p), \
+            patch("wisper_transcribe.config.get_hf_token", return_value="tok"), \
+            patch("wisper_transcribe.diarizer.diarize", side_effect=_diarize):
+        q._run_enroll_job(job)
+
+    assert seen["active"] is not None and seen["active"].worker is fake
+    assert job.status == FAILED and job.error == "Cancelled"
+
+
+def test_recording_enroll_cancel_ends_cancelled(tmp_path, _enabled):
+    from wisper_transcribe.web.jobs import FAILED
+
+    fake = FakeMLWorker()
+    q = _make_queue_with(fake)
+    job = q.submit_recording_enroll(
+        recording_id="rec-1", discord_uid="42", per_user_dir=str(tmp_path),
+        profile_key="alice", display_name="Alice",
+    )
+    with patch("wisper_transcribe.speaker_manager.enroll_speaker_from_audio_dir",
+               side_effect=InterruptedError("Job cancelled by user")):
+        q._run_enroll_job(job)
+
+    assert job.status == FAILED and job.error == "Cancelled"
+
+
+def test_relabel_job_delegates_when_on(_enabled):
+    from wisper_transcribe import ml_worker
+    from types import SimpleNamespace
+    fake = FakeMLWorker()
+    q = _make_queue_with(fake)
+    job = q.submit_relabel("game")
+    report = SimpleNamespace(transcripts=[], recurring=[])
+    holder = {}
+
+    def _inner(slug, **kwargs):
+        holder["active"] = ml_worker.active()
+        return report
+
+    with patch("wisper_transcribe.speaker_registry.relabel_campaign", side_effect=_inner):
+        q._run_relabel_job(job)
+
+    assert holder["active"] is not None and holder["active"].worker is fake
+    assert job.status == "completed"
+
+
+def test_relabel_job_does_not_delegate_when_off():
+    from wisper_transcribe import ml_worker
+    from types import SimpleNamespace
+
+    with patch("wisper_transcribe.web.jobs._ml_worker_enabled", return_value=False):
+        q = _make_queue_with(FakeMLWorker())
+        job = q.submit_relabel("game")
+        holder = {}
+        report = SimpleNamespace(transcripts=[], recurring=[])
+
+        def _inner(slug, **kwargs):
+            holder["active"] = ml_worker.active()
+            return report
+
+        with patch("wisper_transcribe.speaker_registry.relabel_campaign", side_effect=_inner):
+            q._run_relabel_job(job)
+
+    assert holder["active"] is None
+    assert job.status == "completed"
+
+
+def test_relabel_job_cancel_ends_cancelled(_enabled):
+    from wisper_transcribe import ml_worker
+    from wisper_transcribe.web.jobs import FAILED
+
+    fake = FakeMLWorker(block=True)
+    q = _make_queue_with(fake)
+    job = q.submit_relabel("game")
+
+    def _blocked(slug, **kwargs):
+        # Stop killed the worker mid-call, so the delegated call raises.
+        assert ml_worker.active() is not None
+        raise InterruptedError("Job cancelled by user")
+
+    with patch("wisper_transcribe.speaker_registry.relabel_campaign", side_effect=_blocked):
+        q._run_relabel_job(job)
+
+    assert job.status == FAILED and job.error == "Cancelled"
+
+
+def test_llm_journal_and_live_jobs_never_delegate(_enabled, tmp_path):
+    """Only transcription/enroll/relabel delegate; these three leave active() None."""
+    from wisper_transcribe import ml_worker
+    from types import SimpleNamespace
+
+    q = _make_queue_with(FakeMLWorker())
+    seen = {}
+
+    # LLM job: _do_llm_work is the seam.
+    llm_job = q.submit_llm("/tmp/x.md", "refine")
+    with patch.object(q, "_do_llm_work",
+                      side_effect=lambda **kw: seen.setdefault("llm", ml_worker.active())):
+        q._run_llm_job(llm_job)
+    assert seen["llm"] is None
+
+    # Journal job: capture at the first LLM seam.
+    journal_job = q.submit_journal("game")
+    with patch("wisper_transcribe.llm.get_client", return_value=SimpleNamespace(
+            provider="ollama", model="m")), \
+            patch("wisper_transcribe.speaker_manager.load_profiles", return_value={}), \
+            patch("wisper_transcribe.journal.update_journal",
+                  side_effect=lambda *a, **k: seen.setdefault("journal", ml_worker.active())), \
+            patch("wisper_transcribe.journal.unjournalled_sessions", return_value=["s1"]):
+        q._run_journal_job(journal_job)
+    assert seen["journal"] is None
+
+    # Live job: the live loop is the seam.
+    live_job = q.submit_live("rec-1", str(tmp_path / "live.md"),
+                             model_size="tiny", device="cpu")
+    with patch("wisper_transcribe.web.live_transcribe.run_live_loop",
+               side_effect=lambda *a, **k: seen.setdefault("live", ml_worker.active())):
+        q._run_live_job(live_job)
+    assert seen["live"] is None

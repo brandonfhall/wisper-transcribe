@@ -378,36 +378,6 @@ All ML mocked, per CLAUDE.md. New seams are patchable like the existing ones:
 
 ---
 
-## Job cancellation — stop the GPU on cancel (approved)
-
-Today Stop only sets `job._cancel_event`, which the job thread notices on its next `tqdm.write` (`web/jobs.py` `capturing_write`/`ProgressCatcher`). A long model call never writes, so the GPU stays busy until the stage ends. `parallel_stages` doesn't help: its drain thread raises on cancel but the `ProcessPoolExecutor` keeps running.
-
-**Design (Brandon, 2026-10-06): proxy the four GPU calls into one warm worker process.**
-
-- **What runs in the worker:** only `transcriber.transcribe`, `diarizer.diarize`, `word_alignment.align_words`, and `speaker_manager.extract_embedding`. Their module-level model caches (`_model`, `_pipeline`, `_fa_model`/`_fa_processor`, `_embedding_model`) then live in the worker and stay warm between jobs.
-- **What stays in the server:** everything else — `pipeline.process_file`, `match_speakers` (it reads profiles from the DB), enrollment, relabel, ffmpeg work, excerpts, every DB/registry/transcript write. The worker never opens `wisper.db`. All four functions take and return picklable values (paths, dataclass lists, numpy arrays, `AlignmentStats`).
-- **Delegation is per job thread.** A thread-local context (e.g. `ml_worker.delegating(worker, cancel_event, on_log, on_bar)`) set by the job runner and cleared in `finally`. Each of the four functions starts with a guard: if this thread is delegating, send the call to the worker and return its result. Inside the worker, and in the CLI, live recording, and request threads, nothing delegates.
-- **Which jobs delegate:** transcription (`_run_transcription_job`), every enroll job (`_run_enroll_job` and its standalone/recording/wizard paths), and relabel (`_run_relabel_job`). Not `JOB_LIVE` (real-time loop, keeps its own in-process model), not LLM/journal jobs (no GPU).
-- **Config key `ml_worker`, default `true`.** Off runs everything in-process as today. Wire it like `parallel_stages` (`config.DEFAULTS`/`CONFIG_CHOICES`, web Config page, `docs/configuration.md`). The CLI never uses the worker.
-- **`parallel_stages` is ignored while delegating:** the worker runs the stages one after another. Its pool starts from the server, so Stop couldn't kill it and its models would load outside the warm worker. Documented.
-
-**Worker (`ml_worker.py`)**
-- One `MLWorker` owned by `JobQueue`, started lazily on the first delegated call with `multiprocessing.get_context("spawn")` (same on every OS). The child entry is a module-level function: run `_noise_suppress.suppress_third_party_noise()` before any ML import, reuse `pipeline._patch_tqdm_for_queue` for logs and bars, then loop: receive `(function name, args, kwargs)`, call it from a fixed allow-list of the four functions, send back the result or the error.
-- **Waiting and cancel happen in the job thread**, never in a helper thread: loop on the result with a short timeout, drain the log/bar queue each pass (logs → `on_log`, i.e. `tqdm.write` so the job's capture layer sees them; bars → `on_bar`, i.e. `job.progress`), and check `cancel_event`. On cancel: `terminate()`, `join(timeout)`, `kill()` if still alive, mark the worker dead, raise `InterruptedError` — the existing `except InterruptedError` path marks the job Cancelled. (A drain thread would repeat today's parallel_stages bug: `capturing_write` raises in the wrong thread.)
-- **Errors:** the child sends the exception's type name and message; the parent re-raises a small known set (`RuntimeError`, `ValueError`, `FileNotFoundError`, `MemoryError`, `ImportError`) and uses `RuntimeError` for anything else, since torch/pyannote exceptions often don't unpickle. Messages never go into `job.error` beyond what `_set_job_error` already allows.
-- **Crash:** if the child exits without replying, raise `RuntimeError("ML worker exited unexpectedly")`; the next call respawns it.
-- **Shutdown:** `JobQueue.stop()` and the `CancelledError` path in `_worker` terminate the worker, so it never outlives the server holding the GPU. Check the order in `app.py`'s lifespan shutdown.
-- **Cost:** the first delegated call after start or a cancel loads its models in the worker (seconds to tens of seconds). The server process no longer holds models for these jobs; live recording still loads its own.
-
-**Tests** (no GPU, network, or real audio)
-- Several tests mock *below* the four functions (`transcriber.WhisperModel`, `diarizer.Pipeline`, `_load_embedding_model`, `word_alignment` model globals). A spawned child doesn't see those mocks and would load real models, so an autouse fixture in `tests/conftest.py` turns delegation off; only the worker's own tests turn it on.
-- Worker tests use a fake-function module under `tests/` (no torch import) through an injectable allow-list: a real spawned child returns results, maps errors, streams logs/bars, dies on cancel (process gone, `InterruptedError`), respawns after cancel or crash, and stops on `JobQueue.stop()`. Keep real-spawn tests few (each is 1–2 s, slower on Windows CI).
-- Jobs tests with a fake `MLWorker`: transcription/enroll/relabel jobs delegate when `ml_worker` is on and don't when off; cancel ends the job Cancelled and deletes the upload; LLM and live jobs never delegate; `parallel_stages` is skipped while delegating.
-
-**Docs:** `architecture.md` (module map, a "Job cancellation / ML worker" section, the three-layer tqdm note, "Module-level model caches", Known Constraints "Cooperative cancellation"), `CLAUDE.md` gotchas (one-job-at-a-time and tqdm layers mention the worker), `docs/web-ui.md` (Stop Job), `docs/scenarios.md` (cancellation), `docs/configuration.md` (`ml_worker`).
-
----
-
 ## DAVE sidecar → Python migration (parked)
 
 The Java sidecar (JDA 6.3.0 + JDAVE 0.1.8) receives and decrypts DAVE-encrypted audio end-to-end. DAVE is mandatory for non-stage voice, so the only question is where it's implemented. DAVE is MLS over OpenMLS and every path depends on a native (Rust/JNI) binding; the choice is which language wraps it.

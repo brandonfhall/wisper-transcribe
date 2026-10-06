@@ -1161,17 +1161,23 @@ class JobQueue:
         from wisper_transcribe.config import get_device
         from wisper_transcribe.speaker_registry import relabel_campaign
 
-        report = relabel_campaign(job.kwargs["slug"], device=get_device(),
-                                  backfill=True, progress=job.append_log)
-        changed = sum(len(t.renamed) for t in report.transcripts)
-        job.append_log(f"Renamed {changed} speaker label(s) across {len(report.transcripts)} session(s)")
-        if report.recurring:
-            job.append_log(f"Unknown voices heard in more than one session: {report.recurring}")
-        for t in report.transcripts:
-            if t.skipped:
-                job.append_log(f"  Skipped {t.stem}: {t.skipped}")
-        job.status = COMPLETED
-        job.finished_at = datetime.now()
+        try:
+            with self._delegation(job):
+                report = relabel_campaign(job.kwargs["slug"], device=get_device(),
+                                          backfill=True, progress=job.append_log)
+            changed = sum(len(t.renamed) for t in report.transcripts)
+            job.append_log(f"Renamed {changed} speaker label(s) across {len(report.transcripts)} session(s)")
+            if report.recurring:
+                job.append_log(f"Unknown voices heard in more than one session: {report.recurring}")
+            for t in report.transcripts:
+                if t.skipped:
+                    job.append_log(f"  Skipped {t.stem}: {t.skipped}")
+            job.status = COMPLETED
+        except InterruptedError:
+            job.status = FAILED
+            job.error = "Cancelled"
+        finally:
+            job.finished_at = datetime.now()
 
     def _run_journal_job(self, job: Job) -> None:
         """Fold session summaries into a campaign's rolling journal.
@@ -1438,14 +1444,19 @@ class JobQueue:
 
         Runners set a generic ``job.error`` and never re-raise: exception text
         can contain paths, and the job page renders it into HTML.
+
+        The whole dispatch runs in a delegation when ``ml_worker`` is on, so
+        the diarize/embedding calls run in the warm child and Stop terminates
+        it. Each runner turns the resulting ``InterruptedError`` into Cancelled.
         """
-        if job.enroll_mode == "standalone":
-            self._run_standalone_enroll(job)
-            return
-        if job.enroll_mode == "recording":
-            self._run_recording_enroll(job)
-            return
-        self._run_wizard_enroll(job)
+        with self._delegation(job):
+            if job.enroll_mode == "standalone":
+                self._run_standalone_enroll(job)
+                return
+            if job.enroll_mode == "recording":
+                self._run_recording_enroll(job)
+                return
+            self._run_wizard_enroll(job)
 
     def _run_standalone_enroll(self, job: Job) -> None:
         """Run a standalone /speakers/enroll job.
@@ -1511,6 +1522,9 @@ class JobQueue:
                 )
             job.append_log("Speaker enrolled.")
             job.status = COMPLETED
+        except InterruptedError:
+            job.status = FAILED
+            job.error = "Cancelled"
         except Exception as exc:
             log.error("Standalone enroll job %s failed", job.id, exc_info=exc)
             job.status = FAILED
@@ -1545,6 +1559,11 @@ class JobQueue:
                 per_user_dir=Path(p["per_user_dir"]),
                 data_dir=data_dir,
             )
+        except InterruptedError:
+            job.status = FAILED
+            job.error = "Cancelled"
+            job.finished_at = datetime.now()
+            return
         except Exception as exc:
             log.error("Recording enroll job %s failed", job.id, exc_info=exc)
             job.status = FAILED
@@ -1656,6 +1675,9 @@ class JobQueue:
                 except Exception as exc:
                     log.warning("campaign relabel after enroll failed: %s", exc)
             job.status = COMPLETED
+        except InterruptedError:
+            job.status = FAILED
+            job.error = "Cancelled"
         except Exception:
             job.status = FAILED
             job.error = "Enrollment failed"
