@@ -51,7 +51,8 @@ Open `http://localhost:8080/record`.
 - [ ] **Stop recording** returns the toolbar to idle within a couple of seconds.
 - [ ] `/recordings` shows a **LOCAL** badge, status **NEEDS TRANSCRIBE**, and the
       session name.
-- [ ] Detail page shows device names, duration, and a populated Segments panel.
+- [ ] Detail page shows **Source: LOCAL** (device names are no longer stored), duration,
+      and a populated Segments panel.
 - [ ] `combined.flac` has mic + system mixed with no gaps or time compression.
 - [ ] After stop, `combined/` and `per-user/` are gone and `combined.flac` remains.
       To check the separate tracks, play `per-user/mic/0000.wav` (only your voice)
@@ -59,7 +60,28 @@ Open `http://localhost:8080/record`.
       before pressing stop.
 - [ ] Starting a Discord recording while a local session is active is rejected.
 
+**Switching devices mid-session** (needs two inputs, e.g. built-in mic + a USB
+mic or headset; on macOS, BlackHole for system audio):
+
+- [ ] Start a session on mic A. Mid-session, pick mic B in the active panel's
+      **Switch** selects and press **Switch**: the status line says
+      "Switched." and the session keeps recording (no new recording in
+      `/recordings`).
+- [ ] Speak on mic B: the mic level meter moves and the live ticker keeps
+      producing lines. Changing only the system track leaves the mic track
+      untouched (no gap in it).
+- [ ] Pressing **Switch** without changing a select says "Pick a different
+      device first." and does nothing.
+- [ ] Unplug mic A mid-session: the session goes **DEGRADED**. Switch the mic
+      to another device: it returns to recording. If instead you switch only
+      the *system* track, it stays degraded.
+- [ ] After stop, `combined.flac` plays through the switch with a short gap at
+      most, and the transcript covers speech from both mics.
+
 ### 1b. Live transcript + noise floor
+
+- [ ] Rename a speaker profile to `<b>Ann</b>` and record with it bound: the
+      live ticker shows the name as literal text `<b>Ann</b>`, not bold.
 
 - [ ] A new local session shows the **"Live · near-real-time"** pane, initially
       "Waiting for speech…".
@@ -92,6 +114,20 @@ Open `http://localhost:8080/record`.
 
 ---
 
+### 1e. Discord channel picker
+
+- [ ] With a bot token set, the Record page's Discord form shows a **Guild**
+      select, then a **Voice channel** select filtered to that guild. Starting
+      a recording uses the chosen channel.
+- [ ] A preset or the configured default guild/channel is pre-selected.
+- [ ] **Enter IDs manually** shows the raw ID fields; **Show channel list**
+      switches back.
+- [ ] Remove the bot token (or set a wrong one): the form says so and shows the
+      raw ID fields, with no way to the (empty) list. Save-as-preset still
+      picks up typed IDs.
+
+---
+
 ## 2. Campaign journal
 
 **Setup:** a campaign with at least one transcript that has a `.summary.md`
@@ -100,11 +136,11 @@ sidecar (`wisper summarize`, or "Generate campaign summary" at upload).
 ### 2a. CLI
 
 - [ ] `wisper campaigns journal <slug>` folds the next session into
-      `campaigns/<slug>/journal.md`.
+      `<campaign folder>/<campaign folder> Journal.md` in the transcripts folder.
 - [ ] Running it again reports nothing pending.
 - [ ] `--all` folds every pending session, oldest first.
 - [ ] `--session <stem>` folds one specific session.
-- [ ] The `journal.md` body has Story So Far / Active Threads / NPCs /
+- [ ] The journal body has Story So Far / Active Threads / NPCs /
       Party & Decisions / Loot & Resources. Folded sessions are tracked in the
       database; `--export` prints the journal with `journaled_sessions:` added.
 
@@ -121,6 +157,38 @@ sidecar (`wisper summarize`, or "Generate campaign summary" at upload).
 - [ ] **Rebuild journal** (with confirm) re-summarizes every session and rebuilds
       the journal from scratch.
 - [ ] ▲/▼ on the Episodes list reorders sessions and persists on reload.
+
+### 2c. Combined summary and recaps
+
+**Setup:** the same campaign, with a real LLM configured and 2+ summarized
+sessions.
+
+- [ ] **Generate combined summary** runs a job; the Campaign page then links
+      the summary, and `<folder> Combined Summary.md` sits in the campaign
+      folder. The page renders it as sanitized HTML with no raw frontmatter;
+      **Download** saves it under that name.
+- [ ] Re-summarize one session (or add a summarized one): the Campaign page
+      shows the combined summary as stale. Regenerating clears it.
+- [ ] **Write recap** with the selector at 2: a 200–400 word player-facing
+      recap of the last two sessions, no DM-only notes or future plans, saved
+      as `<folder> Recap — <newest session>.md`. Download works (the name has
+      an em dash).
+- [ ] Write another recap for the same newest session: it replaces that file.
+      After a newer session is summarized, a new recap adds a second file;
+      both are listed, newest first.
+- [ ] `wisper campaigns summarize <slug>` and
+      `wisper campaigns recap <slug> --sessions 3` do the same from the CLI.
+- [ ] The buttons are disabled for a campaign with no summarized session.
+
+### 2d. Campaign delete and re-create
+
+- [ ] **Delete campaign, keep the files**: the journal, combined summary, and
+      recaps stay in the folder; sessions move to the transcripts root.
+- [ ] Create a campaign with the same name: it re-claims the folder, and its
+      journal and documents are back (journal panel populated; the documents
+      are registered, so a later full delete removes them).
+- [ ] **Delete campaign and everything in it**: the folder's documents and the
+      folder go.
 
 ---
 
@@ -166,3 +234,21 @@ but the file never existed on disk. It could not be root-caused afterwards.
 - [ ] `/campaigns` and `/record` both load normally.
 - [ ] `wisper --help` lists `campaigns journal` and `record` with no import
       errors.
+
+---
+
+## 5. Stop frees the GPU (`ml_worker`)
+
+Rehearsed on Apple Silicon/MPS with real models on 2026-10-06. Still owed on
+an NVIDIA/CUDA machine and on Windows.
+
+- [ ] Upload a ~10 min file. While **Transcribe** runs, press **Stop job**: the
+      job ends "Cancelled" within a second or two, and the GPU drops to idle
+      (`nvidia-smi`, or Activity Monitor's GPU history). On Windows, Task
+      Manager shows the `python` worker process gone.
+- [ ] Repeat, pressing Stop during **Diarize**.
+- [ ] The next job starts normally (the first one after a Stop reloads models,
+      so it is slower to start) and completes.
+- [ ] Stop the server mid-job: no `python` worker process is left running.
+- [ ] Set **Run GPU work in a separate process** off on the Config page: jobs
+      still run (in-process), and Stop only takes effect at the next log line.

@@ -20,10 +20,16 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 - **SQLite storage in a browser and on real capture** (automated coverage: `test_e2e.py`, `test_schema.py`). With `WISPER_DATA_DIR` pointing at a copy of real data:
   - Journal: the stale-journal notice (move a folded session to another campaign) on the Campaign and Journal pages; **Rebuild journal** vs **Rebuild from transcripts** confirmations and their call counts; journal **Download** includes `journaled_sessions`.
   - Job history page, filters, paging, and a historical job's page after a restart.
-  - Recording end to end: record a few minutes, local and Discord. Add markers, including two in quick succession, and edit the notes mid-session, then stop. After stop, only `combined.wav` and (local) `live_transcript.md` remain; Discord also keeps unbound users' `per-user/<uid>/`. Transcribe it, play it back, and jump to a marker.
+  - Recording end to end: record a few minutes, local and Discord. Add markers, including two in quick succession, and edit the notes mid-session, then stop. After stop, only `combined.flac` and (local) `live_transcript.md` remain; Discord also keeps unbound users' `per-user/<uid>/`. Transcribe it, play it back, and jump to a marker.
   - Search: edit a transcript in Obsidian while the server runs and search for the new words (the result shows "changed — reindexing", then matches after a reload).
 - **Campaign folders, real journal fold:** fold a session into a campaign journal with a real LLM and confirm `<folder> Journal.md` updates in the campaign folder (rehearsals covered it only with a mocked LLM).
 - **macOS loopback.** Record page on a Mac with BlackHole installed: BlackHole appears under System Audio and captures audio.
+- **Shipped 2026-10-06, verified only by automated tests** — steps in `LIVE_AUDIO_TEST_PLAN.md`:
+  - Switching an input device mid-session, and recovering a degraded session (§1a, real devices).
+  - The Discord channel picker with a real bot token (§1e).
+  - Combined summary and recaps in the browser, and keep-files delete + re-create (§2c–2d). Generation itself was checked once with a real LLM.
+  - Live ticker shows a markup-like speaker name as text (§1b).
+  - Stop frees the GPU on NVIDIA/CUDA and on Windows (§5); rehearsed only on Apple Silicon.
 
 ---
 
