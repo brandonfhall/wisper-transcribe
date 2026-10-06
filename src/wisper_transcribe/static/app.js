@@ -96,9 +96,17 @@ window.wisperConnectLiveStream = function(url, onLine, onSnapshot) {
 };
 
 // ── Record: live transcript ticker ──
-// Called via wisperConnectLiveStream's onLine callback in record.html.
-// data: { timestamp: "01:24:09", speaker: "Alice", text: "..." }
-window.wisperTickerAppend = function(data) {
+// Lines are built with textContent, never innerHTML: speaker names come from
+// user-entered profiles and text from the transcriber, so markup in either
+// must render as text.
+function _tickerSpan(css, text) {
+  var span = document.createElement('span');
+  span.style.cssText = css;
+  if (text != null) span.textContent = text;
+  return span;
+}
+
+function _tickerInsert(stamp, dot, who, body) {
   var ticker = document.getElementById('live-ticker');
   if (!ticker) return;
 
@@ -108,15 +116,12 @@ window.wisperTickerAppend = function(data) {
 
   var line = document.createElement('div');
   line.style.cssText = 'display:grid;grid-template-columns:60px 90px 1fr;gap:14px;padding:6px 0;align-items:baseline;opacity:1';
-  line.innerHTML =
-    '<span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint)">' +
-      (data.timestamp || '—') +
-    '</span>' +
-    '<span style="display:flex;align-items:center;gap:7px">' +
-      '<span style="width:6px;height:6px;border-radius:50%;background:var(--color-accent);box-shadow:0 0 6px var(--color-accent);flex-shrink:0"></span>' +
-      '<span style="font-family:var(--font-serif);font-size:13px;color:var(--color-paper)">' + (data.speaker || '') + '</span>' +
-    '</span>' +
-    '<span style="font-size:13.5px;color:var(--color-paper);line-height:1.5">' + (data.text || '') + '</span>';
+  var speaker = _tickerSpan('display:flex;align-items:center;gap:7px');
+  speaker.appendChild(dot);
+  speaker.appendChild(who);
+  line.appendChild(stamp);
+  line.appendChild(speaker);
+  line.appendChild(body);
 
   // Newest on top; older lines fade but are never removed (session scrollback).
   ticker.insertBefore(line, ticker.firstChild);
@@ -125,38 +130,33 @@ window.wisperTickerAppend = function(data) {
   lines.forEach(function(l, i) {
     l.style.opacity = Math.max(0.45, 1 - i * 0.12);
   });
+}
+
+// Called via wisperConnectLiveStream's onLine callback in record.html.
+// data: { timestamp: "01:24:09", speaker: "Alice", text: "..." }
+window.wisperTickerAppend = function(data) {
+  _tickerInsert(
+    _tickerSpan('font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint)', data.timestamp || '—'),
+    _tickerSpan('width:6px;height:6px;border-radius:50%;background:var(--color-accent);box-shadow:0 0 6px var(--color-accent);flex-shrink:0'),
+    _tickerSpan('font-family:var(--font-serif);font-size:13px;color:var(--color-paper)', data.speaker || ''),
+    _tickerSpan('font-size:13.5px;color:var(--color-paper);line-height:1.5', data.text || '')
+  );
 };
 
 // ── Record: "Add marker" flagged line ──
 // Called after a successful POST /record/marker. Rose, italic, and
 // speaker-less so it can't be mistaken for transcript.
 window.wisperTickerAppendMarker = function(elapsedS) {
-  var ticker = document.getElementById('live-ticker');
-  if (!ticker) return;
-
-  var placeholder = ticker.querySelector('div[style*="font-style"]');
-  if (placeholder) placeholder.remove();
-
   var s = Math.max(0, Math.floor(elapsedS || 0));
   var m = Math.floor(s / 60), ss = s % 60;
-  var label = m + ':' + String(ss).padStart(2, '0');
-
-  var line = document.createElement('div');
-  line.style.cssText = 'display:grid;grid-template-columns:60px 90px 1fr;gap:14px;padding:6px 0;align-items:baseline;opacity:1';
-  line.innerHTML =
-    '<span style="font-family:var(--font-mono);font-size:10.5px;color:var(--color-signal-rose)">' + label + '</span>' +
-    '<span style="display:flex;align-items:center;gap:7px">' +
-      '<span class="dot-rose" style="width:6px;height:6px"></span>' +
-      '<span style="font-family:var(--font-serif);font-size:13px;color:var(--color-signal-rose);font-style:italic">Marker</span>' +
-    '</span>' +
-    '<span style="font-size:13.5px;color:var(--color-paper-faint);font-style:italic">flagged moment</span>';
-
-  ticker.insertBefore(line, ticker.firstChild);
-
-  var lines = ticker.querySelectorAll('div[style*="grid-template-columns"]');
-  lines.forEach(function(l, i) {
-    l.style.opacity = Math.max(0.45, 1 - i * 0.12);
-  });
+  var dot = _tickerSpan('width:6px;height:6px');
+  dot.className = 'dot-rose';
+  _tickerInsert(
+    _tickerSpan('font-family:var(--font-mono);font-size:10.5px;color:var(--color-signal-rose)', m + ':' + String(ss).padStart(2, '0')),
+    dot,
+    _tickerSpan('font-family:var(--font-serif);font-size:13px;color:var(--color-signal-rose);font-style:italic', 'Marker'),
+    _tickerSpan('font-size:13.5px;color:var(--color-paper-faint);font-style:italic', 'flagged moment')
+  );
 };
 
 // ── Inline audio excerpt player ──
