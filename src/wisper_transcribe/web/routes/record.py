@@ -488,7 +488,7 @@ async def recording_transcribe(recording_id: str, request: Request):
 
 @router.post("/api/recordings/{recording_id}/recover")
 async def recording_recover_api(recording_id: str):
-    """Rebuild a crashed session's combined.wav from its segments (JSON)."""
+    """Rebuild a crashed session's combined track from its segments (JSON)."""
     safe_id = _validate_recording_id(recording_id)
     if safe_id is None:
         return JSONResponse({"error": "invalid_id"}, status_code=400)

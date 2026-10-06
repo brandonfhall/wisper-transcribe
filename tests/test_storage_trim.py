@@ -26,9 +26,29 @@ def _fake_encode(src, dst):
     Path(dst).write_bytes(b"flac")
 
 
+# The frame count an encode produced, keyed by destination: probe_frames
+# returns it so a recording's combined.wav → combined.flac verifies.
+_flac_frames: dict[str, int] = {}
+
+
+def _recording_encode(src, dst):
+    import wave
+
+    try:
+        with wave.open(str(src), "rb") as wf:
+            _flac_frames[str(dst)] = wf.getnframes()
+    except Exception:
+        _flac_frames[str(dst)] = 0
+    Path(dst).write_bytes(b"flac")
+
+
 @pytest.fixture
-def encode():
-    with mock.patch("wisper_transcribe.audio_utils.encode_flac", side_effect=_fake_encode) as m:
+def encode(monkeypatch):
+    _flac_frames.clear()
+    monkeypatch.setattr("wisper_transcribe.audio_utils.probe_frames",
+                        lambda p: _flac_frames.get(str(p), 0))
+    with mock.patch("wisper_transcribe.audio_utils.encode_flac",
+                    side_effect=_recording_encode) as m:
         yield m
 
 
@@ -151,14 +171,14 @@ def test_foreign_flac_is_never_overwritten(out, encode, probe):
 # --- recordings and orphans --------------------------------------------------
 
 def test_recording_linked_copy_is_dropped(out, encode, probe):
-    rec = seed_recording()
+    rec = seed_recording(as_flac=True)
     md = _transcript(out, "Rec", f"{rec.id}.wav")
     tid = transcript_store.locate_path(md).id
     recording_manager.link_transcript(rec.id, tid)
     report = storage_trim.apply()
     assert not (out / f"{rec.id}.wav").exists()
     assert _audio_row(md) is None
-    assert transcript_store.audio_path(md) == recording_manager.combined_wav_path_for(rec.id)
+    assert transcript_store.audio_path(md) == recording_manager.combined_path_for(rec.id)
     assert report.dropped == ["Rec"]
     encode.assert_not_called()
 
@@ -188,7 +208,7 @@ def test_orphans_only_unreferenced_recording_wavs(out, encode, probe):
 
 
 def test_registered_recording_wav_is_not_an_orphan(out, encode, probe):
-    rec = seed_recording()
+    rec = seed_recording(as_flac=True)
     md = _transcript(out, "Rec", f"{rec.id}.wav")  # an audio row names it, no link
     plan = storage_trim.plan()
     assert not [a for a in plan.actions if a.kind == storage_trim.ORPHAN]
@@ -197,18 +217,127 @@ def test_registered_recording_wav_is_not_an_orphan(out, encode, probe):
 
 
 def test_recordings_are_trimmed(out, encode, probe):
+    """A legacy recording's WAV is converted to FLAC first, then trimmed."""
     rec = seed_recording()
     seg = recording_manager.get_recording_dir(rec.id) / "combined"
     seg.mkdir()
     import shutil
     shutil.copy(recording_manager.combined_wav_path_for(rec.id), seg / "0000.wav")
     plan = storage_trim.plan()
-    assert [a.kind for a in plan.actions] == [storage_trim.TRIM_RECORDING]
+    assert [a.kind for a in plan.actions] == [storage_trim.CONVERT_RECORDING,
+                                             storage_trim.TRIM_RECORDING]
     assert seg.exists()  # a plan changes nothing
     report = storage_trim.apply()
     assert not seg.exists()
-    assert recording_manager.combined_wav_path_for(rec.id).is_file()
-    assert report.trimmed and storage_trim.plan().actions == []
+    assert recording_manager.combined_path_for(rec.id).is_file()  # now .flac
+    assert not recording_manager.combined_wav_path_for(rec.id).exists()
+    assert report.converted_recordings and report.trimmed
+    assert storage_trim.plan().actions == []
+
+
+def _combined_row(rec_id):
+    return file_registry.file_for(file_registry.Owner("recording", rec_id), "combined")
+
+
+def test_legacy_combined_wav_is_converted_in_place(out, encode, probe):
+    rec = seed_recording()
+    wav = recording_manager.combined_wav_path_for(rec.id)
+    before = wav.stat().st_size
+    assert storage_trim.plan().actions[0].kind == storage_trim.CONVERT_RECORDING
+
+    report = storage_trim.apply()
+
+    flac = recording_manager.combined_path_for(rec.id)
+    assert flac.is_file() and not wav.exists()
+    assert _combined_row(rec.id).path == flac
+    assert rec.id in report.converted_recordings
+    assert storage_trim.plan().actions == []  # idempotent
+
+
+def test_a_zero_frame_combined_wav_blocks_conversion(out, encode, probe):
+    rec = seed_recording()
+    wav = recording_manager.combined_wav_path_for(rec.id)
+    import wave
+    with wave.open(str(wav), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+    report = storage_trim.apply()
+    assert wav.is_file() and not recording_manager.combined_path_for(rec.id).exists()
+    assert report.errors and not report.converted_recordings
+    assert _combined_row(rec.id).path == wav
+
+
+def test_a_truncated_combined_wav_blocks_conversion(out, encode, probe):
+    rec = seed_recording()
+    wav = recording_manager.combined_wav_path_for(rec.id)
+    wav.write_bytes(b"RIFF" + b"\x00" * 10)  # an unreadable header
+    report = storage_trim.apply()
+    assert wav.is_file() and not recording_manager.combined_path_for(rec.id).exists()
+    assert report.errors and not report.converted_recordings
+
+
+def test_a_frame_count_mismatch_keeps_the_wav(out, encode, probe):
+    """The FLAC probe disagrees with the WAV, so the conversion is refused."""
+    rec = seed_recording()
+    wav = recording_manager.combined_wav_path_for(rec.id)
+    with mock.patch("wisper_transcribe.audio_utils.probe_frames", return_value=1):
+        report = storage_trim.apply()
+    assert wav.is_file() and not recording_manager.combined_path_for(rec.id).exists()
+    assert any("verify" in e for e in report.errors)
+    assert _combined_row(rec.id).path == wav
+
+
+def test_conversion_updates_the_combined_row_size(out, encode, probe):
+    rec = seed_recording()
+    recording_manager.register_capture_files(rec.id)
+    wav = recording_manager.combined_wav_path_for(rec.id)
+    before = _combined_row(rec.id)
+    assert before.path == wav and before.size == wav.stat().st_size
+    storage_trim.apply()
+    after = _combined_row(rec.id)
+    flac = recording_manager.combined_path_for(rec.id)
+    assert after.path == flac and after.size == flac.stat().st_size
+
+
+def test_a_crash_leftover_flac_still_plans_the_conversion(out, encode, probe):
+    """A .flac beside a .wav whose combined row still names the .wav (a crash
+    before the row re-pointed) is re-encoded, and the WAV is deleted after."""
+    rec = seed_recording()
+    recording_manager.register_capture_files(rec.id)
+    wav = recording_manager.combined_wav_path_for(rec.id)
+    leftover = recording_manager.combined_path_for(rec.id)
+    leftover.write_bytes(b"partial")  # a crash's half-written FLAC
+    assert _combined_row(rec.id).path == wav  # its row still names the WAV
+    plan = storage_trim.plan()
+    assert [a.kind for a in plan.actions] == [storage_trim.CONVERT_RECORDING]
+    storage_trim.apply()
+    assert leftover.read_bytes() == b"flac" and not wav.exists()
+    assert _combined_row(rec.id).path == leftover
+
+
+def test_an_active_capture_is_not_converted(out, encode, probe):
+    rec = seed_recording(status="recording")
+    plan = storage_trim.plan()
+    assert not [a for a in plan.actions if a.kind == storage_trim.CONVERT_RECORDING]
+
+
+def test_trim_still_runs_after_a_recording_conversion(out, encode, probe):
+    rec = seed_recording(source="local")
+    rec_dir = recording_manager.get_recording_dir(rec.id)
+    seg = rec_dir / "combined"
+    seg.mkdir()
+    import shutil
+    shutil.copy(recording_manager.combined_wav_path_for(rec.id), seg / "0000.wav")
+    mic = rec_dir / "per-user" / "mic"
+    mic.mkdir(parents=True)
+    shutil.copy(recording_manager.combined_wav_path_for(rec.id), mic / "0000.wav")
+
+    report = storage_trim.apply()
+
+    assert report.converted_recordings and report.trimmed
+    assert not seg.exists() and not (rec_dir / "per-user").exists()
+    assert recording_manager.combined_path_for(rec.id).is_file()
 
 
 # --- dry run and idempotence -------------------------------------------------

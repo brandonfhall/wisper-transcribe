@@ -560,7 +560,7 @@ class BotManager:
             recording.status = "completed"
             recording.ended_at = datetime.now(timezone.utc)
 
-        # combined.wav's path is derived from the layout, so only a status
+        # combined.flac's path is derived from the layout, so only a status
         # change needs writing; a terminal status saved by a disconnect
         # handler (failed/degraded) is kept.
         if became_completed:

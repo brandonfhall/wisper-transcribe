@@ -171,6 +171,22 @@ def test_a_flac_only_recording_loads_with_combined_path(tmp_path):
     assert load_recordings(tmp_path)[rec.id].combined_path == flac
 
 
+def test_encode_combined_flac_verifies_and_returns_the_path(tmp_path):
+    rec = _make_recording(tmp_path)
+    wav = rm.combined_wav_path_for(rec.id, tmp_path)
+    _write_wav(wav, n_frames=800)
+    assert rm.encode_combined_flac(rec.id, wav, tmp_path) == rm.combined_path_for(rec.id, tmp_path)
+
+
+def test_encode_combined_flac_keeps_the_wav_when_verification_fails(tmp_path, monkeypatch):
+    rec = _make_recording(tmp_path)
+    wav = rm.combined_wav_path_for(rec.id, tmp_path)
+    _write_wav(wav, n_frames=800)
+    monkeypatch.setattr("wisper_transcribe.audio_utils.probe_frames", lambda p: 1)  # mismatch
+    assert rm.encode_combined_flac(rec.id, wav, tmp_path) is None
+    assert wav.is_file() and not rm.combined_path_for(rec.id, tmp_path).exists()
+
+
 def test_save_refuses_off_layout_paths(tmp_path):
     rec = _make_recording(tmp_path)
     rec.combined_path = tmp_path / "elsewhere.wav"

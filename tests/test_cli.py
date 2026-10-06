@@ -1978,6 +1978,48 @@ def _fake_flac(src, dst):
     Path(dst).write_bytes(b"flac")
 
 
+_recording_flac_frames: dict[str, int] = {}
+
+
+def _recording_flac_encode(src, dst):
+    import wave
+
+    try:
+        with wave.open(str(src), "rb") as wf:
+            _recording_flac_frames[str(dst)] = wf.getnframes()
+    except Exception:
+        _recording_flac_frames[str(dst)] = 0
+    Path(dst).write_bytes(b"flac")
+
+
+def test_storage_trim_shows_and_converts_a_legacy_recording(tmp_path, monkeypatch):
+    from tests._seed import seed_recording
+    from wisper_transcribe import recording_manager
+
+    out = _trim_world(tmp_path, monkeypatch)
+    rec = seed_recording()
+    wav = recording_manager.combined_wav_path_for(rec.id)
+
+    dry = CliRunner().invoke(main, ["storage", "trim"])
+    assert dry.exit_code == 0, dry.output
+    lines = dry.output.splitlines()
+    assert any(line.startswith("convert recording to FLAC") and "combined.wav" in line
+               for line in lines)
+    assert any(line.startswith("Recordings") and "combined.wav → combined.flac" in line
+               for line in lines)
+    assert wav.is_file()
+
+    _recording_flac_frames.clear()
+    with patch("wisper_transcribe.audio_utils.encode_flac", side_effect=_recording_flac_encode), \
+         patch("wisper_transcribe.audio_utils.probe_format", return_value=(16000, 1)), \
+         patch("wisper_transcribe.audio_utils.probe_frames",
+               side_effect=lambda p: _recording_flac_frames.get(str(p), 0)):
+        applied = CliRunner().invoke(main, ["storage", "trim", "--apply"])
+    assert applied.exit_code == 0, applied.output
+    assert "converted 1 audio and 1 recording(s)" in applied.output
+    assert recording_manager.combined_path_for(rec.id).is_file() and not wav.exists()
+
+
 def test_storage_trim_dry_run_output_and_no_changes(tmp_path, monkeypatch):
     out = _trim_world(tmp_path, monkeypatch)
     result = CliRunner().invoke(main, ["storage", "trim"])

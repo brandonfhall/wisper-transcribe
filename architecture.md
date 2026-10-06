@@ -50,7 +50,7 @@ src/wisper_transcribe/
 ├── models.py            Dataclasses shared across modules (segments, profiles, campaigns, recordings, LLM results)
 ├── campaign_manager.py  Campaign CRUD, rosters, Discord ID binding, transcript association and order (tables campaigns, campaign_members; a transcript's `campaign_id`/`position`)
 ├── campaign_folders.py  Campaign folder names, `check_available`, claiming a folder (`ensure_folder`), `rename_campaign`/`finish_folder_rename`, reserved-name and clutter checks
-├── storage_trim.py      `wisper storage trim`: plan() reads, apply() moves sessions into campaign folders, converts audio to FLAC, and deletes redundant copies (see "Storage trim")
+├── storage_trim.py      `wisper storage trim`: plan() reads, apply() moves sessions into campaign folders, converts audio and legacy recording WAVs to FLAC, and deletes redundant copies (see "Storage trim")
 ├── recording_manager.py Recording CRUD, segment manifest, markers, crash recovery
 ├── refine.py            LLM vocabulary correction + unknown-speaker suggestions
 ├── summarize.py         LLM session notes → Obsidian-ready `.summary.md` sidecar
@@ -609,12 +609,14 @@ move; the output root is never created here, and an absent one means
 2. Finish any pending campaign folder rename, then for each misplaced session (`transcript_store.needs_attention().misplaced`) move its files into its campaign's folder with `move_files_home`, and adopt each journal still at `<data>/campaigns/<slug>/journal.md` with `journal.adopt_legacy_journal`. A clash, a reserved name, or a blocked folder is reported and skipped; an unavailable transcripts folder stops organizing. Sessions of a campaign whose folder is taken, mid-rename, or missing aren't misplaced (they have their own Needs-attention entries), so they get no action and the plan lists a blocked-campaign line instead.
 3. After a successful organize, `plan()` runs again so the conversion actions name the files' new paths. For each transcript with an `audio` row whose file exists: store the voice embeddings it lacks, then shrink the audio. The action carries the transcript's id; its `.md` and target `<stem>.flac` come from `locate(id)`.
 4. Delete orphaned `<recording-id>.wav` files in the output root.
-5. `trim_recording_audio` for each finished recording.
+5. Convert each finished recording's legacy `combined.wav` to a verified `combined.flac` (a no-op once only the `.flac` remains).
+6. `trim_recording_audio` for each finished recording.
 
 Rules:
 - **Embeddings before conversion.** Backfill reads the original audio, so it runs first. A failed backfill is reported and the conversion still proceeds.
 - **Conversion.** A transcript linked to a recording whose combined track (`.flac` or a legacy `.wav`) exists drops its copy (`set_audio(None)`). A `<stem>.flac` at 16 kHz mono (`audio_utils.probe_format`; an unprobeable file counts as wrong) is kept. Anything else is encoded to `<stem>.flac`, in place through a temp name when it already has that name. A failed encode leaves the original and its row.
-- **Only files tied to a row are deleted.** Those are the replaced `audio` files, plus a `<uuid>.wav` whose uuid is a `recordings.id` and which no row names. A `<stem>.<ext>` beside a CLI transcript can be the user's own file, so it is never matched.
+- **Recording conversion.** `plan()` adds a `CONVERT_RECORDING` action for every recording not in an active capture whose combined file is a legacy `combined.wav` (a `.flac` beside it is preferred, so a re-run after a crash re-encodes). `apply()` verifies the WAV has frames, encodes to `combined.flac` (atomic replace), verifies 16 kHz mono and frame count equal to the WAV's, re-points the `combined` row (`file_registry.repoint`, path + size/mtime) in one transaction, commits, then deletes the WAV. Any failure removes the partial `.flac`, keeps the WAV and its row, appends an error, and continues. It runs before the trim, so the trim then verifies the FLAC.
+- **Only files tied to a row are deleted.** Those are the replaced `audio` files, a converted recording's `combined.wav`, plus a `<uuid>.wav` whose uuid is a `recordings.id` and which no row names. A `<stem>.<ext>` beside a CLI transcript can be the user's own file, so it is never matched.
 - **No server alongside `--apply`.** `db.ServerLock` is an exclusive non-blocking OS lock on `<data>/server.lock` (`flock` on POSIX, never `lockf`, whose record locks don't conflict within one process; `msvcrt.locking` on Windows). `wisper server` takes it in the parent process before its first `db.connect()`; `--apply` takes it before doing anything. The lease table can't serve here: any CLI `connect()` writes a row and never releases it.
 - **Container beside a host process.** In a container that crosses the Docker Desktop VM, `--apply` refuses on a fresh `host` lease read from `db.status()`; a lease from its own runtime never blocks.
 

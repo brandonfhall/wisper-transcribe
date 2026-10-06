@@ -130,7 +130,7 @@ Older uploads keep the whole original file (often a video), and older recordings
 2. Run `wisper storage trim` and review the list. Nothing is changed.
 3. Run `wisper storage trim --apply`.
 
-Each session moves into its campaign's folder with its summary, speaker data, clips, and audio, each transcript keeps one compact `<name>.flac`, and each recording keeps its combined track (`combined.flac`, or a legacy `combined.wav`). See [cli-reference.md](cli-reference.md#wisper-storage).
+Each session moves into its campaign's folder with its summary, speaker data, clips, and audio, each transcript keeps one compact `<name>.flac`, and each recording keeps its combined track (`combined.flac`, or a legacy `combined.wav`, which `wisper storage trim --apply` converts). See [cli-reference.md](cli-reference.md#wisper-storage).
 
 ---
 

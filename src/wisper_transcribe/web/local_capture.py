@@ -578,7 +578,7 @@ class LocalCaptureManager:
             recording.status = "completed"
             recording.ended_at = datetime.now(timezone.utc)
 
-        # combined.wav's path is derived from the layout; only the status
+        # combined.flac's path is derived from the layout; only the status
         # change needs writing, and a terminal status set earlier is kept.
         if became_completed:
             update_recording_status(recording.id, "completed", self._data_dir,
