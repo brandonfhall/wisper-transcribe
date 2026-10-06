@@ -708,7 +708,8 @@ Two managers write the same on-disk layout: `BotManager` (Discord, via a Java si
 - Two capture threads only fill per-track byte FIFOs. One tick thread every ~20 ms drains a chunk from each (silence-padding a starved track; draining surplus when a FIFO passes ~2 s), writes both tracks, and int32-sums them into the combined writer.
 - `stop_session()` is the only finalizer, so a finished ticker and an external stop can't both finalize. Like Discord's `_finalise()`, it joins the combined segments into `combined.wav` and stores a verified `combined.flac`, keeping the WAV if the encode fails.
 - `enumerate_devices()` returns `available: False` rather than raising when `soundcard` is missing or fails, and reports `default_microphone_id`/`default_loopback_id` so the Record page preselects the OS defaults.
-- A dead capture thread (e.g. unplugged USB mic) marks the session `degraded`.
+- **Switch device:** `switch_device(track, device_id)` restarts one track's capture thread on a new device without disturbing the session. Each track's loop holds its own stop `Event` (a generation token) checked before every FIFO push, so a thread a switch retires can never push after the switch even if `record()` was mid-block; the old thread is joined with a short timeout and the new one starts on the same FIFO. A session gone `degraded` from that track's device dying returns to `recording` through `update_recording_status()`. `current_device_ids()` feeds the panel's pre-selection. Runs off the request thread.
+- A dead capture thread (e.g. unplugged USB mic) marks the session `degraded` — but not a track a `switch_device()` already retired.
 - `set_live_sink(callback)` taps the mixed chunks for live transcription; a failing sink disables itself.
 - Level gauge: per-track peak RMS since the last read (`get_and_reset_levels()`), so transients between ~1 s polls aren't missed.
 - `_active_recording` is not cleared after a session; check `.status`.
@@ -729,6 +730,7 @@ Two managers write the same on-disk layout: `BotManager` (Discord, via a Java si
 **JSON API**
 - `GET /api/record/status` — `{"active": false}` or the active recording + `"active": true`; backs the global banner.
 - `GET /api/record/devices`, `POST /api/record/start-local` / `stop-local` — device ids resolve to names server-side.
+- `POST /api/record/switch-device` — `track` (`mic`/`system`) + `device_id` (must be in that track's enumeration) restarts one local track on a new device; a Discord session and an unknown device are generic 400s.
 - `POST /api/record/start` / `stop` — Discord sessions.
 - `GET /api/record/channels` — guilds and voice channels the bot can see; fills the Record page's guild/voice-channel picker, with raw-ID entry as a fallback when it errors (`no_token`/`invalid_token`/`fetch_failed`).
 - `POST /api/record/live-noise-floor` — updates the running `JOB_LIVE` job's noise floor.
@@ -737,7 +739,7 @@ Two managers write the same on-disk layout: `BotManager` (Discord, via a Java si
 - `_current_active_recording()` is the one resolver for "which manager has the active session".
 
 **HTML**
-- `GET /record` — start forms, active-session toolbar, live ticker, noise-floor slider, level gauges (0–2000 RMS; the slider is 0–1000 so speech doesn't pin the bar). Speaker meters render only for Discord (local sessions have no per-participant data).
+- `GET /record` — start forms, active-session toolbar, live ticker, noise-floor slider, level gauges (0–2000 RMS; the slider is 0–1000 so speech doesn't pin the bar), and a **Switch device** card for local sessions (per-track device selects, current device pre-selected). Speaker meters render only for Discord (local sessions have no per-participant data).
 - `GET /record/sse` — status stream; local sessions include `mic_rms`/`system_rms`.
 - `POST /record/marker` — `fetch()`, not a form, so the ticker keeps its scroll position.
 - `GET /recordings` — list with bulk-select delete. Active and degraded rows have no checkbox. Bulk submit uses a separate hidden form because each row already contains its own form.

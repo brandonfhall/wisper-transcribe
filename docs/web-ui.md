@@ -167,6 +167,7 @@ While recording:
 
 - **Live preview** — lines appear a few seconds after each pause, labelled **You** (mic) or **Other** (system audio) by whichever track is louder. It is a draft, not diarization: several people on the system side all appear as "Other".
 - **Noise floor** slider and **level gauges** — audio below the floor is ignored, so room noise isn't transcribed as speech. A gauge turns green when its level clears the floor. Changes apply immediately.
+- **Switch device** — change the microphone or system-audio device without stopping: pick it in the active-session panel's **Switch device** card and click **Switch**. The session keeps recording (segments, mix, and live transcript continue) with a brief gap on the switched track. If a track's device died and left the session **DEGRADED**, switching that track back to a working device returns it to **RECORDING**.
 - **Add marker** — bookmarks the current moment; markers are listed on the recording's detail page.
 
 On CPU-only machines, use `base` or `small` so the preview keeps up.

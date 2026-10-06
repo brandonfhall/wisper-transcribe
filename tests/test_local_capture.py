@@ -9,6 +9,7 @@ package, audio devices, or Win32 calls anywhere in this file.
 from __future__ import annotations
 
 import sys
+import threading
 import types
 import wave
 from unittest.mock import MagicMock
@@ -369,6 +370,142 @@ def test_mark_degraded_does_not_override_terminal_status(tmp_path):
     mgr._mark_degraded()
 
     assert rec.status == "completed"  # not overwritten by a late/spurious call
+
+
+# ---------------------------------------------------------------------------
+# switch_device() -- change one track's input mid-session
+# ---------------------------------------------------------------------------
+
+def _wire_fifo(mgr):
+    mgr._fifos = {"mic": _ByteFifo(), "system": _ByteFifo()}
+
+
+class _CountingFifo:
+    """Minimal stand-in for _ByteFifo that counts pushes (no bytes)."""
+
+    def __init__(self):
+        self.pushes = 0
+
+    def push(self, data):
+        if data:
+            self.pushes += 1
+
+
+def test_capture_loop_never_pushes_after_its_event_is_set(tmp_path):
+    """The core concurrency contract: once the track's event is set (a switch
+    retired this thread), no further push reaches the FIFO -- even if the
+    switch landed while the loop was between blocks."""
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path, capture_factory=scripted_capture_factory({}), ticker=instant_ticker(0),
+    )
+    event = threading.Event()
+
+    def factory(device_id, samplerate):
+        yield _block()       # pushed: event not set yet
+        event.set()          # simulates switch_device() running now
+        yield _block()       # must NOT be pushed
+
+    mgr._capture_factory = factory
+    fifo = _CountingFifo()
+    mgr._capture_loop("mic", "mic-dev", fifo, event)
+
+    assert event.is_set()
+    assert fifo.pushes == 1
+
+
+def test_capture_loop_pushes_normally_before_any_switch(tmp_path):
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path, capture_factory=scripted_capture_factory({}), ticker=instant_ticker(0),
+    )
+    _wire_fifo(mgr)
+    event = threading.Event()
+
+    def factory(device_id, samplerate):
+        yield _block()
+
+    mgr._capture_factory = factory
+    mgr._capture_loop("mic", "mic-dev", mgr._fifos["mic"], event)
+    assert mgr._fifos["mic"].available() > 0
+
+
+def test_switch_device_restarts_track_and_records_new_device(tmp_path):
+    blocks = {"mic-dev": [_block()], "mic-dev2": [_block()]}
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path, capture_factory=scripted_capture_factory(blocks), ticker=instant_ticker(0),
+    )
+    rec = mgr.start_session(None, "mic-dev", "sys-dev")
+    old = mgr._track_threads["mic"]
+    old.join(timeout=5.0)
+
+    mgr.switch_device("mic", "mic-dev2")
+
+    assert mgr._track_device_ids["mic"] == "mic-dev2"
+    assert mgr._track_threads["mic"] is not old
+    assert mgr.current_device_ids() == {"mic": "mic-dev2", "system": "sys-dev"}
+    assert rec.status == "recording"  # the session continues
+    mgr._track_threads["mic"].join(timeout=5.0)
+    mgr.stop_session()
+
+
+def test_switch_device_returns_a_degraded_session_to_recording(tmp_path):
+    from wisper_transcribe.recording_manager import load_recordings
+
+    def factory(device_id, samplerate):
+        if device_id == "bad-mic":
+            raise RuntimeError("mic unplugged")
+        return iter([(_block(), 48000)])
+
+    mgr = LocalCaptureManager(data_dir=tmp_path, capture_factory=factory, ticker=instant_ticker(0))
+    rec = mgr.start_session(None, "bad-mic", "sys-dev")
+    for t in list(mgr._track_threads.values()):
+        t.join(timeout=5.0)
+    assert rec.status == "degraded"  # the dead mic degraded the session
+
+    mgr.switch_device("mic", "good-mic")
+
+    assert rec.status == "recording"
+    assert load_recordings(tmp_path)[rec.id].status == "recording"
+    mgr._track_threads["mic"].join(timeout=5.0)
+    mgr.stop_session()
+
+
+def test_switch_device_unknown_track_raises_and_changes_nothing(tmp_path):
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path, capture_factory=scripted_capture_factory({}), ticker=instant_ticker(0),
+    )
+    mgr.start_session(None, "mic-dev", "sys-dev")
+    with pytest.raises(ValueError):
+        mgr.switch_device("webcam", "x")
+    assert mgr._track_device_ids == {"mic": "mic-dev", "system": "sys-dev"}
+    mgr.stop_session()
+
+
+def test_switch_device_with_no_active_session_raises(tmp_path):
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path, capture_factory=scripted_capture_factory({}), ticker=instant_ticker(0),
+    )
+    with pytest.raises(RuntimeError):
+        mgr.switch_device("mic", "mic-dev")
+
+
+def test_switch_device_keeps_writing_segments_for_the_session(tmp_path):
+    """A switch only restarts one track's thread; the tick thread keeps writing
+    the combined manifest with no interruption."""
+    from wisper_transcribe.recording_manager import load_recordings
+
+    n_ticks = 6
+    blocks = {"mic-dev": [_block() for _ in range(n_ticks)]}
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path, capture_factory=scripted_capture_factory(blocks), ticker=instant_ticker(n_ticks),
+    )
+    rec = mgr.start_session(None, "mic-dev", "sys-dev")
+    mgr.switch_device("mic", "mic-dev")  # same id is a valid restart
+    _run_session_to_completion(mgr)
+
+    loaded = load_recordings(tmp_path)[rec.id]
+    assert loaded.status == "completed"
+    assert len(loaded.segment_manifest) >= 1
+
 
 
 # ---------------------------------------------------------------------------

@@ -216,6 +216,26 @@
       <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:8px;line-height:1.5">
         Bar shows the live signal on each track; the rose line marks the noise floor. Green means it's clearing the floor and reaching the transcript.
       </div>
+
+      <!-- Switch a track's input device mid-session. -->
+      <div style="border-top:1px solid var(--color-rule);margin-top:16px;padding-top:14px">
+        <div class="mono-kicker" style="margin-bottom:10px">Switch device</div>
+        {% for track, label, list in [("mic", "Mic", local_devices.microphones), ("system", "System", local_devices.loopbacks)] %}
+        <div style="margin-bottom:10px">
+          <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-bottom:4px">{{ label }}</div>
+          <select id="switch-select-{{ track }}" data-track="{{ track }}"
+                  style="width:100%;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:7px 9px;border-radius:5px;font-size:12px;font-family:var(--font-sans)">
+            {% for d in list %}
+            <option value="{{ d.id }}" {% if d.id == current_device_ids.get(track) %}selected{% endif %}>{{ d.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        {% endfor %}
+        <button type="button" id="switch-device-btn" class="btn btn-secondary" style="width:100%;justify-content:center">Switch</button>
+        <div id="switch-device-status" style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);margin-top:8px;line-height:1.5">
+          Switched tracks pick up on the new device; the session keeps recording.
+        </div>
+      </div>
     </div>
     {% endif %}
 
@@ -698,6 +718,40 @@
     window.updateThresholdMarkers && window.updateThresholdMarkers(v);
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(function() { send(v); }, 200);
+  });
+})();
+
+// Switch a track's input device mid-session via POST /api/record/switch-device.
+// The session keeps recording; the selected track restarts on the new device.
+(function(){
+  var btn = document.getElementById('switch-device-btn');
+  if (!btn) return;
+  var statusEl = document.getElementById('switch-device-status');
+
+  btn.addEventListener('click', function() {
+    btn.disabled = true;
+    var requests = [];
+    ['mic', 'system'].forEach(function(track) {
+      var sel = document.getElementById('switch-select-' + track);
+      if (sel && sel.value) {
+        requests.push(fetch('/api/record/switch-device', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({track: track, device_id: sel.value}),
+        }).then(function(r) { return r.ok; }));
+      }
+    });
+    Promise.all(requests)
+      .then(function(oks) {
+        if (statusEl) {
+          statusEl.textContent = oks.every(function(ok) { return ok; })
+            ? 'Switched.' : 'Couldn\'t switch — try again.';
+        }
+      })
+      .catch(function() {
+        if (statusEl) statusEl.textContent = 'Couldn\'t switch — try again.';
+      })
+      .finally(function() { btn.disabled = false; });
   });
 })();
 </script>

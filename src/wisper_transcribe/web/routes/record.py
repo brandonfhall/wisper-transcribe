@@ -246,6 +246,48 @@ async def record_devices(request: Request):
     return JSONResponse(enumerate_devices())
 
 
+@router.post("/api/record/switch-device")
+async def record_switch_device(request: Request):
+    """Switch one track of the active local session to another device.
+
+    ``track`` is ``mic`` or ``system``; ``device_id`` must be in this track's
+    ``enumerate_devices()`` list. The session keeps recording: segments, the
+    combined track, the live transcript, and the Recording all continue, with
+    a short gap on the switched track. Errors are generic codes only.
+    """
+    lcm = get_local_capture_manager(request)
+    if lcm is None:
+        return JSONResponse({"detail": "local capture unavailable"}, status_code=503)
+    rec = lcm.active_recording
+    if rec is None or rec.status not in ACTIVE_STATUSES or rec.source != "local":
+        return JSONResponse({"detail": "no active local session"}, status_code=400)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"detail": "invalid JSON body"}, status_code=400)
+
+    track = str(body.get("track", ""))
+    device_id = str(body.get("device_id", ""))
+    if track not in ("mic", "system"):
+        return JSONResponse({"detail": "invalid track"}, status_code=400)
+
+    devices = enumerate_devices()
+    if not devices["available"]:
+        return JSONResponse({"detail": "local capture unavailable"}, status_code=503)
+    allowed = devices["microphones"] if track == "mic" else devices["loopbacks"]
+    if not any(d.get("id") == device_id for d in allowed):
+        return JSONResponse({"detail": "unknown device"}, status_code=400)
+
+    # Joins a capture thread with a timeout -- off the event loop.
+    try:
+        await asyncio.to_thread(lcm.switch_device, track, device_id)
+    except (RuntimeError, ValueError):
+        return JSONResponse({"detail": "switch failed"}, status_code=409)
+
+    return JSONResponse(_recording_to_dict(rec))
+
+
 # int16 RMS -- generous headroom above real speech levels observed in
 # testing (~250-1440), just to keep a fat-fingered slider value sane.
 _MAX_NOISE_FLOOR_RMS = 5000.0
@@ -581,6 +623,7 @@ async def record_page(request: Request) -> HTMLResponse:
     campaigns = load_campaigns(data_dir)
     cfg = load_config()
     active_recording = _current_active_recording(request)
+    lcm = get_local_capture_manager(request)
     return templates.TemplateResponse(
         request,
         "record.html",
@@ -592,6 +635,7 @@ async def record_page(request: Request) -> HTMLResponse:
             "default_guild": cfg.get("discord_default_guild", ""),
             "default_channel": cfg.get("discord_default_channel", ""),
             "local_devices": enumerate_devices(),
+            "current_device_ids": lcm.current_device_ids() if lcm is not None else {},
             "speaker_profiles": load_profiles(data_dir),
             "default_mic_profile_key": cfg.get("default_mic_profile_key", ""),
         },
