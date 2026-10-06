@@ -2063,6 +2063,18 @@ def test_storage_trim_organizes_sessions_into_campaign_folders(tmp_path, monkeyp
     assert "Moved 1 into campaign folders" in applied.output
     assert (out / folder / "Stray.md").is_file() and not md.exists()
 
+
+def test_storage_trim_move_count_names_journals_apart():
+    from wisper_transcribe.cli import _move_count
+    from wisper_transcribe.storage_trim import ORGANIZE, Action
+
+    def act(note=""):
+        return Action(ORGANIZE, Path("x.md"), 1, note=note)
+
+    assert _move_count([act()]) == "1 session"
+    assert _move_count([act(), act(), act("journal")]) == "2 sessions and 1 journal"
+    assert _move_count([act("journal"), act("journal")]) == "2 journals"
+
     again = CliRunner().invoke(main, ["storage", "trim"])
     assert again.exit_code == 0 and "Nothing to trim." in again.output
 

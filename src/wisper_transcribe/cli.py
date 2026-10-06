@@ -2506,6 +2506,15 @@ def storage_trim(apply_: bool, device: str):
         click.echo("Dry run: nothing was changed. Run again with --apply to do this.")
 
 
+def _move_count(moves) -> str:
+    """``"3 sessions and 1 journal"``; journals are organize actions too."""
+    journals = sum(1 for a in moves if a.note == "journal")
+    sessions = len(moves) - journals
+    parts = [f"{n} {word}{'s' if n != 1 else ''}"
+             for n, word in ((sessions, "session"), (journals, "journal")) if n]
+    return " and ".join(parts)
+
+
 def _echo_plan(current) -> None:
     from .storage_trim import KIND_LABELS, ORGANIZE
 
@@ -2520,8 +2529,7 @@ def _echo_plan(current) -> None:
                    "see Needs attention)")
     if current.actions:
         if current.move_bytes:
-            n = len(current.moves)
-            click.echo(f"Move {n} session{'s' if n != 1 else ''} into their campaign "
+            click.echo(f"Move {_move_count(current.moves)} into their campaign "
                        f"folders ({_fmt_bytes(current.move_bytes)}, nothing deleted)")
         if current.total_bytes:
             click.echo(f"{'Deletions free':<16} {_fmt_bytes(current.total_bytes):>10}")

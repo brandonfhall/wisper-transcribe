@@ -870,7 +870,7 @@ def _legacy_campaign(tmp_path, folded=("s1", "s2"), text=LEGACY_TEXT):
     legacy = journal.legacy_journal_path("my-game", tmp_path)
     legacy.parent.mkdir(parents=True)
     legacy.write_text(text, encoding="utf-8")
-    sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    sha = hashlib.sha256(legacy.read_bytes()).hexdigest()
     with db.transaction(tmp_path) as conn:
         conn.execute("INSERT INTO journal_entries SELECT id, campaign_id, 'now' FROM transcripts "
                      "WHERE campaign_id IS NOT NULL")
@@ -951,7 +951,7 @@ def test_a_legacy_pending_file_whose_hash_matches_is_the_one_adopted(tmp_path, o
     pending.write_text(newer, encoding="utf-8")
     with db.transaction(tmp_path) as conn:
         conn.execute("UPDATE campaigns SET journal_sha256 = ?",
-                     (hashlib.sha256(newer.encode()).hexdigest(),))
+                     (hashlib.sha256(pending.read_bytes()).hexdigest(),))
     assert journal.adopt_legacy_journal("my-game", tmp_path) == "adopted"
     assert (out_dir / "My Game" / "My Game Journal.md").read_text(encoding="utf-8") == newer
     assert not legacy.exists() and not pending.exists()

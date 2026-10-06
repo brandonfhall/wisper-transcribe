@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import unicodedata
 from pathlib import Path
 
@@ -393,8 +394,9 @@ def test_rename_campaign_rewrites_prefixes_with_glob_characters():
 
     cid = _seed.seed_campaign("Hanataz", claimed=True)
     folder = get_output_root() / "Hanataz"
-    tid = _seed.seed_transcript("S [1] * ?.md", campaign="hanataz")
-    name = "S [1] * ?.md"
+    # Windows forbids * and ? in file names; [ is the one that breaks GLOB anyway.
+    name = "S [1].md" if sys.platform == "win32" else "S [1] * ?.md"
+    tid = _seed.seed_transcript(name, campaign="hanataz")
     (folder / name).write_text("x", encoding="utf-8")
     file_registry.add(folder / name, kind="transcript",
                       owner=file_registry.Owner("transcript", tid), output_dir=get_output_root())
