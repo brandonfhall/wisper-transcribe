@@ -1,16 +1,17 @@
 """LM Studio client — local LLM via OpenAI-compatible streaming REST API.
 
 LM Studio exposes an OpenAI-compatible server (default http://localhost:1234).
-Uses ``POST /v1/chat/completions`` with ``stream=True`` and SSE parsing so
-long transcripts never hit a read timeout.  A short connect/write timeout
-guards against the server not being reachable.
+Uses ``POST /v1/chat/completions`` with ``stream=True`` and SSE parsing.  A
+short connect/write timeout guards against the server not being reachable, and
+the read timeout bounds the idle gap between chunks, so a stalled stream fails
+rather than blocking forever.
 """
 from __future__ import annotations
 
 import json
 import sys
 
-from .base import LLMClient, _strip_json_fence
+from .base import LLMClient, _STREAM_IDLE_TIMEOUT, _strip_json_fence
 from .errors import LLMResponseError, LLMUnavailableError
 
 _DOT_INTERVAL = 50   # print a progress dot every N content tokens
@@ -30,8 +31,9 @@ class LMStudioClient(LLMClient):
         """POST to /v1/chat/completions with SSE streaming; return full content.
 
         Prints progress dots to stderr while the model generates.  Uses
-        ``connect=self.timeout`` but ``read=None`` so generation on slow
-        hardware never times out mid-stream.
+        ``connect=self.timeout`` and ``read=_STREAM_IDLE_TIMEOUT``; the read
+        timeout is per chunk, so a server that stalls without sending bytes
+        fails instead of blocking forever.
         """
         try:
             import httpx
@@ -44,7 +46,7 @@ class LMStudioClient(LLMClient):
         stream_payload = dict(payload)
         stream_payload["stream"] = True
 
-        timeout = httpx.Timeout(connect=self.timeout, read=None,
+        timeout = httpx.Timeout(connect=self.timeout, read=_STREAM_IDLE_TIMEOUT,
                                 write=self.timeout, pool=10.0)
 
         parts: list[str] = []
@@ -109,6 +111,15 @@ class LMStudioClient(LLMClient):
                 f"Cannot connect to LM Studio at {self.endpoint}. "
                 f"Is the local server running? Enable it in LM Studio → "
                 f"Developer → Local Server."
+            ) from exc
+        except httpx.ReadTimeout as exc:
+            if token_count > 0:
+                sys.stderr.write("\n")
+                sys.stderr.flush()
+            minutes = int(_STREAM_IDLE_TIMEOUT // 60)
+            raise LLMUnavailableError(
+                f"No response from {self.model} for {minutes} minutes; "
+                f"the provider may be overloaded. Try again or pick another model."
             ) from exc
         except httpx.HTTPError as exc:
             if token_count > 0:

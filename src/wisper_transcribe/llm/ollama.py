@@ -1,19 +1,18 @@
 """Ollama client — local LLM via httpx streaming REST wrapper.
 
-Uses the ``/api/chat`` endpoint with ``stream=True`` to avoid read-timeouts
-on long transcripts.  Each chunk is a newline-delimited JSON object; tokens
-are accumulated and the full content string is returned once the final chunk
-arrives.  A connect/write timeout (``self.timeout``) guards against Ollama
-not being reachable, but there is intentionally no per-chunk read timeout —
-the model delivers tokens continuously so there is no long idle gap between
-bytes.
+Uses the ``/api/chat`` endpoint with ``stream=True``.  Each chunk is a
+newline-delimited JSON object; tokens are accumulated and the full content
+string is returned once the final chunk arrives.  A connect/write timeout
+(``self.timeout``) guards against Ollama not being reachable, and the read
+timeout bounds the idle gap between chunks, so a stalled stream fails rather
+than blocking forever.
 """
 from __future__ import annotations
 
 import json
 import sys
 
-from .base import LLMClient, _strip_json_fence
+from .base import LLMClient, _STREAM_IDLE_TIMEOUT, _strip_json_fence
 from .errors import LLMResponseError, LLMUnavailableError
 
 _DOT_INTERVAL = 50   # print a progress dot every N content tokens
@@ -36,8 +35,9 @@ class OllamaClient(LLMClient):
 
         Prints ``  Asking Ollama (model)… ·····`` to stderr while the model
         generates so the user knows progress is being made.  Uses
-        ``connect=self.timeout`` but ``read=None`` so a slow model on a long
-        transcript never times out mid-stream.
+        ``connect=self.timeout`` and ``read=_STREAM_IDLE_TIMEOUT``; the read
+        timeout is per chunk, so a model that stalls without sending bytes
+        fails instead of blocking forever.
         """
         try:
             import httpx
@@ -50,8 +50,8 @@ class OllamaClient(LLMClient):
         stream_payload = dict(payload)
         stream_payload["stream"] = True
 
-        # Short connect/write timeout; no read timeout while streaming.
-        timeout = httpx.Timeout(connect=self.timeout, read=None,
+        # Short connect/write timeout; read timeout bounds the gap between chunks.
+        timeout = httpx.Timeout(connect=self.timeout, read=_STREAM_IDLE_TIMEOUT,
                                 write=self.timeout, pool=10.0)
 
         headers = None
@@ -116,6 +116,15 @@ class OllamaClient(LLMClient):
             raise LLMUnavailableError(
                 f"Cannot connect to Ollama at {self.endpoint}. "
                 f"Is the daemon running? Try: `ollama serve`"
+            ) from exc
+        except httpx.ReadTimeout as exc:
+            if token_count > 0:
+                sys.stderr.write("\n")
+                sys.stderr.flush()
+            minutes = int(_STREAM_IDLE_TIMEOUT // 60)
+            raise LLMUnavailableError(
+                f"No response from {self.model} for {minutes} minutes; "
+                f"the provider may be overloaded. Try again or pick another model."
             ) from exc
         except httpx.HTTPError as exc:
             if token_count > 0:

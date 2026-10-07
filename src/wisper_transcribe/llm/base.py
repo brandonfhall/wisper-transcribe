@@ -26,6 +26,11 @@ from .errors import LLMResponseError
 # attempts (three calls total), sleeping this long before each.
 _EMPTY_RETRY_DELAYS = (5.0, 10.0)
 
+# Idle read timeout for streaming clients. httpx applies it to each socket
+# read, so it bounds the gap between chunks — not total generation time — and
+# a stalled stream fails instead of blocking forever.
+_STREAM_IDLE_TIMEOUT = 600.0
+
 
 def _strip_json_fence(text: str) -> str:
     """Strip a markdown code fence if the model wrapped its JSON output in one.

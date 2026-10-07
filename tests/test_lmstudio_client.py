@@ -22,10 +22,17 @@ def _sse_lines(content: str) -> list[str]:
     ]
 
 
-def _fake_stream_ctx(lines: list[str], raise_on_enter: Exception | None = None):
+def _fake_stream_ctx(lines: list[str], raise_on_enter: Exception | None = None,
+                     raise_on_read: Exception | None = None):
     resp = MagicMock()
     resp.raise_for_status = MagicMock()
-    resp.iter_lines.return_value = iter(lines)
+    if raise_on_read is not None:
+        def _lines():
+            raise raise_on_read
+            yield  # pragma: no cover — makes this a generator
+        resp.iter_lines.side_effect = _lines
+    else:
+        resp.iter_lines.return_value = iter(lines)
     cm = MagicMock()
     if raise_on_enter is not None:
         cm.__enter__ = MagicMock(side_effect=raise_on_enter)
@@ -107,6 +114,33 @@ def test_lmstudio_complete_json_uses_json_object_format():
 # ---------------------------------------------------------------------------
 # LMStudioClient error paths
 # ---------------------------------------------------------------------------
+
+def test_lmstudio_stream_uses_idle_read_timeout():
+    """The stream timeout must set read to the shared idle constant, not None."""
+    from wisper_transcribe.llm.base import _STREAM_IDLE_TIMEOUT
+    from wisper_transcribe.llm.lmstudio import LMStudioClient
+
+    client = LMStudioClient(model="phi-3")
+    fake_cm = _fake_stream_ctx(_sse_lines("hi"))
+    with patch("httpx.stream", return_value=fake_cm) as mock_stream:
+        client.complete("sys", "user")
+
+    timeout = mock_stream.call_args.kwargs["timeout"]
+    assert timeout.read == _STREAM_IDLE_TIMEOUT
+    assert timeout.connect == client.timeout
+
+
+def test_lmstudio_read_timeout_raises_unavailable():
+    """A stalled stream (httpx.ReadTimeout) becomes LLMUnavailableError naming the model."""
+    import httpx
+    from wisper_transcribe.llm.lmstudio import LMStudioClient
+
+    client = LMStudioClient(model="phi-3")
+    fake_cm = _fake_stream_ctx([], raise_on_read=httpx.ReadTimeout("timed out"))
+    with patch("httpx.stream", return_value=fake_cm):
+        with pytest.raises(LLMUnavailableError, match="phi-3"):
+            client.complete("sys", "user")
+
 
 def test_lmstudio_connect_error_mentions_local_server():
     import httpx

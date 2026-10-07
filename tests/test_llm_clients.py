@@ -90,18 +90,26 @@ def test_get_client_anthropic_missing_key(tmp_path, monkeypatch):
 # OllamaClient
 # ---------------------------------------------------------------------------
 
-def _fake_stream_context(chunks: list[dict], raise_on_enter: Exception | None = None):
+def _fake_stream_context(chunks: list[dict], raise_on_enter: Exception | None = None,
+                         raise_on_read: Exception | None = None):
     """Build a mock ``httpx.stream()`` context manager.
 
     ``chunks`` is a list of dicts that will be JSON-serialised and yielded as
     lines by ``resp.iter_lines()``.  Set ``raise_on_enter`` to an
-    ``httpx.HTTPError`` subclass instance to simulate a connection failure.
+    ``httpx.HTTPError`` subclass instance to simulate a connection failure, or
+    ``raise_on_read`` to simulate a timeout while reading chunks.
     """
     import httpx as _httpx
 
     resp = MagicMock()
     resp.raise_for_status = MagicMock()
-    resp.iter_lines.return_value = iter(json.dumps(c) for c in chunks)
+    if raise_on_read is not None:
+        def _lines():
+            raise raise_on_read
+            yield  # pragma: no cover — makes this a generator
+        resp.iter_lines.side_effect = _lines
+    else:
+        resp.iter_lines.return_value = iter(json.dumps(c) for c in chunks)
 
     cm = MagicMock()
     if raise_on_enter is not None:
@@ -197,6 +205,58 @@ def test_ollama_non404_http_status_raises_generic():
 
     with patch("httpx.stream", return_value=cm):
         with pytest.raises(LLMUnavailableError, match="Ollama request failed"):
+            client.complete("sys", "user")
+
+
+def test_ollama_stream_uses_idle_read_timeout():
+    """The stream timeout must set read to the shared idle constant, not None."""
+    from wisper_transcribe.llm.base import _STREAM_IDLE_TIMEOUT
+    from wisper_transcribe.llm.ollama import OllamaClient
+
+    client = OllamaClient(model="llama3.1:8b")
+    fake_cm = _fake_stream_context(_ollama_chunks("hi"))
+    with patch("httpx.stream", return_value=fake_cm) as mock_stream:
+        client.complete("sys", "user")
+
+    timeout = mock_stream.call_args.kwargs["timeout"]
+    assert timeout.read == _STREAM_IDLE_TIMEOUT
+    assert timeout.connect == client.timeout
+
+
+def test_ollama_read_timeout_raises_unavailable():
+    """A stalled stream (httpx.ReadTimeout) becomes LLMUnavailableError naming the model."""
+    import httpx
+    from wisper_transcribe.llm.ollama import OllamaClient
+
+    client = OllamaClient(model="deepseek-v4.1-flash")
+    fake_cm = _fake_stream_context([], raise_on_read=httpx.ReadTimeout("timed out"))
+    with patch("httpx.stream", return_value=fake_cm):
+        with pytest.raises(LLMUnavailableError, match="deepseek-v4.1-flash"):
+            client.complete("sys", "user")
+
+
+def test_ollama_cloud_inherits_idle_read_timeout():
+    """OllamaCloudClient inherits the streaming idle read timeout."""
+    from wisper_transcribe.llm.base import _STREAM_IDLE_TIMEOUT
+    from wisper_transcribe.llm.ollama_cloud import OllamaCloudClient
+
+    client = OllamaCloudClient(model="gpt-oss:120b", api_key="secret-token")
+    fake_cm = _fake_stream_context(_ollama_chunks("ok"))
+    with patch("httpx.stream", return_value=fake_cm) as mock_stream:
+        client.complete("sys", "user")
+
+    assert mock_stream.call_args.kwargs["timeout"].read == _STREAM_IDLE_TIMEOUT
+
+
+def test_ollama_cloud_read_timeout_raises_unavailable():
+    """A stalled Ollama Cloud stream maps to LLMUnavailableError like the local client."""
+    import httpx
+    from wisper_transcribe.llm.ollama_cloud import OllamaCloudClient
+
+    client = OllamaCloudClient(model="deepseek-v4.1-flash", api_key="secret-token")
+    fake_cm = _fake_stream_context([], raise_on_read=httpx.ReadTimeout("timed out"))
+    with patch("httpx.stream", return_value=fake_cm):
+        with pytest.raises(LLMUnavailableError, match="deepseek-v4.1-flash"):
             client.complete("sys", "user")
 
 
