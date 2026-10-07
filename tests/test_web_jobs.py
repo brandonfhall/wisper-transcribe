@@ -10,6 +10,16 @@ import pytest
 from ._seed import seed_profile, sidecar_data
 
 
+@pytest.fixture
+def llm_out_dir(tmp_path, monkeypatch):
+    """A tmp output root, with WISPER_DATA_DIR pointed at the same tree."""
+    d = tmp_path / "output"
+    d.mkdir()
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(d))
+    return d
+
+
 def _make_queue():
     from wisper_transcribe.web.jobs import JobQueue
     return JobQueue()
@@ -2268,3 +2278,168 @@ def test_rerun_from_the_kept_flac_leaves_the_audio_alone(tmp_path, monkeypatch):
     assert _audio_row(out_dir, "s1").path == flac
     assert sorted(p.name for p in out_dir.glob("*.flac")) == ["s1.flac"]
     assert md.read_text(encoding="utf-8") == "# new"
+
+
+# ---------------------------------------------------------------------------
+# LLM job cancellation (Stop) and generic journal errors
+# ---------------------------------------------------------------------------
+
+class _BlockingClient:
+    """Stand-in LLM client that blocks until the scoped cancel event is set.
+
+    Mimics a streaming client that only notices Stop through the thread-local
+    cancel scope, then raises ``InterruptedError`` like the real one.
+    """
+
+    provider = "fake"
+    model = "fake-model"
+
+    def __init__(self, started: "threading.Event | None" = None) -> None:
+        import threading as _threading
+        self._started = started if started is not None else _threading.Event()
+
+    def _block(self):
+        from wisper_transcribe.llm.cancel import current_cancel_event
+        event = current_cancel_event()
+        assert event is not None, "LLM call must run inside a cancel_scope"
+        self._started.set()
+        while not event.is_set():
+            import time
+            time.sleep(0.01)
+        raise InterruptedError("Job cancelled by user")
+
+    def complete(self, system, user):
+        return self._block()
+
+    def complete_json(self, system, user, schema):
+        return self._block()
+
+
+def _journal_env(tmp_path, out_dir, monkeypatch):
+    """A campaign with one summary ready to fold in."""
+    from wisper_transcribe.campaign_manager import create_campaign
+
+    create_campaign("My Game", data_dir=tmp_path)
+    from . import _seed
+    _seed.seed_transcript("s1", campaign="my-game", write_md=True, data_dir=tmp_path)
+    (out_dir / "s1.summary.md").write_text("A session happened.", encoding="utf-8")
+
+
+async def _run_until_cancelled(q, job):
+    """Start the queue, wait for the job to run, cancel it, await its finish."""
+    q.start()
+    while job.status != "running":
+        await asyncio.sleep(0.01)
+    assert q.cancel(job.id) is True
+    while job.finished_at is None:
+        await asyncio.sleep(0.01)
+    await q.stop()
+
+
+@pytest.mark.anyio
+async def test_cancel_running_journal_job_ends_cancelled(tmp_path, llm_out_dir, monkeypatch):
+    import wisper_transcribe.llm as llm_mod
+    from wisper_transcribe.web.jobs import FAILED
+
+    _journal_env(tmp_path, llm_out_dir, monkeypatch)
+    client = _BlockingClient()
+    q = _make_queue()
+    job = q.submit_journal("my-game")
+    with patch.object(llm_mod, "get_client", lambda *a, **k: client):
+        await _run_until_cancelled(q, job)
+
+    assert client._started.is_set()
+    assert job.status == FAILED
+    assert job.error == "Cancelled"
+
+
+@pytest.mark.anyio
+async def test_cancel_running_digest_job_ends_cancelled(tmp_path, llm_out_dir, monkeypatch):
+    import wisper_transcribe.llm as llm_mod
+    from wisper_transcribe.web.jobs import FAILED
+
+    _journal_env(tmp_path, llm_out_dir, monkeypatch)
+    client = _BlockingClient()
+    q = _make_queue()
+    job = q.submit_campaign_summary("my-game")
+    with patch.object(llm_mod, "get_client", lambda *a, **k: client):
+        await _run_until_cancelled(q, job)
+
+    assert client._started.is_set()
+    assert job.status == FAILED
+    assert job.error == "Cancelled"
+
+
+@pytest.mark.anyio
+async def test_cancel_running_summarize_job_ends_cancelled(tmp_path, llm_out_dir, monkeypatch):
+    import wisper_transcribe.llm as llm_mod
+    from wisper_transcribe.web.jobs import FAILED, JOB_SUMMARIZE
+
+    md = tmp_path / "s1.md"
+    md.write_text("# Session\n\nBody.", encoding="utf-8")
+    client = _BlockingClient()
+    q = _make_queue()
+    job = q.submit_llm(str(md), JOB_SUMMARIZE)
+    with patch.object(llm_mod, "get_client", lambda *a, **k: client):
+        await _run_until_cancelled(q, job)
+
+    assert client._started.is_set()
+    assert job.status == FAILED
+    assert job.error == "Cancelled"
+
+
+def test_journal_job_error_is_generic(tmp_path, llm_out_dir, monkeypatch):
+    """A journal runner failure shows the generic message, never exception text."""
+    from wisper_transcribe.web.jobs import FAILED
+
+    _journal_env(tmp_path, llm_out_dir, monkeypatch)
+
+    def _boom(*a, **k):
+        raise RuntimeError(f"cannot open {tmp_path}/secret.bin")
+
+    q = _make_queue()
+    job = q.submit_journal("my-game")
+    import wisper_transcribe.llm as llm_mod
+    with patch.object(llm_mod, "get_client", _boom):
+        with pytest.raises(RuntimeError):
+            q._run_journal_job(job)
+
+    assert job.status == FAILED
+    assert job.error == "Journal update failed — see server logs"
+    assert str(tmp_path) not in job.error
+
+
+def test_cancel_during_post_process_keeps_the_transcription_job(tmp_path):
+    """A Stop during chained refine/summarize ends only the LLM step: the
+    transcript is already saved, so the job completes and its on-complete
+    callback (the recording hand-off) still runs."""
+    from datetime import datetime
+
+    from wisper_transcribe.web.jobs import COMPLETED, Job, JobQueue
+
+    out_md = tmp_path / "out.md"
+    out_md.write_text("# Session", encoding="utf-8")
+
+    q = JobQueue()
+    job = Job(
+        id="pp-cancel",
+        status="running",
+        created_at=datetime.now(),
+        input_path=str(tmp_path / "audio.mp3"),
+        kwargs={"no_diarize": True, "device": "cpu"},
+        post_summarize=True,
+    )
+    completed: list[str] = []
+    q._on_complete_callbacks[job.id] = lambda j: completed.append(j.id)
+
+    with patch("wisper_transcribe.web.jobs.process_file", return_value=out_md), \
+            patch.object(JobQueue, "_do_llm_work",
+                         side_effect=InterruptedError("Job cancelled by user")):
+        q._run_job(job)
+
+    assert job.status == COMPLETED
+    assert not job.error
+    assert "Post-processing cancelled" in job.log_lines
+    assert completed == ["pp-cancel"]
+
+

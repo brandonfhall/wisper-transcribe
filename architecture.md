@@ -62,6 +62,7 @@ src/wisper_transcribe/
 ├── tailwind.py          Pinned Tailwind build (TAILWIND_VERSION, build_css()); `python -m wisper_transcribe.tailwind`
 ├── llm/                 Provider-agnostic LLM clients
 │   ├── base.py          LLMClient ABC: complete() + complete_json(schema)
+│   ├── cancel.py        Thread-local cancel scope: cancel_scope()/current_cancel_event()/raise_if_cancelled()
 │   ├── errors.py        LLMUnavailableError (soft-fail) / LLMResponseError
 │   ├── ollama.py        httpx streaming client for Ollama (/api/chat, NDJSON)
 │   ├── ollama_cloud.py  OllamaClient subclass for ollama.com with Bearer auth
@@ -445,6 +446,13 @@ Two bounded, whole-campaign artifacts built from the same per-session `.summary.
 - **Retry on empty content:** reasoning models (Ollama, LM Studio) can stream a `thinking` field and no `content`, which reads as an empty response. `LLMClient._retry_on_empty` retries the call twice more (after 5 s, then 10 s), logging one line per retry via `tqdm.write` (never `job.error`), and raises `LLMResponseError` if it stays empty. Only empty content retries; a non-empty response whose JSON does not parse fails at once. Both stream loops also read a chunk's `error` field and raise `LLMUnavailableError` with the provider's message immediately, with no retry.
 - **Ollama Cloud:** either keep `llm_provider = "ollama"` and pick a `-cloud` model (the local daemon proxies with `ollama signin` credentials), or use `llm_provider = "ollama-cloud"` with `OLLAMA_API_KEY`, which calls `https://ollama.com/api/chat` directly.
 - **LM Studio:** OpenAI-compatible API on `:1234`, SSE streaming with the same `_STREAM_IDLE_TIMEOUT` read timeout on each chunk, `response_format: json_object`.
+- **Cancellation (`cancel.py`):**
+  - `cancel_scope(event)` is thread-local, nests, and restores the previous value on exit (same shape as `ml_worker.delegating()`). `raise_if_cancelled()` raises `InterruptedError` when the scoped event is set; unscoped code (CLI, request threads) never raises.
+  - The four stderr-capturing job runners enter `cancel_scope(job._cancel_event)`. `_StderrCapture.write` calls `raise_if_cancelled()`, never `job._cancel_event`, because `sys.stderr` is process-wide while a capture is installed and other threads write through it.
+  - The streaming clients read `httpx.stream` in a daemon thread; the caller polls the cancel event every 0.25 s and raises at once. The read is abandoned rather than woken, because a cross-thread close doesn't reliably wake a blocked `recv`; the idle timeout ends it.
+  - Progress writes happen on the caller's side, so an abandoned reader can't write into a later job's log. Reader errors re-raise in the caller unchanged.
+  - `_retry_on_empty` checks before each attempt and waits on the event instead of `time.sleep` when scoped.
+  - A Stop during chained post-processing ends only the LLM step: the transcript is already saved, so the transcription job completes (logging "Post-processing cancelled") and its on-complete callback still runs.
 
 ### Invariants
 1. YAML frontmatter is never sent to the LLM and is preserved byte-for-byte (`parse_transcript()` keeps the raw string).
@@ -854,7 +862,7 @@ Job types:
 
 **Progress.** Per-job `tqdm.write`/`tqdm.__init__` patches feed `job.log_lines`/`job.progress`. In parallel mode, `[progress:<channel>]` messages go to `job.progress_channels`. `GET /transcribe/jobs/{id}/stream` streams all of these plus status.
 
-**Cancel.** `POST /transcribe/jobs/{id}/cancel` fails a pending job immediately; for a running job it sets `_cancel_event`, which the tqdm patch turns into `InterruptedError` on the next write.
+**Cancel.** `POST /transcribe/jobs/{id}/cancel` fails a pending job immediately; for a running job it sets `_cancel_event`. A transcription job sees it on the next tqdm write (or `MLWorker.call()` poll); the LLM job runners enter a thread-local `cancel_scope(job._cancel_event)`, and the streaming clients poll it, so journal, digest, refine, and summarize jobs on Ollama or LM Studio stop within ~0.25 s even mid-stream. A Stop during a transcription's chained post-processing skips the LLM step and the job still completes.
 
 **Web uploads.** Each upload lives in its own `wisper_upload_<job-id>/` folder, so the job can delete everything it made whatever the file is called.
 - `JobQueue.submit()` moves the `wisper_upload_*` temp file to `<folder>/<original_stem><suffix>` (`upload<suffix>` if the filesystem refuses the name), records `Job.upload_dir` and `Job.is_web_upload`, and freezes `needs_extraction` from the original suffix so the job page's Extract step is stable. It sets `output_stem` to `original_stem` and forwards `source_name`, so the transcript is named after the job and its frontmatter `source_file` is the original filename. It resolves `Job.transcript_id` from the output dir and `original_stem`. A non-upload input (a recording's combined track) is never moved or renamed.
@@ -994,6 +1002,7 @@ The job page shows step pills and one bar split into equal per-step slices:
 | Live session holds the queue | `JOB_LIVE` occupies the only worker slot for the session. A job already running when a session starts delays live transcription for the whole session (the Record page warns) |
 | Uploads keep one audio track | The original upload (video, extra audio tracks) isn't kept, only the 16 kHz mono FLAC of its first audio track. To transcribe a file again with a different track, export that track and upload it |
 | Cooperative cancellation | With `ml_worker` on (default), Stop terminates the worker child: the GPU is freed at once and the next job respawns and reloads models. With it off, or for the CLI/live recording, cancel is checked on tqdm writes only, so the GPU finishes its current batch |
+| SDK providers cancel only between calls | The Anthropic, OpenAI, and Google clients are non-streaming SDK calls, so Stop takes effect once the in-flight call returns (bounded by the SDK's own timeout), not mid-call. The Ollama/LM Studio streaming clients poll the cancel scope and stop within ~0.25 s |
 | Host + Docker Desktop container on one DB | File locks don't cross Docker Desktop's VM, so both writing `wisper.db` at once corrupts it. The runtime lease refuses the second one; use Docker for everything or the native CLI with a local `wisper server`. Container + container is safe; native Linux Docker is unaffected |
 | SQLite requirement | SQLite ≥ 3.43 with FTS5 (contentless delete). Shipped Pythons and Docker have it; an old Linux system Python (e.g. Ubuntu 22.04's 3.37) is refused at startup |
 | Search highlighting | Matching uses porter stemming; highlighting approximates it by prefix, so a hit can show no highlighted word |

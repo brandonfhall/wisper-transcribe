@@ -9,12 +9,16 @@ rather than blocking forever.
 from __future__ import annotations
 
 import json
+import queue as _queue
 import sys
+import threading
 
 from .base import LLMClient, _STREAM_IDLE_TIMEOUT, _strip_json_fence
+from .cancel import current_cancel_event
 from .errors import LLMResponseError, LLMUnavailableError
 
 _DOT_INTERVAL = 50   # print a progress dot every N content tokens
+_CANCEL_POLL_SECONDS = 0.25  # how often the caller checks the cancel event
 
 
 class LMStudioClient(LLMClient):
@@ -50,48 +54,91 @@ class LMStudioClient(LLMClient):
                                 write=self.timeout, pool=10.0)
 
         parts: list[str] = []
-        token_count = 0
+        messages: "_queue.Queue" = _queue.Queue()
+        held: dict = {}
+
+        def _read() -> None:
+            """Read the stream in a daemon thread; the caller stays pollable."""
+            token_count = 0
+            try:
+                with httpx.stream("POST", url, json=stream_payload,
+                                  timeout=timeout) as resp:
+                    held["resp"] = resp
+                    resp.raise_for_status()
+                    # All progress writes happen on the caller's side, so an
+                    # abandoned reader can never write into a later job's log.
+                    messages.put(("waiting", None))
+                    for line in resp.iter_lines():
+                        if not line or line == "data: [DONE]":
+                            continue
+                        if not line.startswith("data: "):
+                            continue
+                        try:
+                            chunk = json.loads(line[6:])
+                        except json.JSONDecodeError:
+                            continue
+                        if chunk.get("error"):
+                            raise LLMUnavailableError(
+                                f"LM Studio request failed ({url}): {chunk['error']}"
+                            )
+                        choices = chunk.get("choices") or []
+                        token = (choices[0].get("delta") or {}).get("content", "") if choices else ""
+                        if token:
+                            if token_count == 0:
+                                messages.put(("start", None))
+                            parts.append(token)
+                            token_count += 1
+                            if token_count % _DOT_INTERVAL == 0:
+                                messages.put(("dot", None))
+                        if choices and choices[0].get("finish_reason") == "stop":
+                            break
+                if token_count > 0:
+                    messages.put(("end", None))
+                messages.put(("done", None))
+            except BaseException as exc:
+                messages.put(("error", exc))
+
+        generating = False
         try:
             sys.stderr.write(f"  Connecting to LM Studio ({self.endpoint})...\n")
             sys.stderr.flush()
-            with httpx.stream("POST", url, json=stream_payload,
-                              timeout=timeout) as resp:
-                resp.raise_for_status()
-                sys.stderr.write(
-                    f"  Waiting for {self.model} to start generating...\n"
-                )
+            reader = threading.Thread(target=_read, daemon=True)
+            reader.start()
+            event = current_cancel_event()
+            while True:
+                # Closing the response won't reliably wake a blocked read,
+                # so abandon the reader and fail at once; the close is
+                # best-effort only.
+                if event is not None and event.is_set():
+                    resp = held.get("resp")
+                    if resp is not None:
+                        try:
+                            resp.close()
+                        except Exception:
+                            pass
+                    raise InterruptedError("Job cancelled by user")
+                try:
+                    kind, payload = messages.get(timeout=_CANCEL_POLL_SECONDS)
+                except _queue.Empty:
+                    continue
+                if kind == "done":
+                    break
+                if kind == "error":
+                    raise payload
+                if kind == "waiting":
+                    sys.stderr.write(
+                        f"  Waiting for {self.model} to start generating...\n"
+                    )
+                elif kind == "start":
+                    generating = True
+                    sys.stderr.write(f"  Generating ({self.model}): ")
+                elif kind == "dot":
+                    sys.stderr.write("·")
+                else:  # "end"
+                    sys.stderr.write("\n")
                 sys.stderr.flush()
-                for line in resp.iter_lines():
-                    if not line or line == "data: [DONE]":
-                        continue
-                    if not line.startswith("data: "):
-                        continue
-                    try:
-                        chunk = json.loads(line[6:])
-                    except json.JSONDecodeError:
-                        continue
-                    if chunk.get("error"):
-                        if token_count > 0:
-                            sys.stderr.write("\n")
-                            sys.stderr.flush()
-                        raise LLMUnavailableError(
-                            f"LM Studio request failed ({url}): {chunk['error']}"
-                        )
-                    choices = chunk.get("choices") or []
-                    token = (choices[0].get("delta") or {}).get("content", "") if choices else ""
-                    if token:
-                        if token_count == 0:
-                            sys.stderr.write(f"  Generating ({self.model}): ")
-                            sys.stderr.flush()
-                        parts.append(token)
-                        token_count += 1
-                        if token_count % _DOT_INTERVAL == 0:
-                            sys.stderr.write("·")
-                            sys.stderr.flush()
-                    if choices and choices[0].get("finish_reason") == "stop":
-                        break
         except httpx.HTTPStatusError as exc:
-            if token_count > 0:
+            if generating:
                 sys.stderr.write("\n")
                 sys.stderr.flush()
             if exc.response.status_code == 404:
@@ -104,7 +151,7 @@ class LMStudioClient(LLMClient):
                 f"LM Studio request failed ({url}): {exc}"
             ) from exc
         except httpx.ConnectError as exc:
-            if token_count > 0:
+            if generating:
                 sys.stderr.write("\n")
                 sys.stderr.flush()
             raise LLMUnavailableError(
@@ -113,7 +160,7 @@ class LMStudioClient(LLMClient):
                 f"Developer → Local Server."
             ) from exc
         except httpx.ReadTimeout as exc:
-            if token_count > 0:
+            if generating:
                 sys.stderr.write("\n")
                 sys.stderr.flush()
             minutes = int(_STREAM_IDLE_TIMEOUT // 60)
@@ -122,16 +169,12 @@ class LMStudioClient(LLMClient):
                 f"the provider may be overloaded. Try again or pick another model."
             ) from exc
         except httpx.HTTPError as exc:
-            if token_count > 0:
+            if generating:
                 sys.stderr.write("\n")
                 sys.stderr.flush()
             raise LLMUnavailableError(
                 f"LM Studio request failed ({url}): {exc}"
             ) from exc
-
-        if token_count > 0:
-            sys.stderr.write("\n")
-            sys.stderr.flush()
 
         return "".join(parts)
 

@@ -675,3 +675,97 @@ def test_google_generate_error_raises_unavailable(monkeypatch):
     client._client.models.generate_content.side_effect = RuntimeError("boom")
     with pytest.raises(LLMUnavailableError, match="Google API error"):
         client.complete("sys", "user")
+
+
+# ---------------------------------------------------------------------------
+# OllamaClient cancellation via the thread-local cancel scope
+# ---------------------------------------------------------------------------
+
+def _blocking_stream_context(started: "threading.Event", release: "threading.Event"):
+    """A stream whose iteration blocks until ``release`` is set.
+
+    ``started`` is set once the reader is inside the stream, so a test can
+    cancel after the read is genuinely blocked.
+    """
+    import json as _json
+
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+
+    def _lines():
+        started.set()
+        release.wait(5)
+        yield _json.dumps({"message": {"content": "late"}, "done": True})
+
+    resp.iter_lines.side_effect = _lines
+    cm = MagicMock()
+    cm.__enter__ = MagicMock(return_value=resp)
+    cm.__exit__ = MagicMock(return_value=False)
+    return cm
+
+
+def test_ollama_complete_cancels_a_blocked_stream():
+    """Inside a cancel_scope, Stop ends a blocked stream within ~1 s."""
+    import threading
+    import time
+
+    from wisper_transcribe.llm.cancel import cancel_scope
+    from wisper_transcribe.llm.ollama import OllamaClient
+
+    client = OllamaClient(model="llama3.1:8b")
+    started, release = threading.Event(), threading.Event()
+    fake_cm = _blocking_stream_context(started, release)
+    cancel = threading.Event()
+
+    def _cancel_later() -> None:
+        started.wait(2)
+        cancel.set()
+
+    threading.Thread(target=_cancel_later, daemon=True).start()
+    try:
+        with patch("httpx.stream", return_value=fake_cm):
+            with cancel_scope(cancel):
+                began = time.monotonic()
+                with pytest.raises(InterruptedError, match="Job cancelled by user"):
+                    client.complete("sys", "user")
+                assert time.monotonic() - began < 1.0
+    finally:
+        release.set()
+
+
+def test_ollama_complete_outside_scope_waits_for_the_stream():
+    """With no scope the caller simply waits for the reader thread to finish."""
+    import threading
+
+    from wisper_transcribe.llm.ollama import OllamaClient
+
+    client = OllamaClient(model="llama3.1:8b")
+    started, release = threading.Event(), threading.Event()
+    fake_cm = _blocking_stream_context(started, release)
+
+    def _release_later() -> None:
+        started.wait(2)
+        release.set()
+
+    threading.Thread(target=_release_later, daemon=True).start()
+    with patch("httpx.stream", return_value=fake_cm):
+        assert client.complete("sys", "user") == "late"
+
+
+def test_ollama_reader_thread_error_propagates_unchanged():
+    """An error raised on the reader thread re-raises in the caller as-is."""
+    from wisper_transcribe.llm.ollama import OllamaClient
+
+    client = OllamaClient(model="llama3.1:8b")
+
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.iter_lines.side_effect = LLMUnavailableError("reader blew up")
+    cm = MagicMock()
+    cm.__enter__ = MagicMock(return_value=resp)
+    cm.__exit__ = MagicMock(return_value=False)
+
+    with patch("httpx.stream", return_value=cm):
+        with pytest.raises(LLMUnavailableError, match="reader blew up"):
+            client.complete("sys", "user")
+

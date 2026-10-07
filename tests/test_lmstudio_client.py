@@ -283,3 +283,90 @@ def test_lmstudio_complete_json_bad_json_does_not_retry():
             client.complete_json("sys", "user", {"type": "object"})
 
     assert mock_stream.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# LMStudioClient cancellation via the thread-local cancel scope
+# ---------------------------------------------------------------------------
+
+def _blocking_stream_ctx(started, release):
+    """A stream whose iteration blocks until ``release`` is set."""
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+
+    def _lines():
+        started.set()
+        release.wait(5)
+        yield 'data: {"choices": [{"delta": {"content": "late"}, "finish_reason": "stop"}]}'
+
+    resp.iter_lines.side_effect = _lines
+    cm = MagicMock()
+    cm.__enter__ = MagicMock(return_value=resp)
+    cm.__exit__ = MagicMock(return_value=False)
+    return cm
+
+
+def test_lmstudio_complete_cancels_a_blocked_stream():
+    """Inside a cancel_scope, Stop ends a blocked stream within ~1 s."""
+    import threading
+    import time
+
+    from wisper_transcribe.llm.cancel import cancel_scope
+    from wisper_transcribe.llm.lmstudio import LMStudioClient
+
+    client = LMStudioClient(model="phi-3")
+    started, release = threading.Event(), threading.Event()
+    fake_cm = _blocking_stream_ctx(started, release)
+    cancel = threading.Event()
+
+    def _cancel_later() -> None:
+        started.wait(2)
+        cancel.set()
+
+    threading.Thread(target=_cancel_later, daemon=True).start()
+    try:
+        with patch("httpx.stream", return_value=fake_cm):
+            with cancel_scope(cancel):
+                began = time.monotonic()
+                with pytest.raises(InterruptedError, match="Job cancelled by user"):
+                    client.complete("sys", "user")
+                assert time.monotonic() - began < 1.0
+    finally:
+        release.set()
+
+
+def test_lmstudio_complete_outside_scope_waits_for_the_stream():
+    """With no scope the caller simply waits for the reader thread to finish."""
+    import threading
+
+    from wisper_transcribe.llm.lmstudio import LMStudioClient
+
+    client = LMStudioClient(model="phi-3")
+    started, release = threading.Event(), threading.Event()
+    fake_cm = _blocking_stream_ctx(started, release)
+
+    def _release_later() -> None:
+        started.wait(2)
+        release.set()
+
+    threading.Thread(target=_release_later, daemon=True).start()
+    with patch("httpx.stream", return_value=fake_cm):
+        assert client.complete("sys", "user") == "late"
+
+
+def test_lmstudio_reader_thread_error_propagates_unchanged():
+    """An error raised on the reader thread re-raises in the caller as-is."""
+    from wisper_transcribe.llm.lmstudio import LMStudioClient
+
+    client = LMStudioClient(model="phi-3")
+
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.iter_lines.side_effect = LLMUnavailableError("reader blew up")
+    cm = MagicMock()
+    cm.__enter__ = MagicMock(return_value=resp)
+    cm.__exit__ = MagicMock(return_value=False)
+
+    with patch("httpx.stream", return_value=cm):
+        with pytest.raises(LLMUnavailableError, match="reader blew up"):
+            client.complete("sys", "user")
