@@ -28,6 +28,7 @@ import tqdm as _tqdm_module
 
 from wisper_transcribe import file_registry
 from wisper_transcribe.config import load_config
+from wisper_transcribe.llm.cancel import cancel_scope, raise_if_cancelled
 from wisper_transcribe.pipeline import process_file
 from wisper_transcribe.transcript_store import atomic_write_text, save_summary, save_transcript
 
@@ -65,6 +66,7 @@ _GENERIC_JOB_ERRORS = {
     JOB_SUMMARIZE: "Post-processing failed — see server logs",
     JOB_ENROLL: "Enrollment failed",
     JOB_SPEAKER_RELABEL: "Speaker re-match failed — see server logs",
+    JOB_CAMPAIGN_JOURNAL: "Journal update failed — see server logs",
     JOB_CAMPAIGN_SUMMARY: "Summary generation failed — see server logs",
     JOB_CAMPAIGN_RECAP: "Recap generation failed — see server logs",
 }
@@ -91,9 +93,11 @@ def _set_job_error(job: "Job", exc: BaseException) -> None:
     """Set a generic, path-free error on *job* and log the real exception.
 
     ``"Cancelled"`` is kept verbatim; the job-detail template checks for it.
+    A cancel never replaces an error already set (shutdown sets INTERRUPTED
+    before it cancels the job).
     """
     if isinstance(exc, InterruptedError):
-        job.error = "Cancelled"
+        job.error = job.error or "Cancelled"
         return
     log.error("Job %s (%s) failed", job.id, job.job_type, exc_info=exc)
     from wisper_transcribe.transcript_store import TranscriptExistsError
@@ -172,6 +176,9 @@ class _StderrCapture:
         self._buf = ""
 
     def write(self, s: str) -> None:
+        # Thread-local: only the scoped job thread raises; other threads and
+        # warnings.warn writing through the process-wide sys.stderr don't.
+        raise_if_cancelled()
         self._buf += s
         while "\n" in self._buf:
             line, self._buf = self._buf.split("\n", 1)
@@ -1128,15 +1135,19 @@ class JobQueue:
             try:
                 await asyncio.to_thread(self._run_job, job)
             except asyncio.CancelledError:
-                # Server shutdown (stop()). The job thread can't be stopped and
-                # dies with the process, so the job is interrupted, not done.
+                # Server shutdown (stop()). The job runs in a default-executor
+                # thread, which the interpreter joins at exit, so the job is
+                # interrupted, not done. Signal its cancel event first: an LLM
+                # job in a cancel_scope then returns on its own instead of
+                # blocking exit on an open stream.
                 from wisper_transcribe.job_history import INTERRUPTED
                 job.status = FAILED
                 job.error = INTERRUPTED
                 job.finished_at = datetime.now()
                 _delete_temp_upload(job)
-                # The job thread can't be stopped; kill the ML child so it
-                # doesn't keep the GPU busy until the process exits.
+                job._cancel_event.set()
+                # Kill the ML child so it doesn't keep the GPU busy until the
+                # process exits.
                 await asyncio.to_thread(self._ml_worker.stop)
                 raise
             except Exception as exc:
@@ -1238,52 +1249,56 @@ class JobQueue:
         old_stderr = _sys.stderr
         _sys.stderr = _StderrCapture(job)
         try:
-            cfg = load_config()
-            client = get_client(cfg.get("llm_provider", "ollama"), config=cfg)
-            job.append_log(f"LLM: {client.provider} / {client.model}")
-            profiles = load_profiles()
+            with cancel_scope(job._cancel_event):
+                cfg = load_config()
+                client = get_client(cfg.get("llm_provider", "ollama"), config=cfg)
+                job.append_log(f"LLM: {client.provider} / {client.model}")
+                profiles = load_profiles()
 
-            if rebuild:
-                rebuild_fn = rebuild_campaign if resummarize else refold_campaign
-                result = rebuild_fn(slug, client, profiles, on_progress=job.append_log)
-                job.append_log(f"Summarized: {len(result.resummarized)}")
-                if result.skipped:
-                    job.append_log(f"Skipped: {len(result.skipped)}")
-                    for stem, reason in result.skipped:
-                        job.append_log(f"  {stem}: {reason}")
-                if result.journal is not None:
-                    job.output_path = str(result.journal.path)
+                if rebuild:
+                    rebuild_fn = rebuild_campaign if resummarize else refold_campaign
+                    result = rebuild_fn(slug, client, profiles, on_progress=job.append_log)
+                    job.append_log(f"Summarized: {len(result.resummarized)}")
+                    if result.skipped:
+                        job.append_log(f"Skipped: {len(result.skipped)}")
+                        for stem, reason in result.skipped:
+                            job.append_log(f"  {stem}: {reason}")
+                    if result.journal is not None:
+                        job.output_path = str(result.journal.path)
+                        job.append_log(
+                            f"Journal written: {result.journal.path.name} "
+                            f"({len(result.journal.journaled_sessions)} session(s) folded)"
+                        )
+                    job.status = COMPLETED
+                    return
+
+                if session_stem:
+                    targets = [session_stem]
+                else:
+                    targets = unjournalled_sessions(slug)
+                    if not targets:
+                        job.append_log("Journal already up to date — nothing to fold.")
+                    elif not fold_all:
+                        targets = targets[:1]
+
+                result = None
+                for stem in targets:
+                    job.append_log(f"Folding in: {stem} ...")
+                    result = update_journal(slug, client, profiles, session_stem=stem)
+
+                if result is not None:
+                    job.output_path = str(result.path)
                     job.append_log(
-                        f"Journal written: {result.journal.path.name} "
-                        f"({len(result.journal.journaled_sessions)} session(s) folded)"
+                        f"Journal written: {result.path.name} "
+                        f"({len(result.journaled_sessions)} session(s) folded)"
                     )
                 job.status = COMPLETED
-                return
-
-            if session_stem:
-                targets = [session_stem]
-            else:
-                targets = unjournalled_sessions(slug)
-                if not targets:
-                    job.append_log("Journal already up to date — nothing to fold.")
-                elif not fold_all:
-                    targets = targets[:1]
-
-            result = None
-            for stem in targets:
-                job.append_log(f"Folding in: {stem} ...")
-                result = update_journal(slug, client, profiles, session_stem=stem)
-
-            if result is not None:
-                job.output_path = str(result.path)
-                job.append_log(
-                    f"Journal written: {result.path.name} "
-                    f"({len(result.journaled_sessions)} session(s) folded)"
-                )
-            job.status = COMPLETED
+        except InterruptedError:
+            job.status = FAILED
+            job.error = job.error or "Cancelled"
         except Exception as exc:
             job.status = FAILED
-            job.error = str(exc)
+            _set_job_error(job, exc)
             raise
         finally:
             _sys.stderr = old_stderr
@@ -1310,30 +1325,34 @@ class JobQueue:
         old_stderr = _sys.stderr
         _sys.stderr = _StderrCapture(job)
         try:
-            cfg = load_config()
-            client = get_client(cfg.get("llm_provider", "ollama"), config=cfg)
-            job.append_log(f"LLM: {client.provider} / {client.model}")
-            profiles = load_profiles()
-            try:
-                if job.job_type == JOB_CAMPAIGN_SUMMARY:
-                    result = generate_combined_summary(slug, client, profiles)
-                else:
-                    result = generate_recap(slug, client, profiles,
-                                            sessions=job.kwargs.get("sessions", 1))
-            except (LLMUnavailableError, LLMResponseError) as exc:
-                job.append_log(f"Generation failed: {exc}")
-                job.status = FAILED
-                raise
-            if result is None:
+            with cancel_scope(job._cancel_event):
+                cfg = load_config()
+                client = get_client(cfg.get("llm_provider", "ollama"), config=cfg)
+                job.append_log(f"LLM: {client.provider} / {client.model}")
+                profiles = load_profiles()
+                try:
+                    if job.job_type == JOB_CAMPAIGN_SUMMARY:
+                        result = generate_combined_summary(slug, client, profiles)
+                    else:
+                        result = generate_recap(slug, client, profiles,
+                                                sessions=job.kwargs.get("sessions", 1))
+                except (LLMUnavailableError, LLMResponseError) as exc:
+                    job.append_log(f"Generation failed: {exc}")
+                    job.status = FAILED
+                    raise
+                if result is None:
+                    job.append_log(
+                        f"No summarized session in this campaign yet — nothing to write.")
+                    job.status = COMPLETED
+                    return
+                job.output_path = str(result.path)
+                verb = "Replaced" if result.replaced else "Wrote"
                 job.append_log(
-                    f"No summarized session in this campaign yet — nothing to write.")
+                    f"{verb} {result.path.name} ({len(result.sessions)} session(s) covered)")
                 job.status = COMPLETED
-                return
-            job.output_path = str(result.path)
-            verb = "Replaced" if result.replaced else "Wrote"
-            job.append_log(
-                f"{verb} {result.path.name} ({len(result.sessions)} session(s) covered)")
-            job.status = COMPLETED
+        except InterruptedError:
+            job.status = FAILED
+            job.error = job.error or "Cancelled"
         except Exception:
             job.status = FAILED
             raise
@@ -1490,12 +1509,16 @@ class JobQueue:
         old_stderr = _sys.stderr
         _sys.stderr = _StderrCapture(job)
         try:
-            self._do_llm_work(
-                job=job,
-                transcript_path=transcript_path,
-                do_refine=job.post_refine,
-                do_summarize=job.post_summarize,
-            )
+            with cancel_scope(job._cancel_event):
+                self._do_llm_work(
+                    job=job,
+                    transcript_path=transcript_path,
+                    do_refine=job.post_refine,
+                    do_summarize=job.post_summarize,
+                )
+        except InterruptedError:
+            # The transcript is already saved; Stop only ends the LLM step.
+            job.append_log("Post-processing cancelled")
         except Exception as exc:
             # log_lines render in the UI too: keep this line generic.
             log.error("Post-processing for job %s failed", job.id, exc_info=exc)
@@ -1512,12 +1535,13 @@ class JobQueue:
         old_stderr = _sys.stderr
         _sys.stderr = _StderrCapture(job)
         try:
-            self._do_llm_work(
-                job=job,
-                transcript_path=transcript_path,
-                do_refine=(job.job_type == JOB_REFINE),
-                do_summarize=(job.job_type == JOB_SUMMARIZE),
-            )
+            with cancel_scope(job._cancel_event):
+                self._do_llm_work(
+                    job=job,
+                    transcript_path=transcript_path,
+                    do_refine=(job.job_type == JOB_REFINE),
+                    do_summarize=(job.job_type == JOB_SUMMARIZE),
+                )
             job.status = COMPLETED
         except Exception as exc:
             job.status = FAILED

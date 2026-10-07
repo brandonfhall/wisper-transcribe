@@ -199,4 +199,4 @@ Local recordings appear on the Recordings page with a **LOCAL** badge and transc
 .venv\Scripts\pytest tests/ -v    # Windows
 ```
 
-Tests mock all ML models — no GPU, network, or real audio needed. CI runs them on Python 3.13 and 3.14.
+Tests mock all ML models — no GPU, network, or real audio needed. CI runs them on Python 3.13 and 3.14. They run in parallel across CPU cores (pytest-xdist, installed by the `dev` extras: `pip install -e ".[dev]"`); add `-n 0` to run serially, e.g. to debug with breakpoints.

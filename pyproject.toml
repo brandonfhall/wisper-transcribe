@@ -40,6 +40,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest-cov",
+    "pytest-xdist",          # parallel test runs (-n auto)
     "httpx>=0.28.1",         # async HTTP client for SSE streaming tests
     "isort",
 ]
@@ -77,6 +78,8 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Parallel by default (pytest-xdist); pass -n 0 to debug with breakpoints or -s.
+addopts = "-n auto"
 filterwarnings = [
     # speechbrain 1.0 deprecated-redirect noise (k2, transformers, spacy, numba, pretrained)
     "ignore:Module 'speechbrain.*' was deprecated:UserWarning",

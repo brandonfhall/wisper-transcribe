@@ -20,11 +20,17 @@ from typing import Callable
 
 from tqdm import tqdm
 
+from .cancel import current_cancel_event, raise_if_cancelled
 from .errors import LLMResponseError
 
 # Retry policy when a streaming call comes back with empty content: two more
 # attempts (three calls total), sleeping this long before each.
 _EMPTY_RETRY_DELAYS = (5.0, 10.0)
+
+# Idle read timeout for streaming clients. httpx applies it to each socket
+# read, so it bounds the gap between chunks — not total generation time — and
+# a stalled stream fails instead of blocking forever.
+_STREAM_IDLE_TIMEOUT = 600.0
 
 
 def _strip_json_fence(text: str) -> str:
@@ -60,13 +66,21 @@ class LLMClient(ABC):
         """
         attempts = len(_EMPTY_RETRY_DELAYS) + 1
         for attempt in range(1, attempts + 1):
+            raise_if_cancelled()
             text = call()
             if text.strip():
                 return text
             if attempt == attempts:
                 break
             tqdm.write(f"  LLM returned an empty response; retrying ({attempt}/{attempts - 1})…")
-            time.sleep(_EMPTY_RETRY_DELAYS[attempt - 1])
+            delay = _EMPTY_RETRY_DELAYS[attempt - 1]
+            event = current_cancel_event()
+            if event is not None:
+                # Interruptible wait, so Stop ends the retry instead of sleeping it out.
+                if event.wait(delay):
+                    raise_if_cancelled()
+            else:
+                time.sleep(delay)
         raise LLMResponseError(
             f"The {self.provider} model {self.model!r} returned an empty response "
             f"after {attempts} attempts."

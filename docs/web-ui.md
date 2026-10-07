@@ -205,7 +205,7 @@ The Campaign page's **Rolling journal** panel combines session summaries into on
 - **View journal** shows the rendered result.
 - **View journal** also has **Download**, which saves the journal with the list of folded sessions added to its frontmatter.
 - **Rebuild journal** starts the journal over from each session's existing summary — one LLM call per session (plus one for any session not yet summarized). Your edits to summaries are kept. It asks for confirmation, showing the call count.
-- **Rebuild from transcripts** re-summarizes every session first, overwriting the summaries, then rebuilds — two LLM calls per session. Use it after changing model or provider, or when the summaries themselves are bad.
+- **Rebuild from transcripts** re-summarizes every session first, overwriting the summaries, then rebuilds — two LLM calls per session. Use it after changing model or provider, or when the summaries themselves are bad. Cancelling a rebuild or refold (Stop Job) leaves the journal folded only up to the cancelled session; the summaries already written stay, and running the rebuild again restores it.
 - **Stale journal:** moving a folded session to another campaign, removing it, deleting it, or re-transcribing it leaves the journal text alone and shows an amber notice ("This journal mentions sessions that were moved, removed, or re-transcribed…") on the Campaign and Journal pages. **Rebuild journal** is highlighted until you rebuild. Nothing is regenerated automatically.
 - The journal is a file named `<campaign folder> Journal.md` in the campaign's folder inside the transcripts folder. Editing it yourself (e.g. in Obsidian) is fine; later folds build on your edits. Deleting it starts a fresh journal.
 

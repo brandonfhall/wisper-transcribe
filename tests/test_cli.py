@@ -568,6 +568,17 @@ def test_server_explicit_host_still_works():
     assert kwargs["host"] == "0.0.0.0"
 
 
+def test_server_bounds_graceful_shutdown():
+    """One Ctrl+C closes the open SSE streams after 3 s instead of holding
+    shutdown open on a running job page."""
+    mock_uvicorn = MagicMock()
+    with patch.dict("sys.modules", {"uvicorn": mock_uvicorn}):
+        result = CliRunner().invoke(main, ["server"])
+    assert result.exit_code == 0
+    _, kwargs = mock_uvicorn.run.call_args
+    assert kwargs["timeout_graceful_shutdown"] == 3
+
+
 # ---------------------------------------------------------------------------
 # wisper enroll
 # ---------------------------------------------------------------------------
