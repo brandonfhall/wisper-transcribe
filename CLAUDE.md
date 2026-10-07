@@ -33,7 +33,7 @@ A task is not complete until all four are true — in this order:
 3. **Tailwind rebuilt** — `tailwind.min.css` is rebuilt and committed if it changed. Any text-file change can alter it, because Tailwind v4 scans the whole repo, including Markdown and docstrings.
 4. **Committed** — all changed files in a single `git commit`
 
-A Claude Code pre-commit hook (`.claude/hooks/pre_commit.py`) runs steps 1 and 3 on every `git commit`. It blocks the commit if tests fail (~30 s) or if the rebuilt `tailwind.min.css` differs and isn't staged. The hook runs before the command, so rebuild and `git add` the CSS in one step and commit in the next. It warns when `src/` changes have no doc changes. While iterating, run only the tests you need; the hook runs the full suite at commit. A blocked commit means fix and retry — never bypass it.
+A Claude Code pre-commit hook (`.claude/hooks/pre_commit.py`) runs steps 1 and 3 on every `git commit`. It blocks the commit if tests fail or time out (parallel run, ~1–2 min) or if the rebuilt `tailwind.min.css` differs and isn't staged. The hook runs before the command, so rebuild and `git add` the CSS in one step and commit in the next. It warns when `src/` changes have no doc changes. While iterating, run only the tests you need; the hook runs the full suite at commit. A blocked commit means fix and retry — never bypass it.
 
 When a todo list reaches 100% completed, do steps 2–4 immediately without waiting to be asked.
 
@@ -49,11 +49,12 @@ Commits (and pushing the feature branch) are authorized as part of completing an
 .venv\Scripts\pip install -e .        # Windows
 
 # Run tests
-.venv/bin/pytest tests/ -v            # Mac/Linux
-.venv\Scripts\pytest tests/ -v        # Windows
+.venv/bin/pytest tests/              # Mac/Linux (parallel by default: addopts -n auto)
+.venv\Scripts\pytest tests/          # Windows
+.venv/bin/pytest tests/test_x.py -n 0 -s   # serial, for breakpoints/print debugging
 
 # With coverage (matches CI)
-.venv/bin/pytest tests/ -v --cov --cov-report=term-missing
+.venv/bin/pytest tests/ --cov --cov-report=term-missing
 
 # Run web server
 wisper server --reload                # dev mode; http://localhost:8080

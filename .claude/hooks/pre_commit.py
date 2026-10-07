@@ -3,6 +3,7 @@
 Blocks the commit when tailwind.min.css is stale/unstaged or tests fail;
 warns (without blocking) when src/ changes ship without doc changes.
 """
+import importlib.util
 import json
 import re
 import subprocess
@@ -38,10 +39,18 @@ def main():
     elif not commit_all and run("git", "diff", "--quiet", "--", CSS).returncode != 0:
         problems.append(f"Tailwind rebuild changed {CSS} — `git add` it and retry the commit.")
 
-    tests = run(sys.executable, "-m", "pytest", "tests/", "-x", "-q", "--no-header", "-p", "no:cacheprovider",
-                timeout=280)
-    if tests.returncode != 0:
-        problems.append(f"Tests failed — fix before committing:\n{tests.stdout[-3000:]}")
+    # pyproject's addopts runs tests in parallel; drop it when pytest-xdist is missing so a
+    # venv without the current dev extras still commits (serially).
+    serial = [] if importlib.util.find_spec("xdist") else ["-o", "addopts="]
+    try:
+        tests = run(sys.executable, "-m", "pytest", "tests/", "-x", "-q", "--no-header",
+                    "-p", "no:cacheprovider", *serial, timeout=280)
+    except subprocess.TimeoutExpired:
+        # An uncaught exception exits non-blocking and would let the commit through.
+        problems.append("Tests timed out after 280 s — find the hang before committing.")
+    else:
+        if tests.returncode != 0:
+            problems.append(f"Tests failed — fix before committing:\n{tests.stdout[-3000:]}")
 
     if problems:
         print(json.dumps({"hookSpecificOutput": {
