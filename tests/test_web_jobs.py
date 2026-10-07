@@ -2388,6 +2388,51 @@ async def test_cancel_running_summarize_job_ends_cancelled(tmp_path, llm_out_dir
     assert job.error == "Cancelled"
 
 
+@pytest.mark.anyio
+async def test_stop_with_running_journal_job_ends_it_within_two_seconds(
+        tmp_path, llm_out_dir, monkeypatch):
+    """Ctrl+C (stop()) with a journal job blocked in an LLM call: the
+    CancelledError branch sets the job's cancel event, so its worker thread
+    returns on its own instead of leaving the interpreter to join a thread
+    stuck on an open stream."""
+    import threading
+    import time
+
+    import wisper_transcribe.llm as llm_mod
+    from wisper_transcribe.job_history import INTERRUPTED
+    from wisper_transcribe.web.jobs import FAILED
+
+    _journal_env(tmp_path, llm_out_dir, monkeypatch)
+    started = threading.Event()
+    client = _BlockingClient(started)
+    q = _make_queue()
+    job = q.submit_journal("my-game")
+    with patch.object(llm_mod, "get_client", lambda *a, **k: client), \
+            patch.object(q, "_ml_worker") as ml_worker:
+        q.start()
+        deadline = time.monotonic() + 2
+        while not started.is_set():
+            assert time.monotonic() < deadline, "job never reached the blocking LLM call"
+            await asyncio.sleep(0.01)
+
+        t0 = time.monotonic()
+        await asyncio.wait_for(q.stop(), timeout=2.0)
+        await asyncio.wait_for(
+            _wait_finished(job), timeout=max(0.0, 2.0 - (time.monotonic() - t0))
+        )
+
+    assert time.monotonic() - t0 < 2.0
+    assert job.status == FAILED
+    # Shutdown sets INTERRUPTED before cancelling; the runner keeps it.
+    assert job.error == INTERRUPTED
+    assert ml_worker.stop.called
+
+
+async def _wait_finished(job):
+    while job.finished_at is None:
+        await asyncio.sleep(0.01)
+
+
 def test_journal_job_error_is_generic(tmp_path, llm_out_dir, monkeypatch):
     """A journal runner failure shows the generic message, never exception text."""
     from wisper_transcribe.web.jobs import FAILED

@@ -93,9 +93,11 @@ def _set_job_error(job: "Job", exc: BaseException) -> None:
     """Set a generic, path-free error on *job* and log the real exception.
 
     ``"Cancelled"`` is kept verbatim; the job-detail template checks for it.
+    A cancel never replaces an error already set (shutdown sets INTERRUPTED
+    before it cancels the job).
     """
     if isinstance(exc, InterruptedError):
-        job.error = "Cancelled"
+        job.error = job.error or "Cancelled"
         return
     log.error("Job %s (%s) failed", job.id, job.job_type, exc_info=exc)
     from wisper_transcribe.transcript_store import TranscriptExistsError
@@ -1133,15 +1135,19 @@ class JobQueue:
             try:
                 await asyncio.to_thread(self._run_job, job)
             except asyncio.CancelledError:
-                # Server shutdown (stop()). The job thread can't be stopped and
-                # dies with the process, so the job is interrupted, not done.
+                # Server shutdown (stop()). The job runs in a default-executor
+                # thread, which the interpreter joins at exit, so the job is
+                # interrupted, not done. Signal its cancel event first: an LLM
+                # job in a cancel_scope then returns on its own instead of
+                # blocking exit on an open stream.
                 from wisper_transcribe.job_history import INTERRUPTED
                 job.status = FAILED
                 job.error = INTERRUPTED
                 job.finished_at = datetime.now()
                 _delete_temp_upload(job)
-                # The job thread can't be stopped; kill the ML child so it
-                # doesn't keep the GPU busy until the process exits.
+                job._cancel_event.set()
+                # Kill the ML child so it doesn't keep the GPU busy until the
+                # process exits.
                 await asyncio.to_thread(self._ml_worker.stop)
                 raise
             except Exception as exc:
@@ -1289,7 +1295,7 @@ class JobQueue:
                 job.status = COMPLETED
         except InterruptedError:
             job.status = FAILED
-            job.error = "Cancelled"
+            job.error = job.error or "Cancelled"
         except Exception as exc:
             job.status = FAILED
             _set_job_error(job, exc)
@@ -1346,7 +1352,7 @@ class JobQueue:
                 job.status = COMPLETED
         except InterruptedError:
             job.status = FAILED
-            job.error = "Cancelled"
+            job.error = job.error or "Cancelled"
         except Exception:
             job.status = FAILED
             raise

@@ -6,44 +6,6 @@ Active plans, open bugs, and parked designs. Shipped work is removed; its design
 
 ## Open bugs
 
-### LLM jobs hang forever on a stalled stream, and Stop can't end them
-
-Branch `fix/llm-job-stall-and-cancel`. Seen 2026-10-06: a "Rebuild journal from transcripts" job on `ollama-cloud / deepseek-v4.1-flash` sat at "Waiting for deepseek-v4.1-flash to start generating..." for 13+ minutes with the TCP connection to ollama.com still open. The same model answered a one-line request in under a second, so one stream stalled, not the provider. Stop did nothing.
-
-**Causes**
-
-1. **No read timeout.** `OllamaClient._post_chat` (`llm/ollama.py`) and `LMStudioClient` (`llm/lmstudio.py`) stream with `httpx.Timeout(read=None)`. A server that holds the connection open without sending bytes blocks `resp.iter_lines()` forever. Ollama Cloud inherits this through `OllamaCloudClient`.
-2. **LLM jobs never check `_cancel_event`.** `JobQueue.cancel()` only sets the event. Transcription jobs check it in their tqdm hooks; `_StderrCapture` (`web/jobs.py`), used by the journal, digest, refine/summarize, and post-process runners, never does. Stop does nothing for any LLM job, stalled or not.
-3. **Journal job leaks exception text.** `_run_journal_job` sets `job.error = str(exc)`, against the generic-error rule (`_set_job_error`, `_GENERIC_JOB_ERRORS` has no `JOB_CAMPAIGN_JOURNAL` entry). It also never maps a cancel to `"Cancelled"`.
-
-**Fix**
-
-- **Idle timeout on streams.** In both streaming clients set `read=_STREAM_IDLE_TIMEOUT` (600 s, module constant in `llm/base.py`). httpx's read timeout applies to each socket read, so it bounds the gap between chunks, not total generation time: a long response that keeps streaming never trips it. Map `httpx.ReadTimeout` to `LLMUnavailableError("No response from <model> for 10 minutes ...")` *before* the generic `httpx.HTTPError` branch. Update the module docstrings that say there is intentionally no read timeout. 600 s leaves room for a local model to load and evaluate a long prompt before its first token.
-- **Cancel scope for LLM calls.** New `llm/cancel.py`, modelled on `ml_worker.delegating()`: a thread-local `cancel_scope(event)` context manager plus `current_cancel_event()` and `raise_if_cancelled()`. Code outside a scope (CLI, request threads) sees no event and behaves as today.
-  - The four `_StderrCapture` runners (`_run_journal_job`, `_run_digest_job`, `_run_llm_job`, `_run_post_process`) enter `cancel_scope(job._cancel_event)` next to the stderr redirect.
-  - `_StderrCapture.write` calls `raise_if_cancelled()`, which is thread-local, so it stops a job that is streaming dots or logging between sessions. It must not read `job._cancel_event` directly: `sys.stderr` is process-wide while a capture is installed, so request threads and `warnings.warn` write through it too, and a cancelled job must not make them raise.
-  - Streaming clients: run the `httpx.stream(...)` read loop in a daemon thread and have the calling thread wait on it, polling the cancel event every ~0.25 s. On cancel, close the response (best effort) and raise `InterruptedError` at once. Don't rely on the close to unblock the read: closing a socket from another thread doesn't reliably wake a blocked `recv` on Linux. An abandoned reader thread dies at the latest when the idle timeout fires. Keep token/dot output on the caller's side or guarded so a late reader can't write into a later job's log.
-  - `LLMClient._retry_on_empty` calls `raise_if_cancelled()` before each attempt and waits with `event.wait(delay)` instead of `time.sleep` when a scope is active.
-  - SDK clients (Anthropic, OpenAI, Google) are non-streaming; their SDK default timeouts (~10 min) already bound them. Cancel takes effect once the in-flight call returns, via `_StderrCapture` or the next `raise_if_cancelled()`. Out of scope to interrupt them mid-call.
-- **Journal and digest job errors.** Add `JOB_CAMPAIGN_JOURNAL: "Journal update failed — see server logs"` to `_GENERIC_JOB_ERRORS`. `_run_journal_job` uses `_set_job_error(job, exc)` in place of `str(exc)`; both runners turn `InterruptedError` into `job.error = "Cancelled"` like the other runners do. `journal.py`'s per-session handlers catch only `LLMUnavailableError`/`LLMResponseError`/`FileNotFoundError`/`KeyError`, so `InterruptedError` already reaches the runner. Keep it that way.
-
-- **Ctrl+C with an LLM job running.** Seen in the same incident: the first Ctrl+C printed "Waiting for connections to close", a second one dumped a `CancelledError` ASGI traceback plus a `KeyboardInterrupt` lifespan traceback, and the process still didn't exit. It took several more presses, and meanwhile the job thread printed "LLM returned an empty response; retrying" and sent a new request. Two causes:
-  - The open job-page SSE stream (`job_stream`, `routes/transcribe.py`) keeps uvicorn's graceful shutdown waiting. Pass `timeout_graceful_shutdown=3` to `uvicorn.run` in `cli.py`'s `server` command so one Ctrl+C closes open streams after 3 s.
-  - `JobQueue.stop()` cancels the worker task, but the job runs in `asyncio.to_thread`, and Python joins default-executor threads at exit. The `CancelledError` branch in the worker loop kills only the ML child. Also set `job._cancel_event` there, before `self._ml_worker.stop`, so an LLM job inside `cancel_scope` returns within ~1 s and the interpreter can exit. Fix the comment there that says the thread "dies with the process": it doesn't.
-  - Test: `JobQueue.stop()` with a running journal job whose fake client blocks returns, and the job thread finishes, within a couple of seconds (`test_web_jobs.py`).
-
-**Known consequence (document, don't fix):** cancelling a rebuild or refold after `reset_journal()` leaves the journal folded only up to the cancelled session. The summaries already written stay. Running the rebuild again restores it. One line in `docs/web-ui.md` under the journal rebuild.
-
-**Tests** (no network; use a fake `httpx.stream` or a local socket server that accepts and never sends)
-
-- `test_llm_clients.py` / `test_lmstudio_client.py`: the stream timeout has `read=_STREAM_IDLE_TIMEOUT`; `httpx.ReadTimeout` becomes `LLMUnavailableError`; inside `cancel_scope`, setting the event during a blocked read makes `complete()` raise `InterruptedError` within ~1 s; outside a scope, behaviour is unchanged.
-- `test_llm_cancel.py` (new module → new test file): scope is thread-local and restored on exit; `raise_if_cancelled` without a scope is a no-op.
-- `test_web_jobs.py`: a running journal job whose fake client blocks until cancelled ends `FAILED` with `error == "Cancelled"` after `queue.cancel()`; the same for a digest job and a standalone summarize job; a journal job whose client raises shows the generic message, never the exception text.
-
-**Docs:** `architecture.md` (LLM module map entry for `llm/cancel.py`; streaming-timeout design note; Known Constraints row for "SDK providers cancel only between calls"); `docs/web-ui.md` (Stop works on journal/summary/recap/refine jobs; the rebuild-cancel note above); `docs/cli-reference.md` (`wisper server`: one Ctrl+C stops it, closing open pages after 3 s).
-
-**Out of scope, noted:** a session whose summary or fold fails (including a stall) is skipped and the rebuild carries on, so a later session can fold without an earlier one. Now that Stop works, leave it.
-
 ### Docker Desktop + native CLI on one data dir can corrupt the DB
 
 With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted, a native `wisper` command pointed at the same `./data` (via `WISPER_DATA_DIR`) and writing at the same time can corrupt `wisper.db`: file locks don't cross the Docker Desktop VM boundary. Reproduced 2026-09-30 (one host writer plus one container writer gave `database disk image is malformed` and lost updates). Container + container is fine (15,000/15,000 writes), and native Linux Docker is unaffected.

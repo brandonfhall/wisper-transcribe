@@ -334,6 +334,9 @@ def server(host: str, port: int, reload: bool, debug: bool) -> None:
             port=port,
             reload=reload,
             access_log=False,
+            # One Ctrl+C closes the SSE streams that would otherwise hold
+            # graceful shutdown open, so the process exits promptly.
+            timeout_graceful_shutdown=3,
         )
     finally:
         lock.release()
