@@ -227,8 +227,10 @@ def _load(conn: sqlite3.Connection, data_dir: Optional[Path],
                 for m in markers.get(rid, [])
             ],
             recovered_at=_dt(r["recovered_at"]),
-            recoverable=(r["capture_status"] == "failed" and not has_combined
-                         and _has_segment_files(rid, data_dir)),
+            # A failed session whose audio is on disk: its segments, or a
+            # combined track a disconnect (bot kicked, channel deleted) left.
+            recoverable=(r["capture_status"] == "failed"
+                         and (has_combined or _has_segment_files(rid, data_dir))),
         )
     return recordings
 
@@ -580,8 +582,12 @@ def recover_recording(recording_id: str, data_dir: Optional[Path] = None) -> Rec
     ``recovered_at`` set and can then be transcribed like any other. Slow for
     long sessions: call it off the request thread.
 
-    Raises KeyError (unknown id) or ValueError (active, not failed, already
-    has a combined track, or no readable segments).
+    A failed session that already has its combined track (a Discord session
+    ended by a kick or a deleted channel writes one) needs no join: it just
+    becomes ``completed``.
+
+    Raises KeyError (unknown id) or ValueError (active, not failed, or no
+    readable segments).
     """
     from .web.audio_writer import concat_wav_segments
 
@@ -592,14 +598,15 @@ def recover_recording(recording_id: str, data_dir: Optional[Path] = None) -> Rec
         raise ValueError("the session is still recording")
     if not rec.recoverable:
         raise ValueError("nothing to recover")
-    combined = combined_wav_path_for(recording_id, data_dir)
-    merged = concat_wav_segments(combined.parent / "combined", combined)
-    if merged is None:
-        raise ValueError("no readable audio segments")
-    # Verify the FLAC before deleting the WAV; on failure the WAV is kept and
-    # goes on to be registered as the recording's combined file.
-    if encode_combined_flac(recording_id, merged, data_dir) is not None:
-        merged.unlink(missing_ok=True)
+    if existing_combined_path(recording_id, data_dir) is None:
+        combined = combined_wav_path_for(recording_id, data_dir)
+        merged = concat_wav_segments(combined.parent / "combined", combined)
+        if merged is None:
+            raise ValueError("no readable audio segments")
+        # Verify the FLAC before deleting the WAV; on failure the WAV is kept and
+        # goes on to be registered as the recording's combined file.
+        if encode_combined_flac(recording_id, merged, data_dir) is not None:
+            merged.unlink(missing_ok=True)
     with db.transaction(data_dir) as conn:
         conn.execute(
             "UPDATE recordings SET capture_status = 'completed', recovered_at = ?, "
@@ -611,7 +618,7 @@ def recover_recording(recording_id: str, data_dir: Optional[Path] = None) -> Rec
         file_registry.add_if_owned(
             registered, kind="combined", owner=file_registry.Owner.for_recording(recording_id),
             data_dir=data_dir)
-    log.info("Recovered recording %s from its segments", recording_id)
+    log.info("Recovered recording %s", recording_id)
     try:
         trim_recording_audio(recording_id, data_dir)
     except Exception:

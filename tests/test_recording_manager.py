@@ -512,6 +512,23 @@ def test_crashed_session_with_segments_is_recoverable(tmp_path):
     assert not (tmp_path / "recordings" / rec.id / "combined.wav").exists()
 
 
+
+def test_failed_session_with_its_combined_track_is_recoverable(tmp_path):
+    """A Discord session ended by a kick or a deleted channel is "failed" but
+    has its combined track: recovery keeps that track and completes it, so it
+    can be transcribed instead of stranding the audio."""
+    rec = _crashed_session(tmp_path, n_segments=0)
+    flac = tmp_path / "recordings" / rec.id / "combined.flac"
+    flac.parent.mkdir(parents=True, exist_ok=True)
+    flac.write_bytes(b"fLaC-track")
+    r = load_recordings(tmp_path)[rec.id]
+    assert r.status == "failed" and r.recoverable is True
+
+    recovered = rm.recover_recording(rec.id, tmp_path)
+
+    assert recovered.status == "completed" and recovered.recovered_at is not None
+    assert recovered.combined_path == flac and flac.read_bytes() == b"fLaC-track"
+
 def test_crashed_session_without_segments_is_not_recoverable(tmp_path):
     rec = _crashed_session(tmp_path, n_segments=0)
     assert load_recordings(tmp_path)[rec.id].recoverable is False
