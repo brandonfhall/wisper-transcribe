@@ -738,6 +738,19 @@ def _clash_path(directory: Path, stem: str, fold: bool) -> Optional[Path]:
     return None
 
 
+
+def _is_digest_name(stem: str, folder: str) -> bool:
+    """Whether ``stem`` is a name the campaign's own files use in ``folder``:
+    the journal, the combined summary, or a recap. A session there would be
+    overwritten when that file is written."""
+    from .campaign_folders import _fold, combined_summary_name, journal_name, recap_name
+
+    folded = _fold(stem)
+    if folded in (_fold(Path(journal_name(folder)).stem),
+                  _fold(Path(combined_summary_name(folder)).stem)):
+        return True
+    return folded.startswith(_fold(recap_name(folder, "")[:-len(".md")]))
+
 def check_move(transcript_id: int, campaign_slug: Optional[str], *, new_stem: Optional[str] = None,
                conn: Optional[sqlite3.Connection] = None, data_dir: Optional[Path] = None,
                output_dir: Optional[Path] = None) -> MoveCheck:
@@ -819,7 +832,7 @@ def _check_move_in(conn: sqlite3.Connection, transcript_id: int, campaign_slug: 
         if (not target_claimed and target_dir.is_dir()
                 and not holds_only_wisper(target_dir, target_folder)):
             return MoveCheck("folder_taken", target_dir, stem, None, False, None)
-        if _fold(stem) == _fold(Path(journal_name(target_folder)).stem):
+        if _is_digest_name(stem, target_folder):
             return MoveCheck("reserved", target_dir, stem, None, False, None)
 
     clash_file = _clash_path(target_dir, stem, fold)

@@ -1316,6 +1316,16 @@ def test_check_move_reserved_when_the_name_is_the_journal(out):
     assert check.status == "reserved"
 
 
+
+@pytest.mark.parametrize("name", ["{folder} Combined Summary", "{folder} combined summary",
+                                  "{folder} Recap \u2014 S2"])
+def test_check_move_reserves_the_campaign_digest_names(out, name):
+    """A session named like the campaign's combined summary or a recap would
+    be overwritten when that digest is generated."""
+    cid, slug, folder = _claimed_campaign("Game")
+    tid = _seed.seed_transcript("S", write_md=True)
+    assert ts.check_move(tid, slug, new_stem=name.format(folder=folder)).status == "reserved"
+
 def test_check_move_busy_when_a_job_targets_the_campaign(out):
     from wisper_transcribe.web.jobs import JobQueue
 

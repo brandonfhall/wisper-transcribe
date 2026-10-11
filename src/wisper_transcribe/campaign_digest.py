@@ -464,10 +464,29 @@ def _materials(safe: str, cid: int, stems: list[str],
     return out
 
 
+
+def _check_target_free(target: Path, owner, kind: str, label: Optional[str], *,
+                       data_dir: Optional[Path], output_dir: Optional[Path]) -> None:
+    """Refuse a digest name that is another file wisper owns.
+
+    A session renamed to "<folder> Combined Summary" (or a recap's name) is
+    a registered transcript; writing the digest there would replace it.
+    Checked before the LLM call so nothing is spent on a write that can't
+    happen. An unregistered file (say, a kept digest from a deleted campaign)
+    is this digest's to replace.
+    """
+    if not file_registry.is_registered(target, data_dir=data_dir, output_dir=output_dir):
+        return
+    own = file_registry.file_for(owner, kind, label, data_dir=data_dir, output_dir=output_dir)
+    if own is None or not file_registry._same_file(own.path, target):
+        raise DigestLocationError("digest_name_taken")
+
 def _generate(slug: str, kind: str, target: Path, stems: list[str], *, label: Optional[str],
               system_prompt: str, user_prompt: str, client: LLMClient,
               data_dir: Optional[Path], output_dir: Optional[Path]) -> DigestResult:
     """The common write path: run the LLM, write the file, register, record."""
+    owner = file_registry.Owner.for_campaign_slug(slug, data_dir=data_dir)
+    _check_target_free(target, owner, kind, label, data_dir=data_dir, output_dir=output_dir)
     body = _strip_code_fence(client.complete(system_prompt, user_prompt))
     rendered = render_digest(slug, kind, body, getattr(client, "provider", ""),
                              getattr(client, "model", ""), stems)
@@ -475,7 +494,6 @@ def _generate(slug: str, kind: str, target: Path, stems: list[str], *, label: Op
     replaced = target.exists()
     atomic_write_text(target, rendered)
 
-    owner = file_registry.Owner.for_campaign_slug(slug, data_dir=data_dir)
     with db.transaction(data_dir) as conn:
         file_registry.add_if_owned(target, kind=kind, owner=owner, label=label,
                                    conn=conn, data_dir=data_dir, output_dir=output_dir)

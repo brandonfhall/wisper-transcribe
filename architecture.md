@@ -431,6 +431,8 @@ Cancel only sets `job._cancel_event`, and the job thread can't notice until its 
 Campaign fold order is `Campaign.transcripts` order — **insertion order**, not a date. `reorder_campaign_transcript()` (swap up/down) and `set_campaign_transcript_order()` (full permutation, else `ValueError`) fix it.
 
 ### Campaign digests (`campaign_digest.py`)
+
+A digest is never written over a file registered to anything else (`_check_target_free`, before the LLM call): a session at the digest's name raises `DigestLocationError("digest_name_taken")`.
 Two bounded, whole-campaign artifacts built from the same per-session `.summary.md` sidecars, in the campaign's folder (campaign-owned `files` rows, so a folder rename carries them): the **combined summary** (`<folder> Combined Summary.md`, one per campaign, overwritten on each run) and the **"Previously on…" recap** (`<folder> Recap — <stem>.md`, one per newest session, so history is kept and a rerun for the same stem replaces that one file). Both live under `output`; `recap` carries its newest session's stem in the file row's `label`, which is why the `files_campaign` unique index keys `(campaign_id, kind, coalesce(label, ''))` (v14).
 
 - `summarized_sessions()` mirrors the journal's discovery but returns every session with a summary, in campaign order; `recap_sessions(n)` takes the last 1–3 (`clamp_recap_sessions`, default 1). `combined_summary_path()`/`recap_path()` resolve the registered path, else the derived name in a claimed folder, else None.
@@ -587,7 +589,8 @@ belongs*: the output root, or `<root>/<campaigns.folder>`.
   It validates `new_stem` (`validate_new_stem`, then `safe_path`) before any
   disk access, so a name from a query string is a path guard too. It returns a
   `MoveCheck` with the status (`ok`, `unchanged`, `invalid`, `busy`,
-  `folder_taken`, `reserved`, `clash`), the destination directory and stem, the
+  `folder_taken`, `reserved` (the campaign's journal, combined-summary, or a
+  recap name: `_is_digest_name`), `clash`), the destination directory and stem, the
   clashing file's modified time, whether Overwrite is offered (only when the
   clashing file is a registered transcript), that transcript's id, and
   `files_move` (false when the session is flagged missing or the `.md` is
