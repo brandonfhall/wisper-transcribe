@@ -2395,3 +2395,23 @@ def test_rename_to_a_name_too_long_in_bytes_is_invalid(out):
     tid, md = placed_session("S")
     assert ts.rename_transcript(tid, "\u9f8d" * 100).status == "invalid"
     assert md.exists()
+
+
+
+def test_a_missing_companion_leaves_needs_attention_once_rename_forgets_it(out):
+    """A summary deleted outside wisper is listed as missing; renaming the
+    session forgets its row, so the list drops it too instead of showing it
+    until the next sync."""
+    from ._moves import placed_session
+
+    tid, md = placed_session("S1")
+    summary = md.with_name("S1.summary.md")
+    summary.write_text("sum", encoding="utf-8")
+    file_registry.add_if_owned(summary, kind="summary", owner=file_registry.Owner("transcript", tid))
+    summary.unlink()
+    file_registry.sync()
+    assert [r.path.name for r in ts.needs_attention().missing_files] == ["S1.summary.md"]
+
+    assert ts.rename_transcript(tid, "S2").status == "moved"
+
+    assert ts.needs_attention().missing_files == []
