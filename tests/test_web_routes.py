@@ -2844,6 +2844,55 @@ def test_job_detail_journal_pending_bakes_slug_into_js(client, tmp_path, monkeyp
     assert 'JOURNAL_SLUG = "my-game"' in resp.text
 
 
+
+def _campaign_job(job_type: str, status: str):
+    import uuid
+    from datetime import datetime
+
+    from wisper_transcribe.web.jobs import Job
+
+    return Job(
+        id=str(uuid.uuid4()),
+        status=status,
+        created_at=datetime.now(),
+        input_path="",
+        kwargs={"slug": "my-game"},
+        name="Campaign job",
+        job_type=job_type,
+    )
+
+
+@pytest.mark.parametrize("job_type", ["campaign_summary", "campaign_recap", "speaker_relabel"])
+def test_job_detail_campaign_job_running_bakes_slug_into_js(client, tmp_path, monkeypatch, job_type):
+    """A campaign job watched to the end swaps its Stop button for a link
+    back to the campaign; the page JS needs the slug to build it."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    job = _campaign_job(job_type, "running")
+    client.app.state.job_queue._jobs[job.id] = job
+
+    resp = client.get(f"/transcribe/jobs/{job.id}")
+    assert resp.status_code == 200
+    assert 'CAMPAIGN_SLUG = "my-game"' in resp.text
+
+
+def test_job_detail_transcription_job_has_no_campaign_slug(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    job = _campaign_job("transcription", "running")
+    client.app.state.job_queue._jobs[job.id] = job
+
+    resp = client.get(f"/transcribe/jobs/{job.id}")
+    assert "CAMPAIGN_SLUG = null" in resp.text
+
+
+def test_job_detail_completed_relabel_links_back_to_campaign(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    job = _campaign_job("speaker_relabel", "completed")
+    client.app.state.job_queue._jobs[job.id] = job
+
+    resp = client.get(f"/transcribe/jobs/{job.id}")
+    assert 'href="/campaigns/my-game" class="btn btn-primary">Back to campaign' in resp.text
+    assert "Stop job" not in resp.text
+
 def test_transcribe_form_includes_campaign_select(client, tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     from wisper_transcribe.models import Campaign
