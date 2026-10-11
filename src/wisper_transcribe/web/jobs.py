@@ -307,6 +307,22 @@ def _delete_temp_upload(job: "Job") -> None:  # type: ignore[name-defined]
         shutil.rmtree(folder, ignore_errors=True)
 
 
+def _delete_enroll_source(job: "Job") -> None:  # type: ignore[name-defined]
+    """Delete a standalone enroll job's ``wisper_enrollsrc_*`` upload.
+
+    For a job cancelled while pending: its runner, whose ``finally`` deletes
+    the file, never runs. Acts only on that temp name, so a recording
+    enroll's per-user audio is never touched.
+    """
+    from pathlib import Path as _Path
+
+    if job.job_type != JOB_ENROLL or job.enroll_mode != "standalone" or not job.input_path:
+        return
+    src = _Path(job.input_path)
+    if src.name.startswith("wisper_enrollsrc_"):
+        src.unlink(missing_ok=True)
+
+
 def _longest_aligned_segment(aligned_segments: list, label: str) -> Optional[tuple]:
     """Return (start, duration, text) of the label's longest aligned segment, or None.
 
@@ -1066,6 +1082,7 @@ class JobQueue:
             job.error = "Cancelled"
             job.finished_at = datetime.now()
             _delete_temp_upload(job)
+            _delete_enroll_source(job)
             _record_history(job)
             self._prune_finished_jobs()
             return True

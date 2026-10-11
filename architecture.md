@@ -850,7 +850,7 @@ Job types:
 - **`JOB_SPEAKER_RELABEL`** — `submit_relabel()`: `relabel_campaign()` with audio backfill; logs renames and skipped sessions.
 - **`JOB_ENROLL`** — `enroll_mode` selects:
   - `wizard` — embeddings for renames already applied by the wizard. Carries only the transcript path, rename groups, and device; re-reads the sidecar. `output_path` is set at submit so "View transcript" works immediately. For a campaign transcript it then propagates names with `relabel_campaign(backfill=False)`; a propagation failure is logged and doesn't fail the job.
-  - `standalone` — `/speakers/enroll` upload: convert → diarize → pick the speaker with the most speech → enroll or EMA-update. The upload is renamed to `wisper_enrollsrc_<job-id>` at submit and deleted in a `finally`.
+  - `standalone` — `/speakers/enroll` upload: convert → diarize → pick the speaker with the most speech → enroll or EMA-update. The upload is renamed to `wisper_enrollsrc_<job-id>` at submit and deleted in a `finally`, or by `cancel()` when the job is cancelled while pending.
   - `recording` — enroll an unbound Discord speaker from their per-user track, then bind the id in the recording and campaign (best-effort follow-ups). Never deletes recording audio.
 - **`JOB_LIVE`** — open-ended; runs `run_live_loop()` until `stop_live()` sets `live_stop_event`, which is normal completion, not cancellation. It holds the only worker slot for the whole session. Lines go to `job.live_lines` and `recordings/<id>/live_transcript.md`.
   - `noise_floor` lives in `job.kwargs` and can be changed while running (`set_live_noise_floor()`).
@@ -907,7 +907,7 @@ On transcription completion, `jobs.py`:
 Submit flow: rename synchronously; if nothing is eligible, redirect back; compute `enrollable_labels()` for the submitted labels from the transcript's sidecar; if any group is fully enrollable, `submit_enroll()` and redirect to the job page via `job.id`, else redirect back. Either redirect carries `?notice=enroll_audio_missing` when a label was skipped. Partial enrollment is deliberate: the labels with data still enroll. The wizard shows a banner before submit when any speaker has no saved voice data and the audio is gone.
 
 ### Startup cleanup
-`app._cleanup_orphaned_uploads()` deletes `wisper_upload_*` folders and files plus `wisper_enroll_*` and `wisper_enrollsrc_*` files from the temp dir at startup. A transcription upload lives in `wisper_upload_<job-id>/` until its job ends, and the job deletes the folder on success, failure, or cancel (pending or running); an enroll upload is renamed to `wisper_enrollsrc_<job-id>` at submit and deleted in a `finally`. The sweep only covers a crash, and at startup the in-memory queue is empty.
+`app._cleanup_orphaned_uploads()` deletes `wisper_upload_*` folders and files plus `wisper_enroll_*` and `wisper_enrollsrc_*` files from the temp dir at startup. A transcription upload lives in `wisper_upload_<job-id>/` until its job ends, and the job deletes the folder on success, failure, or cancel (pending or running); an enroll upload is renamed to `wisper_enrollsrc_<job-id>` at submit and deleted in a `finally`, or by `cancel()` for a job cancelled while pending. The sweep only covers a crash, and at startup the in-memory queue is empty.
 
 ### Route security
 CodeQL scans every PR. The patterns (see also CLAUDE.md):
