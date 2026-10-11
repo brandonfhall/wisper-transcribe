@@ -1792,11 +1792,9 @@ def transcripts_rename(name: str, new_name: str, campaign: Optional[str],
 @click.option("--re-enroll", is_flag=True, default=False, help="Print the command that re-enrolls the voice from the original audio")
 def fix(transcript: Path, speaker: str, new_name: str, re_enroll: bool):
     """Fix a speaker name in an existing transcript."""
-    from .formatter import update_speaker_names
+    from .web.enroll_shared import rename_speaker
 
-    content = transcript.read_text(encoding="utf-8")
-    updated = update_speaker_names(content, speaker, new_name)
-    save_transcript(transcript, updated)
+    rename_speaker(transcript, speaker, new_name)
     click.echo(f"Updated {transcript.name}: {speaker!r} → {new_name!r}")
 
     if re_enroll:

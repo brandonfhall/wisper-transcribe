@@ -387,6 +387,8 @@ wisper fix session05.md --speaker "Unknown Speaker 1" --name "Frank"
 wisper fix session03.md --speaker "Alice" --name "Diana"
 ```
 
+The rename counts as a manual one, like a rename in the web **Name speakers** wizard: a campaign's **Re-match speakers** (`wisper campaigns relabel`) keeps the name instead of re-matching that speaker's voice.
+
 `--re-enroll` prints the `wisper enroll <name> --audio <file> --update` command that updates the voice profile; it doesn't run it.
 
 ---

@@ -383,6 +383,35 @@ def apply_renames(
     return RenameResult(current_names, groups=groups)
 
 
+def rename_speaker(md_path: Path, old_name: str, new_name: str) -> None:
+    """Rename every label shown as ``old_name`` to ``new_name``, by hand.
+
+    For ``wisper fix`` and ``POST /transcripts/{id}/fix-speaker``. With
+    diarization data this is :func:`apply_renames` with ``source="manual"``,
+    so the speaker rows and their provenance follow the ``.md`` and the
+    campaign relabel pass keeps the name. Without it (a bare ``.md``), the
+    bold names in the text are replaced.
+    """
+    from wisper_transcribe.formatter import update_speaker_names
+    from wisper_transcribe.models import DiarizationSegment
+    from wisper_transcribe.transcript_store import save_transcript
+
+    diar = _load_diar_sidecar(md_path)
+    if diar is not None:
+        segments = [
+            DiarizationSegment(start=s["start"], end=s["end"], speaker=s["speaker"])
+            for s in diar.get("diarization_segments", [])
+        ]
+        current = resolve_current_names(md_path, diar, segments)
+        labels = [label for label, name in current.items() if name == old_name]
+        if labels:
+            apply_renames(md_path, segments, {label: new_name for label in labels},
+                          source="manual")
+            return
+    content = md_path.read_text(encoding="utf-8")
+    save_transcript(md_path, update_speaker_names(content, old_name, new_name))
+
+
 def enroll_profiles(
     *,
     input_path: Optional[Path] = None,

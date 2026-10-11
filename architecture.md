@@ -204,6 +204,7 @@ Diarization labels are scoped to one run, so cross-session identity comes only f
 - **Manual names are never overwritten.** A label with a recorded provenance follows it. Labels imported without one (older runs) treat only pipeline-shaped names (`AUTO_NAME_RE`: raw labels, `Unknown/Recurring Speaker N`) as automatic, since a real name there may have been typed.
 - **Pipeline-shaped names never become profiles.** `apply_renames()` excludes `AUTO_NAME_RE` names from enrollment, so a prefilled `Unknown Speaker 1` submitted unchanged can't create a junk profile that competes in every match.
 - **Propagation:** a wizard enroll job for a campaign transcript runs `relabel_campaign(backfill=False)` after enrolling, so a newly named person is renamed in the campaign's other sessions from stored embeddings without re-reading audio. The full pass (with backfill) is `wisper campaigns relabel` or the campaign page's **Re-match speakers** (`JOB_SPEAKER_RELABEL`).
+- **`wisper fix` is a manual rename.** `enroll_shared.rename_speaker()` runs `apply_renames(source="manual")` when the transcript has diarization data, so the speaker rows follow the `.md` and the relabel pass skips the label; a bare `.md` gets a text replace only.
 - **Profiles aren't updated from auto matches**, only from wizard or explicit enrollment, so a wrong match can't reinforce itself.
 - `speaker_registry` imports `apply_renames`/`AUTO_NAME_RE` lazily from `web/enroll_shared.py` (pure Python, no FastAPI) rather than duplicating the block-rewrite logic.
 

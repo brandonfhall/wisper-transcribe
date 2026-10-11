@@ -824,10 +824,8 @@ async def fix_speaker(request: Request, transcript_id: int) -> Response:
     new_name = str(form.get("new_name", "")).strip()
 
     if old_name and new_name:
-        from wisper_transcribe.formatter import update_speaker_names
-        content = md_path.read_text(encoding="utf-8")
-        content = update_speaker_names(content, old_name, new_name)
-        transcript_store.save_transcript(md_path, content)
+        from wisper_transcribe.web.enroll_shared import rename_speaker
+        rename_speaker(md_path, old_name, new_name)
 
     return HTMLResponse(
         content="",

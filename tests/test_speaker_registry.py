@@ -115,6 +115,32 @@ def test_manual_names_are_never_overwritten(world):
     assert "**Carol**" in md.read_text(encoding="utf-8")
 
 
+
+def test_name_fixed_with_wisper_fix_survives_relabel(world):
+    """``wisper fix`` is a manual rename: it records the name and its manual
+    provenance with the transcript, so the relabel pass leaves it alone even
+    when the voice matches someone else."""
+    from click.testing import CliRunner
+
+    from wisper_transcribe.cli import main
+
+    data, out = world
+    md = _transcript(out, "s1", {"SPEAKER_00": "Unknown Speaker 1"},
+                     embeddings={"SPEAKER_00": ALICE}, sources={"SPEAKER_00": "auto"})
+    _add(data, "s1", out)
+
+    result = CliRunner().invoke(
+        main, ["fix", str(md), "--speaker", "Unknown Speaker 1", "--name", "Carol"])
+    assert result.exit_code == 0, result.output
+    sidecar = sidecar_data(out / "s1_diar.json")
+    assert sidecar["speaker_map"]["SPEAKER_00"] == "Carol"
+    assert sidecar["speaker_map_source"]["SPEAKER_00"] == "manual"
+
+    report = _run(data, out)
+
+    assert report.transcripts[0].renamed == {}
+    assert "**Carol**" in md.read_text(encoding="utf-8")
+
 def test_legacy_sidecar_real_name_treated_as_manual(world):
     """No provenance recorded: a real name may have been typed, so keep it."""
     data, out = world
