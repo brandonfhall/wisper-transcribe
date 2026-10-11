@@ -564,14 +564,17 @@ class BotManager:
         except Exception:
             log.warning("Could not trim recording %s", recording.id, exc_info=True)
 
-        became_completed = recording.status == "recording"
+        # Degraded (rejoins exhausted) is a live state: once the session ends it
+        # completes like any other, or it would block every new session. The
+        # rejoin log keeps the history; only failed is terminal.
+        became_completed = recording.status in ("recording", "degraded")
         if became_completed:
             recording.status = "completed"
             recording.ended_at = datetime.now(timezone.utc)
 
         # combined.flac's path is derived from the layout, so only a status
-        # change needs writing; a terminal status saved by a disconnect
-        # handler (failed/degraded) is kept.
+        # change needs writing; a failed status saved by a disconnect handler
+        # is kept.
         if became_completed:
             update_recording_status(recording.id, "completed", self._data_dir,
                                     ended_at=recording.ended_at)

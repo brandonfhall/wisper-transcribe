@@ -337,6 +337,29 @@ def test_capture_thread_failure_marks_recording_degraded(tmp_path):
     mgr.stop_session()  # cleanup
 
 
+
+def test_stopping_a_degraded_session_completes_it(tmp_path):
+    """A degraded session (a device died) still ends on Stop: completed with
+    an end time, so it can be transcribed and the next session can start."""
+    from wisper_transcribe.recording_manager import load_recordings
+
+    mgr = LocalCaptureManager(
+        data_dir=tmp_path, capture_factory=_raising_capture_factory, ticker=instant_ticker(0),
+    )
+    rec = mgr.start_session(None, "mic-dev", "sys-dev")
+    for t in mgr._capture_threads:
+        t.join(timeout=5.0)
+    assert rec.status == "degraded"
+
+    mgr.stop_session()
+
+    stored = load_recordings(tmp_path)[rec.id]
+    assert (rec.status, stored.status) == ("completed", "completed")
+    assert stored.ended_at is not None
+    nxt = mgr.start_session(None, "mic-dev", "sys-dev")
+    assert nxt.id != rec.id
+    mgr.stop_session()
+
 def test_device_failing_before_start_session_returns_still_marks_degraded(tmp_path, monkeypatch):
     """Worst case of the race above: each thread runs to completion inside
     Thread.start(), so the device fails before start_session() returns."""

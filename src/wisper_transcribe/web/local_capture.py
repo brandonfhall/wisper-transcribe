@@ -639,7 +639,9 @@ class LocalCaptureManager:
         except Exception:
             log.warning("Could not trim local recording %s", recording.id, exc_info=True)
 
-        became_completed = recording.status == "recording"
+        # Degraded is a live state (a track died mid-session); once stopped the
+        # session is over like any other, or it would block every new session.
+        became_completed = recording.status in ACTIVE_STATUSES
         if became_completed:
             recording.status = "completed"
             recording.ended_at = datetime.now(timezone.utc)
