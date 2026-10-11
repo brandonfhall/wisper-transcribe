@@ -24,6 +24,8 @@ The Discord form on `/record` lists saved presets as `preset_index` radios, but 
 
 **Decision needed:** restore an ID field (or an "unlink" action) on each member row of the Campaign page, or drop the route.
 
+The same redesign dropped the Add member form's per-campaign **role** and **character** fields, and the member list shows the profile's global role instead. `POST /campaigns/{slug}/members` and `wisper campaigns add-member --role/--character` still set them, and only `wisper campaigns show` prints them; no prompt or page reads them. Restore them alongside the Discord ID, or drop the columns.
+
 ## Manual verification owed
 
 - **Live recording + campaign journal:** `LIVE_AUDIO_TEST_PLAN.md` — real-device capture, live transcript, journal browser flows, bulk delete, busy-queue notice.
