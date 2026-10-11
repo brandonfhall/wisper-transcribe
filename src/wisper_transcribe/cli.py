@@ -2498,9 +2498,19 @@ def db_dump(output: Optional[Path]):
         for line in lines:
             click.echo(line)
         return
-    with open(output, "w", encoding="utf-8") as fh:
-        for line in lines:
-            fh.write(line + "\n")
+    # Write beside the target and swap it in only once the dump finished, so
+    # a failed dump (no database, a read error) never truncates an old file.
+    import os
+
+    partial = output.with_name(output.name + ".partial")
+    try:
+        with open(partial, "w", encoding="utf-8") as fh:
+            for line in lines:
+                fh.write(line + "\n")
+        os.replace(partial, output)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
     click.echo(f"Wrote {output}")
 
 
