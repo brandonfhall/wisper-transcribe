@@ -340,8 +340,7 @@
               <div style="font-family:var(--font-serif);font-size:14px;color:var(--color-paper)">{{ p.name or member_key }}</div>
               <div style="font-family:var(--font-mono);font-size:10px;color:var(--color-paper-faint);letter-spacing:0.1em;margin-top:2px">{{ (p.role or '') | upper }}</div>
             </div>
-            <form method="post" action="/campaigns/{{ slug }}/remove-member" style="display:inline">
-              <input type="hidden" name="member_key" value="{{ member_key }}"/>
+            <form method="post" action="/campaigns/{{ slug }}/members/{{ member_key | urlencode }}/remove" style="display:inline">
               <button type="submit" style="background:none;border:none;color:var(--color-signal-rose);font-size:11.5px;cursor:pointer;padding:0">remove</button>
             </form>
           </div>
@@ -354,7 +353,7 @@
         <!-- Add member -->
         <div id="add-member" style="margin-bottom:24px">
           <div class="mono-kicker" style="margin-bottom:10px">Add member</div>
-          <form method="post" action="/campaigns/{{ slug }}/add-member" style="display:flex;gap:8px">
+          <form method="post" action="/campaigns/{{ slug }}/members" style="display:flex;gap:8px">
             <select name="profile_key" style="flex:1;background:var(--color-ink-700);border:1px solid var(--color-rule);color:var(--color-paper);padding:7px 10px;border-radius:5px;font-size:12px;font-family:var(--font-sans)">
               <option value="">— Select speaker —</option>
               {% for key, p in profiles.items() if key not in active_campaign.members %}

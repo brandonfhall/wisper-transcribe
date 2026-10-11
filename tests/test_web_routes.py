@@ -2109,6 +2109,72 @@ def test_campaign_add_member_persists(client, tmp_path, monkeypatch):
     assert loaded["test-game"].members["alice"].role == "DM"
 
 
+
+def test_every_template_form_posts_to_a_registered_route(app):
+    """A form whose action has no route fails only when someone clicks it
+    (the Campaign page's member forms and the Discord start form did, for
+    months). Jinja expressions become ``1``, which fits both ``{slug}`` and
+    ``{id:int}`` parameters; an action that is wholly an expression is skipped."""
+    import re
+    from pathlib import Path
+
+    from starlette.routing import Match
+
+    import wisper_transcribe.web as web_pkg
+
+    templates = Path(web_pkg.__file__).parent / "templates"
+    missing, checked = [], 0
+    for tpl in sorted(templates.glob("*.html")):
+        for attrs in re.findall(r"<form\b([^>]*)>", tpl.read_text(encoding="utf-8"), re.S):
+            action = re.search(r'action="([^"]*)"', attrs)
+            if action is None:
+                continue
+            method = re.search(r'method="([^"]*)"', attrs)
+            method = method.group(1).upper() if method else "GET"
+            url = re.sub(r"\{\{.*?\}\}", "1", action.group(1)).split("?")[0]
+            if not url.startswith("/"):
+                continue
+            checked += 1
+            scope = {"type": "http", "path": url, "method": method}
+            if not any(r.matches(scope)[0] == Match.FULL for r in app.routes):
+                missing.append(f"{tpl.name}: {method} {action.group(1)}")
+    assert checked > 30
+    assert missing == []
+
+
+def test_campaign_page_member_forms_add_and_remove(client, tmp_path, monkeypatch):
+    """Drive the Campaign page's own Add member and remove forms."""
+    import re
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    import numpy as np
+    from wisper_transcribe.campaign_manager import create_campaign, load_campaigns
+    from wisper_transcribe.models import SpeakerProfile
+    from tests._seed import save_profiles
+
+    create_campaign("Test Game", data_dir=tmp_path)
+    save_profiles(
+        {"alice": SpeakerProfile(
+            name="alice", display_name="Alice", role="",
+            embedding=np.ones(4, dtype=np.float32) / 2, enrolled_date="2026-04-28",
+            enrollment_source="test.mp3",
+        )},
+        data_dir=tmp_path,
+    )
+
+    page = client.get("/campaigns/test-game").text
+    add = re.search(r'<form method="post" action="([^"]+)"[^>]*>\s*<select name="profile_key"', page)
+    resp = client.post(add.group(1), data={"profile_key": "alice"}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert "alice" in load_campaigns(tmp_path)["test-game"].members
+
+    page = client.get("/campaigns/test-game").text
+    remove = re.search(r'<form method="post" action="([^"]*/members/alice/remove)"', page)
+    assert remove is not None
+    resp = client.post(remove.group(1), follow_redirects=False)
+    assert resp.status_code == 303
+    assert "alice" not in load_campaigns(tmp_path)["test-game"].members
+
 def test_campaign_add_unknown_profile_rejects(client, tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     from wisper_transcribe.campaign_manager import create_campaign
