@@ -1563,7 +1563,11 @@ def _companion_paths(loc: "Located", conn: Optional[sqlite3.Connection] = None) 
     if loc.md is not None:
         # glob.escape: a stem like "mix*" must not match other transcripts' clips.
         for clip in loc.dir.glob(f"{glob.escape(stem)}_excerpt_*"):
-            add(clip)
+            # Only this transcript's clips: the prefix also matches another
+            # session named "<stem>_excerpt_..." and its .md and companions.
+            if any(kind in ("excerpt", "excerpt_text") and nfc(owner) == nfc(stem)
+                   for kind, owner, _label in file_registry._output_candidates(clip.name)):
+                add(clip)
     return paths
 
 

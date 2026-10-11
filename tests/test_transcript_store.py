@@ -2344,3 +2344,26 @@ def test_rename_case_only_on_a_case_insensitive_filesystem(out, monkeypatch):
         assert conn.execute("SELECT stem FROM transcripts WHERE id = ?", (tid,)).fetchone()[0] == \
             "SESSION"
 
+
+
+
+def test_delete_keeps_a_session_whose_name_extends_the_stem_with_excerpt(tmp_path, monkeypatch):
+    """Deleting "mix" removes mix_excerpt_SPEAKER_00.mp3 (its clip) but not
+    the session "mix_excerpt_final" in the same folder."""
+    from wisper_transcribe import transcript_store as ts
+    from tests._seed import seed_transcript
+
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    mix = seed_transcript("mix", write_md=True)
+    seed_transcript("mix_excerpt_final", write_md=True)
+    (out / "mix_excerpt_SPEAKER_00.mp3").write_bytes(b"clip")
+    (out / "mix_excerpt_final.summary.md").write_text("summary", encoding="utf-8")
+
+    assert ts.delete_transcript(mix) == "deleted"
+
+    assert not (out / "mix_excerpt_SPEAKER_00.mp3").exists()
+    assert (out / "mix_excerpt_final.md").exists()
+    assert (out / "mix_excerpt_final.summary.md").exists()
