@@ -141,7 +141,7 @@ class Recording:
     name: Optional[str] = None     # user-supplied session name, set at start; display-only, never used in a file path
     markers: list = field(default_factory=list)  # list[Marker] -- user-flagged moments, "Add marker" button on /record
     recovered_at: Optional[datetime] = None  # set when a crashed session's segments were joined into its combined track
-    recoverable: bool = False      # derived: failed, no combined track, but combined segments on disk
+    recoverable: bool = False      # derived: failed, with its combined track or combined segments on disk
 
 
 # ---------------------------------------------------------------------------

@@ -259,6 +259,33 @@ def test_generate_combined_summary_writes_registers_and_records(tmp_path, out_di
     assert digest is not None and digest.sessions == ["s1", "s2", "s3"]
 
 
+
+def test_generate_refuses_to_write_over_a_session_with_the_digest_name(tmp_path, out_dir):
+    """A session file already at the combined summary's name (placed by hand,
+    then picked up) is never replaced; the LLM isn't even called."""
+    _game(tmp_path, out_dir)
+    folder = out_dir / "My Game"
+    md = folder / "My Game Combined Summary.md"
+    md.write_text("# a real session\n", encoding="utf-8")
+    tid = _seed.seed_transcript("My Game Combined Summary", campaign="my-game", data_dir=tmp_path)
+    file_registry.add(md, kind="transcript", owner=file_registry.Owner("transcript", tid),
+                      data_dir=tmp_path, output_dir=out_dir)
+    client = FakeClient()
+
+    with pytest.raises(cd.DigestLocationError):
+        cd.generate_combined_summary("my-game", client, {}, data_dir=tmp_path)
+
+    assert md.read_text(encoding="utf-8") == "# a real session\n"
+    assert client.calls == []
+
+
+def test_regenerating_a_digest_replaces_its_own_file(tmp_path, out_dir):
+    _game(tmp_path, out_dir)
+    first = cd.generate_combined_summary("my-game", FakeClient(body="one"), {}, data_dir=tmp_path)
+    again = cd.generate_combined_summary("my-game", FakeClient(body="two"), {}, data_dir=tmp_path)
+    assert again.replaced is True and again.path == first.path
+    assert "two" in again.path.read_text(encoding="utf-8")
+
 def test_generate_combined_summary_is_not_stale_after_writing(tmp_path, out_dir):
     _game(tmp_path, out_dir)
     cd.generate_combined_summary("my-game", FakeClient(), {}, data_dir=tmp_path)

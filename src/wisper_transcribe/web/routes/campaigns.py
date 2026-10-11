@@ -253,7 +253,9 @@ async def campaign_delete(
 async def campaign_add_member(
     request: Request,
     slug: str,
-    profile_key: Annotated[str, Form()],
+    # Defaulted so an unchosen select reaches the unknown_profile message
+    # instead of FastAPI's 422 page.
+    profile_key: Annotated[str, Form()] = "",
     role: Annotated[str, Form()] = "",
     character: Annotated[str, Form()] = "",
 ) -> RedirectResponse:

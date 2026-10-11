@@ -598,6 +598,11 @@ async def recording_delete_api(recording_id: str, request: Request):
     if recording is None:
         return JSONResponse({"error": "not_found"}, status_code=404)
 
+    if recording.status in ACTIVE_STATUSES:
+        # The capture threads still write recordings/<id>/: deleting the row
+        # would orphan the session's audio. Stop it first.
+        return JSONResponse({"error": "active"}, status_code=409)
+
     purge = request.query_params.get("purge", "").lower() == "true"
     if purge:
         _purge_recording_files(recording, data_dir)
@@ -681,7 +686,9 @@ async def record_sse(request: Request) -> StreamingResponse:
 @router.post("/record/start", response_class=HTMLResponse)
 async def record_start_html(
     request: Request,
-    voice_channel_id: Annotated[str, Form()],
+    # Defaulted: the field is hidden behind the channel picker, so it can't be
+    # `required`, and an empty value must reach missing_channel, not a 422.
+    voice_channel_id: Annotated[str, Form()] = "",
     guild_id: Annotated[str, Form()] = "",
     campaign_slug: Annotated[str, Form()] = "",
 ) -> RedirectResponse:
@@ -898,6 +905,8 @@ async def recording_delete_html(recording_id: str, request: Request) -> Redirect
 
     data_dir = get_data_dir()
     recording = load_recordings(data_dir).get(safe_id)
+    if recording is not None and recording.status in ACTIVE_STATUSES:
+        return error_redirect("/recordings", "still_recording")
     if recording is not None:
         _purge_recording_files(recording, data_dir)
     delete_recording(safe_id, data_dir)
@@ -916,8 +925,8 @@ async def recordings_bulk_delete_html(request: Request) -> RedirectResponse:
         if safe_id is None:
             continue
         recording = recordings.get(safe_id)
-        if recording is None:
-            continue
+        if recording is None or recording.status in ACTIVE_STATUSES:
+            continue  # an active session is never deleted; stop it first
         _purge_recording_files(recording, data_dir)
         delete_recording(safe_id, data_dir)
     return RedirectResponse(url="/recordings", status_code=303)

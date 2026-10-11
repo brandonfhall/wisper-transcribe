@@ -49,6 +49,12 @@ def _no_live_transcription(monkeypatch):
     )
 
 
+
+def _stop(rec, data_dir) -> None:
+    """Mark a seeded recording stopped: an active session can't be deleted."""
+    from wisper_transcribe.recording_manager import update_recording_status
+    update_recording_status(rec.id, "completed", data_dir)
+
 def test_record_start_creates_recording(client):
     c, _ = client
     resp = c.post("/api/record/start", json={"voice_channel_id": "123", "guild_id": "G1"})
@@ -63,6 +69,45 @@ def test_record_start_missing_voice_channel_returns_400(client):
     resp = c.post("/api/record/start", json={})
     assert resp.status_code == 400
 
+
+def test_record_start_form_without_a_channel_says_so(client):
+    """The Discord form's channel field is hidden behind the picker, so the
+    browser can't require it: an empty channel shows missing_channel."""
+    c, _ = client
+
+    class _IdleBotManager:
+        active_recording = None
+
+    c.app.state.bot_manager = _IdleBotManager()
+    resp = c.post("/record/start", data={"voice_channel_id": "", "guild_id": ""},
+                  follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/record?error=missing_channel"
+
+
+
+@pytest.mark.parametrize("status", ["recording", "degraded"])
+def test_an_active_recording_is_never_deleted(client, status):
+    """Capture still writes recordings/<id>/ during a session: every delete
+    path refuses, and the row and the audio stay."""
+    c, data_dir = client
+    from wisper_transcribe.recording_manager import (
+        create_recording, get_recording_dir, load_recordings, update_recording_status,
+    )
+
+    rec = create_recording("VC1", "G1", data_dir=data_dir)
+    update_recording_status(rec.id, status, data_dir)
+    rec_dir = get_recording_dir(rec.id, data_dir)
+    rec_dir.mkdir(parents=True, exist_ok=True)
+
+    single = c.post(f"/recordings/{rec.id}/delete", follow_redirects=False)
+    assert single.headers["location"] == "/recordings?error=still_recording"
+    c.post("/recordings/bulk-delete", data={"recording_ids": [rec.id]}, follow_redirects=False)
+    api = c.post(f"/api/recordings/{rec.id}/delete?purge=true")
+    assert api.status_code == 409
+
+    assert load_recordings(data_dir).get(rec.id) is not None
+    assert rec_dir.is_dir()
 
 def test_record_stop_with_no_active_session_returns_400(client):
     c, _ = client
@@ -1347,6 +1392,7 @@ def test_recording_delete_removes_entry(client):
     c, tmp_path = client
     from wisper_transcribe.recording_manager import create_recording, load_recordings
     rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    _stop(rec, tmp_path)
     resp = c.post(f"/recordings/{rec.id}/delete", follow_redirects=False)
     assert resp.status_code == 303
     assert load_recordings(tmp_path).get(rec.id) is None
@@ -1485,6 +1531,7 @@ def test_recordings_bulk_delete_skips_invalid_and_unknown_ids(client):
 
     rec = create_recording("", "", data_dir=tmp_path, source="local")
     save_recording(rec, tmp_path)
+    _stop(rec, tmp_path)
 
     resp = c.post(
         "/recordings/bulk-delete",
@@ -2102,6 +2149,7 @@ def test_api_recording_delete_removes_entry(client):
     from wisper_transcribe.recording_manager import create_recording, load_recordings
 
     rec = create_recording("VC1", "G1", data_dir=tmp_path)
+    _stop(rec, tmp_path)
     resp = c.post(f"/api/recordings/{rec.id}/delete")
     assert resp.status_code == 200
     assert resp.json() == {"id": rec.id, "deleted": True, "purged": False}

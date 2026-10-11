@@ -307,6 +307,22 @@ def _delete_temp_upload(job: "Job") -> None:  # type: ignore[name-defined]
         shutil.rmtree(folder, ignore_errors=True)
 
 
+def _delete_enroll_source(job: "Job") -> None:  # type: ignore[name-defined]
+    """Delete a standalone enroll job's ``wisper_enrollsrc_*`` upload.
+
+    For a job cancelled while pending: its runner, whose ``finally`` deletes
+    the file, never runs. Acts only on that temp name, so a recording
+    enroll's per-user audio is never touched.
+    """
+    from pathlib import Path as _Path
+
+    if job.job_type != JOB_ENROLL or job.enroll_mode != "standalone" or not job.input_path:
+        return
+    src = _Path(job.input_path)
+    if src.name.startswith("wisper_enrollsrc_"):
+        src.unlink(missing_ok=True)
+
+
 def _longest_aligned_segment(aligned_segments: list, label: str) -> Optional[tuple]:
     """Return (start, duration, text) of the label's longest aligned segment, or None.
 
@@ -1010,6 +1026,24 @@ class JobQueue:
         job.kwargs["noise_floor"] = noise_floor
         return True
 
+    def queued_stems(self, output_dir) -> set[str]:
+        """Names pending or running transcription jobs will write in ``output_dir``.
+
+        The name check looks at disk and the database only, so two uploads of
+        one name queued together would both pass and the second fail late
+        with "Transcript already exists"; the upload route adds these.
+        """
+        import os
+
+        want = os.path.normcase(os.path.abspath(str(output_dir)))
+        return {
+            j.kwargs["output_stem"]
+            for j in self._jobs.values()
+            if j.job_type == JOB_TRANSCRIPTION and j.status in (PENDING, RUNNING)
+            and j.kwargs.get("output_stem") and j.kwargs.get("output_dir")
+            and os.path.normcase(os.path.abspath(str(j.kwargs["output_dir"]))) == want
+        }
+
     def find_live_job_for_recording(self, recording_id: str) -> Optional[Job]:
         """Return the (RUNNING or PENDING) JOB_LIVE job for a recording, if any."""
         for job in self._jobs.values():
@@ -1066,6 +1100,7 @@ class JobQueue:
             job.error = "Cancelled"
             job.finished_at = datetime.now()
             _delete_temp_upload(job)
+            _delete_enroll_source(job)
             _record_history(job)
             self._prune_finished_jobs()
             return True
@@ -1659,11 +1694,17 @@ class JobQueue:
         p = job.enroll_params
         try:
             from wisper_transcribe.config import get_data_dir
-            from wisper_transcribe.speaker_manager import enroll_speaker_from_audio_dir
+            from wisper_transcribe.speaker_manager import (
+                enroll_speaker_from_audio_dir, load_profiles,
+            )
 
             data_dir = get_data_dir()
 
-            job.append_log(f"Enrolling {p['display_name']} from recording audio…")
+            if p["profile_key"] in load_profiles(data_dir):
+                job.append_log(f"Linking {p['display_name']} to the existing profile "
+                               "and blending this track into its voiceprint…")
+            else:
+                job.append_log(f"Enrolling {p['display_name']} from recording audio…")
             enroll_speaker_from_audio_dir(
                 name=p["profile_key"],
                 display_name=p["display_name"],

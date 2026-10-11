@@ -71,6 +71,10 @@
 <div style="padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber);margin-bottom:20px">
   That capture mode isn't available right now.
 </div>
+{% elif request.query_params.get('error') == 'missing_channel' %}
+<div style="padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber);margin-bottom:20px">
+  Choose a Discord server and voice channel to start recording.
+</div>
 {% elif request.query_params.get('error') == 'live_delayed' %}
 <div style="padding:12px 14px;background:#e4b57214;border:1px solid #e4b57240;border-radius:4px;font-size:12.5px;color:var(--color-signal-amber);margin-bottom:20px">
   Recording started, but another job is already running — the live transcript preview won't start until it finishes. If the session ends first, the preview may show nothing; the full diarized transcript from Transcribe is unaffected.
@@ -276,7 +280,7 @@
 {# ── Idle / start new session ── #}
 <div style="display:flex;gap:32px;flex-wrap:wrap;align-items:flex-start">
 <div style="max-width:640px;flex:1;min-width:320px">
-  <form method="post" action="/record/start-form" style="margin-bottom:32px"
+  <form method="post" action="/record/start" style="margin-bottom:32px"
         id="discord-start-form"
         data-default-guild="{{ default_guild }}"
         data-default-channel="{{ default_channel }}"

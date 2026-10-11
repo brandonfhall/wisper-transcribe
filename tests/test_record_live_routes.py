@@ -382,9 +382,9 @@ def test_generic_cancel_route_stops_live_job_and_clears_sink(client):
 
 
 def test_generic_cancel_route_stops_pending_live_job(client):
-    """A still-queued (PENDING) live job also gets torn down -- run_live_loop
-    checks live_stop_event as its very first loop condition, so setting it
-    ahead of time makes the job complete immediately once it's dequeued."""
+    """A still-queued (PENDING) live job is torn down and ends at once as
+    Cancelled, like any pending job, rather than staying pending until the
+    worker fails it as "never started"."""
     c, data_dir = client
     job = _make_live_job("rec-cancel-pending", [])
     job.status = "pending"
@@ -394,6 +394,7 @@ def test_generic_cancel_route_stops_pending_live_job(client):
 
     assert resp.status_code == 303
     assert job.live_stop_event.is_set()
+    assert (job.status, job.error) == ("failed", "Cancelled")
 
 
 def test_generic_cancel_route_unaffected_for_non_live_jobs(client):

@@ -495,6 +495,8 @@ def move(row: FileRow, new_path: Path, *, data_dir: Optional[Path] = None,
                              Path(os.path.realpath(_root_dir(row.root, data, output))))
     if not os.path.lexists(src):
         forget_id(row.id, data_dir=data_dir)
+        # Needs attention lists missing rows from the last sync's report.
+        drop_from_report(data_dir, output_dir, file_ids=[row.id])
         return "missing"
     if os.path.lexists(dst) and not _same_file(src, dst):
         return "conflict"

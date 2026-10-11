@@ -1316,6 +1316,16 @@ def test_check_move_reserved_when_the_name_is_the_journal(out):
     assert check.status == "reserved"
 
 
+
+@pytest.mark.parametrize("name", ["{folder} Combined Summary", "{folder} combined summary",
+                                  "{folder} Recap \u2014 S2"])
+def test_check_move_reserves_the_campaign_digest_names(out, name):
+    """A session named like the campaign's combined summary or a recap would
+    be overwritten when that digest is generated."""
+    cid, slug, folder = _claimed_campaign("Game")
+    tid = _seed.seed_transcript("S", write_md=True)
+    assert ts.check_move(tid, slug, new_stem=name.format(folder=folder)).status == "reserved"
+
 def test_check_move_busy_when_a_job_targets_the_campaign(out):
     from wisper_transcribe.web.jobs import JobQueue
 
@@ -2344,3 +2354,64 @@ def test_rename_case_only_on_a_case_insensitive_filesystem(out, monkeypatch):
         assert conn.execute("SELECT stem FROM transcripts WHERE id = ?", (tid,)).fetchone()[0] == \
             "SESSION"
 
+
+
+
+def test_delete_keeps_a_session_whose_name_extends_the_stem_with_excerpt(tmp_path, monkeypatch):
+    """Deleting "mix" removes mix_excerpt_SPEAKER_00.mp3 (its clip) but not
+    the session "mix_excerpt_final" in the same folder."""
+    from wisper_transcribe import transcript_store as ts
+    from tests._seed import seed_transcript
+
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(out))
+    mix = seed_transcript("mix", write_md=True)
+    seed_transcript("mix_excerpt_final", write_md=True)
+    (out / "mix_excerpt_SPEAKER_00.mp3").write_bytes(b"clip")
+    (out / "mix_excerpt_final.summary.md").write_text("summary", encoding="utf-8")
+
+    assert ts.delete_transcript(mix) == "deleted"
+
+    assert not (out / "mix_excerpt_SPEAKER_00.mp3").exists()
+    assert (out / "mix_excerpt_final.md").exists()
+    assert (out / "mix_excerpt_final.summary.md").exists()
+
+
+
+def test_validate_new_stem_caps_the_name_in_bytes():
+    """100 three-byte characters fit the character limit but not a 255-byte
+    file name once the companions' suffixes are added: refused up front
+    instead of failing with "File name too long" mid-rename."""
+    assert ts.validate_new_stem("\u9f8d" * 100) is None
+    assert ts.validate_new_stem("\u9f8d" * 60) == "\u9f8d" * 60
+    assert ts.validate_new_stem("a" * 100) == "a" * 100
+
+
+def test_rename_to_a_name_too_long_in_bytes_is_invalid(out):
+    from ._moves import placed_session
+
+    tid, md = placed_session("S")
+    assert ts.rename_transcript(tid, "\u9f8d" * 100).status == "invalid"
+    assert md.exists()
+
+
+
+def test_a_missing_companion_leaves_needs_attention_once_rename_forgets_it(out):
+    """A summary deleted outside wisper is listed as missing; renaming the
+    session forgets its row, so the list drops it too instead of showing it
+    until the next sync."""
+    from ._moves import placed_session
+
+    tid, md = placed_session("S1")
+    summary = md.with_name("S1.summary.md")
+    summary.write_text("sum", encoding="utf-8")
+    file_registry.add_if_owned(summary, kind="summary", owner=file_registry.Owner("transcript", tid))
+    summary.unlink()
+    file_registry.sync()
+    assert [r.path.name for r in ts.needs_attention().missing_files] == ["S1.summary.md"]
+
+    assert ts.rename_transcript(tid, "S2").status == "moved"
+
+    assert ts.needs_attention().missing_files == []

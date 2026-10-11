@@ -135,8 +135,10 @@ async def test_auto_rejoin_on_transient_close_code_4015(tmp_path):
 # 5. Auto-rejoin — exhausted retries → degraded
 # ---------------------------------------------------------------------------
 
-async def test_auto_rejoin_exhausted_sets_degraded_status(tmp_path):
-    """After DEFAULT_BACKOFF retries all fail, status becomes 'degraded'."""
+async def test_auto_rejoin_exhausted_ends_the_session_completed(tmp_path):
+    """After DEFAULT_BACKOFF retries all fail the session ends: degraded while
+    it lasts, then completed, so it can be transcribed and a new session can
+    start. The rejoin log keeps every attempt."""
     factory = infinite_disconnect_source(close_code=4015)
 
     bm = BotManager(data_dir=tmp_path, audio_source_factory=factory, _backoff=[0] * 5)
@@ -145,8 +147,10 @@ async def test_auto_rejoin_exhausted_sets_degraded_status(tmp_path):
     await asyncio.wait_for(bm._task, timeout=5)
 
     loaded = load_recordings(tmp_path)[rec.id]
-    assert loaded.status == "degraded"
+    assert loaded.status == "completed"
+    assert loaded.ended_at is not None
     assert len(loaded.rejoin_log) == len(bm._backoff)
+    assert bm.active_recording is None or bm.active_recording.status not in ("recording", "degraded")
 
 
 # ---------------------------------------------------------------------------

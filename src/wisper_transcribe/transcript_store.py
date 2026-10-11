@@ -32,6 +32,7 @@ import time
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Iterable
 from typing import Final, Literal, Optional
 
 from . import db, file_registry
@@ -47,6 +48,9 @@ ANY: Final = object()
 TEMP_PREFIX = ".wisper-tmp-"
 # Diarization segments for the enrollment wizard; speakers live in the DB.
 SIDECAR_SUFFIX = "_diar.json"
+# A stem's byte budget: 255 minus the longest companion suffix
+# ("_excerpt_SPEAKER_00.mp3") and the atomic-write temp name's additions.
+MAX_STEM_BYTES = 180
 
 # One writer at a time in this process: reconcile's scan and write, a
 # transcript move or rename, and finishing a folder rename all take it before
@@ -242,7 +246,9 @@ def _modified_local(path: Optional[Path]) -> Optional[str]:
 def validate_new_stem(name: str) -> Optional[str]:
     """``name`` as a new session stem, or None when it is refused.
 
-    NFC-normalized and stripped. Non-empty and at most 100 characters; no
+    NFC-normalized and stripped. Non-empty, at most 100 characters and
+    ``MAX_STEM_BYTES`` UTF-8 bytes (filesystems cap a name at 255 bytes, and
+    companions and atomic-write temp names add to the stem); no
     path separators (``/ \\ : * ? " < > |``) or control characters or DEL; no
     leading dot (which also refuses an atomic-write temp name); no trailing dot
     or space; not ending in ``.summary`` or ``.md`` (case-insensitive); and not
@@ -253,7 +259,7 @@ def validate_new_stem(name: str) -> Optional[str]:
     if not name:
         return None
     name = nfc(name).strip()
-    if not name or len(name) > 100:
+    if not name or len(name) > 100 or len(name.encode("utf-8")) > MAX_STEM_BYTES:
         return None
     if any(c in '/\\:*?"<>|' or ord(c) < 32 or ord(c) == 127 for c in name):
         return None
@@ -622,13 +628,15 @@ def _find_ids(conn: sqlite3.Connection, stem: str, campaign_id, present_only: bo
 
 
 def next_free_stem(directory: Path, stem: str, campaign_id: Optional[int],
-                   conn: Optional[sqlite3.Connection] = None) -> str:
+                   conn: Optional[sqlite3.Connection] = None, *,
+                   also_taken: Iterable[str] = ()) -> str:
     """A free session name in ``directory`` for campaign ``campaign_id``.
 
     ``stem``, else ``stem (2)``, ``stem (3)``, …: the first with no
     ``<name>.md`` or ``<name>.flac`` in ``directory``, no ``(campaign_id, name)``
-    row (casefolded where the filesystem ignores case), and not the folder's
-    journal name. ``campaign_id`` ``None`` means the output root.
+    row (casefolded where the filesystem ignores case), not the folder's
+    journal name, and not in ``also_taken`` (names queued jobs will write).
+    ``campaign_id`` ``None`` means the output root.
     """
     from .campaign_folders import journal_name
 
@@ -636,7 +644,11 @@ def next_free_stem(directory: Path, stem: str, campaign_id: Optional[int],
     fold = file_registry._fold(directory)
     journal = journal_name(directory.name) if campaign_id is not None else None
 
+    queued = {file_registry._key(nfc(n), fold) for n in also_taken}
+
     def taken(name: str) -> bool:
+        if file_registry._key(name, fold) in queued:
+            return True
         for suffix in (".md", ".flac"):
             path = safe_path(name, suffix, directory)
             if path is not None and path.is_file():
@@ -738,6 +750,19 @@ def _clash_path(directory: Path, stem: str, fold: bool) -> Optional[Path]:
     return None
 
 
+
+def _is_digest_name(stem: str, folder: str) -> bool:
+    """Whether ``stem`` is a name the campaign's own files use in ``folder``:
+    the journal, the combined summary, or a recap. A session there would be
+    overwritten when that file is written."""
+    from .campaign_folders import _fold, combined_summary_name, journal_name, recap_name
+
+    folded = _fold(stem)
+    if folded in (_fold(Path(journal_name(folder)).stem),
+                  _fold(Path(combined_summary_name(folder)).stem)):
+        return True
+    return folded.startswith(_fold(recap_name(folder, "")[:-len(".md")]))
+
 def check_move(transcript_id: int, campaign_slug: Optional[str], *, new_stem: Optional[str] = None,
                conn: Optional[sqlite3.Connection] = None, data_dir: Optional[Path] = None,
                output_dir: Optional[Path] = None) -> MoveCheck:
@@ -819,7 +844,7 @@ def _check_move_in(conn: sqlite3.Connection, transcript_id: int, campaign_slug: 
         if (not target_claimed and target_dir.is_dir()
                 and not holds_only_wisper(target_dir, target_folder)):
             return MoveCheck("folder_taken", target_dir, stem, None, False, None)
-        if _fold(stem) == _fold(Path(journal_name(target_folder)).stem):
+        if _is_digest_name(stem, target_folder):
             return MoveCheck("reserved", target_dir, stem, None, False, None)
 
     clash_file = _clash_path(target_dir, stem, fold)
@@ -1563,9 +1588,32 @@ def _companion_paths(loc: "Located", conn: Optional[sqlite3.Connection] = None) 
     if loc.md is not None:
         # glob.escape: a stem like "mix*" must not match other transcripts' clips.
         for clip in loc.dir.glob(f"{glob.escape(stem)}_excerpt_*"):
-            add(clip)
+            # Only this transcript's clips: the prefix also matches another
+            # session named "<stem>_excerpt_..." and its .md and companions.
+            if any(kind in ("excerpt", "excerpt_text") and nfc(owner) == nfc(stem)
+                   for kind, owner, _label in file_registry._output_candidates(clip.name)):
+                add(clip)
     return paths
 
+
+
+def delete_blocked(transcript_id: int, data_dir: Optional[Path] = None) -> bool:
+    """Whether a pending or running job (or a capture) uses this transcript or
+    its campaign, the rule rename and move use: deleting under a refine,
+    summarize, or retranscribe job would fail it or leave an orphan ``.md``."""
+    from .job_history import active_jobs
+
+    with db.connection(data_dir) as conn:
+        row = conn.execute(
+            "SELECT t.campaign_id, c.slug FROM transcripts t "
+            "LEFT JOIN campaigns c ON c.id = t.campaign_id WHERE t.id = ?",
+            (transcript_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        return bool(active_jobs(conn, transcript_id=transcript_id,
+                                campaign_ids={row[0]} - {None},
+                                campaign_slugs={row[1]} - {None}))
 
 def delete_transcript(transcript_id: int, data_dir: Optional[Path] = None,
                       output_dir: Optional[Path] = None) -> Literal["deleted", "kept", "absent"]:

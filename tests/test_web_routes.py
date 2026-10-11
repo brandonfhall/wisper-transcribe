@@ -2109,6 +2109,143 @@ def test_campaign_add_member_persists(client, tmp_path, monkeypatch):
     assert loaded["test-game"].members["alice"].role == "DM"
 
 
+
+def test_every_template_form_posts_to_a_registered_route(app):
+    """A form whose action has no route fails only when someone clicks it, and
+    route tests that post to the route directly can't see it. Jinja
+    expressions become ``1``, which fits both ``{slug}`` and ``{id:int}``
+    parameters; an action that is wholly an expression is skipped."""
+    import re
+    from pathlib import Path
+
+    from starlette.routing import Match
+
+    import wisper_transcribe.web as web_pkg
+
+    templates = Path(web_pkg.__file__).parent / "templates"
+    missing, checked = [], 0
+    for tpl in sorted(templates.glob("*.html")):
+        for attrs in re.findall(r"<form\b([^>]*)>", tpl.read_text(encoding="utf-8"), re.S):
+            action = re.search(r'action="([^"]*)"', attrs)
+            if action is None:
+                continue
+            method = re.search(r'method="([^"]*)"', attrs)
+            method = method.group(1).upper() if method else "GET"
+            url = re.sub(r"\{\{.*?\}\}", "1", action.group(1)).split("?")[0]
+            if not url.startswith("/"):
+                continue
+            checked += 1
+            scope = {"type": "http", "path": url, "method": method}
+            if not any(r.matches(scope)[0] == Match.FULL for r in app.routes):
+                missing.append(f"{tpl.name}: {method} {action.group(1)}")
+    assert checked > 30
+    assert missing == []
+
+
+
+# Redirect target -> the template its GET renders, for the error-code check.
+_ERROR_PAGES = [
+    (r"^/campaigns/X/journal$", "campaign_journal.html"),
+    (r"^/campaigns(/X)?$", "campaigns.html"),
+    (r"^/recordings/X$", "recording_detail.html"),
+    (r"^/recordings$", "recordings.html"),
+    (r"^/record$", "record.html"),
+    (r"^/transcripts/X$", "transcript_detail.html"),
+    (r"^/transcripts$", "transcripts.html"),
+    (r"^/speakers/enroll$", "speaker_enroll_standalone.html"),
+    (r"^/speakers$", "speakers.html"),
+    (r"^/transcribe$", "transcribe.html"),
+    (r"^/config$", "config.html"),
+]
+
+
+def test_every_redirect_error_code_is_shown_on_its_page():
+    """A route that redirects with ``?error=<code>`` to a page that never
+    mentions the code fails silently: the page just reloads. Each code must
+    appear in the target template, unless that template prints any code it
+    doesn't know (``{{ request.query_params.get('error') }}``)."""
+    import re
+    from pathlib import Path
+
+    import wisper_transcribe.web as web_pkg
+
+    web = Path(web_pkg.__file__).parent
+    pairs = set()
+    for route_file in (web / "routes").glob("*.py"):
+        src = route_file.read_text(encoding="utf-8")
+        for m in re.finditer(r'error_redirect\(\s*f?"([^"]+)"\s*,\s*"([a-z_]+)"', src):
+            pairs.add((m.group(1), m.group(2), route_file.name))
+        for m in re.finditer(r'url=f?"([^"?]+)\?error=([a-z_]+)', src):
+            pairs.add((m.group(1), m.group(2), route_file.name))
+    assert len(pairs) > 30
+
+    unshown = []
+    for base, code, route_file in sorted(pairs):
+        shape = re.sub(r"\{[^}]*\}", "X", base)
+        template = next((t for pat, t in _ERROR_PAGES if re.match(pat, shape)), None)
+        if template is None:
+            continue
+        text = (web / "templates" / template).read_text(encoding="utf-8")
+        prints_any = re.search(r"\{\{\s*request\.query_params\.get\(['\"]error['\"]\)\s*\}\}", text)
+        if code not in text and not prints_any:
+            unshown.append(f"{route_file}: {base}?error={code} ({template})")
+    assert unshown == []
+
+
+@pytest.mark.parametrize("url, message", [
+    ("/record?error=missing_channel", "Choose a Discord server and voice channel"),
+    ("/recordings?error=not_found", "That recording can't be found."),
+    ("/transcripts?error=not_found", "That transcript can't be found."),
+])
+def test_error_codes_render_a_message(client, tmp_path, monkeypatch, url, message):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    resp = client.get(url)
+    assert resp.status_code == 200
+    assert message in resp.text
+
+
+def test_campaign_add_member_without_a_choice_says_so(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+    create_campaign("Test Game", data_dir=tmp_path)
+
+    resp = client.post("/campaigns/test-game/members", data={"profile_key": ""})
+    assert resp.status_code == 200
+    assert "Choose a speaker to add." in resp.text
+
+def test_campaign_page_member_forms_add_and_remove(client, tmp_path, monkeypatch):
+    """Drive the Campaign page's own Add member and remove forms."""
+    import re
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    import numpy as np
+    from wisper_transcribe.campaign_manager import create_campaign, load_campaigns
+    from wisper_transcribe.models import SpeakerProfile
+    from tests._seed import save_profiles
+
+    create_campaign("Test Game", data_dir=tmp_path)
+    save_profiles(
+        {"alice": SpeakerProfile(
+            name="alice", display_name="Alice", role="",
+            embedding=np.ones(4, dtype=np.float32) / 2, enrolled_date="2026-04-28",
+            enrollment_source="test.mp3",
+        )},
+        data_dir=tmp_path,
+    )
+
+    page = client.get("/campaigns/test-game").text
+    add = re.search(r'<form method="post" action="([^"]+)"[^>]*>\s*<select name="profile_key"', page)
+    resp = client.post(add.group(1), data={"profile_key": "alice"}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert "alice" in load_campaigns(tmp_path)["test-game"].members
+
+    page = client.get("/campaigns/test-game").text
+    remove = re.search(r'<form method="post" action="([^"]*/members/alice/remove)"', page)
+    assert remove is not None
+    resp = client.post(remove.group(1), follow_redirects=False)
+    assert resp.status_code == 303
+    assert "alice" not in load_campaigns(tmp_path)["test-game"].members
+
 def test_campaign_add_unknown_profile_rejects(client, tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
     from wisper_transcribe.campaign_manager import create_campaign
@@ -2843,6 +2980,55 @@ def test_job_detail_journal_pending_bakes_slug_into_js(client, tmp_path, monkeyp
     assert resp.status_code == 200
     assert 'JOURNAL_SLUG = "my-game"' in resp.text
 
+
+
+def _campaign_job(job_type: str, status: str):
+    import uuid
+    from datetime import datetime
+
+    from wisper_transcribe.web.jobs import Job
+
+    return Job(
+        id=str(uuid.uuid4()),
+        status=status,
+        created_at=datetime.now(),
+        input_path="",
+        kwargs={"slug": "my-game"},
+        name="Campaign job",
+        job_type=job_type,
+    )
+
+
+@pytest.mark.parametrize("job_type", ["campaign_summary", "campaign_recap", "speaker_relabel"])
+def test_job_detail_campaign_job_running_bakes_slug_into_js(client, tmp_path, monkeypatch, job_type):
+    """A campaign job watched to the end swaps its Stop button for a link
+    back to the campaign; the page JS needs the slug to build it."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    job = _campaign_job(job_type, "running")
+    client.app.state.job_queue._jobs[job.id] = job
+
+    resp = client.get(f"/transcribe/jobs/{job.id}")
+    assert resp.status_code == 200
+    assert 'CAMPAIGN_SLUG = "my-game"' in resp.text
+
+
+def test_job_detail_transcription_job_has_no_campaign_slug(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    job = _campaign_job("transcription", "running")
+    client.app.state.job_queue._jobs[job.id] = job
+
+    resp = client.get(f"/transcribe/jobs/{job.id}")
+    assert "CAMPAIGN_SLUG = null" in resp.text
+
+
+def test_job_detail_completed_relabel_links_back_to_campaign(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    job = _campaign_job("speaker_relabel", "completed")
+    client.app.state.job_queue._jobs[job.id] = job
+
+    resp = client.get(f"/transcribe/jobs/{job.id}")
+    assert 'href="/campaigns/my-game" class="btn btn-primary">Back to campaign' in resp.text
+    assert "Stop job" not in resp.text
 
 def test_transcribe_form_includes_campaign_select(client, tmp_path, monkeypatch):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
@@ -4055,6 +4241,40 @@ def test_upload_refused_for_a_flac_only_clash_without_overwrite(client, tmp_path
     assert mock_submit.call_args.kwargs["original_stem"] == "session (2)"
     assert mock_submit.call_args.kwargs["overwrite"] is False
 
+
+
+def _queued_transcription(client, out_dir, stem, status="pending"):
+    """A transcription job in the queue that will write ``<stem>.md`` in ``out_dir``."""
+    import uuid
+    from datetime import datetime
+
+    from wisper_transcribe.web.jobs import JOB_TRANSCRIPTION, Job
+
+    job = Job(id=str(uuid.uuid4()), status=status, created_at=datetime.now(),
+              input_path="x.mp3", kwargs={"output_stem": stem, "output_dir": out_dir},
+              name=stem, job_type=JOB_TRANSCRIPTION)
+    client.app.state.job_queue._jobs[job.id] = job
+    return job
+
+
+def test_upload_of_a_name_a_queued_job_will_write(client, tmp_path):
+    """Two uploads of one name queued together: the second is refused (or
+    becomes "<name> (2)" with Keep both) instead of failing after its wait
+    with "Transcript already exists"."""
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    _queued_transcription(client, other, "session")            # another folder: no clash
+    resp, mock_submit = _post_upload(client, tmp_path)
+    assert mock_submit.call_args.kwargs["original_stem"] == "session"
+
+    _queued_transcription(client, tmp_path, "session", status="running")
+    resp, mock_submit = _post_upload(client, tmp_path)
+    assert resp.headers["location"] == "/transcribe?error=name_exists"
+    mock_submit.assert_not_called()
+
+    _queued_transcription(client, tmp_path, "session (2)")
+    resp, mock_submit = _post_upload(client, tmp_path, clash="keep_both")
+    assert mock_submit.call_args.kwargs["original_stem"] == "session (3)"
 
 def test_upload_passes_the_original_filename_as_source_name(client, tmp_path):
     resp, mock_submit = _post_upload(client, tmp_path)
@@ -5320,3 +5540,76 @@ def test_live_ticker_and_job_errors_render_as_text():
 
     job_detail = (_STATIC_DIR.parent / "web" / "templates" / "job_detail.html").read_text(encoding="utf-8")
     assert not re.search(r"\$\{[^}]*evt\.error", job_detail)
+
+
+
+def _pending_refine(md_path):
+    """A pending refine job on ``md_path`` in job history."""
+    import types
+    import uuid
+    from datetime import datetime
+
+    from wisper_transcribe import job_history
+
+    job_history.record(types.SimpleNamespace(
+        id=str(uuid.uuid4()), job_type="refine", status="pending", created_at=datetime.now(),
+        started_at=None, finished_at=None, error=None, kwargs={}, log_lines=[],
+        recording_id=None, output_path=None, llm_transcript_path=str(md_path),
+    ))
+
+
+def test_delete_waits_for_a_job_on_the_transcript(client, tmp_path, monkeypatch):
+    """Deleting under a pending refine (or summarize, or retranscribe) would
+    fail that job or leave an orphan .md: single and bulk delete refuse."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(tmp_path / "out"))
+    (tmp_path / "out").mkdir()
+    from tests._seed import seed_transcript
+
+    busy = seed_transcript("Busy", write_md=True)
+    free = seed_transcript("Free", write_md=True)
+    _pending_refine(tmp_path / "out" / "Busy.md")
+
+    resp = client.post(f"/transcripts/{busy}/delete", follow_redirects=False)
+    assert resp.headers["location"] == f"/transcripts/{busy}?error=busy"
+    assert (tmp_path / "out" / "Busy.md").exists()
+
+    resp = client.post("/transcripts/bulk-delete",
+                       data={"transcript_id": [str(busy), str(free)]}, follow_redirects=False)
+    assert resp.headers["location"] == "/transcripts?error=delete_busy&busy=1"
+    assert (tmp_path / "out" / "Busy.md").exists()
+    assert not (tmp_path / "out" / "Free.md").exists()
+    assert "1 session(s) weren't deleted" in client.get(resp.headers["location"]).text
+
+
+
+@pytest.mark.parametrize("url, field, data", [
+    ("/transcribe", "file", {}),
+    ("/speakers/enroll", "audio", {"name": "Alice"}),
+])
+def test_a_failed_upload_write_leaves_no_temp_file(app, tmp_path, monkeypatch, url, field, data):
+    """A write that fails mid-upload (a full disk) deletes the partial temp
+    file instead of leaving it until the next restart."""
+    import tempfile as _tempfile
+
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(_tempfile, "tempdir", str(tmp_path))
+    real = _tempfile.NamedTemporaryFile
+
+    def failing(*a, **kw):
+        f = real(*a, **kw)
+
+        def write(_chunk):
+            raise OSError(28, "No space left on device")
+
+        f.write = write
+        return f
+
+    monkeypatch.setattr(_tempfile, "NamedTemporaryFile", failing)
+    (tmp_path / "output").mkdir(exist_ok=True)
+    with TestClient(app, raise_server_exceptions=False) as c:
+        resp = c.post(url, files={field: ("s.mp3", b"x" * 100, "audio/mpeg")}, data=data)
+    assert resp.status_code == 500
+    assert list(tmp_path.glob("wisper_*")) == []

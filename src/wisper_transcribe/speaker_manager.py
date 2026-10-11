@@ -439,6 +439,11 @@ def enroll_speaker_from_audio_dir(
     enrolls from one full-length segment. Very old recordings only have
     ``.opus`` files that were never valid Opus; they are tried as a fallback
     and fail with the caller's generic error.
+
+    When ``name`` already has a profile, the track is blended into its
+    voiceprint (:func:`update_embedding`) and its display name, role, and notes
+    are kept, so naming a Discord speaker after an existing player links them
+    instead of replacing the profile.
     """
     import tempfile
 
@@ -479,12 +484,21 @@ def enroll_speaker_from_audio_dir(
 
     try:
         combined.export(str(tmp_path), format="wav")
+        segments = [DiarizationSegment(0.0, duration_s, "SPEAKER_00")]
+        if name in load_profiles(data_dir):
+            # Linking a recording speaker to an existing profile: keep its
+            # role, notes, and name, and blend the track into the voiceprint.
+            update_embedding(
+                name, extract_embedding(tmp_path, segments, "SPEAKER_00", device),
+                data_dir=data_dir,
+            )
+            return load_profiles(data_dir)[name]
         return enroll_speaker(
             name=name,
             display_name=display_name,
             role=role,
             audio_path=tmp_path,
-            segments=[DiarizationSegment(0.0, duration_s, "SPEAKER_00")],
+            segments=segments,
             speaker_label="SPEAKER_00",
             device=device,
             data_dir=data_dir,

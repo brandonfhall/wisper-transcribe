@@ -954,3 +954,22 @@ def test_upgrade_v10_to_v11_names_folders_and_registers_transcripts(monkeypatch,
     assert "campaign hana: journal record dropped" in text
     assert "campaign hana: folder 'Hanataz Act I'" in text
     assert len(list((data_dir / "backups").glob("wisper-v10-*.db"))) == 1
+
+
+
+def test_cli_db_dump_to_a_file_keeps_it_when_the_dump_fails(tmp_path, data_dir):
+    """With no database, dump fails; an existing file at -o keeps its
+    contents and no partial file is left behind."""
+    from click.testing import CliRunner
+
+    from wisper_transcribe.cli import main
+
+    assert not (data_dir / db.DB_FILENAME).exists()
+    out = tmp_path / "dump.sql"
+    out.write_text("previous dump", encoding="utf-8")
+
+    result = CliRunner().invoke(main, ["db", "dump", "-o", str(out)])
+
+    assert result.exit_code != 0
+    assert out.read_text(encoding="utf-8") == "previous dump"
+    assert not (tmp_path / "dump.sql.partial").exists()

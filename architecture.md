@@ -204,6 +204,7 @@ Diarization labels are scoped to one run, so cross-session identity comes only f
 - **Manual names are never overwritten.** A label with a recorded provenance follows it. Labels imported without one (older runs) treat only pipeline-shaped names (`AUTO_NAME_RE`: raw labels, `Unknown/Recurring Speaker N`) as automatic, since a real name there may have been typed.
 - **Pipeline-shaped names never become profiles.** `apply_renames()` excludes `AUTO_NAME_RE` names from enrollment, so a prefilled `Unknown Speaker 1` submitted unchanged can't create a junk profile that competes in every match.
 - **Propagation:** a wizard enroll job for a campaign transcript runs `relabel_campaign(backfill=False)` after enrolling, so a newly named person is renamed in the campaign's other sessions from stored embeddings without re-reading audio. The full pass (with backfill) is `wisper campaigns relabel` or the campaign page's **Re-match speakers** (`JOB_SPEAKER_RELABEL`).
+- **`wisper fix` is a manual rename.** `enroll_shared.rename_speaker()` runs `apply_renames(source="manual")` when the transcript has diarization data, so the speaker rows follow the `.md` and the relabel pass skips the label; a bare `.md` gets a text replace only.
 - **Profiles aren't updated from auto matches**, only from wizard or explicit enrollment, so a wrong match can't reinforce itself.
 - `speaker_registry` imports `apply_renames`/`AUTO_NAME_RE` lazily from `web/enroll_shared.py` (pure Python, no FastAPI) rather than duplicating the block-rewrite logic.
 
@@ -227,6 +228,7 @@ Embeddings from different models aren't comparable (and differ in dimension), so
 - `load_profile_embedding()` returns `None` for any profile not in the current space; `match_speakers()` and the CLI ranking only compare through it.
 - `stale_profile_keys()` lists old-space profiles. The pipeline logs them as skipped, the Speakers page badges them, and the CLI ranking lists them unscored.
 - `update_embedding()` replaces an old-space vector outright and retags the profile instead of averaging, so any re-enroll path (wizard, standalone upload, `wisper enroll`, CLI pick) migrates a profile.
+- A recording's **Enroll** (an unbound Discord speaker) under a name that already has a profile links that profile: `enroll_speaker_from_audio_dir()` blends the track in with `update_embedding()` and keeps the profile's display name, role, and notes, then the job binds the Discord ID. Only a new name creates a profile.
 
 ### CLI enrollment (`--enroll-speakers`)
 
@@ -429,6 +431,8 @@ Cancel only sets `job._cancel_event`, and the job thread can't notice until its 
 Campaign fold order is `Campaign.transcripts` order — **insertion order**, not a date. `reorder_campaign_transcript()` (swap up/down) and `set_campaign_transcript_order()` (full permutation, else `ValueError`) fix it.
 
 ### Campaign digests (`campaign_digest.py`)
+
+A digest is never written over a file registered to anything else (`_check_target_free`, before the LLM call): a session at the digest's name raises `DigestLocationError("digest_name_taken")`.
 Two bounded, whole-campaign artifacts built from the same per-session `.summary.md` sidecars, in the campaign's folder (campaign-owned `files` rows, so a folder rename carries them): the **combined summary** (`<folder> Combined Summary.md`, one per campaign, overwritten on each run) and the **"Previously on…" recap** (`<folder> Recap — <stem>.md`, one per newest session, so history is kept and a rerun for the same stem replaces that one file). Both live under `output`; `recap` carries its newest session's stem in the file row's `label`, which is why the `files_campaign` unique index keys `(campaign_id, kind, coalesce(label, ''))` (v14).
 
 - `summarized_sessions()` mirrors the journal's discovery but returns every session with a summary, in campaign order; `recap_sessions(n)` takes the last 1–3 (`clamp_recap_sessions`, default 1). `combined_summary_path()`/`recap_path()` resolve the registered path, else the derived name in a claimed folder, else None.
@@ -585,7 +589,8 @@ belongs*: the output root, or `<root>/<campaigns.folder>`.
   It validates `new_stem` (`validate_new_stem`, then `safe_path`) before any
   disk access, so a name from a query string is a path guard too. It returns a
   `MoveCheck` with the status (`ok`, `unchanged`, `invalid`, `busy`,
-  `folder_taken`, `reserved`, `clash`), the destination directory and stem, the
+  `folder_taken`, `reserved` (the campaign's journal, combined-summary, or a
+  recap name: `_is_digest_name`), `clash`), the destination directory and stem, the
   clashing file's modified time, whether Overwrite is offered (only when the
   clashing file is a registered transcript), that transcript's id, and
   `files_move` (false when the session is flagged missing or the `.md` is
@@ -593,7 +598,7 @@ belongs*: the output root, or `<root>/<campaigns.folder>`.
   change only). A clash excludes the session itself (the registered `.md`, by
   `samefile` or path), so a misplaced session moved home or a case-only rename
   isn't a clash with itself. `validate_new_stem(name)` returns the cleaned NFC
-  name or None: non-empty, at most 100 characters, no path separators or
+  name or None: non-empty, at most 100 characters and 180 UTF-8 bytes (`MAX_STEM_BYTES`), no path separators or
   control characters, no leading dot, no trailing dot or space, not ending
   `.summary`/`.md`, and not a Windows device name.
 - `move_transcript(transcript_id, campaign_slug, clash=…)` moves a session
@@ -698,7 +703,7 @@ Two managers write the same on-disk layout: `BotManager` (Discord, via a Java si
   - A local session loses all of `per-user/` and keeps `live_transcript.md`. A Discord session loses `per-user/<uid>/` for each uid bound to a profile; an unbound uid's track stays because enrollment reads it.
   - Each directory is renamed to `.wisper-trash-<n>`, its `per_user` rows are forgotten in one short transaction, then the trash is removed. This keeps the write lock short (capture uses a 500 ms busy timeout). `app._cleanup_recording_trash()` removes trash a crash left.
   - It runs after local and Discord finalise, after `recover_recording()`, and after a recording enroll job binds a speaker. Never at capture-time binding, which runs mid-session. Segment rows stay as metadata. The enroll route redirects with `error=no_audio` when the uid's track is gone.
-- **Crash recovery:** `reconcile_on_startup()` marks `recording`/`degraded` sessions `failed` (audio stays on disk) and restores segment rows missing for `combined/NNNN.wav` files. A failed session with segments and no combined track is `recoverable`: **Recover recording** on its page (or `wisper record recover <id>`, via `POST /api/recordings/{id}/recover`) joins the segments with `concat_wav_segments()` off the request thread (segments are self-contained WAVs, so no repair step), stores a verified `combined.flac` (keeping the WAV if the encode fails), and marks it `completed` with `recovered_at`; the page then notes the last partial minute may be missing.
+- **Crash recovery:** `reconcile_on_startup()` marks `recording`/`degraded` sessions `failed` (audio stays on disk) and restores segment rows missing for `combined/NNNN.wav` files. A failed session with segments and no combined track is `recoverable`: **Recover recording** on its page (or `wisper record recover <id>`, via `POST /api/recordings/{id}/recover`) joins the segments with `concat_wav_segments()` off the request thread (segments are self-contained WAVs, so no repair step), stores a verified `combined.flac` (keeping the WAV if the encode fails), and marks it `completed` with `recovered_at`; the page then notes the last partial minute may be missing. A failed session that already has its combined track (a Discord session ended by a kick or a deleted channel writes one) is recoverable too: recovery skips the join and only marks it `completed`.
 - **Import** (v5): `recordings.json` + each `metadata.json`, backed up and deleted after commit. `transcribing`/`transcribed` import as `completed`, active states as `failed`; `transcript_path` links by stem only under the output root (first recording keeps a shared one); an unknown campaign, a missing profile, Discord speakers on a local session, non-numeric ids, and off-layout segments are repaired or dropped and reported.
 - **Ids:** `_validate_recording_id()` uses the four-step CodeQL pattern.
 - **Fields:** `source` (`discord`|`local`). `name` is a display-only session title (trimmed, ≤200 chars); `id` (uuid4) backs the directory, so `name` needs no path guard.
@@ -731,7 +736,7 @@ Two managers write the same on-disk layout: `BotManager` (Discord, via a Java si
 - `stop_session()` is the only finalizer, so a finished ticker and an external stop can't both finalize. Like Discord's `_finalise()`, it joins the combined segments into `combined.wav` and stores a verified `combined.flac`, keeping the WAV if the encode fails.
 - `enumerate_devices()` returns `available: False` rather than raising when `soundcard` is missing or fails, and reports `default_microphone_id`/`default_loopback_id` so the Record page preselects the OS defaults.
 - **Switch device:** `switch_device(track, device_id)` restarts one track's capture thread on a new device without disturbing the session. Each track's loop holds its own stop `Event` (a generation token) checked before every FIFO push, so a thread a switch retires can never push after the switch even if `record()` was mid-block; the old thread is joined with a short timeout and the new one starts on the same FIFO. A session gone `degraded` from that track's device dying returns to `recording` through `update_recording_status()`. `current_device_ids()` feeds the panel's pre-selection. Runs off the request thread.
-- A dead capture thread (e.g. unplugged USB mic) marks the session `degraded` — but not a track a `switch_device()` already retired.
+- A dead capture thread (e.g. unplugged USB mic) marks the session `degraded` — but not a track a `switch_device()` already retired. Degraded is a live state: `_finalise` (local and Discord, including a Discord session whose rejoins ran out) ends a `recording` or `degraded` session as `completed`; only `failed` is kept.
 - `set_live_sink(callback)` taps the mixed chunks for live transcription; a failing sink disables itself.
 - Level gauge: per-track peak RMS since the last read (`get_and_reset_levels()`), so transients between ~1 s polls aren't missed.
 - `_active_recording` is not cleared after a session; check `.status`.
@@ -849,7 +854,7 @@ Job types:
 - **`JOB_SPEAKER_RELABEL`** — `submit_relabel()`: `relabel_campaign()` with audio backfill; logs renames and skipped sessions.
 - **`JOB_ENROLL`** — `enroll_mode` selects:
   - `wizard` — embeddings for renames already applied by the wizard. Carries only the transcript path, rename groups, and device; re-reads the sidecar. `output_path` is set at submit so "View transcript" works immediately. For a campaign transcript it then propagates names with `relabel_campaign(backfill=False)`; a propagation failure is logged and doesn't fail the job.
-  - `standalone` — `/speakers/enroll` upload: convert → diarize → pick the speaker with the most speech → enroll or EMA-update. The upload is renamed to `wisper_enrollsrc_<job-id>` at submit and deleted in a `finally`.
+  - `standalone` — `/speakers/enroll` upload: convert → diarize → pick the speaker with the most speech → enroll or EMA-update. The upload is renamed to `wisper_enrollsrc_<job-id>` at submit and deleted in a `finally`, or by `cancel()` when the job is cancelled while pending.
   - `recording` — enroll an unbound Discord speaker from their per-user track, then bind the id in the recording and campaign (best-effort follow-ups). Never deletes recording audio.
 - **`JOB_LIVE`** — open-ended; runs `run_live_loop()` until `stop_live()` sets `live_stop_event`, which is normal completion, not cancellation. It holds the only worker slot for the whole session. Lines go to `job.live_lines` and `recordings/<id>/live_transcript.md`.
   - `noise_floor` lives in `job.kwargs` and can be changed while running (`set_live_noise_floor()`).
@@ -906,7 +911,7 @@ On transcription completion, `jobs.py`:
 Submit flow: rename synchronously; if nothing is eligible, redirect back; compute `enrollable_labels()` for the submitted labels from the transcript's sidecar; if any group is fully enrollable, `submit_enroll()` and redirect to the job page via `job.id`, else redirect back. Either redirect carries `?notice=enroll_audio_missing` when a label was skipped. Partial enrollment is deliberate: the labels with data still enroll. The wizard shows a banner before submit when any speaker has no saved voice data and the audio is gone.
 
 ### Startup cleanup
-`app._cleanup_orphaned_uploads()` deletes `wisper_upload_*` folders and files plus `wisper_enroll_*` and `wisper_enrollsrc_*` files from the temp dir at startup. A transcription upload lives in `wisper_upload_<job-id>/` until its job ends, and the job deletes the folder on success, failure, or cancel (pending or running); an enroll upload is renamed to `wisper_enrollsrc_<job-id>` at submit and deleted in a `finally`. The sweep only covers a crash, and at startup the in-memory queue is empty.
+`app._cleanup_orphaned_uploads()` deletes `wisper_upload_*` folders and files plus `wisper_enroll_*` and `wisper_enrollsrc_*` files from the temp dir at startup. A transcription upload lives in `wisper_upload_<job-id>/` until its job ends, and the job deletes the folder on success, failure, or cancel (pending or running); an enroll upload is renamed to `wisper_enrollsrc_<job-id>` at submit and deleted in a `finally`, or by `cancel()` for a job cancelled while pending. The sweep only covers a crash, and at startup the in-memory queue is empty.
 
 ### Route security
 CodeQL scans every PR. The patterns (see also CLAUDE.md):
@@ -999,7 +1004,7 @@ The job page shows step pills and one bar split into equal per-step slices:
 | Long recording sessions | Sessions run until stopped; disk grows ~1.9 MB/min per track (16 kHz mono 16-bit) |
 | Combined audio format | New captures store the joined track as `combined.flac`; a legacy `combined.wav` stays readable (readers prefer `.flac`). `storage trim --apply` converts a `.flac`-less recording. Verification compares the FLAC's frame count to the WAV's, so a failed or truncated conversion keeps the WAV |
 | Local recording is native-only | `soundcard` needs host audio devices, so it never works in Docker; the Local capture card hides when unavailable |
-| Live session holds the queue | `JOB_LIVE` occupies the only worker slot for the session. A job already running when a session starts delays live transcription for the whole session (the Record page warns) |
+| Live session holds the queue | `JOB_LIVE` occupies the only worker slot for the session. A job already running when a session starts delays live transcription until it finishes (the Record page warns); the preview then starts from the last minute (`MAX_BUFFER_S`), not the start of the session. The combined track and the post-Stop transcript are unaffected |
 | Uploads keep one audio track | The original upload (video, extra audio tracks) isn't kept, only the 16 kHz mono FLAC of its first audio track. To transcribe a file again with a different track, export that track and upload it |
 | Cooperative cancellation | With `ml_worker` on (default), Stop terminates the worker child: the GPU is freed at once and the next job respawns and reloads models. With it off, or for the CLI/live recording, cancel is checked on tqdm writes only, so the GPU finishes its current batch |
 | SDK providers cancel only between calls | The Anthropic, OpenAI, and Google clients are non-streaming SDK calls, so Stop takes effect once the in-flight call returns (bounded by the SDK's own timeout), not mid-call. The Ollama/LM Studio streaming clients poll the cancel scope and stop within ~0.25 s |

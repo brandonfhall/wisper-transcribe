@@ -27,6 +27,9 @@ SILENCE_GAP_S = 0.6
 FORCE_CUT_S = 15.0
 MIN_COMMIT_S = 0.3           # skip transcribing sub-300ms scraps
 POLL_INTERVAL_S = 0.25       # how often the live loop checks the ring buffer
+# Most audio the ring buffer holds. It only grows past a chunk while the
+# live job waits behind another job; older audio is dropped, not queued.
+MAX_BUFFER_S = 60.0
 
 # int16 RMS below which a track counts as silent. Silero VAD can flag room tone
 # as speech and Whisper hallucinates text over it. Real speech measures well
@@ -78,6 +81,15 @@ class LiveRingBuffer:
             self._system.extend(system)
             self._mixed.extend(mixed)
             self._elapsed_s += len(mixed) / BYTES_PER_SAMPLE / RATE
+            # Bounded: a live job queued behind another job for a whole session
+            # would otherwise buffer ~350 MB an hour and then transcribe it all
+            # in one call. Dropping the oldest keeps stamps right: a chunk's
+            # start is elapsed_s minus what is still buffered.
+            excess = len(self._mixed) - int(MAX_BUFFER_S * RATE) * BYTES_PER_SAMPLE
+            if excess > 0:
+                del self._mic[:excess]
+                del self._system[:excess]
+                del self._mixed[:excess]
 
     def snapshot(self) -> tuple[bytes, bytes, bytes, float]:
         """Copy of everything buffered so far, plus elapsed media time at
@@ -300,8 +312,9 @@ def run_live_loop(
     """Commit and transcribe chunks from the ring buffer until ``stop_event`` is set.
 
     Backpressure is bounded: if transcription falls behind, the buffer grows
-    and the next ``find_commit_boundary`` force-cuts at FORCE_CUT_S, so the
-    backlog never exceeds one chunk.
+    and the next ``find_commit_boundary`` force-cuts it; the buffer itself
+    never holds more than MAX_BUFFER_S (the oldest audio is dropped), which
+    caps that chunk when the job started late.
 
     A failing chunk is logged, reported via ``on_warning``, and skipped; it
     never ends the session.

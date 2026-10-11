@@ -135,7 +135,7 @@
         {% if job.kwargs.slug %}
           <a href="/campaigns/{{ job.kwargs.slug }}/journal" class="btn btn-primary">View journal</a>
         {% endif %}
-      {% elif job.job_type in ("campaign_summary", "campaign_recap") %}
+      {% elif job.job_type in ("campaign_summary", "campaign_recap", "speaker_relabel") %}
         {% if job.kwargs.slug %}
           <a href="/campaigns/{{ job.kwargs.slug }}" class="btn btn-primary">Back to campaign</a>
         {% endif %}
@@ -179,6 +179,8 @@
 
   // Rendered server-side so the "View journal" link doesn't depend on the SSE payload.
   const JOURNAL_SLUG = {% if job.job_type == "campaign_journal" and job.kwargs.slug %}{{ job.kwargs.slug | tojson }}{% else %}null{% endif %};
+  // Same for the other campaign jobs, which finish with a link back to the campaign.
+  const CAMPAIGN_SLUG = {% if job.job_type in ("campaign_summary", "campaign_recap", "speaker_relabel") and job.kwargs.slug %}{{ job.kwargs.slug | tojson }}{% else %}null{% endif %};
 
   const STEPS = [
     {% if job.job_type == "transcription" %}
@@ -340,6 +342,11 @@
           const enrollBtn  = evt.job_type === 'transcription' ? `<a href="/transcribe/jobs/{{ job.id }}/enroll" class="btn btn-secondary">Name speakers</a>` : '';
           const summaryBtn = evt.summary_path ? `<a href="/transcripts/${evt.transcript_id}/summary" class="btn btn-secondary">View Summary</a>` : '';
           actions.innerHTML = `<a href="/transcripts/${evt.transcript_id}" class="btn btn-primary">View transcript</a>${enrollBtn}${summaryBtn}<a href="/" class="btn btn-secondary">← Dashboard</a>`;
+        } else if (CAMPAIGN_SLUG) {
+          actions.innerHTML = `<a href="/campaigns/${encodeURIComponent(CAMPAIGN_SLUG)}" class="btn btn-primary">Back to campaign</a><a href="/" class="btn btn-secondary">← Dashboard</a>`;
+        } else {
+          // Every finished job drops the Stop button, link or not.
+          actions.innerHTML = `<a href="/" class="btn btn-secondary">← Dashboard</a>`;
         }
       } else if (evt.status === 'failed') {
         if (progressBar) { progressBar.style.background = 'var(--color-signal-rose)'; progressBar.style.boxShadow = 'none'; }

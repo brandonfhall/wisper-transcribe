@@ -962,6 +962,38 @@ def test_cancel_while_pending_deletes_the_upload_folder(tmp_path):
     assert not Path(job.upload_dir).exists()
 
 
+
+def test_cancel_while_pending_deletes_a_standalone_enroll_upload(tmp_path):
+    """A pending standalone enroll never reaches its runner's ``finally``, so
+    cancel deletes the renamed ``wisper_enrollsrc_*`` upload itself."""
+    q = _make_queue()
+    upload = tmp_path / "wisper_enroll_abc.mp3"
+    upload.write_bytes(b"x")
+    job = q.submit_standalone_enroll(str(upload), profile_key="alice", display_name="Alice")
+    held = Path(job.input_path)
+    assert held.name.startswith("wisper_enrollsrc_") and held.exists()
+
+    assert q.cancel(job.id) is True
+
+    assert job.status == "failed"
+    assert not held.exists()
+
+
+def test_cancel_while_pending_keeps_a_recording_enroll_source(tmp_path):
+    """Only a standalone enroll's own upload is deleted: a recording enroll
+    reads the recording's per-user audio, which cancel must never touch."""
+    q = _make_queue()
+    per_user = tmp_path / "recordings" / "r1" / "per-user" / "123456789012345678"
+    per_user.mkdir(parents=True)
+    (per_user / "0000.wav").write_bytes(b"x")
+    job = q.submit_recording_enroll(recording_id="r1", discord_uid="123456789012345678",
+                                    per_user_dir=str(per_user), profile_key="alice",
+                                    display_name="Alice")
+
+    assert q.cancel(job.id) is True
+
+    assert (per_user / "0000.wav").exists()
+
 def test_16khz_wav_upload_is_used_in_place_and_kept_as_flac(tmp_path, monkeypatch):
     tmp_dir, out_dir = _upload_env(tmp_path, monkeypatch)
 

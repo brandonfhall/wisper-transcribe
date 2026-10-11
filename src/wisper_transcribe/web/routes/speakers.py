@@ -126,6 +126,11 @@ async def enroll_submit(
         # Stream to disk in 1 MiB chunks; uploads can be large.
         while chunk := await audio.read(1 << 20):
             tmp.write(chunk)
+    except BaseException:
+        # A failed write (a full disk) must not leave a partial file behind.
+        tmp.close()
+        tmp_path.unlink(missing_ok=True)
+        raise
     finally:
         tmp.close()
 

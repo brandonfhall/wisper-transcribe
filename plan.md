@@ -12,6 +12,20 @@ With the web server in Docker Desktop (Mac or Windows) and `./data` bind-mounted
 
 **Status:** guarded, not fixed. The runtime lease (`db.py`, `runtime_leases`) makes the second runtime refuse to start when the container is inside Docker Desktop's VM; it is advisory (two processes starting in the same second could both pass). Documented in `docs/docker.md` ("One way of running at a time"). A real fix would need a lock that crosses the VM (e.g. routing host CLI writes through the container's server API).
 
+### Record page: Quick-connect preset radios do nothing
+
+The Discord form on `/record` lists saved presets as `preset_index` radios, but no script reads them and `POST /record/start` has no `preset_index` parameter, so picking one leaves the guild and channel unchanged. The Studio redesign (2026-05-13) dropped the old `applyPreset()`, which copied the preset's IDs into the fields. The channel picker's `wanted()` already uses a preset's channel as the default when its guild is selected.
+
+**Decision needed:** (a) a radio change fills the guild/channel fields and the picker selects, as `applyPreset()` did; (b) `POST /record/start` honours `preset_index` over the fields, which is simple and testable but can't be undone without a reload; or (c) drop the radios and keep presets as picker defaults.
+
+### Campaign page: no way to change or clear a member's Discord ID
+
+`POST /campaigns/{slug}/members/{key}/discord-id` works (and validates), but no page posts to it: the Studio redesign (2026-05-13) dropped the members table's "Discord user ID" field. A recording's **Enroll** binds an unknown Discord speaker, and links an existing profile when given its name, but a wrong binding can't be corrected: a bound user never appears as unknown again.
+
+**Decision needed:** restore an ID field (or an "unlink" action) on each member row of the Campaign page, or drop the route.
+
+The same redesign dropped the Add member form's per-campaign **role** and **character** fields, and the member list shows the profile's global role instead. `POST /campaigns/{slug}/members` and `wisper campaigns add-member --role/--character` still set them, and only `wisper campaigns show` prints them; no prompt or page reads them. Restore them alongside the Discord ID, or drop the columns.
+
 ## Manual verification owed
 
 - **Live recording + campaign journal:** `LIVE_AUDIO_TEST_PLAN.md` — real-device capture, live transcript, journal browser flows, bulk delete, busy-queue notice.

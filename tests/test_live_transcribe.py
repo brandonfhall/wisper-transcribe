@@ -69,6 +69,26 @@ def test_ring_buffer_drop_prefix_keeps_tracks_aligned():
     assert np.frombuffer(mixed, dtype="<i2")[0] == 6
 
 
+
+def test_ring_buffer_keeps_only_the_newest_max_buffer_s():
+    """A live job queued behind another job doesn't read the buffer: it keeps
+    the newest MAX_BUFFER_S, aligned, with elapsed time still counting the
+    whole session so later lines are stamped right."""
+    from wisper_transcribe.web.live_transcribe import MAX_BUFFER_S
+
+    buf = LiveRingBuffer()
+    for second in range(int(MAX_BUFFER_S) + 30):
+        v = second + 1
+        buf.push(_tone_i16(1.0, v), _tone_i16(1.0, -v), _tone_i16(1.0, v))
+    mic, system, mixed, elapsed = buf.snapshot()
+
+    assert len(mic) == len(system) == len(mixed) == int(MAX_BUFFER_S * RATE) * 2
+    assert np.frombuffer(mixed, dtype="<i2")[0] == 31  # the first 30 s were dropped
+    assert np.frombuffer(system, dtype="<i2")[0] == -31
+    assert elapsed == pytest.approx(MAX_BUFFER_S + 30)
+    chunk_start_s = elapsed - len(mixed) / 2 / RATE
+    assert chunk_start_s == pytest.approx(30.0)
+
 def test_ring_buffer_len():
     buf = LiveRingBuffer()
     assert len(buf) == 0
