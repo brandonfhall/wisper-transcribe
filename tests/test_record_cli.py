@@ -199,6 +199,7 @@ def test_record_transcribe_valid_id_posts_to_server(runner, server_json):
 # ---------------------------------------------------------------------------
 
 def test_record_list_show_transcribe_delete_end_to_end_against_real_app(runner, server_json):
+    import httpx
     from fastapi.testclient import TestClient
     from urllib.parse import urlsplit
 
@@ -217,7 +218,17 @@ def test_record_list_show_transcribe_delete_end_to_end_against_real_app(runner, 
                 if parsed.query:
                     path += f"?{parsed.query}"
                 kwargs.pop("timeout", None)  # TestClient doesn't accept it
-                return test_client.request(method, path, **kwargs)
+                resp = test_client.request(method, path, **kwargs)
+                # TestClient builds on httpx2 when it is installed, and
+                # httpx2's HTTPStatusError is not httpx's. Hand the CLI a
+                # plain httpx.Response so it sees the exceptions it gets
+                # in production.
+                return httpx.Response(
+                    resp.status_code,
+                    headers=resp.headers.multi_items(),
+                    content=resp.content,
+                    request=httpx.Request(method, url),
+                )
 
             with patch("httpx.request", side_effect=_fake_request):
                 list_result = runner.invoke(main, ["record", "list"])
