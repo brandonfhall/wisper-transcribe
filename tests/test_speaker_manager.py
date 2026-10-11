@@ -792,6 +792,42 @@ def test_enroll_speaker_from_audio_dir_prefers_wav_over_legacy_opus(tmp_path):
     assert _stored_embedding(tmp_path, "alice") is not None
 
 
+
+def test_enroll_speaker_from_audio_dir_keeps_an_existing_profile(tmp_path):
+    """Enrolling a recording speaker under a name that already has a profile
+    links that profile: its role, notes, and display name stay, and the
+    track's voice is blended into the stored voiceprint, not swapped in."""
+    from wisper_transcribe import db
+    from wisper_transcribe.speaker_manager import enroll_speaker_from_audio_dir, load_profiles
+
+    stored = np.zeros(512, dtype=np.float32)
+    stored[0] = 1.0
+    _write_profile(tmp_path, "alice", stored, role="dm")
+    with db.transaction(tmp_path) as conn:
+        conn.execute("UPDATE profiles SET notes = 'runs the table', display_name = 'Alice A.' "
+                     "WHERE key = 'alice'")
+
+    per_user_dir = tmp_path / "recordings" / "session01" / "someuser"
+    per_user_dir.mkdir(parents=True)
+    _write_fake_wav_segment(per_user_dir / "0000.wav", seconds=0.5)
+
+    track = np.zeros(512, dtype=np.float32)
+    track[1] = 1.0
+    with patch("wisper_transcribe.speaker_manager.extract_embedding", return_value=track):
+        profile = enroll_speaker_from_audio_dir(
+            name="alice",
+            display_name="alice",
+            role="player",
+            per_user_dir=per_user_dir,
+            data_dir=tmp_path,
+        )
+
+    kept = load_profiles(tmp_path)["alice"]
+    assert (kept.role, kept.notes, kept.display_name) == ("dm", "runs the table", "Alice A.")
+    assert profile.role == "dm"
+    emb = kept.embedding
+    assert emb[0] > emb[1] > 0.0  # blended toward the track, mostly the stored voice
+
 def test_enroll_speaker_from_audio_dir_legacy_opus_fallback_fails_gracefully(tmp_path):
     """An old recording directory has only (invalid) .opus files.
     enroll_speaker_from_audio_dir attempts them as a

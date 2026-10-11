@@ -1659,11 +1659,17 @@ class JobQueue:
         p = job.enroll_params
         try:
             from wisper_transcribe.config import get_data_dir
-            from wisper_transcribe.speaker_manager import enroll_speaker_from_audio_dir
+            from wisper_transcribe.speaker_manager import (
+                enroll_speaker_from_audio_dir, load_profiles,
+            )
 
             data_dir = get_data_dir()
 
-            job.append_log(f"Enrolling {p['display_name']} from recording audio…")
+            if p["profile_key"] in load_profiles(data_dir):
+                job.append_log(f"Linking {p['display_name']} to the existing profile "
+                               "and blending this track into its voiceprint…")
+            else:
+                job.append_log(f"Enrolling {p['display_name']} from recording audio…")
             enroll_speaker_from_audio_dir(
                 name=p["profile_key"],
                 display_name=p["display_name"],

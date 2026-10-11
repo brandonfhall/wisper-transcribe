@@ -150,7 +150,7 @@ The bot joins a voice channel, records each participant on their own track plus 
 - Pick the server and voice channel from dropdowns (fetched from Discord); the raw guild/channel IDs remain available behind **Enter IDs manually**, and are used automatically if the channel list can't be fetched (`no_token` sends you to the Config page).
 - The Record page shows who is talking in real time.
 
-**Auto-enrollment:** Discord users not yet bound to a campaign member are listed under "Unknown Speakers" on the recording's detail page. Enter a name and click **Enroll** to create a profile from their track; the Discord ID is then bound in the campaign roster, so future sessions tag them automatically.
+**Auto-enrollment:** Discord users not yet bound to a campaign member are listed under "Unknown Speakers" on the recording's detail page. Enter a name and click **Enroll** to create a profile from their track; the Discord ID is then bound in the campaign roster, so future sessions tag them automatically. Entering the name of someone who already has a profile links them instead: their name, role, and notes stay, and the track is blended into their voiceprint.
 
 ### Local (mic + system audio)
 

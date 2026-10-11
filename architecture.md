@@ -227,6 +227,7 @@ Embeddings from different models aren't comparable (and differ in dimension), so
 - `load_profile_embedding()` returns `None` for any profile not in the current space; `match_speakers()` and the CLI ranking only compare through it.
 - `stale_profile_keys()` lists old-space profiles. The pipeline logs them as skipped, the Speakers page badges them, and the CLI ranking lists them unscored.
 - `update_embedding()` replaces an old-space vector outright and retags the profile instead of averaging, so any re-enroll path (wizard, standalone upload, `wisper enroll`, CLI pick) migrates a profile.
+- A recording's **Enroll** (an unbound Discord speaker) under a name that already has a profile links that profile: `enroll_speaker_from_audio_dir()` blends the track in with `update_embedding()` and keeps the profile's display name, role, and notes, then the job binds the Discord ID. Only a new name creates a profile.
 
 ### CLI enrollment (`--enroll-speakers`)
 
