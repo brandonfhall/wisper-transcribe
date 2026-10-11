@@ -20,6 +20,10 @@
 {% block page %}
 <div class="studio-page">
 
+  {% if request.query_params.get('error') == 'not_found' %}
+  <div style="margin-bottom:16px;color:var(--color-signal-amber);font-size:12.5px">That recording no longer exists.</div>
+  {% endif %}
+
   <!-- Filter row -->
   <div style="display:flex;align-items:center;gap:4px;margin-bottom:16px;flex-wrap:wrap">
     {%- set live_recs = recordings | selectattr('status', 'equalto', 'recording') | list -%}

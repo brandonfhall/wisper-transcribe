@@ -67,6 +67,10 @@
 <div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Couldn't delete: an unassigned session already has the same name as one of its sessions.</div>
 {% elif request.query_params.get('error') == 'relink_failed' %}
 <div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Couldn't relink: that file may already belong to a campaign, or the session is no longer missing.</div>
+{% elif request.query_params.get('error') == 'invalid_discord_id' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">A Discord user ID is a number; copy it with Developer Mode on.</div>
+{% elif request.query_params.get('error') == 'unknown_profile' %}
+<div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">Choose a speaker to add.</div>
 {% elif request.query_params.get('error') == 'submit_failed' %}
 <div style="padding:12px 14px 0;color:var(--color-signal-amber);font-size:12.5px">The job could not be queued, so nothing was started. Try again.</div>
 {% endif %}

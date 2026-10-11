@@ -2142,6 +2142,77 @@ def test_every_template_form_posts_to_a_registered_route(app):
     assert missing == []
 
 
+
+# Redirect target -> the template its GET renders, for the error-code check.
+_ERROR_PAGES = [
+    (r"^/campaigns/X/journal$", "campaign_journal.html"),
+    (r"^/campaigns(/X)?$", "campaigns.html"),
+    (r"^/recordings/X$", "recording_detail.html"),
+    (r"^/recordings$", "recordings.html"),
+    (r"^/record$", "record.html"),
+    (r"^/transcripts/X$", "transcript_detail.html"),
+    (r"^/transcripts$", "transcripts.html"),
+    (r"^/speakers/enroll$", "speaker_enroll_standalone.html"),
+    (r"^/speakers$", "speakers.html"),
+    (r"^/transcribe$", "transcribe.html"),
+    (r"^/config$", "config.html"),
+]
+
+
+def test_every_redirect_error_code_is_shown_on_its_page():
+    """A route that redirects with ``?error=<code>`` to a page that never
+    mentions the code fails silently: the page just reloads. Each code must
+    appear in the target template, unless that template prints any code it
+    doesn't know (``{{ request.query_params.get('error') }}``)."""
+    import re
+    from pathlib import Path
+
+    import wisper_transcribe.web as web_pkg
+
+    web = Path(web_pkg.__file__).parent
+    pairs = set()
+    for route_file in (web / "routes").glob("*.py"):
+        src = route_file.read_text(encoding="utf-8")
+        for m in re.finditer(r'error_redirect\(\s*f?"([^"]+)"\s*,\s*"([a-z_]+)"', src):
+            pairs.add((m.group(1), m.group(2), route_file.name))
+        for m in re.finditer(r'url=f?"([^"?]+)\?error=([a-z_]+)', src):
+            pairs.add((m.group(1), m.group(2), route_file.name))
+    assert len(pairs) > 30
+
+    unshown = []
+    for base, code, route_file in sorted(pairs):
+        shape = re.sub(r"\{[^}]*\}", "X", base)
+        template = next((t for pat, t in _ERROR_PAGES if re.match(pat, shape)), None)
+        if template is None:
+            continue
+        text = (web / "templates" / template).read_text(encoding="utf-8")
+        prints_any = re.search(r"\{\{\s*request\.query_params\.get\(['\"]error['\"]\)\s*\}\}", text)
+        if code not in text and not prints_any:
+            unshown.append(f"{route_file}: {base}?error={code} ({template})")
+    assert unshown == []
+
+
+@pytest.mark.parametrize("url, message", [
+    ("/record?error=missing_channel", "Choose a Discord server and voice channel"),
+    ("/recordings?error=not_found", "That recording no longer exists."),
+    ("/transcripts?error=not_found", "That transcript no longer exists."),
+])
+def test_error_codes_render_a_message(client, tmp_path, monkeypatch, url, message):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    resp = client.get(url)
+    assert resp.status_code == 200
+    assert message in resp.text
+
+
+def test_campaign_add_member_without_a_choice_says_so(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    from wisper_transcribe.campaign_manager import create_campaign
+    create_campaign("Test Game", data_dir=tmp_path)
+
+    resp = client.post("/campaigns/test-game/members", data={"profile_key": ""})
+    assert resp.status_code == 200
+    assert "Choose a speaker to add." in resp.text
+
 def test_campaign_page_member_forms_add_and_remove(client, tmp_path, monkeypatch):
     """Drive the Campaign page's own Add member and remove forms."""
     import re

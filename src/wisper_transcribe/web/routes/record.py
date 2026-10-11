@@ -675,7 +675,9 @@ async def record_sse(request: Request) -> StreamingResponse:
 @router.post("/record/start", response_class=HTMLResponse)
 async def record_start_html(
     request: Request,
-    voice_channel_id: Annotated[str, Form()],
+    # Defaulted: the field is hidden behind the channel picker, so it can't be
+    # `required`, and an empty value must reach missing_channel, not a 422.
+    voice_channel_id: Annotated[str, Form()] = "",
     guild_id: Annotated[str, Form()] = "",
     campaign_slug: Annotated[str, Form()] = "",
 ) -> RedirectResponse:
