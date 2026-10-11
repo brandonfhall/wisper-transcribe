@@ -2377,3 +2377,21 @@ def test_delete_keeps_a_session_whose_name_extends_the_stem_with_excerpt(tmp_pat
     assert not (out / "mix_excerpt_SPEAKER_00.mp3").exists()
     assert (out / "mix_excerpt_final.md").exists()
     assert (out / "mix_excerpt_final.summary.md").exists()
+
+
+
+def test_validate_new_stem_caps_the_name_in_bytes():
+    """100 three-byte characters fit the character limit but not a 255-byte
+    file name once the companions' suffixes are added: refused up front
+    instead of failing with "File name too long" mid-rename."""
+    assert ts.validate_new_stem("\u9f8d" * 100) is None
+    assert ts.validate_new_stem("\u9f8d" * 60) == "\u9f8d" * 60
+    assert ts.validate_new_stem("a" * 100) == "a" * 100
+
+
+def test_rename_to_a_name_too_long_in_bytes_is_invalid(out):
+    from ._moves import placed_session
+
+    tid, md = placed_session("S")
+    assert ts.rename_transcript(tid, "\u9f8d" * 100).status == "invalid"
+    assert md.exists()

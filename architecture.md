@@ -598,7 +598,7 @@ belongs*: the output root, or `<root>/<campaigns.folder>`.
   change only). A clash excludes the session itself (the registered `.md`, by
   `samefile` or path), so a misplaced session moved home or a case-only rename
   isn't a clash with itself. `validate_new_stem(name)` returns the cleaned NFC
-  name or None: non-empty, at most 100 characters, no path separators or
+  name or None: non-empty, at most 100 characters and 180 UTF-8 bytes (`MAX_STEM_BYTES`), no path separators or
   control characters, no leading dot, no trailing dot or space, not ending
   `.summary`/`.md`, and not a Windows device name.
 - `move_transcript(transcript_id, campaign_slug, clash=…)` moves a session

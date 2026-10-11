@@ -47,6 +47,9 @@ ANY: Final = object()
 TEMP_PREFIX = ".wisper-tmp-"
 # Diarization segments for the enrollment wizard; speakers live in the DB.
 SIDECAR_SUFFIX = "_diar.json"
+# A stem's byte budget: 255 minus the longest companion suffix
+# ("_excerpt_SPEAKER_00.mp3") and the atomic-write temp name's additions.
+MAX_STEM_BYTES = 180
 
 # One writer at a time in this process: reconcile's scan and write, a
 # transcript move or rename, and finishing a folder rename all take it before
@@ -242,7 +245,9 @@ def _modified_local(path: Optional[Path]) -> Optional[str]:
 def validate_new_stem(name: str) -> Optional[str]:
     """``name`` as a new session stem, or None when it is refused.
 
-    NFC-normalized and stripped. Non-empty and at most 100 characters; no
+    NFC-normalized and stripped. Non-empty, at most 100 characters and
+    ``MAX_STEM_BYTES`` UTF-8 bytes (filesystems cap a name at 255 bytes, and
+    companions and atomic-write temp names add to the stem); no
     path separators (``/ \\ : * ? " < > |``) or control characters or DEL; no
     leading dot (which also refuses an atomic-write temp name); no trailing dot
     or space; not ending in ``.summary`` or ``.md`` (case-insensitive); and not
@@ -253,7 +258,7 @@ def validate_new_stem(name: str) -> Optional[str]:
     if not name:
         return None
     name = nfc(name).strip()
-    if not name or len(name) > 100:
+    if not name or len(name) > 100 or len(name.encode("utf-8")) > MAX_STEM_BYTES:
         return None
     if any(c in '/\\:*?"<>|' or ord(c) < 32 or ord(c) == 127 for c in name):
         return None
