@@ -64,6 +64,21 @@ def test_record_start_missing_voice_channel_returns_400(client):
     assert resp.status_code == 400
 
 
+def test_record_start_form_without_a_channel_says_so(client):
+    """The Discord form's channel field is hidden behind the picker, so the
+    browser can't require it: an empty channel shows missing_channel."""
+    c, _ = client
+
+    class _IdleBotManager:
+        active_recording = None
+
+    c.app.state.bot_manager = _IdleBotManager()
+    resp = c.post("/record/start", data={"voice_channel_id": "", "guild_id": ""},
+                  follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/record?error=missing_channel"
+
+
 def test_record_stop_with_no_active_session_returns_400(client):
     c, _ = client
     resp = c.post("/api/record/stop")
@@ -486,21 +501,6 @@ def test_record_marker_multiple_clicks_each_append(client):
     finally:
         mgr.stop_session()
 
-
-
-def test_record_start_form_without_a_channel_says_so(client):
-    """The Discord form's channel field is hidden behind the picker, so the
-    browser can't require it: an empty channel shows missing_channel."""
-    c, _ = client
-
-    class _IdleBotManager:
-        active_recording = None
-
-    c.app.state.bot_manager = _IdleBotManager()
-    resp = c.post("/record/start", data={"voice_channel_id": "", "guild_id": ""},
-                  follow_redirects=False)
-    assert resp.status_code == 303
-    assert resp.headers["location"] == "/record?error=missing_channel"
 
 def test_stop_local_with_no_active_session_returns_400(client):
     c, data_dir = client

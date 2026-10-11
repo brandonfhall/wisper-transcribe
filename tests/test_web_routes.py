@@ -2111,10 +2111,10 @@ def test_campaign_add_member_persists(client, tmp_path, monkeypatch):
 
 
 def test_every_template_form_posts_to_a_registered_route(app):
-    """A form whose action has no route fails only when someone clicks it
-    (the Campaign page's member forms and the Discord start form did, for
-    months). Jinja expressions become ``1``, which fits both ``{slug}`` and
-    ``{id:int}`` parameters; an action that is wholly an expression is skipped."""
+    """A form whose action has no route fails only when someone clicks it, and
+    route tests that post to the route directly can't see it. Jinja
+    expressions become ``1``, which fits both ``{slug}`` and ``{id:int}``
+    parameters; an action that is wholly an expression is skipped."""
     import re
     from pathlib import Path
 
@@ -2194,8 +2194,8 @@ def test_every_redirect_error_code_is_shown_on_its_page():
 
 @pytest.mark.parametrize("url, message", [
     ("/record?error=missing_channel", "Choose a Discord server and voice channel"),
-    ("/recordings?error=not_found", "That recording no longer exists."),
-    ("/transcripts?error=not_found", "That transcript no longer exists."),
+    ("/recordings?error=not_found", "That recording can't be found."),
+    ("/transcripts?error=not_found", "That transcript can't be found."),
 ])
 def test_error_codes_render_a_message(client, tmp_path, monkeypatch, url, message):
     monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
