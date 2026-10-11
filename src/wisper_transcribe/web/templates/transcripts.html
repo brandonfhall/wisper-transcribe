@@ -29,6 +29,8 @@
   {% set err = request.query_params.get('error') %}
   {% if err == 'not_found' %}
   <div style="margin-bottom:16px;color:var(--color-signal-amber);font-size:12.5px">That transcript can't be found.</div>
+  {% elif err == 'delete_busy' %}
+  <div style="margin-bottom:16px;color:var(--color-signal-amber);font-size:12.5px">{{ request.query_params.get('busy', '') }} session(s) weren't deleted: a job is running for them or their campaign. Try again when it finishes.</div>
   {% elif err == 'relink_failed' %}
   <div style="margin-bottom:16px;color:var(--color-signal-amber);font-size:12.5px">Couldn't relink: that file may already belong to a campaign, or the session isn't missing.</div>
   {% elif err == 'forget_failed' %}

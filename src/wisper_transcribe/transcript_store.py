@@ -1584,6 +1584,25 @@ def _companion_paths(loc: "Located", conn: Optional[sqlite3.Connection] = None) 
     return paths
 
 
+
+def delete_blocked(transcript_id: int, data_dir: Optional[Path] = None) -> bool:
+    """Whether a pending or running job (or a capture) uses this transcript or
+    its campaign, the rule rename and move use: deleting under a refine,
+    summarize, or retranscribe job would fail it or leave an orphan ``.md``."""
+    from .job_history import active_jobs
+
+    with db.connection(data_dir) as conn:
+        row = conn.execute(
+            "SELECT t.campaign_id, c.slug FROM transcripts t "
+            "LEFT JOIN campaigns c ON c.id = t.campaign_id WHERE t.id = ?",
+            (transcript_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        return bool(active_jobs(conn, transcript_id=transcript_id,
+                                campaign_ids={row[0]} - {None},
+                                campaign_slugs={row[1]} - {None}))
+
 def delete_transcript(transcript_id: int, data_dir: Optional[Path] = None,
                       output_dir: Optional[Path] = None) -> Literal["deleted", "kept", "absent"]:
     """Delete a transcript, its links, and its companion files.

@@ -5506,3 +5506,43 @@ def test_live_ticker_and_job_errors_render_as_text():
 
     job_detail = (_STATIC_DIR.parent / "web" / "templates" / "job_detail.html").read_text(encoding="utf-8")
     assert not re.search(r"\$\{[^}]*evt\.error", job_detail)
+
+
+
+def _pending_refine(md_path):
+    """A pending refine job on ``md_path`` in job history."""
+    import types
+    import uuid
+    from datetime import datetime
+
+    from wisper_transcribe import job_history
+
+    job_history.record(types.SimpleNamespace(
+        id=str(uuid.uuid4()), job_type="refine", status="pending", created_at=datetime.now(),
+        started_at=None, finished_at=None, error=None, kwargs={}, log_lines=[],
+        recording_id=None, output_path=None, llm_transcript_path=str(md_path),
+    ))
+
+
+def test_delete_waits_for_a_job_on_the_transcript(client, tmp_path, monkeypatch):
+    """Deleting under a pending refine (or summarize, or retranscribe) would
+    fail that job or leave an orphan .md: single and bulk delete refuse."""
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("WISPER_OUTPUT_DIR", str(tmp_path / "out"))
+    (tmp_path / "out").mkdir()
+    from tests._seed import seed_transcript
+
+    busy = seed_transcript("Busy", write_md=True)
+    free = seed_transcript("Free", write_md=True)
+    _pending_refine(tmp_path / "out" / "Busy.md")
+
+    resp = client.post(f"/transcripts/{busy}/delete", follow_redirects=False)
+    assert resp.headers["location"] == f"/transcripts/{busy}?error=busy"
+    assert (tmp_path / "out" / "Busy.md").exists()
+
+    resp = client.post("/transcripts/bulk-delete",
+                       data={"transcript_id": [str(busy), str(free)]}, follow_redirects=False)
+    assert resp.headers["location"] == "/transcripts?error=delete_busy&busy=1"
+    assert (tmp_path / "out" / "Busy.md").exists()
+    assert not (tmp_path / "out" / "Free.md").exists()
+    assert "1 session(s) weren't deleted" in client.get(resp.headers["location"]).text

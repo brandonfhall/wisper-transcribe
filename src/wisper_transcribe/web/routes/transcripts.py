@@ -470,9 +470,14 @@ def _campaign_folder_names() -> set[str]:
 async def bulk_delete_transcripts(request: Request) -> HTMLResponse:
     """Delete multiple transcripts (and their summary sidecars) in one request."""
     form = await request.form()
+    busy = 0
     for tid in _parse_transcript_ids(form.getlist("transcript_id")):
+        if transcript_store.delete_blocked(tid):
+            busy += 1
+            continue
         transcript_store.delete_transcript(tid)
-    return HTMLResponse(content="", status_code=303, headers={"Location": "/transcripts"})
+    location = f"/transcripts?error=delete_busy&busy={busy}" if busy else "/transcripts"
+    return HTMLResponse(content="", status_code=303, headers={"Location": location})
 
 
 @router.post("/bulk-campaign", response_class=HTMLResponse)
@@ -733,6 +738,8 @@ async def delete_transcript(request: Request, transcript_id: int) -> HTMLRespons
     loc = _located_or_redirect(transcript_id)
     if isinstance(loc, RedirectResponse):
         return loc
+    if transcript_store.delete_blocked(loc.id):
+        return RedirectResponse(url=f"/transcripts/{loc.id}?error=busy", status_code=303)
     transcript_store.delete_transcript(loc.id)
     return HTMLResponse(
         content="",
