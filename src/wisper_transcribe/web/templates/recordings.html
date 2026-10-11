@@ -22,6 +22,8 @@
 
   {% if request.query_params.get('error') == 'not_found' %}
   <div style="margin-bottom:16px;color:var(--color-signal-amber);font-size:12.5px">That recording can't be found.</div>
+  {% elif request.query_params.get('error') == 'still_recording' %}
+  <div style="margin-bottom:16px;color:var(--color-signal-amber);font-size:12.5px">That session is still recording. Stop it on the Record page, then delete it.</div>
   {% endif %}
 
   <!-- Filter row -->
