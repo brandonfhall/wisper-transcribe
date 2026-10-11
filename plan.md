@@ -68,10 +68,6 @@ Design in `architecture.md`. Open items:
 - Caveats: one session; remote podcast audio (cleaner than a table mic); the harness embeds the mixed file, not a loopback-only system track; ground truth is pyannote, not hand labels.
 - **Next:** run it on 2–3 more sessions (an in-room recording especially) before deciding. If they agree, build it with threshold ~0.35, show "Other" for voices not yet matched to a profile, and keep the post-Stop pass authoritative.
 
-### Parked
-
-- **Replay markers into the ticker on reload.** Markers persist (`recording_markers`) and show on the detail page, but a page reload doesn't re-insert them into the live ticker (only transcript lines come back through SSE).
-
 ---
 
 ## Intel Arc GPU support (planned — not started)

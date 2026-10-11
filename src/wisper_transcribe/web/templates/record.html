@@ -162,7 +162,7 @@
           <h2 class="section-title">The thread</h2>
         </div>
       </div>
-      <div id="live-ticker" style="background:var(--color-ink-700);border:1px solid var(--color-rule);padding:14px 18px;border-radius:4px;min-height:80px;max-height:480px;overflow-y:auto">
+      <div id="live-ticker" data-markers="{{ active_markers | tojson | forceescape }}" style="background:var(--color-ink-700);border:1px solid var(--color-rule);padding:14px 18px;border-radius:4px;min-height:80px;max-height:480px;overflow-y:auto">
         <div style="color:var(--color-paper-faint);font-size:12px;font-style:italic">Waiting for transcription stream…</div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;padding:10px 0 4px;font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint);letter-spacing:0.1em;margin-top:4px">
@@ -668,6 +668,17 @@
         .finally(function() { markerBtn.disabled = false; });
     });
   }
+
+  // Markers added before this page load: the stream replays only transcript
+  // lines, so put the session's stored markers back into the ticker.
+  // Deferred app.js defines the ticker helpers, so wait for DOMContentLoaded.
+  document.addEventListener('DOMContentLoaded', function() {
+    var ticker = document.getElementById('live-ticker');
+    if (!ticker || !window.wisperTickerAppendMarker) return;
+    var stored = [];
+    try { stored = JSON.parse(ticker.dataset.markers || '[]'); } catch (ex) {}
+    stored.forEach(function(s) { window.wisperTickerAppendMarker(s); });
+  });
 })();
 </script>
 {% if active_recording.source == 'local' %}
@@ -686,6 +697,7 @@
       function(payload) {
         window.wisperTickerAppend && window.wisperTickerAppend({
           timestamp: fmtElapsed(payload.start_s),
+          t: payload.start_s,
           speaker: payload.speaker,
           text: payload.text,
         });

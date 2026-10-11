@@ -106,7 +106,11 @@ function _tickerSpan(css, text) {
   return span;
 }
 
-function _tickerInsert(stamp, dot, who, body) {
+// Rows are ordered by `t` (seconds since session start), newest on top, so
+// markers replayed on page load sit among the transcript lines the stream
+// replays. Marker times are wall clock and line times are audio time; both
+// count from session start, so the order is close but not exact.
+function _tickerInsert(stamp, dot, who, body, t) {
   var ticker = document.getElementById('live-ticker');
   if (!ticker) return;
 
@@ -116,6 +120,8 @@ function _tickerInsert(stamp, dot, who, body) {
 
   var line = document.createElement('div');
   line.style.cssText = 'display:grid;grid-template-columns:60px 90px 1fr;gap:14px;padding:6px 0;align-items:baseline;opacity:1';
+  t = Number(t) || 0;
+  line.dataset.t = t;
   var speaker = _tickerSpan('display:flex;align-items:center;gap:7px');
   speaker.appendChild(dot);
   speaker.appendChild(who);
@@ -124,7 +130,12 @@ function _tickerInsert(stamp, dot, who, body) {
   line.appendChild(body);
 
   // Newest on top; older lines fade but are never removed (session scrollback).
-  ticker.insertBefore(line, ticker.firstChild);
+  // Insert above the first row that isn't later than this one; ties go on top.
+  var before = ticker.firstChild;
+  while (before && before.dataset && Number(before.dataset.t) > t) {
+    before = before.nextSibling;
+  }
+  ticker.insertBefore(line, before);
 
   var lines = ticker.querySelectorAll('div[style*="grid-template-columns"]');
   lines.forEach(function(l, i) {
@@ -133,19 +144,21 @@ function _tickerInsert(stamp, dot, who, body) {
 }
 
 // Called via wisperConnectLiveStream's onLine callback in record.html.
-// data: { timestamp: "01:24:09", speaker: "Alice", text: "..." }
+// data: { timestamp: "01:24:09", t: 5049.2, speaker: "Alice", text: "..." }
 window.wisperTickerAppend = function(data) {
   _tickerInsert(
     _tickerSpan('font-family:var(--font-mono);font-size:10.5px;color:var(--color-paper-faint)', data.timestamp || '—'),
     _tickerSpan('width:6px;height:6px;border-radius:50%;background:var(--color-accent);box-shadow:0 0 6px var(--color-accent);flex-shrink:0'),
     _tickerSpan('font-family:var(--font-serif);font-size:13px;color:var(--color-paper)', data.speaker || ''),
-    _tickerSpan('font-size:13.5px;color:var(--color-paper);line-height:1.5', data.text || '')
+    _tickerSpan('font-size:13.5px;color:var(--color-paper);line-height:1.5', data.text || ''),
+    data.t
   );
 };
 
 // ── Record: "Add marker" flagged line ──
-// Called after a successful POST /record/marker. Rose, italic, and
-// speaker-less so it can't be mistaken for transcript.
+// Called after a successful POST /record/marker, and for each stored marker
+// when /record loads. Rose, italic, and speaker-less so it can't be mistaken
+// for transcript.
 window.wisperTickerAppendMarker = function(elapsedS) {
   var s = Math.max(0, Math.floor(elapsedS || 0));
   var m = Math.floor(s / 60), ss = s % 60;
@@ -155,7 +168,8 @@ window.wisperTickerAppendMarker = function(elapsedS) {
     _tickerSpan('font-family:var(--font-mono);font-size:10.5px;color:var(--color-signal-rose)', m + ':' + String(ss).padStart(2, '0')),
     dot,
     _tickerSpan('font-family:var(--font-serif);font-size:13px;color:var(--color-signal-rose);font-style:italic', 'Marker'),
-    _tickerSpan('font-size:13.5px;color:var(--color-paper-faint);font-style:italic', 'flagged moment')
+    _tickerSpan('font-size:13.5px;color:var(--color-paper-faint);font-style:italic', 'flagged moment'),
+    elapsedS
   );
 };
 

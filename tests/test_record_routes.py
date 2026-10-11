@@ -487,6 +487,56 @@ def test_record_marker_multiple_clicks_each_append(client):
         mgr.stop_session()
 
 
+
+def _ticker_markers(html: str) -> list:
+    import html as html_mod
+    import re
+
+    m = re.search(r'id="live-ticker" data-markers="([^"]*)"', html)
+    assert m is not None, "ticker has no data-markers attribute"
+    return json.loads(html_mod.unescape(m.group(1)))
+
+
+def test_record_page_hands_stored_markers_to_the_ticker(client):
+    """A reload mid-session puts earlier markers back into the ticker. They
+    are read from the database: append_marker never updates the manager's
+    in-memory Recording, whose markers list stays empty."""
+    c, data_dir = client
+    from wisper_transcribe.recording_manager import create_recording
+
+    rec = create_recording("VC1", "G1", data_dir=data_dir, source="discord")
+
+    class _FakeBotManager:
+        active_recording = rec
+
+    c.app.state.bot_manager = _FakeBotManager()
+
+    first = c.post("/record/marker").json()["elapsed_s"]
+    second = c.post("/record/marker").json()["elapsed_s"]
+    assert rec.markers == []
+
+    resp = c.get("/record")
+    assert resp.status_code == 200
+    stored = _ticker_markers(resp.text)
+    assert stored == [round(first, 2), round(second, 2)]
+    assert stored[0] <= stored[1]
+
+
+def test_record_page_ticker_markers_empty_without_markers(client):
+    c, data_dir = client
+    from wisper_transcribe.recording_manager import create_recording
+
+    rec = create_recording("VC1", "G1", data_dir=data_dir, source="discord")
+
+    class _FakeBotManager:
+        active_recording = rec
+
+    c.app.state.bot_manager = _FakeBotManager()
+
+    resp = c.get("/record")
+    assert resp.status_code == 200
+    assert _ticker_markers(resp.text) == []
+
 def test_stop_local_with_no_active_session_returns_400(client):
     c, data_dir = client
     c.app.state.local_capture_manager = _scripted_local_capture_manager(data_dir)
