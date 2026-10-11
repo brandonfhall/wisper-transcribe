@@ -5580,3 +5580,36 @@ def test_delete_waits_for_a_job_on_the_transcript(client, tmp_path, monkeypatch)
     assert (tmp_path / "out" / "Busy.md").exists()
     assert not (tmp_path / "out" / "Free.md").exists()
     assert "1 session(s) weren't deleted" in client.get(resp.headers["location"]).text
+
+
+
+@pytest.mark.parametrize("url, field, data", [
+    ("/transcribe", "file", {}),
+    ("/speakers/enroll", "audio", {"name": "Alice"}),
+])
+def test_a_failed_upload_write_leaves_no_temp_file(app, tmp_path, monkeypatch, url, field, data):
+    """A write that fails mid-upload (a full disk) deletes the partial temp
+    file instead of leaving it until the next restart."""
+    import tempfile as _tempfile
+
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("WISPER_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(_tempfile, "tempdir", str(tmp_path))
+    real = _tempfile.NamedTemporaryFile
+
+    def failing(*a, **kw):
+        f = real(*a, **kw)
+
+        def write(_chunk):
+            raise OSError(28, "No space left on device")
+
+        f.write = write
+        return f
+
+    monkeypatch.setattr(_tempfile, "NamedTemporaryFile", failing)
+    (tmp_path / "output").mkdir(exist_ok=True)
+    with TestClient(app, raise_server_exceptions=False) as c:
+        resp = c.post(url, files={field: ("s.mp3", b"x" * 100, "audio/mpeg")}, data=data)
+    assert resp.status_code == 500
+    assert list(tmp_path.glob("wisper_*")) == []

@@ -148,6 +148,12 @@ async def start_transcribe(
         # Stream to disk in 1 MiB chunks; uploads can be multi-GB.
         while chunk := await file.read(1 << 20):
             tmp.write(chunk)
+    except BaseException:
+        # A failed write (a full disk) must not leave a partial multi-GB
+        # file in the temp dir until the next restart's sweep.
+        tmp.close()
+        Path(tmp.name).unlink(missing_ok=True)
+        raise
     finally:
         tmp.close()
 
