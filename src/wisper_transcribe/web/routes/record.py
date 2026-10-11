@@ -25,6 +25,7 @@ from wisper_transcribe.recording_manager import (
     append_marker,
     delete_recording,
     link_transcript,
+    load_recording,
     load_recordings,
 )
 from wisper_transcribe.web._responses import error_redirect, invalid_input_response
@@ -544,7 +545,7 @@ async def recording_recover_html(recording_id: str) -> RedirectResponse:
     safe_id = _validate_recording_id(recording_id)
     if safe_id is None:
         return invalid_input_response("Invalid recording ID")
-    from wisper_transcribe.recording_manager import load_recording, recover_recording
+    from wisper_transcribe.recording_manager import recover_recording
 
     data_dir = get_data_dir()
     rec = load_recording(safe_id, data_dir)
@@ -617,6 +618,10 @@ async def record_page(request: Request) -> HTMLResponse:
     cfg = load_config()
     active_recording = _current_active_recording(request)
     lcm = get_local_capture_manager(request)
+    # Markers live only in the database (append_marker never touches the
+    # managers' in-memory Recording), so read them fresh for the ticker.
+    stored = load_recording(active_recording.id, data_dir) if active_recording else None
+    active_markers = [round(m.elapsed_s, 2) for m in stored.markers] if stored else []
     return templates.TemplateResponse(
         request,
         "record.html",
@@ -624,6 +629,7 @@ async def record_page(request: Request) -> HTMLResponse:
             "request": request,
             "campaigns": campaigns,
             "active_recording": active_recording,
+            "active_markers": active_markers,
             "discord_presets": cfg.get("discord_presets", []),
             "default_guild": cfg.get("discord_default_guild", ""),
             "default_channel": cfg.get("discord_default_channel", ""),

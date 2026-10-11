@@ -94,6 +94,8 @@ mic or headset; on macOS, BlackHole for system audio):
       not fatal).
 - [ ] Lines lag no more than ~15–20s on CPU. If they do, try `base` or `small`.
 - [ ] **Add marker** drops a rose, speaker-less line into the ticker.
+- [ ] Reloading `/record` mid-session puts earlier markers back into the ticker,
+      between the lines spoken before and after each one.
 - [ ] After stopping, `recordings/<id>/live_transcript.md` matches the UI, and
       reloading the detail page shows the persisted draft.
 

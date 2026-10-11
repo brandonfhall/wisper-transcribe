@@ -763,7 +763,7 @@ Two managers write the same on-disk layout: `BotManager` (Discord, via a Java si
 **HTML**
 - `GET /record` — start forms, active-session toolbar, live ticker, noise-floor slider, level gauges (0–2000 RMS; the slider is 0–1000 so speech doesn't pin the bar), and a **Switch device** card for local sessions (per-track device selects, current device pre-selected). Speaker meters render only for Discord (local sessions have no per-participant data).
 - `GET /record/sse` — status stream; local sessions include `mic_rms`/`system_rms`.
-- `POST /record/marker` — `fetch()`, not a form, so the ticker keeps its scroll position.
+- `POST /record/marker` — `fetch()`, not a form, so the ticker keeps its scroll position. `GET /record` reads the session's markers from the database (the managers' in-memory `Recording` never sees them) into the ticker's `data-markers`, and the page replays them on load.
 - `GET /recordings` — list with bulk-select delete. Active and degraded rows have no checkbox. Bulk submit uses a separate hidden form because each row already contains its own form.
 - `GET /recordings/{id}` — detail; for a stopped local session without a transcript, renders `live_transcript.md` server-side as a static draft.
 - `GET /recordings/{id}/live` — SSE of live lines with index resume; caches the last-seen job so a line committed as the job ends still streams; ends with a bare `{"type": "snapshot"}` when the job is gone.
@@ -831,7 +831,7 @@ Tokens in `input.css` `@theme`: `--color-ink-*` backgrounds, `--color-paper*` te
 
 ### Global JS (`static/app.js`)
 - `wisperConnectLiveStream(url, onLine, onSnapshot)` — shared SSE connector for live lines. De-dupes on `start_s|speaker|text` because the server's resume cursor is per connection, so a reconnect replays everything.
-- `wisperTickerAppend()` / `wisperTickerAppendMarker()` — Record page ticker rows (markers are rose, italic, speaker-less). The ticker scrolls and never drops lines.
+- `wisperTickerAppend()` / `wisperTickerAppendMarker()` — Record page ticker rows (markers are rose, italic, speaker-less). Rows are ordered by seconds since session start (`data-t`), newest on top, so markers replayed on load sit among the replayed lines. The ticker scrolls and never drops lines.
 - `wisperPlayExcerpt` — inline audio player for the Speakers page and enrollment wizard.
 - Global recording banner — polls `/api/record/status` every 4 s (except on `/record`) and shows an elapsed timer and a Stop button. The session name is HTML-escaped before `innerHTML`.
 
@@ -1006,7 +1006,7 @@ The job page shows step pills and one bar split into equal per-step slices:
 | Host + Docker Desktop container on one DB | File locks don't cross Docker Desktop's VM, so both writing `wisper.db` at once corrupts it. The runtime lease refuses the second one; use Docker for everything or the native CLI with a local `wisper server`. Container + container is safe; native Linux Docker is unaffected |
 | SQLite requirement | SQLite ≥ 3.43 with FTS5 (contentless delete). Shipped Pythons and Docker have it; an old Linux system Python (e.g. Ubuntu 22.04's 3.37) is refused at startup |
 | Search highlighting | Matching uses porter stemming; highlighting approximates it by prefix, so a hit can show no highlighted word |
-| Markers after reload | Markers aren't replayed into the live ticker on page reload (they're on the detail page) |
+| Ticker order after reload | Markers stored for the session return to the live ticker on reload, ordered among the replayed lines by time. A marker's time is wall clock and a line's is audio time, so a marker can land a line off |
 
 ---
 
