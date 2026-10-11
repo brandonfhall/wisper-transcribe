@@ -386,6 +386,10 @@ async def cancel_job(request: Request, job_id: str) -> Response:
         lcm = get_local_capture_manager(request)
         if lcm is not None:
             _stop_live_transcription(request, lcm, job.live_recording_id or "")
+        if job.status == "pending":
+            # Never started: end it now as Cancelled, not later as "the queue
+            # was busy for the whole session".
+            queue.cancel(safe_id)
     else:
         queue.cancel(safe_id)
     # Use server-generated job.id (UUID) instead of safe_id so CodeQL's
