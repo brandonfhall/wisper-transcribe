@@ -1026,6 +1026,24 @@ class JobQueue:
         job.kwargs["noise_floor"] = noise_floor
         return True
 
+    def queued_stems(self, output_dir) -> set[str]:
+        """Names pending or running transcription jobs will write in ``output_dir``.
+
+        The name check looks at disk and the database only, so two uploads of
+        one name queued together would both pass and the second fail late
+        with "Transcript already exists"; the upload route adds these.
+        """
+        import os
+
+        want = os.path.normcase(os.path.abspath(str(output_dir)))
+        return {
+            j.kwargs["output_stem"]
+            for j in self._jobs.values()
+            if j.job_type == JOB_TRANSCRIPTION and j.status in (PENDING, RUNNING)
+            and j.kwargs.get("output_stem") and j.kwargs.get("output_dir")
+            and os.path.normcase(os.path.abspath(str(j.kwargs["output_dir"]))) == want
+        }
+
     def find_live_job_for_recording(self, recording_id: str) -> Optional[Job]:
         """Return the (RUNNING or PENDING) JOB_LIVE job for a recording, if any."""
         for job in self._jobs.values():

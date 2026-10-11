@@ -121,12 +121,13 @@ async def start_transcribe(
     # meaningful name instead of a temp-file UUID.
     original_stem = _upload_stem(file.filename)
     found_clash = _name_clashes(file.filename, safe_campaign)
+    queued = _get_queue(request).queued_stems(out_path)
 
     replace_existing = False
     if clash == "keep_both":
         from wisper_transcribe.transcript_store import next_free_stem
 
-        original_stem = next_free_stem(out_path, original_stem, campaign_id)
+        original_stem = next_free_stem(out_path, original_stem, campaign_id, also_taken=queued)
     elif clash == "overwrite" and found_clash["overwrite_allowed"]:
         loc = found_clash["loc"]
         if loc is not None:
@@ -135,7 +136,7 @@ async def start_transcribe(
             out_path = loc.dir
             original_stem = loc.stem
         replace_existing = True
-    elif found_clash["clashes"]:
+    elif found_clash["clashes"] or _queued_clash(original_stem, queued, out_path):
         return error_redirect("/transcribe", "name_exists")
 
     # Save uploaded file to a persistent temp location (job must outlive request)
@@ -236,6 +237,17 @@ def _resolve_campaign(campaign_slug: Optional[str]) -> Optional[tuple[int, dict]
     campaign = load_campaigns().get(slug)
     return None if campaign is None else (campaign.id, campaign)
 
+
+
+def _queued_clash(stem: str, queued: set[str], directory: Path) -> bool:
+    """Whether a queued job will write ``stem`` in ``directory`` (casefolded
+    where that filesystem ignores case, as ``next_free_stem`` does)."""
+    from wisper_transcribe import file_registry
+    from wisper_transcribe.transcript_store import nfc
+
+    fold = file_registry._fold(directory)
+    key = file_registry._key(nfc(stem), fold)
+    return any(file_registry._key(nfc(q), fold) == key for q in queued)
 
 def _name_clashes(filename: Optional[str], campaign_slug: Optional[str] = None) -> dict:
     """What an upload named ``filename`` would collide with in its target folder.

@@ -32,6 +32,7 @@ import time
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Iterable
 from typing import Final, Literal, Optional
 
 from . import db, file_registry
@@ -627,13 +628,15 @@ def _find_ids(conn: sqlite3.Connection, stem: str, campaign_id, present_only: bo
 
 
 def next_free_stem(directory: Path, stem: str, campaign_id: Optional[int],
-                   conn: Optional[sqlite3.Connection] = None) -> str:
+                   conn: Optional[sqlite3.Connection] = None, *,
+                   also_taken: Iterable[str] = ()) -> str:
     """A free session name in ``directory`` for campaign ``campaign_id``.
 
     ``stem``, else ``stem (2)``, ``stem (3)``, …: the first with no
     ``<name>.md`` or ``<name>.flac`` in ``directory``, no ``(campaign_id, name)``
-    row (casefolded where the filesystem ignores case), and not the folder's
-    journal name. ``campaign_id`` ``None`` means the output root.
+    row (casefolded where the filesystem ignores case), not the folder's
+    journal name, and not in ``also_taken`` (names queued jobs will write).
+    ``campaign_id`` ``None`` means the output root.
     """
     from .campaign_folders import journal_name
 
@@ -641,7 +644,11 @@ def next_free_stem(directory: Path, stem: str, campaign_id: Optional[int],
     fold = file_registry._fold(directory)
     journal = journal_name(directory.name) if campaign_id is not None else None
 
+    queued = {file_registry._key(nfc(n), fold) for n in also_taken}
+
     def taken(name: str) -> bool:
+        if file_registry._key(name, fold) in queued:
+            return True
         for suffix in (".md", ".flac"):
             path = safe_path(name, suffix, directory)
             if path is not None and path.is_file():

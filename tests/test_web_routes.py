@@ -4242,6 +4242,40 @@ def test_upload_refused_for_a_flac_only_clash_without_overwrite(client, tmp_path
     assert mock_submit.call_args.kwargs["overwrite"] is False
 
 
+
+def _queued_transcription(client, out_dir, stem, status="pending"):
+    """A transcription job in the queue that will write ``<stem>.md`` in ``out_dir``."""
+    import uuid
+    from datetime import datetime
+
+    from wisper_transcribe.web.jobs import JOB_TRANSCRIPTION, Job
+
+    job = Job(id=str(uuid.uuid4()), status=status, created_at=datetime.now(),
+              input_path="x.mp3", kwargs={"output_stem": stem, "output_dir": out_dir},
+              name=stem, job_type=JOB_TRANSCRIPTION)
+    client.app.state.job_queue._jobs[job.id] = job
+    return job
+
+
+def test_upload_of_a_name_a_queued_job_will_write(client, tmp_path):
+    """Two uploads of one name queued together: the second is refused (or
+    becomes "<name> (2)" with Keep both) instead of failing after its wait
+    with "Transcript already exists"."""
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    _queued_transcription(client, other, "session")            # another folder: no clash
+    resp, mock_submit = _post_upload(client, tmp_path)
+    assert mock_submit.call_args.kwargs["original_stem"] == "session"
+
+    _queued_transcription(client, tmp_path, "session", status="running")
+    resp, mock_submit = _post_upload(client, tmp_path)
+    assert resp.headers["location"] == "/transcribe?error=name_exists"
+    mock_submit.assert_not_called()
+
+    _queued_transcription(client, tmp_path, "session (2)")
+    resp, mock_submit = _post_upload(client, tmp_path, clash="keep_both")
+    assert mock_submit.call_args.kwargs["original_stem"] == "session (3)"
+
 def test_upload_passes_the_original_filename_as_source_name(client, tmp_path):
     resp, mock_submit = _post_upload(client, tmp_path)
     assert mock_submit.call_args.kwargs["source_name"] == "session.mp3"
