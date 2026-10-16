@@ -641,7 +641,8 @@ def test_newly_enrolled_speaker_appears_for_subsequent_speakers(
 # Feature 3: hotwords / initial_prompt pass-through
 # ---------------------------------------------------------------------------
 
-def test_transcribe_passes_hotwords():
+@patch("wisper_transcribe.audio_utils.load_wav_for_whisper")
+def test_transcribe_passes_hotwords(_mock_load):
     """hotwords list is forwarded to model.transcribe()."""
     from unittest.mock import MagicMock
     mock_model = MagicMock()
@@ -656,7 +657,8 @@ def test_transcribe_passes_hotwords():
     assert kwargs.get("hotwords") == ["Kyra", "Golarion"]
 
 
-def test_transcribe_passes_initial_prompt():
+@patch("wisper_transcribe.audio_utils.load_wav_for_whisper")
+def test_transcribe_passes_initial_prompt(_mock_load):
     """initial_prompt string is forwarded to model.transcribe()."""
     from unittest.mock import MagicMock
     mock_model = MagicMock()
@@ -671,7 +673,8 @@ def test_transcribe_passes_initial_prompt():
     assert kwargs.get("initial_prompt") == "Kyra Zeldris Golarion"
 
 
-def test_transcribe_hotwords_none_by_default():
+@patch("wisper_transcribe.audio_utils.load_wav_for_whisper")
+def test_transcribe_hotwords_none_by_default(_mock_load):
     """hotwords defaults to None (not passed as a non-None value)."""
     from unittest.mock import MagicMock
     mock_model = MagicMock()
