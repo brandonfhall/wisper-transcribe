@@ -8,6 +8,7 @@ from wisper_transcribe.audio_utils import (
     AUDIO_EXTENSIONS,
     SUPPORTED_EXTENSIONS,
     VIDEO_EXTENSIONS,
+    load_wav_for_whisper,
     validate_audio,
 )
 
@@ -556,3 +557,33 @@ def test_load_wav_as_tensor_float32_passthrough(tmp_path):
     np.testing.assert_array_almost_equal(
         result["waveform"].numpy().flatten(), data, decimal=5
     )
+
+
+def _write_wav(path, rate, data):
+    import scipy.io.wavfile as wavfile
+    wavfile.write(str(path), rate, data)
+    return path
+
+
+def test_load_wav_for_whisper_scales_int16(tmp_path):
+    import numpy as np
+    wav = _write_wav(tmp_path / "a.wav", 16000, np.array([0, 16384, -32768, 32767], dtype=np.int16))
+    samples = load_wav_for_whisper(wav)
+    assert samples.dtype == np.float32
+    assert samples.tolist() == pytest.approx([0.0, 0.5, -1.0, 32767 / 32768])
+
+
+def test_load_wav_for_whisper_keeps_float32(tmp_path):
+    import numpy as np
+    wav = _write_wav(tmp_path / "f.wav", 16000, np.array([0.25, -0.5], dtype=np.float32))
+    samples = load_wav_for_whisper(wav)
+    assert samples.dtype == np.float32
+    assert samples.tolist() == [0.25, -0.5]
+
+
+@pytest.mark.parametrize("rate, shape", [(44100, (8,)), (16000, (8, 2))])
+def test_load_wav_for_whisper_rejects_non_16k_mono(tmp_path, rate, shape):
+    import numpy as np
+    wav = _write_wav(tmp_path / "x.wav", rate, np.zeros(shape, dtype=np.int16))
+    with pytest.raises(ValueError, match="16 kHz mono"):
+        load_wav_for_whisper(wav)

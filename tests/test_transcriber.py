@@ -1,6 +1,7 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 
 from wisper_transcribe.models import TranscriptionSegment, Word
@@ -21,6 +22,16 @@ def _make_mock_word(start, end, text):
     w.end = end
     w.word = text  # faster-whisper Word objects carry a leading space
     return w
+
+
+@pytest.fixture(autouse=True)
+def _fake_wav_samples():
+    """The tests pass a path that doesn't exist; stand in for reading it."""
+    with patch(
+        "wisper_transcribe.audio_utils.load_wav_for_whisper",
+        return_value=np.zeros(16000, dtype=np.float32),
+    ) as m:
+        yield m
 
 
 def _make_mock_info(duration: float = 10.0):
@@ -112,6 +123,21 @@ def test_transcribe_passes_word_timestamps():
     t.transcribe(Path("fake.wav"), device="cpu")
     _, kwargs = mock_model.transcribe.call_args
     assert kwargs.get("word_timestamps") is True
+
+
+def test_transcribe_passes_samples_not_path(_fake_wav_samples):
+    """faster-whisper gets the decoded array, so it never opens the file with PyAV."""
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = (iter([]), _make_mock_info(1.0))
+
+    import wisper_transcribe.transcriber as t
+    t._model = mock_model
+    t._model_key = ("medium", "cpu", "auto")
+
+    t.transcribe(Path("fake.wav"), device="cpu")
+    _fake_wav_samples.assert_called_once_with(Path("fake.wav"))
+    args, _ = mock_model.transcribe.call_args
+    assert args[0] is _fake_wav_samples.return_value
 
 
 def test_transcribe_captures_words_onto_segments():

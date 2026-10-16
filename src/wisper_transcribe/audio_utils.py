@@ -341,6 +341,29 @@ def get_duration(path: Path) -> float:
     return len(audio) / 1000.0
 
 
+def load_wav_for_whisper(path: Path):
+    """Read a 16 kHz mono WAV (``convert_to_wav`` output) as float32 samples.
+
+    faster-whisper decodes a file path itself with PyAV; handing it samples
+    keeps PyAV, and its API changes, out of transcription. Integer PCM is
+    scaled to [-1, 1) the way faster-whisper's own decoder does.
+    """
+    import numpy as np
+    import scipy.io.wavfile as _wavfile
+
+    sample_rate, data = _wavfile.read(str(path), mmap=True)
+    if sample_rate != 16000 or data.ndim != 1:
+        channels = 1 if data.ndim == 1 else data.shape[1]
+        raise ValueError(
+            f"Expected a 16 kHz mono WAV, got {sample_rate} Hz with {channels} channels"
+        )
+    if data.dtype == np.uint8:
+        return (data.astype(np.float32) - 128.0) / 128.0
+    if np.issubdtype(data.dtype, np.integer):
+        return data.astype(np.float32) / -float(np.iinfo(data.dtype).min)
+    return np.array(data, dtype=np.float32)
+
+
 def load_wav_as_tensor(path: Path) -> dict:
     """Read a WAV file and return a ``{waveform, sample_rate}`` dict for pyannote.
 

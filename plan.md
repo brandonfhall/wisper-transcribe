@@ -47,12 +47,6 @@ The same redesign dropped the Add member form's per-campaign **role** and **char
 
 ---
 
-## Dependency pins
-
-- **Drop `av<19`** (approved, Brandon 2026-10-05) (pyproject) once a faster-whisper release stops passing `metadata_errors=` to `av.open()`; check with a CPU Docker build and one transcription. Blocked as of 2026-10-06: 1.2.1 is the latest release and still passes it (`faster_whisper/audio.py:46`).
-
----
-
 ## Forced word alignment — follow-ups
 
 Design in `architecture.md` ("Forced word alignment"). The `forced_alignment = auto` default rests on spot-check evidence, not a full labelled set: on a 2 h episode, aligned and unaligned runs disagreed on 155 of 20,675 words; one-word "islands" inside another speaker's run were 10 (unaligned) vs 3 (aligned); 4 of 4 hand-checked disputed words were right with alignment.
