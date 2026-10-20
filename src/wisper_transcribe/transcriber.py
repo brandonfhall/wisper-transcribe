@@ -235,8 +235,12 @@ def transcribe(
     if _model is None or _model_key != (model_size, device, compute_type):
         load_model(model_size, device, compute_type)
 
+    # Pass samples, not the path: faster-whisper would decode the path with
+    # PyAV, whose API changes have broken it before (PyAV 19).
+    from .audio_utils import load_wav_for_whisper
+
     segments, info = _model.transcribe(
-        str(audio_path),
+        load_wav_for_whisper(audio_path),
         language=language if language else None,
         beam_size=5,
         vad_filter=vad_filter,

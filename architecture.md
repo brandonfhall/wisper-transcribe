@@ -39,7 +39,7 @@ src/wisper_transcribe/
 ├── speaker_manager.py   Profile CRUD (table profiles, embeddings as BLOBs), embedding extraction, cosine matching, EMA updates, rename, doctor checks
 ├── speaker_registry.py  Campaign-wide relabel pass from per-transcript sidecar embeddings
 ├── formatter.py         Markdown + YAML frontmatter output; per-block parse/rewrite for speaker edits
-├── audio_utils.py       validate_audio(), convert_to_wav(), encode_flac(), get_duration(), load_wav_as_tensor()
+├── audio_utils.py       validate_audio(), convert_to_wav(), encode_flac(), get_duration(), load_wav_for_whisper(), load_wav_as_tensor()
 ├── time_utils.py        format_timestamp(), format_duration(), parse_timestamp()
 ├── path_utils.py        validate_path_component() (CodeQL-safe guard), get_output_dir()
 ├── transcript_store.py  Transcript registry rows, delete_transcript() (the only delete path), move_transcript()/rename_transcript()/move_files_home() (rows first, then files), locate()/check_move(), atomic_write_text(), save_transcript()/save_summary()
@@ -994,7 +994,7 @@ The job page shows step pills and one bar split into equal per-step slices:
 | Constraint | Detail |
 |-----------|--------|
 | torchcodec on Windows | Needs FFmpeg's full-shared build; bypassed by scipy pre-loading |
-| PyAV pinned `<19` | faster-whisper 1.2.1 decodes audio with `av.open(metadata_errors=…)`, which PyAV 19 removed; a fresh install without the pin fails every CTranslate2 transcription (MLX on Apple Silicon doesn't use it). Drop the pin once faster-whisper releases a fix |
+| faster-whisper gets samples, not a path | `transcribe()` reads the 16 kHz mono WAV with `load_wav_for_whisper()` and passes the array, so faster-whisper never decodes with PyAV. PyAV 19 removed the `av.open(metadata_errors=…)` argument faster-whisper 1.2.1 passes, which broke path input. The whole session is held as float32 (~230 MB per hour), as faster-whisper's own decoder would |
 | MPS on Apple Silicon | CTranslate2 has no MPS backend. With `[macos]`, transcription uses MLX; otherwise CPU. Diarization, embeddings, and word alignment use MPS |
 | Forced alignment scope | 11 languages (others keep Whisper times); `auto` skips CPU-only machines (~9–20 min per 2.5 h session); no confidence score, so a misplaced word can't be filtered; one timeline can't represent overlapped speech |
 | Thread safety | Model globals aren't thread-safe: the web queue runs one job at a time; folder mode uses processes |
