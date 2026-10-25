@@ -249,13 +249,37 @@
     if (progressRate) progressRate.textContent = '';
   }
 
+  // High-water mark: the bar never moves backwards, whatever reports next
+  // (a new stage's bar starting at 0%, parallel channels interleaving).
+  let barPct = 0;
   function setBar(pct) {
-    if (!progressBar) return;
+    if (!progressBar || pct < barPct) return;
+    barPct = pct;
     progressBar.style.width = pct + '%';
     if (progressPct) progressPct.textContent = Math.round(pct) + '%';
   }
 
   function stepPctToBar(idx, within) { return idx * sliceWidth + within * sliceWidth / 100; }
+
+  // Diarize runs two pyannote stages, each with its own 0-100% bar. Map them
+  // onto one slice weighted by measured cost (segmentation ~5% of the time
+  // on a 2.5 h CUDA job): 0-10% segmentation, 10-100% speaker embeddings.
+  // Returns false for a bar that isn't a diarize stage. `activate` is false
+  // for the parallel-mode channel, which runs while Transcribe is still the
+  // active step.
+  const DIARIZE_STAGES = [
+    { key: 'segmentation', from: 0,  span: 10, label: 'Diarizing (1/2: segmentation)…' },
+    { key: 'embedding',    from: 10, span: 90, label: 'Diarizing (2/2: speaker embeddings)…' },
+  ];
+  function diarizeProgress(lo, pct, activate) {
+    const stage = DIARIZE_STAGES.find(s => lo.includes(s.key));
+    const i = STEPS.indexOf('diarize');
+    if (!stage || i < 0) return false;
+    if (activate) activateStep(i);
+    if (stepLabel && activeIdx === i) stepLabel.textContent = stage.label;
+    setBar(stepPctToBar(i, stage.from + pct * stage.span / 100));
+    return true;
+  }
 
   function allDone() {
     STEPS.forEach(id => setStepState(id, 'done'));
@@ -296,11 +320,10 @@
     if (evt.type === 'progress') {
       const pct = parsePercent(evt.message), eta = parseETA(evt.message), rate = parseRate(evt.message);
       const lo = evt.message.toLowerCase();
-      if (pct !== null) {
+      if (pct !== null && !diarizeProgress(lo, pct, true)) {
         let idx = activeIdx;
         if (lo.includes('extracting audio')) { idx = STEPS.indexOf('extract'); if (idx>=0) activateStep(idx); }
         else if (lo.includes('transcrib')) { idx = STEPS.indexOf('transcribe'); if (idx>=0) activateStep(idx); }
-        else if (lo.includes('segmentation') || lo.includes('embedding') || lo.includes('clustering')) { idx = STEPS.indexOf('diarize'); if (idx>=0) activateStep(idx); }
         else if (lo.includes('aligning')) { idx = STEPS.indexOf('align'); if (idx>=0) activateStep(idx); }
         if (idx >= 0) setBar(stepPctToBar(idx, pct));
       }
@@ -311,11 +334,7 @@
     if (evt.type === 'channel_progress') {
       const pct = parsePercent(evt.message), lo = evt.message.toLowerCase();
       if (evt.channel === 'transcribe' && pct !== null) { const i = STEPS.indexOf('transcribe'); if (i>=0) setBar(stepPctToBar(i, pct)); }
-      if (evt.channel === 'diarize' && pct !== null) {
-        let dp = lo.includes('segmentation') ? pct*0.4 : lo.includes('embedding') ? 40+pct*0.4 : lo.includes('clustering') ? 80+pct*0.2 : pct*0.4;
-        const i = STEPS.indexOf('diarize');
-        if (i >= 0) { const cur = parseFloat(progressBar?.style.width)||0; const cand = stepPctToBar(i, Math.round(dp)); if (cand>cur) setBar(cand); }
-      }
+      if (evt.channel === 'diarize' && pct !== null) diarizeProgress(lo, pct, false);
       const eta = parseETA(evt.message), rate = parseRate(evt.message);
       if (progressEta  && eta)  progressEta.textContent  = 'ETA ' + eta;
       if (progressRate && rate) progressRate.textContent = rate;

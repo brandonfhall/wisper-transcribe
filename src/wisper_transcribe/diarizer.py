@@ -15,6 +15,7 @@ _suppress()
 # LazyModule.ensure_module before pyannote imports speechbrain so a failed
 # import returns an empty stub instead.
 import sys as _sys
+import time
 import types as _types
 try:
     import speechbrain.utils.importutils as _sb_import_utils
@@ -49,46 +50,73 @@ _pipeline = None
 _pipeline_device: Optional[str] = None
 
 
+# pyannote step name -> (stage number, label, unit). pyannote 4.x reports
+# progress (a total) only for these two steps. Embeddings progress counts
+# batches of `embedding_batch_size` (chunk, local speaker) pairs, not chunks.
+# The job page matches "segmentation" / "embedding" in these labels.
+_STAGES = {
+    "segmentation": (1, "segmentation", "chunk"),
+    "embeddings": (2, "speaker embeddings", "batch"),
+}
+
+
 class _DiarizationProgressHook:
     """Translates pyannote pipeline hook calls into tqdm progress bars.
 
     pyannote calls hook(step_name, artifact, file, total, completed) at each
-    chunk of the segmentation and embedding steps.  We open a new tqdm bar
-    whenever the step name changes and update it on each callback.
+    chunk of the segmentation and embedding steps.  Each step gets one bar,
+    labelled as a numbered stage of diarization so a new bar doesn't read as
+    the step restarting.  A bar closes only when the step changes (or on
+    close()): segmentation's ``completed`` can overshoot ``total`` and then
+    report once more for the orphan last chunk, which must not open a second
+    bar.  Each stage logs its duration when it first reaches its total.
     """
 
     def __init__(self) -> None:
         self._bar: Optional[tqdm] = None  # type: ignore[type-arg]
         self._step: Optional[str] = None
+        self._started = 0.0
+        self._logged = False
 
     def __call__(self, step_name, *args, total=None, completed=None, **kwargs):  # noqa: ARG002
         if total is None:
             return
+        stage = _STAGES.get(step_name)
         if step_name != self._step:
-            if self._bar is not None:
-                self._bar.close()
+            self.close()
             self._step = step_name
+            self._started = time.monotonic()
+            self._logged = False
+            if stage:
+                desc = f"  Diarizing {stage[0]}/{len(_STAGES)} · {stage[1]}"
+            else:
+                desc = f"  {step_name.capitalize()}"
             self._bar = tqdm(
                 total=total,
-                desc=f"  {step_name.capitalize()}",
+                desc=desc,
                 position=1,
                 leave=False,
-                unit="chunk",
+                unit=stage[2] if stage else "chunk",
                 bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
                 dynamic_ncols=True,
             )
         if completed is not None and self._bar is not None:
-            self._bar.n = completed
+            self._bar.n = min(completed, total)
             self._bar.refresh()
-            if completed >= total:
-                self._bar.close()
-                self._bar = None
-                self._step = None
+            if completed >= total and not self._logged:
+                self._logged = True
+                label, unit = (stage[1], stage[2]) if stage else (step_name, "chunk")
+                plural = "batches" if unit == "batch" else f"{unit}s"
+                tqdm.write(
+                    f"  Diarize {label}: {total} {plural} "
+                    f"({time.monotonic() - self._started:.1f}s)"
+                )
 
     def close(self) -> None:
         if self._bar is not None:
             self._bar.close()
             self._bar = None
+        self._step = None
 
 
 def load_pipeline(hf_token: str, device: str):
