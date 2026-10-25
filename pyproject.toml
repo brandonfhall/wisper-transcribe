@@ -24,6 +24,7 @@ dependencies = [
     "pyyaml>=6.0",
     "tomli>=2.0; python_version < '3.11'",
     "tomli-w>=1.0",
+    "httpx>=0.28.1",         # Ollama / LM Studio clients, config + record routes
     "nvidia-cublas-cu12; sys_platform == 'win32'",
     "nvidia-cudnn-cu12; sys_platform == 'win32'",
     "mlx-whisper; sys_platform == 'darwin' and platform_machine == 'arm64'",
@@ -40,15 +41,14 @@ dependencies = [
 dev = [
     "pytest-cov",
     "pytest-xdist",          # parallel test runs (-n auto)
-    "httpx>=0.28.1",         # async HTTP client for SSE streaming tests
     "isort",
 ]
 macos = [
     "mlx-whisper",         # Apple Silicon GPU/ANE Whisper backend (macOS only)
 ]
 # LLM post-processing (wisper refine / wisper summarize). All opt-in; core
-# install stays ML-only. Ollama uses httpx (already a runtime-adjacent dep
-# via uvicorn/FastAPI) so no extra package is required for local use.
+# install stays ML-only. Ollama and LM Studio use httpx, a core dependency,
+# so no extra package is required for local use.
 llm-anthropic = [
     "anthropic>=0.39.0",
 ]

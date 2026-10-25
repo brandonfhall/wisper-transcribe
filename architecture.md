@@ -959,6 +959,7 @@ The job page shows step pills and one bar split into equal per-step slices:
 - **Dependency refresh:** setup stamps `.venv/.wisper-deps` after `pip install -e .`. The launchers reinstall whenever `pyproject.toml` is newer than the stamp (or it's missing), so updating an existing install picks up new dependencies. A failed reinstall leaves the stamp stale and the server starts anyway. `word_alignment` also names the fix when `transformers` is missing, since that's how a stale install shows up.
 - `setup.sh`/`setup.ps1` check Python ≥ 3.13 and then SQLite ≥ 3.43 with FTS5 contentless delete (the same probe as `db.check_sqlite_capabilities()`, inlined since the package isn't installed yet), so an old system Python fails before ~2 GB of models download rather than at first server start.
 - `setup.sh`/`setup.ps1` probe Ollama (`:11434`) and LM Studio (`:1234`) and offer a model picker, and show progress for long installs.
+- `setup.sh --dev` / `setup.ps1 -Dev` install `.[dev]` instead of `.`, adding the test tools. The launchers' dependency refresh (`pip install -e .`) leaves an installed extra in place.
 - `setup.ps1` installs CUDA `torch`/`torchaudio` **before** `pip install -e .`. Otherwise pip resolves the CPU `torch` first and dependent packages bind to the wrong build (`torch has no attribute _utils`).
 
 ---

@@ -48,6 +48,7 @@ See [docker.md](docker.md) for the full volume layout, Makefile targets, and Dis
 # 1. Run the setup script (creates .venv, installs deps, CUDA PyTorch on Windows)
 bash setup.sh      # Mac/Linux
 .\setup.ps1        # Windows PowerShell
+# Add --dev (Mac/Linux) or -Dev (Windows) to also install the test tools (pytest, pytest-xdist)
 
 # 2. First-time wizard (HF token + model download)
 .venv/bin/wisper setup        # Mac/Linux

@@ -538,7 +538,18 @@ def test_lock_is_held_across_processes(tmp_path):
     finally:
         proc.kill()
         proc.wait()
-    db.ServerLock(tmp_path).acquire().release()
+    # Windows frees a killed process's byte-range locks asynchronously, so
+    # under a loaded parallel run the lock can outlive wait() briefly.
+    import time
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            db.ServerLock(tmp_path).acquire().release()
+            break
+        except db.ServerLockHeld:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.1)
 
 
 def _lease(runtime: str, age_s: float = 0) -> None:
