@@ -2,9 +2,18 @@
 # First-time setup for wisper-transcribe on Mac/Linux.
 # Creates a virtual environment, installs the package, and checks ffmpeg.
 #
-# Usage:  bash setup.sh
+# Usage:  bash setup.sh [--dev]
+#   --dev  also install the test tools (the `dev` extra: pytest, pytest-xdist, ...)
 
 set -e
+
+TARGET="."
+for arg in "$@"; do
+    case "$arg" in
+        --dev) TARGET=".[dev]" ;;
+        *) echo "Unknown option: $arg (usage: bash setup.sh [--dev])"; exit 1 ;;
+    esac
+done
 
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
@@ -96,8 +105,12 @@ PYTHON=".venv/bin/python"
 
 # ── Install package ───────────────────────────────────────────────────────────
 step "Installing wisper-transcribe (this may take several minutes)..."
-pip_with_spinner "Installing wisper-transcribe" install -e . -q
-ok "wisper-transcribe installed"
+pip_with_spinner "Installing wisper-transcribe" install -e "$TARGET" -q
+if [ "$TARGET" = "." ]; then
+    ok "wisper-transcribe installed"
+else
+    ok "wisper-transcribe installed (with test tools)"
+fi
 # Marks the installed dependency set; the launchers reinstall when
 # pyproject.toml is newer (i.e. after an update).
 touch .venv/.wisper-deps

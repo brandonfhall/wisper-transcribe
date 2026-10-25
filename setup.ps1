@@ -5,9 +5,17 @@
     Creates a virtual environment, installs PyTorch (CUDA or CPU build),
     then installs the package so that all ML dependencies resolve against
     the correct torch variant from the start.
+.PARAMETER Dev
+    Also install the test tools (the `dev` extra: pytest, pytest-xdist, ...).
 .EXAMPLE
     .\setup.ps1
+.EXAMPLE
+    .\setup.ps1 -Dev
 #>
+
+param(
+    [switch]$Dev
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -122,9 +130,10 @@ if ($hasNvidia) {
 
 # ── Install package ───────────────────────────────────────────────────────────
 # torch is already present; pip will not pull the CPU fallback from PyPI.
+$target = if ($Dev) { ".[dev]" } else { "." }
 Write-Step "Installing wisper-transcribe (this may take several minutes)..."
-Invoke-PipWithProgress "Installing wisper-transcribe" @("install", "-e", ".", "-q")
-Write-OK "wisper-transcribe installed"
+Invoke-PipWithProgress "Installing wisper-transcribe" @("install", "-e", $target, "-q")
+Write-OK "wisper-transcribe installed$(if ($Dev) { ' (with test tools)' })"
 # Marks the installed dependency set; start.bat reinstalls when
 # pyproject.toml is newer (i.e. after an update).
 New-Item -ItemType File -Force -Path ".venv\.wisper-deps" | Out-Null

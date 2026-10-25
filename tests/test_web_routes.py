@@ -4103,6 +4103,90 @@ def test_job_detail_align_step_only_when_aligning(client, will_align):
     assert ("'align'," in html) is will_align
 
 
+# Minimal DOM + EventSource for running the job page's script under Node:
+# every element id resolves to a plain object, and each SSE payload is fed to
+# es.onmessage in turn, recording the bar width and step label after each.
+_JOB_PAGE_HARNESS = r"""
+const els = {};
+const el = id => els[id] || (els[id] = {style: {}, textContent: '', innerHTML: '',
+  scrollTop: 0, scrollHeight: 0, insertBefore() {}, appendChild() {}});
+let n = 0;
+globalThis.document = {getElementById: el, createElement: () => el('_new' + n++),
+                       createTextNode: () => ({})};
+let es;
+globalThis.EventSource = class { constructor() { es = this; } addEventListener() {} close() {} };
+globalThis.setInterval = () => 0;
+%SCRIPT%
+const out = [];
+for (const evt of %EVENTS%) {
+  es.onmessage({data: JSON.stringify(evt)});
+  out.push([parseFloat(el('progress-bar').style.width) || 0, el('step-label').textContent]);
+}
+console.log(JSON.stringify(out));
+"""
+
+
+def _bar(desc, pct, unit="chunk"):
+    return {"type": "progress", "message": f"{desc}: {pct:3d}%|####      | {pct}/100 [00:01<00:01, 5.00{unit}/s]"}
+
+
+def test_job_detail_bar_never_moves_backwards_through_diarize_stages(client):
+    """Each diarize stage (and Align after it) reports its own 0-100% bar.
+    The page maps them onto one forward-only bar: segmentation fills the
+    first 10% of the Diarize slice, speaker embeddings the rest."""
+    import json
+    import re
+    import shutil
+    import subprocess
+    import uuid
+    from datetime import datetime
+    from wisper_transcribe.web.jobs import JOB_TRANSCRIPTION, Job
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js not installed")
+    job = Job(id=str(uuid.uuid4()), status="pending", created_at=datetime.now(),
+              input_path="/tmp/diarize_bar.wav", kwargs={}, name="diarize_bar",
+              job_type=JOB_TRANSCRIPTION)
+    client.app.state.job_queue._jobs[job.id] = job
+    with patch("wisper_transcribe.web.jobs.Job.will_align", new=True):
+        html = client.get(f"/transcribe/jobs/{job.id}").text
+    steps = re.findall(r'id="step_([a-z]+)"', html)
+    script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
+    events = [
+        {"type": "log", "message": "Model  : large-v3-turbo (cuda, float16)"},
+        _bar("  Transcribing", 100, "s"),
+        _bar("  Diarizing 1/2 · segmentation", 50),
+        _bar("  Diarizing 1/2 · segmentation", 100),
+        _bar("  Diarizing 2/2 · speaker embeddings", 0, "batch"),
+        _bar("  Diarizing 2/2 · speaker embeddings", 50, "batch"),
+        _bar("  Diarizing 2/2 · speaker embeddings", 100, "batch"),
+        {"type": "log", "message": "Diarize speaker embeddings: 824 batches (165.0s)"},
+        _bar("  Aligning words", 0, "seg"),
+        _bar("  Aligning words", 50, "seg"),
+    ]
+    harness = (_JOB_PAGE_HARNESS.replace("%SCRIPT%", script)
+               .replace("%EVENTS%", json.dumps(events)))
+    run = subprocess.run([node, "-"], input=harness, capture_output=True,
+                         text=True, encoding="utf-8", timeout=30)
+    assert run.returncode == 0, run.stderr
+    out = json.loads(run.stdout)
+    widths = [w for w, _ in out]
+    assert widths == sorted(widths), widths
+
+    slice_w = 100 / len(steps)
+    d, a = steps.index("diarize") * slice_w, steps.index("align") * slice_w
+    assert widths[3] == pytest.approx(d + 0.10 * slice_w)   # segmentation done
+    assert widths[4] == pytest.approx(d + 0.10 * slice_w)   # embeddings 0%: no jump back
+    assert widths[5] == pytest.approx(d + 0.55 * slice_w)
+    assert widths[6] == pytest.approx(d + slice_w)
+    assert widths[8] == pytest.approx(a)
+    assert widths[9] == pytest.approx(a + 0.5 * slice_w)
+    assert out[3][1] == "Diarizing (1/2: segmentation)…"
+    assert out[5][1] == "Diarizing (2/2: speaker embeddings)…"
+    assert out[9][1] == "Aligning words…"
+
+
 # ---------------------------------------------------------------------------
 # Upload name collisions: never silently reuse or replace a transcript
 # ---------------------------------------------------------------------------

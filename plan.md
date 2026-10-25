@@ -44,6 +44,10 @@ The same redesign dropped the Add member form's per-campaign **role** and **char
   - Combined summary and recaps in the browser, and keep-files delete + re-create (§2c–2d). Generation itself was checked once with a real LLM.
   - Live ticker shows a markup-like speaker name as text (§1b).
   - Stop frees the GPU on NVIDIA/CUDA and on Windows (§5); rehearsed only on Apple Silicon.
+- **Diarize stage progress (shipped 2026-10-25, verified by a Node-run test of the page script only).** On a real web job, watch the job page:
+  - The bar only moves forward.
+  - The step label reads *Diarizing (1/2: segmentation)…*, then *(2/2: speaker embeddings)…*, then *Aligning words…*.
+  - The log shows `Diarize segmentation: … (Xs)` and `Diarize speaker embeddings: … (Xs)`. Use those times to recheck the 10/90 split, on CPU too.
 
 ---
 

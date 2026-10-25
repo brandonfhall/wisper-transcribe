@@ -303,7 +303,7 @@ def align_words(
     aligned: dict[int, list[dict]] = {}
     with tqdm(
         total=len(jobs),
-        desc="  Aligning",
+        desc="  Aligning words",
         unit="seg",
         position=1,
         leave=False,

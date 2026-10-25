@@ -246,3 +246,66 @@ def test_load_pipeline_gated_model_names_terms_url():
             d.load_pipeline("hf_fake", "cpu")
 
     assert d._pipeline is None
+
+
+# --- progress hook -----------------------------------------------------------
+
+@pytest.fixture
+def fake_tqdm():
+    """Patch the diarizer's tqdm: record each bar's kwargs and every write()."""
+    bars, writes = [], []
+
+    def make_bar(**kwargs):
+        bar = MagicMock(kwargs=kwargs, n=0)
+        bars.append(bar)
+        return bar
+
+    fake = MagicMock(side_effect=make_bar)
+    fake.write.side_effect = writes.append
+    with patch("wisper_transcribe.diarizer.tqdm", fake):
+        yield bars, writes
+
+
+def test_progress_hook_labels_stages(fake_tqdm):
+    from wisper_transcribe.diarizer import _DiarizationProgressHook
+    bars, writes = fake_tqdm
+    hook = _DiarizationProgressHook()
+    hook("segmentation", None, total=10, completed=0)
+    hook("segmentation", None, total=10, completed=10)
+    hook("segmentation", "artifact")  # no total: ignored
+    hook("embeddings", None, total=4, completed=0)
+    hook("embeddings", None, total=4, completed=4)
+    hook.close()
+
+    assert [b.kwargs["desc"] for b in bars] == [
+        "  Diarizing 1/2 · segmentation", "  Diarizing 2/2 · speaker embeddings"]
+    assert [b.kwargs["unit"] for b in bars] == ["chunk", "batch"]
+    assert all(b.close.called for b in bars)
+    assert len(writes) == 2
+    assert writes[0].startswith("  Diarize segmentation: 10 chunks (")
+    assert writes[1].startswith("  Diarize speaker embeddings: 4 batches (")
+
+
+def test_progress_hook_overshoot_keeps_one_bar(fake_tqdm):
+    """Inference reports completed=c+batch_size past the total, then once more
+    for the orphan last chunk. That must not open a second bar or log twice."""
+    from wisper_transcribe.diarizer import _DiarizationProgressHook
+    bars, writes = fake_tqdm
+    hook = _DiarizationProgressHook()
+    for completed in (0, 32, 64, 96):
+        hook("segmentation", None, total=70, completed=completed)
+    hook("segmentation", None, total=70, completed=70)
+
+    assert len(bars) == 1
+    assert bars[0].n == 70
+    assert len(writes) == 1
+
+
+def test_progress_hook_unknown_step_falls_back(fake_tqdm):
+    from wisper_transcribe.diarizer import _DiarizationProgressHook
+    bars, _ = fake_tqdm
+    hook = _DiarizationProgressHook()
+    hook("separations", None, total=3, completed=1)
+    assert bars[0].kwargs["desc"] == "  Separations"
+    hook.close()
+    assert bars[0].close.called
