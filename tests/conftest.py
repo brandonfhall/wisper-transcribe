@@ -49,6 +49,17 @@ def _isolated_data_dir(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_temp_dir(tmp_path_factory, monkeypatch):
+    """Give each test its own system temp dir. The web lifespan sweeps
+    ``wisper_upload_*`` from ``tempfile.gettempdir()`` on every TestClient
+    start; with a shared temp dir, one xdist worker's sweep deletes another
+    worker's in-flight upload."""
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path_factory.mktemp("systmp")))
+
+
+@pytest.fixture(autouse=True)
 def _no_output_env_guard(monkeypatch):
     """The unmerged-build guard needs WISPER_OUTPUT_DIR, which the tests
     above deliberately leave unset. Guard tests turn it back on."""
