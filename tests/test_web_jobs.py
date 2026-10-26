@@ -564,12 +564,16 @@ def test_on_error_callback_invoked_on_cancellation(tmp_path):
 
 
 def test_run_job_tqdm_patch_restores_original(tmp_path):
-    """tqdm.write should be restored to its original after job completes."""
+    """tqdm.write should be restored to its original after job completes.
+
+    Compare the class attribute: it is a classmethod, so every ``tqdm.write``
+    access returns a new bound method.
+    """
     import tqdm as _tqdm
     from wisper_transcribe.web.jobs import Job, JobQueue
     from datetime import datetime
 
-    original_write = _tqdm.tqdm.write
+    original_write = _tqdm.tqdm.__dict__["write"]
     out_md = tmp_path / "out.md"
     out_md.write_text("# Test")
 
@@ -586,7 +590,7 @@ def test_run_job_tqdm_patch_restores_original(tmp_path):
         q._run_job(job)
 
     # tqdm.write should be the original after job finishes
-    assert _tqdm.tqdm.write is original_write
+    assert _tqdm.tqdm.__dict__["write"] is original_write
 
 
 # ---------------------------------------------------------------------------

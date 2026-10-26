@@ -1403,8 +1403,10 @@ class JobQueue:
         original_monitor_interval = _tqdm_module.tqdm.monitor_interval
         _tqdm_module.tqdm.monitor_interval = 0
 
-        # Patch tqdm.write to capture messages
+        # Patch tqdm.write to capture messages. Restore the raw class attribute
+        # (a classmethod), not the bound method attribute access returns.
         original_write = _tqdm_module.tqdm.write
+        original_write_attr = _tqdm_module.tqdm.__dict__["write"]
 
         def capturing_write(msg: str, *args: Any, **kw: Any) -> None:
             if job._cancel_event.is_set():
@@ -1528,7 +1530,7 @@ class JobQueue:
             self._run_on_error_callback(job)
             raise
         finally:
-            _tqdm_module.tqdm.write = original_write  # type: ignore[method-assign]
+            _tqdm_module.tqdm.write = original_write_attr  # type: ignore[method-assign]
             _tqdm_module.tqdm.__init__ = original_init  # type: ignore[method-assign]
             _tqdm_module.tqdm.monitor_interval = original_monitor_interval
             job.finished_at = datetime.now()
