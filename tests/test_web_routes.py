@@ -15,7 +15,7 @@ import pytest
 
 @pytest.fixture()
 def app():
-    """Fresh FastAPI app per test — no lifespan (background worker not started)."""
+    """Fresh FastAPI app per test."""
     from wisper_transcribe.web.app import create_app
     return create_app()
 
@@ -23,7 +23,8 @@ def app():
 @pytest.fixture()
 def client(app):
     from fastapi.testclient import TestClient
-    # Don't start the lifespan (avoids background asyncio worker in tests)
+    # The context manager runs the lifespan, including the startup upload
+    # sweep; conftest gives each test its own temp dir for that reason.
     with TestClient(app, raise_server_exceptions=True) as c:
         yield c
 
@@ -290,6 +291,8 @@ def test_transcribe_post_streams_large_upload_correctly(client, tmp_path):
         )
 
     assert resp.status_code == 303
+    # Every early refusal is also a 303; the location names which one it was.
+    assert resp.headers["location"] == "/transcribe/jobs/fake-job-id"
     assert captured.get("content") == payload
 
 
