@@ -35,6 +35,15 @@ def _mock_flac_encode(monkeypatch):
     install_flac_mock(monkeypatch)
 
 
+@pytest.fixture(autouse=True)
+def _no_jitter_buffer(monkeypatch):
+    """Most tests here exercise mixing, padding, levels and the sink with one
+    hand-fed tick, so they run without the jitter buffer (depth 0: drain
+    whatever is there). The jitter-buffer tests pass ``jitter_s`` explicitly."""
+    import wisper_transcribe.web.local_capture as lc
+    monkeypatch.setattr(lc, "JITTER_S", 0.0)
+
+
 # ---------------------------------------------------------------------------
 # Fakes: scripted capture_factory + instant ticker
 # ---------------------------------------------------------------------------
@@ -961,3 +970,230 @@ def test_enumerate_devices_degrades_to_unavailable_on_exception(monkeypatch):
         "default_microphone_id": "",
         "default_loopback_id": "",
     }
+
+
+# ---------------------------------------------------------------------------
+# Jitter buffer, soft limiter, WASAPI buffer size, discontinuity counting
+# ---------------------------------------------------------------------------
+
+def _tick_with(mgr, push: bool, value: int = 1000):
+    """Feed one 20 ms chunk to both tracks (unless ``push`` is False, i.e. the
+    capture threads are stalled), then run one tick."""
+    if push:
+        mgr._fifos["mic"].push(np.full(320, value, dtype="<i2").tobytes())
+        mgr._fifos["system"].push(np.full(320, value, dtype="<i2").tobytes())
+    mgr._do_tick()
+
+
+def _track_samples(tmp_path, track):
+    frames = b"".join(_read_wav(p)[4] for p in sorted((tmp_path / track).glob("*.wav")))
+    return np.frombuffer(frames, dtype="<i2")
+
+
+def _first_sound(samples) -> int:
+    return int(np.argmax(samples != 0))
+
+
+def _stall_then_burst(mgr):
+    """Steady capture, then a stall: three back-to-back catch-up ticks with no
+    data, then the capture threads push their backlog at once."""
+    for _ in range(10):
+        _tick_with(mgr, push=True)
+    for _ in range(3):
+        _tick_with(mgr, push=False)
+    for _ in range(3):
+        mgr._fifos["mic"].push(np.full(320, 1000, dtype="<i2").tobytes())
+        mgr._fifos["system"].push(np.full(320, 1000, dtype="<i2").tobytes())
+    for _ in range(10):
+        _tick_with(mgr, push=True)
+
+
+def _manual_manager(tmp_path, jitter_s):
+    mgr = LocalCaptureManager(data_dir=tmp_path, capture_factory=scripted_capture_factory({}),
+                              ticker=instant_ticker(0), jitter_s=jitter_s)
+    _wire_manual_writers(mgr, tmp_path)
+    return mgr
+
+
+def test_without_a_jitter_buffer_a_stall_inserts_zeros_mid_speech(tmp_path):
+    """The bug the buffer fixes: catch-up ticks pad empty FIFOs with zeros."""
+    mgr = _manual_manager(tmp_path, jitter_s=0)
+    _stall_then_burst(mgr)
+    _finalize_manual_writers(mgr)
+    mic = _track_samples(tmp_path, "mic")
+    assert np.any(mic[_first_sound(mic):] == 0)
+
+
+def test_jitter_buffer_rides_out_a_stall_without_inserting_zeros(tmp_path):
+    mgr = _manual_manager(tmp_path, jitter_s=0.1)   # 5 ticks deep
+    _stall_then_burst(mgr)
+    _finalize_manual_writers(mgr)
+
+    assert mgr._underruns == {"mic": 0, "system": 0}
+    starts = {}
+    for track in ("mic", "system"):
+        samples = _track_samples(tmp_path, track)
+        starts[track] = _first_sound(samples)
+        assert starts[track] > 0                               # silent while priming
+        assert np.all(samples[starts[track]:] == 1000), track  # then no holes
+    assert starts["mic"] == starts["system"]                   # tracks stay aligned
+
+
+def test_jitter_buffer_underrun_pads_and_reprimes(tmp_path):
+    mgr = _manual_manager(tmp_path, jitter_s=0.04)  # 2 ticks deep
+    _tick_with(mgr, push=True)                      # 1 chunk: not primed yet
+    assert mgr._primed["mic"] is False
+    _tick_with(mgr, push=True)                      # 2 chunks: primed, drains 1
+    assert mgr._primed["mic"] is True
+    for _ in range(3):                              # a stall longer than the buffer
+        _tick_with(mgr, push=False)
+    assert mgr._underruns["mic"] == 1 and mgr._primed["mic"] is False
+    _tick_with(mgr, push=True)                      # refilling: still silent
+    assert mgr._primed["mic"] is False
+    _tick_with(mgr, push=True)
+    assert mgr._primed["mic"] is True
+    _finalize_manual_writers(mgr)
+    assert len(_track_samples(tmp_path, "mic")) == 7 * 320   # wall-clock continuous
+
+
+def test_switching_a_device_reprimes_that_track(tmp_path):
+    mgr = LocalCaptureManager(data_dir=tmp_path, capture_factory=scripted_capture_factory({}),
+                              ticker=instant_ticker(0), jitter_s=0.04)
+    mgr.start_session(None, "mic-dev", "sys-dev")
+    try:
+        mgr._primed = {"mic": True, "system": True}
+        mgr.switch_device("mic", "mic-2")
+        assert mgr._primed == {"mic": False, "system": True}
+    finally:
+        mgr.stop_session()
+
+
+def test_flush_drains_what_the_jitter_buffer_holds(tmp_path):
+    mgr = _manual_manager(tmp_path, jitter_s=0.25)
+    mgr._fifos["mic"].push(np.full(3 * 320, 700, dtype="<i2").tobytes())   # never primed
+    mgr._do_tick(flush=True)
+    _finalize_manual_writers(mgr)
+    assert np.all(_track_samples(tmp_path, "mic") == 700)
+    assert len(_track_samples(tmp_path, "mic")) == 3 * 320
+    assert len(_track_samples(tmp_path, "system")) == 3 * 320             # padded to match
+
+
+def test_stop_session_keeps_the_audio_still_in_the_jitter_buffer(tmp_path):
+    n = 5
+    blocks = {"mic-dev": [_block() for _ in range(n)], "sys-dev": [_block() for _ in range(n)]}
+    mgr = LocalCaptureManager(data_dir=tmp_path, capture_factory=scripted_capture_factory(blocks),
+                              ticker=instant_ticker(0), jitter_s=0.25)
+    rec = mgr.start_session(None, "mic-dev", "sys-dev")
+    _run_session_to_completion(mgr)   # no ticks ran: everything is still buffered
+    assert combined_frames(rec.combined_path) == n * 320
+
+
+def test_soft_limit_passes_normal_levels_and_never_wraps():
+    from wisper_transcribe.web.local_capture import LIMIT_KNEE, soft_limit
+
+    knee = int(LIMIT_KNEE * 32767)
+    quiet = np.array([0, 1, -1, 3000, -3000, knee, -knee], dtype=np.int32)
+    assert np.array_equal(soft_limit(quiet), quiet.astype("<i2"))
+
+    loud = np.array([knee + 1, 40000, 65534, -40000, -65536], dtype=np.int32)
+    out = soft_limit(loud).astype(np.int32)
+    assert np.all(np.sign(out) == np.sign(loud))             # no wrap-around
+    assert np.all(np.abs(out) <= 32767)
+    assert np.all(np.abs(out) > knee)
+    assert out[1] < out[2]                                    # still monotonic
+
+
+def _fake_soundcard(monkeypatch, recorder_calls, emit_warning=False):
+    """A stand-in ``soundcard`` module whose recorder hands back silent blocks."""
+    class FakeWarning(RuntimeWarning):
+        pass
+
+    class _Recorder:
+        def __init__(self, **kw):
+            recorder_calls.append(kw)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def record(self, numframes=None):
+            import warnings as _w
+            if emit_warning:
+                _w.warn("data discontinuity in recording", FakeWarning)
+            return np.zeros((960, 2), dtype=np.float32)
+
+    class _Mic:
+        def recorder(self, **kw):
+            return _Recorder(**kw)
+
+    fake = types.ModuleType("soundcard")
+    fake.SoundcardRuntimeWarning = FakeWarning
+    fake.get_microphone = lambda id, include_loopback: _Mic()
+    monkeypatch.setitem(sys.modules, "soundcard", fake)
+    return fake
+
+
+@pytest.fixture
+def fresh_warning_counter(monkeypatch):
+    """Let _install_discontinuity_counter() install against the fake module,
+    and undo its global warnings changes afterwards."""
+    import warnings
+    import wisper_transcribe.web.local_capture as lc
+    monkeypatch.setattr(lc, "_counter_installed", False)
+    monkeypatch.setattr(warnings, "showwarning", warnings.showwarning)
+    monkeypatch.setattr(warnings, "filters", list(warnings.filters))
+    monkeypatch.setattr(lc, "_com_init", lambda: None)
+    monkeypatch.setattr(lc, "_com_uninit", lambda: None)
+    lc.take_discontinuities()
+    yield lc
+    lc.take_discontinuities()
+
+
+@pytest.mark.parametrize("platform, expected", [
+    ("win32", {"samplerate": 48000, "blocksize": 24000}),
+    ("linux", {"samplerate": 48000}),
+    ("darwin", {"samplerate": 48000}),
+])
+def test_capture_factory_opens_a_half_second_wasapi_buffer_on_windows(
+        monkeypatch, fresh_warning_counter, platform, expected):
+    lc = fresh_warning_counter
+    calls = []
+    _fake_soundcard(monkeypatch, calls)
+    monkeypatch.setattr(lc.sys, "platform", platform)
+    gen = lc._soundcard_capture_factory("dev", 48000)
+    next(gen)
+    gen.close()
+    assert calls == [expected]
+
+
+def test_discontinuity_warnings_are_counted_per_track_not_printed(
+        monkeypatch, capsys, fresh_warning_counter):
+    lc = fresh_warning_counter
+    _fake_soundcard(monkeypatch, [], emit_warning=True)
+
+    def _capture(n):
+        gen = lc._soundcard_capture_factory("dev", 48000)
+        for _ in range(n):
+            next(gen)
+        gen.close()
+
+    t = threading.Thread(target=_capture, args=(3,), name="local-capture-system-abcd1234")
+    t.start()
+    t.join()
+
+    assert lc.take_discontinuities() == {"system": 3}
+    assert lc.take_discontinuities() == {}
+    assert "discontinuity" not in capsys.readouterr().err
+
+
+def test_other_warnings_still_reach_the_previous_handler(monkeypatch, fresh_warning_counter):
+    import warnings
+    lc = fresh_warning_counter
+    _fake_soundcard(monkeypatch, [])
+    seen = []
+    monkeypatch.setattr(warnings, "showwarning", lambda *a, **k: seen.append(a[0]))
+    lc._install_discontinuity_counter()
+    warnings.warn_explicit("unrelated", UserWarning, "x.py", 1)
+    assert [str(m) for m in seen] == ["unrelated"]
