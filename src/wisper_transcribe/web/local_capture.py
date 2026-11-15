@@ -11,9 +11,8 @@ writes each track to its own SegmentedWavWriter, and writes their int32 sum
 three tracks wall-clock aligned, which live speaker attribution relies on.
 
 Each FIFO is also a jitter buffer: a track is drained only once it holds
-``JITTER_S`` of audio, and re-primes after it runs dry. A process stall (the
-live job loading a model, say) delays the capture threads and the tick thread
-alike; the wall-clock ticker then catches up with back-to-back ticks, which
+``JITTER_S`` of audio, and re-primes after it runs dry. A process stall delays
+the capture threads and the tick thread alike; the wall-clock ticker then catches up with back-to-back ticks, which
 would otherwise drain empty FIFOs and pad zeros into the middle of speech.
 On Windows the WASAPI buffer is opened at ``WASAPI_BUFFER_S`` (soundcard's
 default is one ~10 ms device period), so a stall doesn't drop samples either.

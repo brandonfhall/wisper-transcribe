@@ -1767,7 +1767,7 @@ def _named_recording(tmp_path, name):
 
 
 @pytest.mark.parametrize("name, stem", [
-    ("C5E12", "C5E12"),
+    ("Session 7", "Session 7"),
     ("Session 14 — the ambush", "Session 14 — the ambush"),
     ("Ep 3: Ambush/Fight?", "Ep 3- Ambush-Fight-"),
     ("  ..hidden  ", "hidden"),
@@ -1790,13 +1790,13 @@ def test_recording_transcript_name_avoids_an_existing_session(client):
     c, tmp_path = client
     out = get_output_dir()
     out.mkdir(parents=True, exist_ok=True)
-    other = out / "C5E12.md"
+    other = out / "Session 7.md"
     other.write_text("someone else's session", encoding="utf-8")
     transcript_store.register(other, origin="job")
-    rec = _named_recording(tmp_path, "C5E12")
+    rec = _named_recording(tmp_path, "Session 7")
 
     call = _hand_off(c, tmp_path, rec)
-    assert call.kwargs["original_stem"] == "C5E12 (2)"
+    assert call.kwargs["original_stem"] == "Session 7 (2)"
     # overwrite=True therefore can't clobber the other session.
     job = _run_handed_off_job(call, out)
     assert job.status == "completed"
@@ -1805,10 +1805,10 @@ def test_recording_transcript_name_avoids_an_existing_session(client):
 
 def test_recording_transcript_name_avoids_a_queued_job(client):
     c, tmp_path = client
-    rec = _named_recording(tmp_path, "C5E12")
-    with patch.object(c.app.state.job_queue, "queued_stems", return_value={"C5E12"}):
+    rec = _named_recording(tmp_path, "Session 7")
+    with patch.object(c.app.state.job_queue, "queued_stems", return_value={"Session 7"}):
         call = _hand_off(c, tmp_path, rec)
-    assert call.kwargs["original_stem"] == "C5E12 (2)"
+    assert call.kwargs["original_stem"] == "Session 7 (2)"
 
 
 def test_recording_transcript_name_with_nothing_usable_falls_back_to_the_date(client):
@@ -2234,15 +2234,15 @@ def test_recording_first_run_lands_in_the_campaign_folder(client):
     c, tmp_path = client
     campaign = create_campaign("My Game", data_dir=tmp_path)
     folder = campaign_folders.ensure_folder(campaign.id, data_dir=tmp_path)
-    rec = seed_recording(tmp_path, campaign_slug="my-game", name="C5E12")
+    rec = seed_recording(tmp_path, campaign_slug="my-game", name="Session 7")
 
     call = _hand_off(c, tmp_path, rec)
     assert Path(call.kwargs["output_dir"]) == folder
-    assert call.kwargs["original_stem"] == "C5E12"
+    assert call.kwargs["original_stem"] == "Session 7"
 
     job = _run_handed_off_job(call, folder)
     assert job.status == "completed"
-    assert (folder / "C5E12.md").is_file()
+    assert (folder / "Session 7.md").is_file()
     assert not (folder / f"{rec.id}.md").exists()
 
 

@@ -1237,7 +1237,7 @@ def test_validate_new_stem_accepts_and_refuses():
 
 
 @pytest.mark.parametrize("title, stem", [
-    ("C5E12", "C5E12"),
+    ("Session 7", "Session 7"),
     ("Ep 3: Ambush/Fight", "Ep 3- Ambush-Fight"),
     ("../../etc/passwd", "-..-etc-passwd"),
     ("..\\..\\x", "-..-x"),
