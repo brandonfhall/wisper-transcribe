@@ -998,6 +998,25 @@ async def recording_enroll_html(
 # ---------------------------------------------------------------------------
 
 
+def _first_transcript_stem(recording, output_dir: Path, campaign_id, request: Request) -> str:
+    """The name a recording's first transcript gets in ``output_dir``.
+
+    The session name typed at Start (repaired into a valid file name), else
+    ``Recording YYYY-MM-DD HHMM`` from its local start time; then the first
+    free variant (``name (2)``, …) against existing sessions and names queued
+    jobs will write, as an upload gets. Never the recording's id.
+    """
+    from wisper_transcribe.transcript_store import next_free_stem, stem_from_title
+
+    stem = stem_from_title(recording.name)
+    if stem is None:
+        started = recording.started_at
+        local = started.astimezone() if started is not None else datetime.now()
+        stem = f"Recording {local:%Y-%m-%d %H%M}"
+    queued = request.app.state.job_queue.queued_stems(output_dir)
+    return next_free_stem(output_dir, stem, campaign_id, also_taken=queued)
+
+
 def _submit_recording_transcription(recording, request: Request, data_dir: Path):
     """Validate a recording and submit its transcription job.
 
@@ -1041,7 +1060,7 @@ def _submit_recording_transcription(recording, request: Request, data_dir: Path)
             output_dir = get_output_root()
             if not output_dir.is_dir():
                 return None, "output_unavailable"
-        stem = recording.id
+        stem = _first_transcript_stem(recording, output_dir, campaign_id, request)
 
     # On success, link the transcript. Nothing to undo on failure: the
     # recording reads as "transcribing" only while this job is active.

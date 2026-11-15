@@ -7,8 +7,17 @@ Data flow: two capture threads (mic, system) resample each block to 16 kHz
 mono int16 and push it onto per-track byte FIFOs. A single tick thread wakes
 every ~20 ms, drains one chunk from each FIFO (silence for a starved track),
 writes each track to its own SegmentedWavWriter, and writes their int32 sum
-(clipped to int16) to the combined writer. Silence substitution keeps all
+(soft-limited to int16) to the combined writer. Silence substitution keeps all
 three tracks wall-clock aligned, which live speaker attribution relies on.
+
+Each FIFO is also a jitter buffer: a track is drained only once it holds
+``JITTER_S`` of audio, and re-primes after it runs dry. A process stall delays
+the capture threads and the tick thread alike; the wall-clock ticker then catches up with back-to-back ticks, which
+would otherwise drain empty FIFOs and pad zeros into the middle of speech.
+On Windows the WASAPI buffer is opened at ``WASAPI_BUFFER_S`` (soundcard's
+default is one ~10 ms device period), so a stall doesn't drop samples either.
+soundcard's "data discontinuity" warnings are counted, not printed, and logged
+as a per-session summary.
 
 Test seams:
   - ``capture_factory(device_id, samplerate)`` -> blocking iterator of
@@ -28,6 +37,7 @@ import logging
 import sys
 import threading
 import time
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator, Optional
@@ -42,6 +52,7 @@ from wisper_transcribe.recording_manager import (
     encode_combined_flac,
     record_completed_wav_segment,
     register_capture_files,
+    start_listen_copy,
     trim_recording_audio,
     update_recording_status,
 )
@@ -62,6 +73,17 @@ TICK_BYTES = SAMPLES_PER_TICK * BYTES_PER_SAMPLE   # 640
 FIFO_CAP_S = 2.0
 FIFO_CAP_BYTES = int(FIFO_CAP_S * RATE) * BYTES_PER_SAMPLE
 _DEFAULT_CAPTURE_SAMPLERATE = 48000
+# Jitter-buffer depth per track (see the module docstring). Read when a
+# manager is built, so tests can pin it.
+JITTER_S = 0.25
+# WASAPI shared-mode buffer on Windows. Bigger only adds capacity: data still
+# arrives every device period, so it adds no latency.
+WASAPI_BUFFER_S = 0.5
+# Combined-mix soft limiter: linear up to this fraction of full scale, then a
+# tanh knee that approaches (never reaches past) full scale.
+LIMIT_KNEE = 0.8
+# How often the tick thread logs capture health at debug level.
+_STATS_EVERY_TICKS = int(60 / TICK_S)
 
 _TRACKS = ("mic", "system")
 # Used by routes/record.py for cross-manager exclusion. "Active" means
@@ -128,6 +150,81 @@ def _com_uninit() -> None:
 
 
 # ---------------------------------------------------------------------------
+# soundcard "data discontinuity" warnings -> per-track counters
+# ---------------------------------------------------------------------------
+
+_discontinuity_lock = threading.Lock()
+_discontinuities: dict[str, int] = {}
+_counter_installed = False
+
+
+def _track_of_thread(name: str) -> Optional[str]:
+    """``"mic"``/``"system"`` for a capture thread name, else None."""
+    for track in _TRACKS:
+        if name.startswith(f"local-capture-{track}-"):
+            return track
+    return None
+
+
+def _install_discontinuity_counter() -> None:
+    """Count soundcard's ``SoundcardRuntimeWarning`` per track instead of
+    printing it. Installed once per process.
+
+    ``warnings.catch_warnings()`` isn't thread-safe, so this wraps
+    ``warnings.showwarning`` once (counting by the warning thread's name) and
+    sets the category to ``always`` so each one is counted, not just the first.
+    Every other warning goes to the previous handler unchanged.
+    """
+    global _counter_installed
+    with _discontinuity_lock:
+        if _counter_installed:
+            return
+        _counter_installed = True
+    try:
+        from soundcard import SoundcardRuntimeWarning
+    except Exception:
+        return
+    warnings.filterwarnings("always", category=SoundcardRuntimeWarning)
+    previous = warnings.showwarning
+
+    def _show(message, category, filename, lineno, file=None, line=None):
+        if issubclass(category, SoundcardRuntimeWarning):
+            track = _track_of_thread(threading.current_thread().name) or "other"
+            with _discontinuity_lock:
+                _discontinuities[track] = _discontinuities.get(track, 0) + 1
+            return
+        return previous(message, category, filename, lineno, file, line)
+
+    warnings.showwarning = _show
+
+
+def take_discontinuities() -> dict[str, int]:
+    """Discontinuity counts per track since the last call, then reset."""
+    with _discontinuity_lock:
+        counts = dict(_discontinuities)
+        _discontinuities.clear()
+    return counts
+
+
+def soft_limit(mixed: np.ndarray) -> np.ndarray:
+    """Soft-limit an int32 sum of int16 tracks into int16.
+
+    Samples within ``LIMIT_KNEE`` of full scale pass unchanged; louder ones
+    bend along a tanh knee toward full scale instead of clipping flat, so a
+    loud moment on both tracks doesn't square off the mix.
+    """
+    full = 32767.0
+    knee = LIMIT_KNEE * full
+    x = mixed.astype(np.float64)
+    mag = np.abs(x)
+    over = mag > knee
+    if np.any(over):
+        span = full - knee
+        x[over] = np.sign(x[over]) * (knee + span * np.tanh((mag[over] - knee) / span))
+    return np.clip(np.rint(x), -32768, 32767).astype("<i2")
+
+
+# ---------------------------------------------------------------------------
 # Default (production) capture factory -- soundcard, lazily imported
 # ---------------------------------------------------------------------------
 
@@ -136,14 +233,18 @@ def _soundcard_capture_factory(device_id: str, samplerate: int) -> Iterator:
 
     Imports ``soundcard`` lazily. Being a generator, its body —
     including Windows COM initialisation — runs on the capture thread that
-    iterates it, and uninitialises on exit.
+    iterates it, and uninitialises on exit. On Windows the recorder gets a
+    ``WASAPI_BUFFER_S`` buffer; elsewhere ``blocksize`` sets the fragment size
+    (latency), so the backend default stays.
     """
     import soundcard as sc
 
+    _install_discontinuity_counter()
     _com_init()
     try:
         mic = sc.get_microphone(id=device_id, include_loopback=True)
-        with mic.recorder(samplerate=samplerate) as recorder:
+        options = {"blocksize": int(samplerate * WASAPI_BUFFER_S)} if sys.platform == "win32" else {}
+        with mic.recorder(samplerate=samplerate, **options) as recorder:
             while True:
                 block = recorder.record(numframes=None)
                 yield block, samplerate
@@ -245,6 +346,7 @@ class LocalCaptureManager:
         data_dir: Path,
         capture_factory: Optional[Callable] = None,
         ticker: Optional[Callable[[], Iterator]] = None,
+        jitter_s: Optional[float] = None,
     ):
         """
         capture_factory(device_id, samplerate) -> iterator of (np.ndarray, samplerate)
@@ -253,10 +355,23 @@ class LocalCaptureManager:
         ticker() -> iterator, yielding once per tick.
             Defaults to `_wall_clock_ticker`. Tests inject a finite instant
             generator.
+        jitter_s
+            Jitter-buffer depth per track; defaults to the module's
+            ``JITTER_S``. 0 drains whatever is there every tick.
         """
         self._data_dir = Path(data_dir)
         self._capture_factory = capture_factory or _soundcard_capture_factory
         self._ticker = ticker or _wall_clock_ticker
+        depth = JITTER_S if jitter_s is None else jitter_s
+        self._jitter_bytes = int(depth * RATE) * BYTES_PER_SAMPLE
+        # Per-track jitter-buffer state and capture-health counters, reset
+        # each session. Touched only by the tick thread (and switch_device,
+        # which only clears a flag).
+        self._primed: dict[str, bool] = {t: False for t in _TRACKS}
+        self._underruns: dict[str, int] = {t: 0 for t in _TRACKS}
+        self._max_tick_gap_s = 0.0
+        self._ticks = 0
+        self._discontinuity_totals: dict[str, int] = {}
 
         self._active_recording: Optional[Recording] = None
         self._stop_event = threading.Event()
@@ -367,6 +482,12 @@ class LocalCaptureManager:
 
         with self._level_lock:
             self._level_peaks = {"mic": 0.0, "system": 0.0}
+        self._primed = {t: False for t in _TRACKS}
+        self._underruns = {t: 0 for t in _TRACKS}
+        self._max_tick_gap_s = 0.0
+        self._ticks = 0
+        self._discontinuity_totals = {}
+        take_discontinuities()  # drop counts from before this session
 
         self._stop_event = threading.Event()
         # Published before any thread starts: a device that fails at once
@@ -404,6 +525,14 @@ class LocalCaptureManager:
             t.join(timeout=5.0)
         if self._tick_thread is not None:
             self._tick_thread.join(timeout=5.0)
+        # Play out what the jitter buffer still holds (with no buffer there
+        # is no intentional backlog, and a racing tail isn't worth a tick).
+        if self._jitter_bytes and self._writers and self._combined_writer is not None:
+            try:
+                self._do_tick(flush=True)
+            except Exception:
+                log.warning("Could not drain the capture buffers at stop", exc_info=True)
+        self._log_capture_stats(final=True)
         self._finalise(recording)
         log.info("Local capture session stopped: %s", recording.id)
 
@@ -461,6 +590,8 @@ class LocalCaptureManager:
         if old_thread is not None:
             old_thread.join(timeout=2.0)
 
+        # The new device starts from an empty buffer; re-prime it.
+        self._primed[track] = False
         self._start_capture_thread(track, device_id)
 
         # Recover a track-killed session, but only once no track is still
@@ -518,35 +649,70 @@ class LocalCaptureManager:
     # ------------------------------------------------------------------
 
     def _tick_loop(self) -> None:
+        last = time.monotonic()
         for _ in self._ticker():
             if self._stop_event.is_set():
                 return
+            now = time.monotonic()
+            self._max_tick_gap_s = max(self._max_tick_gap_s, now - last)
+            last = now
             self._do_tick()
+            self._ticks += 1
+            if self._ticks % _STATS_EVERY_TICKS == 0:
+                self._log_capture_stats(final=False)
 
-    def _do_tick(self) -> None:
+    def _log_capture_stats(self, final: bool) -> None:
+        """Capture health: discontinuities (dropped device samples), jitter
+        underruns (zeros inserted), and the longest gap between ticks.
+
+        Debug once a minute; one INFO summary when the session ends.
+        """
+        for track, n in take_discontinuities().items():
+            self._discontinuity_totals[track] = self._discontinuity_totals.get(track, 0) + n
+        recording = self._active_recording
+        rid = recording.id if recording is not None else "?"
+        msg = ("Local capture %s: %d ticks, discontinuities %s, underruns %s, "
+               "longest tick gap %.0f ms")
+        args = (rid, self._ticks, dict(self._discontinuity_totals), dict(self._underruns),
+                self._max_tick_gap_s * 1000)
+        if final:
+            log.info(msg, *args)
+        else:
+            log.debug(msg, *args)
+
+    def _do_tick(self, flush: bool = False) -> None:
         """One tick: drain each FIFO, write per-track + mixed combined chunks.
 
-        Normally drains exactly `TICK_BYTES` (20 ms) per track -- draining
-        less than that (because a track's FIFO is starved, e.g. WASAPI
-        loopback with nothing playing) is silently padded with silence so
-        every track stays wall-clock continuous.
+        Normally drains exactly `TICK_BYTES` (20 ms) per primed track. A track
+        is primed once its FIFO holds the jitter depth; until then it writes
+        silence. A primed track that comes up short (underrun) pads the rest
+        with silence and re-primes. Either way every track stays wall-clock
+        continuous.
 
         If a FIFO has grown past `FIFO_CAP_BYTES` (device clock running
         faster than the tick clock), this tick drains the full surplus
         instead of dropping audio -- and every track's chunk for this tick
         is padded with silence up to that larger length, so the combined
         mix stays a straight per-sample sum of two equal-length arrays.
+
+        ``flush`` (used once at stop) drains everything left, primed or not,
+        so the jitter buffer's last fraction of a second isn't lost.
         """
         tick_bytes = TICK_BYTES
         for fifo in self._fifos.values():
             avail = fifo.available()
-            if avail > FIFO_CAP_BYTES:
-                tick_bytes = max(tick_bytes, avail)
+            if avail > FIFO_CAP_BYTES or (flush and avail > tick_bytes):
+                tick_bytes = max(tick_bytes, avail - avail % BYTES_PER_SAMPLE)
 
         wanted = tick_bytes // BYTES_PER_SAMPLE
         track_samples: dict[str, np.ndarray] = {}
         for name, fifo in self._fifos.items():
-            chunk = fifo.drain(tick_bytes)
+            if not self._primed.get(name, False) and (flush or fifo.available() >= self._jitter_bytes):
+                self._primed[name] = True
+            chunk = fifo.drain(tick_bytes) if self._primed.get(name, False) else b""
+            if self._primed.get(name, False) and len(chunk) < TICK_BYTES and not flush:
+                self._primed[name] = False
+                self._underruns[name] = self._underruns.get(name, 0) + 1
             samples = np.frombuffer(chunk, dtype="<i2") if chunk else np.zeros(0, dtype="<i2")
             if len(samples) < wanted:
                 samples = np.concatenate([samples, np.zeros(wanted - len(samples), dtype="<i2")])
@@ -562,8 +728,7 @@ class LocalCaptureManager:
         mixed = np.zeros(wanted, dtype=np.int32)
         for name in _TRACKS:
             mixed += track_samples[name].astype(np.int32)
-        mixed_clipped = np.clip(mixed, -32768, 32767).astype("<i2")
-        mixed_bytes = mixed_clipped.tobytes()
+        mixed_bytes = soft_limit(mixed).tobytes()
         completed_path = self._combined_writer.write(mixed_bytes)
         if completed_path is not None:
             self._combined_segment_started_at = record_completed_wav_segment(
@@ -652,3 +817,5 @@ class LocalCaptureManager:
             update_recording_status(recording.id, "completed", self._data_dir,
                                     ended_at=recording.ended_at)
             log.info("Local recording %s finalised as completed", recording.id)
+        # The denoised playback copy is made in the background.
+        start_listen_copy(recording.id, self._data_dir)

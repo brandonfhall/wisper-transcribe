@@ -73,6 +73,8 @@ def conn():
           VALUES (1, 1, 'combined_summary', 14, '2026-01-01T00:00:00Z', 'ollama', 'm'),
                  (2, 1, 'recap', 15, '2026-01-01T00:00:00Z', 'ollama', 'm');
         INSERT INTO campaign_digest_sessions (digest_id, transcript_id) VALUES (1, 1), (1, 2), (2, 2);
+        INSERT INTO files (kind, root, rel_path, recording_id, size, mtime_ns)
+          VALUES ('listen', 'data', 'recordings/{R}/listen.flac', '{R}', 10, 5);
     """)
     yield c
     c.close()
@@ -278,6 +280,14 @@ VIOLATIONS = {
                               f"VALUES ('per_user', 'data', 'recordings/{R}/per-user/system', 'mic', '{R}')",
     "live_draft path mismatch": f"INSERT INTO files (kind, root, rel_path, recording_id) "
                                 f"VALUES ('live_draft', 'data', 'recordings/{L}/live_transcript.md', '{R}')",
+    "listen path mismatch": f"INSERT INTO files (kind, root, rel_path, recording_id) "
+                            f"VALUES ('listen', 'data', 'recordings/{L}/listen.flac', '{R}')",
+    "listen wrong name": f"INSERT INTO files (kind, root, rel_path, recording_id) "
+                         f"VALUES ('listen', 'data', 'recordings/{R}/combined.flac', '{R}')",
+    "listen owned by a transcript": "INSERT INTO files (kind, root, rel_path, transcript_id) "
+                                    "VALUES ('listen', 'data', 'recordings/x/listen.flac', 2)",
+    "listen under the output root": f"INSERT INTO files (kind, root, rel_path, recording_id) "
+                                    f"VALUES ('listen', 'output', 'recordings/{R}/listen.flac', '{R}')",
     "audio path ending .md": "INSERT INTO files (kind, root, rel_path, transcript_id) VALUES ('audio', 'output', 'x.md', 2)",
     "backup not ending .md.bak": "INSERT INTO files (kind, root, rel_path, transcript_id) "
                                  "VALUES ('backup', 'output', 'x.md', 2)",

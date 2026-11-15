@@ -38,6 +38,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import threading
 import uuid
 import wave
 from datetime import UTC, datetime, timezone
@@ -680,6 +681,83 @@ def encode_combined_flac(recording_id: str, wav: Path,
         flac.unlink(missing_ok=True)
         return None
     return flac
+
+
+def listen_path_for(recording_id: str, data_dir: Optional[Path] = None) -> Path:
+    """Where a recording's denoised listening copy lives (it may not exist)."""
+    return get_recording_dir(recording_id, data_dir) / "listen.flac"
+
+
+_listen_lock = threading.Lock()
+_listen_busy: set[str] = set()
+# Tests turn this off so finishing a session or loading a player never starts
+# a real ffmpeg thread; listening-copy tests call ensure_listen_copy() directly.
+LISTEN_AUTOSTART = True
+
+
+def ensure_listen_copy(recording_id: str, data_dir: Optional[Path] = None,
+                       audio_filter: Optional[str] = None) -> Optional[Path]:
+    """Make the recording's ``listen.flac`` if it's missing; return its path.
+
+    The combined track run through the playback filter (``denoise_filter``),
+    for the transcript player only: transcription, enrollment and re-transcribe
+    keep reading the untouched combined track. The copy must match the
+    combined track's frame count, so timestamps seek to the same words, and is
+    registered as the recording's ``listen`` file. One encode per recording at
+    a time; a concurrent call returns None at once. Never raises: on any
+    failure it logs, removes a partial file, and returns None.
+    """
+    from .audio_utils import encode_listen_flac
+    from .config import load_config
+
+    out = listen_path_for(recording_id, data_dir)
+    if out.is_file():
+        return out
+    with _listen_lock:
+        if recording_id in _listen_busy:
+            return None
+        _listen_busy.add(recording_id)
+    try:
+        if out.is_file():
+            return out
+        source = existing_combined_path(recording_id, data_dir)
+        if source is None:
+            return None
+        if audio_filter is None:
+            audio_filter = str(load_config().get("denoise_filter") or "")
+        expected = combined_frames(source)
+        encode_listen_flac(source, out, audio_filter)
+        if expected <= 0 or combined_frames(out) != expected:
+            raise ValueError("the listening copy did not verify")
+        with db.transaction(data_dir) as conn:
+            owner = file_registry.Owner.for_recording(recording_id, conn=conn)
+            if owner is None:   # the recording was deleted meanwhile
+                raise ValueError("the recording is gone")
+            file_registry.add_if_owned(out, kind="listen", owner=owner, conn=conn,
+                                       data_dir=data_dir)
+        log.info("Recording %s listening copy written to %s", recording_id, out)
+        return out
+    except Exception:
+        log.warning("Could not make recording %s's listening copy", recording_id, exc_info=True)
+        out.unlink(missing_ok=True)
+        return None
+    finally:
+        with _listen_lock:
+            _listen_busy.discard(recording_id)
+
+
+def start_listen_copy(recording_id: str, data_dir: Optional[Path] = None) -> None:
+    """Run :func:`ensure_listen_copy` on a daemon thread when playback denoise
+    is on and the copy is missing, so a session stop or a page load never
+    waits on ffmpeg."""
+    from .config import load_config
+
+    if not LISTEN_AUTOSTART or not load_config().get("denoise_playback", True):
+        return
+    if listen_path_for(recording_id, data_dir).is_file():
+        return
+    threading.Thread(target=ensure_listen_copy, args=(recording_id, data_dir),
+                     name=f"listen-copy-{recording_id[:8]}", daemon=True).start()
 
 
 def _tree_bytes(path: Path) -> int:

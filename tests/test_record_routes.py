@@ -1753,9 +1753,69 @@ def test_transcribe_recording_handoff(client):
     assert not list((tmp_path / "output").glob("*.wav"))
     mock_submit.assert_called_once()
     assert mock_submit.call_args.args[0] == str(combined)
-    assert mock_submit.call_args.kwargs["original_stem"] == rec.id
+    # Unnamed: a dated name from the local start time, never the id.
+    local = rec.started_at.astimezone()
+    assert mock_submit.call_args.kwargs["original_stem"] == f"Recording {local:%Y-%m-%d %H%M}"
     assert mock_submit.call_args.kwargs["source_name"] == rec.id
     assert combined.exists()
+
+
+def _named_recording(tmp_path, name):
+    from ._seed import seed_recording
+
+    return seed_recording(tmp_path, name=name)
+
+
+@pytest.mark.parametrize("name, stem", [
+    ("Session 7", "Session 7"),
+    ("Session 14 — the ambush", "Session 14 — the ambush"),
+    ("Ep 3: Ambush/Fight?", "Ep 3- Ambush-Fight-"),
+    ("  ..hidden  ", "hidden"),
+    ("con", "con_"),
+])
+def test_recording_transcript_is_named_after_the_session(client, name, stem):
+    """The first transcript of a recording takes the session name typed at
+    Start (repaired into a valid file name), so the campaign thread shows it."""
+    c, tmp_path = client
+    rec = _named_recording(tmp_path, name)
+    call = _hand_off(c, tmp_path, rec)
+    assert call.kwargs["original_stem"] == stem
+    assert call.kwargs["title"] == name
+
+
+def test_recording_transcript_name_avoids_an_existing_session(client):
+    from wisper_transcribe import transcript_store
+    from wisper_transcribe.path_utils import get_output_dir
+
+    c, tmp_path = client
+    out = get_output_dir()
+    out.mkdir(parents=True, exist_ok=True)
+    other = out / "Session 7.md"
+    other.write_text("someone else's session", encoding="utf-8")
+    transcript_store.register(other, origin="job")
+    rec = _named_recording(tmp_path, "Session 7")
+
+    call = _hand_off(c, tmp_path, rec)
+    assert call.kwargs["original_stem"] == "Session 7 (2)"
+    # overwrite=True therefore can't clobber the other session.
+    job = _run_handed_off_job(call, out)
+    assert job.status == "completed"
+    assert other.read_text(encoding="utf-8") == "someone else's session"
+
+
+def test_recording_transcript_name_avoids_a_queued_job(client):
+    c, tmp_path = client
+    rec = _named_recording(tmp_path, "Session 7")
+    with patch.object(c.app.state.job_queue, "queued_stems", return_value={"Session 7"}):
+        call = _hand_off(c, tmp_path, rec)
+    assert call.kwargs["original_stem"] == "Session 7 (2)"
+
+
+def test_recording_transcript_name_with_nothing_usable_falls_back_to_the_date(client):
+    c, tmp_path = client
+    rec = _named_recording(tmp_path, " ... ")
+    call = _hand_off(c, tmp_path, rec)
+    assert call.kwargs["original_stem"].startswith("Recording ")
 
 
 def _hand_off(c, tmp_path, rec):
@@ -2165,7 +2225,7 @@ def test_api_recording_delete_unknown_id_returns_404(client):
 
 
 def test_recording_first_run_lands_in_the_campaign_folder(client):
-    """A first transcription writes into the campaign's folder, at the recording id."""
+    """A first transcription writes into the campaign's folder, named after the session."""
     from wisper_transcribe import campaign_folders
     from wisper_transcribe.campaign_manager import create_campaign
 
@@ -2174,15 +2234,16 @@ def test_recording_first_run_lands_in_the_campaign_folder(client):
     c, tmp_path = client
     campaign = create_campaign("My Game", data_dir=tmp_path)
     folder = campaign_folders.ensure_folder(campaign.id, data_dir=tmp_path)
-    rec = seed_recording(tmp_path, campaign_slug="my-game")
+    rec = seed_recording(tmp_path, campaign_slug="my-game", name="Session 7")
 
     call = _hand_off(c, tmp_path, rec)
     assert Path(call.kwargs["output_dir"]) == folder
-    assert call.kwargs["original_stem"] == rec.id
+    assert call.kwargs["original_stem"] == "Session 7"
 
     job = _run_handed_off_job(call, folder)
     assert job.status == "completed"
-    assert (folder / f"{rec.id}.md").is_file()
+    assert (folder / "Session 7.md").is_file()
+    assert not (folder / f"{rec.id}.md").exists()
 
 
 def test_recording_retranscribe_writes_where_a_misplaced_md_is(client):

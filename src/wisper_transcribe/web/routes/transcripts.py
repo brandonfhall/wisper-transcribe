@@ -696,6 +696,29 @@ async def transcript_detail(request: Request, transcript_id: int, q: str = "") -
     )
 
 
+def _listen_copy(transcript_id: int) -> Optional[Path]:
+    """The denoised ``listen.flac`` of the recording behind this transcript.
+
+    None when playback denoise is off, the transcript isn't from a recording,
+    or the copy doesn't exist yet; in that last case its encode is started in
+    the background and this request plays the combined track. Only the player
+    uses it: everything that analyses audio reads ``audio_path()``.
+    """
+    from wisper_transcribe.config import load_config
+    from wisper_transcribe.recording_manager import listen_path_for, start_listen_copy
+
+    if not load_config().get("denoise_playback", True):
+        return None
+    rec = recording_for_transcript(transcript_id)
+    if rec is None:
+        return None
+    listen = listen_path_for(rec.id)
+    if listen.is_file():
+        return listen
+    start_listen_copy(rec.id)
+    return None
+
+
 @router.get("/{transcript_id:int}/audio")
 async def transcript_audio(transcript_id: int):
     loc = _located_or_redirect(transcript_id)
@@ -703,7 +726,7 @@ async def transcript_audio(transcript_id: int):
         return loc
     if not loc.md.exists():
         return HTMLResponse(content="Not found", status_code=404)
-    audio = transcript_store.audio_path(loc.md, output_dir=get_output_root())
+    audio = _listen_copy(loc.id) or transcript_store.audio_path(loc.md, output_dir=get_output_root())
     if audio is None:
         return HTMLResponse(content="No audio", status_code=404)
     target = os.path.abspath(str(audio))

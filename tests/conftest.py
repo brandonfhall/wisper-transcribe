@@ -85,6 +85,14 @@ def _no_search_backfill_thread(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_listen_copy_thread(monkeypatch):
+    """Finishing a session or loading a recording's player would start an
+    ffmpeg thread for the denoised listening copy. Tests that cover it call
+    recording_manager.ensure_listen_copy() directly or re-enable this."""
+    monkeypatch.setattr("wisper_transcribe.recording_manager.LISTEN_AUTOSTART", False)
+
+
+@pytest.fixture(autouse=True)
 def _isolated_pipeline_config():
     """Patch pipeline.load_config so tests never read the real user config."""
     with patch(

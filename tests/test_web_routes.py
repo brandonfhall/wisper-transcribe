@@ -5215,6 +5215,58 @@ def test_audio_route_404_without_audio_or_file(client, tmp_path, monkeypatch):
     assert client.get(f"/transcripts/{tid}/audio").status_code == 404
 
 
+def test_audio_route_plays_the_recordings_denoised_listening_copy(client, tmp_path, monkeypatch):
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    rec = _recording_for(tmp_path, md)
+    listen = tmp_path / "recordings" / rec.id / "listen.flac"
+    listen.write_bytes(b"fLaC-denoised")
+    resp = client.get(f"/transcripts/{_tid(md)}/audio")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "audio/flac"
+    assert resp.content == b"fLaC-denoised"
+
+
+def test_audio_route_without_a_listening_copy_plays_the_original_and_starts_one(
+        client, tmp_path, monkeypatch):
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    rec = _recording_for(tmp_path, md)
+    started = []
+    monkeypatch.setattr("wisper_transcribe.recording_manager.start_listen_copy",
+                        lambda rid, data_dir=None: started.append(rid))
+    resp = client.get(f"/transcripts/{_tid(md)}/audio")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "audio/wav"   # the combined track
+    assert started == [rec.id]
+
+
+def test_audio_route_ignores_the_listening_copy_when_denoise_is_off(client, tmp_path, monkeypatch):
+    from wisper_transcribe import config
+
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    rec = _recording_for(tmp_path, md)
+    (tmp_path / "recordings" / rec.id / "listen.flac").write_bytes(b"fLaC-denoised")
+    started = []
+    monkeypatch.setattr("wisper_transcribe.recording_manager.start_listen_copy",
+                        lambda rid, data_dir=None: started.append(rid))
+    monkeypatch.setattr(config, "load_config",
+                        lambda: {**config.DEFAULTS, "denoise_playback": False})
+    resp = client.get(f"/transcripts/{_tid(md)}/audio")
+    assert resp.headers["content-type"] == "audio/wav"
+    assert started == []
+
+
+def test_upload_transcript_never_plays_a_listening_copy(client, tmp_path, monkeypatch):
+    out, md = _playback_setup(tmp_path, monkeypatch)
+    from wisper_transcribe import transcript_store as ts
+    (out / "s1.flac").write_bytes(b"fLaC-upload")
+    ts.set_audio(md, out / "s1.flac")
+    started = []
+    monkeypatch.setattr("wisper_transcribe.recording_manager.start_listen_copy",
+                        lambda rid, data_dir=None: started.append(rid))
+    assert client.get(f"/transcripts/{_tid(md)}/audio").content == b"fLaC-upload"
+    assert started == []
+
+
 def test_detail_page_player_only_with_audio(client, tmp_path, monkeypatch):
     out, md = _playback_setup(tmp_path, monkeypatch)
     tid = _tid(md)

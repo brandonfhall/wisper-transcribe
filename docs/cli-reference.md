@@ -498,6 +498,8 @@ wisper record delete <recording_id>                             # delete recordi
 wisper record recover <recording_id>                            # rebuild a crashed session's audio so it can be transcribed
 ```
 
+`record transcribe` names a recording's first transcript after its session name (characters a file name can't hold become `-`; an unnamed session becomes `Recording YYYY-MM-DD HHMM`; ` (2)` on a clash). Re-transcribing keeps the transcript's current name.
+
 `record start` resolves the guild and channel from: explicit flags → `--preset` → the `discord_default_guild`/`discord_default_channel` config keys (set via `wisper config discord`, also used by the web Record page).
 
 **Managing channel presets:**

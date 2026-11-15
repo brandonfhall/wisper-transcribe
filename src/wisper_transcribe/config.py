@@ -49,6 +49,13 @@ DEFAULTS = {
     # (word_alignment.py). "auto" aligns when diarization runs on a GPU
     # (CUDA or MPS); CPU adds ~9-20 min per 2.5 h session.
     "forced_alignment": "auto",
+    # Playback of recording transcripts uses recordings/<id>/listen.flac: the
+    # combined track through this ffmpeg filter chain (high-pass for rumble,
+    # afftdn spectral denoise with noise tracking). Transcription and enrollment
+    # always read the untouched combined track. Changing the chain affects new
+    # copies only; delete a listen.flac to re-make it.
+    "denoise_playback": True,
+    "denoise_filter": "highpass=f=90,afftdn=nr=18:nf=-40:tn=1",
     # LLM post-processing (refine, summarize, campaign journal). Opt-in.
     # Default provider is local Ollama; cloud providers require explicit config + key.
     "llm_provider": "ollama",                 # ollama | anthropic | openai | google

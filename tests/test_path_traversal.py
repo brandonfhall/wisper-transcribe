@@ -1042,3 +1042,26 @@ def test_assign_campaign_form_slug_is_guarded(client, payload, tmp_path, monkeyp
     assert resp.headers.get("location", "") == f"/transcripts/{tid}?error=invalid_campaign"
     assert payload not in resp.text
     assert md.exists()
+
+
+# A recording's free-text session name becomes its first transcript's file
+# name (routes/record.py:_first_transcript_stem), so hostile names must stay
+# inside the output folder.
+@pytest.mark.parametrize("name", _MALICIOUS_PAYLOADS + _REGEX_PAYLOADS + [
+    "../etc/passwd", r"..\..\windows\win.ini", "/abs/path", r"C:\abs",
+    "id/with/slashes", "evil\r\nLocation: x", "con", "..", "...",
+])
+def test_recording_session_name_never_leaves_the_output_folder(tmp_path, name):
+    import os
+
+    from wisper_transcribe.transcript_store import safe_path, stem_from_title
+
+    stem = stem_from_title(name)
+    if stem is None:
+        return  # the caller falls back to a dated name
+    for bad in ("/", "\\", ":", "\x00", "\r", "\n"):
+        assert bad not in stem
+    path = safe_path(stem, ".md", tmp_path)
+    assert path is not None
+    base = os.path.abspath(str(tmp_path))
+    assert os.path.abspath(str(path)).startswith(base + os.sep)

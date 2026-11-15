@@ -39,6 +39,8 @@ Stored in `config.toml`. View with `wisper config show`, change with `wisper con
 | `forced_alignment` | `auto` | Re-time Whisper's words against the audio before speaker assignment, so words at speaker changes land with the right person. `auto` = on when diarizing on a GPU (CUDA or Apple Silicon), off on CPU; `true` / `false` force it. Never runs with `--no-diarize`. `--forced-align/--no-forced-align` overrides. |
 | `parallel_stages` | `false` | Run transcription and diarization concurrently in two subprocesses. Uses more memory; benchmark before enabling. Ignored while the web job queue delegates to the ML worker (`ml_worker`). |
 | `ml_worker` | `true` | Web jobs: run the GPU model calls in a separate process so **Stop Job** terminates it and frees the GPU immediately. Off runs everything in-process (Stop then waits for the current batch). Ignored by the CLI. |
+| `denoise_playback` | `true` | Play a recording's transcript from a denoised copy (`recordings/<id>/listen.flac`), made in the background when a session ends or the first time you play it. Transcription and speaker matching always use the original. |
+| `denoise_filter` | `highpass=f=90,afftdn=nr=18:nf=-40:tn=1` | The ffmpeg filter chain for that copy: a high-pass removes low rumble, `afftdn` reduces steady background noise (`nr` is the strength in dB). A change applies to new copies; delete a recording's `listen.flac` to re-make it. |
 | `llm_provider` | `ollama` | `ollama`, `ollama-cloud`, `lmstudio`, `anthropic`, `openai`, or `google` |
 | `llm_model` | — | Blank uses the provider's default model |
 | `llm_endpoint` | `http://localhost:11434` | Local LLM server URL (LM Studio default is `:1234`) |

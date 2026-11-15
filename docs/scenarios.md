@@ -214,6 +214,19 @@ If wisper crashes or the machine loses power mid-session, the recording shows **
 
 ---
 
+## Recording playback is noisy
+
+A recording's transcript plays a denoised copy (see `denoise_playback` / `denoise_filter` in [configuration.md](configuration.md)). The default filter suits steady room noise: fans, HVAC, and the low rumble a desk mic picks up.
+
+- **Still too noisy:** raise `nr` in `denoise_filter` (e.g. `afftdn=nr=24`), then delete that recording's `recordings/<id>/listen.flac` so it's re-made on the next play.
+- **Voices sound watery or thin:** lower `nr` (e.g. 12), or lower the high-pass (`highpass=f=70`).
+- **Mains hum (a steady 50/60 Hz tone):** add notch filters before `afftdn`, e.g. `highpass=f=90,bandreject=f=120:w=10,bandreject=f=180:w=10,afftdn=nr=18:nf=-40:tn=1`.
+- **Chatter, keyboard, or other changing noise:** ffmpeg's filters only handle steady noise. [DeepFilterNet](https://github.com/Rikorose/DeepFilterNet) (a neural denoiser on PyTorch, which wisper already installs) handles these much better. It isn't bundled; run it by hand on `combined.flac` and save the result as that recording's `listen.flac`.
+
+The transcript itself is never affected: transcription and speaker matching read the original audio.
+
+---
+
 ## Known Limitations
 
 - **Only the first audio track of an uploaded file is transcribed and kept.** To use a different track, export it from the original and upload that.
@@ -222,8 +235,9 @@ If wisper crashes or the machine loses power mid-session, the recording shows **
 - **Discord recording needs Java.** Discord encrypts voice end-to-end (DAVE); the Java JDA + JDAVE sidecar decrypts it, since no stable Python library supports DAVE receive.
 - **Live transcription is local-only.** Discord sessions are transcribed after they stop.
 - **The live preview is a draft.** Lines are labelled "You" or "Other" by comparing mic and system-audio volume, not by voice. The diarized transcript from **Transcribe** is the real one. On CPU-only machines, use `base` or `small` so the preview keeps up.
+- **Local recording starts about a quarter second late.** Each track buffers 0.25 s before it's written, so a moment when the computer is busy doesn't leave tiny gaps or clicks. The buffer's last fraction of a second is written when you stop. With `wisper server --debug`, the log file in `logs/` gets a capture-health line every minute, and every session logs one summary line when it stops. A non-zero `discontinuities` count means Windows dropped samples.
 - **Live preview waits for other jobs.** Jobs run one at a time, so a job already running when a local session starts delays the preview until it finishes.
-- **Word alignment needs a GPU by default.** On CPU-only machines `forced_alignment = auto` leaves it off (it adds ~9–20 min per 2.5 h session); set it to `true` to use it anyway. It supports 11 languages (English, Chinese, Cantonese, French, German, Italian, Japanese, Korean, Portuguese, Russian, Spanish); others keep Whisper's word timing. It can't split words when two people talk at once.
+- **Word alignment needs a GPU by default.** On CPU-only machines `forced_alignment = auto` leaves it off because it's slow there (`scripts/alignment_eval.py` measures it on your machine); set it to `true` to use it anyway. It supports 11 languages (English, Chinese, Cantonese, French, German, Italian, Japanese, Korean, Portuguese, Russian, Spanish); others keep Whisper's word timing. It can't split words when two people talk at once.
 - **Cancelling is best-effort.** With **Run GPU work in a separate process** on (default), a cancelled transcription, enroll, or relabel job terminates the model worker at once and frees the GPU. With it off, or for the CLI and live recording, a cancelled job stops at its next progress update and the GPU may finish its current batch first.
 - **Search highlighting is approximate.** Matching understands word forms ("fights" finds "fight"), but the highlighter only guesses at them, so occasionally a result shows no highlighted word.
 - **One way of running per data folder on Mac/Windows.** Don't run the native CLI or server against a data folder that a Docker Desktop container is using at the same time; wisper refuses the second one (see [docker.md](docker.md#one-way-of-running-at-a-time)).
