@@ -22,6 +22,8 @@ Keep docs in sync with code as part of every task; it's step 2 of the Definition
 
 Doc updates go **in the same commit** as the code change, not as a follow-up.
 
+**No scar tissue.** Docs, code comments, and docstrings describe how things work now and why: the mechanism, and the test or script that reproduces it. Leave out one-off incident details (a particular session's numbers, "we saw X last night"), causes nobody verified, and real user data such as session names. Those belong in commit messages and PR descriptions, which are history and fine to be dated. Tests use synthetic data.
+
 ---
 
 ## Definition of Done
