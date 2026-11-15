@@ -13,7 +13,7 @@ three tracks wall-clock aligned, which live speaker attribution relies on.
 Test seams:
   - ``capture_factory(device_id, samplerate)`` -> blocking iterator of
     ``(float32 array (n, ch), samplerate)``. The default wraps ``soundcard``,
-    imported lazily so this module works without the ``[live]`` extra.
+    imported lazily so this module still imports where it is missing or broken.
   - ``ticker()`` -> iterator yielding once per tick. Tests pass a finite,
     instant generator.
 
@@ -134,7 +134,7 @@ def _com_uninit() -> None:
 def _soundcard_capture_factory(device_id: str, samplerate: int) -> Iterator:
     """Default ``capture_factory``: open a soundcard device and block on ``record()``.
 
-    Imports ``soundcard`` lazily (optional extra). Being a generator, its body —
+    Imports ``soundcard`` lazily. Being a generator, its body —
     including Windows COM initialisation — runs on the capture thread that
     iterates it, and uninitialises on exit.
     """

@@ -143,12 +143,6 @@ pip install -e '.[llm-google]'      # Google (Gemini)
 pip install -e '.[llm-all]'         # all three
 ```
 
-**Optional local-recording extra** (mic + system-audio capture, native install only — see below):
-
-```bash
-pip install -e '.[live]'
-```
-
 **Optional Apple Silicon extra** (MLX Whisper — GPU transcription on M-series Macs):
 
 ```bash
@@ -159,7 +153,7 @@ pip install -e '.[macos]'
 
 ## Local Recording (mic + system audio)
 
-Records your microphone and the machine's system audio (the other side of a call, a video, a game) on the machine running `wisper server`, without a Discord bot. Requires the `[live]` extra, which installs [`soundcard`](https://github.com/bastibe/SoundCard).
+Records your microphone and the machine's system audio (the other side of a call, a video, a game) on the machine running `wisper server`, without a Discord bot. Built in: every install includes [`soundcard`](https://github.com/bastibe/SoundCard).
 
 **Native install only** — a Docker container can't reach host audio devices. The Record page hides the Local capture card when `soundcard` or devices are unavailable.
 

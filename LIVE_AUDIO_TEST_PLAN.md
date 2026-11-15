@@ -12,7 +12,7 @@ OS + GPU/CPU.
 ## 0. Setup
 
 ```powershell
-.venv\Scripts\pip install -e '.[live]'
+.venv\Scripts\pip install -e .
 $env:WISPER_DEBUG=1; .venv\Scripts\wisper server --reload
 ```
 
