@@ -1236,6 +1236,30 @@ def test_validate_new_stem_accepts_and_refuses():
     assert ts.validate_new_stem("trailing ") == "trailing"
 
 
+@pytest.mark.parametrize("title, stem", [
+    ("C5E12", "C5E12"),
+    ("Ep 3: Ambush/Fight", "Ep 3- Ambush-Fight"),
+    ("../../etc/passwd", "-..-etc-passwd"),
+    ("..\\..\\x", "-..-x"),
+    ("evil\x00name", "evil-name"),
+    ("evil\r\nLocation: x", "evil Location- x"),
+    ("a\tb   c", "a b c"),
+    ("  ..hidden. ", "hidden"),
+    ("COM1", "COM1_"),
+    ("x" * 150, "x" * 100),
+    ("é" * 100, "é" * 90),          # 180 UTF-8 bytes, the byte cap
+])
+def test_stem_from_title_repairs_free_text(title, stem):
+    result = ts.stem_from_title(title)
+    assert result == stem
+    assert ts.validate_new_stem(result) == result
+
+
+@pytest.mark.parametrize("title", [None, "", "   ", " ... ", "Notes.md", "Recap.summary"])
+def test_stem_from_title_returns_none_when_nothing_usable(title):
+    assert ts.stem_from_title(title) is None
+
+
 def _campaign_slug(cid: int) -> str:
     with db.connection() as conn:
         return conn.execute("SELECT slug FROM campaigns WHERE id = ?", (cid,)).fetchone()[0]

@@ -273,6 +273,33 @@ def validate_new_stem(name: str) -> Optional[str]:
     return name
 
 
+def stem_from_title(title: Optional[str]) -> Optional[str]:
+    """A session stem made from free text such as a recording's name, or None.
+
+    Unlike :func:`validate_new_stem`, which refuses a bad name, this repairs
+    one: whitespace runs become one space, path separators and control
+    characters become ``-``, leading dots and trailing dots/spaces go, the
+    name is cut to the length limits, and a Windows device name gets ``_``.
+    The result still passes through :func:`validate_new_stem`, so None means
+    nothing usable was left.
+    """
+    import re
+
+    from .campaign_folders import is_reserved
+
+    if not title:
+        return None
+    name = re.sub(r"\s+", " ", nfc(title))
+    name = re.sub(r'[/\\:*?"<>|\x00-\x1f\x7f]', "-", name).strip().lstrip(".")
+    name = name[:100]
+    while len(name.encode("utf-8")) > MAX_STEM_BYTES:
+        name = name[:-1]
+    name = name.rstrip(". ")
+    if name and is_reserved(name):
+        name += "_"
+    return validate_new_stem(name)
+
+
 # ---------------------------------------------------------------------------
 # Locations: where a transcript's files are, and where they should be
 # ---------------------------------------------------------------------------
