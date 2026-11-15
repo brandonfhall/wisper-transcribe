@@ -91,8 +91,9 @@ def test_enum_checks_mirror_python_constants():
     from wisper_transcribe.web import jobs
 
     ddl = "\n".join(m.ddl for m in db.MIGRATIONS)
-    # v14 rebuilds `jobs` and `files`; read the latest definition of each.
+    # v14 rebuilds `jobs` and v15 `files`; read the latest definition of each.
     v14 = next(m.ddl for m in db.MIGRATIONS if m.version == 14)
+    v15 = next(m.ddl for m in db.MIGRATIONS if m.version == 15)
 
     def check_values(column: str, source: str = ddl) -> set[str]:
         m = re.search(rf"{column}\s+TEXT NOT NULL CHECK \({column} IN \(([^)]*)\)\)", source)
@@ -104,8 +105,8 @@ def test_enum_checks_mirror_python_constants():
     assert check_values("status") == {jobs.PENDING, jobs.RUNNING, jobs.COMPLETED, jobs.FAILED}
     assert check_values("capture_status") == set(recording_manager.CAPTURE_STATUSES)
     assert check_values("source") >= {SOURCE_AUTO, SOURCE_MANUAL}
-    # Other tables also have a `kind` column; the v14 files rebuild has the latest.
-    assert check_values("kind", v14) == set(file_registry.KINDS)
+    # Other tables also have a `kind` column; the v15 files rebuild has the latest.
+    assert check_values("kind", v15) == set(file_registry.KINDS)
 
 
 def test_history_page_and_detail_fallback(tmp_path):

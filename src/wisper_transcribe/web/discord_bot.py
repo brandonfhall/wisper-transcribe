@@ -33,6 +33,7 @@ from wisper_transcribe.recording_manager import (
     load_recordings,
     record_completed_wav_segment,
     register_capture_files,
+    start_listen_copy,
     trim_recording_audio,
     update_recording_status,
 )
@@ -579,3 +580,5 @@ class BotManager:
             update_recording_status(recording.id, "completed", self._data_dir,
                                     ended_at=recording.ended_at)
             log.info("Recording %s finalised as completed", recording.id)
+        # The denoised playback copy is made in the background.
+        start_listen_copy(recording.id, self._data_dir)

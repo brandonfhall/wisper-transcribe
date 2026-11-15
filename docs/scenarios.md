@@ -214,6 +214,19 @@ If wisper crashes or the machine loses power mid-session, the recording shows **
 
 ---
 
+## Recording playback is noisy
+
+A recording's transcript plays a denoised copy (see `denoise_playback` / `denoise_filter` in [configuration.md](configuration.md)). The default filter suits steady room noise: fans, HVAC, and the low rumble a desk mic picks up.
+
+- **Still too noisy:** raise `nr` in `denoise_filter` (e.g. `afftdn=nr=24`), then delete that recording's `recordings/<id>/listen.flac` so it's re-made on the next play.
+- **Voices sound watery or thin:** lower `nr` (e.g. 12), or lower the high-pass (`highpass=f=70`).
+- **Mains hum (a steady 50/60 Hz tone):** add notch filters before `afftdn`, e.g. `highpass=f=90,bandreject=f=120:w=10,bandreject=f=180:w=10,afftdn=nr=18:nf=-40:tn=1`.
+- **Chatter, keyboard, or other changing noise:** ffmpeg's filters only handle steady noise. [DeepFilterNet](https://github.com/Rikorose/DeepFilterNet) (a neural denoiser on PyTorch, which wisper already installs) handles these much better. It isn't bundled; run it by hand on `combined.flac` and save the result as that recording's `listen.flac`.
+
+The transcript itself is never affected: transcription and speaker matching read the original audio.
+
+---
+
 ## Known Limitations
 
 - **Only the first audio track of an uploaded file is transcribed and kept.** To use a different track, export it from the original and upload that.

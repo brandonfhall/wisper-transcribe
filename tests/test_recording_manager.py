@@ -871,3 +871,137 @@ def test_save_recording_sets_an_untranscribed_recordings_campaign(tmp_path, monk
     rec.campaign_slug = "dnd"
     save_recording(rec, tmp_path)
     assert rm.load_recording(rec.id, tmp_path).campaign_slug == "dnd"
+
+
+# ---------------------------------------------------------------------------
+# Denoised listening copy
+# ---------------------------------------------------------------------------
+
+def _listen_setup(tmp_path, monkeypatch, *, frames_out=800, fail=False):
+    """A recording with an 800-frame combined.wav, and a mocked filter encode
+    that writes listen.flac reporting ``frames_out`` frames."""
+    rec = _make_recording(tmp_path)
+    _write_wav(rm.combined_wav_path_for(rec.id, tmp_path), n_frames=800)
+    calls = []
+
+    def _encode(src, dst, chain):
+        calls.append((Path(src).name, Path(dst).name, chain))
+        if fail:
+            raise ValueError("ffmpeg failed")
+        Path(dst).write_bytes(b"fLaC")
+
+    monkeypatch.setattr("wisper_transcribe.audio_utils.encode_listen_flac", _encode)
+    monkeypatch.setattr("wisper_transcribe.audio_utils.probe_frames", lambda p: frames_out)
+    return rec, calls
+
+
+def _listen_row(rec_id, tmp_path):
+    from wisper_transcribe import file_registry
+    owner = file_registry.Owner("recording", rec_id)
+    return file_registry.file_for(owner, "listen", data_dir=tmp_path)
+
+
+def test_ensure_listen_copy_encodes_verifies_and_registers(tmp_path, monkeypatch):
+    rec, calls = _listen_setup(tmp_path, monkeypatch)
+    out = rm.ensure_listen_copy(rec.id, tmp_path, audio_filter="highpass=f=90")
+    assert out == rm.listen_path_for(rec.id, tmp_path) and out.is_file()
+    assert calls == [("combined.wav", "listen.flac", "highpass=f=90")]
+    assert _listen_row(rec.id, tmp_path) is not None
+    # Idempotent: an existing copy is returned without re-encoding.
+    assert rm.ensure_listen_copy(rec.id, tmp_path) == out
+    assert len(calls) == 1
+
+
+def test_ensure_listen_copy_uses_the_configured_filter(tmp_path, monkeypatch):
+    from wisper_transcribe import config
+    rec, calls = _listen_setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "load_config",
+                        lambda: {**config.DEFAULTS, "denoise_filter": "afftdn=nr=6"})
+    rm.ensure_listen_copy(rec.id, tmp_path)
+    assert calls[0][2] == "afftdn=nr=6"
+
+
+def test_default_denoise_filter_is_the_chosen_chain():
+    from wisper_transcribe.config import DEFAULTS
+    assert DEFAULTS["denoise_playback"] is True
+    assert DEFAULTS["denoise_filter"] == "highpass=f=90,afftdn=nr=18:nf=-40:tn=1"
+
+
+@pytest.mark.parametrize("kwargs", [{"frames_out": 799}, {"fail": True}])
+def test_ensure_listen_copy_failure_leaves_nothing(tmp_path, monkeypatch, kwargs):
+    rec, _ = _listen_setup(tmp_path, monkeypatch, **kwargs)
+    assert rm.ensure_listen_copy(rec.id, tmp_path) is None
+    assert not rm.listen_path_for(rec.id, tmp_path).exists()
+    assert _listen_row(rec.id, tmp_path) is None
+
+
+def test_ensure_listen_copy_without_a_combined_track_returns_none(tmp_path, monkeypatch):
+    rec, calls = _listen_setup(tmp_path, monkeypatch)
+    rm.combined_wav_path_for(rec.id, tmp_path).unlink()
+    assert rm.ensure_listen_copy(rec.id, tmp_path) is None
+    assert calls == []
+
+
+def test_ensure_listen_copy_runs_one_encode_per_recording(tmp_path, monkeypatch):
+    rec, _ = _listen_setup(tmp_path, monkeypatch)
+    entered, release = threading.Event(), threading.Event()
+
+    def _slow(src, dst, chain):
+        entered.set()
+        release.wait(5)
+        Path(dst).write_bytes(b"fLaC")
+
+    monkeypatch.setattr("wisper_transcribe.audio_utils.encode_listen_flac", _slow)
+    results = []
+    first = threading.Thread(target=lambda: results.append(rm.ensure_listen_copy(rec.id, tmp_path)))
+    first.start()
+    assert entered.wait(5)
+    assert rm.ensure_listen_copy(rec.id, tmp_path) is None   # busy: returns at once
+    release.set()
+    first.join(5)
+    assert results == [rm.listen_path_for(rec.id, tmp_path)]
+
+
+def test_deleting_the_recording_drops_its_listening_copy_row(tmp_path, monkeypatch):
+    """The row cascades with the recording; the file goes with recordings/<id>/,
+    which the delete routes remove (routes/record.py:_purge_recording_files)."""
+    rec, _ = _listen_setup(tmp_path, monkeypatch)
+    rm.ensure_listen_copy(rec.id, tmp_path)
+    rm.delete_recording(rec.id, tmp_path)
+    with db.connection(tmp_path) as conn:
+        assert conn.execute("SELECT count(*) FROM files WHERE kind = 'listen'").fetchone()[0] == 0
+
+
+def test_start_listen_copy_runs_in_the_background_only_when_wanted(tmp_path, monkeypatch):
+    from wisper_transcribe import config
+    rec = _make_recording(tmp_path)
+    started = []
+
+    class _Thread:
+        def __init__(self, target, args, name, daemon):
+            assert daemon is True
+            started.append(args[0])
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(rm.threading, "Thread", _Thread)
+
+    rm.start_listen_copy(rec.id, tmp_path)                 # autostart off in tests
+    assert started == []
+
+    monkeypatch.setattr(rm, "LISTEN_AUTOSTART", True)
+    rm.start_listen_copy(rec.id, tmp_path)
+    assert started == [rec.id]
+
+    monkeypatch.setattr(config, "load_config",
+                        lambda: {**config.DEFAULTS, "denoise_playback": False})
+    rm.start_listen_copy(rec.id, tmp_path)                 # denoise off
+    assert started == [rec.id]
+
+    monkeypatch.setattr(config, "load_config", lambda: dict(config.DEFAULTS))
+    path = rm.listen_path_for(rec.id, tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"fLaC")
+    rm.start_listen_copy(rec.id, tmp_path)                 # already there
+    assert started == [rec.id]

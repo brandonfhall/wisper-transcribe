@@ -587,3 +587,42 @@ def test_load_wav_for_whisper_rejects_non_16k_mono(tmp_path, rate, shape):
     wav = _write_wav(tmp_path / "x.wav", rate, np.zeros(shape, dtype=np.int16))
     with pytest.raises(ValueError, match="16 kHz mono"):
         load_wav_for_whisper(wav)
+
+
+def test_encode_listen_flac_runs_the_filter_chain_and_keeps_16_bit(tmp_path):
+    from wisper_transcribe.audio_utils import encode_listen_flac
+
+    src = tmp_path / "combined.flac"
+    src.write_bytes(b"fLaC")
+    dst = tmp_path / "listen.flac"
+
+    def _run(cmd, **kw):
+        Path(cmd[-1]).write_bytes(b"fLaC")
+        return MagicMock(returncode=0, stderr=b"")
+
+    chain = "highpass=f=90,afftdn=nr=18:nf=-40:tn=1"
+    with patch("wisper_transcribe.audio_utils.subprocess.run", side_effect=_run) as run:
+        encode_listen_flac(src, dst, chain)
+
+    cmd = run.call_args[0][0]
+    assert cmd[cmd.index("-af") + 1] == chain
+    assert cmd.index("-af") < cmd.index("-ac")
+    # afftdn outputs float; FLAC would otherwise be 24-bit and larger.
+    assert cmd[cmd.index("-sample_fmt") + 1] == "s16"
+    assert cmd[cmd.index("-ar") + 1] == "16000"
+    assert dst.read_bytes() == b"fLaC"
+
+
+def test_encode_listen_flac_with_no_chain_is_a_plain_encode(tmp_path):
+    from wisper_transcribe.audio_utils import encode_listen_flac
+
+    src = tmp_path / "combined.flac"
+    src.write_bytes(b"fLaC")
+
+    def _run(cmd, **kw):
+        Path(cmd[-1]).write_bytes(b"fLaC")
+        return MagicMock(returncode=0, stderr=b"")
+
+    with patch("wisper_transcribe.audio_utils.subprocess.run", side_effect=_run) as run:
+        encode_listen_flac(src, tmp_path / "listen.flac", "")
+    assert "-af" not in run.call_args[0][0]

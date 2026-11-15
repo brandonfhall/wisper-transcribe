@@ -204,6 +204,20 @@ def encode_flac(src: Path, dst: Path) -> None:
     Writes to a temp name beside ``dst`` and replaces ``dst`` only on success,
     so a failed encode never leaves a half-written or truncated ``dst``.
     """
+    _encode_flac(src, dst, [])
+
+
+def encode_listen_flac(src: Path, dst: Path, audio_filter: str) -> None:
+    """Like :func:`encode_flac`, through the ffmpeg filter chain ``audio_filter``.
+
+    Used for a recording's denoised listening copy. The output stays 16 kHz
+    mono 16-bit, sample for sample the source's timeline, so transcript
+    timestamps seek to the same words.
+    """
+    _encode_flac(src, dst, ["-af", audio_filter] if audio_filter else [])
+
+
+def _encode_flac(src: Path, dst: Path, extra: list[str]) -> None:
     import os
 
     from wisper_transcribe.transcript_store import TEMP_PREFIX
@@ -216,6 +230,7 @@ def encode_flac(src: Path, dst: Path) -> None:
                 "ffmpeg", "-y",
                 "-i", str(src),
                 "-map", "0:a:0",
+                *extra,
                 "-ac", "1",
                 "-ar", "16000",
                 # A float decoder (MP3, AAC) would otherwise get 32-bit FLAC, larger than raw PCM.

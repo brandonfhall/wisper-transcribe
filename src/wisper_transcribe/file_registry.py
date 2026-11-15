@@ -44,7 +44,7 @@ log = logging.getLogger(__name__)
 KINDS = (
     "transcript", "summary", "sidecar", "excerpt", "excerpt_text", "audio",
     "backup", "combined", "per_user", "live_draft", "reference_clip", "journal",
-    "combined_summary", "recap",
+    "combined_summary", "recap", "listen",
 )
 _OUTPUT_KINDS = frozenset(
     {"transcript", "summary", "sidecar", "excerpt", "excerpt_text", "audio", "backup"}
@@ -68,6 +68,7 @@ _OWNER_COLUMN: dict[str, str] = {
 _OWNER_OF_KIND: dict[str, str] = {
     **{k: "transcript" for k in _OUTPUT_KINDS},
     "combined": "recording", "per_user": "recording", "live_draft": "recording",
+    "listen": "recording",
     "reference_clip": "profile", "journal": "campaign",
     "combined_summary": "campaign", "recap": "campaign",
 }
@@ -744,7 +745,8 @@ def _scan_data(data: Path, in_output, recordings: dict[str, str],
                 continue
             owner = Owner("recording", rec_dir.name) if status is not None else None
             for kind, names in (("combined", ("combined.flac", "combined.wav")),
-                                ("live_draft", ("live_transcript.md",))):
+                                ("live_draft", ("live_transcript.md",)),
+                                ("listen", ("listen.flac",))):
                 for name in names:
                     if (rec_dir / name).is_file():
                         found.append(_Found(kind, rec_dir / name, "data", owner))

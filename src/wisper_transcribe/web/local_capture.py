@@ -53,6 +53,7 @@ from wisper_transcribe.recording_manager import (
     encode_combined_flac,
     record_completed_wav_segment,
     register_capture_files,
+    start_listen_copy,
     trim_recording_audio,
     update_recording_status,
 )
@@ -817,3 +818,5 @@ class LocalCaptureManager:
             update_recording_status(recording.id, "completed", self._data_dir,
                                     ended_at=recording.ended_at)
             log.info("Local recording %s finalised as completed", recording.id)
+        # The denoised playback copy is made in the background.
+        start_listen_copy(recording.id, self._data_dir)
