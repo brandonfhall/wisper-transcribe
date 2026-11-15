@@ -155,7 +155,7 @@ The bot joins a voice channel, records each participant on their own track plus 
 
 ### Local (mic + system audio)
 
-Records your microphone and the machine's system audio (the other side of a call, a video, a game) as two tracks plus a mix, with a live transcript preview. Requires the `[live]` extra and a native install — see [setup.md](setup.md#local-recording-mic--system-audio) for per-OS setup, including BlackHole on macOS.
+Records your microphone and the machine's system audio (the other side of a call, a video, a game) as two tracks plus a mix, with a live transcript preview. Requires a native install — see [setup.md](setup.md#local-recording-mic--system-audio) for per-OS setup, including BlackHole on macOS.
 
 The **Local capture** card appears only when the extra is installed and devices are detected. To start:
 

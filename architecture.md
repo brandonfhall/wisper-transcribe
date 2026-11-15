@@ -17,7 +17,7 @@ Current-state technical reference: what each part does and why it is built that 
 | CLI | `click` | `setup`, `server`, `transcribe`, `enroll`, `speakers`, `campaigns`, `transcripts`, `search`, `fix`, `refine`, `summarize`, `record`, `config`, `db` |
 | Web UI | FastAPI + Jinja2 + HTMX + Tailwind v4 | See [Web Interface](#web-interface) |
 | LLM post-processing | `llm/` package (httpx + optional provider SDKs) | Ollama, Ollama Cloud, LM Studio, Anthropic, OpenAI, Google |
-| Live capture | `soundcard` (optional `[live]` extra) | Local mic + system-audio loopback |
+| Live capture | `soundcard` (core dependency; unusable in Docker, which has no host audio devices) | Local mic + system-audio loopback |
 | Config | `platformdirs` + TOML | OS-native user data dir, overridable with `WISPER_DATA_DIR` |
 | Storage | stdlib `sqlite3` (≥ 3.43, FTS5) | `wisper.db`: profiles, campaigns, transcript registry, speakers, journals, recordings, job history, search index (see [Database](#database-dbpy)) |
 | Progress display | `tqdm` | Nested bars: folder (position 0), transcription (position 1) |

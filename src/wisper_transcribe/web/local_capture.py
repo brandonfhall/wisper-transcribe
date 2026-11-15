@@ -13,7 +13,7 @@ three tracks wall-clock aligned, which live speaker attribution relies on.
 Test seams:
   - ``capture_factory(device_id, samplerate)`` -> blocking iterator of
     ``(float32 array (n, ch), samplerate)``. The default wraps ``soundcard``,
-    imported lazily so this module works without the ``[live]`` extra.
+    imported lazily so this module still imports where it is missing or broken.
   - ``ticker()`` -> iterator yielding once per tick. Tests pass a finite,
     instant generator.
 

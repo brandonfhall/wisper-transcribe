@@ -25,6 +25,7 @@ dependencies = [
     "tomli>=2.0; python_version < '3.11'",
     "tomli-w>=1.0",
     "httpx>=0.28.1",         # Ollama / LM Studio clients, config + record routes
+    "SoundCard>=0.4.3",      # local mic + system-audio recording; imported lazily, the Local card hides without host audio devices (Docker)
     "nvidia-cublas-cu12; sys_platform == 'win32'",
     "nvidia-cudnn-cu12; sys_platform == 'win32'",
     "mlx-whisper; sys_platform == 'darwin' and platform_machine == 'arm64'",
@@ -62,11 +63,6 @@ llm-all = [
     "anthropic>=0.39.0",
     "openai>=1.50.0",
     "google-genai>=0.3.0",
-]
-# Local mic + system-audio capture (local recording). Optional:
-# useless inside Docker (no host audio devices) and on headless boxes.
-live = [
-    "SoundCard>=0.4.3",
 ]
 
 [project.scripts]
