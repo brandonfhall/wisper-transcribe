@@ -30,7 +30,7 @@ RUN cd discord-bot && gradle shadowJar --no-daemon -q
 FROM eclipse-temurin:25-jre AS jre
 
 # ── shared base ───────────────────────────────────────────────────────────────
-FROM python:3.14-slim AS base
+FROM python:3.15-slim AS base
 
 ARG DEBIAN_FRONTEND=noninteractive
 
